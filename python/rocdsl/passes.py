@@ -59,7 +59,7 @@ def run_pipeline(
         >>> print(lowered)
     """
     # Re-parse to get fresh module
-    module = Module.parse(module.operation.get_asm(enable_debug_info=True))
+    module = Module.parse(module.operation.get_asm(enable_debug_info=True), context=module.context)
     
     if isinstance(pipeline, Pipeline):
         pipeline = str(pipeline)
