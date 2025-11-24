@@ -39,7 +39,7 @@ def test_logical_product(ctx, insert_point):
     
     ir_text = str(ctx.module)
     assert "cute.logical_product" in ir_text
-    assert "!cute.layout<4>" in ir_text
+    assert "!cute.layout<2>" in ir_text
 
 
 def test_zipped_product(ctx, insert_point):

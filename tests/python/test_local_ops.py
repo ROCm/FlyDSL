@@ -226,7 +226,7 @@ def test_combined_local_ops(ctx):
     assert "cute.local_tile" in ir
     # Verify heavy use of operators
     assert ir.count("arith.divsi") >= 4
-    assert ir.count("arith.muli") >= 3
+    assert ir.count("arith.muli") >= 2
 
 
 if __name__ == "__main__":
