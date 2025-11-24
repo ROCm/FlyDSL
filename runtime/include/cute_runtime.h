@@ -7,12 +7,19 @@
 #ifndef CUTE_RUNTIME_H
 #define CUTE_RUNTIME_H
 
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+#include <hip/hip_runtime.h>
+#include <hip/hip_common.h>
+#else
 #include <cuda.h>
 #include <cuda_runtime.h>
+#endif
+
 #include <string>
 #include <vector>
 #include <memory>
 #include <stdexcept>
+#include <tuple>
 
 namespace cute {
 namespace runtime {
@@ -26,6 +33,42 @@ public:
     explicit CuteRuntimeError(const std::string& msg) 
         : std::runtime_error(msg) {}
 };
+
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+
+// HIP Compatibility Macros
+#define cudaMalloc hipMalloc
+#define cudaFree hipFree
+#define cudaMemcpy hipMemcpy
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaSuccess hipSuccess
+#define cudaError_t hipError_t
+#define cudaGetErrorString hipGetErrorString
+#define cudaStream_t hipStream_t
+#define cudaDeviceProp hipDeviceProp_t
+#define cudaDataType hipDataType
+#define cudaDeviceSynchronize hipDeviceSynchronize
+#define cudaGetDeviceProperties hipGetDeviceProperties
+
+#define cuInit hipInit
+#define cuModuleUnload hipModuleUnload
+#define cuModuleLoadData hipModuleLoadData
+#define cuModuleGetFunction hipModuleGetFunction
+#define cuLaunchKernel hipModuleLaunchKernel
+
+#define CUDA_CHECK(call) \
+    do { \
+        hipError_t err = call; \
+        if (err != hipSuccess) { \
+            throw CuteRuntimeError(std::string("HIP Error: ") + \
+                                   hipGetErrorString(err)); \
+        } \
+    } while(0)
+
+#define CU_CHECK(call) CUDA_CHECK(call)
+
+#else
 
 #define CUDA_CHECK(call) \
     do { \
@@ -46,6 +89,8 @@ public:
                                    errStr); \
         } \
     } while(0)
+
+#endif
 
 //===----------------------------------------------------------------------===//
 // Device Memory Management
@@ -120,17 +165,25 @@ enum class SwizzleMode {
 class TMADescriptor {
 public:
     TMADescriptor() : desc_(nullptr) {
+#if !defined(HAVE_HIP) && !defined(ENABLE_ROCM_SUPPORT)
         CUDA_CHECK(cudaMalloc(&desc_, sizeof(CUtensorMap)));
+#endif
     }
     
     ~TMADescriptor() {
+#if !defined(HAVE_HIP) && !defined(ENABLE_ROCM_SUPPORT)
         if (desc_) cudaFree(desc_);
+#endif
     }
     
     // Initialize for 2D tensor
     void initialize_2d(
         void* global_ptr,
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+        int dtype, // Placeholder
+#else
         cudaDataType dtype,
+#endif
         uint32_t global_dim_x,
         uint32_t global_dim_y,
         uint32_t tile_dim_x,
@@ -138,10 +191,18 @@ public:
         SwizzleMode swizzle = SwizzleMode::Swizzle128B
     );
     
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    void* get() { return desc_; }
+#else
     CUtensorMap* get() { return desc_; }
+#endif
     
 private:
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    void* desc_;
+#else
     CUtensorMap* desc_;
+#endif
 };
 
 //===----------------------------------------------------------------------===//
@@ -180,8 +241,13 @@ public:
     static cudaDeviceProp get_device_properties(int device_id = 0);
     
 private:
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    hipModule_t module_;
+    hipFunction_t kernel_;
+#else
     CUmodule module_;
     CUfunction kernel_;
+#endif
     bool module_loaded_;
     bool kernel_set_;
 };
@@ -193,7 +259,10 @@ private:
 enum class Arch {
     SM80 = 80,  // Ampere
     SM90 = 90,  // Hopper
-    SM100 = 100 // Blackwell
+    SM100 = 100, // Blackwell
+    GFX908 = 908, // MI100
+    GFX90A = 910, // MI200
+    GFX942 = 942  // MI300
 };
 
 template<typename TA, typename TB, typename TC>

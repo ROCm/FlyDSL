@@ -46,12 +46,13 @@ if(USE_ROCM)
     find_package(hiprtc QUIET CONFIG PATHS /opt/rocm)
     
     if(hip_FOUND)
+        enable_language(HIP)
         message(STATUS "ROCm/HIP support enabled")
         message(STATUS "HIP version: ${HIP_VERSION}")
         
         list(APPEND CUTE_RUNTIME_LIBS hip::device hip::host)
         if(hiprtc_FOUND)
-            list(APPEND CUTE_RUNTIME_LIBS hip::hiprtc)
+            list(APPEND CUTE_RUNTIME_LIBS hiprtc::hiprtc)
         endif()
         
         list(APPEND CUTE_RUNTIME_DEFS -DHAVE_HIP -DENABLE_ROCM_SUPPORT)
@@ -63,6 +64,7 @@ if(USE_ROCM)
         
         # Add HIP source file only if ROCm is enabled
         list(APPEND CUTE_RUNTIME_SOURCES src/cute_runtime_hip.cpp)
+        set_source_files_properties(${CUTE_RUNTIME_SOURCES} PROPERTIES LANGUAGE HIP)
     else()
         message(WARNING "ROCm/HIP requested but not found")
     endif()
@@ -76,6 +78,7 @@ include_directories(
 )
 
 if(hip_FOUND)
+        enable_language(HIP)
     include_directories(${hip_INCLUDE_DIRS})
 endif()
 

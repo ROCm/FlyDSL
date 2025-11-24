@@ -4,6 +4,7 @@ CuTe Runtime Python Package Setup
 ==================================
 
 Build and install the CuTe runtime Python bindings.
+Supports AMD ROCm/HIP (default) and NVIDIA CUDA.
 
 Build:
     python setup.py build_ext --inplace
@@ -38,13 +39,13 @@ class CMakeBuild(build_ext):
         except OSError:
             raise RuntimeError("CMake must be installed to build CuTe runtime")
         
-        # Check CUDA is available
-        cuda_home = os.environ.get('CUDA_HOME', '/usr/local/cuda')
-        if not os.path.exists(cuda_home):
-            raise RuntimeError(
-                f"CUDA not found at {cuda_home}. "
-                "Set CUDA_HOME environment variable."
-            )
+        # Check ROCm is available (AMD GPU)
+        rocm_path = os.environ.get('ROCM_PATH', '/opt/rocm')
+        if not os.path.exists(rocm_path):
+            print(f"Warning: ROCm not found at {rocm_path}")
+            print("Building without GPU runtime support")
+        else:
+            print(f"Found ROCm at {rocm_path}")
         
         for ext in self.extensions:
             self.build_extension(ext)
@@ -59,15 +60,39 @@ class CMakeBuild(build_ext):
             '-DCMAKE_BUILD_TYPE=Release',
         ]
         
-        # CUDA architecture (can be overridden)
-        cuda_arch = os.environ.get('CUDA_ARCH', '80;90')
-        cmake_args.append(f'-DCMAKE_CUDA_ARCHITECTURES={cuda_arch}')
+        # ROCm/HIP support for AMD GPUs
+        rocm_path = os.environ.get('ROCM_PATH', '/opt/rocm')
+        if os.path.exists(rocm_path):
+            cmake_args.append('-DENABLE_ROCM=ON')
+            cmake_args.append('-DUSE_ROCM=ON')
+            cmake_args.append('-DUSE_CUDA=OFF')
+            # GFX942 for MI300 series
+            hip_arch = os.environ.get('HIP_ARCHITECTURES', 'gfx942')
+            cmake_args.append(f'-DHIP_ARCHITECTURES={hip_arch}')
+            print(f"Building with ROCm support for {hip_arch}")
+        else:
+            cmake_args.append('-DENABLE_ROCM=OFF')
+            cmake_args.append('-DUSE_ROCM=OFF')
+            cmake_args.append('-DBUILD_RUNTIME=OFF')
+            print("Building without GPU runtime")
         
         # MLIR path (if available)
         mlir_path = os.environ.get('MLIR_INSTALL_DIR')
+        if not mlir_path:
+            # Try to find MLIR in common locations
+            for path in ['/mnt/raid0/felix/llvm-project/buildmlir',
+                        '/usr/local/lib/cmake/mlir',
+                        '/usr/lib/llvm-*/lib/cmake/mlir']:
+                if os.path.exists(path):
+                    mlir_path = path
+                    break
+        
         if mlir_path:
             cmake_args.append(f'-DMLIR_DIR={mlir_path}/lib/cmake/mlir')
             cmake_args.append(f'-DLLVM_DIR={mlir_path}/lib/cmake/llvm')
+            print(f"Using MLIR from {mlir_path}")
+        else:
+            print("MLIR not found, TableGen targets will be skipped")
         
         # Build configuration
         build_args = ['--config', 'Release']
@@ -95,13 +120,13 @@ def read_readme():
     if os.path.exists(readme_path):
         with open(readme_path, encoding='utf-8') as f:
             return f.read()
-    return "CuTe Runtime - Python bindings for CuTe MLIR compiler"
+    return "CuTe Runtime - Python bindings for CuTe MLIR compiler with AMD ROCm support"
 
 setup(
     name='cute-runtime',
     version='0.1.0',
     author='CuTe IR Project',
-    description='Python runtime library for CuTe MLIR compiler',
+    description='Python runtime library for CuTe MLIR compiler (AMD ROCm/HIP)',
     long_description=read_readme(),
     long_description_content_type='text/markdown',
     url='https://github.com/your-org/cute-ir-tablegen',
@@ -141,6 +166,7 @@ setup(
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         'Programming Language :: C++',
     ],
     

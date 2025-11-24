@@ -6,6 +6,10 @@
 #include <cstdlib>
 #include <array>
 
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+#include <hip/hip_runtime.h>
+#endif
+
 namespace cute {
 namespace runtime {
 
@@ -15,13 +19,18 @@ namespace runtime {
 
 void TMADescriptor::initialize_2d(
     void* global_ptr,
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    int dtype,
+#else
     cudaDataType dtype,
+#endif
     uint32_t global_dim_x,
     uint32_t global_dim_y,
     uint32_t tile_dim_x,
     uint32_t tile_dim_y,
     SwizzleMode swizzle
 ) {
+#if !defined(HAVE_HIP) && !defined(ENABLE_ROCM_SUPPORT)
     // Element size mapping
     uint32_t elem_size;
     switch (dtype) {
@@ -66,6 +75,12 @@ void TMADescriptor::initialize_2d(
         CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
         CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
     ));
+#else
+    // TMA not supported on HIP/AMD yet
+    (void)global_ptr; (void)dtype; (void)global_dim_x; (void)global_dim_y;
+    (void)tile_dim_x; (void)tile_dim_y; (void)swizzle;
+    throw CuteRuntimeError("TMA not supported on AMD GPUs");
+#endif
 }
 
 //===----------------------------------------------------------------------===//
@@ -193,6 +208,9 @@ std::string CuteCompiler::compile_to_ptx(
     Arch arch,
     int opt_level
 ) {
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    throw CuteRuntimeError("Compilation not supported on AMD yet");
+#else
     // Write MLIR to temp file
     std::string temp_mlir = "/tmp/cute_kernel.mlir";
     std::ofstream mlir_file(temp_mlir);
@@ -240,12 +258,16 @@ std::string CuteCompiler::compile_to_ptx(
     );
     
     return ptx_code;
+#endif
 }
 
 std::string CuteCompiler::compile_to_cubin(
     const std::string& ptx_code,
     Arch arch
 ) {
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+    throw CuteRuntimeError("Compilation not supported on AMD yet");
+#else
     // Write PTX to temp file
     std::string temp_ptx = "/tmp/cute_kernel.ptx";
     std::ofstream ptx_file(temp_ptx);
@@ -263,6 +285,7 @@ std::string CuteCompiler::compile_to_cubin(
     run_command(ptxas_cmd);
     
     return temp_cubin;
+#endif
 }
 
 std::string CuteCompiler::compile(
@@ -293,10 +316,11 @@ GemmExecutor<TA, TB, TC>::GemmExecutor(
     d_C_ = std::make_unique<DeviceBuffer<TC>>(M * N);
     
     // Initialize TMA descriptors for SM90+
-    if (use_tma && static_cast<int>(arch) >= 90) {
+    if (use_tma && static_cast<int>(arch) >= 90 && static_cast<int>(arch) < 900) {
         tma_desc_A_ = std::make_unique<TMADescriptor>();
         tma_desc_B_ = std::make_unique<TMADescriptor>();
         
+#if !defined(HAVE_HIP) && !defined(ENABLE_ROCM_SUPPORT)
         cudaDataType dtype_a = sizeof(TA) == 2 ? CUDA_R_16F : CUDA_R_32F;
         cudaDataType dtype_b = sizeof(TB) == 2 ? CUDA_R_16F : CUDA_R_32F;
         
@@ -314,6 +338,7 @@ GemmExecutor<TA, TB, TC>::GemmExecutor(
             static_cast<uint32_t>(N), static_cast<uint32_t>(K),
             tile_n, tile_k
         );
+#endif
     }
 }
 
@@ -330,13 +355,18 @@ void GemmExecutor<TA, TB, TC>::execute(
     
     // Prepare kernel arguments
     std::vector<void*> args;
-    args.push_back(&d_A_->ptr());
-    args.push_back(&d_B_->ptr());
-    args.push_back(&d_C_->ptr());
+    void* ptr_a = d_A_->ptr();
+    void* ptr_b = d_B_->ptr();
+    void* ptr_c = d_C_->ptr();
+    args.push_back(&ptr_a);
+    args.push_back(&ptr_b);
+    args.push_back(&ptr_c);
     
     if (use_tma_) {
-        args.push_back(&tma_desc_A_->get());
-        args.push_back(&tma_desc_B_->get());
+        void* ptr_tma_a = tma_desc_A_->get();
+        void* ptr_tma_b = tma_desc_B_->get();
+        args.push_back(&ptr_tma_a);
+        args.push_back(&ptr_tma_b);
     }
     
     // Compute grid/block dimensions
@@ -375,15 +405,23 @@ GemmExecutor<TA, TB, TC>::get_optimal_tile_size(
             return {128, 128, 64};
         case Arch::SM100: // Blackwell
             return {256, 128, 64};
+        case Arch::GFX942: // MI300
+            return {256, 256, 32};
         default:
             return {64, 64, 16};
     }
 }
 
 // Explicit instantiations for common types
+// Use float for half if half is not available or use hip_fp16.h
+#if defined(HAVE_HIP) || defined(ENABLE_ROCM_SUPPORT)
+// For now just instantiate float
+template class GemmExecutor<float, float, float>;
+#else
 template class GemmExecutor<half, half, float>;
 template class GemmExecutor<half, half, half>;
 template class GemmExecutor<float, float, float>;
+#endif
 
 } // namespace runtime
 } // namespace cute
