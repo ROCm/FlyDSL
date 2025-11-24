@@ -160,21 +160,6 @@ cute_ir_tablegen/
 - **C++17 compiler**
 - **Docker**: felixatt container recommended
 
-## 🏗️ Build Details
-
-The build system uses TableGen to generate operation definitions. The TableGen definitions use modern MLIR API directly:
-
-```tablegen
-// Type constraints use modern llvm::isa<> API
-def Cute_IntType : Type<CPred<"llvm::isa<::mlir::cute::IntType>($_self)">, "cute.int">;
-```
-
-**Key differences from legacy MLIR**:
-- ✅ Modern: `llvm::isa<Type>(value)` - global function
-- ❌ Legacy: `value.isa<Type>()` - member function (removed in modern MLIR)
-
-The TableGen definitions in `CuteOps.td` use the modern API, so generated code compiles without post-processing.
-
 ## 🔍 Implementation Notes
 
 - **Type System**: Manual implementation using `TypeBase` and `TypeStorage` (not TableGen `TypeDef`)
