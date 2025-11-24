@@ -1,6 +1,5 @@
 # CuTe IR Lowering Pass Pipeline
 
-## 完整编译流程
 
 ```
 Python CuTe DSL

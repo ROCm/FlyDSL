@@ -1,11 +1,10 @@
 # CuTe IR - MLIR Compiler Infrastructure for CUDA Template Library
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![CUDA](https://img.shields.io/badge/CUDA-11.0%2B-76B900?logo=nvidia)]()
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 
-A complete MLIR-based compiler infrastructure for CuTe (CUDA Template Library), enabling high-performance GPU kernel generation through Layout algebra and hardware-specific optimizations.
+A complete MLIR-based compiler infrastructure for CuTe, enabling high-performance GPU kernel generation through Layout algebra and hardware-specific optimizations.
 
 ## 🎯 Features
 
