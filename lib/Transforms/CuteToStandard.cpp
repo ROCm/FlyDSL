@@ -5,7 +5,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -376,38 +376,21 @@ struct CuteToStandardPass
   using impl::CuteToStandardPassBase<CuteToStandardPass>::CuteToStandardPassBase;
   
   void runOnOperation() override {
-    auto module = getOperation();
-    auto *ctx = &getContext();
     
-    ConversionTarget target(*ctx);
-    
-    target.addLegalDialect<arith::ArithDialect,
-                          memref::MemRefDialect,
-                          func::FuncDialect,
-                          scf::SCFDialect>();
-    
-    // Mark cute dialect as illegal to trigger lowering
-    target.addIllegalDialect<CuteDialect>();
-
-    RewritePatternSet patterns(ctx);
+    RewritePatternSet patterns(&getContext());
     
     // Add all lowering patterns
-    patterns.add<SizeOpLowering>(ctx);
-    patterns.add<CosizeOpLowering>(ctx);
-    patterns.add<GetOpLowering>(ctx);
-    patterns.add<RankOpLowering>(ctx);
-    patterns.add<Crd2IdxOpLowering>(ctx);
-    patterns.add<Idx2CrdOpLowering>(ctx);
-    patterns.add<GetShapeOpLowering>(ctx);
-    patterns.add<GetStrideOpLowering>(ctx);
+    patterns.add<SizeOpLowering>(&getContext());
+    patterns.add<CosizeOpLowering>(&getContext());
+    patterns.add<GetOpLowering>(&getContext());
+    patterns.add<RankOpLowering>(&getContext());
+    patterns.add<Crd2IdxOpLowering>(&getContext());
+    patterns.add<Idx2CrdOpLowering>(&getContext());
+    patterns.add<GetShapeOpLowering>(&getContext());
+    patterns.add<GetStrideOpLowering>(&getContext());
     
-    // Erase construction operations
-    patterns.add<MakeOpLowering>("cute.make_coord", ctx);
-    patterns.add<MakeOpLowering>("cute.make_stride", ctx);
-    patterns.add<MakeOpLowering>("cute.make_layout", ctx);
-    patterns.add<MakeOpLowering>("cute.make_shape", ctx);
 
-    if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
+    if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
   }
