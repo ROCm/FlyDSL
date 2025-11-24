@@ -1,0 +1,2 @@
+# MLIR Python bindings (requires LLVM/MLIR installation)
+# These are typically provided by the MLIR build
