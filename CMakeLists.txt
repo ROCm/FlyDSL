@@ -59,7 +59,7 @@ endif()
 
 # Build runtime library
 if(BUILD_RUNTIME)
-    add_subdirectory(runtime)
+#    add_subdirectory(runtime)
 endif()
 
 add_subdirectory(lib)
