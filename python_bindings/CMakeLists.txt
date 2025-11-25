@@ -62,3 +62,24 @@ if(pybind11_FOUND)
 else()
   message(WARNING "pybind11 not found - CuTe passes will not be available in Python")
 endif()
+
+  # Build Python extension module for dialect registration
+  pybind11_add_module(_cuteDialect CuteDialectModule.cpp)
+  
+  target_include_directories(_cuteDialect PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${MLIR_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
+  )
+  
+  # No additional libraries needed for simple stub module
+  # target_link_libraries(_cuteDialect PRIVATE)
+  
+  # Install to python_bindings directory
+  set_target_properties(_cuteDialect PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  
+  add_dependencies(CutePythonModules _cuteDialect)
+  
+  message(STATUS "CuTe dialect Python extension module will be built")

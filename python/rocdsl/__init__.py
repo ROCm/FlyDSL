@@ -18,11 +18,12 @@ def _register_cute_passes():
         if python_bindings_dir not in sys.path:
             sys.path.insert(0, python_bindings_dir)
         
-        # Import the pass registration module
+        # Import the pass registration module and dialect module
         try:
             import _cutePassesExt
-            # Passes are auto-registered on import
-            # But we can also call register_passes() explicitly if needed
+            import _cuteDialect  # Simple stub module for now
+            
+            # Register passes
             _cutePassesExt.register_passes()
         except ImportError as e:
             warnings.warn(f"CuTe passes extension module not found: {e}. Passes will not be available.")
