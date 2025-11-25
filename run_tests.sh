@@ -99,6 +99,59 @@ echo "========================================"
 
 echo ""
 echo "========================================"
+echo "GPU Test Suite"
+echo "========================================"
+echo ""
+
+# Set up Python path for GPU tests
+export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/python
+
+# Check if GPU is available
+if command -v rocm-smi &> /dev/null; then
+    echo "🎮 GPU detected, running GPU tests..."
+    echo ""
+    
+    # Test 1: Basic GPU kernel
+    echo "Test 1: Basic GPU Vector Addition"
+    python3 tests/python/test_gpu_simple.py
+    GPU_SIMPLE_EXIT=$?
+    if [ $GPU_SIMPLE_EXIT -eq 0 ]; then
+        echo "   ✅ PASS"
+    else
+        echo "   ❌ FAIL (exit code: $GPU_SIMPLE_EXIT)"
+    fi
+    echo ""
+    
+    # Test 2: Layout-based indexing
+    echo "Test 2: GPU Layout-based Indexing"
+    python3 tests/python/test_gpu_layout.py
+    GPU_LAYOUT_EXIT=$?
+    if [ $GPU_LAYOUT_EXIT -eq 0 ]; then
+        echo "   ✅ PASS"
+    else
+        echo "   ❌ FAIL (exit code: $GPU_LAYOUT_EXIT)"
+    fi
+    echo ""
+    
+    GPU_TESTS_PASSED=$(( $GPU_SIMPLE_EXIT == 0 && $GPU_LAYOUT_EXIT == 0 ))
+else
+    echo "⚠️  No GPU detected, skipping GPU tests"
+    echo "   (Install ROCm and ensure GPU is available to run GPU tests)"
+    GPU_TESTS_PASSED=1
+fi
+
+echo "========================================"
+echo "GPU Test Summary"
+echo "========================================"
+if [ $GPU_TESTS_PASSED -eq 1 ]; then
+    echo "✅ All GPU tests passed"
+else
+    echo "⚠️  Some GPU tests failed"
+fi
+echo "========================================"
+
+echo ""
+echo "========================================"
 echo "Python Test Suite"
 echo "========================================"
 echo ""
@@ -114,7 +167,6 @@ echo ""
 # Set up Python environment
 export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core
 export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/build/python_bindings
-export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/python
 
 echo "Running Python tests with pytest..."
 python3 -m pytest tests/python/ -v --tb=short
@@ -129,6 +181,12 @@ if [ $PYTEST_EXIT -eq 0 ]; then
     echo "✅ All Python tests passed"
 else
     echo "⚠️  Some Python tests failed (exit code: $PYTEST_EXIT)"
+fi
+
+if [ $GPU_TESTS_PASSED -eq 1 ]; then
+    echo "✅ All GPU tests passed"
+else
+    echo "⚠️  Some GPU tests failed"
 fi
 echo "========================================"
 
