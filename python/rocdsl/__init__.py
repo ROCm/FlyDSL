@@ -34,17 +34,24 @@ def _register_cute_passes():
 # Register passes before importing other modules
 _register_cute_passes()
 
-from .dialects.ext import rocir, arith, scf
-from .passes import (
-    Pipeline,
-    run_pipeline,
-    lower_rocir_to_standard,
-    lower_cute_to_nvgpu,
-    optimize_layouts,
-)
+# Lazy import dialects and passes to avoid requiring MLIR when only using runtime
+def __getattr__(name):
+    if name == "rocir":
+        from .dialects.ext import rocir
+        return rocir
+    elif name == "arith":
+        from .dialects.ext import arith
+        return arith
+    elif name == "scf":
+        from .dialects.ext import scf
+        return scf
+    elif name in ["Pipeline", "run_pipeline", "lower_rocir_to_standard", 
+                   "lower_cute_to_nvgpu", "optimize_layouts"]:
+        from . import passes
+        return getattr(passes, name)
 
 __all__ = [
-    "cute",
+    "rocir",
     "arith",
     "scf",
     "Pipeline",
