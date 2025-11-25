@@ -105,8 +105,8 @@ echo ""
 
 # Set up Python environment
 export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core
-export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/cute_ir_tablegen/build/python_bindings
-export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/cute_ir_tablegen/python
+export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/build/python_bindings
+export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/python
 
 echo "Running Python tests with pytest..."
 python3 -m pytest tests/python/ -v --tb=short

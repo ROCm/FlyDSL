@@ -32,12 +32,12 @@ tests/
 
 **In Docker with PYTHONPATH:**
 ```bash
-docker exec -it felixatt bash -c "export PYTHONPATH=/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core && cd /mnt/raid0/felix/cute_ir_tablegen && python3 -m pytest tests/python/test_passes.py -v"
+docker exec -it felixatt bash -c "export PYTHONPATH=/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core && cd /mnt/raid0/felix/rocDSL && python3 -m pytest tests/python/test_passes.py -v"
 ```
 
 **Run all Python tests:**
 ```bash
-docker exec -it felixatt bash -c "export PYTHONPATH=/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core && cd /mnt/raid0/felix/cute_ir_tablegen && python3 -m pytest tests/python/ -v"
+docker exec -it felixatt bash -c "export PYTHONPATH=/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core && cd /mnt/raid0/felix/rocDSL && python3 -m pytest tests/python/ -v"
 ```
 
 ## Test Status

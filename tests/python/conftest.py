@@ -2,6 +2,41 @@
 
 import pytest
 from mlir.ir import Context, Location, Module, InsertionPoint
+import ctypes
+import os
+
+# Register CuTe passes by loading the shared library
+def register_cute_passes():
+    """Register CuTe passes with MLIR."""
+    try:
+        # Try to find and load the CuTe dialect library
+        lib_paths = [
+            '/mnt/raid0/felix/rocDSL/build/lib/Dialect/Cute/libCuteDialect.so',
+            '/mnt/raid0/felix/rocDSL/build/lib/libCuteDialect.so',
+        ]
+        
+        for lib_path in lib_paths:
+            if os.path.exists(lib_path):
+                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+                break
+                
+        # Also try loading transforms library
+        transform_paths = [
+            '/mnt/raid0/felix/rocDSL/build/lib/Transforms/libCuteTransforms.so',
+            '/mnt/raid0/felix/rocDSL/build/lib/libCuteTransforms.so',
+        ]
+        
+        for lib_path in transform_paths:
+            if os.path.exists(lib_path):
+                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+                break
+                
+    except Exception as e:
+        import warnings
+        warnings.warn(f"Could not load CuTe libraries: {e}")
+
+# Register passes at module import time
+register_cute_passes()
 
 
 @pytest.fixture

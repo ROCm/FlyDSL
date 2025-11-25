@@ -4,6 +4,13 @@ Provides Pythonic interface for MLIR transformation passes, following
 mlir-python-extras patterns.
 """
 
+# Import cute-opt runner for cute-specific passes
+try:
+    from .cute_opt_runner import run_cute_opt
+    HAS_CUTE_OPT = True
+except ImportError:
+    HAS_CUTE_OPT = False
+
 import logging
 import sys
 import tempfile
@@ -65,6 +72,20 @@ def run_pipeline(
         pipeline = str(pipeline)
     
     module_name = get_module_name(module)
+
+    # Check if this is a cute-specific pass that needs cute-opt
+    cute_passes = ["cute-to-standard", "cute-to-rocm", "cute-nvgpu-to-nvgpu"]
+    needs_cute_opt = any(cp in pipeline for cp in cute_passes)
+
+    if needs_cute_opt and HAS_CUTE_OPT:
+        # Use cute-opt for cute-specific passes
+        for cute_pass in cute_passes:
+            if cute_pass in pipeline:
+                try:
+                    return run_cute_opt(module, cute_pass)
+                except Exception as e:
+                    raise RocDSLCompilerError(f"cute-opt execution failed: {e}") from e
+
     
     try:
         # Capture stderr for error reporting

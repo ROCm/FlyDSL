@@ -18,3 +18,47 @@ add_dependencies(CutePythonModules CutePythonOpsIncGen)
 mlir_tablegen(_cute_enum_gen.py -gen-python-enum-bindings)
 add_public_tablegen_target(CutePythonEnumIncGen)
 add_dependencies(CutePythonModules CutePythonEnumIncGen)
+
+# Build Python extension module for pass registration
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+
+# Find pybind11
+execute_process(
+  COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+  OUTPUT_VARIABLE pybind11_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE pybind11_NOTFOUND
+)
+
+if(NOT pybind11_NOTFOUND)
+  find_package(pybind11 CONFIG)
+endif()
+
+if(pybind11_FOUND)
+  message(STATUS "Found pybind11: ${pybind11_DIR}")
+  
+  pybind11_add_module(_cutePassesExt CutePassesModule.cpp)
+  
+  target_include_directories(_cutePassesExt PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${MLIR_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
+  )
+  
+  target_link_libraries(_cutePassesExt PRIVATE
+    CuteTransforms
+    MLIRPass
+    MLIRIR
+  )
+  
+  # Install to python_bindings directory
+  set_target_properties(_cutePassesExt PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+  
+  add_dependencies(CutePythonModules _cutePassesExt)
+  
+  message(STATUS "CuTe passes Python extension module will be built")
+else()
+  message(WARNING "pybind11 not found - CuTe passes will not be available in Python")
+endif()

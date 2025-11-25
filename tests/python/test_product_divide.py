@@ -42,6 +42,9 @@ def test_logical_product(ctx):
             return tiled
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     
     ir = str(ctx.module)
     assert "cute.logical_product" in ir
@@ -77,6 +80,9 @@ def test_zipped_product(ctx):
             return zipped
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     
     ir = str(ctx.module)
     assert "cute.zipped_product" in ir
@@ -107,6 +113,9 @@ def test_flat_product(ctx):
             return flat
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     assert "cute.flat_product" in str(ctx.module)
 
 @pytest.mark.skip(reason="outer_product operation not implemented yet")
@@ -134,6 +143,9 @@ def test_outer_product(ctx):
             return outer
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     assert "cute.outer_product" in str(ctx.module)
 
 
@@ -163,6 +175,9 @@ def test_blocked_product(ctx):
             return blocked
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     
     ir = str(ctx.module)
     assert "cute.blocked_product" in ir
@@ -192,6 +207,9 @@ def test_raked_product(ctx):
             return raked
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     assert "cute.raked_product" in str(ctx.module)
 
 
@@ -224,6 +242,9 @@ def test_logical_divide(ctx):
             return divided
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     
     ir = str(ctx.module)
     assert "cute.logical_divide" in ir
@@ -253,6 +274,9 @@ def test_zipped_divide(ctx):
             return zipped
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     assert "cute.zipped_divide" in str(ctx.module)
 
 
@@ -278,6 +302,9 @@ def test_flat_divide(ctx):
             return flat
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     assert "cute.flat_divide" in str(ctx.module)
 
 
@@ -309,6 +336,9 @@ def test_tiled_divide(ctx):
             return tiled
     
     ctx.module.operation.verify()
+    # Apply lowering
+
+
     
     ir = str(ctx.module)
     assert "cute.tiled_divide" in ir
