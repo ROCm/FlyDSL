@@ -65,26 +65,28 @@ def run_pipeline(
         >>> lowered = run_pipeline(module, "cute-to-standard")
         >>> print(lowered)
     """
-    # Re-parse to get fresh module
-    module = Module.parse(module.operation.get_asm(enable_debug_info=True), context=module.context)
-    
+    # Convert pipeline to string if needed
     if isinstance(pipeline, Pipeline):
         pipeline = str(pipeline)
     
-    module_name = get_module_name(module)
-
     # Check if this is a cute-specific pass that needs cute-opt
+    # Do this BEFORE re-parsing to avoid parsing errors with unregistered dialect
     cute_passes = ["cute-to-standard", "cute-to-rocm", "cute-nvgpu-to-nvgpu"]
     needs_cute_opt = any(cp in pipeline for cp in cute_passes)
 
     if needs_cute_opt and HAS_CUTE_OPT:
-        # Use cute-opt for cute-specific passes
+        # Use cute-opt for cute-specific passes (bypasses Python MLIR parser)
         for cute_pass in cute_passes:
             if cute_pass in pipeline:
                 try:
                     return run_cute_opt(module, cute_pass)
                 except Exception as e:
                     raise RocDSLCompilerError(f"cute-opt execution failed: {e}") from e
+    
+    # Re-parse to get fresh module (only for non-cute passes)
+    module = Module.parse(module.operation.get_asm(enable_debug_info=True), context=module.context)
+    
+    module_name = get_module_name(module)
 
     
     try:
