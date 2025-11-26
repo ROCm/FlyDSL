@@ -45,11 +45,24 @@ if(pybind11_FOUND)
     ${LLVM_INCLUDE_DIRS}
   )
   
+  # Link to MLIRPythonCAPI.so to share the global pass registry with Python MLIR
+  find_library(MLIR_PYTHON_CAPI_LIB
+    NAMES MLIRPythonCAPI
+    PATHS /mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core/mlir/_mlir_libs
+    NO_DEFAULT_PATH
+  )
+  
+  if(MLIR_PYTHON_CAPI_LIB)
+    message(STATUS "Found MLIRPythonCAPI: ${MLIR_PYTHON_CAPI_LIB}")
+  else()
+    message(FATAL_ERROR "MLIRPythonCAPI library not found!")
+  endif()
+  
   target_link_libraries(_rocirPassesExt PRIVATE
     RocirTransforms
-    MLIRPass
-    MLIRIR
+    ${MLIR_PYTHON_CAPI_LIB}
   )
+  set_target_properties(_rocirPassesExt PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
   
   # Install to python_bindings directory
   set_target_properties(_rocirPassesExt PROPERTIES
@@ -62,27 +75,6 @@ if(pybind11_FOUND)
 else()
   message(WARNING "pybind11 not found - CuTe passes will not be available in Python")
 endif()
-
-  # Build Python extension module for dialect registration
-  pybind11_add_module(_rocirDialect RocirDialectModule.cpp)
-  
-  target_include_directories(_rocirDialect PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${MLIR_INCLUDE_DIRS}
-    ${LLVM_INCLUDE_DIRS}
-  )
-  
-  # No additional libraries needed for simple stub module
-  # target_link_libraries(_rocirDialect PRIVATE)
-  
-  # Install to python_bindings directory
-  set_target_properties(_rocirDialect PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  )
-  
-  add_dependencies(RocirPythonModules _rocirDialect)
-  
-  message(STATUS "CuTe dialect Python extension module will be built")
 
 # Fix TableGen-generated relative imports for standalone usage
 # TableGen generates "from ._ods_common import ..." which assumes the code is part of mlir.dialects package
