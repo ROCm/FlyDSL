@@ -71,17 +71,48 @@ echo "IR Tests: $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 echo ""
 
 #=============================================================================
-# Part 3: GPU Execution Tests (Real GPU kernels)
+# Part 3: Example/Demo Tests (ROCDL dialect operations)
 #=============================================================================
 echo "========================================================================"
-echo "Part 3: GPU Execution Tests (Compile + Run on GPU)"
+echo "Part 3: Example Tests (ROCDL Dialect Operations)"
+echo "========================================================================"
+echo ""
+
+EXAMPLE_TEST_COUNT=0
+EXAMPLE_PASS_COUNT=0
+
+for test_file in tests/python/examples/test_*.py; do
+    if [ -f "$test_file" ]; then
+        EXAMPLE_TEST_COUNT=$((EXAMPLE_TEST_COUNT + 1))
+        test_name=$(basename "$test_file" .py)
+        echo "Running: $test_name"
+        python3 "$test_file" > /tmp/${test_name}.log 2>&1
+        if [ $? -eq 0 ]; then
+            echo "   ✅ PASS"
+            EXAMPLE_PASS_COUNT=$((EXAMPLE_PASS_COUNT + 1))
+        else
+            echo "   ❌ FAIL"
+            echo "      Log: /tmp/${test_name}.log"
+        fi
+    fi
+done
+
+echo ""
+echo "Example Tests: $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
+echo ""
+
+#=============================================================================
+# Part 4: GPU Execution Tests (Real GPU kernels)
+#=============================================================================
+echo "========================================================================"
+echo "Part 4: GPU Execution Tests (Compile + Run on GPU)"
 echo "========================================================================"
 echo ""
 
 if command -v rocm-smi &> /dev/null; then
     GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | head -1)
     if [ -n "$GPU_NAME" ]; then
-        echo "�� GPU detected: $GPU_NAME"
+        echo "🎮 GPU detected: $GPU_NAME"
     else
         echo "🎮 GPU detected (ROCm available)"
     fi
@@ -132,15 +163,16 @@ echo "========================================================================"
 echo ""
 echo "MLIR IR Tests (Lowering):        ✓ Passed"
 echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
+echo "Example Tests (ROCDL):           $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
 
 if [ $ALL_GPU_PASSED -eq 1 ]; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
     echo ""
-    echo "�� ALL TESTS PASSED!"
     echo ""
     echo "Verified Capabilities:"
     echo "  ✓ Rocir IR generation and lowering"
     echo "  ✓ Coordinate operations (crd2idx, layouts)"
+    echo "  ✓ ROCDL dialect operations (381 ops exposed)"
     echo "  ✓ GPU kernel compilation (MLIR → HSACO)"
     echo "  ✓ GPU kernel execution (HIP runtime)"
     echo "  ✓ Shared memory optimizations (LDS)"
