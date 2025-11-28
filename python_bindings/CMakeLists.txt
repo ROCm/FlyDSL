@@ -51,9 +51,10 @@ if(pybind11_FOUND)
   )
   
   # Link to MLIRPythonCAPI.so to share the global pass registry with Python MLIR
+  get_filename_component(MLIR_BUILD_DIR "${MLIR_DIR}/../../.." ABSOLUTE)
   find_library(MLIR_PYTHON_CAPI_LIB
     NAMES MLIRPythonCAPI
-    PATHS /mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core/mlir/_mlir_libs
+    PATHS ${MLIR_BUILD_DIR}/tools/mlir/python_packages/mlir_core/mlir/_mlir_libs
     NO_DEFAULT_PATH
   )
   

@@ -6,7 +6,8 @@ Extends successful test_mfma_python_api.py to include A, B parameters.
 Minimal changes to verify 3-parameter function works.
 """
 import sys
-sys.path.insert(0, '/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core')
+import os
+sys.path.insert(0, os.environ['MLIR_PATH'] + '/tools/mlir/python_packages/mlir_core')
 sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
 sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
 

@@ -70,7 +70,7 @@ def test_mfma():
             module,
             Pipeline()
             .canonicalize()
-            .rocdl_attach_target(chip="gfx942")
+            .rocdl_attach_target(chip=gpu_arch)
             .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP"))
             .gpu_to_llvm()
             .lower_to_llvm()

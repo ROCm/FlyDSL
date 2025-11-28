@@ -10,9 +10,11 @@ echo "========================================================================"
 echo ""
 
 # Set up Python path
-export PYTHONPATH=/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core
-export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/build/python_bindings
-export PYTHONPATH=$PYTHONPATH:/mnt/raid0/felix/rocDSL/python
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+export MLIR_PATH=${MLIR_PATH:-/home/yanronli/llvm-project/buildmlir}
+export PYTHONPATH=$MLIR_PATH/tools/mlir/python_packages/mlir_core
+export PYTHONPATH=$PYTHONPATH:$SCRIPT_DIR/build/python_bindings
+export PYTHONPATH=$PYTHONPATH:$SCRIPT_DIR/python
 
 #=============================================================================
 # Part 1: MLIR IR Tests (Lowering Passes)

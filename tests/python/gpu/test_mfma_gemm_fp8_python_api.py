@@ -24,7 +24,7 @@ def construct_module(val_a_list, val_b_list):
     with loc:
         module = ir.Module.create(loc=loc)
         
-        targets_attr = ir.Attribute.parse('[#rocdl.target<chip = "gfx942", abi = "500">]')
+        targets_attr = ir.Attribute.parse('[#rocdl.target<chip = gpu_arch, abi = "500">]')
         
         with ir.InsertionPoint(module.body):
             gpu_mod = gpu.GPUModuleOp("mfma_mod", targets=targets_attr)
@@ -141,7 +141,7 @@ def test_mfma_fp8_api():
         try:
             pipeline = Pipeline() \
                 .canonicalize() \
-                .rocdl_attach_target(chip="gfx942") \
+                .rocdl_attach_target(chip=gpu_arch) \
                 .convert_vector_to_llvm() \
                 .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")) \
                 .gpu_to_llvm() \
@@ -151,7 +151,7 @@ def test_mfma_fp8_api():
             print("Warning: Pipeline.convert_vector_to_llvm not found. Trying without it.")
             pipeline = Pipeline() \
                 .canonicalize() \
-                .rocdl_attach_target(chip="gfx942") \
+                .rocdl_attach_target(chip=gpu_arch) \
                 .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")) \
                 .gpu_to_llvm() \
                 .lower_to_llvm() \

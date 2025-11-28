@@ -24,7 +24,7 @@ A modern MLIR-based compiler infrastructure for high performance rocm kernels, p
 cpp test:
 cd rocdsl
 mkdir -p build && cd build
-cmake .. -DMLIR_DIR=/mnt/raid0/felix/llvm-project/buildmlir/lib/cmake/mlir
+cmake .. -DMLIR_DIR=$MLIR_PATH//lib/cmake/mlir
 make -j; make rocir-opt -j
 
 python test:

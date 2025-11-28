@@ -2,9 +2,10 @@
 """GPU kernel tests demonstrating integration with Rocir Layout concepts"""
 
 import sys
-sys.path.insert(0, '/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
+import os
+sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', '/home/yanronli/llvm-project/buildmlir'), 'tools/mlir/python_packages/mlir_core'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
@@ -23,13 +24,16 @@ def compile_to_hsaco(mlir_module):
     # Apply rocir coordinate lowering first
     lowered_module = apply_rocir_coord_lowering(mlir_module)
     
+    # Get the current GPU architecture
+    gpu_arch = get_hip_arch()
+    
     # Then run the main GPU compilation pipeline
     lowered = run_pipeline(
         lowered_module,
         Pipeline()
         .canonicalize()
         .cse()
-        .rocdl_attach_target(chip="gfx942")
+        .rocdl_attach_target(chip=gpu_arch)
         .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP"))
         .gpu_to_llvm()
         .lower_to_llvm()
@@ -571,7 +575,7 @@ if __name__ == "__main__":
         print("• Vector operations use rocir 1D layouts")
         print("• Matrix operations use rocir 2D row-major layouts")
         print("• Coordinate indexing lowered to arithmetic via rocir-opt")
-        print("• All tests verified on gfx942 GPU")
+        print(f"• All tests verified on {get_hip_arch()} GPU")
         sys.exit(0)
     else:
         print("⚠️ SOME TESTS FAILED")

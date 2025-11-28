@@ -15,7 +15,7 @@ Implementation:
 - Manually unrolled loop for K=64.
 - Uses vector.transfer_write.
 - Calculates global thread ID to support multiple blocks.
-- Target: gfx942 (MI300) explicitly set in rocdl.target attribute.
+- Target: "${gpu_arch}" (MI300) explicitly set in rocdl.target attribute.
 """
 import sys
 sys.path.insert(0, "/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core")
@@ -31,7 +31,7 @@ import ctypes
 
 MLIR_TEXT = """
 module {
-  gpu.module @mfma_mod [#rocdl.target<chip = "gfx942", abi = "500">] {
+  gpu.module @mfma_mod [#rocdl.target<chip = gpu_arch, abi = "500">] {
     gpu.func @kernel(%C: memref<4096xf32>) kernel {
       %c0_i32 = arith.constant 0 : i32
       %c4 = arith.constant 4 : index
@@ -86,7 +86,7 @@ def test_mfma_real():
         try:
             pipeline = Pipeline() \
                 .canonicalize() \
-                .rocdl_attach_target(chip="gfx942") \
+                .rocdl_attach_target(chip=gpu_arch) \
                 .convert_vector_to_llvm() \
                 .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")) \
                 .gpu_to_llvm() \
@@ -96,7 +96,7 @@ def test_mfma_real():
             print("Warning: Pipeline.convert_vector_to_llvm not found. Trying without it.")
             pipeline = Pipeline() \
                 .canonicalize() \
-                .rocdl_attach_target(chip="gfx942") \
+                .rocdl_attach_target(chip=gpu_arch) \
                 .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")) \
                 .gpu_to_llvm() \
                 .lower_to_llvm() \

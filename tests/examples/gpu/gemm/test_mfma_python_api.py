@@ -6,7 +6,8 @@ Demonstrates rocdl.mfma.f32.16x16x16f16 using pure Python API.
 Following test_gpu_rocdsl.py style without ir.Module.parse().
 """
 import sys
-sys.path.insert(0, '/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core')
+import os
+sys.path.insert(0, os.environ['MLIR_PATH'] + '/tools/mlir/python_packages/mlir_core')
 sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
 sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
 
