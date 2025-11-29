@@ -6,9 +6,11 @@ Replicates test_mfma_gemm_real.py but constructs the MLIR module
 programmatically using Python bindings instead of parsing text.
 """
 import sys
-sys.path.insert(0, "/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/build/python_bindings")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/python")
+
+import os
+sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', '/home/yanronli/llvm-project/buildmlir'), 'tools/mlir/python_packages/mlir_core'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 # Do NOT import ext.gpu to avoid issues with targets attribute
 # import rocdsl.dialects.ext.gpu

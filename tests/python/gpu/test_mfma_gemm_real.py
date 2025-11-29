@@ -18,10 +18,11 @@ Implementation:
 - Target: "${gpu_arch}" (MI300) explicitly set in rocdl.target attribute.
 """
 import sys
-sys.path.insert(0, "/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/build/python_bindings")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/python")
 
+import os
+sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', '/home/yanronli/llvm-project/buildmlir'), 'tools/mlir/python_packages/mlir_core'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import numpy as np

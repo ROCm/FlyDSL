@@ -7,8 +7,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from rocdsl.runtime.fp8_util import to_byte
 import rocdsl.dialects.ext.rocir as rocir
+from rocdsl.runtime.fp8_util import to_byte
 import numpy as np
 from mlir import ir
 from mlir.dialects import gpu, arith, vector, memref, builtin, scf
@@ -339,9 +339,9 @@ def test_mfma_fp8_rocir():
             .rocdl_attach_target(chip="gfx942") \
             .convert_vector_to_llvm() \
             .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP", chipset="gfx942")) \
-           .gpu_to_llvm() \
-           .lower_to_llvm(use_bare_ptr_memref_call_conv=True) \
-           .gpu_module_to_binary(format="bin")
+            .gpu_to_llvm() \
+            .lower_to_llvm() \
+            .gpu_module_to_binary(format="bin")
             
         lowered = run_pipeline(module, pipeline)
     
@@ -360,8 +360,6 @@ def test_mfma_fp8_rocir():
     a_host = np.random.randint(-16, 16, size=(M, K)).astype(np.float32)
     b_host = np.random.randint(-16, 16, size=(K, N)).astype(np.float32)
     
-    # a_host = np.random.randint(-128, 128, size=(M, K)).astype(np.float32) / 128.0
-    # b_host = np.random.randint(-128, 128, size=(K, N)).astype(np.float32) /128.0
     # Transpose B for the kernel (NxK)
     b_host_T = np.ascontiguousarray(b_host.T)
     
@@ -393,12 +391,16 @@ def test_mfma_fp8_rocir():
     expected_matrix = np.matmul(a_host, b_host)
     expected = expected_matrix.flatten()
     
+    hip_check(hip.hipFree(d_a))
+    hip_check(hip.hipFree(d_b))
+    hip_check(hip.hipFree(d_c))
+    hip_check(hip.hipModuleUnload(hip_module))
+    print("="*80)
     print(f"Max Absolute Difference: {np.max(np.abs(c_host - expected))}")
     
     if np.allclose(c_host, expected, atol=1.0):
-        print("c_host:",c_host)
-        print("expected_matrix:",expected)
         print(f"✓ Kernel executed correctly (Matches np.matmul)")
+        return True
     else:
         print(f"✗ Unexpected result")
         print(f"  Min: {np.min(c_host)}")
@@ -408,14 +410,9 @@ def test_mfma_fp8_rocir():
             print(f"  First failure at index {failures[0]}: Expected {expected[failures[0]]}, Got {c_host[failures[0]]}")
             print(f"  Total failures: {len(failures)}")
         raise ValueError("Kernel result does not match expected values")
+        return False
     
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_b))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
     
-    print("="*80)
-    return True
 
 if __name__ == "__main__":
     test_mfma_fp8_rocir()
