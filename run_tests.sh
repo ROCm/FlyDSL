@@ -153,6 +153,50 @@ else
     GPU_PASS_COUNT=0
 fi
 
+#=============================================================================
+# Part 5: Benchmark Tests (Performance Benchmarks)
+#=============================================================================
+echo "========================================================================"
+echo "Part 5: Benchmark Tests (Performance Benchmarks)"
+echo "========================================================================"
+echo ""
+
+if command -v rocm-smi &> /dev/null; then
+    BENCHMARK_TEST_COUNT=0
+    BENCHMARK_PASS_COUNT=0
+    
+    for test_file in tests/benchmark/*.py; do
+        if [ -f "$test_file" ]; then
+            BENCHMARK_TEST_COUNT=$((BENCHMARK_TEST_COUNT + 1))
+            test_name=$(basename "$test_file" .py)
+            echo "Running: $test_name"
+            pytest -sv "$test_file" > /tmp/${test_name}.log 2>&1
+            if [ $? -eq 0 ]; then
+                echo "   ✅ PASS"
+                BENCHMARK_PASS_COUNT=$((BENCHMARK_PASS_COUNT + 1))
+                # Show key metrics if available
+                if grep -q "Bandwidth:" /tmp/${test_name}.log; then
+                    grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+                fi
+            else
+                echo "   ❌ FAIL"
+                echo "      Log: /tmp/${test_name}.log"
+            fi
+        fi
+    done
+    
+    echo ""
+    echo "Benchmark Tests: $BENCHMARK_PASS_COUNT/$BENCHMARK_TEST_COUNT passed"
+    
+    ALL_BENCHMARK_PASSED=$((BENCHMARK_PASS_COUNT == BENCHMARK_TEST_COUNT))
+else
+    echo "⚠️  Skipped (requires GPU)"
+    echo ""
+    ALL_BENCHMARK_PASSED=1
+    BENCHMARK_TEST_COUNT=0
+    BENCHMARK_PASS_COUNT=0
+fi
+
 echo ""
 
 #=============================================================================
@@ -166,8 +210,15 @@ echo "MLIR IR Tests (Lowering):        $MLIR_PASS_COUNT/$MLIR_TEST_COUNT passed"
 echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 echo "Example Tests (ROCDL):           $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
 
-if [ $ALL_GPU_PASSED -eq 1 ]; then
+if command -v rocm-smi &> /dev/null; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
+    echo "Benchmark Tests:                 $BENCHMARK_PASS_COUNT/$BENCHMARK_TEST_COUNT passed"
+else
+    echo "GPU Execution Tests:             Skipped (no GPU)"
+    echo "Benchmark Tests:                 Skipped (no GPU)"
+fi
+
+if [ $ALL_GPU_PASSED -eq 1 ] && [ $ALL_BENCHMARK_PASSED -eq 1 ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"
@@ -178,17 +229,20 @@ if [ $ALL_GPU_PASSED -eq 1 ]; then
     echo "  ✓ GPU kernel execution (HIP runtime)"
     echo "  ✓ Shared memory optimizations (LDS)"
     echo "  ✓ MFMA operations (Pure Python API)"
+    echo "  ✓ Performance benchmarking (bandwidth tests)"
     echo ""
     exit 0
 else
     if command -v rocm-smi &> /dev/null; then
-        echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
         echo ""
-        echo "⚠️  Some GPU tests failed"
+        if [ $ALL_GPU_PASSED -ne 1 ]; then
+            echo "⚠️  Some GPU tests failed"
+        fi
+        if [ $ALL_BENCHMARK_PASSED -ne 1 ]; then
+            echo "⚠️  Some benchmark tests failed"
+        fi
         exit 1
     else
-        echo "GPU Execution Tests:             Skipped (no GPU)"
-        echo "MFMA GEMM Examples:              Skipped (no GPU)"
         echo ""
         echo "✅ All available tests passed"
         echo "   (GPU tests skipped - no ROCm GPU detected)"
