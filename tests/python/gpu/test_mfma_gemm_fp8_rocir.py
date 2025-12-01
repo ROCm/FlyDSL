@@ -254,9 +254,18 @@ def construct_module():
                         a_pack = vector.ExtractOp(a_vec64, static_position=[0], dynamic_position=[]).result
                         b_pack = vector.ExtractOp(b_vec64, static_position=[0], dynamic_position=[]).result
                         
-                        acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            vec4_f32, [unwrap(a_pack), unwrap(b_pack), unwrap(acc), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
-                        ).result
+                        # acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        #     vec4_f32, [unwrap(a_pack), unwrap(b_pack), unwrap(acc), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
+                        # ).result
+                        op = ir.Operation.create(
+                            "rocdl.mfma.f32.16x16x32.fp8.fp8",
+                            results=[vec4_f32],
+                            operands=[unwrap(a_pack), unwrap(b_pack), unwrap(acc), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)],
+                            loc=loc
+                        )
+                        # Insert at current insertion point (inside the loop)
+                        # ir.InsertionPoint.current.insert(op)
+                        acc = op.result
                         
                     gpu.BarrierOp()
                     current_acc = acc
@@ -300,6 +309,9 @@ def construct_module():
                 
                 gpu.ReturnOp([])
                 
+            # Add terminator to gpu.module body
+            gpu.ModuleEndOp()
+                
     return module
 
 def test_mfma_fp8_rocir():
@@ -332,11 +344,22 @@ def test_mfma_fp8_rocir():
         pipeline = Pipeline() \
             .add_pass("rocir-coord-lowering") \
             .canonicalize() \
+            .cse() \
             .rocdl_attach_target(chip="gfx942") \
-            .convert_vector_to_llvm() \
-            .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP", chipset="gfx942")) \
-            .gpu_to_llvm() \
-            .lower_to_llvm() \
+            .lower_affine() \
+            .convert_scf_to_cf() \
+            .convert_cf_to_llvm() \
+            .convert_arith_to_llvm() \
+            .convert_math_to_llvm() \
+            .convert_vector_to_llvm(force_32bit_vector_indices=True) \
+            .convert_index_to_llvm() \
+            .expand_strided_metadata() \
+            .finalize_memref_to_llvm() \
+            .reconcile_unrealized_casts() \
+            .Gpu(Pipeline() \
+                .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP", chipset="gfx942") \
+                .reconcile_unrealized_casts() \
+            ) \
             .gpu_module_to_binary(format="bin")
             
         lowered = run_pipeline(module, pipeline)

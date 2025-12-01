@@ -82,10 +82,20 @@ def construct_module(val_a, val_b):
                 # Unroll K=1024 (64 iterations of 16)
                 d = c_init
                 for _ in range(64):
-                    d = rocdl.mfma_f32_16x16x16f16(
-                        vec4_f32, 
-                        [a_vec, b_vec, d, c0_i32, c0_i32, c0_i32]
-                    ).result
+                    # Workaround for MLIR Python binding recursion bug
+                    # d = rocdl.mfma_f32_16x16x16f16(
+                    #     vec4_f32, 
+                    #     [a_vec, b_vec, d, c0_i32, c0_i32, c0_i32]
+                    # ).result
+                    op = ir.Operation.create(
+                        "rocdl.mfma.f32.16x16x16f16",
+                        results=[vec4_f32],
+                        operands=[a_vec, b_vec, d, c0_i32, c0_i32, c0_i32],
+                        loc=loc
+                    )
+                    # Insert at current insertion point
+                    # ir.InsertionPoint.current.insert(op)
+                    d = op.result
                 
                 tx = gpu.ThreadIdOp(gpu.Dimension.x).result
                 bx = gpu.BlockIdOp(gpu.Dimension.x).result
@@ -112,6 +122,9 @@ def construct_module(val_a, val_b):
                 
                 gpu.ReturnOp([])
                 
+            # Add ModuleEndOp terminator
+            gpu.ModuleEndOp()
+                
     return module
 
 def test_mfma_real_api():
@@ -136,13 +149,25 @@ def test_mfma_real_api():
             pipeline = Pipeline() \
                 .canonicalize() \
                 .rocdl_attach_target(chip=gpu_arch) \
-                .convert_vector_to_llvm() \
-                .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")) \
+                .convert_vector_to_llvm(force_32bit_vector_indices=True) \
+                .convert_scf_to_cf() \
+                .convert_cf_to_llvm() \
+                .convert_arith_to_llvm() \
+                .convert_math_to_llvm() \
+                .convert_index_to_llvm() \
+                .expand_strided_metadata() \
+                .finalize_memref_to_llvm() \
+                .reconcile_unrealized_casts() \
+                .Gpu(Pipeline() \
+                    .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP") \
+                    .reconcile_unrealized_casts() \
+                ) \
                 .gpu_to_llvm() \
                 .lower_to_llvm() \
                 .gpu_module_to_binary(format="bin")
         except AttributeError:
-            print("Warning: Pipeline.convert_vector_to_llvm not found. Trying without it.")
+            print("Warning: Pipeline construction failed. Using simplified pipeline.")
+            # Fallback if some methods are missing
             pipeline = Pipeline() \
                 .canonicalize() \
                 .rocdl_attach_target(chip=gpu_arch) \

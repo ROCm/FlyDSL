@@ -20,14 +20,22 @@ A modern MLIR-based compiler infrastructure for high performance rocm kernels, p
 ### Build
 
 ```bash
-# Inside Docker container
-cpp test:
+# Inside Docker container or environment
+
+# 1. Set MLIR_DIR environment variable to your LLVM build's cmake/mlir directory
+# Example: export MLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+
+# 2. Build the project
+cd rocdsl
+./build.sh
+
+# Or manually:
 cd rocdsl
 mkdir -p build && cd build
 cmake .. -DMLIR_DIR=$MLIR_PATH//lib/cmake/mlir
 make -j; make rocir-opt -j
 
-python test:
+# 3. Install python bindings
 cd python
 python setup.py develop
 ```
@@ -36,16 +44,16 @@ python setup.py develop
 
 ```bash
 # Test type parsing
-./build/tools/rocir-opt/rocir-opt tests/test_basic.mlir
+./build/tools/rocir-opt/rocir-opt tests/mlir/test_basic.mlir
 
 # Test all operations
-./build/tools/rocir-opt/rocir-opt tests/test_ops.mlir
+./build/tools/rocir-opt/rocir-opt tests/mlir/test_ops.mlir
 
 # Test layout operations
-./build/tools/rocir-opt/rocir-opt tests/test_layout.mlir
+./build/tools/rocir-opt/rocir-opt tests/mlir/test_layout.mlir
 
 # Run transformation pass
-./build/tools/rocir-opt/rocir-opt tests/test_pass.mlir --rocir-to-standard
+./build/tools/rocir-opt/rocir-opt tests/mlir/test_pass.mlir --rocir-to-standard
 
 # run python test
 pytest -sv tests/python/test_rocir_basic.py
@@ -116,7 +124,7 @@ rocdsl/
 │       └── RocirNvgpuToNvgpu.cpp
 ├── tools/rocir-opt/        # Optimization tool
 │   └── rocir-opt.cpp       # Tool entry point
-├── tests/                 # MLIR test files
+├── tests/mlir/            # MLIR test files
 │   ├── test_basic.mlir    # Type parsing test
 │   ├── test_ops.mlir      # All operations test
 │   ├── test_layout.mlir   # Layout operations test
@@ -199,11 +207,11 @@ All test files have been organized in the `tests/` directory:
 ./run_tests.sh
 
 # Or run individual tests
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/test_crd2idx.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/test_size.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/test_rank.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/test_cosize.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/comprehensive_test.mlir
+./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_crd2idx.mlir
+./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_size.mlir
+./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_rank.mlir
+./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_cosize.mlir
+./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/comprehensive_test.mlir
 ```
 
 ### Test Coverage

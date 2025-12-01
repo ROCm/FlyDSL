@@ -9,10 +9,14 @@ import os
 def register_cute_passes():
     """Register CuTe passes with MLIR."""
     try:
+        # Determine project root relative to this file
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        build_dir = os.path.join(project_root, 'build')
+        
         # Try to find and load the CuTe dialect library
         lib_paths = [
-            '/mnt/raid0/felix/rocDSL/build/lib/Dialect/Rocir/libRocirDialect.so',
-            '/mnt/raid0/felix/rocDSL/build/lib/libRocirDialect.so',
+            os.path.join(build_dir, 'lib', 'Dialect', 'Rocir', 'libRocirDialect.so'),
+            os.path.join(build_dir, 'lib', 'libRocirDialect.so'),
         ]
         
         for lib_path in lib_paths:
@@ -22,8 +26,8 @@ def register_cute_passes():
                 
         # Also try loading transforms library
         transform_paths = [
-            '/mnt/raid0/felix/rocDSL/build/lib/Transforms/libCuteTransforms.so',
-            '/mnt/raid0/felix/rocDSL/build/lib/libCuteTransforms.so',
+            os.path.join(build_dir, 'lib', 'Transforms', 'libCuteTransforms.so'),
+            os.path.join(build_dir, 'lib', 'libCuteTransforms.so'),
         ]
         
         for lib_path in transform_paths:

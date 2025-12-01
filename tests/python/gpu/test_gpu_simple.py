@@ -4,9 +4,23 @@ Vector addition test with clean, readable syntax
 """
 
 import sys
-sys.path.insert(0, "/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/build/python_bindings")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/python")
+import os
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Add python bindings path
+build_dir = os.path.join(project_root, 'build', 'python_bindings')
+if build_dir not in sys.path:
+    sys.path.insert(0, build_dir)
+
+# Add python source path
+python_src = os.path.join(project_root, 'python')
+if python_src not in sys.path:
+    sys.path.insert(0, python_src)
+
+# MLIR python bindings should be in PYTHONPATH or handled by environment
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline

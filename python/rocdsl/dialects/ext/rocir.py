@@ -14,6 +14,7 @@ from mlir.ir import (
     IndexType,
     IntegerAttr,
     IntegerType,
+    Operation,
 )
 
 # Import generated ops
@@ -237,8 +238,14 @@ def crd2idx(coord: Value, layout: Value, loc: Optional[Location] = None, ip: Opt
     loc = _get_location(loc)
     result_type = IndexType.get()
     
-    with ip or InsertionPoint.current:
-        op = rocir_ops.Crd2IdxOp(_unwrap_value(coord), _unwrap_value(layout), results=[result_type], loc=loc, ip=ip)
+    with ip or InsertionPoint.current as insertion_point:
+        op = Operation.create(
+            rocir_ops.Crd2IdxOp.OPERATION_NAME,
+            results=[result_type],
+            operands=[_unwrap_value(coord), _unwrap_value(layout)],
+            loc=loc
+        )
+        # insertion_point.insert(op)
         return op.results[0]
 
 
@@ -293,8 +300,13 @@ def size(shape_or_layout: Value, loc: Optional[Location] = None, ip: Optional[In
     loc = _get_location(loc)
     result_type = IndexType.get()
     
-    with ip or InsertionPoint.current:
-        op = rocir_ops.SizeOp(_unwrap_value(shape_or_layout), results=[result_type], loc=loc, ip=ip)
+    with ip or InsertionPoint.current as insertion_point:
+        op = Operation.create(
+            rocir_ops.SizeOp.OPERATION_NAME,
+            results=[result_type],
+            operands=[_unwrap_value(shape_or_layout)],
+            loc=loc
+        )
         return op.results[0]
 
 
@@ -313,8 +325,13 @@ def cosize(layout: Value, loc: Optional[Location] = None, ip: Optional[Insertion
     loc = _get_location(loc)
     result_type = IndexType.get()
     
-    with ip or InsertionPoint.current:
-        op = rocir_ops.CosizeOp(_unwrap_value(layout), results=[result_type], loc=loc, ip=ip)
+    with ip or InsertionPoint.current as insertion_point:
+        op = Operation.create(
+            rocir_ops.CosizeOp.OPERATION_NAME,
+            results=[result_type],
+            operands=[_unwrap_value(layout)],
+            loc=loc
+        )
         return op.results[0]
 
 
@@ -333,8 +350,13 @@ def rank(shape_or_layout: Value, loc: Optional[Location] = None, ip: Optional[In
     loc = _get_location(loc)
     result_type = IndexType.get()
     
-    with ip or InsertionPoint.current:
-        op = rocir_ops.RankOp(_unwrap_value(shape_or_layout), results=[result_type], loc=loc, ip=ip)
+    with ip or InsertionPoint.current as insertion_point:
+        op = Operation.create(
+            rocir_ops.RankOp.OPERATION_NAME,
+            results=[result_type],
+            operands=[_unwrap_value(shape_or_layout)],
+            loc=loc
+        )
         return op.results[0]
 
 

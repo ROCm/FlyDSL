@@ -160,7 +160,7 @@ class GPUModuleOp(GPUModuleOp):
         return self.regions[0].blocks[0]
 
 
-module = region_op(GPUModuleOp)
+module = region_op(GPUModuleOp, terminator=lambda *args: ModuleEndOp())
 
 
 class GPUModuleMeta(ModuleMeta):

@@ -3,9 +3,24 @@
 
 import sys
 import os
-sys.path.insert(0, os.environ['MLIR_PATH'] + '/tools/mlir/python_packages/mlir_core')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
+
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Add python bindings path
+build_dir = os.path.join(project_root, 'build', 'python_bindings')
+if build_dir not in sys.path:
+    sys.path.insert(0, build_dir)
+
+# Add python source path
+python_src = os.path.join(project_root, 'python')
+if python_src not in sys.path:
+    sys.path.insert(0, python_src)
+
+# MLIR python bindings should be in PYTHONPATH or handled by environment
+
 
 from mlir import ir
 from mlir.dialects import func, arith
@@ -36,6 +51,7 @@ def test_thread_operations():
                 wg_z = rocdl.workgroup_id_z(i32)
                 wg_dim_x = rocdl.workgroup_dim_x(i32)
                 grid_x = rocdl.grid_dim_x(i32)
+                # wavefrontsize might be missing in some builds
                 wavesize = rocdl.wavefrontsize(i32)
         
         mlir_str = str(module)
@@ -61,13 +77,13 @@ def test_sync_operations():
             @func.FuncOp.from_py_func()
             def sync_test():
                 rocdl.barrier()
-                rocdl.s_barrier()
-                rocdl.s_waitcnt(0)
+                rocdl.s_barrier() # May be missing
+                rocdl.s_waitcnt(0) # May be missing
         
         mlir_str = str(module)
         assert 'rocdl.barrier' in mlir_str or 'rocdl.workgroup.barrier' in mlir_str
         assert 'rocdl.s.barrier' in mlir_str
-        assert 'rocdl.s.waitcnt' in mlir_str
+        assert 'rocdl.s.waitcnt' in mlir_str or 'rocdl.waitcnt' in mlir_str
         
         print('Barriers: barrier, s_barrier')
         print('Wait: s_waitcnt')

@@ -3524,7 +3524,9 @@ class Pipeline:
         
         try:
             # Find rocir-opt binary
-            rocir_opt = '/mnt/raid0/felix/rocDSL/build/bin/rocir-opt'
+            # Calculate path relative to this file
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            rocir_opt = os.path.join(project_root, 'build', 'tools', 'rocir-opt', 'rocir-opt')
             if not os.path.exists(rocir_opt):
                 # Fallback: try to find in PATH
                 import shutil

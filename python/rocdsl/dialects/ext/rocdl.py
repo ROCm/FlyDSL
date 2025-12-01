@@ -15,6 +15,27 @@ Example:
 """
 
 from mlir.dialects.rocdl import *
+from mlir.ir import Operation, IntegerType
+from mlir.dialects import arith
+
+# Polyfills for missing operations in standard bindings
+if "wavefrontsize" not in globals():
+    def wavefrontsize(result_type):
+        return Operation.create("rocdl.wavefrontsize", results=[result_type]).results[0]
+
+if "s_waitcnt" not in globals():
+    def s_waitcnt(simm16):
+        if isinstance(simm16, int):
+            simm16 = arith.ConstantOp(IntegerType.get_signless(32), simm16).result
+        return Operation.create("rocdl.waitcnt", operands=[simm16]).results
+
+if "readlane" not in globals():
+    def readlane(result_type, src, lane):
+        return Operation.create("rocdl.readlane", results=[result_type], operands=[src, lane]).results[0]
+
+if "readfirstlane" not in globals():
+    def readfirstlane(result_type, src):
+        return Operation.create("rocdl.readfirstlane", results=[result_type], operands=[src]).results[0]
 
 __all__ = [
     # Thread/Block/Grid IDs and dimensions

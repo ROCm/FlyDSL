@@ -32,7 +32,9 @@ def run_cute_opt(module: Module, passes: str) -> Module:
     print(f"[DEBUG] run_cute_opt called with passes: {passes}")
     
     # Get rocir-opt path
-    cute_opt = Path("/mnt/raid0/felix/rocDSL/build/tools/rocir-opt/rocir-opt")
+    # Calculate project root relative to this file
+    project_root = Path(__file__).parent.parent.parent
+    cute_opt = project_root / "build" / "tools" / "rocir-opt" / "rocir-opt"
     if not cute_opt.exists():
         raise RuntimeError(f"rocir-opt not found at {cute_opt}")
     

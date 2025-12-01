@@ -36,9 +36,26 @@ def compile_to_hsaco(mlir_module):
         .canonicalize()
         .cse()
         .rocdl_attach_target(chip=gpu_arch)
-        .Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP"))
-        .gpu_to_llvm()
-        .lower_to_llvm()
+        
+        # Lower control flow and standard ops globally first
+        # This ensures gpu.module content (gpu.func body) is lowered to LLVM-compatible ops
+        # BEFORE we convert the function itself to llvm.func.
+        .convert_scf_to_cf()
+        .convert_cf_to_llvm()
+        .convert_arith_to_llvm()
+        .convert_math_to_llvm()
+        .convert_vector_to_llvm(force_32bit_vector_indices=True)
+        .convert_index_to_llvm()
+        .reconcile_unrealized_casts()
+        
+        # Now convert GPU dialect to ROCDL
+        # This handles gpu.func -> llvm.func and memref -> llvm pointers
+        .Gpu(Pipeline()
+            .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")
+            .reconcile_unrealized_casts()
+        )
+        
+        # Finally serialize
         .gpu_module_to_binary(format="bin")
     )
     from rocdsl.dialects.ext.gpu import get_compile_object_bytes

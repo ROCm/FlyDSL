@@ -3,9 +3,22 @@
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', '/home/yanronli/llvm-project/buildmlir'), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Add python bindings path
+build_dir = os.path.join(project_root, 'build', 'python_bindings')
+if build_dir not in sys.path:
+    sys.path.insert(0, build_dir)
+
+# Add python source path
+python_src = os.path.join(project_root, 'python')
+if python_src not in sys.path:
+    sys.path.insert(0, python_src)
+
+# MLIR python bindings should be in PYTHONPATH or handled by environment
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import gpu, scf
