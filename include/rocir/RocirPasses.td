@@ -14,7 +14,7 @@ include "mlir/Pass/PassBase.td"
 // rocdsl → Standard Dialects (scf, arith, memref)
 //===----------------------------------------------------------------------===//
 
-def RocirToStandardPass : Pass<"rocir-to-standard", "::mlir::ModuleOp"> {
+def RocirToStandardPass : Pass<"rocir-to-standard", "::mlir::func::FuncOp"> {
   let summary = "Lower CuTe IR to standard MLIR dialects";
   let description = [{
     Converts rocdsl operations to combinations of:

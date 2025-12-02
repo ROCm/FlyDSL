@@ -52,8 +52,8 @@ def test_printf_ir_generation():
     @func.FuncOp.from_py_func()
     def test_printf_func():
         x = Const.index(42)
-        # Print a dynamic index value
-        rocdsl.rocir.printf(">?? {}", x)
+            # Print a dynamic index value
+            rocdsl.rocir.printf(">?? {}", x)
         return []
     
     # Verify the IR contains gpu.printf operation
@@ -77,8 +77,8 @@ def test_printf_with_multiple_args():
     def test_multi_printf():
         a = Const.index(10)
         b = Const.index(20)
-        # Print multiple values
-        rocdsl.rocir.printf("a: {}, b: {}", a, b)
+            # Print multiple values
+            rocdsl.rocir.printf("a: {}, b: {}", a, b)
         return []
     
     ir_str = str(ctx.module)
@@ -109,19 +109,19 @@ def test_print_vs_printf_concept():
         # Dynamic value
         a = Const.index(8)
         
-        # Static value
-        b = 2
-        
-        # Python's print: shows compile-time info
-        rocdsl.rocir.print(">>>", b)  # Will print: >>> 2
+            # Static value
+            b = 2
+            
+            # Python's print: shows compile-time info
+            rocdsl.rocir.print(">>>", b)  # Will print: >>> 2
         rocdsl.rocir.print(">>> a is dynamic:", a)  # Will print object representation
-        
-        # rocir.printf: shows runtime values
-        rocdsl.rocir.printf(">?? {}", a)  # Will print actual value at runtime
+            
+            # rocir.printf: shows runtime values
+            rocdsl.rocir.printf(">?? {}", a)  # Will print actual value at runtime
         
         c2 = Const.index(2)
         rocdsl.rocir.printf(">?? {}", c2)  # Will print 2 at runtime
-        
+            
         return []
     
     # Verify both types of output exist
@@ -149,10 +149,10 @@ def test_printf_with_layout_types():
         
         # Create a nested shape
         shape = rocdsl.rocir.make_shape(dim0, (dim1, dim2))
-        
-        # Print the shape dimensions
+            
+            # Print the shape dimensions
         rocdsl.rocir.printf("Shape dims: {} x ({} x {})", dim0, dim1, dim2)
-        
+            
         return []
     
     ir_str = str(ctx.module)

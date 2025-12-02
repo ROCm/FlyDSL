@@ -1,6 +1,7 @@
 #include "rocir/RocirDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/Bytecode/BytecodeImplementation.h"
 #include "mlir/IR/TypeSupport.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -18,10 +19,20 @@ struct IntTypeStorage : public TypeStorage {
   }
 };
 
+struct StructureTypeStorage : public TypeStorage {
+  using KeyTy = ArrayRef<int32_t>;
+  StructureTypeStorage(KeyTy key) : structure(key) {}
+  bool operator==(const KeyTy &key) const { return key == structure; }
+  static StructureTypeStorage *construct(TypeStorageAllocator &allocator, const KeyTy &key) {
+    return new (allocator.allocate<StructureTypeStorage>()) StructureTypeStorage(allocator.copyInto(key));
+  }
+  ArrayRef<int32_t> structure;
+};
+
 struct RankedTypeStorage : public TypeStorage {
   using KeyTy = int;
-  RankedTypeStorage(int rank) : rank(rank) {}
-  bool operator==(const KeyTy &key) const { return rank == key; }
+  RankedTypeStorage(KeyTy key) : rank(key) {}
+  bool operator==(const KeyTy &key) const { return key == rank; }
   static RankedTypeStorage *construct(TypeStorageAllocator &allocator, const KeyTy &key) {
     return new (allocator.allocate<RankedTypeStorage>()) RankedTypeStorage(key);
   }
@@ -35,19 +46,59 @@ IntType IntType::get(MLIRContext *ctx) {
 }
 
 ShapeType ShapeType::get(MLIRContext *ctx, int rank) {
-  return Base::get(ctx, rank);
+  // Legacy support: create flat tuple structure
+  SmallVector<int32_t> structure;
+  if (rank == 0) {
+    structure.push_back(0); // Empty tuple
+  } else {
+    structure.push_back(rank);
+    for (int i = 0; i < rank; ++i) structure.push_back(-1); // -1 for Leaf
+  }
+  return Base::get(ctx, structure);
+}
+
+ShapeType ShapeType::get(MLIRContext *ctx, ArrayRef<int32_t> structure) {
+  return Base::get(ctx, structure);
 }
 
 int ShapeType::getRank() const {
-  return getImpl()->rank;
+  // Count leaves (-1)
+  int leaves = 0;
+  for (auto s : getImpl()->structure) {
+    if (s == -1) leaves++;
+  }
+  return leaves;
+}
+
+ArrayRef<int32_t> ShapeType::getStructure() const {
+  return getImpl()->structure;
 }
 
 StrideType StrideType::get(MLIRContext *ctx, int rank) {
-  return Base::get(ctx, rank);
+  SmallVector<int32_t> structure;
+  if (rank == 0) {
+    structure.push_back(0);
+  } else {
+    structure.push_back(rank);
+    for (int i = 0; i < rank; ++i) structure.push_back(-1);
+  }
+  return Base::get(ctx, structure);
+}
+
+StrideType StrideType::get(MLIRContext *ctx, ArrayRef<int32_t> structure) {
+  return Base::get(ctx, structure);
 }
 
 int StrideType::getRank() const {
-  return getImpl()->rank;
+  int leaves = 0;
+  for (auto s : getImpl()->structure) {
+    if (s == -1) leaves++;
+  }
+  return leaves;
+}
+
+ArrayRef<int32_t> StrideType::getStructure() const {
+  return getImpl()->structure;
 }
 
 LayoutType LayoutType::get(MLIRContext *ctx, int rank) {
@@ -96,14 +147,34 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
   if (mnemonic == "int")
     return IntType::get(ctx);
     
-  if (mnemonic == "shape" || mnemonic == "stride" || 
-      mnemonic == "layout" || mnemonic == "coord") {
+  if (mnemonic == "shape" || mnemonic == "stride") {
+    SmallVector<int32_t> structure;
+    if (parser.parseLess()) return Type();
+    
+    // Parse comma-separated integers
+    do {
+      int32_t val;
+      if (parser.parseInteger(val)) return Type();
+      structure.push_back(val);
+    } while (succeeded(parser.parseOptionalComma()));
+    
+    if (parser.parseGreater()) return Type();
+    
+    // Backward compatibility: if single integer N >= 0, treat as rank (flat tuple)
+    // But if N=-1, it is a leaf structure (invalid as top level usually, but maybe).
+    if (structure.size() == 1 && structure[0] >= 0) {
+       if (mnemonic == "shape") return ShapeType::get(ctx, structure[0]);
+       if (mnemonic == "stride") return StrideType::get(ctx, structure[0]);
+    }
+    
+    if (mnemonic == "shape") return ShapeType::get(ctx, structure);
+    if (mnemonic == "stride") return StrideType::get(ctx, structure);
+  }
+
+  if (mnemonic == "layout" || mnemonic == "coord") {
     int rank;
     if (parser.parseLess() || parser.parseInteger(rank) || parser.parseGreater())
       return Type();
-      
-    if (mnemonic == "shape") return ShapeType::get(ctx, rank);
-    if (mnemonic == "stride") return StrideType::get(ctx, rank);
     if (mnemonic == "layout") return LayoutType::get(ctx, rank);
     if (mnemonic == "coord") return CoordType::get(ctx, rank);
   }
@@ -116,9 +187,21 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &printer) const {
   if (llvm::isa<IntType>(type)) {
     printer << "int";
   } else if (auto t = llvm::dyn_cast<ShapeType>(type)) {
-    printer << "shape<" << t.getRank() << ">";
+    printer << "shape<";
+    auto s = t.getStructure();
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (i > 0) printer << ", ";
+      printer << s[i];
+    }
+    printer << ">";
   } else if (auto t = llvm::dyn_cast<StrideType>(type)) {
-    printer << "stride<" << t.getRank() << ">";
+    printer << "stride<";
+    auto s = t.getStructure();
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (i > 0) printer << ", ";
+      printer << s[i];
+    }
+    printer << ">";
   } else if (auto t = llvm::dyn_cast<LayoutType>(type)) {
     printer << "layout<" << t.getRank() << ">";
   } else if (auto t = llvm::dyn_cast<CoordType>(type)) {

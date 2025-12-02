@@ -12,6 +12,7 @@ namespace mlir::rocir {
 namespace detail {
 struct IntTypeStorage;
 struct RankedTypeStorage;
+struct StructureTypeStorage;
 }
 
 // Type declarations
@@ -22,20 +23,24 @@ public:
   static IntType get(MLIRContext *context);
 };
 
-class ShapeType : public Type::TypeBase<ShapeType, Type, detail::RankedTypeStorage> {
+class ShapeType : public Type::TypeBase<ShapeType, Type, detail::StructureTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.shape";
   static ShapeType get(MLIRContext *context, int rank);
+  static ShapeType get(MLIRContext *context, ArrayRef<int32_t> structure);
   int getRank() const;
+  ArrayRef<int32_t> getStructure() const;
 };
 
-class StrideType : public Type::TypeBase<StrideType, Type, detail::RankedTypeStorage> {
+class StrideType : public Type::TypeBase<StrideType, Type, detail::StructureTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.stride";
   static StrideType get(MLIRContext *context, int rank);
+  static StrideType get(MLIRContext *context, ArrayRef<int32_t> structure);
   int getRank() const;
+  ArrayRef<int32_t> getStructure() const;
 };
 
 class LayoutType : public Type::TypeBase<LayoutType, Type, detail::RankedTypeStorage> {
