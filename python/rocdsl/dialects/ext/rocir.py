@@ -464,6 +464,31 @@ def get_stride(layout: Value, loc: Optional[Location] = None, ip: Optional[Inser
         return rocir_ops.GetStrideOp(result_type, _unwrap_value(layout), loc=loc).result
 
 
+def get(input: Value, index: Value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
+    """Extract element from shape/stride/coord at given index.
+    
+    Args:
+        input: A Rocir shape, stride, or coord value
+        index: Index of element to extract
+        loc: Optional source location
+        ip: Optional insertion point
+        
+    Returns:
+        The element at the given index (as an index value)
+        
+    Example:
+        >>> shape = rocir.make_shape(c2, c3, c4)
+        >>> dim0 = rocir.get(shape, Const.index(0))  # Returns 2
+        >>> dim1 = rocir.get(shape, Const.index(1))  # Returns 3
+    """
+    
+    loc = _get_location(loc)
+    result_type = IndexType.get()
+    
+    with ip or InsertionPoint.current:
+        return rocir_ops.GetOp(input=_unwrap_value(input), idx=_unwrap_value(index), results=[result_type], loc=loc, ip=ip).result
+
+
 def composition(layout_a: Value, layout_b: Value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
     """Compose two layouts.
     
@@ -766,6 +791,7 @@ __all__ = [
     "size",
     "cosize",
     "rank",
+    "get",
     "get_shape",
     "get_stride",
     "composition",
