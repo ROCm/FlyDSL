@@ -2,6 +2,19 @@
 set -ex
 
 # Set up environment
+if [ -z "$MLIR_PATH" ]; then
+    # Default path based on build_llvm.sh
+    DEFAULT_MLIR_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/llvm-project/buildmlir"
+    if [ -d "$DEFAULT_MLIR_PATH" ]; then
+        echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH"
+        export MLIR_PATH="$DEFAULT_MLIR_PATH"
+    else
+        echo "Error: MLIR_PATH not set and default location ($DEFAULT_MLIR_PATH) not found."
+        echo "Please run ./build_llvm.sh first or set MLIR_PATH."
+        exit 1
+    fi
+fi
+
 export PYTHONPATH=$MLIR_PATH/tools/mlir/python_packages/mlir_core:$PYTHONPATH
 
 # Install Python requirements
