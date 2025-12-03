@@ -4,16 +4,23 @@
 [![MLIR](https://img.shields.io/badge/MLIR-amd--staging-orange)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 
-A modern MLIR-based compiler infrastructure for high performance rocm kernels, providing a high-level IR for layout algebra and tensor operations with hardware-specific optimizations.
+A modern MLIR-based compiler infrastructure for high performance ROCm kernels, providing a high-level IR for layout algebra and tensor operations with hardware-specific optimizations.
 
 ## 🎯 Features
 
-- **Rocir Dialect**: Layout algebra IR with custom types and operations
-  - Type system: `!rocir.int`, `!rocir.shape<N>`, `!rocir.stride<N>`, `!rocir.layout<N>`, `!rocir.coord<N>`
-  - Operations: `make_shape`, `make_stride`, `make_layout`, `make_coord`, `size`, `crd2idx`
-- **Transformation Passes**: Lowering ROCDSL to standard MLIR dialects
-- **rocir-opt Tool**: MLIR optimization and transformation tool
-- **Modern MLIR API**: Built with latest MLIR (amd-staging branch)
+- **Rocir Dialect**: Layout algebra IR inspired by CuTe/CUTLASS
+  - Core abstractions: `!rocir.shape`, `!rocir.stride`, `!rocir.layout`
+  - Powerful algebra: Composition, Product, Divide, Partition operations
+  - Compile-time + Runtime hybrid evaluation
+- **Python Bindings**: Fluent Python API (`rocdsl`) for kernel construction
+  - `Pipeline` API for easy pass management
+  - `ArithValue` wrapper for intuitive arithmetic expressions
+- **Hardware Support**:
+  - AMD MI300 (gfx940/gfx942) optimization support (MFMA)
+  - Generic ROCm/HIP support
+- **Transformation Passes**:
+  - `rocir-coord-lowering`: Lowers layout abstractions to efficient arithmetic
+  - `gpu-to-rocdl`: Full lowering pipeline to HSACO binary
 
 ## 🚀 Quick Start
 
@@ -22,198 +29,151 @@ A modern MLIR-based compiler infrastructure for high performance rocm kernels, p
 ```bash
 # Inside Docker container or environment
 
-# 1. Build the llvm-project (If you don't have this llvm-project)
+# 1. Build the llvm-project (if needed)
 cd rocdsl
 ./build_llvm.sh
 
-# 2. Build the rocdsl project
+# 2. Install Python requirements
+pip install -r python/requirements.txt
+
+# 3. Build the rocdsl project (C++ and Python bindings)
 ./build.sh
 
-# 3. Install python bindings
+# 4. Install python bindings in editable mode
 cd python
 python setup.py develop
 ```
 
-### Test
+### Run Tests
 
 ```bash
-# Test type parsing
-./build/tools/rocir-opt/rocir-opt tests/mlir/test_basic.mlir
+# Run the full test suite (C++ and Python tests)
+./run_tests.sh
 
-# Test all operations
-./build/tools/rocir-opt/rocir-opt tests/mlir/test_ops.mlir
-
-# Test layout operations
-./build/tools/rocir-opt/rocir-opt tests/mlir/test_layout.mlir
-
-# Run transformation pass
-./build/tools/rocir-opt/rocir-opt tests/mlir/test_pass.mlir --rocir-to-standard
-
-# run python test
-pytest -sv tests/python/test_rocir_basic.py
+# Run specific Python benchmark
+python tests/benchmark/vecAdd.py
 ```
 
-## 📝 Example Usage
+## 📐 Layout System
 
-### Basic Type Usage
+ROCDSL introduces a powerful layout system to manage complex data mapping patterns on GPUs (tiling, swizzling, vectorization).
+
+### Core Abstractions
+
+1.  **Shape**: The extent of dimensions (e.g., `(M, N)`).
+2.  **Stride**: The distance between elements in memory (e.g., `(1, M)` for column-major).
+3.  **Layout**: A pair of `(Shape, Stride)` that maps a logical **Coordinate** to a physical linear **Index**.
+
+Formula: `Index = dot(Coord, Stride) = sum(c_i * s_i)`
+
+### Operations
+
+*   **Construction**: `make_shape`, `make_stride`, `make_layout`, `make_coord`
+*   **Mapping**:
+    *   `crd2idx(coord, layout) -> index`: Convert logical coordinate to physical index.
+    *   `idx2crd(index, layout) -> coord`: Convert physical index to logical coordinate.
+*   **Inspection**: `size`, `cosize`, `rank`
+*   **Algebra**:
+    *   `composition(A, B)`: Compose layouts (A ∘ B).
+    *   `product(A, B)`: Combine layouts (Logical, Tiled, Blocked, etc.).
+    *   `divide(A, B)`: Partition layout A by B (Logical, Tiled, etc.).
+    *   `local_partition(layout, tile, index)`: Slice layout for a specific thread/block.
+
+### Example (MLIR)
 
 ```mlir
-module {
-  func.func @test_types(%i1: !rocir.int, %i2: !rocir.int) -> !rocir.layout<2> {
-    %shape = rocir.make_shape %i1, %i2 : (!rocir.int, !rocir.int) -> !rocir.shape<2>
-    %stride = rocir.make_stride %i1, %i2 : (!rocir.int, !rocir.int) -> !rocir.stride<2>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<2>, !rocir.stride<2>) -> !rocir.layout<2>
-    return %layout : !rocir.layout<2>
-  }
-  
-  func.func @test_all_types(%s: !rocir.shape<3>, %st: !rocir.stride<3>, 
-                            %l: !rocir.layout<2>, %c: !rocir.coord<2>) {
-    return
-  }
+func.func @layout_example(%i: !rocir.int, %j: !rocir.int) -> !rocir.int {
+  // Create 2D layout (8, 16) with column-major stride (1, 8)
+  %shape = rocir.make_shape %c8, %c16 : (!rocir.int, !rocir.int) -> !rocir.shape<2>
+  %stride = rocir.make_stride %c1, %c8 : (!rocir.int, !rocir.int) -> !rocir.stride<2>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<2>, !rocir.stride<2>) -> !rocir.layout<2>
+
+  // Convert coordinate (i, j) to linear index
+  %coord = rocir.make_coord %i, %j : (!rocir.int, !rocir.int) -> !rocir.coord<2>
+  %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<2>, !rocir.layout<2>) -> !rocir.int
+
+  return %idx : !rocir.int
 }
 ```
 
-### Layout Operations
+## 🐍 Python API (`rocdsl`)
 
-```mlir
-module {
-  func.func @test_make_layout(%i8: !rocir.int, %i16: !rocir.int, %i1: !rocir.int) -> !rocir.layout<2> {
-    // Create shape and stride
-    %shape = rocir.make_shape %i8, %i16 : (!rocir.int, !rocir.int) -> !rocir.shape<2>
-    %stride = rocir.make_stride %i1, %i8 : (!rocir.int, !rocir.int) -> !rocir.stride<2>
-    
-    // Create layout from shape and stride
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<2>, !rocir.stride<2>) -> !rocir.layout<2>
-    
-    return %layout : !rocir.layout<2>
-  }
-  
-  func.func @test_coord_to_index(%layout: !rocir.layout<2>, %i3: !rocir.int, %i5: !rocir.int) -> !rocir.int {
-    %coord = rocir.make_coord %i3, %i5 : (!rocir.int, !rocir.int) -> !rocir.coord<2>
-    
-    // Convert coordinate to linear index
-    %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<2>, !rocir.layout<2>) -> !rocir.int
-    
-    return %idx : !rocir.int
-  }
-}
+ROCDSL provides a high-level Python API for generating kernels.
+
+### Layout Construction
+
+```python
+from rocdsl.dialects.ext import rocir, arith
+
+# Create constants
+c8 = arith.constant(8, index=True)
+c16 = arith.constant(16, index=True)
+
+# Create Layout
+shape = rocir.make_shape(c8, c16)
+stride = rocir.make_stride(arith.constant(1, index=True), c8)
+layout = rocir.make_layout(shape, stride)
+
+# Coordinate to Index
+coord = rocir.make_coord(i, j)
+idx = rocir.crd2idx(coord, layout)
 ```
+
+### Pipeline API
+
+Easy-to-use compilation pipeline:
+
+```python
+from rocdsl.compiler.pipeline import Pipeline
+
+# Build and run optimization pipeline
+pipeline = Pipeline() \
+    .rocir_coord_lowering() \
+    .canonicalize() \
+    .cse() \
+    .rocdl_attach_target(chip="gfx942") \
+    .Gpu(Pipeline().convert_gpu_to_rocdl(runtime="HIP")) \
+    .gpu_to_llvm() \
+    .lower_to_llvm() \
+    .gpu_module_to_binary(format="bin")
+
+binary_module = pipeline.run(module)
+```
+
+## ✅ Testing Status
+
+| Category | Status | Description |
+|----------|--------|-------------|
+| **MLIR Core** | ✅ Passing | Type parsing, Op verification, Basic transforms |
+| **Rocir Ops** | ✅ Passing | Layout algebra, Coordinate lowering |
+| **GPU Backend**| ✅ Passing | GPU kernel compilation, Shared memory, Vectorization |
+| **Hardware** | ✅ Passing | MFMA (Matrix Fused Multiply-Add) execution on MI300 |
+
+**Verified Platforms**:
+*   AMD MI300X (gfx942)
+*   Linux / ROCm 6.x
 
 ## 🗂️ Project Structure
 
 ```
 rocdsl/
-├── include/rocir/          # Dialect definitions (TableGen)
-│   ├── RocirDialect.h      # Dialect and type declarations (5 types)
-│   ├── RocirDialect.td     # Dialect definition with custom type parsing
-│   ├── RocirOps.td         # 6 operations with modern MLIR API
-│   ├── RocirPasses.td      # Pass definitions
-│   └── RocirPasses.h       # Pass interface
-├── lib/
-│   ├── Dialect/Rocir/
-│   │   └── RocirDialect.cpp    # Dialect implementation (90 lines)
-│   └── Transforms/
-│       ├── RocirToStandard.cpp # Lowering pass (partial implementation)
-│       ├── RocirToRocm.cpp
-│       └── RocirNvgpuToNvgpu.cpp
-├── tools/rocir-opt/        # Optimization tool
-│   └── rocir-opt.cpp       # Tool entry point
-├── tests/mlir/            # MLIR test files
-│   ├── test_basic.mlir    # Type parsing test
-│   ├── test_ops.mlir      # All operations test
-│   ├── test_layout.mlir   # Layout operations test
-│   └── test_pass.mlir     # Pass transformation test
-└── CMakeLists.txt
+├── include/rocir/          # C++ Dialect definitions
+├── lib/                    # C++ Implementation (Dialect, Transforms)
+├── python/                 # Python bindings package (rocdsl)
+│   ├── rocdsl/
+│   │   ├── dialects/       # MLIR Dialect wrappers
+│   │   └── compiler/       # Pipeline and Context utilities
+│   ├── requirements.txt    # Python dependencies
+│   └── setup.py            # Build script
+├── tools/                  # CLI tools (rocir-opt)
+└── tests/                  # Test suite
+    ├── mlir/               # Lit tests for C++ components
+    └── python/             # Pytest suite for Python API
+        ├── ir/             # IR generation tests
+        ├── gpu/            # GPU execution tests
+        └── benchmark/      # Performance benchmarks
 ```
-
-## 🧩 Type System
-
-| Type | Syntax | Description |
-|------|--------|-------------|
-| `IntType` | `!rocir.int` | Compile-time integer value |
-| `ShapeType` | `!rocir.shape<N>` | N-dimensional shape (N elements) |
-| `StrideType` | `!rocir.stride<N>` | N-dimensional stride (N elements) |
-| `LayoutType` | `!rocir.layout<N>` | Combined shape+stride layout |
-| `CoordType` | `!rocir.coord<N>` | N-dimensional coordinate |
-
-## 🔧 Operations
-
-| Operation | Description | Signature |
-|-----------|-------------|-----------|
-| `make_shape` | Create shape from integers | `(!rocir.int, ...) -> !rocir.shape<N>` |
-| `make_stride` | Create stride from integers | `(!rocir.int, ...) -> !rocir.stride<N>` |
-| `make_layout` | Create layout from shape+stride | `(!rocir.shape<N>, !rocir.stride<N>) -> !rocir.layout<N>` |
-| `make_coord` | Create coordinate from integers | `(!rocir.int, ...) -> !rocir.coord<N>` |
-| `size` | Get total size of shape | `!rocir.shape<N> -> !rocir.int` |
-| `crd2idx` | Convert coord to linear index | `(!rocir.coord<N>, !rocir.layout<N>) -> !rocir.int` |
-
-## 🎨 Passes
-
-| Pass | Flag | Status | Description |
-|------|------|--------|-------------|
-| `RocirToStandardPass` | `--rocir-to-standard` | ✅ Partial | Lower ROCDSL to standard dialects (only `crd2idx` implemented) |
-| `RocirToRocmPass` | `--rocir-to-rocm` | ⚠️ Skeleton | Lower to ROCm-specific operations |
-| `RocirNvgpuToNvgpuPass` | `--rocir-nvgpu-to-nvgpu` | ⚠️ Skeleton | Lower to NVGPU dialect |
-
-## ✅ Testing Status
-
-- ✅ **Type parsing**: All 5 types parse and print correctly
-- ✅ **Operations**: All 6 operations parse successfully
-- ✅ **Pass registration**: `--rocir-to-standard` registered in rocir-opt
-- ⚠️ **Pass execution**: Only `crd2idx` lowering implemented (type conversion warnings are expected)
-
-## 🛠️ Prerequisites
-
-- **MLIR/LLVM**: amd-staging branch (commit 04f968b02917)
-  - Build path: `llvm-project/buildmlir`
-- **CMake 3.18+**
-- **C++17 compiler**
-- **Docker**: felixatt container recommended
-
-## 🔍 Implementation Notes
-
-- **Type System**: Manual implementation using `TypeBase` and `TypeStorage` (not TableGen `TypeDef`)
-- **Type Parsing**: Custom `parseType()` and `printType()` in `RocirDialect.cpp`
-- **Pass System**: Modern MLIR using `GEN_PASS_DEF` macros and `impl::PassBase` inheritance
-- **Dependencies**: Requires `MLIRSCFDialect` for pass infrastructure
-- **API Compatibility**: Uses modern `llvm::isa<>()` instead of legacy `.isa<>()`
 
 ## 📄 License
 
 Apache License 2.0
-
-## 🙏 Acknowledgments
-
-Built on:
-- [MLIR](https://mlir.llvm.org/) - Multi-Level IR framework
-- [CUTLASS](https://github.com/NVIDIA/cutlass) - CUDA Templates for Linear Algebra
-
----
-
-**Version**: 0.2.0-alpha | **MLIR**: amd-staging (04f968b02917)
-
-## Running Tests
-
-All test files have been organized in the `tests/` directory:
-
-```bash
-# Run all tests with the test suite
-./run_tests.sh
-
-# Or run individual tests
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_crd2idx.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_size.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_rank.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/test_cosize.mlir
-./build/tools/rocir-opt/rocir-opt --rocir-to-standard tests/mlir/comprehensive_test.mlir
-```
-
-### Test Coverage
-
-- ✅ **test_crd2idx.mlir** - Coordinate to linear index conversion
-- ✅ **test_size.mlir** - Shape size computation (product of dimensions)
-- ✅ **test_rank.mlir** - Rank extraction (compile-time constant)
-- ✅ **test_cosize.mlir** - Codomain size (max span computation)
-- ✅ **comprehensive_test.mlir** - All operations together
-
-All tests pass with optimal lowering to standard MLIR arithmetic operations.
