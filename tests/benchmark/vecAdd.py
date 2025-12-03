@@ -25,7 +25,7 @@ def benchmark_vector_add():
     """Benchmark vector addition kernel performance"""
     
     # Configuration parameters - change these to experiment
-    SIZE = 204800000
+    SIZE = 20480000
     TILE_SIZE = 8  # Each thread processes TILE_SIZE elements
     VEC_WIDTH = 4   # Vector width for vectorized loads/stores (must divide TILE_SIZE evenly)
     ITERS_PER_THREAD = TILE_SIZE // VEC_WIDTH  # Number of vectorized iterations per thread

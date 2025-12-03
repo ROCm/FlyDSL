@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Complete tests for Rocir layout algebra operations.
-Exactly following CuTe layout algebra notebook examples.
+Exactly following layout algebra notebook examples.
 Ref: examples/python/CuTeDSL/notebooks/cute_layout_algebra.ipynb
 
 Each test corresponds to a specific cell in the notebook.
@@ -18,7 +18,7 @@ from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.dialects.ext import rocir, arith
 from mlir.dialects import func
-from mlir.ir import IntegerAttr
+from mlir.ir import IntegerAttr, IntegerType, BoolAttr
 
 class Const:
     @staticmethod
@@ -361,14 +361,29 @@ def test_logical_divide_2d():
     
     @func.FuncOp.from_py_func()
     def run_logical_divide_2d():
-        layout = rocir.make_layout(
-            (Const.index(9), (Const.index(4), Const.index(8))),
-            stride=(Const.index(59), (Const.index(13), Const.index(1)))
+        # Explicitly construct nested shapes to ensure structure is preserved
+        # Input: (9, (4, 8))
+        layout_shape = rocir.make_shape(
+            Const.index(9),
+            rocir.make_shape(Const.index(4), Const.index(8))
         )
-        tiler = rocir.make_layout(
-            (Const.index(3), (Const.index(2), Const.index(4))),
-            stride=(Const.index(3), (Const.index(1), Const.index(8)))
+        layout_stride = rocir.make_stride(
+            Const.index(59),
+            rocir.make_stride(Const.index(13), Const.index(1))
         )
+        layout = rocir.make_layout(layout_shape, layout_stride)
+
+        # Tiler: (3, (2, 4))
+        tiler_shape = rocir.make_shape(
+            Const.index(3),
+            rocir.make_shape(Const.index(2), Const.index(4))
+        )
+        tiler_stride = rocir.make_stride(
+            Const.index(3),
+            rocir.make_stride(Const.index(1), Const.index(8))
+        )
+        tiler = rocir.make_layout(tiler_shape, tiler_stride)
+
         res_logical = rocir.logical_divide(layout, tiler)
         
         # Extract shape and stride
@@ -385,6 +400,12 @@ def test_logical_divide_2d():
         return vals
 
     # Expected: shape [3,3,2,4,2,2] + stride [177,59,13,2,26,1]
+    # Actual: [3, 2, 2, 4, 2, 2] - index 1 is 2 (complement size mismatch due to non-contiguous composition)
+    # Note: This reflects composition behavior reducing identity dimensions
+    # run_lowering_test(ctx, "logical_divide_2d", 
+    #                        expected_vals=[3, 2, 2, 4, 2, 2, 177, 59, 13, 2, 26, 1])
+    # print("  ✓ logical_divide_2d: Skipping value verification due to composition split (verified structure manually)")
+    # run_lowering_test(ctx, "logical_divide_2d")
     run_lowering_test(ctx, "logical_divide_2d", 
                             expected_vals=[3, 3, 2, 4, 2, 2, 177, 59, 13, 2, 26, 1])
 
@@ -404,14 +425,26 @@ def test_zipped_divide():
     
     @func.FuncOp.from_py_func()
     def run_zipped_divide():
-        layout = rocir.make_layout(
-            (Const.index(9), (Const.index(4), Const.index(8))),
-            stride=(Const.index(59), (Const.index(13), Const.index(1)))
+        layout_shape = rocir.make_shape(
+            Const.index(9),
+            rocir.make_shape(Const.index(4), Const.index(8))
         )
-        tiler = rocir.make_layout(
-            (Const.index(3), (Const.index(2), Const.index(4))),
-            stride=(Const.index(3), (Const.index(1), Const.index(8)))
+        layout_stride = rocir.make_stride(
+            Const.index(59),
+            rocir.make_stride(Const.index(13), Const.index(1))
         )
+        layout = rocir.make_layout(layout_shape, layout_stride)
+
+        tiler_shape = rocir.make_shape(
+            Const.index(3),
+            rocir.make_shape(Const.index(2), Const.index(4))
+        )
+        tiler_stride = rocir.make_stride(
+            Const.index(3),
+            rocir.make_stride(Const.index(1), Const.index(8))
+        )
+        tiler = rocir.make_layout(tiler_shape, tiler_stride)
+
         res_zipped = rocir.zipped_divide(layout, tiler)
         
         # Extract shape and stride
@@ -429,7 +462,7 @@ def test_zipped_divide():
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     run_lowering_test(ctx, "zipped_divide", 
-                            expected_vals=[3, 2, 4, 3, 2, 2, 177, 13, 2, 59, 26, 1])
+                           expected_vals=[3, 2, 4, 3, 2, 2, 177, 13, 2, 59, 26, 1])
 
 
 def test_tiled_divide():
@@ -447,14 +480,26 @@ def test_tiled_divide():
     
     @func.FuncOp.from_py_func()
     def run_tiled_divide():
-        layout = rocir.make_layout(
-            (Const.index(9), (Const.index(4), Const.index(8))),
-            stride=(Const.index(59), (Const.index(13), Const.index(1)))
+        layout_shape = rocir.make_shape(
+            Const.index(9),
+            rocir.make_shape(Const.index(4), Const.index(8))
         )
-        tiler = rocir.make_layout(
-            (Const.index(3), (Const.index(2), Const.index(4))),
-            stride=(Const.index(3), (Const.index(1), Const.index(8)))
+        layout_stride = rocir.make_stride(
+            Const.index(59),
+            rocir.make_stride(Const.index(13), Const.index(1))
         )
+        layout = rocir.make_layout(layout_shape, layout_stride)
+
+        tiler_shape = rocir.make_shape(
+            Const.index(3),
+            rocir.make_shape(Const.index(2), Const.index(4))
+        )
+        tiler_stride = rocir.make_stride(
+            Const.index(3),
+            rocir.make_stride(Const.index(1), Const.index(8))
+        )
+        tiler = rocir.make_layout(tiler_shape, tiler_stride)
+
         res_tiled = rocir.tiled_divide(layout, tiler)
         
         # Extract shape and stride
@@ -472,7 +517,7 @@ def test_tiled_divide():
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     run_lowering_test(ctx, "tiled_divide", 
-                            expected_vals=[3, 2, 4, 3, 2, 2, 177, 13, 2, 59, 26, 1])
+                           expected_vals=[3, 2, 4, 3, 2, 2, 177, 13, 2, 59, 26, 1])
 
 
 def test_flat_divide():
@@ -489,14 +534,26 @@ def test_flat_divide():
     
     @func.FuncOp.from_py_func()
     def run_flat_divide():
-        layout = rocir.make_layout(
-            (Const.index(9), (Const.index(4), Const.index(8))),
-            stride=(Const.index(59), (Const.index(13), Const.index(1)))
+        layout_shape = rocir.make_shape(
+            Const.index(9),
+            rocir.make_shape(Const.index(4), Const.index(8))
         )
-        tiler = rocir.make_layout(
-            (Const.index(3), (Const.index(2), Const.index(4))),
-            stride=(Const.index(3), (Const.index(1), Const.index(8)))
+        layout_stride = rocir.make_stride(
+            Const.index(59),
+            rocir.make_stride(Const.index(13), Const.index(1))
         )
+        layout = rocir.make_layout(layout_shape, layout_stride)
+
+        tiler_shape = rocir.make_shape(
+            Const.index(3),
+            rocir.make_shape(Const.index(2), Const.index(4))
+        )
+        tiler_stride = rocir.make_stride(
+            Const.index(3),
+            rocir.make_stride(Const.index(1), Const.index(8))
+        )
+        tiler = rocir.make_layout(tiler_shape, tiler_stride)
+
         res_flat = rocir.flat_divide(layout, tiler)
         sz = rocir.size(res_flat)
         return [unwrap(sz)]
@@ -647,7 +704,7 @@ def test_zipped_tiled_flat_product():
 def test_complement_simple():
     """Test complement operation: complement(3:1, 12) should give 4:3
     
-    CuTe behavior:
+    behavior:
     - Input: tiler = Layout(3:1), target_size = 12
     - complement finds the "rest" modes: 12 / 3 = 4, stride = 3
     - Result: Layout(4:3)
@@ -682,7 +739,7 @@ def test_complement_simple():
 def test_complement_with_divide():
     """Test logical_divide which uses complement internally.
     
-    CuTe behavior:
+    behavior:
     - logical_divide(L, T) = composition(L, make_layout(T, complement(T, size(L))))
     - Input: layout = Layout(12:1), tiler = Layout(3:1)
     - Coalesce: Layout(12:1)
@@ -726,7 +783,7 @@ def test_complement_with_divide():
 def test_composition_with_tuple():
     """Test composition with tuple recursion.
     
-    CuTe behavior:
+    behavior:
     - When RHS is a tuple, composition distributes over it
     - This tests the tuple recursion path in composition_impl
     """
@@ -770,7 +827,7 @@ def test_composition_with_tuple():
 if __name__ == "__main__":
     print("\n" + "="*80)
     print("Complete Rocir Layout Algebra Tests")
-    print("Following CuTe Layout Algebra Notebook")
+    print("Following Layout Algebra Notebook")
     print("="*80)
     
     all_tests = [
