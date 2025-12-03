@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import gpu, scf
+from rocdsl.dialects.ext import gpu, scf, rocir
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from utils import compile_to_hsaco
@@ -72,6 +72,17 @@ def layernorm_kernel(
     n_float = arith.constant(T.f32(), float(N))
     eps = arith.constant(T.f32(), EPS)
     
+    # Define Rocir Layouts for Shared Memory
+    smem_shape = rocir.make_shape(n_idx)
+    smem_stride = rocir.make_stride(one_idx)
+    smem_layout = rocir.make_layout(smem_shape, smem_stride)
+
+    # Helper to get smem index from linear offset
+    def get_smem_idx(idx_val):
+        coord = rocir.make_coord(idx_val)
+        val = rocir.crd2idx(coord, smem_layout)
+        return val.value if hasattr(val, 'value') else val
+
     smem = memref.get_global(smem_type, "shared_buffer")
     
     # Load Input
@@ -80,7 +91,8 @@ def layernorm_kernel(
     # -----------------------------------------------------
     # 1. Calculate Mean
     # -----------------------------------------------------
-    memref.store(val.value, smem, [tid.value])
+    tid_idx = get_smem_idx(tid.value)
+    memref.store(val.value, smem, [tid_idx])
     gpu.barrier()
     
     is_thread_0 = arith.cmpi(arith.CmpIPredicate.eq, tid.value, zero_idx.value)
@@ -88,26 +100,30 @@ def layernorm_kernel(
     # Reduction Sum for Mean (Thread 0 only)
     if_op = scf.IfOp(is_thread_0.value)
     with ir.InsertionPoint(if_op.then_block):
-        init_sum = memref.load(smem, [zero_idx.value])
+        zero_smem_idx = get_smem_idx(zero_idx.value)
+        init_sum = memref.load(smem, [zero_smem_idx])
         
         loop = scf.ForOp(one_idx.value, n_idx.value, one_idx.value, [init_sum.value])
         with ir.InsertionPoint(loop.body):
             i = loop.induction_variable
             curr_sum = loop.inner_iter_args[0]
-            v = memref.load(smem, [i.value])
+            
+            i_idx = get_smem_idx(i.value)
+            v = memref.load(smem, [i_idx])
+            
             new_sum = arith.addf(curr_sum.value, v.value)
             scf.yield_([new_sum.value])
         
         sum_val = loop.results[0]
         mean_val = arith.divf(sum_val.value, n_float.value)
         # Store mean back to smem[0] to broadcast
-        memref.store(mean_val.value, smem, [zero_idx.value])
+        memref.store(mean_val.value, smem, [zero_smem_idx])
         scf.yield_([])
     
     gpu.barrier()
     
     # Broadcast Mean
-    mean = memref.load(smem, [zero_idx.value])
+    mean = memref.load(smem, [get_smem_idx(zero_idx.value)])
     
     # -----------------------------------------------------
     # 2. Calculate Variance
@@ -117,31 +133,35 @@ def layernorm_kernel(
     sq_diff = arith.mulf(diff.value, diff.value)
     
     # Store to shared mem for reduction
-    memref.store(sq_diff.value, smem, [tid.value])
+    memref.store(sq_diff.value, smem, [tid_idx])
     gpu.barrier()
     
     # Reduction Sum for Variance (Thread 0 only)
     if_op_var = scf.IfOp(is_thread_0.value)
     with ir.InsertionPoint(if_op_var.then_block):
-        init_var_sum = memref.load(smem, [zero_idx.value])
+        zero_smem_idx = get_smem_idx(zero_idx.value)
+        init_var_sum = memref.load(smem, [zero_smem_idx])
         
         loop_var = scf.ForOp(one_idx.value, n_idx.value, one_idx.value, [init_var_sum.value])
         with ir.InsertionPoint(loop_var.body):
             i = loop_var.induction_variable
             curr_sum = loop_var.inner_iter_args[0]
-            v = memref.load(smem, [i.value])
+            
+            i_idx = get_smem_idx(i.value)
+            v = memref.load(smem, [i_idx])
+            
             new_sum = arith.addf(curr_sum.value, v.value)
             scf.yield_([new_sum.value])
             
         var_sum = loop_var.results[0]
         var_val = arith.divf(var_sum.value, n_float.value)
-        memref.store(var_val.value, smem, [zero_idx.value])
+        memref.store(var_val.value, smem, [zero_smem_idx])
         scf.yield_([])
         
     gpu.barrier()
     
     # Broadcast Variance
-    variance = memref.load(smem, [zero_idx.value])
+    variance = memref.load(smem, [get_smem_idx(zero_idx.value)])
     
     # -----------------------------------------------------
     # 3. Normalize and Scale

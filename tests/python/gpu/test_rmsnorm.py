@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import gpu, scf
+from rocdsl.dialects.ext import gpu, scf, rocir
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from utils import compile_to_hsaco
@@ -71,6 +71,17 @@ def rmsnorm_kernel(
     n_float = arith.constant(T.f32(), float(N))
     eps = arith.constant(T.f32(), EPS)
     
+    # Define Rocir Layouts for Shared Memory
+    smem_shape = rocir.make_shape(n_idx)
+    smem_stride = rocir.make_stride(one_idx)
+    smem_layout = rocir.make_layout(smem_shape, smem_stride)
+
+    # Helper to get smem index from linear offset
+    def get_smem_idx(idx_val):
+        coord = rocir.make_coord(idx_val)
+        val = rocir.crd2idx(coord, smem_layout)
+        return val.value if hasattr(val, 'value') else val
+
     smem = memref.get_global(smem_type, "shared_buffer")
     
     # Load Input
@@ -80,7 +91,9 @@ def rmsnorm_kernel(
     # 1. Calculate Sum of Squares (x^2)
     # -----------------------------------------------------
     sq = arith.mulf(val.value, val.value)
-    memref.store(sq.value, smem, [tid.value])
+    
+    tid_idx = get_smem_idx(tid.value)
+    memref.store(sq.value, smem, [tid_idx])
     gpu.barrier()
     
     is_thread_0 = arith.cmpi(arith.CmpIPredicate.eq, tid.value, zero_idx.value)
@@ -88,13 +101,17 @@ def rmsnorm_kernel(
     # Reduction Sum (Thread 0 only)
     if_op = scf.IfOp(is_thread_0.value)
     with ir.InsertionPoint(if_op.then_block):
-        init_sum = memref.load(smem, [zero_idx.value])
+        zero_smem_idx = get_smem_idx(zero_idx.value)
+        init_sum = memref.load(smem, [zero_smem_idx])
         
         loop = scf.ForOp(one_idx.value, n_idx.value, one_idx.value, [init_sum.value])
         with ir.InsertionPoint(loop.body):
             i = loop.induction_variable
             curr_sum = loop.inner_iter_args[0]
-            v = memref.load(smem, [i.value])
+            
+            i_idx = get_smem_idx(i.value)
+            v = memref.load(smem, [i_idx])
+            
             new_sum = arith.addf(curr_sum.value, v.value)
             scf.yield_([new_sum.value])
         
@@ -102,13 +119,14 @@ def rmsnorm_kernel(
         # Calculate Mean Square: mean(x^2)
         mean_sq = arith.divf(sum_sq_val.value, n_float.value)
         # Store back to broadcast
-        memref.store(mean_sq.value, smem, [zero_idx.value])
+        memref.store(mean_sq.value, smem, [zero_smem_idx])
         scf.yield_([])
     
     gpu.barrier()
     
     # Broadcast Mean Square
-    mean_sq = memref.load(smem, [zero_idx.value])
+    # Use zero_smem_idx again (re-calculate since it's outside the if block scope, or just use get_smem_idx)
+    mean_sq = memref.load(smem, [get_smem_idx(zero_idx.value)])
     
     # -----------------------------------------------------
     # 2. Normalize and Scale

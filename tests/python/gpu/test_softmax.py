@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import gpu, scf
+from rocdsl.dialects.ext import gpu, scf, rocir
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from utils import compile_to_hsaco
@@ -59,19 +59,38 @@ def softmax_kernel(A: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
     # IDs
     row = gpu.block_id("x")
     tid = gpu.thread_id("x")
+
+    # Define Rocir Layouts for Shared Memory
+    # Shape: (N), Stride: (1)
+    n_idx_c = arith.constant(T.index(), N)
+    one_idx_c = arith.constant(T.index(), 1)
+    
+    smem_shape = rocir.make_shape(n_idx_c)
+    smem_stride = rocir.make_stride(one_idx_c)
+    smem_layout = rocir.make_layout(smem_shape, smem_stride)
+
+    # Helper to get smem index from linear offset
+    def get_smem_idx(idx_val):
+        coord = rocir.make_coord(idx_val)
+        val = rocir.crd2idx(coord, smem_layout)
+        return val.value if hasattr(val, 'value') else val
     
     # Get shared memory
     smem = memref.get_global(smem_type, "shared_buffer")
     
     # 1. Load data and write to shared memory for Max Reduction
     val = memref.load(A, [row.value, tid.value])
-    memref.store(val.value, smem, [tid.value])
+    
+    # Use rocir to calculate index
+    tid_idx = get_smem_idx(tid.value)
+    memref.store(val.value, smem, [tid_idx])
     
     gpu.barrier()
     
     # 2. Reduction Max (Naive implementation: Thread 0 scans all)
     # Note: In production, use tree reduction
     zero_idx = arith.constant(T.index(), 0)
+    zero_smem_idx = get_smem_idx(zero_idx.value)
     
     # Variable to hold max value, initialized to first element by Thread 0
     # We use a stack allocation (alloca) or just pass via iter_args in SCF
@@ -84,7 +103,7 @@ def softmax_kernel(A: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
     if_op = scf.IfOp(is_thread_0.value)
     with ir.InsertionPoint(if_op.then_block):
         # Thread 0 finds max
-        init_max = memref.load(smem, [zero_idx.value])
+        init_max = memref.load(smem, [zero_smem_idx])
         
         one_idx = arith.constant(T.index(), 1)
         n_idx = arith.constant(T.index(), N)
@@ -93,25 +112,28 @@ def softmax_kernel(A: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
         with ir.InsertionPoint(loop.body):
             i = loop.induction_variable
             curr_max = loop.inner_iter_args[0]
-            val_i = memref.load(smem, [i.value])
+            
+            i_idx = get_smem_idx(i.value)
+            val_i = memref.load(smem, [i_idx])
+            
             new_max = arith.maximumf(curr_max.value, val_i.value)
             scf.yield_([new_max.value])
             
         max_val = loop.results[0]
-        memref.store(max_val.value, smem, [zero_idx.value])
+        memref.store(max_val.value, smem, [zero_smem_idx])
         scf.yield_([])
         
     gpu.barrier()
     
     # 3. Broadcast Max
     # All threads read the max value from smem[0]
-    row_max = memref.load(smem, [zero_idx.value])
+    row_max = memref.load(smem, [zero_smem_idx])
     
     # 4. Compute Exp and write to shared memory for Sum Reduction
     # exp(x - max)
     diff = arith.subf(val.value, row_max.value)
     exp_val = math.exp(diff.value)
-    memref.store(exp_val.value, smem, [tid.value])
+    memref.store(exp_val.value, smem, [tid_idx])
     
     gpu.barrier()
     
@@ -119,7 +141,7 @@ def softmax_kernel(A: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
     if_op_sum = scf.IfOp(is_thread_0.value)
     with ir.InsertionPoint(if_op_sum.then_block):
         # Thread 0 calculates sum
-        init_sum = memref.load(smem, [zero_idx.value]) # Load exp(x_0)
+        init_sum = memref.load(smem, [zero_smem_idx]) # Load exp(x_0)
         
         one_idx = arith.constant(T.index(), 1)
         n_idx = arith.constant(T.index(), N)
@@ -128,18 +150,21 @@ def softmax_kernel(A: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
         with ir.InsertionPoint(loop_sum.body):
             i = loop_sum.induction_variable
             curr_sum = loop_sum.inner_iter_args[0]
-            val_i = memref.load(smem, [i.value])
+            
+            i_idx = get_smem_idx(i.value)
+            val_i = memref.load(smem, [i_idx])
+            
             new_sum = arith.addf(curr_sum.value, val_i.value)
             scf.yield_([new_sum.value])
             
         sum_val = loop_sum.results[0]
-        memref.store(sum_val.value, smem, [zero_idx.value])
+        memref.store(sum_val.value, smem, [zero_smem_idx])
         scf.yield_([])
 
     gpu.barrier()
     
     # 6. Broadcast Sum
-    row_sum = memref.load(smem, [zero_idx.value])
+    row_sum = memref.load(smem, [zero_smem_idx])
     
     # 7. Normalize and Store
     # res = exp_val / row_sum
