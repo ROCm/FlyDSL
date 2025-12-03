@@ -11,24 +11,15 @@ def create_basic_layout_example():
         module = Module.create()
         
         with InsertionPoint(module.body):
-            # Define a function that creates a 2D layout
             @func.FuncOp.from_py_func(name="test_layout")
             def test_layout():
-                # Create dimension constants
                 c8 = arith.constant(8, index=True)
                 c16 = arith.constant(16, index=True)
                 c1 = arith.constant(1, index=True)
                 
-                # Create shape (8, 16)
                 shape = rocir.make_shape(c8, c16)
-                
-                # Create stride (1, 8) - column-major
                 stride = rocir.make_stride(c1, c8)
-                
-                # Create layout
                 layout = rocir.make_layout(shape, stride)
-                
-                # Compute size
                 total_size = rocir.size(layout)
                 
                 return total_size
@@ -44,7 +35,6 @@ def create_tiled_layout_example():
         with InsertionPoint(module.body):
             @func.FuncOp.from_py_func(name="test_tiled_layout")
             def test_tiled_layout():
-                # Create a 32x64 base layout
                 c32 = arith.constant(32, index=True)
                 c64 = arith.constant(64, index=True)
                 c1 = arith.constant(1, index=True)
@@ -53,16 +43,12 @@ def create_tiled_layout_example():
                 base_stride = rocir.make_stride(c1, c32)
                 base_layout = rocir.make_layout(base_shape, base_stride)
                 
-                # Create a 4x4 tiler
                 c4 = arith.constant(4, index=True)
                 tile_shape = rocir.make_shape(c4, c4)
                 tile_stride = rocir.make_stride(c1, c4)
                 tile_layout = rocir.make_layout(tile_shape, tile_stride)
                 
-                # Compute product
                 tiled = rocir.logical_product(base_layout, tile_layout)
-                
-                # Get size
                 result_size = rocir.size(tiled)
                 
                 return result_size
@@ -78,7 +64,6 @@ def create_partition_example():
         with InsertionPoint(module.body):
             @func.FuncOp.from_py_func(name="test_partition")
             def test_partition():
-                # Global 128x128 tensor
                 c128 = arith.constant(128, index=True)
                 c1 = arith.constant(1, index=True)
                 c0 = arith.constant(0, index=True)
@@ -87,16 +72,12 @@ def create_partition_example():
                 global_stride = rocir.make_stride(c1, c128)
                 global_layout = rocir.make_layout(global_shape, global_stride)
                 
-                # Thread tile 8x8
                 c8 = arith.constant(8, index=True)
                 tile_shape = rocir.make_shape(c8, c8)
                 tile_stride = rocir.make_stride(c1, c8)
                 tile_layout = rocir.make_layout(tile_shape, tile_stride)
                 
-                # Partition for thread 0
                 thread_data = rocir.local_partition(global_layout, tile_layout, c0)
-                
-                # Get size of thread data
                 thread_size = rocir.size(thread_data)
                 
                 return thread_size

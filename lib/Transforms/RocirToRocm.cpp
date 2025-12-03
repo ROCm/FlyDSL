@@ -26,10 +26,10 @@ namespace rocir {
 
 namespace {
 
-/// Pass to lower Rocir IR to the ROCm dialect for AMD GFX942
-struct CuteToRocmPass : public PassWrapper<CuteToRocmPass, OperationPass<ModuleOp>> {
+/// Pass to lower Rocir IR to the ROCm dialect for AMD GFX942.
+struct RocirToRocmPass : public PassWrapper<RocirToRocmPass, OperationPass<ModuleOp>> {
   
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(CuteToRocmPass)
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(RocirToRocmPass)
   
   StringRef getArgument() const final { return "cute-to-rocm"; }
   StringRef getDescription() const final { 
@@ -45,19 +45,7 @@ struct CuteToRocmPass : public PassWrapper<CuteToRocmPass, OperationPass<ModuleO
     module->setAttr("rocir.target_vendor",
                     StringAttr::get(&getContext(), "amd"));
     
-    // TODO: Add conversion patterns
-    // ConversionTarget target(getContext());
-    // RewritePatternSet patterns(&getContext());
-    
-    // Mark the ROCm dialect as legal, rocir layout as illegal
-    // target.addLegalDialect<cute::rocm::RocirRocmDialect>();
-    // target.addIllegalDialect<cute::RocirDialect>();
-    
-    // Add patterns here
-    // patterns.add<LayoutToMfmaPattern>(...);
-    
-    // if (failed(applyPartialConversion(module, target, std::move(patterns))))
-    //   signalPassFailure();
+    // TODO: add dialect conversion once ROCm lowering patterns are available.
   }
 };
 
@@ -68,7 +56,7 @@ struct CuteToRocmPass : public PassWrapper<CuteToRocmPass, OperationPass<ModuleO
 //===----------------------------------------------------------------------===//
 
 std::unique_ptr<Pass> createCuteToRocmPass() {
-  return std::make_unique<CuteToRocmPass>();
+  return std::make_unique<RocirToRocmPass>();
 }
 
 } // namespace rocir
