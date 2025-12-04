@@ -255,16 +255,21 @@ def perftest(func):
         # Warmup iterations
         warmup_iters = 5
         print(f"\n  Running {warmup_iters} warmup iterations...")
-        for i in range(warmup_iters):
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                *grid_dims,
-                *block_dims,
-                sharedMemBytes=0,
-                stream=None,
-                kernelParams=kernel_args,
-                extra=None
-            )
+        
+        if callable(kernel_func):
+             for i in range(warmup_iters):
+                kernel_func(*kernel_args)
+        else:
+            for i in range(warmup_iters):
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    *grid_dims,
+                    *block_dims,
+                    sharedMemBytes=0,
+                    stream=None,
+                    kernelParams=kernel_args,
+                    extra=None
+                )
         hip.hipDeviceSynchronize()
         
         # Benchmark iterations
@@ -281,15 +286,18 @@ def perftest(func):
             hip.hipEventRecord(start_event, None)
             
             # Launch kernel
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                *grid_dims,
-                *block_dims,
-                sharedMemBytes=0,
-                stream=None,
-                kernelParams=kernel_args,
-                extra=None
-            )
+            if callable(kernel_func):
+                kernel_func(*kernel_args)
+            else:
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    *grid_dims,
+                    *block_dims,
+                    sharedMemBytes=0,
+                    stream=None,
+                    kernelParams=kernel_args,
+                    extra=None
+                )
             
             # Record stop event
             hip.hipEventRecord(stop_event, None)

@@ -18,10 +18,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import ctypes
 import numpy as np
-import torch
-import aiter
+try:
+    import torch
+    import aiter
+    from aiter.ops.quant import per_token_quant_hip
+    HAS_AITER = True
+except ImportError:
+    HAS_AITER = False
 
-from aiter.ops.quant import per_token_quant_hip
 from hip import hip
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
@@ -40,6 +44,8 @@ from mlir.dialects import (
 import mlir.extras.types as T
 from utils import perftest, compile_to_hsaco
 
+from rocdsl.dialects.ext.gpu import lds_space
+
 def benchmark_per_token_quant():
     print("\n" + "=" * 80)
     print("Benchmark: Per-Token Quantization Performance (RocDSL)")
@@ -51,7 +57,7 @@ def benchmark_per_token_quant():
     # Configuration parameters
     M = 4096  # Number of tokens (Batch Size * Seq Len)
     N = 8192  # Hidden dimension
-    BLOCK_SIZE = 64  # Threads per block (1 wavefront for simple reduction)
+    BLOCK_SIZE = 256  # Threads per block (1 wavefront for simple reduction)
     VEC_WIDTH = 8  # float16x8 (16 bytes, same as 4xfloat32)
 
     ELEMS_PER_THREAD = VEC_WIDTH
@@ -67,10 +73,12 @@ def benchmark_per_token_quant():
     # Pass 1 (Read Input) + Pass 2 (Read Input + Write Output) + Write Scale
     # Memory Traffic estimation:
     # - Read Input (Pass 1): M*N*2 bytes (FP16!)
-    # - Read Input (Pass 2): M*N*2 bytes
+    # - Read Input (Pass 2): M*N*2 bytes -> Optimized to 0 (LDS)
     # - Write Output: M*N*1 bytes
     # - Write Scale: M*4 bytes
-    total_bytes_rw = (M * N * 2) * 2 + (M * N * 1) + (M * 4)
+    # Original: (M * N * 2) * 2 + (M * N * 1) + (M * 4)
+    # Optimized: (M * N * 2) * 1 + (M * N * 1) + (M * 4)
+    total_bytes_rw = (M * N * 2) * 1 + (M * N * 1) + (M * 4)
 
     print(f"Configuration:")
     print(f"  - Shape: [{M}, {N}]")
@@ -104,6 +112,10 @@ def benchmark_per_token_quant():
 
     ip = ir.InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
     ip.__enter__()
+
+    # Shared memory for reduction (enough for max warps)
+    red_type = T.memref(64, T.f32(), memory_space=lds_space())
+    memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
 
     def unwrap(v):
         return v._value if hasattr(v, "_value") else v
@@ -156,11 +168,24 @@ def benchmark_per_token_quant():
         # 使用 RocDSL arith.index 简化常量定义
         c_vec_width = arith.index(VEC_WIDTH)._value
 
+        # Shared Memory Access
+        # smem = memref.get_global(smem_type, "smem_buffer") # Optimized out: Use Register Caching
+        red_buf = memref.get_global(red_type, "red_buffer")
+        
+        if hasattr(red_buf, "result"):
+            red_val = red_buf.result
+        elif hasattr(red_buf, "results"):
+            red_val = red_buf.results[0]
+        else:
+            red_val = red_buf
+
         # -----------------------------------------------------------
-        # Pass 1: Compute Max (Row Reduction)
+        # Pass 1: Compute Max (Row Reduction) & Cache to Registers
         # -----------------------------------------------------------
         local_max = f_0
+        cached_vecs = [] # Register Cache
 
+        # 1. Load Phase (Maximize MLP)
         for i in range(ITERS):
             # 1. Calculate chunk_offset
             c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)._value
@@ -177,7 +202,12 @@ def benchmark_per_token_quant():
 
             # Vector Load (fp16)
             vec_val_f16 = vector.load(vec_type_f16, input, [idx_val])
-            
+            cached_vecs.append(vec_val_f16)
+
+        # 2. Compute Phase (Compute Max)
+        for i in range(ITERS):
+            vec_val_f16 = cached_vecs[i]
+
             # Convert fp16 to fp32 for computation
             vec_val = _arith_mlir.extf(vec_type_f32, vec_val_f16)
 
@@ -217,7 +247,43 @@ def benchmark_per_token_quant():
                 unwrap(current_val), unwrap(shuffled_val)
             ).result
 
-        reduced_max = current_val
+        # Cross-Warp Reduction (using Shared Memory)
+        c_64 = arith.index(64)._value
+        warp_id = _arith_mlir.DivUIOp(unwrap(tid), unwrap(c_64)).result
+        lane_id = _arith_mlir.RemUIOp(unwrap(tid), unwrap(c_64)).result
+        
+        is_lane_0 = _arith_mlir.CmpIOp(_arith_mlir.CmpIPredicate.eq, unwrap(lane_id), unwrap(c_0)).result
+        
+        # Store warp max to shared memory
+        if_warp_store = scf.IfOp(unwrap(is_lane_0))
+        with ir.InsertionPoint(if_warp_store.then_block):
+            memref.store(unwrap(current_val), unwrap(red_val), [unwrap(warp_id)])
+            scf.YieldOp([])
+            
+        mlir_gpu.BarrierOp()
+        
+        # Reduce across warps (Thread 0 only)
+        # Assuming Block Size 256 -> 4 warps.
+        is_thread_0 = _arith_mlir.CmpIOp(_arith_mlir.CmpIPredicate.eq, unwrap(tid), unwrap(c_0)).result
+        
+        if_block_reduce = scf.IfOp(unwrap(is_thread_0))
+        with ir.InsertionPoint(if_block_reduce.then_block):
+            # We know there are 4 warps for BLOCK_SIZE=256. 
+            # Ideally should be dynamic but let's unroll for 4.
+            final_max_val = f_0
+            for w in range(4): # Hardcoded for BlockSize=256
+                c_w = arith.index(w)._value
+                val = memref.load(unwrap(red_val), [unwrap(c_w)])
+                final_max_val = _arith_mlir.MaximumFOp(unwrap(final_max_val), unwrap(val)).result
+            
+            # Store back to red_val[0] for broadcast
+            memref.store(unwrap(final_max_val), unwrap(red_val), [unwrap(c_0)])
+            scf.YieldOp([])
+            
+        mlir_gpu.BarrierOp()
+        
+        # Broadcast: All threads read the result
+        reduced_max = memref.load(unwrap(red_val), [unwrap(c_0)])
 
         # -----------------------------------------------------------
         # Compute Scale
@@ -245,6 +311,10 @@ def benchmark_per_token_quant():
         with ir.InsertionPoint(if_op.then_block):
             memref.store(unwrap(final_scale), unwrap(scales), [unwrap(m_idx)])
             scf.YieldOp([])
+        
+        # Synchronization?
+        # Implicitly handled for scale by data dependency (final_scale)
+        # For SMEM: thread T wrote to indices K, thread T reads from indices K. No barrier needed.
 
         # -----------------------------------------------------------
         # Pass 2: Quantize and Store
@@ -263,13 +333,15 @@ def benchmark_per_token_quant():
             col_idx = _arith_mlir.AddIOp(
                 unwrap(c_chunk_offset), unwrap(thread_offset)
             ).result
-
+            
+            # Global Store Index
             coord = rocir.make_coord(m_idx, col_idx)
             linear_idx = rocir.crd2idx(coord, layout_global)
             idx_val = linear_idx.value if hasattr(linear_idx, "value") else linear_idx
 
-            # Load input (fp16)
-            vec_val_f16 = vector.load(vec_type_f16, input, [idx_val])
+            # Load input from Register Cache
+            vec_val_f16 = cached_vecs[i]
+
             vec_val = _arith_mlir.extf(vec_type_f32, vec_val_f16)
             
             vec_scaled = _arith_mlir.divf(vec_val, vec_scale)
@@ -371,7 +443,7 @@ def benchmark_per_token_quant():
     # ========================================================================
     # Benchmark Reference Implementation (aiter)
     # ========================================================================
-    if True: # HAS_ATIER
+    if HAS_AITER: # HAS_ATIER
         print("\n" + "=" * 80)
         print("Benchmarking Reference Implementation (aiter)")
         print("=" * 80)
@@ -380,36 +452,21 @@ def benchmark_per_token_quant():
         # aiter expects float16 (half precision)
         input_torch = torch.from_numpy(input_data_fp16).cuda()
         
-        # Warmup
-        print(f"  Running warmup iterations...")
-        for _ in range(5):
-            output_torch, scale_torch = per_token_quant_hip(input_torch)
-            torch.cuda.synchronize()
+        @perftest
+        def run_aiter_benchmark():
+            return (
+                per_token_quant_hip,
+                (input_torch,),
+                (M, 1, 1),
+                (BLOCK_SIZE, 1, 1),
+                total_elements,
+                total_bytes_rw,
+            )
+            
+        aiter_results = run_aiter_benchmark()
         
-        # Benchmark
-        print(f"  Running benchmark iterations...")
-        import time
-        times_ms = []
-        for _ in range(100):
-            torch.cuda.synchronize()
-            start = time.perf_counter()
-            output_torch, scale_torch = per_token_quant_hip(input_torch)
-            torch.cuda.synchronize()
-            end = time.perf_counter()
-            times_ms.append((end - start) * 1000)
-        
-        avg_time = np.mean(times_ms)
-        min_time = np.min(times_ms)
-        max_time = np.max(times_ms)
-        std_time = np.std(times_ms)
-        bandwidth = (total_bytes_rw / 1e9) / (avg_time / 1000)
-        
-        print(f"\n  Reference (aiter) Results:")
-        print(f"  Average Time:  {avg_time:.3f} ms")
-        print(f"  Min Time:      {min_time:.3f} ms")
-        print(f"  Max Time:      {max_time:.3f} ms")
-        print(f"  Std Dev:       {std_time:.3f} ms")
-        print(f"  Bandwidth:     {bandwidth:.2f} GB/s")
+        output_torch, scale_torch = per_token_quant_hip(input_torch)
+        torch.cuda.synchronize()
         
         # Verify correctness
         output_ref_torch = output_torch.cpu().numpy()
@@ -426,13 +483,13 @@ def benchmark_per_token_quant():
         
         # Performance comparison
         rocdsl_time = results.avg_ms
-        aiter_time = avg_time
+        aiter_time = aiter_results.avg_ms
         speedup = aiter_time / rocdsl_time
         
         print(f"\n" + "=" * 80)
         print(f"Performance Comparison:")
         print(f"  RocDSL:     {rocdsl_time:7.3f} ms  ({results.bandwidth_gbs:8.2f} GB/s)")
-        print(f"  Reference:  {aiter_time:7.3f} ms  ({bandwidth:8.2f} GB/s)")
+        print(f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results.bandwidth_gbs:8.2f} GB/s)")
         print(f"  Speedup:    {speedup:7.2f}x")
         print("=" * 80)
 
