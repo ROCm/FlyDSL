@@ -15,6 +15,7 @@ from mlir.ir import (
     IntegerAttr,
     IntegerType,
 )
+from mlir.dialects import memref, arith, scf, gpu
 
 # Import generated ops
 import sys
@@ -57,6 +58,53 @@ def _get_insertion_point(ip: Optional[InsertionPoint] = None) -> InsertionPoint:
     if ip is None:
         return InsertionPoint.current
     return ip
+
+
+class TensorView:
+    """Lightweight view object representing a tensor slice."""
+
+    def __init__(self, memref_value, shape, base_coords=None):
+        self.memref = _unwrap_value(memref_value)
+        self.shape = tuple(shape) if shape is not None else ()
+        self.rank = len(self.shape)
+        if base_coords is None:
+            base_coords = [_unwrap_value(0) for _ in self.shape]
+        self.base_coords = base_coords
+
+
+def _to_index_value(val):
+    """Convert python int or MLIR value to an index-typed MLIR value."""
+    return _unwrap_value(val)
+
+
+def _linear_idx_to_coords(index_value, dims):
+    """Convert linear index into per-dimension coordinates."""
+    coords = []
+    remaining = _to_index_value(index_value)
+    for size in reversed(dims):
+        size_val = _to_index_value(size)
+        rem_val = _to_index_value(remaining)
+        coord = arith.RemUIOp(rem_val, size_val).result
+        coords.append(coord)
+        remaining = arith.DivUIOp(rem_val, size_val).result
+    coords.reverse()
+    return coords
+
+
+def _add_index(base, offset):
+    """Add an offset to a base coordinate."""
+    if offset is None:
+        return _to_index_value(base)
+    base_val = _to_index_value(base)
+    offset_val = _to_index_value(offset)
+    return arith.AddIOp(base_val, offset_val).result
+
+
+def _scale_index(value, factor):
+    """Scale an index value by an integer factor."""
+    value_val = _to_index_value(value)
+    factor_val = _to_index_value(factor)
+    return arith.MulIOp(value_val, factor_val).result
 
 
 class ShapeType(Type):
@@ -964,46 +1012,61 @@ class Fragment:
         pass
 
 
-def make_fragment_like(tensor: Value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Fragment:
-    """Create a fragment (register memory tensor) with the same shape as the input tensor.
+def make_fragment_like(template, element_type: Type = None, loc: Optional[Location] = None,
+                       ip: Optional[InsertionPoint] = None):
+    """Create a fragment buffer.
     
-    Args:
-        tensor: Template tensor to match shape
-        loc: Optional source location
-        ip: Optional insertion point
-        
-    Returns:
-        Fragment allocated in register memory
-        
-    Example:
-        >>> thrA = thr_copy_A.partition_S(blkA)
-        >>> frgA = rocir.make_fragment_like(thrA)
-    """
-    # For now, return a Fragment wrapper around the tensor
-    # In a full implementation, this would allocate register memory
-    return Fragment(tensor)
+    If `template` is a TiledCopy descriptor, a TensorView matching its value tile
+    shape is returned. Otherwise this behaves like the previous implementation
+    and simply allocates a memref matching the provided tensor."""
+    loc = _get_location(loc)
+    if isinstance(template, TiledCopy):
+        if element_type is None:
+            raise ValueError("make_fragment_like(tiled_copy, element_type=...) requires element_type")
+        val_shape = template.val_shape
+        if val_shape is None:
+            raise ValueError("tiled_copy missing val_shape metadata")
+        from mlir.ir import MemRefType
+        memref_type = MemRefType.get(val_shape, element_type)
+        with ip or InsertionPoint.current:
+            buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
+        base_coords = [_to_index_value(0) for _ in val_shape]
+        return TensorView(buffer, val_shape, base_coords)
+    
+    tensor = _unwrap_value(template)
+    tensor_type = tensor.type
+    with ip or InsertionPoint.current:
+        return memref.AllocaOp(tensor_type, [], [], loc=loc).result
 
 
-def make_rmem_tensor(shape, element_type: Type, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Fragment:
+def make_rmem_tensor(shape, element_type: Type, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
     """Create a tensor in register memory with given shape and type.
     
     Args:
-        shape: Shape of the tensor (can be a Value or tuple)
+        shape: Shape tuple
         element_type: Element type
         loc: Optional source location
         ip: Optional insertion point
         
     Returns:
-        Fragment allocated in register memory
+        Fragment allocated in register memory (memref)
         
     Example:
-        >>> frgPred = rocir.make_rmem_tensor(thrCrd.shape, Boolean)
+        >>> frgPred = rocir.make_rmem_tensor((4, 4), Boolean)
     """
-    # Create a placeholder fragment
-    # In full implementation, would allocate actual register memory
-    from mlir.dialects import memref
-    # For now, return a Fragment object
-    return Fragment(None, element_type)
+    from mlir.ir import MemRefType
+    
+    loc = _get_location(loc)
+    
+    # Construct MemRefType from shape tuple
+    if isinstance(shape, (tuple, list)):
+        memref_type = MemRefType.get(shape, element_type)
+    else:
+        # Fallback/TODO: handle Value shape dynamic alloc
+        raise NotImplementedError("Dynamic shape not supported in make_rmem_tensor yet")
+        
+    with ip or InsertionPoint.current:
+        return memref.AllocaOp(memref_type, [], [], loc=loc).result
 
 
 def make_identity_tensor(shape, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
@@ -1181,6 +1244,8 @@ def make_copy_atom(element_type: Type, vector_size: int = 8, is_coalesced: bool 
 
 
 def make_tiled_copy_tv(copy_atom: CopyAtom, thr_layout: Value, val_layout: Value,
+                       thr_shape: Optional[tuple] = None,
+                       val_shape: Optional[tuple] = None,
                        loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> TiledCopy:
     """Create a tiled copy from copy atom and separate thread/value layouts.
     
@@ -1203,29 +1268,126 @@ def make_tiled_copy_tv(copy_atom: CopyAtom, thr_layout: Value, val_layout: Value
     tiled_copy = TiledCopy(copy_atom, tv_layout=None, tiler=None)
     tiled_copy.thr_layout = thr_layout
     tiled_copy.val_layout = val_layout
+    tiled_copy.thr_shape = thr_shape
+    tiled_copy.val_shape = val_shape
     return tiled_copy
 
 
-def copy(copy_atom: CopyAtom, src: Value, dst: Value, 
+def make_tensor(memref, layout, shape, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> TensorView:
+    """Create a tensor view from a memref with a specific layout and shape."""
+    if shape is None:
+        raise ValueError("make_tensor requires explicit shape information")
+    _get_location(loc)  # ensure location evaluated for consistency
+    _unwrap_value(layout)  # ensure layout op emitted
+    base_coords = [_to_index_value(0) for _ in shape]
+    return TensorView(memref, shape, base_coords)
+
+
+def partition_src(tiled_copy, tensor, thread_id, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Partition source tensor for a specific thread."""
+    loc = _get_location(loc)
+    if not isinstance(tensor, TensorView):
+        raise ValueError("partition_src expects a TensorView produced by make_tensor")
+    thr_shape = getattr(tiled_copy, "thr_shape", None)
+    val_shape = getattr(tiled_copy, "val_shape", None)
+    if thr_shape is None or val_shape is None:
+        raise ValueError("tiled_copy is missing thr_shape/val_shape metadata")
+    coords = _linear_idx_to_coords(_to_index_value(thread_id), thr_shape)
+    base_coords = []
+    for dim in range(tensor.rank):
+        coord = coords[dim] if dim < len(coords) else _to_index_value(0)
+        step = val_shape[dim] if dim < len(val_shape) else 1
+        offset = _scale_index(coord, step)
+        base_coords.append(_add_index(tensor.base_coords[dim], offset))
+    return TensorView(tensor.memref, tensor.shape, base_coords)
+
+
+def partition_dst(tiled_copy, tensor, thread_id, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Partition destination tensor for a specific thread."""
+    return partition_src(tiled_copy, tensor, thread_id, loc=loc, ip=ip)
+
+
+def fragment_load(fragment, index, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Load an element from a register fragment."""
+    from mlir.dialects import memref as memref_dialect
+    loc = _get_location(loc)
+    fragment = _unwrap_value(fragment)
+    index = _unwrap_value(index)
+    with _get_insertion_point(ip):
+        return memref_dialect.load(fragment, [index])
+
+
+def fragment_store(value, fragment, index, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Store an element to a register fragment."""
+    from mlir.dialects import memref as memref_dialect
+    loc = _get_location(loc)
+    value = _unwrap_value(value)
+    fragment = _unwrap_value(fragment)
+    index = _unwrap_value(index)
+    with _get_insertion_point(ip):
+        memref_dialect.store(value, fragment, [index])
+
+
+def copy(copy_desc, src, dst, 
+         src_indices: Optional[List[Value]] = None,
+         dst_indices: Optional[List[Value]] = None,
          pred: Optional[Value] = None,
          loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> None:
     """Execute a copy operation using the given copy atom.
     
     Args:
-        copy_atom: Copy atom specifying the transfer operation
-        src: Source tensor
-        dst: Destination tensor
+        copy_desc: Copy atom or tiled copy descriptor
+        src: Source tensor (memref)
+        dst: Destination tensor (memref)
+        src_indices: Indices for source access
+        dst_indices: Indices for destination access
         pred: Optional predicate mask for conditional copying
         loc: Optional source location
         ip: Optional insertion point
         
     Example:
-        >>> rocir.copy(copy_atom, src_tensor, dst_tensor, pred=pred_mask)
+        >>> rocir.copy(atom, src, dst, src_indices=[i,j], dst_indices=[k])
     """
+    from mlir.dialects import memref as memref_dialect
     loc = _get_location(loc)
-    # This would generate the actual copy operation in MLIR
-    # For now, this is a placeholder that would be implemented with proper MLIR ops
-    pass
+    if isinstance(copy_desc, TiledCopy) and isinstance(src, TensorView) and isinstance(dst, TensorView):
+        val_shape = copy_desc.val_shape
+        if val_shape is None:
+            raise ValueError("tiled_copy missing val_shape metadata")
+        offsets = [_to_index_value(0) for _ in val_shape]
+        def recurse(dim):
+            if dim == len(val_shape):
+                src_coords = [_to_index_value(_add_index(src.base_coords[i], offsets[i])) for i in range(src.rank)]
+                dst_coords = [_to_index_value(_add_index(dst.base_coords[i], offsets[i])) for i in range(dst.rank)]
+                val = memref_dialect.load(src.memref, src_coords)
+                val = _unwrap_value(val)
+                memref_dialect.store(val, dst.memref, dst_coords)
+                return
+            for i in range(val_shape[dim]):
+                offsets[dim] = _to_index_value(i)
+                recurse(dim + 1)
+        with ip or InsertionPoint.current:
+            recurse(0)
+        return
+    
+    copy_atom = copy_desc
+    src_val = _unwrap_value(src)
+    dst_val = _unwrap_value(dst)
+    with ip or InsertionPoint.current:
+        if src_indices is not None and dst_indices is not None:
+            s_idx = [_unwrap_value(i) for i in src_indices]
+            d_idx = [_unwrap_value(i) for i in dst_indices]
+            val_op = memref_dialect.load(src_val, s_idx)
+            if hasattr(val_op, 'result'):
+                val = val_op.result
+            elif hasattr(val_op, 'results') and len(val_op.results) > 0:
+                val = val_op.results[0]
+            else:
+                val = val_op
+            val = _unwrap_value(val)
+            memref_dialect.store(val, dst_val, d_idx)
+        else:
+            pass
 
 
 #===----------------------------------------------------------------------===//
