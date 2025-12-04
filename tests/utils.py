@@ -103,7 +103,10 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     # Stage 5: Convert GPU to ROCDL
     rocdl_converted = run_pipeline(
         cf_converted,
-        Pipeline().Gpu(Pipeline().convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP"))
+        Pipeline().Gpu(
+            Pipeline()
+            .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")
+        )
     )
     dump_stage(rocdl_converted, "07_rocdl")
     
@@ -162,18 +165,20 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
 class BenchmarkResults:
     """Container for benchmark timing results."""
     
-    def __init__(self, times_ms, size, dtype_bytes=4):
+    def __init__(self, times_ms, size, dtype_bytes=4, total_bytes=None):
         """
         Initialize benchmark results.
         
         Args:
             times_ms: List of execution times in milliseconds
-            size: Number of elements processed
+            size: Number of elements processed (or total bytes if used that way)
             dtype_bytes: Size of each element in bytes (default: 4 for float32)
+            total_bytes: Total bytes transferred (overrides calculation from size)
         """
         self.times_ms = times_ms
         self.size = size
         self.dtype_bytes = dtype_bytes
+        self._total_bytes = total_bytes
         
     @property
     def avg_ms(self):
@@ -197,9 +202,13 @@ class BenchmarkResults:
     
     @property
     def bandwidth_gbs(self):
-        """Calculate achieved bandwidth in GB/s (assuming 3x memory traffic: 2 reads + 1 write)."""
-        # For vector operations like A + B = C, we have 3 memory operations
-        total_bytes = 3 * self.size * self.dtype_bytes
+        """Calculate achieved bandwidth in GB/s."""
+        if self._total_bytes is not None:
+            total_bytes = self._total_bytes
+        else:
+            # For vector operations like A + B = C, we have 3 memory operations
+            total_bytes = 3 * self.size * self.dtype_bytes
+            
         return (total_bytes / 1e9) / (self.avg_ms / 1000)
     
     def __str__(self):
@@ -228,7 +237,20 @@ def perftest(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         # Get kernel configuration from the decorated function
-        kernel_func, kernel_args, grid_dims, block_dims, size = func(*args, **kwargs)
+        # func returns: (kernel_func, args, grid_dims, block_dims, size_or_bytes)
+        # We can't change the signature easily, so we check if size seems to be total bytes
+        # or if we can adapt.
+        # For now, just assume existing behavior unless total_bytes kwarg is added to perftest?
+        # No, perftest decorator calls func().
+        
+        ret = func(*args, **kwargs)
+        if len(ret) == 5:
+            kernel_func, kernel_args, grid_dims, block_dims, size = ret
+            total_bytes = None
+        elif len(ret) == 6:
+            kernel_func, kernel_args, grid_dims, block_dims, size, total_bytes = ret
+        else:
+            raise ValueError("Decorated function must return 5 or 6 values")
         
         # Warmup iterations
         warmup_iters = 5
@@ -283,7 +305,7 @@ def perftest(func):
             hip.hipEventDestroy(start_event)
             hip.hipEventDestroy(stop_event)
         
-        return BenchmarkResults(times_ms, size)
+        return BenchmarkResults(times_ms, size, total_bytes=total_bytes)
     
     return wrapper
 
