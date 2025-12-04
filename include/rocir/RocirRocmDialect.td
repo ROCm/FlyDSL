@@ -17,7 +17,7 @@ include "mlir/IR/EnumAttr.td"
 //===----------------------------------------------------------------------===//
 
 def RocirRocm_Dialect : Dialect {
-  let name = "cute_rocm";
+  let name = "rocir_rocm";
   let cppNamespace = "::mlir::rocir::rocm";
   let summary = "AMD GPU hardware-aware Rocir IR for GFX942";
   let description = [{
@@ -186,13 +186,85 @@ def RocirRocm_CopyAtomType : RocirRocm_Type<"CopyAtom", "copy_atom"> {
     - Register to LDS
     
     Supports buffer_load/buffer_store and flat_load/flat_store instructions.
+    
+    The copy atom contains:
+    - Element type and vector size
+    - Thread ID layout (ThrID)
+    - Source/Destination TV layouts (layout_src_tv, layout_dst_tv)
   }];
   let parameters = (ins
     "Type":$elementType,
     "int64_t":$vectorSize,                       // Number of elements per instruction
-    "bool":$isCoalesced                          // Whether accesses are coalesced
+    "bool":$isCoalesced,                         // Whether accesses are coalesced
+    "Type":$thrId,                               // Thread ID layout
+    "Type":$layoutSrcTV,                         // Source thread-value layout
+    "Type":$layoutDstTV                          // Destination thread-value layout
   );
-  let assemblyFormat = "`<` $elementType `,` $vectorSize `,` $isCoalesced `>`";
+  let assemblyFormat = "`<` $elementType `,` $vectorSize `,` $isCoalesced `,` $thrId `,` $layoutSrcTV `,` $layoutDstTV `>`";
+}
+
+def RocirRocm_TiledCopyType : RocirRocm_Type<"TiledCopy", "tiled_copy"> {
+  let summary = "Tiled copy operation descriptor";
+  let description = [{
+    Describes a tiled copy operation that distributes data movement across threads.
+    
+    Composition of:
+    - Base copy atom (defines single-thread copy behavior)
+    - Tiler MN (tile size per thread block)
+    - TV layout tiled (thread-value layout for the tile)
+    - Layouts for source and destination
+    
+    This type encodes how to partition and copy data across a thread block.
+  }];
+  let parameters = (ins
+    "CopyAtomType":$copyAtom,                    // Base copy atom
+    "Type":$tilerMN,                             // Tiler shape (tile size)
+    "Type":$layoutTVTiled,                       // Tiled TV layout
+    "Type":$layoutSrcTVTiled,                    // Source TV layout tiled
+    "Type":$layoutDstTVTiled                     // Destination TV layout tiled
+  );
+  let assemblyFormat = "`<` $copyAtom `,` $tilerMN `,` $layoutTVTiled `,` $layoutSrcTVTiled `,` $layoutDstTVTiled `>`";
+}
+
+//===----------------------------------------------------------------------===//
+// Tensor Types
+//===----------------------------------------------------------------------===//
+
+def RocirRocm_TensorType : RocirRocm_Type<"Tensor", "tensor"> {
+  let summary = "Tensor type with iterator and layout";
+  let description = [{
+    Represents a tensor as (iterator, layout) pair.
+    
+    A tensor evaluates to: T(coord) = *(iterator + layout(coord))
+    
+    Supports different memory spaces:
+    - Global memory (gmem)
+    - LDS (smem equivalent)
+    - Register file (rmem)
+    
+    The layout encodes the coordinate-to-offset mapping.
+  }];
+  let parameters = (ins
+    "Type":$elementType,                         // Element type (f16, f32, etc.)
+    "Type":$layout,                              // Layout type
+    "Type":$memorySpace                          // Memory space (gmem, smem, rmem)
+  );
+  let assemblyFormat = "`<` $elementType `,` $layout `,` $memorySpace `>`";
+}
+
+def RocirRocm_FragmentType : RocirRocm_Type<"Fragment", "fragment"> {
+  let summary = "Register memory fragment type";
+  let description = [{
+    Represents a fragment of data in register memory.
+    
+    Fragments are allocated per-thread and used for computation.
+    Size is determined by the layout.
+  }];
+  let parameters = (ins
+    "Type":$elementType,                         // Element type
+    "Type":$layout                               // Layout defining fragment shape
+  );
+  let assemblyFormat = "`<` $elementType `,` $layout `>`";
 }
 
 //===----------------------------------------------------------------------===//

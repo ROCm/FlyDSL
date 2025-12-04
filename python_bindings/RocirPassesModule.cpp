@@ -18,17 +18,24 @@ namespace py = pybind11;
 // Provide a C API handle so Python can register the Rocir dialect.
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Rocir, rocir, mlir::rocir::RocirDialect)
 
+// Auto-generated pass registration functions
+#define GEN_PASS_REGISTRATION
+#include "rocir/RocirPasses.h.inc"
+
 PYBIND11_MODULE(_rocirPassesExt, m) {
   m.doc() = "Rocir transformation passes and dialect helpers";
 
-  // Register Rocir passes with the global registry (shared with Python MLIR).
+  // Register all passes at module load time
+  
+  // Manual registration for RocirCoordLoweringPass (not in TableGen)
   ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
-    return mlir::rocir::createRocirCoordLoweringPass();
+    return ::mlir::rocir::createRocirCoordLoweringPass();
   });
-
-  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
-    return mlir::rocir::createRocirToStandardPass();
-  });
+  
+  // TableGen-generated registrations
+  registerRocirToStandardPass();           // To standard dialect
+  // registerRocirLayoutCanonicalizePass();  // TODO: Enable when needed
+  // registerRocirRocmToGPUPass();           // TODO: Enable when RocirRocm is enabled
 
   m.def(
       "register_dialect",

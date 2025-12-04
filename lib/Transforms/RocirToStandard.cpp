@@ -1,5 +1,5 @@
 #include "rocir/RocirDialect.h"
-#include "rocir/RocirOps.h.inc"
+#include "rocir/RocirOps.h"
 #include "rocir/RocirPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -548,7 +548,7 @@ static std::pair<LayoutNode, LayoutNode> coalesceLayoutNode(
 }
 
 // Helper to compute GCD
-static Value computeGCD(Location loc, Value a, Value b, PatternRewriter &rewriter) {
+[[maybe_unused]] static Value computeGCD(Location loc, Value a, Value b, PatternRewriter &rewriter) {
   // Try constant folding
   auto *aOp = a.getDefiningOp();
   auto *bOp = b.getDefiningOp();

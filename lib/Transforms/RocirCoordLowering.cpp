@@ -9,7 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "rocir/RocirDialect.h"
-#include "rocir/RocirOps.h.inc"
+#include "rocir/RocirOps.h"
 #include "rocir/RocirPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

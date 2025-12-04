@@ -5,15 +5,9 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Types.h"
+#include "rocir/RocirTypes.h"
 
 namespace mlir::rocir {
-
-// Forward declarations for type storage
-namespace detail {
-struct IntTypeStorage;
-struct RankedTypeStorage;
-struct StructureTypeStorage;
-}
 
 // Type declarations
 class IntType : public Type::TypeBase<IntType, Type, detail::IntTypeStorage> {
@@ -65,7 +59,4 @@ public:
 #include "rocir/RocirDialect.h.inc"
 
 // Include generated operation declarations
-#define GET_OP_CLASSES
-#include "rocir/RocirOps.h.inc"
-
 #endif // ROCIR_DIALECT_H

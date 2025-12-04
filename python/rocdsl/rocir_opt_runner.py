@@ -27,14 +27,14 @@ def convert_generic_to_pretty(ir_str: str) -> str:
     pattern = r'(%\w+\s*=\s*)"(cute\.\w+)"\(([^)]*)\)(\s*:.+?)(?=\n|$)'
     return re.sub(pattern, convert_op, ir_str)
 
-def run_cute_opt(module: Module, passes: str) -> Module:
+def run_rocir_opt(module: Module, passes: str) -> Module:
     """Run rocir-opt with given passes and return transformed module."""
     print(f"[DEBUG] run_cute_opt called with passes: {passes}")
     
     # Get rocir-opt path
     cute_opt = Path("/mnt/raid0/felix/rocDSL/build/tools/rocir-opt/rocir-opt")
     if not cute_opt.exists():
-        raise RuntimeError(f"rocir-opt not found at {cute_opt}")
+        raise RuntimeError(f"rocir-opt not found at {rocir_opt}")
     
     # Write module to temp file
     with tempfile.NamedTemporaryFile(mode='w', suffix='.mlir', delete=False) as f:
@@ -48,7 +48,7 @@ def run_cute_opt(module: Module, passes: str) -> Module:
     
     try:
         # Run rocir-opt
-        cmd = [str(cute_opt), f"--{passes}", input_file]
+        cmd = [str(rocir_opt), f"--{passes}", input_file]
         print(f"[DEBUG] Running: {' '.join(cmd)}")
         result = subprocess.run(
             cmd,
@@ -74,4 +74,4 @@ def run_cute_opt(module: Module, passes: str) -> Module:
 
 def rocir_to_standard(module: Module) -> Module:
     """Lower Rocir IR to standard dialects using rocir-opt."""
-    return run_cute_opt(module, "rocir-to-standard")
+    return run_rocir_opt(module, "rocir-to-standard")

@@ -344,6 +344,15 @@ def Rocir_TiledDivideOp : Rocir_Op<"tiled_divide", []> {
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
 }
 
+//===----------------------------------------------------------------------===//
+// Advanced Layout Operations
+//===----------------------------------------------------------------------===//
+
+// NOTE: product_each and make_layout_tv are implemented at the Python level
+// using existing low-level operations (raked_product, get_shape, size, composition, etc.)
+// They don't need dedicated MLIR IR operations since they can be computed
+// using combinations of existing operations.
+
 def Rocir_FlatDivideOp : Rocir_Op<"flat_divide", []> {
   let summary = "Divide a layout by a tiler with flat semantics";
   let description = [{

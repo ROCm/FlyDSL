@@ -43,7 +43,7 @@ def RocirRocm_MfmaOp : RocirRocm_OpBase<"mfma", [Pure]> {
     AnyType:$b,                          // B operand (RHS)
     AnyType:$c,                          // C operand (accumulator)
     ArrayAttr:$shape,                    // [M, N, K] shape
-    GfxArchEnum:$arch                    // Target architecture
+    StrAttr:$arch                        // Target architecture (gfx942, etc.)
   );
   
   let results = (outs AnyType:$result);
@@ -169,6 +169,279 @@ def RocirRocm_LdsStoreOp : RocirRocm_OpBase<"lds_store"> {
   let assemblyFormat = [{
     $data `,` $buffer `,` $coord attr-dict `:` 
     `(` type($data) `,` type($buffer) `,` type($coord) `)`
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Atom Construction Operations
+//===----------------------------------------------------------------------===//
+
+def RocirRocm_MakeCopyAtomOp : RocirRocm_OpBase<"make_copy_atom", [Pure]> {
+  let summary = "Create a copy atom for GFX942";
+  let description = [{
+    Creates a copy atom descriptor for data movement operations on AMD GPUs.
+    
+    A copy atom encodes:
+    - Element type being copied
+    - Vector size (elements per instruction)
+    - Coalescing strategy for memory bandwidth
+    
+    Example:
+    ```mlir
+    %atom = rocir.rocm.make_copy_atom !f16, 8, true
+      : !rocir_rocm.copy_atom<f16, 8, true>
+    ```
+  }];
+  
+  let arguments = (ins
+    TypeAttr:$element_type,
+    I64Attr:$vector_size,
+    BoolAttr:$is_coalesced
+  );
+  
+  let results = (outs RocirRocm_CopyAtomType:$result);
+  
+  let assemblyFormat = [{
+    $element_type `,` $vector_size `,` $is_coalesced attr-dict
+    `:` type($result)
+  }];
+}
+
+def RocirRocm_MakeTiledCopyOp : RocirRocm_OpBase<"make_tiled_copy", [Pure]> {
+  let summary = "Create a tiled copy from copy atom and TV layout";
+  let description = [{
+    Creates a tiled copy operation by composing a copy atom with a
+    thread-value (TV) layout and tiler.
+    
+    This defines how data movement is distributed across threads in a
+    thread block.
+    
+    Example:
+    ```mlir
+    %tiled_copy = rocir.rocm.make_tiled_copy %atom, %tv_layout, %tiler
+      : (!rocir_rocm.copy_atom<...>, !rocir.layout<2>, !rocir.shape<2>)
+        -> !rocir_rocm.tiled_copy<...>
+    ```
+  }];
+  
+  let arguments = (ins
+    RocirRocm_CopyAtomType:$atom,
+    AnyType:$tv_layout,
+    AnyType:$tiler
+  );
+  
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = [{
+    $atom `,` $tv_layout `,` $tiler attr-dict `:`
+    `(` type($atom) `,` type($tv_layout) `,` type($tiler) `)` `->` type($result)
+  }];
+}
+
+def RocirRocm_MakeTiledCopyTVOp : RocirRocm_OpBase<"make_tiled_copy_tv", [Pure]> {
+  let summary = "Create a tiled copy from copy atom and separate thread/value layouts";
+  let description = [{
+    Creates a tiled copy from a copy atom and separate thread and value layouts.
+    
+    The TV layout is inferred from the thread layout (mapping threads to tile coords)
+    and value layout (mapping values per thread to tile coords).
+    
+    Implementation:
+    1. Compute tiler_mn = product_each(raked_product(thr_layout, val_layout).shape)
+    2. Compute layout_tv from thr_layout and val_layout composition
+    3. Create TiledCopyType with (atom, tiler_mn, layout_tv)
+    
+    Example:
+    ```mlir
+    %tiled_copy = rocir.rocm.make_tiled_copy_tv %atom, %thr_layout, %val_layout
+      : (!rocir_rocm.copy_atom<...>, !rocir.layout<2>, !rocir.layout<2>)
+        -> !rocir_rocm.tiled_copy<...>
+    ```
+  }];
+  
+  let arguments = (ins
+    RocirRocm_CopyAtomType:$atom,
+    AnyType:$thr_layout,
+    AnyType:$val_layout
+  );
+  
+  let results = (outs RocirRocm_TiledCopyType:$result);
+  
+  let assemblyFormat = [{
+    $atom `,` $thr_layout `,` $val_layout attr-dict `:`
+    `(` type($atom) `,` type($thr_layout) `,` type($val_layout) `)` `->` type($result)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Partition Operations
+//===----------------------------------------------------------------------===//
+
+def RocirRocm_PartitionSrcOp : RocirRocm_OpBase<"partition_src", [Pure]> {
+  let summary = "Partition source tensor according to tiled copy layout";
+  let description = [{
+    Partitions a source tensor for a specific thread according to the
+    tiled copy's TV layout.
+    
+    Given:
+    - tiled_copy: TiledCopy descriptor
+    - src_tensor: Source tensor to partition
+    - thr_idx: Thread index
+    
+    Returns:
+    - Partitioned tensor for this thread
+    
+    Example:
+    ```mlir
+    %thrA = rocir.rocm.partition_src %tiled_copy, %blkA, %tidx
+      : (!rocir_rocm.tiled_copy<...>, !rocir_rocm.tensor<...>, index)
+        -> !rocir_rocm.tensor<...>
+    ```
+  }];
+  
+  let arguments = (ins
+    RocirRocm_TiledCopyType:$tiled_copy,
+    AnyType:$src_tensor,
+    Index:$thr_idx
+  );
+  
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = [{
+    $tiled_copy `,` $src_tensor `,` $thr_idx attr-dict `:`
+    `(` type($tiled_copy) `,` type($src_tensor) `,` type($thr_idx) `)` `->` type($result)
+  }];
+}
+
+def RocirRocm_PartitionDstOp : RocirRocm_OpBase<"partition_dst", [Pure]> {
+  let summary = "Partition destination tensor according to tiled copy layout";
+  let description = [{
+    Partitions a destination tensor for a specific thread according to the
+    tiled copy's TV layout.
+    
+    Similar to partition_src but for destination tensors.
+    
+    Example:
+    ```mlir
+    %thrC = rocir.rocm.partition_dst %tiled_copy, %blkC, %tidx
+      : (!rocir_rocm.tiled_copy<...>, !rocir_rocm.tensor<...>, index)
+        -> !rocir_rocm.tensor<...>
+    ```
+  }];
+  
+  let arguments = (ins
+    RocirRocm_TiledCopyType:$tiled_copy,
+    AnyType:$dst_tensor,
+    Index:$thr_idx
+  );
+  
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = [{
+    $tiled_copy `,` $dst_tensor `,` $thr_idx attr-dict `:`
+    `(` type($tiled_copy) `,` type($dst_tensor) `,` type($thr_idx) `)` `->` type($result)
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// Tensor Operations
+//===----------------------------------------------------------------------===//
+
+def RocirRocm_MakeTensorOp : RocirRocm_OpBase<"make_tensor", [Pure]> {
+  let summary = "Create a tensor from pointer and layout";
+  let description = [{
+    Creates a tensor by combining an iterator (pointer) with a layout.
+    
+    Tensor semantics: T(coord) = *(ptr + layout(coord))
+    
+    Example:
+    ```mlir
+    %tensor = rocir.rocm.make_tensor %ptr, %layout
+      : (!llvm.ptr, !rocir.layout<2>) -> !rocir_rocm.tensor<f16, ...>
+    ```
+  }];
+  
+  let arguments = (ins
+    AnyType:$ptr,
+    AnyType:$layout
+  );
+  
+  let results = (outs RocirRocm_TensorType:$result);
+  
+  let assemblyFormat = [{
+    $ptr `,` $layout attr-dict `:`
+    `(` type($ptr) `,` type($layout) `)` `->` type($result)
+  }];
+}
+
+def RocirRocm_MakeFragmentOp : RocirRocm_OpBase<"make_fragment", [Pure]> {
+  let summary = "Create a fragment (register memory tensor)";
+  let description = [{
+    Allocates a fragment in register memory with given layout.
+    
+    Fragments are per-thread local storage used for computation.
+    
+    Example:
+    ```mlir
+    %frg = rocir.rocm.make_fragment %layout, %element_type
+      : (!rocir.layout<2>, !f16) -> !rocir_rocm.fragment<f16, ...>
+    ```
+  }];
+  
+  let arguments = (ins
+    AnyType:$layout,
+    TypeAttr:$element_type
+  );
+  
+  let results = (outs RocirRocm_FragmentType:$result);
+  
+  let assemblyFormat = [{
+    $layout `,` $element_type attr-dict `:`
+    `(` type($layout) `)` `->` type($result)
+  }];
+}
+
+def RocirRocm_FragmentLoadOp : RocirRocm_OpBase<"fragment_load", [Pure]> {
+  let summary = "Load data from fragment for computation";
+  let description = [{
+    Loads fragment data into computational value.
+    The compiler optimizes away redundant loads.
+    
+    Example:
+    ```mlir
+    %val = rocir.rocm.fragment_load %frg
+      : (!rocir_rocm.fragment<f16, ...>) -> vector<16xf16>
+    ```
+  }];
+  
+  let arguments = (ins RocirRocm_FragmentType:$fragment);
+  let results = (outs AnyType:$result);
+  
+  let assemblyFormat = [{
+    $fragment attr-dict `:` `(` type($fragment) `)` `->` type($result)
+  }];
+}
+
+def RocirRocm_FragmentStoreOp : RocirRocm_OpBase<"fragment_store"> {
+  let summary = "Store computed value into fragment";
+  let description = [{
+    Stores a computed value back into the fragment.
+    
+    Example:
+    ```mlir
+    rocir.rocm.fragment_store %value, %frg
+      : (vector<16xf16>, !rocir_rocm.fragment<f16, ...>)
+    ```
+  }];
+  
+  let arguments = (ins
+    AnyType:$value,
+    RocirRocm_FragmentType:$fragment
+  );
+  
+  let assemblyFormat = [{
+    $value `,` $fragment attr-dict `:`
+    `(` type($value) `,` type($fragment) `)`
   }];
 }
 

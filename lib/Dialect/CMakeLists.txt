@@ -1,3 +1,3 @@
 add_subdirectory(Rocir)
-#add_subdirectory(RocirRocm)
-#add_subdirectory(RocirNvgpu)
+# RocirRocm temporarily disabled for build fixes
+# add_subdirectory(RocirRocm)

@@ -65,6 +65,7 @@ if(pybind11_FOUND)
   endif()
   
   target_link_libraries(_rocirPassesExt PRIVATE
+    RocirDialect
     RocirTransforms
     ${MLIR_PYTHON_CAPI_LIB}
   )
