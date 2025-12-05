@@ -243,8 +243,8 @@ def perftest(func):
         size = config.get("size")
         if launch is None or size is None:
             raise ValueError("perftest config requires 'launch' callable and 'size'")
-        warmup_iters = config.get("warmup_iters", 3)
-        bench_iters = config.get("bench_iters", 20)
+        warmup_iters = config.get("warmup_iters", 5)
+        bench_iters = config.get("bench_iters", 100)
         total_bytes = config.get("total_bytes")
 
         def time_call(callable_fn: Callable[[], None]) -> float:

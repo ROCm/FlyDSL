@@ -176,9 +176,9 @@ def benchmark_pytorch_add(size: int):
     def run_torch():
         return {
             "launch": torch_launch,
-            "warmup": torch_launch,
             "size": size,
             "total_bytes": 3 * size * a.element_size(),
+            "bench_iters": 20,
         }
 
     return run_torch()
@@ -260,9 +260,9 @@ def benchmark_vector_add(tile_size: int = 4):
     def run_benchmark():
         return {
             "launch": hip_kernel_launch,
-            "warmup": hip_kernel_launch,
             "size": SIZE,
             "total_bytes": 3 * SIZE * 4,
+            "bench_iters": 20,
         }
     
     # Run benchmark
