@@ -12,7 +12,7 @@ from rocdsl.dialects.ext import gpu, rocir, arith, scf
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from rocdsl.utils import SmemAllocator
-from utils import compile_to_hsaco
+from tests.utils import compile_to_hsaco
 from mlir import ir
 from mlir.dialects import memref
 import mlir.extras.types as T

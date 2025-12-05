@@ -184,7 +184,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     # Compile to HSACO  
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-    from utils import compile_to_hsaco
+    from tests.utils import compile_to_hsaco
     from rocdsl.compiler.pipeline import run_pipeline, Pipeline
     
     # Run optimization pipeline

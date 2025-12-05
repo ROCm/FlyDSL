@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import gpu, rocir
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from utils import compile_to_hsaco
+from tests.utils import compile_to_hsaco
 from mlir import ir
 from mlir.dialects import arith, memref, scf
 import mlir.extras.types as T

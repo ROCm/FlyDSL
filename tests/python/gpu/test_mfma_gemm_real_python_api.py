@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from utils import compile_to_hsaco
+from tests.utils import compile_to_hsaco
 import numpy as np
 from mlir import ir
 from mlir.dialects import arith as _arith_mlir, vector, memref
