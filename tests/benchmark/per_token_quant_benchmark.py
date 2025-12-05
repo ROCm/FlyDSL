@@ -368,17 +368,28 @@ def benchmark_per_token_quant():
         *[ctypes.addressof(p) for p in arg_ptrs]
     )
 
-    # Benchmark Execution
+    grid_dims = (M, 1, 1)
+    block_dims = (BLOCK_SIZE, 1, 1)
+    
+    def hip_kernel_launch():
+        hip.hipModuleLaunchKernel(
+            kernel_func,
+            *grid_dims,
+            *block_dims,
+            sharedMemBytes=0,
+            stream=None,
+            kernelParams=args_array,
+            extra=None,
+        )
+        hip.hipDeviceSynchronize()
+
     @perftest
     def run_benchmark():
-        return (
-            kernel_func,
-            args_array,
-            (M, 1, 1),  # Grid: M blocks (one per token)
-            (BLOCK_SIZE, 1, 1),  # Block: BLOCK_SIZE threads
-            total_elements,  # Size (elements)
-            total_bytes_rw,  # Total bytes (explicit)
-        )
+        return {
+            "launch": hip_kernel_launch,
+            "size": total_elements,
+            "total_bytes": total_bytes_rw,
+        }
 
     print("Running benchmark...")
     results = run_benchmark()

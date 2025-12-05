@@ -108,29 +108,31 @@ def benchmark_matrix_transpose():
     arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_b))]
     args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
     
-    # Benchmark function that returns kernel configuration
-    # Note: For transpose, memory traffic is 2x (read + write), not 3x like vector add
-    class TransposeBenchmarkResults(BenchmarkResults):
-        @property
-        def bandwidth_gbs(self):
-            """Calculate achieved bandwidth in GB/s for transpose (read + write)"""
-            total_bytes = 2 * self.size * self.dtype_bytes  # Read once, write once
-            return (total_bytes / 1e9) / (self.avg_ms / 1000)
-    
+    grid_dims = (grid_x, grid_y, 1)
+    block_dims = (block_size, block_size, 1)
+
+    def hip_kernel_launch():
+        hip.hipModuleLaunchKernel(
+            kernel_func,
+            *grid_dims,
+            *block_dims,
+            sharedMemBytes=0,
+            stream=None,
+            kernelParams=args,
+            extra=None,
+        )
+        hip.hipDeviceSynchronize()
+
     @perftest
     def run_benchmark():
-        return (
-            kernel_func,
-            args,
-            (grid_x, grid_y, 1),  # grid dimensions
-            (block_size, block_size, 1),  # block dimensions
-            M * N  # for bandwidth calculation
-        )
+        return {
+            "launch": hip_kernel_launch,
+            "size": M * N,
+            "total_bytes": 2 * M * N * 4,
+        }
     
     # Run benchmark
     results = run_benchmark()
-    # Convert to TransposeBenchmarkResults for proper bandwidth calculation
-    transpose_results = TransposeBenchmarkResults(results.times_ms, M * N)
     
     # Verify correctness
     hip_check(hip.hipMemcpy(b_host.ctypes.data, d_b, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
@@ -141,7 +143,7 @@ def benchmark_matrix_transpose():
     print(f"  Max error: {error:.2e}")
     
     # Print benchmark results
-    print(f"\n{transpose_results}")
+    print(f"\n{results}")
     
     # Cleanup
     hip_check(hip.hipFree(d_a))

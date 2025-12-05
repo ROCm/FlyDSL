@@ -3,12 +3,12 @@
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.compiler.rocir_opt_helper import apply_rocir_coord_lowering
 from rocdsl.runtime.hip_util import get_hip_arch
-from hip import hip
 from mlir import ir
 import numpy as np
 from functools import wraps
 import os
 import tempfile
+from typing import Dict, Any, Callable
 
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel"):
@@ -220,81 +220,61 @@ class BenchmarkResults:
 
 def perftest(func):
     """
-    Decorator for benchmarking GPU kernels.
+    Decorator for benchmarking workloads.
     
-    The decorated function should return a tuple containing:
-        (kernel_func, args, grid_dims, block_dims, size)
-        or (kernel_func, args, grid_dims, block_dims, size, total_bytes)
+    The decorated function must return a dict with:
+        launch: callable -> float  (returns elapsed time in ms)
+        size:   int                (number of elements processed)
     
-    The decorator will:
-    1. Run warmup iterations
-    2. Run benchmark iterations with timing
-    3. Return BenchmarkResults object
+    Optional dict entries:
+        warmup_iters: int (default 5)
+        bench_iters: int (default 100)
+        total_bytes: int (override bandwidth calculation)
+    
+    The supplied callables are responsible for issuing device work and
+    performing any necessary synchronization before returning.
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Get kernel configuration from the decorated function
-        ret = func(*args, **kwargs)
-        if len(ret) == 5:
-            kernel_func, kernel_args, grid_dims, block_dims, size = ret
-            total_bytes = None
-        elif len(ret) == 6:
-            kernel_func, kernel_args, grid_dims, block_dims, size, total_bytes = ret
-        else:
-            raise ValueError("Decorated function must return 5 or 6 values")
-        
-        # Warmup iterations
-        warmup_iters = 5
+        config: Dict[str, Any] = func(*args, **kwargs)
+        if not isinstance(config, dict):
+            raise ValueError("perftest config must be a dict")
+        launch = config.get("launch")
+        size = config.get("size")
+        if launch is None or size is None:
+            raise ValueError("perftest config requires 'launch' callable and 'size'")
+        warmup_iters = config.get("warmup_iters", 5)
+        bench_iters = config.get("bench_iters", 100)
+        total_bytes = config.get("total_bytes")
+
+        def time_call(callable_fn: Callable[[], None]) -> float:
+            """Use HIP events if available, else wall-clock."""
+            try:
+                from hip import hip  # local import to avoid mandatory dependency
+                start_event = hip.hipEventCreate()[1]
+                stop_event = hip.hipEventCreate()[1]
+                hip.hipEventRecord(start_event, None)
+                callable_fn()
+                hip.hipEventRecord(stop_event, None)
+                hip.hipEventSynchronize(stop_event)
+                elapsed_ms = hip.hipEventElapsedTime(start_event, stop_event)[1]
+                hip.hipEventDestroy(start_event)
+                hip.hipEventDestroy(stop_event)
+                return elapsed_ms
+            except Exception:
+                import time
+                start = time.perf_counter()
+                callable_fn()
+                return (time.perf_counter() - start) * 1000.0
         print(f"\n  Running {warmup_iters} warmup iterations...")
-        for i in range(warmup_iters):
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                *grid_dims,
-                *block_dims,
-                sharedMemBytes=0,
-                stream=None,
-                kernelParams=kernel_args,
-                extra=None
-            )
-        hip.hipDeviceSynchronize()
+        for _ in range(warmup_iters):
+            launch()
         
-        # Benchmark iterations
-        num_iters = 100
-        print(f"  Running {num_iters} benchmark iterations...")
-        
+        print(f"  Running {bench_iters} benchmark iterations...")
         times_ms = []
-        for i in range(num_iters):
-            # Create events for timing
-            start_event = hip.hipEventCreate()[1]
-            stop_event = hip.hipEventCreate()[1]
-            
-            # Record start event
-            hip.hipEventRecord(start_event, None)
-            
-            # Launch kernel
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                *grid_dims,
-                *block_dims,
-                sharedMemBytes=0,
-                stream=None,
-                kernelParams=kernel_args,
-                extra=None
-            )
-            
-            # Record stop event
-            hip.hipEventRecord(stop_event, None)
-            
-            # Wait for completion
-            hip.hipEventSynchronize(stop_event)
-            
-            # Get elapsed time
-            elapsed_ms = hip.hipEventElapsedTime(start_event, stop_event)[1]
+        for _ in range(bench_iters):
+            elapsed_ms = time_call(launch)
             times_ms.append(elapsed_ms)
-            
-            # Cleanup events
-            hip.hipEventDestroy(start_event)
-            hip.hipEventDestroy(stop_event)
         
         return BenchmarkResults(times_ms, size, total_bytes=total_bytes)
     
