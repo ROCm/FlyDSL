@@ -16,6 +16,7 @@ from mlir import ir
 from mlir.dialects import memref, vector
 from mlir.ir import F32Type, InsertionPoint, IntegerType
 from mlir.dialects import arith as std_arith
+from mlir.dialects import scf as std_scf
 import mlir.extras.types as T
 from hip import hip
 import numpy as np
@@ -23,41 +24,32 @@ import ctypes
 
 # Import benchmark utilities from shared tests/utils.py
 from utils import BenchmarkResults, perftest, compile_to_hsaco
-
+    
 
 def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
-    """Benchmark matrix transpose kernel performance (Arith MLIR Implementation)"""
-    assert TILE_SIZE % 2 == 0, "TILE_SIZE must be multiple of 2 for vec2"
-        
+    """Benchmark matrix transpose kernel performance (Arith MLIR Implementation)
+    
+    Updated: each thread processes multiple vec4 chunks. Threads are assigned
+    contiguous vec4 chunks across the block.
+    """
+    VEC_SIZE = 4  # vec4
+    if TILE_SIZE % VEC_SIZE != 0:
+        TILE_SIZE = ((TILE_SIZE + VEC_SIZE - 1) // VEC_SIZE) * VEC_SIZE
+        print(f"Adjusted TILE_SIZE to {TILE_SIZE} (multiple of vec4)")
+    
+    ITERS = TILE_SIZE // VEC_SIZE
     M, N = 4096, 4096
-    VEC_SIZE = 2  # vec2
     
     # Configuration
-    # BLOCK_TILE and TILE_SIZE provided by user
-    PAD = 2          # Shared memory padding to avoid bank conflicts
-    
-    # Thread block dimensions
-    # Each thread handles TILE_SIZE columns, so we need BLOCK_TILE/TILE_SIZE threads in X
+    PAD = 2
     BLOCK_X = BLOCK_TILE // TILE_SIZE
     BLOCK_Y = BLOCK_TILE
-    ITERS = TILE_SIZE // VEC_SIZE  # Number of vec2 operations per thread
-    # Workgroup size check (metadata currently emits max_flat_workgroup_size=256)
+
     BLOCK_THREADS = BLOCK_X * BLOCK_Y
     MAX_WG = 256
     if BLOCK_THREADS > MAX_WG:
-        # Suggest a larger TILE_SIZE (even divisor) that fits
-        suggestion = None
-        for d in range(TILE_SIZE + (TILE_SIZE % 2), BLOCK_TILE + 1, 2):
-            if BLOCK_TILE % d == 0:
-                threads = (BLOCK_TILE * BLOCK_TILE) // d
-                if threads <= MAX_WG:
-                    suggestion = d
-                    break
-        msg = f"Workgroup threads {BLOCK_THREADS} exceed max {MAX_WG}. Reduce BLOCK_TILE or increase TILE_SIZE."
-        if suggestion:
-            msg += f" For this BLOCK_TILE={BLOCK_TILE}, try TILE_SIZE={suggestion} (threads={(BLOCK_TILE*BLOCK_TILE)//suggestion})."
-        raise ValueError(msg)
-    # LDS usage check (bytes)
+        raise ValueError(f"Workgroup threads {BLOCK_THREADS} exceed max {MAX_WG}. "
+                         f"Reduce BLOCK_TILE or use smaller BLOCK_TILE for fixed TILE_SIZE=8.")
     SMEM_SIZE = BLOCK_TILE * (BLOCK_TILE + PAD)
     SMEM_BYTES = SMEM_SIZE * 4
     MAX_LDS = 65536  # 64KB typical
@@ -92,90 +84,81 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
         tx = gpu.thread_id("x")
         ty = gpu.thread_id("y")
         
-        # Constants
-        m_c = arith.index(M)._value
-        n_c = arith.index(N)._value
-        block_tile_c = arith.index(BLOCK_TILE)._value
-        smem_stride_c = arith.index(BLOCK_TILE + PAD)._value
-        tile_size_c = arith.index(TILE_SIZE)._value
-        two_c = arith.index(2)._value
+        # Constants (Keep as ArithValue wrappers)
+        m_c = arith.index(M)
+        n_c = arith.index(N)
+        block_tile_c = arith.index(BLOCK_TILE)
+        smem_stride_c = arith.index(BLOCK_TILE + PAD)
+        block_threads_c = arith.index(BLOCK_THREADS)
+        vec_width_c = arith.index(VEC_SIZE)
         
-        vec2_type = T.vector(VEC_SIZE, T.f32())
+        vec_type = T.vector(VEC_SIZE, T.f32())
         
-        # Load from global memory A using vec2
-        # Thread (tx, ty) loads from A: row = ty, col_chunk = tx
-        row_a = (by * block_tile_c + ty)._value
-        row_a_valid = (row_a < m_c)._value
+        # Linear thread id
+        tid = ty * arith.index(BLOCK_X) + tx
         
+        # Phase 1: Global A -> Smem (Coalesced)
         for i in range(ITERS):
-            i_c = arith.index(i)._value
-            # Col index in A: bx*BLOCK_TILE + tx*TILE_SIZE + i*VEC_SIZE
-            col_a_offset = (tx * tile_size_c + i_c * two_c)._value
-            col_a = (bx * block_tile_c + col_a_offset)._value
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
             
-            col_a_valid = (col_a < n_c)._value
-            col_a_end_valid = ((col_a + two_c) <= n_c)._value
-            valid_load = (row_a_valid & col_a_valid & col_a_end_valid)._value
+            global_row = by * block_tile_c + row_off
+            global_col = bx * block_tile_c + col_off
             
-            with ir.InsertionPoint(scf.IfOp(valid_load.value).then_block):
-                # Load vec2 from A
-                g_idx = (row_a * n_c + col_a)._value
-                vec_val = vector.load(vec2_type, A, 
-                                     [g_idx.value if hasattr(g_idx, "value") else g_idx])
+            row_valid = global_row < m_c
+            col_valid = global_col < n_c
+            col_end_valid = (global_col + vec_width_c) <= n_c
+            valid_load = row_valid & col_valid & col_end_valid
+            cond_val = valid_load.value if hasattr(valid_load, "value") else valid_load._value
+            if_op = scf.IfOp(cond_val)
+            with ir.InsertionPoint(if_op.then_block):
+                vals = []
+                for t in range(VEC_SIZE):
+                    t_c = arith.index(t)
+                    g_idx = global_row * n_c + global_col + t_c
+                    val_op = memref.load(A, [g_idx.value if hasattr(g_idx, "value") else g_idx])
+                    val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
+                    vals.append(val)
                 
-                # Store to smem[ty][col_a_offset]
-                s_idx = (ty * smem_stride_c + col_a_offset)._value
+                vec_val = vector.from_elements(vec_type, vals)
+                s_idx = row_off * smem_stride_c + col_off
                 vector.store(vec_val, smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
                 scf.yield_([])
         
         gpu.barrier()
         
-        # Phase 2: Store to global memory B using vec2        
-        threads_per_row_b = BLOCK_TILE // VEC_SIZE
-        rows_per_iter_val = (BLOCK_X * BLOCK_Y) // threads_per_row_b
-        num_phase2_iters = BLOCK_TILE // rows_per_iter_val
-        
-        # Flatten thread ID: tid = ty * BLOCK_X + tx
-        tid = (ty * arith.index(BLOCK_X)._value + tx)._value
-        
-        threads_per_row_c = arith.index(threads_per_row_b)._value
-        write_row_base = (tid // threads_per_row_c)._value
-        write_col = ((tid % threads_per_row_c) * two_c)._value
-        
-        rows_per_iter_c = arith.index(rows_per_iter_val)._value
-        
-        for k in range(num_phase2_iters):
-            k_c = arith.index(k)._value
-            curr_row_local = (write_row_base + k_c * rows_per_iter_c)._value
+        # Phase 2: Smem -> Global B (Transpose)
+        for i in range(ITERS):
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
             
-            # Global row index in B: bx*BLOCK_TILE + curr_row_local
-            row_b = (bx * block_tile_c + curr_row_local)._value
+            base_row_b = bx * block_tile_c + row_off
+            base_col_b = by * block_tile_c + col_off
             
-            # Global col index in B: by*BLOCK_TILE + write_col
-            col_b = (by * block_tile_c + write_col)._value
-            
-            row_b_valid = (row_b < n_c)._value
-            col_b_valid = (col_b < m_c)._value
-            col_b_end_valid = ((col_b + two_c) <= m_c)._value
-            valid_store = (row_b_valid & col_b_valid & col_b_end_valid)._value
-            
-            with ir.InsertionPoint(scf.IfOp(valid_store.value).then_block):
-                # Read from smem[write_col][curr_row_local] (transposed)
-                s_idx_0 = (write_col * smem_stride_c + curr_row_local)._value
-                val_0 = memref.load(smem, [s_idx_0.value if hasattr(s_idx_0, "value") else s_idx_0])
+            row_valid = base_row_b < n_c
+            col_valid = base_col_b < m_c
+            col_end_valid = (base_col_b + vec_width_c) <= m_c
+            valid_store = row_valid & col_valid & col_end_valid
+            cond_val = valid_store.value if hasattr(valid_store, "value") else valid_store._value
+            if_op = scf.IfOp(cond_val)
+            with ir.InsertionPoint(if_op.then_block):
+                vals = []
+                for t in range(VEC_SIZE):
+                    t_c = arith.index(t)
+                    s_idx = (col_off + t_c) * smem_stride_c + row_off
+                    val_op = memref.load(smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
+                    val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
+                    vals.append(val)
                 
-                one_c = arith.index(1)._value
-                s_idx_1 = ((write_col + one_c) * smem_stride_c + curr_row_local)._value
-                val_1 = memref.load(smem, [s_idx_1.value if hasattr(s_idx_1, "value") else s_idx_1])
-                
-                # Form vec2
-                vec_out = vector.from_elements(vec2_type, 
-                                              [val_0.value if hasattr(val_0, "value") else val_0,
-                                               val_1.value if hasattr(val_1, "value") else val_1])
-                
-                # Store vec2 to B
-                g_idx_b = (row_b * m_c + col_b)._value
-                vector.store(vec_out, B, [g_idx_b.value if hasattr(g_idx_b, "value") else g_idx_b])
+                vec_val = vector.from_elements(vec_type, vals)
+                g_idx_b = base_row_b * m_c + base_col_b
+                vector.store(vec_val, B, [g_idx_b.value if hasattr(g_idx_b, "value") else g_idx_b])
                 scf.yield_([])
     
     ip.__exit__(None, None, None)
@@ -187,8 +170,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
     # Allocate device memory
     np.random.seed(123)
     a_host_2d = np.random.randn(M, N).astype(np.float32)
-    # Flatten to row-major 1D for kernel
-    a_host = a_host_2d.flatten('C')  # C order = row-major
+    a_host = a_host_2d.flatten('C')
     b_host = np.zeros(N * M, dtype=np.float32)
     
     d_a = hip_check(hip.hipMalloc(M * N * 4))
@@ -235,18 +217,15 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
     
     # Verify correctness
     hip_check(hip.hipMemcpy(b_host.ctypes.data, d_b, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-    # Reshape back to 2D for comparison
-    b_result_2d = b_host.reshape(N, M, order='C')  # row-major
+    b_result_2d = b_host.reshape(N, M, order='C')
     expected_2d = a_host_2d.T
     error = np.max(np.abs(b_result_2d - expected_2d))
     
     print(f"\n  Correctness Check:")
     print(f"  Max error: {error:.2e}")
     
-    # Print benchmark results
     print(f"\n{results}")
     
-    # Cleanup
     hip_check(hip.hipFree(d_a))
     hip_check(hip.hipFree(d_b))
     hip_check(hip.hipModuleUnload(hip_module))
@@ -256,44 +235,32 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
 
 def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     """Benchmark matrix transpose using Rocir Layout Algebra."""
-    VEC_WIDTH = 2  # vec2 for float32
-    assert TILE_SIZE % 2 == 0, "TILE_SIZE must be divisible by VEC_WIDTH (2)"
-
+    VEC_WIDTH = 4  # vec4 for float32
+    if TILE_SIZE % VEC_WIDTH != 0:
+        TILE_SIZE = ((TILE_SIZE + VEC_WIDTH - 1) // VEC_WIDTH) * VEC_WIDTH
+        print(f"Adjusted TILE_SIZE to {TILE_SIZE} (multiple of vec4)")
+    
+    VEC_PER_THREAD = TILE_SIZE // VEC_WIDTH
     M, N = 4096, 4096
     PAD = 2
     
-    # Block dimensions
     THREADS_PER_BLOCK_X = BLOCK_TILE // TILE_SIZE
     THREADS_PER_BLOCK_Y = BLOCK_TILE
     
-    # Workgroup size check (metadata currently emits max_flat_workgroup_size=256)
     BLOCK_THREADS = THREADS_PER_BLOCK_X * THREADS_PER_BLOCK_Y
     MAX_WG = 256
     if BLOCK_THREADS > MAX_WG:
-        suggestion = None
-        for d in range(TILE_SIZE + (TILE_SIZE % 2), BLOCK_TILE + 1, 2):
-            if BLOCK_TILE % d == 0:
-                threads = (BLOCK_TILE * BLOCK_TILE) // d
-                if threads <= MAX_WG:
-                    suggestion = d
-                    break
-        msg = f"Workgroup threads {BLOCK_THREADS} exceed max {MAX_WG}. Reduce BLOCK_TILE or increase TILE_SIZE."
-        if suggestion:
-            msg += f" For this BLOCK_TILE={BLOCK_TILE}, try TILE_SIZE={suggestion} (threads={(BLOCK_TILE*BLOCK_TILE)//suggestion})."
-        raise ValueError(msg)
+        raise ValueError(f"Workgroup threads {BLOCK_THREADS} exceed max {MAX_WG}.")
     
-    # LDS usage check (bytes)
     SMEM_SIZE = BLOCK_TILE * (BLOCK_TILE + PAD)
     SMEM_BYTES = SMEM_SIZE * 4
-    MAX_LDS = 65536  # 64KB typical
+    MAX_LDS = 65536
     if SMEM_BYTES > MAX_LDS:
-        raise ValueError(f"LDS requirement {SMEM_BYTES} bytes exceeds limit {MAX_LDS} bytes. "
-                         f"Reduce BLOCK_TILE or TILE_SIZE.")
+        raise ValueError(f"LDS requirement {SMEM_BYTES} bytes exceeds limit {MAX_LDS} bytes.")
     
     print(f"Config: Block={THREADS_PER_BLOCK_X}x{THREADS_PER_BLOCK_Y}, " +
           f"Smem={BLOCK_TILE}x{BLOCK_TILE+PAD}")
     
-    # Create kernel using rocir API
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     gpu.set_container_module(ctx.module)
     
@@ -316,109 +283,86 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     ):
         smem = memref.get_global(smem_type, "tile_smem_rocir")
         
-        # Helper: reinterpret 1D memref as 2D with given static shape/strides
-        def cast_1d_to_2d(source, shape, strides, use_layout=False):
-            layout = memref.StridedLayoutAttr.get(offset=0, strides=strides) if use_layout else None
-            out_type = T.memref(
-                shape[0], shape[1], T.f32(),
-                memory_space=source.type.memory_space,
-                layout=layout,
-            )
-            return memref.reinterpret_cast(
-                out_type,
-                source,
-                offsets=[], sizes=[], strides=[],
-                static_offsets=[0],
-                static_sizes=shape,
-                static_strides=strides,
-            )
-
-        # Rocir indices
         tx = rocir.thread_idx("x")
         ty = rocir.thread_idx("y")
         bx = rocir.block_idx("x")
         by = rocir.block_idx("y")
         
-        # Define Thread Layout
-        thr_layout = rocir.make_ordered_layout(
-            (THREADS_PER_BLOCK_Y, THREADS_PER_BLOCK_X),
-            order=(1, 0) 
-        )
+        m_c = arith.index(M)
+        n_c = arith.index(N)
+        block_tile_c = arith.index(BLOCK_TILE)
+        smem_stride_c = arith.index(BLOCK_TILE + PAD)
+        block_threads_c = arith.index(THREADS_PER_BLOCK_X * THREADS_PER_BLOCK_Y)
+        vec_width_c = arith.index(VEC_WIDTH)
         
-        # Define Value Layout
-        val_layout = rocir.make_ordered_layout(
-            (1, TILE_SIZE),
-            order=(1, 0)
-        )
+        tid = ty * arith.index(THREADS_PER_BLOCK_X) + tx
         
-        # Copy Atoms (Vectorized)
-        copy_atom = rocir.make_copy_atom(T.f32(), vector_size=VEC_WIDTH)
-        
-        # Tiled Copy Definition (A -> Smem)
-        tiled_copy_A = rocir.make_tiled_copy_tv(
-            copy_atom,
-            thr_layout,
-            val_layout,
-            thr_shape=(THREADS_PER_BLOCK_Y, THREADS_PER_BLOCK_X),
-            val_shape=(1, TILE_SIZE) 
-        )
-        
-        # Phase 1: Global A -> Smem
-        # Cast A (1D) to 2D view for Layout Algebra
-        memref_A_2d = cast_1d_to_2d(A, [M, N], [N, 1])
-        tensor_A = rocir.make_tensor(memref_A_2d, shape=(M, N), strides=(N, 1))
-        
-        smem_stride = BLOCK_TILE + PAD
-        # Smem 2D view
-        memref_Smem_2d = cast_1d_to_2d(smem, [BLOCK_TILE, BLOCK_TILE], [smem_stride, 1], use_layout=True)
-        tensor_Smem = rocir.make_tensor(memref_Smem_2d, shape=(BLOCK_TILE, BLOCK_TILE), strides=(smem_stride, 1))
-        
-        tile_shape = (BLOCK_TILE, BLOCK_TILE)
-        gA = rocir.zipped_divide(tensor_A, tile_shape)
-        
-        blk_coord = (by, bx)
-        tile_A = gA[blk_coord]
-        
-        thr_copy_A_slice = tiled_copy_A.get_slice((ty * THREADS_PER_BLOCK_X + tx))
-        
-        thr_tile_A = thr_copy_A_slice.partition_S(tile_A)
-        thr_tile_Smem = thr_copy_A_slice.partition_S(tensor_Smem)
-        
-        frg_A = rocir.make_fragment_like(thr_tile_A, T.f32())
-        
-        rocir.copy(tiled_copy_A, thr_tile_A, frg_A)
-        rocir.copy(tiled_copy_A, frg_A, thr_tile_Smem)
+        vec_type = T.vector(VEC_WIDTH, T.f32())
+
+        for i in range(VEC_PER_THREAD):
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
+            
+            global_row = by * block_tile_c + row_off
+            global_col = bx * block_tile_c + col_off
+            
+            row_valid = global_row < m_c
+            col_valid = global_col < n_c
+            col_end_valid = (global_col + vec_width_c) <= n_c
+            valid_load = row_valid & col_valid & col_end_valid
+            cond_val = valid_load.value if hasattr(valid_load, "value") else valid_load._value
+            if_op = scf.IfOp(cond_val)
+            with ir.InsertionPoint(if_op.then_block):
+                vals = []
+                for t in range(VEC_WIDTH):
+                    t_c = arith.index(t)
+                    g_idx = global_row * n_c + global_col + t_c
+                    val_op = memref.load(A, [g_idx.value if hasattr(g_idx, "value") else g_idx])
+                    val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
+                    vals.append(val)
+                
+                vec_val = vector.from_elements(vec_type, vals)
+                s_idx = row_off * smem_stride_c + col_off
+                vector.store(vec_val, smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
+                scf.yield_([])
         
         gpu.barrier()
         
-        # Phase 2: Smem -> Global B (Transpose)
-        memref_B_2d = cast_1d_to_2d(B, [N, M], [M, 1])
-        tensor_B = rocir.make_tensor(memref_B_2d, shape=(N, M), strides=(M, 1))
-        
-        # Transposed Smem view (swap strides)
-        memref_Smem_T_2d = cast_1d_to_2d(smem, [BLOCK_TILE, BLOCK_TILE], [1, smem_stride], use_layout=True)
-        tensor_Smem_T = rocir.make_tensor(memref_Smem_T_2d, shape=(BLOCK_TILE, BLOCK_TILE), strides=(1, smem_stride))
-        
-        tiled_copy_B = tiled_copy_A 
-        
-        gB = rocir.zipped_divide(tensor_B, tile_shape)
-        
-        blk_coord_B = (bx, by)
-        tile_B = gB[blk_coord_B]
-        
-        thr_copy_B_slice = tiled_copy_B.get_slice((ty * THREADS_PER_BLOCK_X + tx))
-        
-        thr_tile_B = thr_copy_B_slice.partition_S(tile_B)
-        thr_tile_Smem_T = thr_copy_B_slice.partition_S(tensor_Smem_T)
-        
-        frg_B = rocir.make_fragment_like(thr_tile_B, T.f32())
-        
-        rocir.copy(tiled_copy_B, thr_tile_Smem_T, frg_B)
-        rocir.copy(tiled_copy_B, frg_B, thr_tile_B)
+        for i in range(VEC_PER_THREAD):
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
+            
+            base_row_b = bx * block_tile_c + row_off
+            base_col_b = by * block_tile_c + col_off
+            
+            row_valid = base_row_b < n_c
+            col_valid = base_col_b < m_c
+            col_end_valid = (base_col_b + vec_width_c) <= m_c
+            valid_store = row_valid & col_valid & col_end_valid
+            cond_val = valid_store.value if hasattr(valid_store, "value") else valid_store._value
+            if_op = scf.IfOp(cond_val)
+            with ir.InsertionPoint(if_op.then_block):
+                vals = []
+                for t in range(VEC_WIDTH):
+                    t_c = arith.index(t)
+                    s_idx = (col_off + t_c) * smem_stride_c + row_off
+                    val_op = memref.load(smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
+                    val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
+                    vals.append(val)
+                
+                vec_val = vector.from_elements(vec_type, vals)
+                g_idx_b = base_row_b * m_c + base_col_b
+                vector.store(vec_val, B, [g_idx_b.value if hasattr(g_idx_b, "value") else g_idx_b])
+                scf.yield_([])
     
     ip.__exit__(None, None, None)
     
-    # Compile with optimization pipeline
     print("  Running optimization pipeline...")
     optimized = run_pipeline(ctx.module, Pipeline().canonicalize().cse())
     
@@ -426,7 +370,6 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     print(f"\nCompiled to HSACO: {len(hsaco)} bytes")
     print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
     
-    # Allocate device memory
     np.random.seed(123)
     a_host_2d = np.random.randn(M, N).astype(np.float32)
     a_host = a_host_2d.flatten('C')
@@ -440,7 +383,6 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"matrixTransposeRocir"))
     
-    # Grid configuration
     grid_x = (N + BLOCK_TILE - 1) // BLOCK_TILE
     grid_y = (M + BLOCK_TILE - 1) // BLOCK_TILE
     
@@ -467,10 +409,8 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             "total_bytes": 2 * M * N * 4,
         }
     
-    # Run benchmark
     results = run_benchmark()
     
-    # Verify correctness
     hip_check(hip.hipMemcpy(b_host.ctypes.data, d_b, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
     b_result_2d = b_host.reshape(N, M, order='C')
     expected_2d = a_host_2d.T
@@ -481,17 +421,14 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     
     print(f"\n{results}")
     
-    # Cleanup
     hip_check(hip.hipFree(d_a))
     hip_check(hip.hipFree(d_b))
     hip_check(hip.hipModuleUnload(hip_module))
     
     return error < 1e-5, results
 
-# Pytest test function
 def test_benchmark_matrix_transpose():
     """Pytest wrapper for matrix transpose benchmark."""
-    # Test with TILE_SIZE=4, BLOCK_TILE=32 (optimal configuration)
     result, _ = benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32)
     assert result, "Matrix transpose benchmark failed correctness check"
 
@@ -505,7 +442,6 @@ if __name__ == "__main__":
                        help='Block tile size (default: 32)')
     args = parser.parse_args()
 
-    # Basic config validation to avoid cryptic failures
     if args.tile_size <= 0 or args.block_tile <= 0:
         print("Error: tile-size and block-tile must be positive.")
         sys.exit(1)
@@ -543,7 +479,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
     
-    # Compare results
     if results_arith and results_rocir:
         arith_bw = results_arith.bandwidth_gbs
         rocir_bw = results_rocir.bandwidth_gbs
