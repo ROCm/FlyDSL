@@ -6,6 +6,7 @@ from . import rocir
 from . import gpu
 from . import func
 from . import rocdl
+from . import buffer_ops
 from mlir.dialects import memref
 
-__all__ = ["arith", "scf", "rocir", "gpu", "func", "rocdl", "memref"]
+__all__ = ["arith", "scf", "rocir", "gpu", "func", "rocdl", "buffer_ops", "memref"]

@@ -235,6 +235,208 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
     return error < 1e-5, results
 
 
+def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
+    """Benchmark matrix transpose using Buffer Load (AMD CDNA3 optimized)."""
+    VEC_WIDTH = 4
+    if TILE_SIZE % VEC_WIDTH != 0:
+        TILE_SIZE = ((TILE_SIZE + VEC_WIDTH - 1) // VEC_WIDTH) * VEC_WIDTH
+        print(f"Adjusted TILE_SIZE to {TILE_SIZE} (multiple of vec4)")
+    
+    VEC_PER_THREAD = TILE_SIZE // VEC_WIDTH
+    M, N = 4096, 4096
+    PAD = 2
+    
+    THREADS_PER_BLOCK_X = BLOCK_TILE // TILE_SIZE
+    THREADS_PER_BLOCK_Y = BLOCK_TILE
+    
+    BLOCK_THREADS = THREADS_PER_BLOCK_X * THREADS_PER_BLOCK_Y
+    MAX_WG = 256
+    if BLOCK_THREADS > MAX_WG:
+        raise ValueError(f"Workgroup threads {BLOCK_THREADS} exceed max {MAX_WG}.")
+    
+    SMEM_SIZE = BLOCK_TILE * (BLOCK_TILE + PAD)
+    SMEM_BYTES = SMEM_SIZE * 4
+    MAX_LDS = 65536
+    if SMEM_BYTES > MAX_LDS:
+        raise ValueError(f"LDS requirement {SMEM_BYTES} bytes exceeds limit {MAX_LDS} bytes.")
+    
+    print(f"Config: Block={THREADS_PER_BLOCK_X}x{THREADS_PER_BLOCK_Y}, " +
+          f"Smem={BLOCK_TILE}x{BLOCK_TILE+PAD}, Buffer Load Enabled")
+    
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+    gpu.set_container_module(ctx.module)
+    
+    # Import buffer operations
+    from rocdsl.dialects.ext import buffer_ops
+    
+    @gpu.module("transpose_kernels_buffer_load", ["#rocdl.target<abi = \"500\">"])
+    def gpu_mod():
+        pass
+    
+    ip = InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
+    ip.__enter__()
+    
+    # Shared memory definition
+    smem_type = T.memref(SMEM_SIZE, T.f32(), memory_space=gpu.lds_space())
+    memref.global_(sym_name="tile_smem_buffer_load", type_=smem_type, alignment=16)
+    
+    @gpu.func(emit=True)
+    def matrixTransposeBufferLoad(
+        A: T.memref(M * N, T.f32()),
+        B: T.memref(N * M, T.f32())
+    ):
+        smem = memref.get_global(smem_type, "tile_smem_buffer_load")
+        
+        tx = rocir.thread_idx("x")
+        ty = rocir.thread_idx("y")
+        bx = rocir.block_idx("x")
+        by = rocir.block_idx("y")
+        
+        # Constants
+        m_c = arith.index(M)
+        n_c = arith.index(N)
+        block_tile_c = arith.index(BLOCK_TILE)
+        block_threads_c = arith.index(THREADS_PER_BLOCK_X * THREADS_PER_BLOCK_Y)
+        vec_width_c = arith.index(VEC_WIDTH)
+        smem_stride_c = arith.index(BLOCK_TILE + PAD)
+        
+        tid = ty * arith.index(THREADS_PER_BLOCK_X) + tx
+        
+        a_rsrc = buffer_ops.create_buffer_resource(A)
+        b_rsrc = buffer_ops.create_buffer_resource(B)
+        
+        vec_type = T.vector(VEC_WIDTH, T.f32())
+        
+        # Phase 1: Global -> Shared via buffer load
+        for i in range(VEC_PER_THREAD):
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
+            
+            global_row = by * block_tile_c + row_off
+            global_col = bx * block_tile_c + col_off
+            
+            row_valid = global_row < m_c
+            col_valid = global_col < n_c
+            col_end_valid = (global_col + vec_width_c) <= n_c
+            valid_load = row_valid & col_valid & col_end_valid
+            mask_val = valid_load.value if hasattr(valid_load, "value") else valid_load._value
+            
+            vec_val = buffer_ops.buffer_load_2d(a_rsrc, global_row, global_col, n_c, 
+                                                 vec_width=VEC_WIDTH, mask=mask_val)
+            
+            s_idx = row_off * smem_stride_c + col_off
+            s_idx_val = s_idx.value if hasattr(s_idx, "value") else s_idx
+            vector.store(vec_val, smem, [s_idx_val])
+        
+        gpu.barrier()
+        
+        # Phase 2: Shared -> Global via buffer store (transposed)
+        for i in range(VEC_PER_THREAD):
+            i_c = arith.index(i)
+            vec_index = tid + i_c * block_threads_c
+            tile_linear = vec_index * vec_width_c
+            
+            row_off = tile_linear // block_tile_c
+            col_off = tile_linear % block_tile_c
+            
+            base_row_b = bx * block_tile_c + row_off
+            base_col_b = by * block_tile_c + col_off
+            
+            vals = []
+            for t in range(VEC_WIDTH):
+                t_c = arith.index(t)
+                s_idx = (col_off + t_c) * smem_stride_c + row_off
+                s_idx_val = s_idx.value if hasattr(s_idx, "value") else s_idx
+                val_op = memref.load(smem, [s_idx_val])
+                val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
+                vals.append(val)
+            
+            vec_val = vector.from_elements(vec_type, vals)
+            
+            row_valid = base_row_b < n_c
+            col_valid = base_col_b < m_c
+            col_end_valid = (base_col_b + vec_width_c) <= m_c
+            valid_store = row_valid & col_valid & col_end_valid
+            mask_val = valid_store.value if hasattr(valid_store, "value") else valid_store._value
+            
+            buffer_ops.buffer_store_2d(vec_val, b_rsrc, base_row_b, base_col_b, m_c, mask=mask_val)
+    
+    ip.__exit__(None, None, None)
+    
+    print("  Running optimization pipeline...")
+    # Try simpler pipeline for buffer ops (avoid aggressive canonicalization)
+    try:
+        optimized = run_pipeline(ctx.module, Pipeline().cse())
+    except Exception as e:
+        print(f"  Warning: Pipeline with CSE failed ({e}), trying without optimization...")
+        optimized = ctx.module
+    
+    hsaco = compile_to_hsaco(optimized, kernel_name="matrixTransposeBufferLoad")
+    print(f"\nCompiled to HSACO: {len(hsaco)} bytes")
+    print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
+    
+    np.random.seed(123)
+    a_host_2d = np.random.randn(M, N).astype(np.float32)
+    a_host = a_host_2d.flatten('C')
+    b_host = np.zeros(N * M, dtype=np.float32)
+    
+    d_a = hip_check(hip.hipMalloc(M * N * 4))
+    d_b = hip_check(hip.hipMalloc(M * N * 4))
+    
+    hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, M * N * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    
+    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
+    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"matrixTransposeBufferLoad"))
+    
+    grid_x = (N + BLOCK_TILE - 1) // BLOCK_TILE
+    grid_y = (M + BLOCK_TILE - 1) // BLOCK_TILE
+    
+    print(f"Grid: ({grid_x}, {grid_y}), Block: ({THREADS_PER_BLOCK_X}, {THREADS_PER_BLOCK_Y})")
+    print(f"Total threads: {grid_x * grid_y * THREADS_PER_BLOCK_X * THREADS_PER_BLOCK_Y:,}")
+    
+    arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_b))]
+    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
+    
+    def launch_kernel():
+        hip_check(hip.hipModuleLaunchKernel(
+            kernel_func,
+            grid_x, grid_y, 1,
+            THREADS_PER_BLOCK_X, THREADS_PER_BLOCK_Y, 1,
+            0, None, args, None
+        ))
+        hip_check(hip.hipDeviceSynchronize())
+    
+    @perftest
+    def run_benchmark():
+        return {
+            "launch": launch_kernel,
+            "size": M * N,
+            "total_bytes": 2 * M * N * 4,
+        }
+    
+    results = run_benchmark()
+    
+    hip_check(hip.hipMemcpy(b_host.ctypes.data, d_b, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+    b_result_2d = b_host.reshape(N, M, order='C')
+    expected_2d = a_host_2d.T
+    error = np.max(np.abs(b_result_2d - expected_2d))
+    
+    print(f"\n  Correctness Check:")
+    print(f"  Max error: {error:.2e}")
+    
+    print(f"\n{results}")
+    
+    hip_check(hip.hipFree(d_a))
+    hip_check(hip.hipFree(d_b))
+    hip_check(hip.hipModuleUnload(hip_module))
+    
+    return error < 1e-5, results
+
+
 def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     """Benchmark matrix transpose using Rocir Layout Algebra."""
     VEC_WIDTH = 4  # vec4 for float32
@@ -454,6 +656,7 @@ if __name__ == "__main__":
     
     results_arith = None
     results_rocir = None
+    results_buffer_load = None
     
     print("\n" + "="*80)
     print("RUNNING: Arith Implementation")
@@ -481,12 +684,44 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
     
-    if results_arith and results_rocir:
-        arith_bw = results_arith.bandwidth_gbs
-        rocir_bw = results_rocir.bandwidth_gbs
-        speedup = rocir_bw / arith_bw
+    print("\n" + "="*80)
+    print("RUNNING: Buffer Load Implementation (AMD CDNA3)")
+    try:
+        print("  Importing buffer_ops...")
+        from rocdsl.dialects.ext import buffer_ops
+        print("  ✓ buffer_ops imported")
         
-        print(f"{'Arith':<20} {results_arith.avg_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
-        print(f"{'Rocir Layout API':<20} {results_rocir.avg_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+        success, results_buffer_load = benchmark_matrix_transpose_buffer_load(
+            TILE_SIZE=args.tile_size,
+            BLOCK_TILE=args.block_tile
+        )
+        if not success:
+            print("Buffer Load implementation failed correctness check")
+    except Exception as e:
+        print(f"  ✗ Error in Buffer Load implementation: {e}")
+        import traceback
+        traceback.print_exc()
     
+    # Print comparison table
+    print("\n" + "="*80)
+    print("RESULTS SUMMARY")
+    print("="*80)
+    print(f"{'Implementation':<25} {'Time (ms)':<15} {'Bandwidth (GB/s)':<20} {'Speedup':<10}")
+    print("-" * 80)
+    
+    if results_arith:
+        arith_bw = results_arith.bandwidth_gbs
+        print(f"{'Arith':<25} {results_arith.avg_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
+        
+        if results_rocir:
+            rocir_bw = results_rocir.bandwidth_gbs
+            speedup = rocir_bw / arith_bw
+            print(f"{'Rocir Layout API':<25} {results_rocir.avg_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+        
+        if results_buffer_load:
+            buffer_bw = results_buffer_load.bandwidth_gbs
+            speedup = buffer_bw / arith_bw
+            print(f"{'Buffer Load (CDNA3)':<25} {results_buffer_load.avg_ms:<15.3f} {buffer_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+    
+    print("="*80)
     print("✓ BENCHMARK COMPLETED")
