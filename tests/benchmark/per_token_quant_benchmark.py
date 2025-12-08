@@ -47,6 +47,7 @@ from mlir.dialects import (
 import mlir.extras.types as T
 from utils import perftest, compile_to_hsaco
 
+
 def benchmark_per_token_quant(M=4096, N=8192):
     print("\n" + "=" * 80)
     print(f"Benchmark: Per-Token Quantization Performance (RocDSL) [M={M}, N={N}]")
@@ -133,17 +134,7 @@ def benchmark_per_token_quant(M=4096, N=8192):
 
         c_vec_width = arith.index(VEC_WIDTH)._value
 
-        red_buf = memref.get_global(red_type, "red_buffer")
-
-        if hasattr(red_buf, "result"):
-            print(f'[DEBUG] 1')
-            red_val = red_buf.result
-        elif hasattr(red_buf, "results"):
-            print(f'[DEBUG] 2')
-            red_val = red_buf.results[0]
-        else:
-            print(f'[DEBUG] 3')
-            red_val = red_buf
+        red_val = memref.get_global(red_type, "red_buffer")
 
         local_max = f_0
         cached_vecs = []
@@ -151,7 +142,9 @@ def benchmark_per_token_quant(M=4096, N=8192):
         for i in range(ITERS):
             c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)._value
             thread_offset = _arith_mlir.MulIOp(unwrap(tid), unwrap(c_vec_width)).result
-            col_idx = _arith_mlir.AddIOp(unwrap(c_chunk_offset), unwrap(thread_offset)).result
+            col_idx = _arith_mlir.AddIOp(
+                unwrap(c_chunk_offset), unwrap(thread_offset)
+            ).result
 
             is_valid = _arith_mlir.CmpIOp(
                 _arith_mlir.CmpIPredicate.slt, unwrap(col_idx), unwrap(c_n)
@@ -161,14 +154,19 @@ def benchmark_per_token_quant(M=4096, N=8192):
             with ir.InsertionPoint(if_load.then_block):
                 coord = rocir.make_coord(m_idx, col_idx)
                 linear_idx = rocir.crd2idx(coord, layout_global)
-                idx_val = linear_idx.value if hasattr(linear_idx, "value") else linear_idx
-                
+                idx_val = (
+                    linear_idx.value if hasattr(linear_idx, "value") else linear_idx
+                )
+
                 vec_val = vector.load(vec_type_f16, input, [idx_val])
                 scf.YieldOp([vec_val])
-            
+
             with ir.InsertionPoint(if_load.else_block):
                 zero_vec = _arith_mlir.ConstantOp(
-                    vec_type_f16, ir.DenseElementsAttr.get_splat(vec_type_f16, ir.FloatAttr.get(T.f16(), 0.0))
+                    vec_type_f16,
+                    ir.DenseElementsAttr.get_splat(
+                        vec_type_f16, ir.FloatAttr.get(T.f16(), 0.0)
+                    ),
                 ).result
                 scf.YieldOp([zero_vec])
 
@@ -281,7 +279,9 @@ def benchmark_per_token_quant(M=4096, N=8192):
             with ir.InsertionPoint(if_store.then_block):
                 coord = rocir.make_coord(m_idx, col_idx)
                 linear_idx = rocir.crd2idx(coord, layout_global)
-                idx_val = linear_idx.value if hasattr(linear_idx, "value") else linear_idx
+                idx_val = (
+                    linear_idx.value if hasattr(linear_idx, "value") else linear_idx
+                )
 
                 vec_val_f16 = cached_vecs[i]
                 vec_val = _arith_mlir.extf(vec_type_f32, unwrap(vec_val_f16))
@@ -444,11 +444,15 @@ def test_benchmark_per_token_quant():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark Per-Token Quantization")
-    parser.add_argument("-m", "--tokens", type=int, default=4096, help="Number of tokens (M)")
-    parser.add_argument("-n", "--hidden", type=int, default=8192, help="Hidden dimension (N)")
+    parser.add_argument(
+        "-m", "--tokens", type=int, default=4096, help="Number of tokens (M)"
+    )
+    parser.add_argument(
+        "-n", "--hidden", type=int, default=8192, help="Hidden dimension (N)"
+    )
     args = parser.parse_args()
 
     success = benchmark_per_token_quant(M=args.tokens, N=args.hidden)
-    
+
     if not success:
         sys.exit(1)
