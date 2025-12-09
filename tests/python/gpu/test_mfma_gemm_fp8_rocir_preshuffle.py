@@ -17,7 +17,7 @@ from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco, perftest, checkAllclose
+from tests.utils import compile_to_hsaco, perftest, pertoken_quant, shuffle_weight, verify_output
 import torch
 import torch.nn.functional as F
 import pytest
@@ -30,70 +30,6 @@ import mlir.extras.types as T
 from hip import hip
 import ctypes
 
-# Simple dtypes namespace for compatibility
-class dtypes:
-    fp32 = torch.float32
-    fp16 = torch.float16
-    bf16 = torch.bfloat16
-    i8 = torch.int8
-    fp8 = torch.float8_e4m3fn
-
-@functools.lru_cache()
-def get_dtype_max(dtype):
-    """Get max value for a given dtype."""
-    try:
-        dtypeMax = torch.finfo(dtype).max
-    except:
-        dtypeMax = torch.iinfo(dtype).max
-    return dtypeMax
-
-def pertoken_quant(
-    x,
-    scale=None,
-    x_scale=None,  # smooth_scale
-    scale_dtype=torch.float32,
-    quant_dtype=torch.float8_e4m3fn,
-    dtypeMax=None,
-):
-    """
-    Per-token quantization (from aiter project).
-    Quantizes x to quant_dtype with per-token (per-row) scaling.
-    
-    Args:
-        x: Input tensor (M, K)
-        scale: Optional pre-computed scale
-        x_scale: Optional smooth quantization scale
-        scale_dtype: Output scale dtype
-        quant_dtype: Quantization target dtype
-        dtypeMax: Maximum value for quantization range
-    
-    Returns:
-        y: Quantized tensor
-        y_scale: Per-token scale factors (M, 1)
-    """
-    x = x.to(torch.float32)
-    if x_scale is None:
-        hidden_states = x
-    else:
-        # smooth quant
-        hidden_states = x * x_scale
-
-    if dtypeMax is None:
-        dtypeMax = get_dtype_max(quant_dtype)
-
-    per_token_scale = scale
-    if scale is None:
-        # [m, 1]
-        per_token_amax, _ = torch.max(
-            input=torch.abs(hidden_states), dim=-1, keepdim=True
-        )
-        per_token_scale = per_token_amax / dtypeMax
-        per_token_scale[per_token_scale == 0] = 1
-
-    # quant hidden_states
-    y = (hidden_states / per_token_scale).to(dtype=quant_dtype)
-    y_scale = per_token_scale.to(scale_dtype)
-    return y, y_scale
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     """
@@ -106,37 +42,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     if bias is not None:
         out = out.to(bias.dtype) + bias
     return out.to(dtype)
-def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
-    checkAllclose(c_out, c_ref, rtol=atol, atol=atol)
-    def calc_diff(x: torch.Tensor, y: torch.Tensor):
-        x, y = x.double(), y.double()
-        denominator = (x * x + y * y).sum()
-        sim = 2 * (x * y).sum() / denominator
-        return 1 - sim
 
-    logits_diff = calc_diff(c_out, c_ref)
-    print(f"Logits Diff: {logits_diff}")
-    if logits_diff > 1e-3:
-        print(f"✗ Check failed: logits_diff {logits_diff} > 1e-3")
-        logging.error(f"logits_diff: {logits_diff} is too large, please check the implementation")
-        return False
-    print("✓ Check passed")
-    return True
-
-def shuffle_weight_tensor(x, layout=(16, 16)):
-    """
-    Shuffle weight tensor B (N, K) for MFMA.
-    """
-    # x shape: (N, K)
-    N_dim, K_dim = x.shape  
-    IN, IK = layout
-    BK = IK * 2 # 32
-    K_block = 16 
-    BN = IN # 16
-    
-    x = x.view(-1, N_dim // BN, BN, K_dim // BK, BK // K_block, K_block)
-    x = x.permute(0, 1, 3, 4, 2, 5).contiguous()
-    return x.view(N_dim, K_dim)
 
 def unwrap(v):
     if isinstance(v, int): return arith.constant(v, index=True).value
@@ -329,12 +235,32 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             iter_args = acc_inits + [vec_a_init]
             
             for_op = scf.ForOp(c0, c_k, c_tile_k, iter_args)
+            
+            # # Use scf.IfOp for runtime conditional execution
+            # tx_val = unwrap(tx)
+            # bx_val = unwrap(bx)
+            # by_val = unwrap(by)
+            
+            # sum_0 = _arith_mlir.AddIOp(tx_val, bx_val).result
+            # # sum_0 might be wrapped as ArithValue by rocdsl magic, so unwrap it
+            # sum_1 = _arith_mlir.AddIOp(unwrap(sum_0), by_val).result
+            
+            # c0_idx = arith.constant(0, index=True)
+            # is_zero = _arith_mlir.CmpIOp(0, unwrap(sum_1), unwrap(c0_idx)).result
+            
+            # if_op = scf.IfOp(unwrap(is_zero))
+            # with ir.InsertionPoint(if_op.then_block):
+            #     rocir.printf("tid %d, bx %d, by %d\n", tx, bx, by)
+            #     scf.yield_([])
+            
             with ir.InsertionPoint(for_op.body):
                 k_iv = for_op.induction_variable
                 args = for_op.inner_iter_args
                 accs_iter = args[:-1]
                 vec_a_iter = args[-1]
                 
+
+
                 vector.StoreOp(vec_a_iter, lds_a, [unwrap(lds_write_idx)])
                 gpu.barrier()
                 
@@ -343,8 +269,6 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                 next_idx_a_div4 = _arith_mlir.AddIOp(unwrap(idx_a_base_div4), unwrap(next_k_div4)).result
                 v_i32_next = buffer_ops.buffer_load(a_rsrc, next_idx_a_div4, vec_width=vec_width_a_i32, dtype=i32_type)
                 vec_a_next = vector.BitCastOp(vec_a_load_type, v_i32_next).result
-                
-                k_iv_offset_b = _arith_mlir.MulIOp(unwrap(k_iv), unwrap(c4)).result
                 
                 current_accs_list = list(accs_iter)
                 
@@ -362,7 +286,16 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         curr_acc0 = current_accs_list[acc_idx0]
                         curr_acc1 = current_accs_list[acc_idx1]
                         
-                        idx_b0 = _arith_mlir.AddIOp(unwrap(base_b_div4_0s[u_idx]), unwrap(k_iv_offset_b)).result
+                        # Compute global K position for this sub-tile (use MLIR ops explicitly)
+                        col_lds_global = _arith_mlir.AddIOp(unwrap(col_lds), unwrap(k_iv)).result
+                        k_intra = _arith_mlir.RemUIOp(unwrap(col_lds_global), unwrap(c16)).result
+                        k_rem = _arith_mlir.DivUIOp(unwrap(col_lds_global), unwrap(c16)).result
+                        k_pack = _arith_mlir.RemUIOp(unwrap(k_rem), unwrap(c2)).result
+                        k_blk_local = _arith_mlir.DivUIOp(unwrap(k_rem), unwrap(c2)).result
+                        
+                        coord_b_base0 = rocir.make_coord(n_intra0, n_blk0, k_intra, k_pack, k_blk_local)
+                        idx_b_base0 = rocir.crd2idx(coord_b_base0, layout_b)
+                        idx_b0 = _arith_mlir.DivUIOp(unwrap(idx_b_base0), unwrap(c4)).result
                         loaded_b0 = buffer_ops.buffer_load(b_rsrc, idx_b0, vec_width=2, dtype=i32_type)
                         b_pack0 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b0).result, static_position=[0], dynamic_position=[]).result
                         
@@ -371,7 +304,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         ).result
                         current_accs_list[acc_idx0] = new_acc0
                         
-                        idx_b1 = _arith_mlir.AddIOp(unwrap(base_b_div4_1s[u_idx]), unwrap(k_iv_offset_b)).result
+                        coord_b_base1 = rocir.make_coord(n_intra1, n_blk1, k_intra, k_pack, k_blk_local)
+                        idx_b_base1 = rocir.crd2idx(coord_b_base1, layout_b)
+                        idx_b1 = _arith_mlir.DivUIOp(unwrap(idx_b_base1), unwrap(c4)).result
                         loaded_b1 = buffer_ops.buffer_load(b_rsrc, idx_b1, vec_width=2, dtype=i32_type)
                         b_pack1 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b1).result, static_position=[0], dynamic_position=[]).result
                         
@@ -379,9 +314,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                             vec4_f32, [unwrap(a_pack), unwrap(b_pack1), unwrap(curr_acc1), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
                         ).result
                         current_accs_list[acc_idx1] = new_acc1
-
+                        
                 scf.yield_(current_accs_list + [vec_a_next])
-
             final_accs = for_op.results[:-1]
             
             for mi in range(m_repeat):
@@ -408,7 +342,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
 
     print("Compiling...")
     hsaco = compile_to_hsaco(ctx.module)
-    print("✓ Compiled")
+    print("✓ Compiled")    
     
     grid_x = M // tile_m
     grid_y = N // tile_n
@@ -417,33 +351,24 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     device = torch.device('cuda')
     
     # 1. Source Data (FP32)
-    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K) for weight
+    torch.manual_seed(42)  # For reproducibility
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K) for weight
     
     # 2. Per-token Quantize to FP8 (E4M3)
-    a_q_fp8, scale_a = pertoken_quant(a_fp32, quant_dtype=torch.float8_e4m3fn)  # (M, K)
-    b_q_fp8_t, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.float8_e4m3fn)  # (N, K)
+    a_q_fp8, scale_a = pertoken_quant(a_fp32, quant_dtype=torch.float8_e4m3fnuz)  # (M, K)
+    b_q_fp8, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.float8_e4m3fnuz)  # (N, K)
     
-    # 3. Convert to bytes and shuffle B
-    a_q_bytes = a_q_fp8.view(torch.uint8)
-    b_q_bytes_t = b_q_fp8_t.view(torch.uint8)
-    b_shuffled = shuffle_weight_tensor(b_q_bytes_t, layout=(16, 16))  # (N, K) -> shuffled
+    b_shuffled = shuffle_weight(b_q_fp8)  # (N, K) -> shuffled
     
     # 4. Compute Baseline using AIter style (dequant + matmul)
-    # For reference: a_fp32 @ b_fp32_t.T, but using quantized/dequantized values
-    a_deq = a_q_fp8.to(torch.float32) * scale_a  # (M, K)
-    b_deq = b_q_fp8_t.to(torch.float32) * scale_b  # (N, K)
-    c_ref = torch.matmul(a_deq, b_deq.t())  # (M, K) @ (K, N) = (M, N)
-    
-    # Alternative: Use run_torch style
-    # c_ref = run_torch(a_q_fp8, b_q_fp8_t, scale_a, scale_b, bias=None, dtype=torch.float32)
-    
+    c_ref = run_torch(a_q_fp8, b_q_fp8, scale_a, scale_b, bias=None, dtype=torch.float32)
     # 5. Run Kernel
     c_out_raw = torch.zeros((M, N), dtype=torch.float32, device=device)
     
     arg_ptrs = [
         ctypes.c_void_p(c_out_raw.data_ptr()),
-        ctypes.c_void_p(a_q_bytes.data_ptr()),
+        ctypes.c_void_p(a_q_fp8.data_ptr()),
         ctypes.c_void_p(b_shuffled.data_ptr()),
         ctypes.c_long(M), ctypes.c_long(N), ctypes.c_long(K)
     ]
@@ -458,16 +383,10 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     
     launch_kernel()
     hip_check(hip.hipDeviceSynchronize())
-    
-    # 6. Scale kernel output
-    # Kernel computes sum(a_q * b_q) in FP32, need to apply scales
-    # scale_a: (M, 1), scale_b: (N, 1)
-    # Output: (M, N), each element C[i,j] *= scale_a[i] * scale_b[j]
     c_out_scaled = c_out_raw * scale_a * scale_b.t()
     
     # 7. Verify
     verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1) 
-    
     # Benchmark
     warmup = 5
     runs = 20
