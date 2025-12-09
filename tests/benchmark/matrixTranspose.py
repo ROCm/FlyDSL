@@ -714,8 +714,8 @@ if __name__ == "__main__":
         print(f"{'Arith':<25} {results_arith.avg_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
         
         if results_rocir:
-        rocir_bw = results_rocir.bandwidth_gbs
-        speedup = rocir_bw / arith_bw
+            rocir_bw = results_rocir.bandwidth_gbs
+            speedup = rocir_bw / arith_bw
             print(f"{'Rocir Layout API':<25} {results_rocir.avg_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
         
         if results_buffer_load:
