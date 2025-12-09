@@ -248,16 +248,26 @@ class Pipeline:
         """Reconcile unrealized conversion casts."""
         return self.add_pass("reconcile-unrealized-casts")
     
-    def gpu_to_llvm(self, use_bare_ptr_memref_call_conv: Optional[bool] = None) -> "Pipeline":
-        """Convert GPU-related types to LLVM types.
+    def gpu_to_rocdl(self) -> "Pipeline":
+        """Convert GPU dialect operations to ROCDL dialect operations."""
+        # This pass MUST be run on the gpu.module, not the builtin.module
+        return self.nest("gpu.module", Pipeline().add_pass("convert-gpu-to-rocdl"))
 
-        Args:
-            use_bare_ptr_memref_call_conv: Use bare pointer calling convention for memrefs
-        """
+    def memref_to_llvm(self) -> "Pipeline":
+        """Convert memref ops/types to LLVM."""
+        return self.add_pass("convert-memref-to-llvm")
+    
+    def gpu_to_llvm(self, use_bare_ptr_memref_call_conv: Optional[bool] = None) -> "Pipeline":
+        """Convert GPU-related types/ops to LLVM."""
         options = {}
         if use_bare_ptr_memref_call_conv is not None:
             options["use-bare-ptr-memref-call-conv"] = 1 if use_bare_ptr_memref_call_conv else 0
         return self.add_pass("gpu-to-llvm", **options)
+    
+    def rocdl_to_binary(self) -> "Pipeline":
+        """Convert ROCDL module to binary (HSACO)."""
+        # This wraps the gpu-module-to-binary pass for AMD
+        return self.add_pass("gpu-module-to-binary", format="bin")
     
     def lower_to_llvm(self) -> "Pipeline":
         """Lower to LLVM dialect (alias for convert-func-to-llvm)."""

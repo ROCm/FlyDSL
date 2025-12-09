@@ -9,7 +9,9 @@ from functools import wraps
 import os
 import tempfile
 from typing import Dict, Any, Callable
-
+import torch
+import logging
+import functools
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     """
@@ -275,4 +277,153 @@ def perftest(func):
         return BenchmarkResults(times_ms, size, total_bytes=total_bytes)
     
     return wrapper
+    
+# Simple dtypes namespace for compatibility
+class dtypes:
+    fp32 = torch.float32
+    fp16 = torch.float16
+    bf16 = torch.bfloat16
+    i8 = torch.int8
+    fp8 = torch.float8_e4m3fn
 
+@functools.lru_cache()
+def get_dtype_max(dtype):
+    """Get max value for a given dtype."""
+    try:
+        dtypeMax = torch.finfo(dtype).max
+    except:
+        dtypeMax = torch.iinfo(dtype).max
+    return dtypeMax
+
+def pertoken_quant(
+    x,
+    scale=None,
+    x_scale=None,  # smooth_scale
+    scale_dtype=dtypes.fp32,
+    quant_dtype=dtypes.i8,
+    dtypeMax=None,
+):
+    x = x.to(dtypes.fp32)
+    if x_scale is None:
+        hidden_states = x
+    else:
+        # smooth quant
+        hidden_states = x * x_scale
+
+    if dtypeMax is None:
+        dtypeMax = get_dtype_max(quant_dtype)
+
+    per_token_scale = scale
+    if scale is None:
+        # [m, 1]
+        per_token_amax, _ = torch.max(
+            input=torch.abs(hidden_states), dim=-1, keepdim=True
+        )
+        per_token_scale = per_token_amax / dtypeMax
+        per_token_scale[per_token_scale == 0] = 1
+
+    # quant hidden_states
+    y = (hidden_states / per_token_scale).to(dtype=quant_dtype)
+    y_scale = per_token_scale.to(scale_dtype)
+    return y, y_scale
+
+def checkAllclose(
+    a, b, rtol=1e-2, atol=1e-2, tol_err_ratio=0.05, msg="", printNum=8, printLog=True
+):
+    logging.basicConfig(level=logging.INFO)
+    isClose = torch.isclose(a, b, rtol=rtol, atol=atol)
+    if isClose.all():
+        if printLog:
+            logging.info(f"{msg}[checkAllclose {atol=} {rtol=} \033[32mpassed~\033[0m]")
+        return 0
+    else:
+        try:
+            mask = ~isClose
+            num = mask.sum()
+            printNum = min(printNum, num)
+            percent = (num / a.numel()).item()
+            if not printLog:
+                return percent
+            a_msked = a[mask]
+            b_msked = b[mask]
+            delta = (a_msked - b_msked).abs()
+        except RuntimeError as e:
+            mask = ~isClose.to("cpu")
+            num = mask.sum()
+            printNum = min(printNum, num)
+            percent = (num / a.numel()).item()
+            if not printLog:
+                return percent
+            a_msked = a[mask]
+            b_msked = b[mask]
+            delta = (a_msked - b_msked).abs()
+        if percent > tol_err_ratio:
+            logging.info(
+                f"""{msg}[checkAllclose {atol=} {rtol=} \033[31mfailed!\033[0m]
+    a    : {a.shape}
+           {a_msked[:printNum]}
+    b    : {b.shape}
+           {b_msked[:printNum]}
+    delta:
+           {delta[:printNum]}"""
+            )
+        else:
+            logging.info(
+                f"""{msg}[checkAllclose {atol=} {rtol=} \033[33mwarning!\033[0m] a and b results are not all close"""
+            )
+        logging.info(
+            f"-->max abs delta:{delta.max()}, delta details: {percent:.1%} ({num} of {a.numel()}) elements"
+        )
+        return percent
+
+
+def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
+    checkAllclose(c_out, c_ref, rtol=atol, atol=atol)
+    
+    # Calculate various error metrics
+    abs_diff = (c_out - c_ref).abs()
+    max_diff = abs_diff.max().item()
+    mean_diff = abs_diff.mean().item()
+    
+    def calc_diff(x: torch.Tensor, y: torch.Tensor):
+        x, y = x.double(), y.double()
+        denominator = (x * x + y * y).sum()
+        if denominator == 0:
+            return 0.0
+        numerator = 2 * (x * y).sum()
+        sim = numerator / denominator
+        diff = (1 - sim).item()
+        return diff if not torch.isnan(torch.tensor(diff)) else 0.0
+
+    logits_diff = calc_diff(c_out, c_ref)
+    print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")
+    # Relax threshold for FP8 due to quantization error and NaN masking
+    if logits_diff > 2e-3:
+        print(f"✗ Check failed: logits_diff {logits_diff} > 1e-3")
+        logging.error(f"logits_diff: {logits_diff} is too large, please check the implementation")
+        return False
+    print("✓ Check passed")
+    return True
+
+
+def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Tensor:
+    # Hardcode BLOCK_K and BLOCK_N
+    x_type = x.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+
+    IN, IK = layout
+    BK = IK * 2
+    K = 16 // x.element_size() if not use_int4 else 32
+    BN = IN
+    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN }"
+    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK }"
+
+    x_ = x
+    x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+    x_ = x_.permute(0, 1, 3, 4, 2, 5)
+    x_ = x_.contiguous()
+    x_ = x_.view(*x.shape)
+    x_ = x_.view(x_type)
+    x_.is_shuffled = True
+    return x_

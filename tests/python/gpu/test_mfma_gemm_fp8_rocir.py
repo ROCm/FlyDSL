@@ -3,6 +3,12 @@
 
 import sys
 import os
+import logging
+import functools
+
+# Configure logging to show INFO level messages
+logging.basicConfig(level=logging.INFO)
+
 sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH'), 'tools/mlir/python_packages/mlir_core'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
@@ -11,10 +17,11 @@ from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
-from rocdsl.runtime.fp8_util import to_byte
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco
-import numpy as np
+from tests.utils import compile_to_hsaco, perftest, pertoken_quant, verify_output
+import torch
+import torch.nn.functional as F
+import pytest
 from mlir import ir
 from mlir.dialects import vector, memref, builtin
 from rocdsl.dialects.ext import arith, scf, gpu
@@ -23,6 +30,18 @@ import mlir.dialects.rocdl as rocdl
 import mlir.extras.types as T
 from hip import hip
 import ctypes
+
+def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.float32):
+    """
+    Torch reference implementation (from aiter project).
+    Dequantize FP8 inputs and compute FP32 matmul.
+    """
+    x = x.to(torch.float32) * x_scale
+    weight = weight.to(torch.float32) * w_scale
+    out = F.linear(x, weight)
+    if bias is not None:
+        out = out.to(bias.dtype) + bias
+    return out.to(dtype)
 
 def unwrap(v):
     if isinstance(v, int):
@@ -76,7 +95,9 @@ def test_mfma_fp8_rocir():
         def kernel(
             arg_c: T.memref(size_c, T.f32()),
             arg_a: T.memref(size_a, f8),
-            arg_b: T.memref(size_b, f8)
+            arg_b: T.memref(size_b, f8),
+            arg_scale_a: T.memref(M, T.f32()),
+            arg_scale_b: T.memref(N, T.f32())
         ):
             c0, c1 = 0, 1
             c_m, c_n, c_k = 1024, 1024, 1280
@@ -252,7 +273,19 @@ def test_mfma_fp8_rocir():
                 coord_c = rocir.make_coord(row_g, col_g)
                 idx = rocir.crd2idx(coord_c, layout_c)
                 
-                memref.StoreOp(unwrap(val), arg_c, [unwrap(idx)])
+                # Load Scale A
+                # Since arg_scale_a is 1D (M), index by row_g
+                scale_a_val = memref.LoadOp(arg_scale_a, [unwrap(row_g)]).result
+                
+                # Load Scale B
+                # Since arg_scale_b is 1D (N), index by col_g
+                scale_b_val = memref.LoadOp(arg_scale_b, [unwrap(col_g)]).result
+
+                # Apply scaling: val = val * scale_a * scale_b
+                val_s = _arith_mlir.MulFOp(unwrap(val), unwrap(scale_a_val)).result
+                val_s = _arith_mlir.MulFOp(unwrap(val_s), unwrap(scale_b_val)).result
+                
+                memref.StoreOp(unwrap(val_s), arg_c, [unwrap(idx)])
     
     print("✓ MLIR module constructed via @gpu.func decorator")
     
@@ -278,61 +311,67 @@ def test_mfma_fp8_rocir():
     
     print("Executing kernel...")
     
-    # Random inputs
-    a_host = np.random.randint(-16, 16, size=(M, K)).astype(np.float32)
-    b_host = np.random.randint(-16, 16, size=(K, N)).astype(np.float32)
+    # --- Torch Data Gen & Baseline (AIter Style) ---
+    device = torch.device('cuda')
+    torch.manual_seed(42)
+
+    # 1. Source Data (FP32)
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)
+
+    # 2. Quantize (FP8 E4M3FNUZ)
+    a_q_fp8, scale_a = pertoken_quant(a_fp32, quant_dtype=torch.float8_e4m3fnuz)  # (M, K)
+    b_q_fp8, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.float8_e4m3fnuz)  # (N, K)
+
+    # 4. Compute Baseline using AIter style (dequant + matmul)
+    c_ref = run_torch(a_q_fp8, b_q_fp8, scale_a, scale_b, bias=None, dtype=torch.float32)
+
+    # 5. Run Kernel (Output F32, in-kernel scaling)
+    c_out_raw = torch.zeros((M, N), dtype=torch.float32, device=device)
     
-    # Transpose B for the kernel (NxK)
-    b_host_T = np.ascontiguousarray(b_host.T)
-    
-    a_bytes = np.array([to_byte(x) for x in a_host.flatten()], dtype=np.uint8)
-    b_bytes = np.array([to_byte(x) for x in b_host_T.flatten()], dtype=np.uint8)
-    
-    c_host = np.zeros(size_c, dtype=np.float32)
-    
-    d_a = hip_check(hip.hipMalloc(size_a))
-    d_b = hip_check(hip.hipMalloc(size_b))
-    d_c = hip_check(hip.hipMalloc(size_c * 4))
-    
-    hip_check(hip.hipMemcpy(d_a, a_bytes.ctypes.data, size_a, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_b, b_bytes.ctypes.data, size_b, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    arg_ptrs = [
+        ctypes.c_void_p(c_out_raw.data_ptr()),
+        ctypes.c_void_p(a_q_fp8.data_ptr()),
+        ctypes.c_void_p(b_q_fp8.data_ptr()),
+        ctypes.c_void_p(scale_a.data_ptr()),
+        ctypes.c_void_p(scale_b.data_ptr()),
+    ]
+    args_array = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
     
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel"))
     
-    arg_ptrs = [ctypes.c_void_p(int(d_c)), ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_b))]
-    args_array = (ctypes.c_void_p * 3)(*[ctypes.addressof(p) for p in arg_ptrs])
+    def launch_kernel():
+        # Grid: 32x32 blocks. Block: 256 threads.
+        hip_check(hip.hipModuleLaunchKernel(kernel_func, 32, 32, 1, 256, 1, 1, 0, 0, args_array, None))
     
-    # Grid: 32x32 blocks. Block: 256 threads.
-    hip_check(hip.hipModuleLaunchKernel(kernel_func, 32, 32, 1, 256, 1, 1, 0, 0, args_array, None))
+    launch_kernel()
     hip_check(hip.hipDeviceSynchronize())
-    hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, size_c * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
     
-    # Verification with np.matmul
-    print("Computing expected result with np.matmul...")
-    expected_matrix = np.matmul(a_host, b_host)
-    expected = expected_matrix.flatten()
+    # 7. Verify
+    verify_output(c_out_raw, c_ref, rtol=0.1, atol=0.1)
     
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_b))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
-    print("="*80)
-    print(f"Max Absolute Difference: {np.max(np.abs(c_host - expected))}")
-    
-    if np.allclose(c_host, expected, atol=1.0):
-        print(f"✓ Kernel executed correctly (Matches np.matmul)")
-        return True
-    else:
-        print(f"✗ Unexpected result")
-        print(f"  Min: {np.min(c_host)}")
-        print(f"  Max: {np.max(c_host)}")
-        failures = np.where(np.abs(c_host - expected) > 1.0)[0]
-        if len(failures) > 0:
-            print(f"  First failure at index {failures[0]}: Expected {expected[failures[0]]}, Got {c_host[failures[0]]}")
-            print(f"  Total failures: {len(failures)}")
-        raise ValueError("Kernel result does not match expected values")
-    
+    # Benchmark
+    warmup = 5
+    runs = 20
+    # A(1)+B(1)+C(4) + scales
+    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+
+    @perftest
+    def bench():
+        return {
+            "launch": launch_kernel,
+            "size": size_c,  
+            "warmup_iters": warmup,
+            "bench_iters": runs,
+            "total_bytes": bytes_moved,
+        }
+
+    results = bench()
+    gflops = flops / (results.avg_ms / 1e3) / 1e9
+    print(f"Throughput: {gflops:.2f} GFLOPS, BW: {results.bandwidth_gbs:.2f} GB/s")
 
 if __name__ == "__main__":
+    torch.set_default_device('cuda')
     test_mfma_fp8_rocir()
