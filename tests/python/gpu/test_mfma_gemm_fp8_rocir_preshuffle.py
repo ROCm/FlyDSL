@@ -373,7 +373,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
     
     def launch_kernel():
-        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, 256, 1, 1, 0, 0, args_array, None))
+    hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, 256, 1, 1, 0, 0, args_array, None))
     
     launch_kernel()
     hip_check(hip.hipDeviceSynchronize())

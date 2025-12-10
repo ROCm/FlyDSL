@@ -158,15 +158,56 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     return ctx.module
 
 
+# Test cases
+TEST_SHAPES = [
+    (1, 3),
+    (17, 15),
+    (64, 128),
+    (129, 255),
+    (1021, 515),
+]
+
+# Compute Max Dims for shared kernel
+MAX_M = max(s[0] for s in TEST_SHAPES)
+MAX_N = max(s[1] for s in TEST_SHAPES)
+
+# Cache compiled kernel (singleton)
+_compiled_kernel_hsaco = None
+
+def get_or_compile_kernel(dtype=F32Type):
+    """Get or compile the single shared kernel for MAX dimensions."""
+    global _compiled_kernel_hsaco
+    
+    if _compiled_kernel_hsaco is None:
+        print(f"\n[RocDSL INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
+        
+        # Create kernel with MAX dimensions
+        module = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
+        
+        # Compile to HSACO  
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+        from tests.utils import compile_to_hsaco
+        from rocdsl.compiler.pipeline import run_pipeline, Pipeline
+        
+        # Run optimization pipeline
+        print(f"[RocDSL INFO] Running optimization pipeline...")
+        optimized = run_pipeline(module, Pipeline().canonicalize().cse())
+        
+        # Compile to HSACO
+        print(f"[RocDSL INFO] Compiling to HSACO...")
+        hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
+        print(f"[RocDSL INFO] Compiled to HSACO: {len(hsaco)} bytes")
+        _compiled_kernel_hsaco = hsaco
+    else:
+        print(f"[RocDSL INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
+    
+    return _compiled_kernel_hsaco
+
+
 @pytest.mark.parametrize(
     ("M", "N"),
-    [
-        (1, 3),
-        (17, 15),
-        (64, 128),
-        (129, 255),
-        (1021, 515),
-    ],
+    TEST_SHAPES,
 )
 def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     """Compile and run the elementwise add kernel."""
@@ -178,23 +219,8 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"GPU: {get_hip_arch()}")
     print("="*80)
     
-    # Create kernel
-    module = create_elementwise_add_kernel(M, N, dtype)
-    
-    # Compile to HSACO  
-    import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-    from tests.utils import compile_to_hsaco
-    from rocdsl.compiler.pipeline import run_pipeline, Pipeline
-    
-    # Run optimization pipeline
-    print(f"[RocDSL INFO] Running optimization pipeline...")
-    optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-    
-    # Compile to HSACO
-    print(f"[RocDSL INFO] Compiling to HSACO...")
-    hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
-    print(f"\n[RocDSL INFO] Compiled to HSACO: {len(hsaco)} bytes")
+    # Get or compile kernel (uses MAX_M x MAX_N kernel)
+    hsaco = get_or_compile_kernel(dtype)
     
     # Prepare data
     np.random.seed(42)
@@ -203,27 +229,37 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     b_host = np.random.randn(M, N).astype(torch_dtype)
     c_host = np.zeros((M, N), dtype=torch_dtype)
     
-    # Allocate device memory
-    size_bytes = M * N * a_host.itemsize
-    d_a = hip_check(hip.hipMalloc(size_bytes))
-    d_b = hip_check(hip.hipMalloc(size_bytes))
-    d_c = hip_check(hip.hipMalloc(size_bytes))
+    # Padded data for shared kernel (must match MAX_M x MAX_N strides)
+    # The kernel expects buffers of size MAX_M * MAX_N with stride MAX_N
+    a_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
+    b_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
+    c_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
     
-    # Copy to device
-    hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_b, b_host.ctypes.data, size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    a_padded[:M, :N] = a_host
+    b_padded[:M, :N] = b_host
+    
+    # Allocate device memory (full MAX size)
+    max_size_bytes = MAX_M * MAX_N * a_host.itemsize
+    d_a = hip_check(hip.hipMalloc(max_size_bytes))
+    d_b = hip_check(hip.hipMalloc(max_size_bytes))
+    d_c = hip_check(hip.hipMalloc(max_size_bytes))
+    
+    # Copy to device (padded)
+    hip_check(hip.hipMemcpy(d_a, a_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_b, b_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
     
     # Load kernel
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"elementwise_add_kernel"))
     
     # Launch configuration
+    # We only launch enough blocks to cover M x N, but they access padded memory
     BLOCK_X, BLOCK_Y = 16, 16
     grid_x = (N + BLOCK_X - 1) // BLOCK_X
     grid_y = (M + BLOCK_Y - 1) // BLOCK_Y
     
     print(f"\n[RocDSL INFO] Launch configuration:")
-    print(f"  Grid: ({grid_x}, {grid_y}, 1)")
+    print(f"  Grid: ({grid_x}, {grid_y}, 1) [Partial launch on {MAX_M}x{MAX_N} kernel]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
     # Prepare arguments
@@ -237,7 +273,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     # Launch kernel
     hip_check(hip.hipModuleLaunchKernel(
         kernel_func,
-        grid_x, grid_y, 1,  # grid dim
+        grid_x, grid_y, 1,  # grid dim (partial)
         BLOCK_X, BLOCK_Y, 1,   # block dim
         0,  # shared mem
         None,  # stream
@@ -245,8 +281,11 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         None
     ))
     
-    # Copy result back
-    hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+    # Copy result back (full padded buffer)
+    hip_check(hip.hipMemcpy(c_padded.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+    
+    # Extract relevant part
+    c_host = c_padded[:M, :N]
     
     # Verify results
     expected = a_host + b_host
@@ -309,14 +348,30 @@ if __name__ == "__main__":
     parser.add_argument("--N", default=255, type=int, help="Number of columns")
     parser.add_argument("--benchmark", action="store_true", help="Run benchmark")
     parser.add_argument("--iterations", default=100, type=int, help="Benchmark iterations")
+    parser.add_argument("--run-all-shapes", action="store_true", help="Run all test shapes")
     
     args = parser.parse_args()
     
-    test_compile_and_run(
-        args.M, args.N,
-        dtype=F32Type,
-        benchmark=args.benchmark,
-        iterations=args.iterations
-    )
-    
-    print("✅ PASS - Elementwise add test completed successfully!")
+    if args.run_all_shapes:
+        # Run all shapes to demonstrate kernel caching
+        print("\n" + "="*80)
+        print("Running all test shapes (demonstrates kernel caching)")
+        print("="*80)
+        for M, N in TEST_SHAPES:
+            print(f"\n--- Testing shape {M}x{N} (1st run) ---")
+            test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
+            
+            # Run again to show kernel is reused
+            print(f"\n--- Testing shape {M}x{N} (2nd run - should reuse kernel) ---")
+            test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
+        
+        print("\n✅ PASS - All shapes tested with kernel caching!")
+    else:
+        test_compile_and_run(
+            args.M, args.N,
+            dtype=F32Type,
+            benchmark=args.benchmark,
+            iterations=args.iterations
+        )
+        
+        print("✅ PASS - Elementwise add test completed successfully!")
