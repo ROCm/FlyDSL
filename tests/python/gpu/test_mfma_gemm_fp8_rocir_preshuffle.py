@@ -465,10 +465,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     idx1 = rocir.crd2idx(rocir.make_coord(unwrap(row_g), unwrap(col_g1)), layout_c)
                     buffer_ops.buffer_store(val1_f16, c_rsrc, idx1)
 
-    print("Compiling...")
     hsaco = compile_to_hsaco(ctx.module)
     print(f"✓ Compiled ({len(hsaco)} bytes)")
-    print(f"DEBUG: HSACO header: {hsaco[:16]}")    
     
     grid_x = M // tile_m
     grid_y = N // tile_n
@@ -544,12 +542,12 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             "warmup_iters": warmup,
             "bench_iters": runs,
             "total_bytes": bytes_moved,
-            # "args": (c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b) # Pass args for rotation if supported by utils
+            "args": (c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b) 
         }
 
     results = bench()
     gflops = flops / (results.avg_ms / 1e3) / 1e9
-    print(f"Throughput: {gflops:.2f} GFLOPS, BW: {results.bandwidth_gbs:.2f} GB/s")
+    print(f"Throughput: {results.avg_ms:.3f} ms, {gflops:.2f} GFLOPS, BW: {results.bandwidth_gbs:.2f} GB/s")
 
     if HAS_AITER:
         print("-" * 40)
@@ -580,7 +578,6 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
         # Verify Aiter output first
         c_aiter = launch_aiter()
         verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
-        print("✓ Aiter output verified")
 
         @perftest
         def bench_aiter():
@@ -590,14 +587,14 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                 "warmup_iters": warmup,
                 "bench_iters": runs,
                 "total_bytes": bytes_moved,
-                # "args": (c_aiter, a_q_fp8, b_shuffled_aiter, scale_a, scale_b) # P
+                "args": (c_aiter, a_q_fp8, b_shuffled, scale_a, scale_b) 
             }
             
         results_aiter = bench_aiter()
         gflops_aiter = flops / (results_aiter.avg_ms / 1e3) / 1e9
-        print(f"Aiter Throughput: {gflops_aiter:.2f} GFLOPS, BW: {results_aiter.bandwidth_gbs:.2f} GB/s")
+        # print(f"Aiter Throughput: {results_aiter.avg_ms:.3f} ms, {gflops_aiter:.2f} GFLOPS, BW: {results_aiter.bandwidth_gbs:.2f} GB/s")
         
-        print(f"Speedup vs Aiter: {gflops / gflops_aiter:.2f}x")
+        print(f"Speedup vs Aiter: {gflops / gflops_aiter:.2f}x, ms {results_aiter.avg_ms * 1000:.1f} vs {results.avg_ms * 1000:.1f}")
         print("-" * 40)
 
 
@@ -605,7 +602,8 @@ if __name__ == "__main__":
     torch.set_default_device('cuda')
     # Test cases
     print("Running Tiling Tests...")
-    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=128) 
-    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=256) 
-    test_mfma_fp8_rocir_preshuffle(32, 4096, 4096, tile_m=32, tile_k=128) 
-    test_mfma_fp8_rocir_preshuffle(32, 4096, 4096, tile_m=32, tile_k=256)
+    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_k=128) 
+    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_k=256) 
+    # test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=256) 
+    test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_k=256) 
+    # test_mfma_fp8_rocir_preshuffle(32, 20480, 4096, tile_m=32, tile_k=256)

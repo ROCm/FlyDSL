@@ -252,7 +252,6 @@ def perftest(func):
             # Create copies for cache flushing
             # Use a reasonable pool size (e.g. 20) to avoid excessive memory usage
             pool_size = min(warmup_iters + bench_iters, 20)
-            print(f"  Generating {pool_size} copies of arguments for cache flushing...")
             for _ in range(pool_size):
                 new_args = []
                 for arg in input_args:
@@ -287,14 +286,12 @@ def perftest(func):
                 else:
                     callable_fn()
                 return (time.perf_counter() - start) * 1000.0
-        print(f"\n  Running {warmup_iters} warmup iterations...")
         for i in range(warmup_iters):
             if rotated_args:
                 launch(rotated_args[i % len(rotated_args)])
             else:
                 launch()
         
-        print(f"  Running {bench_iters} benchmark iterations...")
         times_ms = []
         for i in range(bench_iters):
             curr_args = rotated_args[(i + warmup_iters) % len(rotated_args)] if rotated_args else None
