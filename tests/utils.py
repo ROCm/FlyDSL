@@ -228,6 +228,7 @@ def perftest(func):
         warmup_iters: int (default 5)
         bench_iters: int (default 100)
         total_bytes: int (override bandwidth calculation)
+        args: tuple (arguments to rotate/clone for cache flushing)
     
     The supplied callables are responsible for issuing device work and
     performing any necessary synchronization before returning.
@@ -244,15 +245,34 @@ def perftest(func):
         warmup_iters = config.get("warmup_iters", 5)
         bench_iters = config.get("bench_iters", 100)
         total_bytes = config.get("total_bytes")
+        input_args = config.get("args")
 
-        def time_call(callable_fn: Callable[[], None]) -> float:
+        rotated_args = []
+        if input_args is not None:
+            # Create copies for cache flushing
+            # Use a reasonable pool size (e.g. 20) to avoid excessive memory usage
+            pool_size = min(warmup_iters + bench_iters, 20)
+            print(f"  Generating {pool_size} copies of arguments for cache flushing...")
+            for _ in range(pool_size):
+                new_args = []
+                for arg in input_args:
+                    if isinstance(arg, torch.Tensor):
+                        new_args.append(arg.clone())
+                    else:
+                        new_args.append(arg)
+                rotated_args.append(tuple(new_args))
+
+        def time_call(callable_fn: Callable[..., None], args=None) -> float:
             """Use HIP events if available, else wall-clock."""
             try:
                 from hip import hip  # local import to avoid mandatory dependency
                 start_event = hip.hipEventCreate()[1]
                 stop_event = hip.hipEventCreate()[1]
                 hip.hipEventRecord(start_event, None)
-                callable_fn()
+                if args is not None:
+                    callable_fn(args)
+                else:
+                    callable_fn()
                 hip.hipEventRecord(stop_event, None)
                 hip.hipEventSynchronize(stop_event)
                 elapsed_ms = hip.hipEventElapsedTime(start_event, stop_event)[1]
@@ -262,16 +282,23 @@ def perftest(func):
             except Exception:
                 import time
                 start = time.perf_counter()
-                callable_fn()
+                if args is not None:
+                    callable_fn(args)
+                else:
+                    callable_fn()
                 return (time.perf_counter() - start) * 1000.0
         print(f"\n  Running {warmup_iters} warmup iterations...")
-        for _ in range(warmup_iters):
-            launch()
+        for i in range(warmup_iters):
+            if rotated_args:
+                launch(rotated_args[i % len(rotated_args)])
+            else:
+                launch()
         
         print(f"  Running {bench_iters} benchmark iterations...")
         times_ms = []
-        for _ in range(bench_iters):
-            elapsed_ms = time_call(launch)
+        for i in range(bench_iters):
+            curr_args = rotated_args[(i + warmup_iters) % len(rotated_args)] if rotated_args else None
+            elapsed_ms = time_call(launch, curr_args)
             times_ms.append(elapsed_ms)
         
         return BenchmarkResults(times_ms, size, total_bytes=total_bytes)
