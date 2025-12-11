@@ -30,6 +30,15 @@ import mlir.extras.types as T
 from hip import hip
 import ctypes
 
+# Aiter imports
+try:
+    import aiter
+    from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
+    HAS_AITER = True
+except ImportError:
+    print("Warning: Aiter not found, skipping comparison")
+    HAS_AITER = False
+
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     """
@@ -120,7 +129,6 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
             
             vec_a_load_len = bytes_per_thread_a
-            vec_a_load_type = ir.VectorType.get([vec_a_load_len], f8)
             
             zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
             acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
@@ -253,21 +261,60 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     b_vals.append(loaded_b1)
                 return b_vals
 
-            # Initial Loads (A and B)
-            v_i32_init = buffer_ops.buffer_load(a_rsrc, idx_a_base_div4, vec_width=vec_width_a_i32, dtype=i32_type)
-            vec_a_init = vector.BitCastOp(vec_a_load_type, v_i32_init).result
+            # Split A loads logic
+            max_bytes_per_load = 16
+            num_a_loads = (bytes_per_thread_a + max_bytes_per_load - 1) // max_bytes_per_load
             
+            vec_a_parts_types = []
+            vec_a_parts_lens = []
+            
+            remaining_bytes = bytes_per_thread_a
+            for i in range(num_a_loads):
+                curr_bytes = min(remaining_bytes, max_bytes_per_load)
+                vec_a_parts_lens.append(curr_bytes)
+                vec_a_parts_types.append(ir.VectorType.get([curr_bytes], f8))
+                remaining_bytes -= curr_bytes
+
+            # Helper to load A (split)
+            def load_a_split(idx_div4):
+                parts = []
+                curr_off_i32 = 0
+                for i in range(num_a_loads):
+                    curr_bytes = vec_a_parts_lens[i]
+                    curr_i32 = curr_bytes // 4
+                    
+                    curr_idx = idx_div4
+                    if curr_off_i32 > 0:
+                        curr_idx = _arith_mlir.AddIOp(unwrap(idx_div4), unwrap(arith.constant(curr_off_i32, index=True))).result
+                    
+                    val = buffer_ops.buffer_load(a_rsrc, curr_idx, vec_width=curr_i32, dtype=i32_type)
+                    if curr_i32 == 1:
+                         val = vector.BroadcastOp(ir.VectorType.get([1], i32_type), val).result
+                    val_f8 = vector.BitCastOp(vec_a_parts_types[i], val).result
+                    parts.append(val_f8)
+                    curr_off_i32 += curr_i32
+                return parts
+
+            # Initial Loads (A and B)
+            vec_a_inits = load_a_split(idx_a_base_div4)
             b_vals_init = load_b_tile(c0)
             
-            iter_args = acc_inits + [vec_a_init] + b_vals_init
+            iter_args = acc_inits + vec_a_inits + b_vals_init
             
             # Helper to emit tile body
-            def emit_tile(k_iv, accs_in, vec_a_in, b_vals_in, is_last_tile=False):
-                # Store A to LDS
-                vector.StoreOp(vec_a_in, lds_a, [unwrap(lds_write_idx)])
+            def emit_tile(k_iv, accs_in, vec_a_in_parts, b_vals_in, is_last_tile=False):
+                # Store A to LDS (split)
+                curr_store_off = 0
+                for i in range(num_a_loads):
+                    idx = lds_write_idx
+                    if curr_store_off > 0:
+                        idx = _arith_mlir.AddIOp(unwrap(lds_write_idx), unwrap(arith.constant(curr_store_off, index=True))).result
+                    vector.StoreOp(vec_a_in_parts[i], lds_a, [unwrap(idx)])
+                    curr_store_off += vec_a_parts_lens[i]
+
                 gpu.barrier()
                 
-                vec_a_next_res = vec_a_in # Default placeholder
+                vec_a_next_parts = vec_a_in_parts # Default placeholder
                 b_vals_next = b_vals_in # Default placeholder
                 scales_pf = {}
                 
@@ -278,8 +325,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     # Prefetch A
                     next_k_div4 = _arith_mlir.DivUIOp(unwrap(next_k), unwrap(c4)).result
                     next_idx_a_div4 = _arith_mlir.AddIOp(unwrap(idx_a_base_div4), unwrap(next_k_div4)).result
-                    v_i32_next = buffer_ops.buffer_load(a_rsrc, next_idx_a_div4, vec_width=vec_width_a_i32, dtype=i32_type)
-                    vec_a_next_res = vector.BitCastOp(vec_a_load_type, v_i32_next).result
+                    vec_a_next_parts = load_a_split(next_idx_a_div4)
                     
                     # Prefetch B
                     b_vals_next = load_b_tile(next_k)
@@ -348,7 +394,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         current_accs_list[acc_idx1] = new_acc1
                 
                 gpu.barrier()
-                return current_accs_list, vec_a_next_res, b_vals_next, scales_pf
+                return current_accs_list, vec_a_next_parts, b_vals_next, scales_pf
 
             # Main Loop (runs 0 to K-tile_k)
             # Peel off the last iteration
@@ -363,18 +409,18 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                 # Split args
                 num_accs = 2 * m_repeat
                 accs_iter = args[:num_accs]
-                vec_a_iter = args[num_accs]
-                b_vals_iter = args[num_accs+1:]
+                vec_a_iter = args[num_accs : num_accs + num_a_loads]
+                b_vals_iter = args[num_accs + num_a_loads:]
                 
                 accs_next, vec_a_next, b_vals_next, _ = emit_tile(k_iv, accs_iter, vec_a_iter, b_vals_iter, is_last_tile=False)
                 
-                scf.yield_(accs_next + [vec_a_next] + b_vals_next)
+                scf.yield_(accs_next + vec_a_next + b_vals_next)
             
             results_list = for_op.results
             num_accs = 2 * m_repeat
             final_accs_loop = results_list[:num_accs]
-            vec_a_final_loop = results_list[num_accs]
-            b_vals_final_loop = results_list[num_accs+1:]
+            vec_a_final_loop = results_list[num_accs : num_accs + num_a_loads]
+            b_vals_final_loop = results_list[num_accs + num_a_loads:]
             
             # Epilogue: Run last tile and prefetch scales
             final_accs, _, _, scales = emit_tile(c_k_main, final_accs_loop, vec_a_final_loop, b_vals_final_loop, is_last_tile=True)
@@ -460,8 +506,22 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
     
-    def launch_kernel():
-        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, 256, 1, 1, 0, 0, args_array, None))
+    def launch_kernel(args=None):
+        if args is None:
+            current_args_array = args_array
+        else:
+            c, a, b, sa, sb = args
+            arg_ptrs = [
+                ctypes.c_void_p(c.data_ptr()),
+                ctypes.c_void_p(a.data_ptr()),
+                ctypes.c_void_p(b.data_ptr()),
+                ctypes.c_void_p(sa.data_ptr()),
+                ctypes.c_void_p(sb.data_ptr()),
+                ctypes.c_long(M), ctypes.c_long(N), ctypes.c_long(K)
+            ]
+            current_args_array = (ctypes.c_void_p * 8)(*[ctypes.addressof(p) for p in arg_ptrs])
+            
+        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, 256, 1, 1, 0, 0, current_args_array, None))
     
     launch_kernel()
     hip_check(hip.hipDeviceSynchronize())
@@ -484,16 +544,68 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             "warmup_iters": warmup,
             "bench_iters": runs,
             "total_bytes": bytes_moved,
+            # "args": (c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b) # Pass args for rotation if supported by utils
         }
 
     results = bench()
     gflops = flops / (results.avg_ms / 1e3) / 1e9
     print(f"Throughput: {gflops:.2f} GFLOPS, BW: {results.bandwidth_gbs:.2f} GB/s")
 
+    if HAS_AITER:
+        print("-" * 40)
+        print("Running Aiter Benchmark...")
+        
+        
+        def launch_aiter(args=None):
+            if args is None:
+                return aiter.gemm_a8w8_bpreshuffle(
+                    a_q_fp8, 
+                    b_shuffled, 
+                    scale_a, 
+                    scale_b, 
+                    None, # bias
+                    torch.float16
+                )
+            else:
+                _, a, b, sa, sb = args
+                return aiter.gemm_a8w8_bpreshuffle(
+                    a, 
+                    b, 
+                    sa, 
+                    sb, 
+                    None, # bias
+                    torch.float16
+                )
+            
+        # Verify Aiter output first
+        c_aiter = launch_aiter()
+        verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+        print("✓ Aiter output verified")
+
+        @perftest
+        def bench_aiter():
+            return {
+                "launch": launch_aiter,
+                "size": size_c,
+                "warmup_iters": warmup,
+                "bench_iters": runs,
+                "total_bytes": bytes_moved,
+                # "args": (c_aiter, a_q_fp8, b_shuffled_aiter, scale_a, scale_b) # P
+            }
+            
+        results_aiter = bench_aiter()
+        gflops_aiter = flops / (results_aiter.avg_ms / 1e3) / 1e9
+        print(f"Aiter Throughput: {gflops_aiter:.2f} GFLOPS, BW: {results_aiter.bandwidth_gbs:.2f} GB/s")
+        
+        print(f"Speedup vs Aiter: {gflops / gflops_aiter:.2f}x")
+        print("-" * 40)
+
+
 if __name__ == "__main__":
     torch.set_default_device('cuda')
     # Test cases
     print("Running Tiling Tests...")
-    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=256) # Baseline
-    # test_mfma_fp8_rocir_preshuffle(32, 4096, 2048, tile_m=32, tile_k=128) # Double M
-    # test_mfma_fp8_rocir_preshuffle(32, 4096, 2048, tile_m=16, tile_k=256) # Double K
+    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=128) 
+    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=256) 
+    test_mfma_fp8_rocir_preshuffle(32, 4096, 4096, tile_m=32, tile_k=128) 
+    test_mfma_fp8_rocir_preshuffle(32, 4096, 4096, tile_m=32, tile_k=256)
