@@ -85,8 +85,11 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     bytes_per_thread_a = elems_per_thread_a 
     vec_width_a_i32 = bytes_per_thread_a // 4
     
+    pad_k = 8 # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
+    lds_stride = tile_k + pad_k
+    
     allocator = SmemAllocator(ctx, arch=gpu_arch)
-    lds_a_decl = allocator.allocate_array(f8, tile_m * tile_k)
+    lds_a_decl = allocator.allocate_array(f8, tile_m * lds_stride)
     
     @gpu.module("mfma_mod", [f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'])
     def gpu_mod():
@@ -138,7 +141,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             layout_b = rocir.make_layout((c16, n_blocks, c16, arith.constant(2, index=True), k_blocks), stride=stride_b)
             
             shape_lds = rocir.make_shape(tile_m, tile_k)
-            stride_lds = rocir.make_stride(tile_k, 1)
+            stride_lds = rocir.make_stride(lds_stride, 1)
             layout_lds = rocir.make_layout(shape_lds, stride_lds)
             
             tx = gpu.thread_id("x")
@@ -218,26 +221,68 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     
             acc_inits = [acc_init] * (2 * m_repeat)
             
+            # --- B Load Logic ---
+            def load_b_tile(base_k):
+                b_vals = []
+                for ki_step in range(k_unroll):
+                    ki = ki_step * 32
+                    ki_val = arith.constant(ki, index=True)
+                    
+                    # col_lds_global = col_offset_base + ki_val + base_k
+                    col_lds_off = _arith_mlir.AddIOp(unwrap(col_offset_base), unwrap(ki_val)).result
+                    col_lds_global = _arith_mlir.AddIOp(unwrap(col_lds_off), unwrap(base_k)).result
+                    
+                    k_intra = _arith_mlir.RemUIOp(unwrap(col_lds_global), unwrap(c16)).result
+                    k_rem = _arith_mlir.DivUIOp(unwrap(col_lds_global), unwrap(c16)).result
+                    k_pack = _arith_mlir.RemUIOp(unwrap(k_rem), unwrap(c2)).result
+                    k_blk_local = _arith_mlir.DivUIOp(unwrap(k_rem), unwrap(c2)).result
+                    
+                    # b0
+                    coord_b_base0 = rocir.make_coord(n_intra0, n_blk0, k_intra, k_pack, k_blk_local)
+                    idx_b_base0 = rocir.crd2idx(coord_b_base0, layout_b)
+                    idx_b0 = _arith_mlir.DivUIOp(unwrap(idx_b_base0), unwrap(c4)).result
+                    loaded_b0 = buffer_ops.buffer_load(b_rsrc, idx_b0, vec_width=2, dtype=i32_type)
+                    
+                    # b1
+                    coord_b_base1 = rocir.make_coord(n_intra1, n_blk1, k_intra, k_pack, k_blk_local)
+                    idx_b_base1 = rocir.crd2idx(coord_b_base1, layout_b)
+                    idx_b1 = _arith_mlir.DivUIOp(unwrap(idx_b_base1), unwrap(c4)).result
+                    loaded_b1 = buffer_ops.buffer_load(b_rsrc, idx_b1, vec_width=2, dtype=i32_type)
+                    
+                    b_vals.append(loaded_b0)
+                    b_vals.append(loaded_b1)
+                return b_vals
+
+            # Initial Loads (A and B)
             v_i32_init = buffer_ops.buffer_load(a_rsrc, idx_a_base_div4, vec_width=vec_width_a_i32, dtype=i32_type)
             vec_a_init = vector.BitCastOp(vec_a_load_type, v_i32_init).result
             
-            iter_args = acc_inits + [vec_a_init]
+            b_vals_init = load_b_tile(c0)
+            
+            iter_args = acc_inits + [vec_a_init] + b_vals_init
             
             # Helper to emit tile body
-            def emit_tile(k_iv, accs_in, vec_a_in, is_last_tile=False):
+            def emit_tile(k_iv, accs_in, vec_a_in, b_vals_in, is_last_tile=False):
                 # Store A to LDS
                 vector.StoreOp(vec_a_in, lds_a, [unwrap(lds_write_idx)])
                 gpu.barrier()
                 
                 vec_a_next_res = vec_a_in # Default placeholder
+                b_vals_next = b_vals_in # Default placeholder
                 scales_pf = {}
                 
                 if not is_last_tile:
+                    # Next K calculations
                     next_k = _arith_mlir.AddIOp(unwrap(k_iv), unwrap(c_tile_k)).result
+                    
+                    # Prefetch A
                     next_k_div4 = _arith_mlir.DivUIOp(unwrap(next_k), unwrap(c4)).result
                     next_idx_a_div4 = _arith_mlir.AddIOp(unwrap(idx_a_base_div4), unwrap(next_k_div4)).result
                     v_i32_next = buffer_ops.buffer_load(a_rsrc, next_idx_a_div4, vec_width=vec_width_a_i32, dtype=i32_type)
                     vec_a_next_res = vector.BitCastOp(vec_a_load_type, v_i32_next).result
+                    
+                    # Prefetch B
+                    b_vals_next = load_b_tile(next_k)
                 else:
                     # --- PREFETCH SCALES (Last Iteration) ---
                     # Prefetch Scale B (invariant for thread)
@@ -264,14 +309,24 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
 
                 current_accs_list = list(accs_in)
                 
-                for mi in range(m_repeat):
-                    for ki_step in range(k_unroll):
-                        ki = ki_step * 32
-                        ki_val = arith.constant(ki, index=True)
-                        col_lds = col_offset_base + ki_val
-                        
+                # Loop Swap: Iterate K_step (outer) -> MI (inner)
+                # To reuse B
+                
+                for ki_step in range(k_unroll):
+                    # Get B for this step from regs
+                    loaded_b0 = b_vals_in[ki_step * 2]
+                    loaded_b1 = b_vals_in[ki_step * 2 + 1]
+                    
+                    # Pack B once per k_step
+                    b_pack0 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b0).result, static_position=[0], dynamic_position=[]).result
+                    b_pack1 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b1).result, static_position=[0], dynamic_position=[]).result
+                    
+                    ki = ki_step * 32
+                    ki_val = arith.constant(ki, index=True)
+                    col_lds = col_offset_base + ki_val
+                    
+                    for mi in range(m_repeat):
                         u_idx = mi * k_unroll + ki_step
-                        
                         loaded_a = vector.LoadOp(vec8_f8, lds_a, [unwrap(lds_a_indices[u_idx])]).result
                         a_vec64 = vector.BitCastOp(vec1_i64, loaded_a).result
                         a_pack = vector.ExtractOp(a_vec64, static_position=[0], dynamic_position=[]).result
@@ -282,37 +337,18 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         curr_acc0 = current_accs_list[acc_idx0]
                         curr_acc1 = current_accs_list[acc_idx1]
                         
-                        # Compute global K position for this sub-tile (use MLIR ops explicitly)
-                        col_lds_global = _arith_mlir.AddIOp(unwrap(col_lds), unwrap(k_iv)).result
-                        k_intra = _arith_mlir.RemUIOp(unwrap(col_lds_global), unwrap(c16)).result
-                        k_rem = _arith_mlir.DivUIOp(unwrap(col_lds_global), unwrap(c16)).result
-                        k_pack = _arith_mlir.RemUIOp(unwrap(k_rem), unwrap(c2)).result
-                        k_blk_local = _arith_mlir.DivUIOp(unwrap(k_rem), unwrap(c2)).result
-                        
-                        coord_b_base0 = rocir.make_coord(n_intra0, n_blk0, k_intra, k_pack, k_blk_local)
-                        idx_b_base0 = rocir.crd2idx(coord_b_base0, layout_b)
-                        idx_b0 = _arith_mlir.DivUIOp(unwrap(idx_b_base0), unwrap(c4)).result
-                        loaded_b0 = buffer_ops.buffer_load(b_rsrc, idx_b0, vec_width=2, dtype=i32_type)
-                        b_pack0 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b0).result, static_position=[0], dynamic_position=[]).result
-                        
                         new_acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                             vec4_f32, [unwrap(a_pack), unwrap(b_pack0), unwrap(curr_acc0), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
                         ).result
                         current_accs_list[acc_idx0] = new_acc0
                         
-                        coord_b_base1 = rocir.make_coord(n_intra1, n_blk1, k_intra, k_pack, k_blk_local)
-                        idx_b_base1 = rocir.crd2idx(coord_b_base1, layout_b)
-                        idx_b1 = _arith_mlir.DivUIOp(unwrap(idx_b_base1), unwrap(c4)).result
-                        loaded_b1 = buffer_ops.buffer_load(b_rsrc, idx_b1, vec_width=2, dtype=i32_type)
-                        b_pack1 = vector.ExtractOp(vector.BitCastOp(vec1_i64, loaded_b1).result, static_position=[0], dynamic_position=[]).result
-                    
                         new_acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                             vec4_f32, [unwrap(a_pack), unwrap(b_pack1), unwrap(curr_acc1), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
-                    ).result
+                        ).result
                         current_accs_list[acc_idx1] = new_acc1
                 
                 gpu.barrier()
-                return current_accs_list, vec_a_next_res, scales_pf
+                return current_accs_list, vec_a_next_res, b_vals_next, scales_pf
 
             # Main Loop (runs 0 to K-tile_k)
             # Peel off the last iteration
@@ -323,18 +359,26 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             with ir.InsertionPoint(for_op.body):
                 k_iv = for_op.induction_variable
                 args = for_op.inner_iter_args
-                accs_iter = args[:-1]
-                vec_a_iter = args[-1]
                 
-                accs_next, vec_a_next, _ = emit_tile(k_iv, accs_iter, vec_a_iter, is_last_tile=False)
+                # Split args
+                num_accs = 2 * m_repeat
+                accs_iter = args[:num_accs]
+                vec_a_iter = args[num_accs]
+                b_vals_iter = args[num_accs+1:]
                 
-                scf.yield_(accs_next + [vec_a_next])
+                accs_next, vec_a_next, b_vals_next, _ = emit_tile(k_iv, accs_iter, vec_a_iter, b_vals_iter, is_last_tile=False)
+                
+                scf.yield_(accs_next + [vec_a_next] + b_vals_next)
             
-            final_accs_loop = for_op.results[:-1]
-            vec_a_final_loop = for_op.results[-1]
+            results_list = for_op.results
+            num_accs = 2 * m_repeat
+            final_accs_loop = results_list[:num_accs]
+            vec_a_final_loop = results_list[num_accs]
+            b_vals_final_loop = results_list[num_accs+1:]
             
             # Epilogue: Run last tile and prefetch scales
-            final_accs, _, scales = emit_tile(c_k_main, final_accs_loop, vec_a_final_loop, is_last_tile=True)
+            final_accs, _, _, scales = emit_tile(c_k_main, final_accs_loop, vec_a_final_loop, b_vals_final_loop, is_last_tile=True)
+
             
             s_b0_pre = scales['s_b0']
             s_b1_pre = scales['s_b1']
@@ -450,6 +494,6 @@ if __name__ == "__main__":
     torch.set_default_device('cuda')
     # Test cases
     print("Running Tiling Tests...")
-    test_mfma_fp8_rocir_preshuffle(16, 4096, 2048, tile_m=16, tile_k=128) # Baseline
+    test_mfma_fp8_rocir_preshuffle(16, 20480, 4096, tile_m=16, tile_k=256) # Baseline
     # test_mfma_fp8_rocir_preshuffle(32, 4096, 2048, tile_m=32, tile_k=128) # Double M
     # test_mfma_fp8_rocir_preshuffle(32, 4096, 2048, tile_m=16, tile_k=256) # Double K
