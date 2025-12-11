@@ -58,26 +58,24 @@ def unwrap(v):
 
 
 @pytest.mark.parametrize("dtype_config", [DType.FP8, DType.FP16])
-def test_mfma_gemm_rocir(dtype_config):
+def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n=32, tile_k=128):
     """Test MFMA GEMM with configurable dtype (FP8 or FP16)."""
     
     # Configure based on dtype (non-MLIR parameters)
     if dtype_config == DType.FP8:
         print("="*80)
-        print("MFMA FP8 GEMM Test (mfma_16x16x32) - 1024x1024x1280")
+        print(f"MFMA FP8 GEMM Test (mfma_16x16x32) - {M}x{N}x{K}")
         print("="*80)
         mfma_k = 32  # FP8 MFMA processes 32 K elements
-        tile_k = 128  # Must be multiple of mfma_k
         torch_dtype = torch.float8_e4m3fnuz
         use_scales = True
         vec_load_size = 16  # Load 16 FP8 elements (16 bytes)
         dtype_name = "fp8"
     else:  # FP16
         print("="*80)
-        print("MFMA FP16 GEMM Test (mfma_16x16x16) - 1024x1024x1280")
+        print(f"MFMA FP16 GEMM Test (mfma_16x16x16) - {M}x{N}x{K}")
         print("="*80)
         mfma_k = 16  # FP16 MFMA processes 16 K elements
-        tile_k = 128  # Must be multiple of mfma_k
         torch_dtype = torch.float16
         use_scales = False
         vec_load_size = 16  # Load 16 FP16 elements (32 bytes)
@@ -86,10 +84,6 @@ def test_mfma_gemm_rocir(dtype_config):
     gpu_arch = get_hip_arch()
     print(f"Detected HIP Arch: {gpu_arch}")
     print(f"MFMA K dimension: {mfma_k}, Tile K: {tile_k}")
-
-    # Constants
-    M, N, K = 1024, 1024, 1280
-    tile_m, tile_n = 32, 32
     
     ctx = RAIIMLIRContextModule()
     
@@ -137,11 +131,14 @@ def test_mfma_gemm_rocir(dtype_config):
             arg_a: T.memref(size_a, mlir_dtype),
             arg_b: T.memref(size_b, mlir_dtype),
             arg_scale_a: T.memref(M, T.f32()),
-            arg_scale_b: T.memref(N, T.f32())
+            arg_scale_b: T.memref(N, T.f32()),
+            m_in: T.index(),
+            n_in: T.index(),
+            k_in: T.index()
         ):
             c0, c1 = 0, 1
-            c_m, c_n, c_k = M, N, K
-            c_tile_k = tile_k
+            c_m, c_n, c_k = m_in, n_in, k_in
+            c_tile_k = arith.constant(tile_k, index=True)
             c_mfma_k = mfma_k
             c128, c32, c16, c8, c4, c2, c64 = 128, 32, 16, 8, 4, 2, 64
             c0_i32 = arith.i32(0)
@@ -222,7 +219,10 @@ def test_mfma_gemm_rocir(dtype_config):
             row_a_lds_base = wave_row * c16
             row_a_lds = row_a_lds_base + lane_mod_16
             
-            col_offset_base = lane_div_16 * c8
+            if dtype_config == DType.FP8:
+                col_offset_base = lane_div_16 * c8
+            else:
+                col_offset_base = lane_div_16 * c4
             
             row_b_lds_base = wave_col * c16
             row_b_lds = row_b_lds_base + lane_mod_16
@@ -292,12 +292,12 @@ def test_mfma_gemm_rocir(dtype_config):
             vec_a_init, vec_b_init = load_global(c_k_idx)
             
             # Main Loop: 0 to K-tile_k
-            c_tile_k_idx = arith.index(tile_k)
-            c_k_main = c_k - c_tile_k_idx
+            # c_k_main = c_k - c_tile_k_idx
+            c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
             
             iter_args = [acc_init, vec_a_init, vec_b_init]
             
-            for_op = scf.ForOp(c_k_idx, c_k_main, c_tile_k_idx, iter_args)
+            for_op = scf.ForOp(c_k_idx, c_k_main, c_tile_k, iter_args)
             with ir.InsertionPoint(for_op.body):
                 k_curr = for_op.induction_variable
                 acc_iter = for_op.inner_iter_args[0]
@@ -309,7 +309,8 @@ def test_mfma_gemm_rocir(dtype_config):
                 vector.StoreOp(vec_b_curr, lds_b, [unwrap(lds_write_idx)])
                 
                 # 2. Prefetch Next
-                k_next = k_curr + c_tile_k_idx
+                # k_next = k_curr + c_tile_k_idx
+                k_next = _arith_mlir.AddIOp(unwrap(k_curr), unwrap(c_tile_k)).result
                 vec_a_next, vec_b_next = load_global(k_next)
                 
                 gpu.barrier()
@@ -442,6 +443,9 @@ def test_mfma_gemm_rocir(dtype_config):
         ctypes.c_void_p(b_q.data_ptr()),
         ctypes.c_void_p(scale_a.data_ptr()),
         ctypes.c_void_p(scale_b.data_ptr()),
+        ctypes.c_long(M),
+        ctypes.c_long(N),
+        ctypes.c_long(K)
     ]
     
     args_array = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
