@@ -103,6 +103,14 @@ def i64(value: int, *, loc: Location = None, ip: InsertionPoint = None) -> "Arit
     """Create an i64 constant."""
     return constant(value, type=IntegerType.get_signless(64), loc=loc, ip=ip)
 
+def f16(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+    """Create an f16 constant."""
+    return constant(value, type=F16Type.get(), loc=loc, ip=ip)
+
+def f16(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+    """Create an f16 constant."""
+    return constant(value, type=F16Type.get(), loc=loc, ip=ip)
+
 def f32(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
     """Create an f32 constant."""
     return constant(value, type=F32Type.get(), loc=loc, ip=ip)
@@ -244,6 +252,73 @@ def constant_vector(element_value: Union[int, float], vector_type: Type, *, loc:
     
     result = _arith.ConstantOp(vector_type, dense_attr, loc=loc).result
     return ArithValue(result)
+
+def absf(value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Calculate absolute value (floating point).
+    
+    Args:
+        value: Input value (float or vector of floats)
+        loc: Optional source location
+        
+    Returns:
+        Absolute value result wrapped in ArithValue
+    """
+    from mlir.dialects import math as _math
+    val = _unwrap_value(value)
+    result = _math.AbsFOp(val, loc=loc).result
+    return ArithValue(result)
+
+def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optional[Value] = None, loc: Location = None) -> "ArithValue":
+    """Perform vector reduction.
+    
+    Args:
+        value: Input vector value
+        kind: Reduction kind ("add", "mul", "min", "max", "and", "or", "xor")
+        acc: Optional accumulator
+        loc: Optional source location
+        
+    Returns:
+        Reduced scalar value wrapped in ArithValue
+    """
+    from mlir.dialects import vector as _vector
+    
+    val = _unwrap_value(value)
+    
+    # Map string kind to CombiningKind enum
+    kind = kind.lower()
+    val_type = val.type
+    elem_type = _get_element_type(val_type)
+    
+    is_float = _is_floating_point_type(elem_type)
+    
+    kind_map = {
+        "add": _vector.CombiningKind.ADD,
+        "mul": _vector.CombiningKind.MUL,
+        "and": _vector.CombiningKind.AND,
+        "or": _vector.CombiningKind.OR,
+        "xor": _vector.CombiningKind.XOR,
+    }
+    
+    if kind in ["min", "max"]:
+        if is_float:
+            kind_map["min"] = _vector.CombiningKind.MINIMUMF
+            kind_map["max"] = _vector.CombiningKind.MAXIMUMF
+        else:
+            kind_map["min"] = _vector.CombiningKind.MINSI # Default to signed
+            kind_map["max"] = _vector.CombiningKind.MAXSI
+            
+    if kind not in kind_map:
+        raise ValueError(f"Unsupported reduction kind: {kind}")
+        
+    combining_kind = kind_map[kind]
+    
+    if acc is not None:
+        acc = _unwrap_value(acc)
+        op = _vector.ReductionOp(elem_type, combining_kind, val, acc=acc, loc=loc)
+    else:
+        op = _vector.ReductionOp(elem_type, combining_kind, val, loc=loc)
+        
+    return ArithValue(op.result)
 
 def _unwrap_value(val):
     """递归unwrap ArithValue，获取底层的 ir.Value"""
@@ -462,8 +537,8 @@ from mlir.dialects.arith import (
 )
 
 __all__ = [
-    "constant", "index", "i32", "i64", "f32", "f64", "Index",
-    "maximum", "minimum", "select", "extf", "fptosi", "constant_vector",
+    "constant", "index", "i32", "i64", "f16", "f32", "f64", "Index",
+    "maximum", "minimum", "select", "extf", "fptosi", "absf", "reduce", "constant_vector",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
     "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",

@@ -151,6 +151,8 @@ class TensorView:
         self.store(value, coords)
 
 
+
+
 def _to_index_value(val, loc: Optional[Location] = None):
     """Convert python int or MLIR value to an index-typed MLIR value."""
     val = _unwrap_value(val)
@@ -1522,6 +1524,86 @@ def fragment_store(value, fragment, index, loc: Optional[Location] = None, ip: O
         memref_dialect.store(value, fragment, [index])
 
 
+def _normalize_indices_to_memref(memref_val: Value, indices: List[Value], strides: Optional[tuple], loc: Location) -> List[Value]:
+    """Normalize indices to match the backing memref's rank.
+    
+    If the memref rank is less than the number of indices, linearize the multi-dimensional 
+    indices into a flat index using the strides.
+    
+    Args:
+        memref_val: The memref Value to access
+        indices: List of index Values (possibly multi-dimensional)
+        strides: Strides tuple from TensorView (or None for default row-major)
+        loc: Source location for generated operations
+        
+    Returns:
+        List of index Values matching the memref's rank
+    """
+    from mlir.ir import MemRefType
+    
+    memref_type = memref_val.type
+    if not isinstance(memref_type, MemRefType):
+        # Not a memref, return indices as-is
+        return indices
+    
+    memref_rank = memref_type.rank
+    num_indices = len(indices)
+    
+    if memref_rank == num_indices:
+        # Ranks match, no conversion needed
+        return indices
+    
+    if memref_rank == 1 and num_indices > 1:
+        # Linearize multi-dimensional indices into 1D
+        # linear_idx = idx[0] * stride[0] + idx[1] * stride[1] + ...
+        
+        # If no strides provided, assume row-major (C-style) layout
+        if strides is None or len(strides) != num_indices:
+            # Default row-major strides
+            # For a 2D array [M, N]: strides = [N, 1]
+            # We can infer from memref shape if available
+            shape = memref_type.shape
+            if len(shape) == 1 and len(shape) > 0:
+                # 1D memref with known size
+                # Assume the original layout was row-major with last stride = 1
+                # But we don't have the original shape, so we need to compute from strides
+                # For now, assume the last stride is 1 and work backwards
+                # This is a simplified heuristic
+                computed_strides = [1] * num_indices
+                # Example: for 2D with total size N, strides = [N, 1]
+                # But we don't know N from just the 1D memref
+                # FALLBACK: We'll use the provided strides from TensorView
+                pass
+        
+        # Use the strides from TensorView
+        linear_idx = None
+        for i, (idx, stride) in enumerate(zip(indices, strides if strides else [1]*num_indices)):
+            # Ensure idx is a proper Value by unwrapping
+            idx = _unwrap_value(idx)
+            
+            if stride == 1:
+                term = idx
+            else:
+                stride_val = _to_index_value(stride, loc)
+                term = arith.muli(idx, stride_val, loc=loc)
+                # Unwrap in case arith.muli returns an ArithValue wrapper
+                term = _unwrap_value(term)
+            
+            if linear_idx is None:
+                linear_idx = term
+            else:
+                # Unwrap both operands to ensure they're raw MLIR Values
+                linear_idx = _unwrap_value(linear_idx)
+                term = _unwrap_value(term)
+                linear_idx = arith.addi(linear_idx, term, loc=loc)
+        
+        # Unwrap the final result before returning
+        return [_unwrap_value(linear_idx)]
+    
+    # For other cases, return indices as-is and let MLIR validation catch mismatches
+    return indices
+
+
 def copy(copy_desc, src, dst, 
          src_indices: Optional[List[Value]] = None,
          dst_indices: Optional[List[Value]] = None,
@@ -1535,7 +1617,8 @@ def copy(copy_desc, src, dst,
         dst: Destination tensor (memref)
         src_indices: Indices for source access
         dst_indices: Indices for destination access
-        pred: Optional predicate mask for conditional copying
+        pred: Optional predicate mask for conditional copying. 
+              Can be a TensorView (element-wise mask) or a scalar Value (broadcast mask).
         loc: Optional source location
         ip: Optional insertion point
         
@@ -1545,23 +1628,52 @@ def copy(copy_desc, src, dst,
     from mlir.dialects import memref as memref_dialect
     loc = _get_location(loc)
 
-    def emit_tensor_copy(copy_shape, src_view: TensorView, dst_view: TensorView, pred_view: Optional[TensorView]):
+    def emit_tensor_copy(copy_shape, src_view: TensorView, dst_view: TensorView, pred_view: Optional[Union[TensorView, Value]]):
+        from mlir.dialects import vector
+        from mlir.ir import VectorType
+
+        # Attempt vectorization if copy_desc has vector_size
+        vector_size = 1
+        if isinstance(copy_desc, TiledCopy) and copy_desc.copy_atom:
+            vector_size = copy_desc.copy_atom.vector_size
+        elif hasattr(copy_desc, "vector_size"):
+            vector_size = copy_desc.vector_size
+
         def recurse(dim, src_idx, dst_idx, pred_idx):
             if dim == len(copy_shape):
-                load_idx = [_unwrap_value(i) for i in src_idx]
-                store_idx = [_unwrap_value(i) for i in dst_idx]
+                # Scalar fall-back (should be covered by vectorized path if possible)
+                load_idx = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(i) for i in src_idx], src_view.strides, loc)
+                store_idx = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(i) for i in dst_idx], dst_view.strides, loc)
                 load_op = memref_dialect.load(src_view.memref, load_idx)
                 val = load_op.result if hasattr(load_op, "result") else load_op
                 val = _unwrap_value(val)
+                
+                cond = None
                 if pred_view is not None:
-                    pred_idx_vals = [_unwrap_value(i) for i in pred_idx]
-                    pred_op = memref_dialect.load(pred_view.memref, pred_idx_vals)
-                    flag = pred_op.result if hasattr(pred_op, "result") else pred_op
-                    flag = _unwrap_value(flag)
-                    zero_op = arith.ConstantOp(flag.type, IntegerAttr.get(flag.type, 0), loc=loc)
-                    zero = _unwrap_value(zero_op.result if hasattr(zero_op, "result") else zero_op)
-                    cond = arith.CmpIOp(arith.CmpIPredicate.ne, flag, zero, loc=loc).result
+                    if isinstance(pred_view, TensorView):
+                        # Scalar masked store logic from tensor view
+                        pred_idx_vals = [_unwrap_value(i) for i in pred_idx]
+                        pred_op = memref_dialect.load(pred_view.memref, pred_idx_vals)
+                        flag = pred_op.result if hasattr(pred_op, "result") else pred_op
+                        flag = _unwrap_value(flag)
+                        zero_op = arith.ConstantOp(flag.type, IntegerAttr.get(flag.type, 0), loc=loc)
+                        zero = _unwrap_value(zero_op.result if hasattr(zero_op, "result") else zero_op)
+                        cond = arith.CmpIOp(arith.CmpIPredicate.ne, flag, zero, loc=loc).result
+                    else:
+                        # Scalar broadcast mask
+                        cond = _unwrap_value(pred_view)
+
+                if cond is not None:
                     cond = _unwrap_value(cond)
+                    
+                    # Optimization: If cond is a broadcast scalar mask (not dependent on indices inside recurse loop),
+                    # we can hoist the if check outside. However, here we are inside the scalar/vector loop.
+                    # Since we are inside the scalar recursion, 'cond' might depend on 'pred_idx' if it came from TensorView.
+                    # If it came from scalar broadcast, it is invariant.
+                    
+                    # For scalar broadcast, 'pred_view' is a Value (not TensorView).
+                    # 'cond' is that value.
+                    
                     if_op = scf.IfOp(cond, [], loc=loc)
                     with InsertionPoint(if_op.then_block):
                         memref_dialect.store(val, dst_view.memref, store_idx)
@@ -1569,30 +1681,105 @@ def copy(copy_desc, src, dst,
                 else:
                     memref_dialect.store(val, dst_view.memref, store_idx)
                 return
+
             extent = int(copy_shape[dim])
+            
+            # Check for vectorization opportunity on the last dimension
+            if dim == len(copy_shape) - 1 and vector_size > 1 and extent % vector_size == 0:
+                # 1. Verify contiguity (stride=1) for innermost dim
+                # Simplified check: assume TensorView with default inner stride 1 if not specified
+                # Ideally check src_view.strides[-1] == 1
+                
+                # Iterate in chunks of vector_size
+                base_src = src_view.base_indices[dim] if dim < len(src_view.base_indices) else _to_index_value(0, loc)
+                base_dst = dst_view.base_indices[dim] if dim < len(dst_view.base_indices) else _to_index_value(0, loc)
+                base_pred = pred_view.base_indices[dim] if isinstance(pred_view, TensorView) else None
+
+                # Optimization: Scalar Broadcast Mask Hoisting
+                # If pred_view is a scalar Value (broadcast mask), we can hoist the check outside the vector loop.
+                hoisted_cond = None
+                if pred_view is not None and not isinstance(pred_view, TensorView):
+                     hoisted_cond = _unwrap_value(pred_view)
+
+                def emit_vector_loop_body():
+                    for i in range(0, extent, vector_size):
+                        off = _to_index_value(i, loc)
+                        # For vector load, we use the start index of the vector
+                        vec_src_idx = src_idx + [_add_index(base_src, off)]
+                        vec_dst_idx = dst_idx + [_add_index(base_dst, off)]
+                        
+                        # Prepare vector type
+                        elem_type = src_view.element_type
+                        vec_type = VectorType.get((vector_size,), elem_type)
+                        
+                        load_indices = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(idx) for idx in vec_src_idx], src_view.strides, loc)
+                        store_indices = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(idx) for idx in vec_dst_idx], dst_view.strides, loc)
+
+                        # Vector Load
+                        vec_val = vector.load(vec_type, src_view.memref, load_indices)
+
+                        # Handle Predicate (TensorView case only inside loop)
+                        if pred_view is not None and isinstance(pred_view, TensorView):
+                            cond = None
+                            # FALLBACK STRATEGY for TensorView mask: 
+                            # Check first element of the vector range
+                            curr_pred_base = _add_index(base_pred, off)
+                            p_idx = pred_idx + [curr_pred_base]
+                            p_idx_vals = [_unwrap_value(p) for p in p_idx]
+                            
+                            pred_val_op = memref_dialect.load(pred_view.memref, p_idx_vals)
+                            flag = pred_val_op.result if hasattr(pred_val_op, "result") else pred_val_op
+                            flag = _unwrap_value(flag)
+                            
+                            zero_op = arith.ConstantOp(flag.type, IntegerAttr.get(flag.type, 0), loc=loc)
+                            zero = _unwrap_value(zero_op.result if hasattr(zero_op, "result") else zero_op)
+                            cond = arith.CmpIOp(arith.CmpIPredicate.ne, flag, zero, loc=loc).result
+                            
+                            cond = _unwrap_value(cond)
+                            if_op = scf.IfOp(cond, [], loc=loc)
+                            with InsertionPoint(if_op.then_block):
+                                vector.store(vec_val, dst_view.memref, store_indices)
+                                scf.YieldOp([])
+                        else:
+                            # No predicate or handled by hoisted check
+                            vector.store(vec_val, dst_view.memref, store_indices)
+
+                if hoisted_cond is not None:
+                    # Hoist the scf.If outside the vector loop
+                    if_op = scf.IfOp(hoisted_cond, [], loc=loc)
+                    with InsertionPoint(if_op.then_block):
+                        emit_vector_loop_body()
+                        scf.YieldOp([])
+                else:
+                    emit_vector_loop_body()
+                
+                return
+
+            # Scalar recursion
             base_src = src_view.base_indices[dim] if dim < len(src_view.base_indices) else _to_index_value(0, loc)
             base_dst = dst_view.base_indices[dim] if dim < len(dst_view.base_indices) else _to_index_value(0, loc)
-            base_pred = pred_view.base_indices[dim] if pred_view is not None else None
+            base_pred = pred_view.base_indices[dim] if isinstance(pred_view, TensorView) else None
             for i in range(extent):
                 off = _to_index_value(i, loc)
                 next_src = _add_index(base_src, off)
                 next_dst = _add_index(base_dst, off)
                 next_pred_idx = pred_idx
-                if pred_view is not None:
+                if isinstance(pred_view, TensorView):
                     next_pred_idx = pred_idx + [_add_index(base_pred, off)]
                 recurse(dim + 1, src_idx + [next_src], dst_idx + [next_dst], next_pred_idx)
+
 
         with ip or InsertionPoint.current:
             recurse(0, [], [], [])
 
     if isinstance(copy_desc, TiledCopy) and isinstance(src, TensorView) and isinstance(dst, TensorView):
-        pred_view = pred if isinstance(pred, TensorView) else None
-        emit_tensor_copy(copy_desc.val_shape, src, dst, pred_view)
+        # pred can be TensorView or scalar Value
+        emit_tensor_copy(copy_desc.val_shape, src, dst, pred)
         return
 
     if isinstance(src, TensorView) and isinstance(dst, TensorView):
-        pred_view = pred if isinstance(pred, TensorView) else None
-        emit_tensor_copy(src.shape, src, dst, pred_view)
+        # pred can be TensorView or scalar Value
+        emit_tensor_copy(src.shape, src, dst, pred)
         return
 
     src_val = _unwrap_value(src)

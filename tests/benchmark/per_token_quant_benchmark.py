@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 """
 Benchmark: Per-Token Quantization Kernel
-Reference: /data/zhimding/aiter/aiter/ops/quant.py
-Based on: /data/zhimding/rocDSL/tests/benchmark/vecAdd.py
+
+Usage Examples:
+    # Single test with default size (4096x8192)
+    python per_token_quant_benchmark_3.py
+    
+    # Single test with custom size
+    python per_token_quant_benchmark_3.py -m 2048 -n 4096
+    
+    # Multi-size testing (same N - only compiles ONCE! 🚀)
+    python per_token_quant_benchmark_3.py --multi-test "2048x8192,4096x8192,8192x8192"
+    # Output: ✓ All tests use N=8192 - will compile once and reuse!
+    
+    # Multi-size testing (different N - compiles per N value)
+    python per_token_quant_benchmark_3.py --multi-test "2048x4096,4096x8192"
+    # Output: ⚠ 2 different N values detected: [4096, 8192]
+    
+    # Complex scenario (5 tests, 2 N values = 2 compilations)
+    python per_token_quant_benchmark_3.py --multi-test "1024x4096,2048x4096,4096x4096,2048x8192,4096x8192"
+    # Compiles N=4096 once → runs 3 tests
+    # Compiles N=8192 once → runs 2 tests
 """
 
 import sys
@@ -32,61 +50,72 @@ except ImportError:
 
 from hip import hip
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import arith, gpu, rocir
+from rocdsl.dialects.ext import arith, gpu, rocir, collective_ops
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from rocdsl.utils import SmemAllocator
 from mlir import ir
 from mlir.dialects import (
-    math as _math_mlir,
     scf,
     vector,
     memref,
-    gpu as mlir_gpu,
 )
 import mlir.extras.types as T
 from utils import compile_to_hsaco
 from tests.test_common import run_perftest
 
 
-def benchmark_per_token_quant(M=4096, N=8192):
-    print("\n" + "=" * 80)
-    print(f"Benchmark: Per-Token Quantization Performance (RocDSL) [M={M}, N={N}]")
-    print("=" * 80)
+class scf_if:
+    """Helper to restore scf.if_ like syntax using scf.IfOp context manager."""
 
-    gpu_arch = get_hip_arch()
-    print(f"Detected HIP Arch: {gpu_arch}")
+    def __init__(self, cond):
+        self.op = scf.IfOp(cond)
 
+    def __enter__(self):
+        self.ip = ir.InsertionPoint(self.op.then_block)
+        self.ip.__enter__()
+        return self.op
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            if not self.op.then_block.operations or not isinstance(
+                self.op.then_block.operations[-1], scf.YieldOp
+            ):
+                scf.YieldOp([])
+        self.ip.__exit__(exc_type, exc_val, exc_tb)
+
+
+class KernelCompilationCache:
+    
+    def __init__(self):
+        self.cache = {}
+    
+    def get_or_compile(self, N, compile_fn):
+        if N in self.cache:
+            return self.cache[N] + (True,)
+        
+        result = compile_fn()
+        self.cache[N] = result
+        return result + (False,)
+    
+    def clear(self):
+        self.cache.clear()
+
+
+def compile_kernel_for_n(N, gpu_arch=None):
+    if gpu_arch is None:
+        gpu_arch = get_hip_arch()
+    
     NUM_WARPS = 4
     BLOCK_SIZE = 64 * NUM_WARPS
     VEC_WIDTH = 32
-
-    ELEMS_PER_THREAD = VEC_WIDTH
-    ELEMS_PER_BLOCK_ITER = BLOCK_SIZE * ELEMS_PER_THREAD
-
-    assert N % VEC_WIDTH == 0, "N must be multiple of VecWidth (32)"
+    ELEMS_PER_BLOCK_ITER = BLOCK_SIZE * VEC_WIDTH
+    
+    assert N % VEC_WIDTH == 0, f"N must be multiple of {VEC_WIDTH}"
     ITERS = (N + ELEMS_PER_BLOCK_ITER - 1) // ELEMS_PER_BLOCK_ITER
-
-    total_elements = M * N
-    total_bytes_rw = (M * N * 2) * 1 + (M * N * 1) + (M * 4)
-
-    print(f"Configuration:")
-    print(f"  - Shape: [{M}, {N}]")
-    print(f"  - Block Size: {BLOCK_SIZE}")
-    print(f"  - Total Elements: {total_elements/1e6:.2f}M")
-    print(f"  - Loops per Block: {ITERS}")
-    print(f"  - Est. Memory Traffic: {total_bytes_rw/1e9:.2f} GB per call")
-
-    np.random.seed(42)
-    input_data_fp16 = np.random.uniform(-5.0, 5.0, size=(M, N)).astype(np.float16)
-    input_data = input_data_fp16.astype(np.float32)
-    dtypeMax = 127.0
-    per_token_amax = np.max(np.abs(input_data), axis=1)
-    per_token_scale = per_token_amax / dtypeMax
-    per_token_scale[per_token_scale == 0] = 1.0
-    scale_expanded = per_token_scale[:, np.newaxis]
-    output_ref = (input_data / scale_expanded).astype(np.int8)
-
+    
+    M_compile = 16384
+    
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     gpu.set_container_module(ctx.module)
     allocator = SmemAllocator(ctx, arch=gpu_arch)
@@ -103,18 +132,48 @@ def benchmark_per_token_quant(M=4096, N=8192):
     red_type = T.memref(NUM_WARPS, T.f32(), memory_space=lds_space())
     memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
 
-    def unwrap(v):
-        return v._value if hasattr(v, "_value") else v
-
     @gpu.func(emit=True)
     def quant_kernel(
-        input: T.memref(M * N, T.f16()),
-        output: T.memref(M * N, T.i8()),
-        scales: T.memref(M, T.f32()),
+        input: T.memref(M_compile * N, T.f16()),
+        output: T.memref(M_compile * N, T.i8()),
+        scales: T.memref(M_compile, T.f32()),
     ):
         tid_x = rocir.thread_idx("x")
         bid_x = rocir.block_idx("x")
         tid_linear = tid_x
+
+        thr_layout = rocir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0))
+        val_layout = rocir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
+
+        copy_atom_load = rocir.make_copy_atom(T.f16(), vector_size=VEC_WIDTH)
+        copy_atom_store = rocir.make_copy_atom(T.i8(), vector_size=VEC_WIDTH)
+
+        tiled_copy_input = rocir.make_tiled_copy_tv(
+            copy_atom_load,
+            thr_layout,
+            val_layout,
+            thr_shape=(1, BLOCK_SIZE),
+            val_shape=(1, VEC_WIDTH),
+        )
+        tiled_copy_output = rocir.make_tiled_copy_tv(
+            copy_atom_store,
+            thr_layout,
+            val_layout,
+            thr_shape=(1, BLOCK_SIZE),
+            val_shape=(1, VEC_WIDTH),
+        )
+
+        tensor_input = rocir.make_tensor(input, shape=(M_compile, N), strides=(N, 1))
+        tensor_output = rocir.make_tensor(output, shape=(M_compile, N), strides=(N, 1))
+        tensor_scales = rocir.make_tensor(scales, shape=(M_compile,), strides=(1,))
+
+        tile_shape = (1, ELEMS_PER_BLOCK_ITER)
+
+        gInput = rocir.zipped_divide(tensor_input, tile_shape)
+        gOutput = rocir.zipped_divide(tensor_output, tile_shape)
+
+        thr_copy_input = tiled_copy_input.get_slice(tid_linear)
+        thr_copy_output = tiled_copy_output.get_slice(tid_linear)
 
         base_ptr = allocator.get_base()
         red_val = red_buffer_decl(base_ptr).get()
@@ -130,104 +189,55 @@ def benchmark_per_token_quant(M=4096, N=8192):
         vec_type_f16 = T.vector(VEC_WIDTH, T.f16())
         vec_type_f32 = T.vector(VEC_WIDTH, T.f32())
 
-        # Load phase: 使用 rocir 坐标计算
-        c_m = arith.index(M)
         c_n = arith.index(N)
-        c_1 = arith.index(1)
 
         for i in range(ITERS):
             c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)
-            c_vec_width = arith.index(VEC_WIDTH)
-            thread_offset = tid_linear * c_vec_width
+            thread_offset = tid_linear * arith.index(VEC_WIDTH)
             col_base = c_chunk_offset + thread_offset
 
             is_valid = col_base < c_n
 
-            if_load = scf.IfOp(is_valid.value, [vec_type_f16], hasElse=True)
-            with ir.InsertionPoint(if_load.then_block):
-                coord = rocir.make_coord(bid_x, col_base)
-                layout_global = rocir.make_layout((c_m, c_n), stride=(c_n, c_1))
-                linear_idx = rocir.crd2idx(coord, layout_global)
+            blk_coord = (bid_x, arith.index(i))
+            blkInput = gInput[blk_coord]
+            thrInput = thr_copy_input.partition_S(blkInput)
 
-                vec_val = vector.load(vec_type_f16, input, [linear_idx.value])
-                scf.YieldOp([vec_val])
+            frgInput = rocir.make_fragment_like(thrInput, T.f16())
 
-            with ir.InsertionPoint(if_load.else_block):
-                zero_vec = arith.constant_vector(0.0, vec_type_f16).value
-                scf.YieldOp([zero_vec])
+            zero_vec = arith.constant_vector(0.0, vec_type_f16).value
+            frg_memref = frgInput.memref if hasattr(frgInput, "memref") else frgInput
+            vector.store(zero_vec, frg_memref, [c_0.value, c_0.value])
 
-            vec_val_f16 = if_load.results[0]
-            cached_vecs.append(vec_val_f16)
+            rocir.copy(tiled_copy_input, thrInput, frgInput, pred=is_valid)
 
-        for i in range(ITERS):
-            vec_val_f16 = cached_vecs[i]
-            vec_val = arith.extf(vec_type_f32, vec_val_f16).value
-            vec_abs = _math_mlir.absf(vec_val)
-            chunk_max = vector.ReductionOp(
-                T.f32(), vector.CombiningKind.MAXIMUMF, vec_abs
-            ).result
-            local_max = arith.maximum(local_max, chunk_max).value
+            vec_val_f16 = vector.load(vec_type_f16, frg_memref, [c_0.value, c_0.value])
+            vec_val_f32 = arith.extf(vec_type_f32, vec_val_f16)
 
-        current_val = arith.ArithValue(local_max)
-        for s in [32, 16, 8, 4, 2, 1]:
-            offset = arith.i32(s)
-            width = arith.i32(64)
+            vec_abs_f32 = arith.absf(vec_val_f32)
+            chunk_max = arith.reduce(vec_abs_f32, "max")
+            local_max = arith.maximum(local_max, chunk_max)
 
-            shuffled_op = mlir_gpu.ShuffleOp(
-                current_val.value,
-                offset.value,
-                width.value,
-                mode=mlir_gpu.ShuffleMode.XOR,
-            )
-            shuffled_val = shuffled_op.results[0]
-            current_val = arith.maximum(current_val, shuffled_val)
+            cached_vecs.append(vec_val_f32)
 
-        c_64 = arith.index(64)
-        c_0_idx = arith.index(0)
-        warp_id = tid_linear / c_64
-        lane_id = tid_linear % c_64
+        reduced_max = collective_ops.block_reduce_max(
+            local_max, red_val, tid_linear, num_warps=NUM_WARPS, warp_size=64
+        )
 
-        is_lane_0 = lane_id == c_0_idx
-
-        if_warp_store = scf.IfOp(is_lane_0.value)
-        with ir.InsertionPoint(if_warp_store.then_block):
-            memref.store(current_val.value, red_val, [warp_id.value])
-            scf.YieldOp([])
-
-        mlir_gpu.BarrierOp()
-
-        is_thread_0 = (tid_linear == c_0_idx)
-
-        if_block_reduce = scf.IfOp(is_thread_0.value)
-        with ir.InsertionPoint(if_block_reduce.then_block):
-            final_max_val = arith.ArithValue(f_0)
-            for w in range(NUM_WARPS):
-                c_w = arith.index(w).value
-                val = memref.load(red_val, [c_w])
-                final_max_val = arith.maximum(final_max_val, val)
-
-            memref.store(final_max_val.value, red_val, [c_0.value])
-            scf.YieldOp([])
-
-        mlir_gpu.BarrierOp()
-
-        reduced_max = memref.load(red_val, [c_0.value])
-        scale = reduced_max / 127
-
+        scale = reduced_max / f_127
         is_zero = scale == 0
         final_scale = arith.select(is_zero, f_1, scale)
 
-        if_op = scf.IfOp(is_thread_0.value)
-        with ir.InsertionPoint(if_op.then_block):
-            bid_x_val = bid_x.value if hasattr(bid_x, "value") else bid_x
-            memref.store(final_scale.value, scales, [bid_x_val])
-            scf.YieldOp([])
+        c_0_idx = arith.index(0)
+        is_thread_0 = tid_linear == c_0_idx
+
+        with scf_if(is_thread_0.value):
+            tensor_scales[bid_x] = final_scale
 
         vec_scale = vector.BroadcastOp(vec_type_f32, final_scale.value).result
         vec_f1 = vector.BroadcastOp(vec_type_f32, f_1.value).result
         vec_f1_arith = arith.ArithValue(vec_f1)
         vec_scale_arith = arith.ArithValue(vec_scale)
-        vec_inv_scale = (vec_f1_arith / vec_scale_arith).value
+        vec_inv_scale = (vec_f1_arith / vec_scale_arith)
 
         for i in range(ITERS):
             c_chunk_offset = arith.index(i * ELEMS_PER_BLOCK_ITER)
@@ -236,27 +246,93 @@ def benchmark_per_token_quant(M=4096, N=8192):
             col_base = c_chunk_offset + thread_offset
 
             is_valid = col_base < c_n
-            if_store = scf.IfOp(is_valid.value)
-            with ir.InsertionPoint(if_store.then_block):
-                coord = rocir.make_coord(bid_x, col_base)
-                layout_global = rocir.make_layout((c_m, c_n), stride=(c_n, c_1))
-                linear_idx = rocir.crd2idx(coord, layout_global)
 
-                vec_val_f16 = cached_vecs[i]
-                vec_val = arith.extf(vec_type_f32, vec_val_f16)
+            vec_val = cached_vecs[i]
+            vec_scaled = vec_val * vec_inv_scale
+            vec_i8_type = T.vector(VEC_WIDTH, T.i8())
+            vec_quant = arith.fptosi(vec_i8_type, vec_scaled)
 
-                vec_scaled = vec_val * vec_inv_scale
-                vec_i8_type = T.vector(VEC_WIDTH, T.i8())
-                vec_quant = arith.fptosi(vec_i8_type, vec_scaled)
+            blk_coord = (bid_x, arith.index(i))
+            blkOutput = gOutput[blk_coord]
+            thrOutput = thr_copy_output.partition_D(blkOutput)
 
-                vector.store(vec_quant.value, output, [linear_idx.value])
-                scf.YieldOp([])
+            frgOutput = rocir.make_fragment_like(thrOutput, T.i8())
+            frg_out_memref = (
+                frgOutput.memref if hasattr(frgOutput, "memref") else frgOutput
+            )
+
+            vector.store(vec_quant.value, frg_out_memref, [c_0.value, c_0.value])
+            rocir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid.value)
 
     ip.__exit__(None, None, None)
 
-    print("Compiling MLIR module...")
     hsaco = compile_to_hsaco(ctx.module)
-    print(f"Compiled to HSACO: {len(hsaco)} bytes")
+    
+    config = {
+        'N': N,
+        'NUM_WARPS': NUM_WARPS,
+        'BLOCK_SIZE': BLOCK_SIZE,
+        'VEC_WIDTH': VEC_WIDTH,
+        'ELEMS_PER_BLOCK_ITER': ELEMS_PER_BLOCK_ITER,
+        'ITERS': ITERS,
+    }
+    
+    return hsaco, config
+
+
+def benchmark_per_token_quant(M=4096, N=8192, hsaco=None, config=None):
+    """Run Per-Token Quantization benchmark.
+    
+    Args:
+        M: Number of tokens
+        N: Hidden dimension
+        hsaco: Pre-compiled HSACO bytes (optional)
+        config: Config dict from compile_kernel_for_n (optional)
+    
+    Returns:
+        bool: True if correctness check passed
+    """
+    print("\n" + "=" * 80)
+    print(f"Benchmark: Per-Token Quantization Performance (RocDSL) [M={M}, N={N}]")
+    print("=" * 80)
+
+    # Compile if not provided
+    if hsaco is None or config is None:
+        gpu_arch = get_hip_arch()
+        print(f"Detected HIP Arch: {gpu_arch}")
+        print("Compiling MLIR module...")
+        hsaco, config = compile_kernel_for_n(N, gpu_arch)
+        print(f"Compiled to HSACO: {len(hsaco)} bytes")
+    else:
+        print(f"Using pre-compiled kernel ({len(hsaco)} bytes)")
+    
+    # Extract config
+    NUM_WARPS = config['NUM_WARPS']
+    BLOCK_SIZE = config['BLOCK_SIZE']
+    VEC_WIDTH = config['VEC_WIDTH']
+    ELEMS_PER_BLOCK_ITER = config['ELEMS_PER_BLOCK_ITER']
+    ITERS = config['ITERS']
+
+    total_elements = M * N
+    total_bytes_rw = (M * N * 2) * 1 + (M * N * 1) + (M * 4)
+
+    print(f"Configuration:")
+    print(f"  - Shape: [{M}, {N}]")
+    print(f"  - Block Size: {BLOCK_SIZE}")
+    print(f"  - Total Elements: {total_elements/1e6:.2f}M")
+    print(f"  - Loops per Block: {ITERS}")
+    print(f"  - Est. Memory Traffic: {total_bytes_rw/1e9:.2f} GB per call")
+
+    # Prepare test data
+    np.random.seed(42)
+    input_data_fp16 = np.random.uniform(-5.0, 5.0, size=(M, N)).astype(np.float16)
+    input_data = input_data_fp16.astype(np.float32)
+    dtypeMax = 127.0
+    per_token_amax = np.max(np.abs(input_data), axis=1)
+    per_token_scale = per_token_amax / dtypeMax
+    per_token_scale[per_token_scale == 0] = 1.0
+    scale_expanded = per_token_scale[:, np.newaxis]
+    output_ref = (input_data / scale_expanded).astype(np.int8)
 
     input_size_bytes = M * N * 2
     output_size_bytes = M * N * 1
@@ -353,10 +429,7 @@ def benchmark_per_token_quant(M=4096, N=8192):
     hip_check(hip.hipFree(d_scales))
     hip_check(hip.hipModuleUnload(hip_module))
 
-    # ========================================================================
-    # Benchmark Reference Implementation (aiter)
-    # ========================================================================
-    if HAS_AITER:  # HAS_ATIER
+    if HAS_AITER:
         print("\n" + "=" * 80)
         print("Benchmarking Reference Implementation (aiter)")
         print("=" * 80)
@@ -432,9 +505,98 @@ if __name__ == "__main__":
     parser.add_argument(
         "-n", "--hidden", type=int, default=8192, help="Hidden dimension (N)"
     )
+    parser.add_argument(
+        "--multi-test", type=str, default=None,
+        help="Run multiple tests with different sizes. Format: 'MxN,MxN,...' (e.g., '2048x4096,4096x8192')"
+    )
     args = parser.parse_args()
 
-    success = benchmark_per_token_quant(M=args.tokens, N=args.hidden)
+    if args.multi_test:
+        test_configs = []
+        for size_str in args.multi_test.split(','):
+            m_str, n_str = size_str.strip().split('x')
+            test_configs.append((int(m_str), int(n_str)))
 
-    if not success:
-        sys.exit(1)
+        print(f"\n{'='*80}")
+        print(f"Per-Token Quantization Multi-Size Benchmark (v3 with caching)")
+        print(f"Test Configurations: {len(test_configs)}")
+        for i, (m, n) in enumerate(test_configs, 1):
+            print(f"  {i}. M={m}, N={n}")
+        print(f"{'='*80}")
+
+        from collections import defaultdict
+        tests_by_n = defaultdict(list)
+        for m, n in test_configs:
+            tests_by_n[n].append((m, n))
+        
+        unique_ns = sorted(tests_by_n.keys())
+        if len(unique_ns) == 1:
+            print(f"\n✓ All tests use N={unique_ns[0]} - will compile once and reuse!")
+        else:
+            print(f"\n⚠ {len(unique_ns)} different N values detected: {unique_ns}")
+            print(f"  Will compile once per N value (total {len(unique_ns)} compilations)")
+        
+        gpu_arch = get_hip_arch()
+        results = []
+        cache = KernelCompilationCache()
+        
+        for n_val in unique_ns:
+            n_tests = tests_by_n[n_val]
+            
+            print(f"\n{'='*80}")
+            print(f"Processing N={n_val} group ({len(n_tests)} test(s))")
+            print(f"{'='*80}")
+            
+            # Compile kernel for this N (only once)
+            print(f"Compiling kernel for N={n_val}...")
+            hsaco, config, was_cached = cache.get_or_compile(
+                n_val,
+                lambda: compile_kernel_for_n(n_val, gpu_arch)
+            )
+            
+            if was_cached:
+                print(f"✓ Using cached kernel ({len(hsaco)} bytes)")
+            else:
+                print(f"✓ Compiled to HSACO: {len(hsaco)} bytes")
+            
+            # Run all tests with this N using the compiled kernel
+            for M, N in n_tests:
+                print(f"\n{'='*80}")
+                print(f"Test {len(results)+1}/{len(test_configs)}: M={M}, N={N}")
+                print(f"{'='*80}")
+                
+                success = benchmark_per_token_quant(M=M, N=N, hsaco=hsaco, config=config)
+                
+                results.append({
+                    'M': M,
+                    'N': N,
+                    'success': success,
+                })
+                
+                if not success:
+                    print(f"✗ Failed for M={M}, N={N}")
+
+        # Summary
+        print(f"\n{'='*80}")
+        print(f"Summary of All Tests")
+        print(f"{'='*80}")
+        print(f"{'M':>6} {'N':>6} {'Status':>8}")
+        print(f"{'-'*80}")
+        for r in results:
+            status = "✓ Pass" if r['success'] else "✗ Fail"
+            print(f"{r['M']:6} {r['N']:6} {status:>8}")
+        
+        all_passed = all(r['success'] for r in results)
+        print(f"\n{'='*80}")
+        if all_passed:
+            print("✓ All tests passed!")
+        else:
+            print("✗ Some tests failed")
+        print(f"{'='*80}\n")
+
+        sys.exit(0 if all_passed else 1)
+    else:
+        # Single test mode
+        success = benchmark_per_token_quant(M=args.tokens, N=args.hidden)
+        if not success:
+            sys.exit(1)
