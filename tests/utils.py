@@ -4,15 +4,9 @@ from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.compiler.rocir_opt_helper import apply_rocir_coord_lowering
 from rocdsl.runtime.hip_util import get_hip_arch
 from mlir import ir
-import numpy as np
-from functools import wraps
 import os
-import tempfile
-from typing import Dict, Any, Callable
 import torch
-import logging
 import functools
-from tests.test_common import run_perftest, verify_output
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     """
