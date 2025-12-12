@@ -50,7 +50,7 @@ except ImportError:
 
 from hip import hip
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import arith, gpu, rocir, collective_ops
+from rocdsl.dialects.ext import arith, gpu, rocir, block_reduce_ops
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from rocdsl.utils import SmemAllocator
@@ -219,7 +219,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
 
             cached_vecs.append(vec_val_f32)
 
-        reduced_max = collective_ops.block_reduce_max(
+        reduced_max = block_reduce_ops.block_reduce_max(
             local_max, red_val, tid_linear, num_warps=NUM_WARPS, warp_size=64
         )
 
