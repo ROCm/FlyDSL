@@ -20,8 +20,8 @@ from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco, pertoken_quant, verify_output
-from tests.test_common import run_perftest
+from tests.utils import compile_to_hsaco, pertoken_quant
+from tests.test_common import run_perftest, verify_output
 import torch
 import torch.nn.functional as F
 import pytest
