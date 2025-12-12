@@ -130,7 +130,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             index_type = ir.IndexType.get()
             vec4_f32 = ir.VectorType.get([4], f32)
             vec8_f8 = ir.VectorType.get([8], f8)
+            vec16_f8 = ir.VectorType.get([16], f8)
             vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+            vec2_i64 = ir.VectorType.get([2], ir.IntegerType.get_signless(64))
             vec2_i32 = ir.VectorType.get([2], i32_type)
             vec4_i32 = ir.VectorType.get([4], i32_type)
             
@@ -276,42 +278,38 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
             # --- B Load Logic ---
             def load_b_tile(base_k):
                 b_vals = []
-                for ki_step in range(k_unroll):
-                    # We will load two K=32 slices: k0 and k0+32 (K64 total)
-                    ki = ki_step * 64
-                    ki_val = arith.constant(ki, index=True)
+                # For our layout, stepping K by +32 only changes k_blk_local by +1, and that
+                # corresponds to +512 bytes in memory (stride_k_blocks = 512 for fp8).
+                # We take advantage of that by computing a single base address (k0) and using
+                # constant index increments (+128 i32 elements == +512B) that the backend can fold
+                # into the instruction's immediate `offset:` field (avoids v_add chains *and*
+                # avoids extra SGPR soffset registers).
+                k0 = _arith_mlir.AddIOp(unwrap(col_offset_base), unwrap(base_k)).result
+                k_intra = _arith_mlir.RemUIOp(unwrap(k0), unwrap(c16)).result
+                k_rem = _arith_mlir.DivUIOp(unwrap(k0), unwrap(c16)).result
+                k_pack = _arith_mlir.RemUIOp(unwrap(k_rem), unwrap(c_dim_k_split)).result
+                k_blk = _arith_mlir.DivUIOp(unwrap(k_rem), unwrap(c_dim_k_split)).result
 
-                    # k0
-                    col0_off = _arith_mlir.AddIOp(unwrap(col_offset_base), unwrap(ki_val)).result
-                    col0 = _arith_mlir.AddIOp(unwrap(col0_off), unwrap(base_k)).result
-                    k0_intra = _arith_mlir.RemUIOp(unwrap(col0), unwrap(c16)).result
-                    k0_rem = _arith_mlir.DivUIOp(unwrap(col0), unwrap(c16)).result
-                    k0_pack = _arith_mlir.RemUIOp(unwrap(k0_rem), unwrap(c_dim_k_split)).result
-                    k0_blk = _arith_mlir.DivUIOp(unwrap(k0_rem), unwrap(c_dim_k_split)).result
+                for i in range(num_acc_n):
+                    n_intra = n_intra_list[i]
+                    n_blk = n_blk_list[i]
+                    coord_b0 = rocir.make_coord(n_intra, n_blk, k_intra, k_pack, k_blk)
+                    idx_b0_base = rocir.crd2idx(coord_b0, layout_b)
+                    idx_b0 = _arith_mlir.DivUIOp(unwrap(idx_b0_base), unwrap(c4)).result
 
-                    # k1 = k0 + 32
-                    col1 = _arith_mlir.AddIOp(unwrap(col0), unwrap(c32)).result
-                    k1_intra = _arith_mlir.RemUIOp(unwrap(col1), unwrap(c16)).result
-                    k1_rem = _arith_mlir.DivUIOp(unwrap(col1), unwrap(c16)).result
-                    k1_pack = _arith_mlir.RemUIOp(unwrap(k1_rem), unwrap(c_dim_k_split)).result
-                    k1_blk = _arith_mlir.DivUIOp(unwrap(k1_rem), unwrap(c_dim_k_split)).result
-                    
-                    for i in range(num_acc_n):
-                        n_intra = n_intra_list[i]
-                        n_blk = n_blk_list[i]
+                    # Emit 2*k_unroll loads: for each ki_step we need b0 (K) and b1 (K+32).
+                    # k_blk_local advances by +1 per +32, so these are consecutive 512B strides.
+                    for ki_step in range(k_unroll):
+                        # buffer_ops.buffer_load uses element offsets and multiplies by 4 (i32 bytes),
+                        # so +512B is +128 i32 elements.
+                        inc0 = arith.constant((2 * ki_step + 0) * 128, index=True)
+                        inc1 = arith.constant((2 * ki_step + 1) * 128, index=True)
+                        idx0 = _arith_mlir.AddIOp(unwrap(idx_b0), unwrap(inc0)).result
+                        idx1 = _arith_mlir.AddIOp(unwrap(idx_b0), unwrap(inc1)).result
 
-                        # b0
-                        coord_b0 = rocir.make_coord(n_intra, n_blk, k0_intra, k0_pack, k0_blk)
-                        idx_b0_base = rocir.crd2idx(coord_b0, layout_b)
-                        idx_b0 = _arith_mlir.DivUIOp(unwrap(idx_b0_base), unwrap(c4)).result
-                        b0 = buffer_ops.buffer_load(b_rsrc, idx_b0, vec_width=4, dtype=i32_type)
+                        b0 = buffer_ops.buffer_load(b_rsrc, idx0, vec_width=4, dtype=i32_type)
+                        b1 = buffer_ops.buffer_load(b_rsrc, idx1, vec_width=4, dtype=i32_type)
                         b_vals.append(b0)
-
-                        # b1 (K+32)
-                        coord_b1 = rocir.make_coord(n_intra, n_blk, k1_intra, k1_pack, k1_blk)
-                        idx_b1_base = rocir.crd2idx(coord_b1, layout_b)
-                        idx_b1 = _arith_mlir.DivUIOp(unwrap(idx_b1_base), unwrap(c4)).result
-                        b1 = buffer_ops.buffer_load(b_rsrc, idx_b1, vec_width=4, dtype=i32_type)
                         b_vals.append(b1)
                 return b_vals
 
@@ -491,11 +489,15 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                 
                 for ki_step in range(k_unroll):
                     # Get B for this step from regs.
-                    # Layout: for each ki_step, we stored [b0(ni=0..), b1(ni=0..)] interleaved per ni,
-                    # so total per step is 2 * num_acc_n entries.
-                    base = ki_step * (2 * num_acc_n)
-                    b0_step = b_vals_in[base : base + (2 * num_acc_n) : 2]
-                    b1_step = b_vals_in[base + 1 : base + (2 * num_acc_n) : 2]
+                    # Layout after address-rewrite: for each ni we stored:
+                    #   [b0(step0), b1(step0), b0(step1), b1(step1), ...]
+                    # So total b_vals_in is (num_acc_n * 2 * k_unroll).
+                    b0_step = []
+                    b1_step = []
+                    for ni in range(num_acc_n):
+                        base = ni * (2 * k_unroll)
+                        b0_step.append(b_vals_in[base + (2 * ki_step + 0)])
+                        b1_step.append(b_vals_in[base + (2 * ki_step + 1)])
 
                     # Pack B0 and B1 once per k_step (each MFMA operand is 8B -> i64).
                     b0_packs = []
@@ -546,22 +548,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
                         
-                        # Load A operands (two 8B packs) for the K64 micro-step.
-                        # a0 uses K base, a1 uses K+32.
+                        # Load A operands for the K64 micro-step.
+                        # In LDS we swizzle so K and K+32 are adjacent (8B apart), so we can do one
+                        # 16B LDS read (ds_read_b128) and split into two i64 packs.
                         coord_a0 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
                         idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
                         idx_a0_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0)).result
 
-                        coord_a1 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds1_swizzled))
-                        idx_a1 = rocir.crd2idx(coord_a1, layout_lds)
-                        idx_a1_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a1)).result
-
-                        loaded_a0 = vector.LoadOp(vec8_f8, lds_a, [unwrap(idx_a0_idx)]).result
-                        loaded_a1 = vector.LoadOp(vec8_f8, lds_a, [unwrap(idx_a1_idx)]).result
-                        a0_vec64 = vector.BitCastOp(vec1_i64, loaded_a0).result
-                        a1_vec64 = vector.BitCastOp(vec1_i64, loaded_a1).result
-                        a0_pack = vector.ExtractOp(a0_vec64, static_position=[0], dynamic_position=[]).result
-                        a1_pack = vector.ExtractOp(a1_vec64, static_position=[0], dynamic_position=[]).result
+                        loaded_a16 = vector.LoadOp(vec16_f8, lds_a, [unwrap(idx_a0_idx)]).result
+                        a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
+                        a0_pack = vector.ExtractOp(a_vec128, static_position=[0], dynamic_position=[]).result
+                        a1_pack = vector.ExtractOp(a_vec128, static_position=[1], dynamic_position=[]).result
                         
                         for ni in range(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
