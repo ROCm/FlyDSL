@@ -209,7 +209,8 @@ def buffer_load(rsrc: ir.Value,
                 vec_width: int = 4,
                 dtype = None,
                 mask: Optional[ir.Value] = None,
-                cache_modifier: int = 0) -> ir.Value:
+                cache_modifier: int = 0,
+                soffset_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
     """AMD buffer load operation.
     
     Load data from global memory using buffer descriptor and offset.
@@ -222,6 +223,9 @@ def buffer_load(rsrc: ir.Value,
         dtype: Element data type (None for f32, or ir.F32Type, etc.)
         mask: Optional mask for predicated load (i1 type)
         cache_modifier: Cache control flags (0 for default)
+        soffset_bytes: Optional scalar offset (in BYTES) added by the buffer instruction (soffset).
+                      Use this to fold small constant deltas into the instruction instead of emitting
+                      extra VGPR address arithmetic.
         
     Returns:
         Loaded data (scalar or vector depending on vec_width)
@@ -266,7 +270,16 @@ def buffer_load(rsrc: ir.Value,
         result_type = ir.VectorType.get([vec_width], dtype)
     
     # Create instruction offset and aux flags
-    zero_i32 = _create_i32_constant(0)
+    if soffset_bytes is None:
+        soffset = _create_i32_constant(0)
+    else:
+        if isinstance(soffset_bytes, int):
+            soffset = _create_i32_constant(soffset_bytes)
+        else:
+            soffset = _unwrap_value(soffset_bytes)
+            if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
+                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     
     # Emit buffer load
@@ -274,7 +287,7 @@ def buffer_load(rsrc: ir.Value,
         result_type, 
         rsrc, 
         offset, 
-        zero_i32,  # soffset (instruction offset)
+        soffset,   # soffset (scalar byte offset)
         aux_flags  # aux (cache modifiers)
     )
     

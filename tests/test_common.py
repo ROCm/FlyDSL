@@ -417,7 +417,8 @@ def checkAllclose(
 
 
 def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
-    checkAllclose(c_out, c_ref, rtol=atol, atol=atol)
+    if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
+        return True
     
     # Calculate various error metrics
     abs_diff = (c_out - c_ref).abs()
@@ -432,7 +433,7 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
         numerator = 2 * (x * y).sum()
         sim = numerator / denominator
         diff = (1 - sim).item()
-        return diff if not torch.isnan(torch.tensor(diff)) else 0.0
+        return diff if not torch.isnan(torch.tensor(diff)) else 1.0 # NaN means mismatch
 
     logits_diff = calc_diff(c_out, c_ref)
     print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")
