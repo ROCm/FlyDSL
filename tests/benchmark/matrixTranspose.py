@@ -503,6 +503,15 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
         A: T.memref(M * N, T.f32()),
         B: T.memref(N * M, T.f32())
     ):
+        # Helpers to keep the kernel code readable.
+        def v(x):
+            """Unwrap ArithValue (or similar wrappers) to an MLIR Value."""
+            return x.value if hasattr(x, "value") else (x._value if hasattr(x, "_value") else x)
+
+        def if_(pred):
+            """Create scf.if with a possibly wrapped i1 predicate."""
+            return scf.IfOp(v(pred))
+
         smem = memref.get_global(smem_type, "tile_smem_rocir")
         
         tx = rocir.thread_idx("x")
@@ -521,12 +530,27 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
         
         vec_type = T.vector(VEC_WIDTH, T.f32())
 
+        # Layouts for index mapping (express address math via rocir ops where possible).
+        one_c = arith.index(1)
+        i0 = arith.index(0)
+        i1 = arith.index(1)
+
+        tile_layout = rocir.make_layout(
+            (block_tile_c, block_tile_c),
+            stride=(block_tile_c, one_c),  # row-major
+        )
+        a_layout = rocir.make_layout((m_c, n_c), stride=(n_c, one_c))
+        b_layout = rocir.make_layout((n_c, m_c), stride=(m_c, one_c))
+        smem_layout = rocir.make_layout((block_tile_c, smem_stride_c), stride=(smem_stride_c, one_c))
+
         for i in range(VEC_PER_THREAD):
             i_c = arith.index(i)
             vec_index = tid + i_c * block_threads_c
             tile_linear = vec_index * vec_width_c
-            row_off = tile_linear // block_tile_c
-            col_off = tile_linear % block_tile_c
+            # (row_off, col_off) = idx2crd(tile_linear, tile_layout)
+            tile_coord = rocir.idx2crd(tile_linear, tile_layout)
+            row_off = rocir.get(tile_coord, i0)
+            col_off = rocir.get(tile_coord, i1)
             
             global_row = by * block_tile_c + row_off
             global_col = bx * block_tile_c + col_off
@@ -535,20 +559,22 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             col_valid = global_col < n_c
             col_end_valid = (global_col + vec_width_c) <= n_c
             valid_load = row_valid & col_valid & col_end_valid
-            cond_val = valid_load.value if hasattr(valid_load, "value") else valid_load._value
-            if_op = scf.IfOp(cond_val)
+            if_op = if_(valid_load)
             with ir.InsertionPoint(if_op.then_block):
                 vals = []
                 for t in range(VEC_WIDTH):
                     t_c = arith.index(t)
-                    g_idx = global_row * n_c + global_col + t_c
-                    val_op = memref.load(A, [g_idx.value if hasattr(g_idx, "value") else g_idx])
+                    # g_idx = (global_row, global_col + t) under A layout
+                    a_coord = rocir.make_coord(global_row, global_col + t_c)
+                    g_idx = rocir.crd2idx(a_coord, a_layout)
+                    val_op = memref.load(A, [v(g_idx)])
                     val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
                     vals.append(val)
                 
                 vec_val = vector.from_elements(vec_type, vals)
-                s_idx = row_off * smem_stride_c + col_off
-                vector.store(vec_val, smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
+                s_coord = rocir.make_coord(row_off, col_off)
+                s_idx = rocir.crd2idx(s_coord, smem_layout)
+                vector.store(vec_val, smem, [v(s_idx)])
                 scf.yield_([])
         
         gpu.barrier()
@@ -557,8 +583,9 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             i_c = arith.index(i)
             vec_index = tid + i_c * block_threads_c
             tile_linear = vec_index * vec_width_c
-            row_off = tile_linear // block_tile_c
-            col_off = tile_linear % block_tile_c
+            tile_coord = rocir.idx2crd(tile_linear, tile_layout)
+            row_off = rocir.get(tile_coord, i0)
+            col_off = rocir.get(tile_coord, i1)
             
             base_row_b = bx * block_tile_c + row_off
             base_col_b = by * block_tile_c + col_off
@@ -567,20 +594,21 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             col_valid = base_col_b < m_c
             col_end_valid = (base_col_b + vec_width_c) <= m_c
             valid_store = row_valid & col_valid & col_end_valid
-            cond_val = valid_store.value if hasattr(valid_store, "value") else valid_store._value
-            if_op = scf.IfOp(cond_val)
+            if_op = if_(valid_store)
             with ir.InsertionPoint(if_op.then_block):
                 vals = []
                 for t in range(VEC_WIDTH):
                     t_c = arith.index(t)
-                    s_idx = (col_off + t_c) * smem_stride_c + row_off
-                    val_op = memref.load(smem, [s_idx.value if hasattr(s_idx, "value") else s_idx])
+                    s_coord = rocir.make_coord(col_off + t_c, row_off)
+                    s_idx = rocir.crd2idx(s_coord, smem_layout)
+                    val_op = memref.load(smem, [v(s_idx)])
                     val = val_op.value if hasattr(val_op, "value") else (val_op.result if hasattr(val_op, "result") else val_op)
                     vals.append(val)
                 
                 vec_val = vector.from_elements(vec_type, vals)
-                g_idx_b = base_row_b * m_c + base_col_b
-                vector.store(vec_val, B, [g_idx_b.value if hasattr(g_idx_b, "value") else g_idx_b])
+                b_coord = rocir.make_coord(base_row_b, base_col_b)
+                g_idx_b = rocir.crd2idx(b_coord, b_layout)
+                vector.store(vec_val, B, [v(g_idx_b)])
                 scf.yield_([])
     
     ip.__exit__(None, None, None)
@@ -735,19 +763,30 @@ if __name__ == "__main__":
     print(f"{'Implementation':<25} {'Time (ms)':<15} {'Bandwidth (GB/s)':<20} {'Speedup':<10}")
     print("-" * 80)
     
+    def _metric(res, name: str, default=None):
+        """Support either dict-style or object-style benchmark result containers."""
+        if res is None:
+            return default
+        if isinstance(res, dict):
+            return res.get(name, default)
+        return getattr(res, name, default)
+
     if results_arith:
-        arith_bw = results_arith.bandwidth_gbs
-        print(f"{'Arith':<25} {results_arith.avg_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
+        arith_bw = _metric(results_arith, "bandwidth_gbs")
+        arith_ms = _metric(results_arith, "avg_ms")
+        print(f"{'Arith':<25} {arith_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
         
         if results_rocir:
-            rocir_bw = results_rocir.bandwidth_gbs
+            rocir_bw = _metric(results_rocir, "bandwidth_gbs")
+            rocir_ms = _metric(results_rocir, "avg_ms")
             speedup = rocir_bw / arith_bw
-            print(f"{'Rocir Layout API':<25} {results_rocir.avg_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+            print(f"{'Rocir Layout API':<25} {rocir_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
         
         if results_buffer_load:
-            buffer_bw = results_buffer_load.bandwidth_gbs
+            buffer_bw = _metric(results_buffer_load, "bandwidth_gbs")
+            buffer_ms = _metric(results_buffer_load, "avg_ms")
             speedup = buffer_bw / arith_bw
-            print(f"{'Buffer Load (CDNA3)':<25} {results_buffer_load.avg_ms:<15.3f} {buffer_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+            print(f"{'Buffer Load (CDNA3)':<25} {buffer_ms:<15.3f} {buffer_bw:<20.2f} {f'{speedup:.2f}x':<10}")
     
     print("="*80)
     print("✓ BENCHMARK COMPLETED")

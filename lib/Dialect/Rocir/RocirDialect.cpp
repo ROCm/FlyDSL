@@ -530,14 +530,34 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &os) const {
       // Tuple spec: no quotes.
       os << "shape<" << shapeType.getSpec() << ">";
     } else {
-      os << "shape<" << shapeType.getRank() << ">";
+      int r = shapeType.getRank();
+      if (r >= 0) {
+        os << "shape<(";
+        for (int i = 0; i < r; ++i) {
+          if (i) os << ",";
+          os << "?";
+        }
+        os << ")>";
+      } else {
+        os << "shape<" << r << ">";
+      }
     }
   } else if (auto strideType = llvm::dyn_cast<StrideType>(type)) {
     if (!strideType.getSpec().empty()) {
       // Tuple spec: no quotes.
       os << "stride<" << strideType.getSpec() << ">";
     } else {
-      os << "stride<" << strideType.getRank() << ">";
+      int r = strideType.getRank();
+      if (r >= 0) {
+        os << "stride<(";
+        for (int i = 0; i < r; ++i) {
+          if (i) os << ",";
+          os << "?";
+        }
+        os << ")>";
+      } else {
+        os << "stride<" << r << ">";
+      }
     }
   } else if (auto layoutType = llvm::dyn_cast<LayoutType>(type)) {
     int r = layoutType.getRank();
