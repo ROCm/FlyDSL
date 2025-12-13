@@ -569,6 +569,19 @@ def test_logical_divide_2d():
                             expected_vals=[3, 3, 2, 4, 2, 2, 177, 59, 13, 2, 26, 1])
 
 
+def test_shape_stride_type_nested_spec_printing():
+    """Ensure nested shape/stride types print in the cute-like form: <"(...)">."""
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+
+    @func.FuncOp.from_py_func()
+    def _build():
+        s = rocir.make_shape(Index(9), (Index(4), Index(8)))
+        st = rocir.make_stride(Index(59), (Index(13), Index(1)))
+        assert str(s.type) == '!rocir.shape<"(9,(4,8))">'
+        assert str(st.type) == '!rocir.stride<"(59,(13,1))">'
+        return
+
+
 def test_zipped_divide():
     """Cell 19: Zipped Divide - same inputs as Cell 17"""
     print("\n" + "="*80)
