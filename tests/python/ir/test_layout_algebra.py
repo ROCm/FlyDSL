@@ -520,28 +520,17 @@ def test_logical_divide_2d():
     
     @func.FuncOp.from_py_func()
     def run_logical_divide_2d():
-        # Explicitly construct nested shapes to ensure structure is preserved
-        # Input: (9, (4, 8))
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        # Input: (9, (4, 8)):(59, (13, 1))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        # Tiler: (3, (2, 4))
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        # Tiler: (3, (2, 4)):(3, (1, 8))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_logical = rocir.logical_divide(layout, tiler)
         
@@ -577,8 +566,8 @@ def test_shape_stride_type_nested_spec_printing():
     def _build():
         s = rocir.make_shape(Index(9), (Index(4), Index(8)))
         st = rocir.make_stride(Index(59), (Index(13), Index(1)))
-        assert str(s.type) == '!rocir.shape<"(9,(4,8))">'
-        assert str(st.type) == '!rocir.stride<"(59,(13,1))">'
+        assert str(s.type) == '!rocir.shape<(9,(4,8))>'
+        assert str(st.type) == '!rocir.stride<(59,(13,1))>'
         return
 
 
@@ -597,25 +586,15 @@ def test_zipped_divide():
     
     @func.FuncOp.from_py_func()
     def run_zipped_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_zipped = rocir.zipped_divide(layout, tiler)
         
@@ -652,25 +631,15 @@ def test_tiled_divide():
     
     @func.FuncOp.from_py_func()
     def run_tiled_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_tiled = rocir.tiled_divide(layout, tiler)
         
@@ -706,25 +675,15 @@ def test_flat_divide():
     
     @func.FuncOp.from_py_func()
     def run_flat_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_flat = rocir.flat_divide(layout, tiler)
         sz = rocir.size(res_flat)

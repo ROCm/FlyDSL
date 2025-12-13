@@ -24,6 +24,10 @@ public:
   static ShapeType get(MLIRContext *context, int rank);
   /// Create a ShapeType from a canonical textual spec, e.g. "(9,(4,8))" or "(?,(?,?))".
   static ShapeType get(MLIRContext *context, ::llvm::StringRef spec);
+  /// Create a ShapeType from a tuple key (structure encoding + flattened dims).
+  static ShapeType get(MLIRContext *context,
+                       ::llvm::ArrayRef<int32_t> structure,
+                       ::llvm::ArrayRef<int64_t> dims);
   int getRank() const;
   ArrayRef<int32_t> getStructure() const;
   ::llvm::StringRef getSpec() const;
@@ -37,6 +41,10 @@ public:
   static StrideType get(MLIRContext *context, int rank);
   /// Create a StrideType from a canonical textual spec, e.g. "(59,(13,1))" or "(?,(?,?))".
   static StrideType get(MLIRContext *context, ::llvm::StringRef spec);
+  /// Create a StrideType from a tuple key (structure encoding + flattened dims).
+  static StrideType get(MLIRContext *context,
+                        ::llvm::ArrayRef<int32_t> structure,
+                        ::llvm::ArrayRef<int64_t> dims);
   int getRank() const;
   ArrayRef<int32_t> getStructure() const;
   ::llvm::StringRef getSpec() const;

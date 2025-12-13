@@ -452,7 +452,7 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
         dims = dims[0]
     
     # Nested form: allow tuple/list and nested rocir.make_shape results.
-    # If we can fully flatten to leaf index values, emit a cute-like type: !rocir.shape<"(...)">.
+    # If we can fully flatten to leaf index values, emit a cute-like type: !rocir.shape<(...)>.
     nested_spec = None
     nested_leaf_vals = None
 
@@ -509,7 +509,7 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
 
     if nested_spec is not None and nested_leaf_vals is not None:
         # Type carries structure; rank is implied by leaf count.
-        result_type = Type.parse(f'!rocir.shape<"{nested_spec}">')
+        result_type = Type.parse(f'!rocir.shape<{nested_spec}>')
         flat_dims = nested_leaf_vals
     else:
         # Fallback: flat shape only
@@ -599,7 +599,7 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
             nested_leaf_vals = None
 
     if nested_spec is not None and nested_leaf_vals is not None:
-        result_type = Type.parse(f'!rocir.stride<"{nested_spec}">')
+        result_type = Type.parse(f'!rocir.stride<{nested_spec}>')
         flat_strides = nested_leaf_vals
     else:
         flat_strides = _flatten_nested(strides)
@@ -663,8 +663,13 @@ def make_layout(shape, stride=None, loc: Optional[Location] = None, ip: Optional
     # Extract rank from shape type
     shape_type_str = str(shape.type)
     type_content = shape_type_str.split("<")[1].split(">")[0].strip()
-    # New format: !rocir.shape<"(...)">
-    if len(type_content) >= 2 and type_content[0] == '"' and type_content[-1] == '"':
+    # New formats:
+    # - !rocir.shape<(...)> (cute-like)
+    # - !rocir.shape<"(...)"> (legacy)
+    if type_content.startswith("("):
+        spec = type_content
+        rank = _count_leaves_in_tuple_spec(spec)
+    elif len(type_content) >= 2 and type_content[0] == '"' and type_content[-1] == '"':
         spec = type_content[1:-1]
         rank = _count_leaves_in_tuple_spec(spec)
     elif "," in type_content:

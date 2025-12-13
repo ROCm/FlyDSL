@@ -2,6 +2,8 @@
 build/
 build_*/
 cmake-build-*/
+*dump*
+.cache
 
 # Python
 __pycache__/
