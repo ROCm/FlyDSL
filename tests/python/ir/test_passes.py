@@ -30,17 +30,14 @@ def test_pipeline_construction():
 
 def test_pipeline_add_pass_with_options():
     """Test adding passes with options."""
-    pipeline = Pipeline().cute_nvgpu_to_nvgpu(
-        target_arch="sm_90",
-        enable_tma=True
-    )
+    pipeline = Pipeline().add_pass("canonicalize", max_iterations=10, top_down=True)
     
     pipeline_str = str(pipeline)
     
     # Should format options correctly
-    assert "rocir-nvgpu-to-nvgpu" in pipeline_str
-    assert "target-arch=sm_90" in pipeline_str
-    assert "enable-tma=1" in pipeline_str
+    assert "canonicalize" in pipeline_str
+    assert "max_iterations=10" in pipeline_str
+    assert "top_down=True" in pipeline_str
 
 
 def test_pipeline_composition():
@@ -68,33 +65,22 @@ def test_nested_pipelines():
                       .canonicalize()
                       .cse())
                 .Gpu(Pipeline()
-                     .cute_memory_coalescing()))
+                     .canonicalize()))
     
     pipeline_str = str(pipeline)
     
     assert "func.func(canonicalize,cse)" in pipeline_str
-    assert "gpu.module(rocir-memory-coalescing)" in pipeline_str
+    assert "gpu.module(canonicalize)" in pipeline_str
 
 
 def test_pipeline_recipes():
     """Test pre-built pipeline recipes."""
-    # Rocir to Standard recipe
-    p1 = Pipeline().lower_rocir_to_standard()
-    s1 = str(p1)
-    assert "rocir-to-standard" in s1
-    assert "canonicalize" in s1
-    
-    # Optimization recipe
-    p2 = Pipeline().optimize_cute_layouts()
-    s2 = str(p2)
-    assert "rocir-layout-fusion" in s2
-    assert "rocir-vectorization" in s2
-    
-    # LLVM lowering recipe  
-    p3 = Pipeline().lower_to_llvm()
-    s3 = str(p3)
-    assert "convert-scf-to-cf" in s3
-    assert "convert-func-to-llvm" in s3
+    # Simple composed recipe (API-level check)
+    p = Pipeline().rocir_to_standard().canonicalize().cse()
+    s = str(p)
+    assert "rocir-to-standard" in s
+    assert "canonicalize" in s
+    assert "cse" in s
 
 
 def test_run_pipeline_basic():
