@@ -9,14 +9,14 @@ func.func @test_idx2crd() {
   // Create layout with shape (8, 128) and stride (1, 16)
   %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
   %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<2>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
   
   // Convert linear index 50 back to coordinate
   // Expected: (2, 3) since 50 = 2*1 + 3*16
-  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<-1>) -> !rocir.coord<-1>
+  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<(?,?)>) -> !rocir.coord<(?,?)>
   
   // Verify coord was created (avoid DCE)
-  %size = rocir.size %layout : !rocir.layout<-1> -> index
+  %size = rocir.size %layout : !rocir.layout<(?,?)> -> index
   
   return
 }

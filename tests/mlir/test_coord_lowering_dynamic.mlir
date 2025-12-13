@@ -9,13 +9,13 @@ module {
     
     %shape = rocir.make_shape %c32, %c64 : (index, index) -> !rocir.shape<(?,?)>
     %stride = rocir.make_stride %c64, %c1 : (index, index) -> !rocir.stride<(?,?)>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<2>
+    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
     
     // Create coordinate from dynamic arguments
-    %coord = rocir.make_coord %arg0, %arg1 : (index, index) -> !rocir.coord<2>
+    %coord = rocir.make_coord %arg0, %arg1 : (index, index) -> !rocir.coord<(?,?)>
     
     // Convert to linear index
-    %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<2>, !rocir.layout<2>) -> index
+    %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<(?,?)>, !rocir.layout<(?,?)>) -> index
     
     return %idx : index
   }

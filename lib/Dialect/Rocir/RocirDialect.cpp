@@ -1,14 +1,12 @@
 //===- RocirDialect.cpp - Rocir Dialect Implementation --------------------===//
 
 #include "rocir/RocirDialect.h"
-#include "rocir/RocirOps.h"
+#include "rocir/RocirOps.h" // Required for generated RocirOps.cpp.inc op class references.
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/MathExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include <functional>
 #include <string>
@@ -263,7 +261,7 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
     if (succeeded(parser.parseOptionalLess())) {
       // Supported:
       // - shape<"(...)">   (legacy quoted tuple spec)
-      // - shape<(...)>     (cute-like unquoted tuple spec)
+      // - shape<(...)>     (tuple spec, unquoted)
       // - shape<rank>
       std::string spec;
       int64_t rank = -1;
@@ -343,7 +341,7 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
     if (succeeded(parser.parseOptionalLess())) {
       // Supported:
       // - stride<"(...)">   (legacy quoted tuple spec)
-      // - stride<(...)>     (cute-like unquoted tuple spec)
+      // - stride<(...)>     (tuple spec, unquoted)
       // - stride<rank>
       std::string spec;
       int64_t rank = -1;
@@ -417,7 +415,50 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
   
   if (mnemonic == "layout") {
     if (succeeded(parser.parseOptionalLess())) {
+      // Supported:
+      // - layout<(...)>   (tuple rank spec)
+      // - layout<rank>
       int64_t rank = -1;
+      if (succeeded(parser.parseOptionalLParen())) {
+        // Parse tuple purely to count leaf rank (integers or '?').
+        int leafCount = 0;
+        std::function<ParseResult()> parseElem;
+        std::function<ParseResult()> parseTuple;
+
+        parseElem = [&]() -> ParseResult {
+          if (succeeded(parser.parseOptionalLParen()))
+            return parseTuple();
+          if (succeeded(parser.parseOptionalQuestion())) {
+            ++leafCount;
+            return success();
+          }
+          int64_t v = 0;
+          if (parser.parseInteger(v))
+            return failure();
+          ++leafCount;
+          return success();
+        };
+
+        parseTuple = [&]() -> ParseResult {
+          if (succeeded(parser.parseOptionalRParen()))
+            return success();
+          while (true) {
+            if (failed(parseElem()))
+              return failure();
+            if (succeeded(parser.parseOptionalComma()))
+              continue;
+            break;
+          }
+          if (parser.parseRParen())
+            return failure();
+          return success();
+        };
+
+        if (failed(parseTuple()) || parser.parseGreater())
+          return Type();
+        return LayoutType::get(ctx, leafCount);
+      }
+
       if (parser.parseInteger(rank) || parser.parseGreater())
         return Type();
       return LayoutType::get(ctx, static_cast<int>(rank));
@@ -427,7 +468,49 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
   
   if (mnemonic == "coord") {
     if (succeeded(parser.parseOptionalLess())) {
+      // Supported:
+      // - coord<(...)>   (tuple rank spec)
+      // - coord<rank>
       int64_t rank = -1;
+      if (succeeded(parser.parseOptionalLParen())) {
+        int leafCount = 0;
+        std::function<ParseResult()> parseElem;
+        std::function<ParseResult()> parseTuple;
+
+        parseElem = [&]() -> ParseResult {
+          if (succeeded(parser.parseOptionalLParen()))
+            return parseTuple();
+          if (succeeded(parser.parseOptionalQuestion())) {
+            ++leafCount;
+            return success();
+          }
+          int64_t v = 0;
+          if (parser.parseInteger(v))
+            return failure();
+          ++leafCount;
+          return success();
+        };
+
+        parseTuple = [&]() -> ParseResult {
+          if (succeeded(parser.parseOptionalRParen()))
+            return success();
+          while (true) {
+            if (failed(parseElem()))
+              return failure();
+            if (succeeded(parser.parseOptionalComma()))
+              continue;
+            break;
+          }
+          if (parser.parseRParen())
+            return failure();
+          return success();
+        };
+
+        if (failed(parseTuple()) || parser.parseGreater())
+          return Type();
+        return CoordType::get(ctx, leafCount);
+      }
+
       if (parser.parseInteger(rank) || parser.parseGreater())
         return Type();
       return CoordType::get(ctx, static_cast<int>(rank));
@@ -444,21 +527,41 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &os) const {
     os << "int";
   } else if (auto shapeType = llvm::dyn_cast<ShapeType>(type)) {
     if (!shapeType.getSpec().empty()) {
-      // Cute-like: no quotes.
+      // Tuple spec: no quotes.
       os << "shape<" << shapeType.getSpec() << ">";
     } else {
       os << "shape<" << shapeType.getRank() << ">";
     }
   } else if (auto strideType = llvm::dyn_cast<StrideType>(type)) {
     if (!strideType.getSpec().empty()) {
-      // Cute-like: no quotes.
+      // Tuple spec: no quotes.
       os << "stride<" << strideType.getSpec() << ">";
     } else {
       os << "stride<" << strideType.getRank() << ">";
     }
   } else if (auto layoutType = llvm::dyn_cast<LayoutType>(type)) {
-    os << "layout<" << layoutType.getRank() << ">";
+    int r = layoutType.getRank();
+    if (r >= 0) {
+      os << "layout<(";
+      for (int i = 0; i < r; ++i) {
+        if (i) os << ",";
+        os << "?";
+      }
+      os << ")>";
+    } else {
+      os << "layout<" << r << ">";
+    }
   } else if (auto coordType = llvm::dyn_cast<CoordType>(type)) {
-    os << "coord<" << coordType.getRank() << ">";
+    int r = coordType.getRank();
+    if (r >= 0) {
+      os << "coord<(";
+      for (int i = 0; i < r; ++i) {
+        if (i) os << ",";
+        os << "?";
+      }
+      os << ")>";
+    } else {
+      os << "coord<" << r << ">";
+    }
   }
 }

@@ -291,7 +291,7 @@ def test_composition_basic():
 def test_composition_static_vs_dynamic():
     """Cell 11: Composition with static vs dynamic - (10,2):(16,4) o (5,4):(1,5)
     
-    This test mirrors Cell 11 from cute_layout_algebra.ipynb which demonstrates
+    This test mirrors a reference notebook Cell 11 which demonstrates
     the difference between static (compile-time) and dynamic (runtime) types:
     
     STATIC types:
@@ -559,7 +559,7 @@ def test_logical_divide_2d():
 
 
 def test_shape_stride_type_nested_spec_printing():
-    """Ensure nested shape/stride types print in the cute-like form: <"(...)">."""
+    """Ensure nested shape/stride types print in tuple form."""
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
 
     @func.FuncOp.from_py_func()

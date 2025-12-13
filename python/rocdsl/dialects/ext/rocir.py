@@ -123,6 +123,19 @@ def _count_leaves_in_tuple_spec(spec: str) -> int:
     return leaves
 
 
+def _extract_rank_from_rocir_type_str(type_str: str) -> int:
+    """Extract rank from a rocir type string like '!rocir.layout<2>' or '!rocir.layout<(?,?)>'."""
+    if "<" not in type_str or ">" not in type_str:
+        raise ValueError(f"Cannot extract rank from type string: {type_str}")
+    inner = type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
+    if inner.startswith("("):
+        return _count_leaves_in_tuple_spec(inner)
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        return _count_leaves_in_tuple_spec(inner[1:-1])
+    # numeric
+    return int(inner)
+
+
 def _extract_tuple_spec_from_rocir_type(type_str: str) -> Optional[str]:
     """If type_str is like '!rocir.shape<\"(...)\">' or '!rocir.stride<\"(...)\">', return '(...)'."""
     if "<" not in type_str or ">" not in type_str:
@@ -452,7 +465,7 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
         dims = dims[0]
     
     # Nested form: allow tuple/list and nested rocir.make_shape results.
-    # If we can fully flatten to leaf index values, emit a cute-like type: !rocir.shape<(...)>.
+    # If we can fully flatten to leaf index values, emit a tuple-spec type: !rocir.shape<(...)>.
     nested_spec = None
     nested_leaf_vals = None
 
@@ -664,7 +677,7 @@ def make_layout(shape, stride=None, loc: Optional[Location] = None, ip: Optional
     shape_type_str = str(shape.type)
     type_content = shape_type_str.split("<")[1].split(">")[0].strip()
     # New formats:
-    # - !rocir.shape<(...)> (cute-like)
+    # - !rocir.shape<(...)> (tuple spec)
     # - !rocir.shape<"(...)"> (legacy)
     if type_content.startswith("("):
         spec = type_content
@@ -759,7 +772,7 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = CoordType.get(rank)
     
     with ip or InsertionPoint.current:
@@ -861,7 +874,7 @@ def get_shape(layout: Value, loc: Optional[Location] = None, ip: Optional[Insert
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = ShapeType.get(rank)
     
     with ip or InsertionPoint.current:
@@ -883,7 +896,7 @@ def get_stride(layout: Value, loc: Optional[Location] = None, ip: Optional[Inser
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = StrideType.get(rank)
     
     with ip or InsertionPoint.current:

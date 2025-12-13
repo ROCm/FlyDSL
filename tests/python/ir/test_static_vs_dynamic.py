@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static vs dynamic layout types test (mirrors cute_layout_algebra.ipynb Cell 11)"""
+"""Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
 
 import sys
 import os

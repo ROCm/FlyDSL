@@ -8,7 +8,7 @@ A modern MLIR-based compiler infrastructure for high performance ROCm kernels, p
 
 ## 🎯 Features
 
-- **Rocir Dialect**: Layout algebra IR inspired by CuTe/CUTLASS
+- **Rocir Dialect**: Layout algebra IR inspired by CUTLASS
   - Core abstractions: `!rocir.shape`, `!rocir.stride`, `!rocir.layout`
   - Powerful algebra: Composition, Product, Divide, Partition operations
   - Compile-time + Runtime hybrid evaluation

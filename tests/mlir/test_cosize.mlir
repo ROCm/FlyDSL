@@ -7,9 +7,9 @@ func.func @test_cosize() -> index {
   
   %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
   %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<2>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
   
-  %cosize = rocir.cosize %layout : !rocir.layout<2> -> index
+  %cosize = rocir.cosize %layout : !rocir.layout<(?,?)> -> index
   
   return %cosize : index
 }

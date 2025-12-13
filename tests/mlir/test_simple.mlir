@@ -7,9 +7,9 @@ func.func @test_idx2crd() {
   
   %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
   %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<2>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
   
-  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<-1>) -> !rocir.coord<-1>
+  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<(?,?)>) -> !rocir.coord<(?,?)>
   
   return
 }

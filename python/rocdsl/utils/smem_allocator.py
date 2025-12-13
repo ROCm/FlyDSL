@@ -51,7 +51,7 @@ def get_op_result_or_value(op_or_val):
 class SmemPtr:
     """
     Represents a typed pointer into Shared Memory.
-    Analogue to cute::Pointer<T>.
+    Analogue to a typed pointer wrapper.
     """
     def __init__(self, base_memref: ir.Value, byte_offset: int, element_type: ir.Type, shape: Optional[Tuple[int, ...]] = None):
         self.base_memref = base_memref # The raw i8 buffer

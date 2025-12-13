@@ -5,9 +5,9 @@ func.func @test1() {
   
   %shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
   %stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<2>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
   
-  %extracted_shape = rocir.get_shape %layout : !rocir.layout<2> -> !rocir.shape<(?,?)>
+  %extracted_shape = rocir.get_shape %layout : !rocir.layout<(?,?)> -> !rocir.shape<(?,?)>
   %size = rocir.size %extracted_shape : !rocir.shape<(?,?)> -> index
   
   return
