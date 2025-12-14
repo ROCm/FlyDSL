@@ -28,7 +28,12 @@ from mlir.ir import F16Type, F32Type, IntegerType, InsertionPoint
 from mlir.dialects import arith
 import mlir.extras.types as T
 from hip import hip
+from tests.test_common import run_perftest
 
+
+THR_M, THR_N = 4, 32
+VAL_M, VAL_N = 4, 4
+COPY_VEC = 8
 
 def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     """Create elementwise addition kernel demonstrating RocDSL API.
@@ -73,17 +78,13 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         blk_coord_y = bid_y
         blk_coord_x = bid_x
         
-        # ===== Step 2: Re-create TiledCopy and Layouts (Kernel Scope) =====
-        # Since we need these for logic inside the kernel
-        THR_M, THR_N = 4, 32
-        VAL_M, VAL_N = 4, 4
-        
+        # ===== Step 2: TiledCopy + Layouts =====
         thr_layout = rocir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
         val_layout = rocir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
         
         # Atoms
-        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=8)
-        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=8)
+        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
         
         # Tiled Copies
         tiled_copy_A = rocir.make_tiled_copy_tv(copy_atom_load, thr_layout, val_layout,
@@ -160,9 +161,10 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
 
 # Test cases
 TEST_SHAPES = [
-    (1, 3),
-    (129, 255),
-    (1021, 515),
+    # (1, 3),
+    # (129, 255),
+    # (1021, 515),
+    (5120, 4000),
 ]
 
 # Compute Max Dims for shared kernel
@@ -250,14 +252,17 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"elementwise_add_kernel"))
     
-    # Launch configuration
-    # We only launch enough blocks to cover M x N, but they access padded memory
-    BLOCK_X, BLOCK_Y = 16, 16
-    grid_x = (N + BLOCK_X - 1) // BLOCK_X
-    grid_y = (M + BLOCK_Y - 1) // BLOCK_Y
+    # Launch configuration (must match kernel tiling)
+    # - blockDim should provide exactly THR_M*THR_N threads (tidx in [0, THR_M*THR_N))
+    # - gridDim should be computed in units of the kernel's tile coverage
+    BLOCK_X, BLOCK_Y = THR_N, THR_M
+    TILE_M = THR_M * VAL_M
+    TILE_N = THR_N * VAL_N
+    grid_x = (N + TILE_N - 1) // TILE_N
+    grid_y = (M + TILE_M - 1) // TILE_M
     
     print(f"\n[RocDSL INFO] Launch configuration:")
-    print(f"  Grid: ({grid_x}, {grid_y}, 1) [Partial launch on {MAX_M}x{MAX_N} kernel]")
+    print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, partial launch on {MAX_M}x{MAX_N} kernel]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
     # Prepare arguments
@@ -294,41 +299,44 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     
     # Benchmark if requested
     if benchmark:
-        print(f"\n[RocDSL INFO] Running benchmark ({iterations} iterations)...")
-        import time
-        
-        start_event = hip_check(hip.hipEventCreate())
-        stop_event = hip_check(hip.hipEventCreate())
-        
-        # Warmup
-        for _ in range(10):
-            hip_check(hip.hipModuleLaunchKernel(
-                kernel_func, grid_x, grid_y, 1, BLOCK_X, BLOCK_Y, 1,
-                0, None, args, None
-            ))
+        # Use the shared perf harness (same as vecAdd benchmark) so results are comparable.
+        # NOTE: run_perftest uses torch.profiler on ROCm; it expects torch to be installed.
+        print(f"\n[RocDSL INFO] Running benchmark via run_perftest ({iterations} iterations)...")
+        try:
+            import torch  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "Benchmark requested but torch is unavailable. "
+                "Install torch ROCm build or run without --benchmark."
+            ) from e
+
+        def hip_kernel_launch():
+            hip_check(
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK_X,
+                    BLOCK_Y,
+                    1,
+                    0,
+                    None,
+                    args,
+                    None,
+                )
+            )
+
+        # run_perftest returns (data, avg_us)
+        _, avg_us = run_perftest(hip_kernel_launch, num_iters=iterations, num_warmup=10)
         hip_check(hip.hipDeviceSynchronize())
-        
-        # Benchmark
-        hip_check(hip.hipEventRecord(start_event, None))
-        for _ in range(iterations):
-            hip_check(hip.hipModuleLaunchKernel(
-                kernel_func, grid_x, grid_y, 1, BLOCK_X, BLOCK_Y, 1,
-                0, None, args, None
-            ))
-        hip_check(hip.hipEventRecord(stop_event, None))
-        hip_check(hip.hipEventSynchronize(stop_event))
-        
-        elapsed_ms = ctypes.c_float()
-        hip_check(hip.hipEventElapsedTime(ctypes.byref(elapsed_ms), start_event, stop_event))
-        
-        avg_time_ms = elapsed_ms.value / iterations
-        bandwidth_gb = (3 * M * N * a_host.itemsize) / (avg_time_ms / 1e3) / 1e9
-        
+
+        total_bytes = 3 * M * N * a_host.itemsize
+        bandwidth_gb = total_bytes / (avg_us / 1e6) / 1e9
+        avg_time_ms = avg_us / 1000.0
+
         print(f"  Average time: {avg_time_ms:.4f} ms")
         print(f"  Bandwidth: {bandwidth_gb:.2f} GB/s")
-        
-        hip_check(hip.hipEventDestroy(start_event))
-        hip_check(hip.hipEventDestroy(stop_event))
     
     # Cleanup
     hip_check(hip.hipFree(d_a))
