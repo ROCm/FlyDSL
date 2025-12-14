@@ -7,6 +7,7 @@ from mlir import ir
 import os
 import torch
 import functools
+import time
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     """
@@ -36,6 +37,17 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     dump_ir = os.environ.get('ROCDSL_DUMP_IR', '0') == '1'
     dump_dir = os.environ.get('ROCDSL_DUMP_DIR', '/tmp/rocdsl_dump')
     enable_ir_printing = os.environ.get('ROCDSL_ENABLE_IR_PRINTING', '0') == '1'
+    time_stages = os.environ.get("ROCDSL_TIME_COMPILE", "0") == "1"
+    t0_all = time.perf_counter()
+    stage_times_ms = {}
+
+    def _timeit(name, fn):
+        if not time_stages:
+            return fn()
+        t0 = time.perf_counter()
+        out = fn()
+        stage_times_ms[name] = (time.perf_counter() - t0) * 1e3
+        return out
     
     # Create dump directory if needed
     if dump_ir:
@@ -62,7 +74,7 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     dump_stage(mlir_module, "01_initial")
     
     # Apply rocir coordinate lowering first
-    lowered_module = apply_rocir_coord_lowering(mlir_module)
+    lowered_module = _timeit("02_rocir_coord_lowering", lambda: apply_rocir_coord_lowering(mlir_module))
     dump_stage(lowered_module, "02_rocir_lowered")
     
     # Get the current GPU architecture
@@ -70,47 +82,52 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
     
     # Build pipeline step by step for intermediate dumps
     # Stage 1: Canonicalize
-    canonicalized = run_pipeline(
-        lowered_module,
-        Pipeline().canonicalize()
+    canonicalized = _timeit(
+        "03_canonicalize",
+        lambda: run_pipeline(lowered_module, Pipeline().canonicalize()),
     )
     dump_stage(canonicalized, "03_canonicalized")
     
     # Stage 2: CSE
-    cse_result = run_pipeline(
-        canonicalized,
-        Pipeline().cse()
+    cse_result = _timeit(
+        "04_cse",
+        lambda: run_pipeline(canonicalized, Pipeline().cse()),
     )
     dump_stage(cse_result, "04_cse")
     
     # Stage 3: Attach ROCDL target
-    with_target = run_pipeline(
-        cse_result,
-        Pipeline().rocdl_attach_target(chip=gpu_arch)
+    with_target = _timeit(
+        "05_attach_target",
+        lambda: run_pipeline(cse_result, Pipeline().rocdl_attach_target(chip=gpu_arch)),
     )
     dump_stage(with_target, "05_with_target")
     
     # Stage 4: Convert GPU to ROCDL (with SCF to CF inside GPU module)
-    rocdl_converted = run_pipeline(
-        with_target,
-        Pipeline().Gpu(Pipeline()
-                      .convert_scf_to_cf()  # Lower SCF loops first inside GPU module
-                      .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")
-                      .reconcile_unrealized_casts())  # Clean up inside GPU module
+    rocdl_converted = _timeit(
+        "06_convert_gpu_to_rocdl",
+        lambda: run_pipeline(
+            with_target,
+            Pipeline().Gpu(
+                Pipeline()
+                .convert_scf_to_cf()  # Lower SCF loops first inside GPU module
+                .convert_gpu_to_rocdl(use_bare_ptr_memref_call_conv=True, runtime="HIP")
+                .reconcile_unrealized_casts()
+            ),  # Clean up inside GPU module
+        ),
     )
     dump_stage(rocdl_converted, "06_rocdl")
     
     # Stage 5: GPU to LLVM  
-    llvm_converted = run_pipeline(
-        rocdl_converted,
-        Pipeline().gpu_to_llvm().reconcile_unrealized_casts()  # Clean up type conversions
+    llvm_converted = _timeit(
+        "07_gpu_to_llvm",
+        lambda: run_pipeline(rocdl_converted, Pipeline().gpu_to_llvm().reconcile_unrealized_casts()),
     )
     dump_stage(llvm_converted, "07_llvm_gpu")
     
     # Stage 6: Lower to LLVM (includes CF to LLVM conversion)
-    llvm_lowered = run_pipeline(
-        llvm_converted,
-        Pipeline().lower_to_llvm().reconcile_unrealized_casts()  # Clean up again after lowering
+    llvm_lowered = _timeit(
+        "08_lower_to_llvm",
+        lambda: run_pipeline(llvm_converted, Pipeline().lower_to_llvm().reconcile_unrealized_casts()),
     )
     dump_stage(llvm_lowered, "08_llvm_final")
     
@@ -133,14 +150,14 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
             print(f"  Could not dump assembly: {e}")
     
     # Final binary generation
-    lowered = run_pipeline(
-        llvm_lowered,
-        Pipeline().gpu_module_to_binary(format="bin")
+    lowered = _timeit(
+        "10_gpu_module_to_binary_bin",
+        lambda: run_pipeline(llvm_lowered, Pipeline().gpu_module_to_binary(format="bin")),
     )
     dump_stage(lowered, "10_binary_module")
     
     from rocdsl.dialects.ext.gpu import get_compile_object_bytes
-    hsaco_bytes = get_compile_object_bytes(lowered)
+    hsaco_bytes = _timeit("11_get_compile_object_bytes", lambda: get_compile_object_bytes(lowered))
     
     # Save HSACO binary if dumping
     if dump_ir:
@@ -149,6 +166,12 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
             f.write(hsaco_bytes)
         print(f"  Dumped HSACO binary: {hsaco_filename}")
     
+    if time_stages:
+        total_ms = (time.perf_counter() - t0_all) * 1e3
+        print(f"\n[ROCDSL TIME] compile_to_hsaco({kernel_name}) arch={gpu_arch}")
+        for k, v in stage_times_ms.items():
+            print(f"  - {k}: {v:.1f} ms")
+        print(f"  - total: {total_ms:.1f} ms")
     return hsaco_bytes
 
 

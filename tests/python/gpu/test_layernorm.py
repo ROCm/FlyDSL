@@ -268,7 +268,7 @@ def test_layernorm():
     print(f"Max absolute error: {error:.2e}")
 
     if np.allclose(output_host, expected, atol=1e-4):
-        print("✅ PASSED: LayerNorm implementation is correct.")
+        print("PASSED: LayerNorm implementation is correct.")
     else:
         print("❌ FAILED: Results do not match reference.")
         print("First row Expected:")

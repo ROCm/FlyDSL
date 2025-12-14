@@ -139,7 +139,7 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
                         f"{test_name}: Value [{i}] mismatch. Expected {expected}, got {actual}. "
                         f"All values: {all_actual}")
             
-            print(f"  ✅ {test_name}: All values verified: {expected_vals}")
+            print(f"  {test_name}: All values verified: {expected_vals}")
         
         # Handle single return value
         elif expected_val is not None:
@@ -170,7 +170,7 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
             
             assert actual == expected_val, \
                 f"{test_name}: Size mismatch. Expected {expected_val}, got {actual}"
-            print(f"  ✅ {test_name}: Size verified: {actual}")
+            print(f"  {test_name}: Size verified: {actual}")
 
 
 # ==============================================================================
@@ -426,7 +426,7 @@ def test_composition_static_vs_dynamic():
     run_pipeline(ctx_dynamic.module, pipeline)
     assert ctx_dynamic.module.operation.verify(), "Dynamic composition IR verification failed"
     print("  ✓ composition_dynamic: Lowering successful!")
-    print("  ✅ composition_dynamic: PASSED")
+    print("  composition_dynamic: PASSED")
     
     # -------------------------------------------------------------------------
     # Part 3: MIXED static/dynamic - some compile-time, some runtime values
@@ -435,7 +435,7 @@ def test_composition_static_vs_dynamic():
     print("  " + "-"*76)
     print("  Mixed static/dynamic layouts are fully tested in test_static_vs_dynamic.py")
     print("  See test_mixed_static_dynamic() for comprehensive coverage")
-    print("  ✅ Refer to test_static_vs_dynamic.py for mixed layout tests")
+    print("  Refer to test_static_vs_dynamic.py for mixed layout tests")
 
 
 def test_composition_bymode():
@@ -987,7 +987,7 @@ if __name__ == "__main__":
         try:
             test_func()  # Test functions now return None and use assertions
             passed += 1
-            print(f"  ✅ {test_name}: PASSED\n")
+            print(f"  {test_name}: PASSED\n")
         except AssertionError as e:
             print(f"  ❌ {test_name}: FAILED - {e}\n")
             failed += 1
@@ -1001,7 +1001,7 @@ if __name__ == "__main__":
     print("="*80)
     
     if failed == 0:
-        print("✅ All tests PASSED!")
+        print("All tests PASSED!")
         sys.exit(0)
     else:
         print(f"❌ {failed} test(s) FAILED!")

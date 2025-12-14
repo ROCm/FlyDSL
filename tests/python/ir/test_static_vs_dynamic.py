@@ -160,7 +160,7 @@ if __name__ == "__main__":
     for name, func in tests:
         try:
             func()
-            print(f"✅ {name}: PASSED")
+            print(f"{name}: PASSED")
         except Exception as e:
             print(f"❌ {name}: FAILED - {e}")
             import traceback

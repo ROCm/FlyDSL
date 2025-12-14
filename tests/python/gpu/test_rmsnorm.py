@@ -228,7 +228,7 @@ def test_rmsnorm():
     print(f"Max absolute error: {error:.2e}")
 
     if np.allclose(output_host, expected, atol=1e-4):
-        print("✅ PASSED: RMSNorm implementation is correct.")
+        print("PASSED: RMSNorm implementation is correct.")
     else:
         print("❌ FAILED: Results do not match reference.")
         print("First row Expected:")

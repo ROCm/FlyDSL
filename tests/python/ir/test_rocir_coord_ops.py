@@ -87,7 +87,7 @@ def test_coord_operations():
         print(ctx.module)
         
         print("\n" + "="*80)
-        print("✅ All coordinate operations work correctly!")
+        print("All coordinate operations work correctly!")
         print("="*80)
         print("\nSummary:")
         print("  - CoordType: ✓ (1D, 2D, 3D tested)")

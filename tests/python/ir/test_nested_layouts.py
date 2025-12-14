@@ -242,7 +242,7 @@ if __name__ == "__main__":
     
     if all_pass:
         print("\n" + "="*80)
-        print("✅ All Nested Layout Tests PASSED!")
+        print("All Nested Layout Tests PASSED!")
         print("="*80)
         sys.exit(0)
     else:

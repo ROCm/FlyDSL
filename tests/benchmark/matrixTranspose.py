@@ -456,7 +456,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
 
 def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     """Benchmark matrix transpose using Rocir Layout Algebra."""
-    from tests.test_common import run_perftest as _rocir_run_perftest
+    from tests.test_common import run_perftest
     VEC_WIDTH = 4  # vec4 for float32
     if TILE_SIZE % VEC_WIDTH != 0:
         TILE_SIZE = ((TILE_SIZE + VEC_WIDTH - 1) // VEC_WIDTH) * VEC_WIDTH
@@ -652,7 +652,7 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
         hip_check(hip.hipDeviceSynchronize())
     
     # Run benchmark
-    _, avg_us = _rocir_run_perftest(launch_kernel, num_iters=20, num_warmup=2)
+    _, avg_us = run_perftest(launch_kernel, num_iters=20, num_warmup=2)
     
     hip_check(hip.hipMemcpy(b_host.ctypes.data, d_b, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
     b_result_2d = b_host.reshape(N, M, order='C')

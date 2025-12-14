@@ -514,5 +514,5 @@ if __name__ == "__main__":
         print("This is expected as FP16 support is experimental/WIP.")
     
     print("\n" + "="*80)
-    print("✅ All dtype tests completed!")
+    print("All dtype tests completed!")
     print("="*80)
