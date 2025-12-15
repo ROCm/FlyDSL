@@ -77,38 +77,38 @@ def _try_get_constant_index(v: Value) -> Optional[int]:
     """
 
     def _get_owner_op(val: Value):
-    try:
+        try:
             owner = val.owner
-    except Exception:
+        except Exception:
             return None, None
 
-    # Normalize to an Operation handle (some APIs return OpView, others Operation).
-    op = getattr(owner, "operation", owner)
+        # Normalize to an Operation handle (some APIs return OpView, others Operation).
+        op = getattr(owner, "operation", owner)
         return owner, op
 
     def _const_from_op(owner, op) -> Optional[int]:
         # Operation path (newer bindings)
-    try:
-        if getattr(op, "name", None) == "arith.constant":
-            attrs = getattr(op, "attributes", None)
-            if attrs is None:
-                return None
-            try:
-                attr = attrs["value"]
-            except Exception:
-                attr = None
-            if isinstance(attr, IntegerAttr):
-                return int(attr.value)
-    except Exception:
+        try:
+            if getattr(op, "name", None) == "arith.constant":
+                attrs = getattr(op, "attributes", None)
+                if attrs is None:
+                    return None
+                try:
+                    attr = attrs["value"]
+                except Exception:
+                    attr = None
+                if isinstance(attr, IntegerAttr):
+                    return int(attr.value)
+        except Exception:
             pass
 
         # OpView path (older bindings)
-    try:
-        if isinstance(owner, arith.ConstantOp):
-            attr = owner.value
-            if isinstance(attr, IntegerAttr):
-                return int(attr.value)
-    except Exception:
+        try:
+            if isinstance(owner, arith.ConstantOp):
+                attr = owner.value
+                if isinstance(attr, IntegerAttr):
+                    return int(attr.value)
+        except Exception:
             pass
         return None
 
@@ -116,7 +116,7 @@ def _try_get_constant_index(v: Value) -> Optional[int]:
         try:
             return list(op.operands)
         except Exception:
-    return None
+            return None
 
     def _eval(val: Value, depth: int = 0) -> Optional[int]:
         if depth > 8:
@@ -145,6 +145,7 @@ def _try_get_constant_index(v: Value) -> Optional[int]:
                 return a - b
             if opname == "arith.muli":
                 return a * b
+
         return None
 
     return _eval(v, 0)
@@ -598,7 +599,7 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
             flat_spec = "(" + ",".join(spec_elems) + ")"
             result_type = Type.parse(f"!rocir.shape<{flat_spec}>")
         else:
-        result_type = ShapeType.get(rank)
+            result_type = ShapeType.get(rank)
     
     with ip or InsertionPoint.current:
         return rocir_ops.MakeShapeOp(result_type, [_unwrap_value(d) for d in flat_dims], loc=loc).result
@@ -707,7 +708,7 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
             flat_spec = "(" + ",".join(spec_elems) + ")"
             result_type = Type.parse(f"!rocir.stride<{flat_spec}>")
         else:
-        result_type = StrideType.get(rank)
+            result_type = StrideType.get(rank)
     
     with ip or InsertionPoint.current:
         return rocir_ops.MakeStrideOp(result_type, [_unwrap_value(s) for s in flat_strides], loc=loc).result

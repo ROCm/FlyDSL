@@ -366,10 +366,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     # bit3 = (x & 8) >> 3; bit5 = (x & 32) >> 5
                     # x_new = x & ~40 | (bit3 << 5) | (bit5 << 3)
                     
-                    def swizzle_idx(col_idx):
-                        return col_idx
+                    def swizzle_idx(row_idx, col_idx):
+                        c16 = arith.constant(16, index=True)
+                        # CK-style xor-with-modulo swizzle on K, applied at 16B granularity so
+                        # vector<16xf8> loads preserve intra-vector order.
+                        # NOTE: we rely on tile_k being a power-of-two so xor stays in-bounds.
+                        k_blocks16 = arith.constant(tile_k // 16, index=True)
+                        row_mod = _arith_mlir.RemUIOp(unwrap(row_idx), unwrap(k_blocks16)).result
+                        xor_mask = _arith_mlir.MulIOp(unwrap(row_mod), unwrap(c16)).result
+                        return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
 
-                    col_swizzled_0 = swizzle_idx(col_0)
+                    col_swizzled_0 = swizzle_idx(row_a_local, col_0)
                     coord_store_0 = rocir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_0))
                     idx_0 = rocir.crd2idx(coord_store_0, layout_lds)
 
@@ -383,7 +390,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         vector.StoreOp(val_lo, lds_a, [unwrap(idx_0)])
 
                         col_1 = _arith_mlir.AddIOp(unwrap(col_0), unwrap(c8)).result
-                        col_swizzled_1 = swizzle_idx(col_1)
+                        col_swizzled_1 = swizzle_idx(row_a_local, col_1)
                         coord_store_1 = rocir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_1))
                         idx_1 = rocir.crd2idx(coord_store_1, layout_lds)
                         vector.StoreOp(val_hi, lds_a, [unwrap(idx_1)])
@@ -471,31 +478,22 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     col_lds0 = col_offset_base + ki_val
                     col_lds1 = col_offset_base + ki_val + c32
                     
-                    # CK mapping: keep LDS K dimension contiguous (no swizzle).
-                    def swizzle_idx(col_idx):
-                        return col_idx
-
-                    col_lds0_swizzled = swizzle_idx(col_lds0)
-                    col_lds1_swizzled = swizzle_idx(col_lds1)
-
-                    # Compute a single lane-dependent base index for A in LDS, then add
-                    # compile-time constant row-stride offsets for each `mi`. This helps the
-                    # backend select ds_read with `offset:` immediates instead of materializing
-                    # many distinct base address VGPRs.
-                    coord_a0_base = rocir.make_coord(unwrap(row_a_lds), unwrap(col_lds0_swizzled))
-                    idx_a0_base = rocir.crd2idx(coord_a0_base, layout_lds)
-                    idx_a0_base_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0_base)).result
+                    def swizzle_idx(row_idx, col_idx):
+                        c16 = arith.constant(16, index=True)
+                        k_blocks16 = arith.constant(tile_k // 16, index=True)
+                        row_mod = _arith_mlir.RemUIOp(unwrap(row_idx), unwrap(k_blocks16)).result
+                        xor_mask = _arith_mlir.MulIOp(unwrap(row_mod), unwrap(c16)).result
+                        return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
 
                     for mi in range(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
                         
-                        # Load A operands for the K64 micro-step.
-                        # In LDS we swizzle so K and K+32 are adjacent (8B apart), so we can do one
-                        # 16B LDS read (ds_read_b128) and split into two i64 packs.
-                        # idx(row_a_lds + mi*16, col) = idx_base + (mi*16)*lds_stride
-                        mi_linear_off = arith.constant(mi * 16 * lds_stride, index=True)
-                        idx_a0_idx = _arith_mlir.AddIOp(unwrap(idx_a0_base_idx), unwrap(mi_linear_off)).result
+                        # Read A from LDS using the same (row,col)->(row,col') xor swizzle as the store.
+                        col_lds0_swizzled = swizzle_idx(curr_row_a_lds, col_lds0)
+                        coord_a0 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
+                        idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
+                        idx_a0_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0)).result
 
                         loaded_a16 = vector.LoadOp(vec16_f8, lds_a, [unwrap(idx_a0_idx)]).result
                         a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
@@ -708,7 +706,7 @@ if __name__ == "__main__":
     print("Running Tiling Tests...")
     
     test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
-    # test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
+    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
+    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
+    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
+    test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
