@@ -21,98 +21,6 @@ def unwrap(val):
     if hasattr(val, '_value'): return val._value
     return val
 
-
-def test_nested_shape_creation():
-    """Test creating nested shapes such as (9, (4, 8))."""
-    print("\n" + "="*80)
-    print("Test 1: Nested Shape Creation")
-    print("="*80)
-    
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    
-    @func.FuncOp.from_py_func()
-    def test_nested_shape():
-        # Create nested shape: (9, (4, 8))
-        c9 = Index(9)
-        c4 = Index(4)
-        c8 = Index(8)
-        
-        # Nested shape
-        shape = rocir.make_shape(c9, (c4, c8))
-        print(">>> Created nested shape: (9, (4, 8))")
-        
-        # Verify size is 9 * 4 * 8 = 288
-        sz = rocir.size(shape)
-        return [unwrap(sz)]
-    
-    print("Generated IR:")
-    print(ctx.module)
-    print("✓ Nested shape created successfully")
-    return True
-
-
-def test_nested_stride_creation():
-    """Test creating nested strides such as (59, (13, 1))."""
-    print("\n" + "="*80)
-    print("Test 2: Nested Stride Creation")
-    print("="*80)
-    
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    
-    @func.FuncOp.from_py_func()
-    def test_nested_stride():
-        # Create nested stride: (59, (13, 1))
-        c59 = Index(59)
-        c13 = Index(13)
-        c1 = Index(1)
-        
-        # Nested stride
-        stride = rocir.make_stride(c59, (c13, c1))
-        print(">>> Created nested stride: (59, (13, 1))")
-        
-        return []
-    
-    print("Generated IR:")
-    print(ctx.module)
-    print("✓ Nested stride created successfully")
-    return True
-
-
-def test_nested_layout_creation():
-    """Test creating nested layouts like (9,(4,8)):(59,(13,1))."""
-    print("\n" + "="*80)
-    print("Test 3: Nested Layout Creation")
-    print("="*80)
-    print(">>> Creating layout: (9,(4,8)):(59,(13,1))")
-    
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    
-    @func.FuncOp.from_py_func()
-    def test_nested_layout():
-        # Create nested layout: (9,(4,8)):(59,(13,1))
-        c9 = Index(9)
-        c4 = Index(4)
-        c8 = Index(8)
-        c59 = Index(59)
-        c13 = Index(13)
-        c1 = Index(1)
-        
-        # Method 1: Create shape and stride separately
-        shape = rocir.make_shape(c9, (c4, c8))
-        stride = rocir.make_stride(c59, (c13, c1))
-        layout = rocir.make_layout(shape, stride)
-        
-        # Verify size
-        sz = rocir.size(layout)
-        
-        return [unwrap(sz)]
-    
-    print("Generated IR:")
-    print(ctx.module)
-    print("✓ Nested layout created successfully")
-    return True
-
-
 def test_nested_layout_direct():
     """Test creating nested layouts using direct tuple syntax"""
     print("\n" + "="*80)
@@ -143,6 +51,45 @@ def test_nested_layout_direct():
     print("Generated IR:")
     print(ctx.module)
     print("✓ Direct tuple syntax works!")
+    return True
+
+
+def test_multi_level_nested_shape_and_stride_spec():
+    """Test multi-level nested shape/stride carry constant spec in the type."""
+    print("\n" + "="*80)
+    print("Test 7: Multi-level Nested Shape/Stride Spec")
+    print("="*80)
+    print(">>> Creating shape: (9, (4, (8, (1+1)))) and stride: (59, (13, ((1+1), 1)))")
+    
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+    
+    @func.FuncOp.from_py_func()
+    def test_multi_level():
+        c9 = Index(9)
+        c4 = Index(4)
+        c8 = Index(8)
+        # Derived constant (arith.addi), should still be recognized as 2 in the spec.
+        c2 = Index(1) + Index(1)
+        c59 = Index(59)
+        c13 = Index(13)
+        c1 = Index(1)
+        
+        shape = rocir.make_shape(c9, (c4, (c8, c2)))
+        stride = rocir.make_stride(c59, (c13, (c2, c1)))
+        layout = rocir.make_layout(shape, stride)
+        
+        # Keep them live so they appear in IR.
+        sz = rocir.size(layout)
+        return [unwrap(sz)]
+    
+    ir_text = str(ctx.module)
+    print("Generated IR:")
+    print(ir_text)
+    
+    # The key check: multi-level nested spec should be preserved with constants.
+    assert "!rocir.shape<(9,(4,(8,2)))>" in ir_text, "Nested shape type spec did not materialize as expected"
+    assert "!rocir.stride<(59,(13,(2,1)))>" in ir_text, "Nested stride type spec did not materialize as expected"
+    print("✓ Multi-level nested shape/stride spec is preserved")
     return True
 
 
@@ -233,21 +180,19 @@ if __name__ == "__main__":
     
     all_pass = True
     
-    all_pass &= test_nested_shape_creation()
-    all_pass &= test_nested_stride_creation()
-    all_pass &= test_nested_layout_creation()
     all_pass &= test_nested_layout_direct()
     all_pass &= test_flat_divide_with_nested_layout()
     all_pass &= test_logical_divide_2d_nested()
+    all_pass &= test_multi_level_nested_shape_and_stride_spec()
     
     if all_pass:
         print("\n" + "="*80)
-        print("✅ All Nested Layout Tests PASSED!")
+        print("All Nested Layout Tests PASSED!")
         print("="*80)
         sys.exit(0)
     else:
         print("\n" + "="*80)
-        print("❌ Some tests FAILED!")
+        print("Some tests FAILED!")
         print("="*80)
         sys.exit(1)
 

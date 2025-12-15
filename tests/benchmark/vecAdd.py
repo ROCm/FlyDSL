@@ -285,6 +285,9 @@ def benchmark_vector_add(tile_size: int = 4):
     print(f"\n  Correctness Check:")
     print(f"  Max error: {error:.2e}")
     
+    # Print a standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose).
+    print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
+
     # Print benchmark results
     print(f"\n{results}")
 
@@ -293,6 +296,8 @@ def benchmark_vector_add(tile_size: int = 4):
         print("\nPyTorch torch.add baseline:")
         print(torch_results)
         bw_ratio = results["bandwidth_gbs"] / torch_results["bandwidth_gbs"]
+        # Avoid "Bandwidth:" here so run_tests.sh doesn't accidentally pick the baseline.
+        print(f"  PyTorch BW: {torch_results['bandwidth_gbs']:.2f} GB/s")
         print(f"  Bandwidth ratio (RocDSL / PyTorch): {bw_ratio:.2f}x")
     
     # Cleanup

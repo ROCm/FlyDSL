@@ -6,10 +6,10 @@ func.func @test_get() -> index {
   %c1 = arith.constant 1 : index
   
   // Create shape (8, 16, 32)
-  %shape = rocir.make_shape %c8, %c16, %c32 : (index, index, index) -> !rocir.shape<3>
+  %shape = rocir.make_shape %c8, %c16, %c32 : (index, index, index) -> !rocir.shape<(?,?,?)>
   
   // Get element at index 1 (should return 16)
-  %elem = rocir.get %shape, %c1 : !rocir.shape<3>, index -> index
+  %elem = rocir.get %shape, %c1 : !rocir.shape<(?,?,?)>, index -> index
   
   return %elem : index
 }

@@ -5,12 +5,12 @@ module attributes {
   rocir.target_vendor = "amd"
 } {
   
-  func.func @test_make_layout_amd() -> !rocir.layout<2> {
+  func.func @test_make_layout_amd() -> !rocir.layout<(?,?)> {
     %c32 = arith.constant 32 : index
     %c1 = arith.constant 1 : index
-    %shape = rocir.make_shape %c32, %c32 : (index, index) -> !rocir.shape<2>
-    %stride = rocir.make_stride %c1, %c32 : (index, index) -> !rocir.stride<2>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<2>, !rocir.stride<2>) -> !rocir.layout<2>
-    return %layout : !rocir.layout<2>
+    %shape = rocir.make_shape %c32, %c32 : (index, index) -> !rocir.shape<(?,?)>
+    %stride = rocir.make_stride %c1, %c32 : (index, index) -> !rocir.stride<(?,?)>
+    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    return %layout : !rocir.layout<(?,?)>
   }
 }

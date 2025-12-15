@@ -422,6 +422,8 @@ def benchmark_per_token_quant(M=4096, N=8192, hsaco=None, config=None):
     print(f"\nRocDSL Kernel Results:")
     print(f"  Max Scale Diff:  {scale_diff:.2e}")
     print(f"  Max Output Diff: {output_diff:.2e}")
+    # Standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose).
+    print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
     print(f"  {results}")
 
     hip_check(hip.hipFree(d_input))
@@ -480,6 +482,7 @@ def benchmark_per_token_quant(M=4096, N=8192, hsaco=None, config=None):
         print(
             f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)"
         )
+        # Avoid printing another "Bandwidth:" line here; run_tests.sh greps for "Bandwidth:".
         print(f"  Speedup:    {speedup:7.2f}x")
         print("=" * 80)
 

@@ -5,11 +5,11 @@ func.func @test_idx2crd() {
   %c1 = arith.constant 1 : index
   %c16 = arith.constant 16 : index
   
-  %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<-1>
-  %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<-1>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<-1>, !rocir.stride<-1>) -> !rocir.layout<-1>
+  %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
+  %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
+  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
   
-  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<-1>) -> !rocir.coord<-1>
+  %coord = rocir.idx2crd %c50, %layout : (index, !rocir.layout<(?,?)>) -> !rocir.coord<(?,?)>
   
   return
 }

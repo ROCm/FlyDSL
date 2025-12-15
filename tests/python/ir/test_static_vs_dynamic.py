@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static vs dynamic layout types test (mirrors cute_layout_algebra.ipynb Cell 11)"""
+"""Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
 
 import sys
 import os
@@ -160,7 +160,7 @@ if __name__ == "__main__":
     for name, func in tests:
         try:
             func()
-            print(f"✅ {name}: PASSED")
+            print(f"{name}: PASSED")
         except Exception as e:
             print(f"❌ {name}: FAILED - {e}")
             import traceback

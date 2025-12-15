@@ -92,10 +92,8 @@ def example_full_lowering_pipeline():
               .cse()
               .loop_invariant_code_motion())
         
-        # Stage 3: GPU-specific transformations
-        .cute_to_rocm()
-        .Gpu(Pipeline()
-             .cute_memory_coalescing())
+        # Stage 3: GPU-specific transformations (ROCDL lowering)
+        .Gpu(Pipeline())
         
         # Stage 4: Standard dialect lowering
         .convert_scf_to_cf()
@@ -145,8 +143,7 @@ def example_pass_with_options():
     
     pipeline = (Pipeline()
                 .rocir_to_standard()
-                .cute_async_pipeline(pipeline_depth=3)
-                .cute_layout_analysis(print_analysis=True))
+                .add_pass("canonicalize", max_iterations=3))
     
     result = pipeline.run(ctx.module)
     

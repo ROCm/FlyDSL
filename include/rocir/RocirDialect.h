@@ -17,24 +17,38 @@ public:
   static IntType get(MLIRContext *context);
 };
 
-class ShapeType : public Type::TypeBase<ShapeType, Type, detail::StructureTypeStorage> {
+class ShapeType : public Type::TypeBase<ShapeType, Type, detail::StructuredTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.shape";
   static ShapeType get(MLIRContext *context, int rank);
-  static ShapeType get(MLIRContext *context, ArrayRef<int32_t> structure);
+  /// Create a ShapeType from a canonical textual spec, e.g. "(9,(4,8))" or "(?,(?,?))".
+  static ShapeType get(MLIRContext *context, ::llvm::StringRef spec);
+  /// Create a ShapeType from a tuple key (structure encoding + flattened dims).
+  static ShapeType get(MLIRContext *context,
+                       ::llvm::ArrayRef<int32_t> structure,
+                       ::llvm::ArrayRef<int64_t> dims);
   int getRank() const;
   ArrayRef<int32_t> getStructure() const;
+  ::llvm::StringRef getSpec() const;
+  ::llvm::ArrayRef<int64_t> getDims() const;
 };
 
-class StrideType : public Type::TypeBase<StrideType, Type, detail::StructureTypeStorage> {
+class StrideType : public Type::TypeBase<StrideType, Type, detail::StructuredTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.stride";
   static StrideType get(MLIRContext *context, int rank);
-  static StrideType get(MLIRContext *context, ArrayRef<int32_t> structure);
+  /// Create a StrideType from a canonical textual spec, e.g. "(59,(13,1))" or "(?,(?,?))".
+  static StrideType get(MLIRContext *context, ::llvm::StringRef spec);
+  /// Create a StrideType from a tuple key (structure encoding + flattened dims).
+  static StrideType get(MLIRContext *context,
+                        ::llvm::ArrayRef<int32_t> structure,
+                        ::llvm::ArrayRef<int64_t> dims);
   int getRank() const;
   ArrayRef<int32_t> getStructure() const;
+  ::llvm::StringRef getSpec() const;
+  ::llvm::ArrayRef<int64_t> getDims() const;
 };
 
 class LayoutType : public Type::TypeBase<LayoutType, Type, detail::RankedTypeStorage> {

@@ -66,6 +66,191 @@ def _get_insertion_point(ip: Optional[InsertionPoint] = None) -> InsertionPoint:
     return ip
 
 
+def _try_get_constant_index(v: Value) -> Optional[int]:
+    """Best-effort extract an int from an index-typed Value.
+
+    Supports:
+    - arith.constant
+    - a small set of arithmetic ops when all operands are constant (addi, subi, muli)
+
+    This is intentionally conservative: if we can't prove it's constant, return None.
+    """
+
+    def _get_owner_op(val: Value):
+        try:
+            owner = val.owner
+        except Exception:
+            return None, None
+        op = getattr(owner, "operation", owner)
+        name = getattr(op, "name", None)
+        if name is None and hasattr(op, "operation"):
+            name = getattr(op.operation, "name", None)
+        return owner, op
+
+    def _const_from_op(owner, op) -> Optional[int]:
+        # Operation path (newer bindings)
+        try:
+            if getattr(op, "name", None) == "arith.constant":
+                attrs = getattr(op, "attributes", None)
+                if attrs is None:
+                    return None
+                try:
+                    attr = attrs["value"]
+                except Exception:
+                    attr = None
+                if isinstance(attr, IntegerAttr):
+                    return int(attr.value)
+        except Exception:
+            pass
+
+        # OpView path (older bindings)
+        try:
+            if isinstance(owner, arith.ConstantOp):
+                attr = owner.value
+                if isinstance(attr, IntegerAttr):
+                    return int(attr.value)
+        except Exception:
+            pass
+        return None
+
+    def _operands(op) -> Optional[List[Value]]:
+        try:
+            return list(op.operands)
+        except Exception:
+            return None
+
+    def _eval(val: Value, depth: int = 0) -> Optional[int]:
+        if depth > 8:
+            return None
+
+        owner, op = _get_owner_op(val)
+        if owner is None or op is None:
+            return None
+
+        c = _const_from_op(owner, op)
+        if c is not None:
+            return c
+
+        opname = getattr(op, "name", None)
+        if opname in ("arith.addi", "arith.subi", "arith.muli"):
+            ops = _operands(op)
+            if not ops or len(ops) != 2:
+                return None
+            a = _eval(ops[0], depth + 1)
+            b = _eval(ops[1], depth + 1)
+            if a is None or b is None:
+                return None
+            if opname == "arith.addi":
+                return a + b
+            if opname == "arith.subi":
+                return a - b
+            if opname == "arith.muli":
+                return a * b
+        return None
+
+    return _eval(v, 0)
+
+
+def _count_leaves_in_tuple_spec(spec: str) -> int:
+    """Count leaf entries in a canonical tuple spec like '(9,(4,8))' or '(?,(?,?))'."""
+    s = "".join(ch for ch in spec if not ch.isspace())
+    i = 0
+    leaves = 0
+    while i < len(s):
+        c = s[i]
+        if c == "?":
+            leaves += 1
+            i += 1
+            continue
+        if c.isdigit() or (c == "-" and i + 1 < len(s) and s[i + 1].isdigit()):
+            # integer literal
+            i += 1 if c == "-" else 0
+            while i < len(s) and s[i].isdigit():
+                i += 1
+            leaves += 1
+            continue
+        i += 1
+    return leaves
+
+
+def _extract_rank_from_rocir_type_str(type_str: str) -> int:
+    """Extract rank from a rocir type string like '!rocir.layout<2>' or '!rocir.layout<(?,?)>'."""
+    if "<" not in type_str or ">" not in type_str:
+        raise ValueError(f"Cannot extract rank from type string: {type_str}")
+    inner = type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
+    if inner.startswith("("):
+        return _count_leaves_in_tuple_spec(inner)
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        return _count_leaves_in_tuple_spec(inner[1:-1])
+    # numeric
+    return int(inner)
+
+
+def _extract_tuple_spec_from_rocir_type(type_str: str) -> Optional[str]:
+    """If type_str is like '!rocir.shape<\"(...)\">' or '!rocir.stride<\"(...)\">', return '(...)'."""
+    if "<" not in type_str or ">" not in type_str:
+        return None
+    inner = type_str.split("<", 1)[1].rsplit(">", 1)[0]
+    inner = inner.strip()
+    if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+        return inner[1:-1]
+    return None
+
+
+def _is_rocir_type(v: Value, prefix: str) -> bool:
+    try:
+        return str(v.type).startswith(prefix)
+    except Exception:
+        return False
+
+
+def _flatten_nested_shape_or_stride_value(v: Value, kind: str) -> Optional[tuple]:
+    """If v is produced by rocir.make_shape/make_stride, flatten it into (spec, leaf_values)."""
+    try:
+        op = v.owner
+    except Exception:
+        return None
+    op_name = ""
+    try:
+        op_name = op.operation.name
+    except Exception:
+        try:
+            op_name = op.name
+        except Exception:
+            op_name = ""
+    expected = "rocir.make_shape" if kind == "shape" else "rocir.make_stride"
+    if op_name != expected:
+        return None
+
+    try:
+        operands = list(op.values)
+    except Exception:
+        # Generated opviews may use accessors like getValues().
+        try:
+            operands = list(op.getValues())
+        except Exception:
+            return None
+
+    child_specs = []
+    leaf_vals: List[Value] = []
+    for ov in operands:
+        ov = _unwrap_value(ov)
+        if isinstance(ov, Value) and _is_rocir_type(ov, f"!rocir.{kind}<"):
+            rec = _flatten_nested_shape_or_stride_value(ov, kind)
+            if rec is None:
+                return None
+            sub_spec, sub_leaves = rec
+            child_specs.append(sub_spec)
+            leaf_vals.extend(sub_leaves)
+        else:
+            # Leaf index value
+            const = _try_get_constant_index(ov) if isinstance(ov, Value) else None
+            child_specs.append(str(const) if const is not None else "?")
+            leaf_vals.append(ov)
+    spec = "(" + ",".join(child_specs) + ")"
+    return spec, leaf_vals
+
+
 class TensorView:
     """Lightweight view object representing a tensor slice."""
 
@@ -192,10 +377,10 @@ def _scale_index(value, factor):
     if isinstance(factor, int):
         if factor == 0:
             return _to_index_value(0)
-        result = value_val
-        for _ in range(int(factor) - 1):
-            result = _unwrap_value(arith.AddIOp(result, value_val).result)
-        return result
+        if factor == 1:
+            return value_val
+        factor_val = _unwrap_value(_to_index_value(int(factor)))
+        return arith.MulIOp(value_val, factor_val).result
     factor_val = _unwrap_value(_to_index_value(factor))
     return arith.MulIOp(value_val, factor_val).result
 
@@ -329,10 +514,92 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
     if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
         dims = dims[0]
     
-    # Flatten nested structure to get all dimension values
-    flat_dims = _flatten_nested(dims)
-    rank = len(flat_dims)
-    result_type = ShapeType.get(rank)
+    # Nested form: allow tuple/list and nested rocir.make_shape results.
+    # If we can fully flatten to leaf index values, emit a tuple-spec type: !rocir.shape<(...)>.
+    nested_spec = None
+    nested_leaf_vals = None
+
+    # Normalize to a list for processing
+    dims_list = list(dims)
+    if len(dims_list) == 1 and isinstance(dims_list[0], (tuple, list)):
+        dims_list = list(dims_list[0])
+
+    # Detect nested structure (tuple/list or shape values)
+    has_nested = any(isinstance(d, (tuple, list)) for d in dims_list) or any(
+        isinstance(_unwrap_value(d), Value) and _is_rocir_type(_unwrap_value(d), "!rocir.shape<") for d in dims_list
+    )
+
+    if has_nested:
+        # Build a spec and leaf list by recursively expanding nested make_shape ops and tuples.
+        child_specs = []
+        leaf_vals: List[Value] = []
+
+        def consume_node(node):
+            nonlocal child_specs, leaf_vals
+            if isinstance(node, (tuple, list)):
+                sub_child_specs = []
+                for x in node:
+                    consume_node(x)
+                    # move last spec into sub list
+                    sub_child_specs.append(child_specs.pop())
+                    # leaf_vals already appended
+                child_specs.append("(" + ",".join(sub_child_specs) + ")")
+                return
+
+            v = _unwrap_value(node)
+            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.shape<"):
+                rec = _flatten_nested_shape_or_stride_value(v, "shape")
+                if rec is None:
+                    raise ValueError("Cannot flatten nested rocir.shape value without defining rocir.make_shape")
+                sub_spec, sub_leaves = rec
+                child_specs.append(sub_spec)
+                leaf_vals.extend(sub_leaves)
+                return
+
+            # Leaf index
+            const = _try_get_constant_index(v) if isinstance(v, Value) else None
+            child_specs.append(str(const) if const is not None else "?")
+            leaf_vals.append(v)
+
+        try:
+            for d in dims_list:
+                consume_node(d)
+            nested_spec = "(" + ",".join(child_specs) + ")"
+            nested_leaf_vals = leaf_vals
+        except Exception:
+            nested_spec = None
+            nested_leaf_vals = None
+
+    if nested_spec is not None and nested_leaf_vals is not None:
+        # Type carries structure; rank is implied by leaf count.
+        result_type = Type.parse(f'!rocir.shape<{nested_spec}>')
+        flat_dims = nested_leaf_vals
+    else:
+        # Fallback: flat shape only
+        flat_dims = _flatten_nested(dims)
+        rank = len(flat_dims)
+        # If any dimension is a compile-time constant, encode it in the type spec
+        # so downstream passes can "see" static information early:
+        #   !rocir.shape<(4,32)> or partial !rocir.shape<(4,?)>
+        spec_elems = []
+        has_any_const = False
+        for d in flat_dims:
+            v = _unwrap_value(d)
+            const = None
+            if isinstance(v, int):
+                const = v
+            elif isinstance(v, Value):
+                const = _try_get_constant_index(v)
+            if const is not None:
+                has_any_const = True
+                spec_elems.append(str(const))
+            else:
+                spec_elems.append("?")
+        if has_any_const:
+            flat_spec = "(" + ",".join(spec_elems) + ")"
+            result_type = Type.parse(f"!rocir.shape<{flat_spec}>")
+        else:
+            result_type = ShapeType.get(rank)
     
     with ip or InsertionPoint.current:
         return rocir_ops.MakeShapeOp(result_type, [_unwrap_value(d) for d in flat_dims], loc=loc).result
@@ -367,10 +634,81 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
     if len(strides) == 1 and isinstance(strides[0], (tuple, list)):
         strides = strides[0]
     
-    # Flatten nested structure to get all stride values
-    flat_strides = _flatten_nested(strides)
-    rank = len(flat_strides)
-    result_type = StrideType.get(rank)
+    nested_spec = None
+    nested_leaf_vals = None
+
+    strides_list = list(strides)
+    if len(strides_list) == 1 and isinstance(strides_list[0], (tuple, list)):
+        strides_list = list(strides_list[0])
+
+    has_nested = any(isinstance(s, (tuple, list)) for s in strides_list) or any(
+        isinstance(_unwrap_value(s), Value) and _is_rocir_type(_unwrap_value(s), "!rocir.stride<") for s in strides_list
+    )
+
+    if has_nested:
+        child_specs = []
+        leaf_vals: List[Value] = []
+
+        def consume_node(node):
+            nonlocal child_specs, leaf_vals
+            if isinstance(node, (tuple, list)):
+                sub_child_specs = []
+                for x in node:
+                    consume_node(x)
+                    sub_child_specs.append(child_specs.pop())
+                child_specs.append("(" + ",".join(sub_child_specs) + ")")
+                return
+
+            v = _unwrap_value(node)
+            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.stride<"):
+                rec = _flatten_nested_shape_or_stride_value(v, "stride")
+                if rec is None:
+                    raise ValueError("Cannot flatten nested rocir.stride value without defining rocir.make_stride")
+                sub_spec, sub_leaves = rec
+                child_specs.append(sub_spec)
+                leaf_vals.extend(sub_leaves)
+                return
+
+            const = _try_get_constant_index(v) if isinstance(v, Value) else None
+            child_specs.append(str(const) if const is not None else "?")
+            leaf_vals.append(v)
+
+        try:
+            for s in strides_list:
+                consume_node(s)
+            nested_spec = "(" + ",".join(child_specs) + ")"
+            nested_leaf_vals = leaf_vals
+        except Exception:
+            nested_spec = None
+            nested_leaf_vals = None
+
+    if nested_spec is not None and nested_leaf_vals is not None:
+        result_type = Type.parse(f'!rocir.stride<{nested_spec}>')
+        flat_strides = nested_leaf_vals
+    else:
+        flat_strides = _flatten_nested(strides)
+        rank = len(flat_strides)
+        # Same idea as make_shape: encode constant strides into the type spec
+        # e.g. !rocir.stride<(32,1)> or partial !rocir.stride<(?,1)>
+        spec_elems = []
+        has_any_const = False
+        for s in flat_strides:
+            v = _unwrap_value(s)
+            const = None
+            if isinstance(v, int):
+                const = v
+            elif isinstance(v, Value):
+                const = _try_get_constant_index(v)
+            if const is not None:
+                has_any_const = True
+                spec_elems.append(str(const))
+            else:
+                spec_elems.append("?")
+        if has_any_const:
+            flat_spec = "(" + ",".join(spec_elems) + ")"
+            result_type = Type.parse(f"!rocir.stride<{flat_spec}>")
+        else:
+            result_type = StrideType.get(rank)
     
     with ip or InsertionPoint.current:
         return rocir_ops.MakeStrideOp(result_type, [_unwrap_value(s) for s in flat_strides], loc=loc).result
@@ -428,14 +766,20 @@ def make_layout(shape, stride=None, loc: Optional[Location] = None, ip: Optional
     
     # Extract rank from shape type
     shape_type_str = str(shape.type)
-    # Type format: !rocir.shape<1, -1> where 1 is rank, -1 is structure encoding
-    # Or: !rocir.shape<2> for rank 2
-    type_content = shape_type_str.split("<")[1].split(">")[0]
-    if "," in type_content:
-        # Has structure encoding: first number is rank
+    type_content = shape_type_str.split("<")[1].split(">")[0].strip()
+    # New formats:
+    # - !rocir.shape<(...)> (tuple spec)
+    # - !rocir.shape<"(...)"> (legacy)
+    if type_content.startswith("("):
+        spec = type_content
+        rank = _count_leaves_in_tuple_spec(spec)
+    elif len(type_content) >= 2 and type_content[0] == '"' and type_content[-1] == '"':
+        spec = type_content[1:-1]
+        rank = _count_leaves_in_tuple_spec(spec)
+    elif "," in type_content:
+        # Legacy format: !rocir.shape<rank, ...>
         rank = int(type_content.split(",")[0].strip())
     else:
-        # Simple rank
         rank = int(type_content)
     result_type = LayoutType.get(rank)
     
@@ -519,7 +863,7 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = CoordType.get(rank)
     
     with ip or InsertionPoint.current:
@@ -621,7 +965,7 @@ def get_shape(layout: Value, loc: Optional[Location] = None, ip: Optional[Insert
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = ShapeType.get(rank)
     
     with ip or InsertionPoint.current:
@@ -643,7 +987,7 @@ def get_stride(layout: Value, loc: Optional[Location] = None, ip: Optional[Inser
     loc = _get_location(loc)
     # Extract rank from layout type
     layout_type_str = str(layout.type)
-    rank = int(layout_type_str.split("<")[1].split(">")[0])
+    rank = _extract_rank_from_rocir_type_str(layout_type_str)
     result_type = StrideType.get(rank)
     
     with ip or InsertionPoint.current:

@@ -252,7 +252,7 @@ def test_softmax():
     print(f"Max absolute error: {error:.2e}")
     
     if np.allclose(c_host, expected, atol=1e-5):
-        print("✅ PASSED: Softmax implementation is correct.")
+        print("PASSED: Softmax implementation is correct.")
     else:
         print("❌ FAILED: Results do not match reference.")
         # Debug prints

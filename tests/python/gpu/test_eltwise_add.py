@@ -28,7 +28,12 @@ from mlir.ir import F16Type, F32Type, IntegerType, InsertionPoint
 from mlir.dialects import arith
 import mlir.extras.types as T
 from hip import hip
+from tests.test_common import run_perftest
 
+
+THR_M, THR_N = 4, 32
+VAL_M, VAL_N = 4, 4
+COPY_VEC = 8
 
 def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     """Create elementwise addition kernel demonstrating RocDSL API.
@@ -73,17 +78,13 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         blk_coord_y = bid_y
         blk_coord_x = bid_x
         
-        # ===== Step 2: Re-create TiledCopy and Layouts (Kernel Scope) =====
-        # Since we need these for logic inside the kernel
-        THR_M, THR_N = 4, 32
-        VAL_M, VAL_N = 4, 4
-        
+        # ===== Step 2: TiledCopy + Layouts =====
         thr_layout = rocir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
         val_layout = rocir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
         
         # Atoms
-        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=8)
-        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=8)
+        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
         
         # Tiled Copies
         tiled_copy_A = rocir.make_tiled_copy_tv(copy_atom_load, thr_layout, val_layout,
@@ -163,6 +164,7 @@ TEST_SHAPES = [
     (1, 3),
     (129, 255),
     (1021, 515),
+    # (5120, 4000),
 ]
 
 # Compute Max Dims for shared kernel
@@ -217,8 +219,22 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"GPU: {get_hip_arch()}")
     print("="*80)
     
-    # Get or compile kernel (uses MAX_M x MAX_N kernel)
-    hsaco = get_or_compile_kernel(dtype)
+    # Kernel selection:
+    # - If the requested MxN fits within TEST_SHAPES' MAX_M/MAX_N, reuse the shared MAX kernel
+    #   and use padded buffers.
+    # - If the requested M or N exceeds MAX, compile an exact-shape kernel and skip padding.
+    use_shared_max_kernel = (M <= MAX_M) and (N <= MAX_N)
+    if use_shared_max_kernel:
+        hsaco = get_or_compile_kernel(dtype)
+        compile_M, compile_N = MAX_M, MAX_N
+    else:
+        print(f"\n[RocDSL INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
+        from rocdsl.compiler.pipeline import run_pipeline, Pipeline
+        from tests.utils import compile_to_hsaco
+        module = create_elementwise_add_kernel(M, N, dtype)
+        optimized = run_pipeline(module, Pipeline().canonicalize().cse())
+        hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
+        compile_M, compile_N = M, N
     
     # Prepare data
     np.random.seed(42)
@@ -227,37 +243,50 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     b_host = np.random.randn(M, N).astype(torch_dtype)
     c_host = np.zeros((M, N), dtype=torch_dtype)
     
-    # Padded data for shared kernel (must match MAX_M x MAX_N strides)
-    # The kernel expects buffers of size MAX_M * MAX_N with stride MAX_N
-    a_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-    b_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-    c_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-    
-    a_padded[:M, :N] = a_host
-    b_padded[:M, :N] = b_host
-    
-    # Allocate device memory (full MAX size)
-    max_size_bytes = MAX_M * MAX_N * a_host.itemsize
-    d_a = hip_check(hip.hipMalloc(max_size_bytes))
-    d_b = hip_check(hip.hipMalloc(max_size_bytes))
-    d_c = hip_check(hip.hipMalloc(max_size_bytes))
-    
-    # Copy to device (padded)
-    hip_check(hip.hipMemcpy(d_a, a_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_b, b_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    if use_shared_max_kernel:
+        # Padded data for shared kernel (must match MAX_M x MAX_N strides)
+        # The kernel expects buffers of size MAX_M * MAX_N with stride MAX_N
+        a_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
+        b_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
+        c_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
+        
+        a_padded[:M, :N] = a_host
+        b_padded[:M, :N] = b_host
+        
+        # Allocate device memory (full MAX size)
+        max_size_bytes = MAX_M * MAX_N * a_host.itemsize
+        d_a = hip_check(hip.hipMalloc(max_size_bytes))
+        d_b = hip_check(hip.hipMalloc(max_size_bytes))
+        d_c = hip_check(hip.hipMalloc(max_size_bytes))
+        
+        # Copy to device (padded)
+        hip_check(hip.hipMemcpy(d_a, a_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+        hip_check(hip.hipMemcpy(d_b, b_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    else:
+        # Exact-shape kernel: no padding
+        max_size_bytes = M * N * a_host.itemsize
+        d_a = hip_check(hip.hipMalloc(max_size_bytes))
+        d_b = hip_check(hip.hipMalloc(max_size_bytes))
+        d_c = hip_check(hip.hipMalloc(max_size_bytes))
+        hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+        hip_check(hip.hipMemcpy(d_b, b_host.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
     
     # Load kernel
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"elementwise_add_kernel"))
     
-    # Launch configuration
-    # We only launch enough blocks to cover M x N, but they access padded memory
-    BLOCK_X, BLOCK_Y = 16, 16
-    grid_x = (N + BLOCK_X - 1) // BLOCK_X
-    grid_y = (M + BLOCK_Y - 1) // BLOCK_Y
+    # Launch configuration (must match kernel tiling)
+    # - blockDim should provide exactly THR_M*THR_N threads (tidx in [0, THR_M*THR_N))
+    # - gridDim should be computed in units of the kernel's tile coverage
+    BLOCK_X, BLOCK_Y = THR_N, THR_M
+    TILE_M = THR_M * VAL_M
+    TILE_N = THR_N * VAL_N
+    grid_x = (N + TILE_N - 1) // TILE_N
+    grid_y = (M + TILE_M - 1) // TILE_M
     
     print(f"\n[RocDSL INFO] Launch configuration:")
-    print(f"  Grid: ({grid_x}, {grid_y}, 1) [Partial launch on {MAX_M}x{MAX_N} kernel]")
+    kernel_tag = f"{compile_M}x{compile_N}"
+    print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, kernel={kernel_tag}]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
     # Prepare arguments
@@ -279,11 +308,13 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         None
     ))
     
-    # Copy result back (full padded buffer)
-    hip_check(hip.hipMemcpy(c_padded.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-    
-    # Extract relevant part
-    c_host = c_padded[:M, :N]
+    if use_shared_max_kernel:
+        # Copy result back (full padded buffer)
+        hip_check(hip.hipMemcpy(c_padded.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+        # Extract relevant part
+        c_host = c_padded[:M, :N]
+    else:
+        hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
     
     # Verify results
     expected = a_host + b_host
@@ -294,41 +325,56 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     
     # Benchmark if requested
     if benchmark:
-        print(f"\n[RocDSL INFO] Running benchmark ({iterations} iterations)...")
-        import time
-        
-        start_event = hip_check(hip.hipEventCreate())
-        stop_event = hip_check(hip.hipEventCreate())
-        
-        # Warmup
-        for _ in range(10):
-            hip_check(hip.hipModuleLaunchKernel(
-                kernel_func, grid_x, grid_y, 1, BLOCK_X, BLOCK_Y, 1,
-                0, None, args, None
-            ))
+        # Use the shared perf harness (same as vecAdd benchmark) so results are comparable.
+        # NOTE: run_perftest uses torch.profiler on ROCm; it expects torch to be installed.
+        print(f"\n[RocDSL INFO] Running benchmark via run_perftest ({iterations} iterations)...")
+        try:
+            import torch  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                "Benchmark requested but torch is unavailable. "
+                "Install torch ROCm build or run without --benchmark."
+            ) from e
+
+        def hip_kernel_launch():
+            hip_check(
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK_X,
+                    BLOCK_Y,
+                    1,
+                    0,
+                    None,
+                    args,
+                    None,
+                )
+            )
+
+        # run_perftest returns (data, avg_us)
+        _, avg_us = run_perftest(hip_kernel_launch, num_iters=iterations, num_warmup=10)
         hip_check(hip.hipDeviceSynchronize())
-        
-        # Benchmark
-        hip_check(hip.hipEventRecord(start_event, None))
-        for _ in range(iterations):
-            hip_check(hip.hipModuleLaunchKernel(
-                kernel_func, grid_x, grid_y, 1, BLOCK_X, BLOCK_Y, 1,
-                0, None, args, None
-            ))
-        hip_check(hip.hipEventRecord(stop_event, None))
-        hip_check(hip.hipEventSynchronize(stop_event))
-        
-        elapsed_ms = ctypes.c_float()
-        hip_check(hip.hipEventElapsedTime(ctypes.byref(elapsed_ms), start_event, stop_event))
-        
-        avg_time_ms = elapsed_ms.value / iterations
-        bandwidth_gb = (3 * M * N * a_host.itemsize) / (avg_time_ms / 1e3) / 1e9
-        
+
+        total_bytes = 3 * M * N * a_host.itemsize
+        bandwidth_gb = total_bytes / (avg_us / 1e6) / 1e9
+        avg_time_ms = avg_us / 1000.0
+
         print(f"  Average time: {avg_time_ms:.4f} ms")
         print(f"  Bandwidth: {bandwidth_gb:.2f} GB/s")
-        
-        hip_check(hip.hipEventDestroy(start_event))
-        hip_check(hip.hipEventDestroy(stop_event))
+
+        # Standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose / vecAdd).
+        print(f"\nBandwidth: {bandwidth_gb:.2f} GB/s")
+
+        results = {
+            "avg_ms": avg_time_ms,
+            "avg_us": avg_us,
+            "bandwidth_gbs": bandwidth_gb,
+            "size": M * N,
+            "total_bytes": total_bytes,
+        }
+        print(f"\n{results}")
     
     # Cleanup
     hip_check(hip.hipFree(d_a))
@@ -363,7 +409,7 @@ if __name__ == "__main__":
             print(f"\n--- Testing shape {M}x{N} (2nd run - should reuse kernel) ---")
             test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
         
-        print("\n✅ PASS - All shapes tested with kernel caching!")
+        print("\nPASS - All shapes tested with kernel caching!")
     else:
         test_compile_and_run(
             args.M, args.N,
@@ -372,4 +418,4 @@ if __name__ == "__main__":
             iterations=args.iterations
         )
         
-        print("✅ PASS - Elementwise add test completed successfully!")
+        print("PASS - Elementwise add test completed successfully!")

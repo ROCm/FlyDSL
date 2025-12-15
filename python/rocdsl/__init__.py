@@ -45,8 +45,7 @@ def __getattr__(name):
     elif name == "scf":
         from .dialects.ext import scf
         return scf
-    elif name in ["Pipeline", "run_pipeline", "lower_rocir_to_standard", 
-                   "lower_cute_to_nvgpu", "optimize_layouts"]:
+    elif name in ["Pipeline", "run_pipeline", "lower_rocir_to_standard"]:
         from . import passes
         return getattr(passes, name)
 
@@ -57,8 +56,6 @@ __all__ = [
     "Pipeline",
     "run_pipeline",
     "lower_rocir_to_standard",
-    "lower_cute_to_nvgpu",
-    "optimize_layouts",
 ]
 
 # Export compiler modules

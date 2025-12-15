@@ -139,7 +139,7 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
                         f"{test_name}: Value [{i}] mismatch. Expected {expected}, got {actual}. "
                         f"All values: {all_actual}")
             
-            print(f"  ✅ {test_name}: All values verified: {expected_vals}")
+            print(f"  {test_name}: All values verified: {expected_vals}")
         
         # Handle single return value
         elif expected_val is not None:
@@ -170,7 +170,7 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
             
             assert actual == expected_val, \
                 f"{test_name}: Size mismatch. Expected {expected_val}, got {actual}"
-            print(f"  ✅ {test_name}: Size verified: {actual}")
+            print(f"  {test_name}: Size verified: {actual}")
 
 
 # ==============================================================================
@@ -291,7 +291,7 @@ def test_composition_basic():
 def test_composition_static_vs_dynamic():
     """Cell 11: Composition with static vs dynamic - (10,2):(16,4) o (5,4):(1,5)
     
-    This test mirrors Cell 11 from cute_layout_algebra.ipynb which demonstrates
+    This test mirrors a reference notebook Cell 11 which demonstrates
     the difference between static (compile-time) and dynamic (runtime) types:
     
     STATIC types:
@@ -426,7 +426,7 @@ def test_composition_static_vs_dynamic():
     run_pipeline(ctx_dynamic.module, pipeline)
     assert ctx_dynamic.module.operation.verify(), "Dynamic composition IR verification failed"
     print("  ✓ composition_dynamic: Lowering successful!")
-    print("  ✅ composition_dynamic: PASSED")
+    print("  composition_dynamic: PASSED")
     
     # -------------------------------------------------------------------------
     # Part 3: MIXED static/dynamic - some compile-time, some runtime values
@@ -435,7 +435,7 @@ def test_composition_static_vs_dynamic():
     print("  " + "-"*76)
     print("  Mixed static/dynamic layouts are fully tested in test_static_vs_dynamic.py")
     print("  See test_mixed_static_dynamic() for comprehensive coverage")
-    print("  ✅ Refer to test_static_vs_dynamic.py for mixed layout tests")
+    print("  Refer to test_static_vs_dynamic.py for mixed layout tests")
 
 
 def test_composition_bymode():
@@ -520,28 +520,17 @@ def test_logical_divide_2d():
     
     @func.FuncOp.from_py_func()
     def run_logical_divide_2d():
-        # Explicitly construct nested shapes to ensure structure is preserved
-        # Input: (9, (4, 8))
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        # Input: (9, (4, 8)):(59, (13, 1))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        # Tiler: (3, (2, 4))
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        # Tiler: (3, (2, 4)):(3, (1, 8))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_logical = rocir.logical_divide(layout, tiler)
         
@@ -569,6 +558,19 @@ def test_logical_divide_2d():
                             expected_vals=[3, 3, 2, 4, 2, 2, 177, 59, 13, 2, 26, 1])
 
 
+def test_shape_stride_type_nested_spec_printing():
+    """Ensure nested shape/stride types print in tuple form."""
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+
+    @func.FuncOp.from_py_func()
+    def _build():
+        s = rocir.make_shape(Index(9), (Index(4), Index(8)))
+        st = rocir.make_stride(Index(59), (Index(13), Index(1)))
+        assert str(s.type) == '!rocir.shape<(9,(4,8))>'
+        assert str(st.type) == '!rocir.stride<(59,(13,1))>'
+        return
+
+
 def test_zipped_divide():
     """Cell 19: Zipped Divide - same inputs as Cell 17"""
     print("\n" + "="*80)
@@ -584,25 +586,15 @@ def test_zipped_divide():
     
     @func.FuncOp.from_py_func()
     def run_zipped_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_zipped = rocir.zipped_divide(layout, tiler)
         
@@ -639,25 +631,15 @@ def test_tiled_divide():
     
     @func.FuncOp.from_py_func()
     def run_tiled_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_tiled = rocir.tiled_divide(layout, tiler)
         
@@ -693,25 +675,15 @@ def test_flat_divide():
     
     @func.FuncOp.from_py_func()
     def run_flat_divide():
-        layout_shape = rocir.make_shape(
-            Index(9),
-            rocir.make_shape(Index(4), Index(8))
+        layout = rocir.make_layout(
+            (Index(9), (Index(4), Index(8))),
+            stride=(Index(59), (Index(13), Index(1))),
         )
-        layout_stride = rocir.make_stride(
-            Index(59),
-            rocir.make_stride(Index(13), Index(1))
-        )
-        layout = rocir.make_layout(layout_shape, layout_stride)
 
-        tiler_shape = rocir.make_shape(
-            Index(3),
-            rocir.make_shape(Index(2), Index(4))
+        tiler = rocir.make_layout(
+            (Index(3), (Index(2), Index(4))),
+            stride=(Index(3), (Index(1), Index(8))),
         )
-        tiler_stride = rocir.make_stride(
-            Index(3),
-            rocir.make_stride(Index(1), Index(8))
-        )
-        tiler = rocir.make_layout(tiler_shape, tiler_stride)
 
         res_flat = rocir.flat_divide(layout, tiler)
         sz = rocir.size(res_flat)
@@ -1015,7 +987,7 @@ if __name__ == "__main__":
         try:
             test_func()  # Test functions now return None and use assertions
             passed += 1
-            print(f"  ✅ {test_name}: PASSED\n")
+            print(f"  {test_name}: PASSED\n")
         except AssertionError as e:
             print(f"  ❌ {test_name}: FAILED - {e}\n")
             failed += 1
@@ -1029,7 +1001,7 @@ if __name__ == "__main__":
     print("="*80)
     
     if failed == 0:
-        print("✅ All tests PASSED!")
+        print("All tests PASSED!")
         sys.exit(0)
     else:
         print(f"❌ {failed} test(s) FAILED!")

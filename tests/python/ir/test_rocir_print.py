@@ -174,7 +174,7 @@ if __name__ == "__main__":
     
     if all_pass:
         print("\n" + "="*80)
-        print("✅ All Print/Printf Tests PASSED!")
+        print("All Print/Printf Tests PASSED!")
         print("="*80)
         sys.exit(0)
     else:

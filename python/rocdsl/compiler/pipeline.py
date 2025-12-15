@@ -93,91 +93,6 @@ class Pipeline:
         """Lower Rocir dialect operations to standard dialects."""
         return self.add_pass("rocir-to-standard")
     
-    def cute_to_rocm(self) -> "Pipeline":
-        """Lower Rocir layout dialect to the ROCm dialect."""
-        return self.add_pass("cute-to-rocm")
-    
-    def cute_layout_canonicalize(self) -> "Pipeline":
-        """Canonicalize Rocir layout operations."""
-        return self.add_pass("cute-layout-canonicalize")
-    
-    def cute_tensor_partition(self) -> "Pipeline":
-        """Partition tensors for parallel execution."""
-        return self.add_pass("cute-tensor-partition")
-    
-    def cute_nvgpu_to_nvgpu(self, target_arch: Optional[str] = None, enable_tma: Optional[bool] = None) -> "Pipeline":
-        """Transform NVGPU operations.
-        
-        Args:
-            target_arch: Target architecture (e.g., "sm_80", "sm_90")
-            enable_tma: Enable Tensor Memory Accelerator
-        """
-        options = {}
-        if target_arch is not None:
-            options["target-arch"] = target_arch
-        if enable_tma is not None:
-            options["enable-tma"] = 1 if enable_tma else 0
-        return self.add_pass("cute-nvgpu-to-nvgpu", **options)
-    
-    def cute_nvgpu_mma_lowering(self) -> "Pipeline":
-        """Lower NVGPU MMA operations."""
-        return self.add_pass("cute-nvgpu-mma-lowering")
-    
-    def cute_nvgpu_copy_lowering(self) -> "Pipeline":
-        """Lower NVGPU copy operations."""
-        return self.add_pass("cute-nvgpu-copy-lowering")
-    
-    def cute_layout_fusion(self) -> "Pipeline":
-        """Fuse layout operations."""
-        return self.add_pass("cute-layout-fusion")
-    
-    def cute_vectorization(self) -> "Pipeline":
-        """Vectorize memory operations."""
-        return self.add_pass("cute-vectorization")
-    
-    def cute_memory_coalescing(self) -> "Pipeline":
-        """Coalesce memory accesses."""
-        return self.add_pass("cute-memory-coalescing")
-    
-    def cute_smem_swizzling(self) -> "Pipeline":
-        """Apply shared memory swizzling."""
-        return self.add_pass("cute-smem-swizzling")
-    
-    def cute_async_pipeline(self, pipeline_depth: Optional[int] = None) -> "Pipeline":
-        """Apply async pipelining.
-
-        Args:
-            pipeline_depth: Optional depth for the async pipeline.
-        """
-        if pipeline_depth is not None:
-            return self.add_pass("cute-async-pipeline", pipeline_depth=pipeline_depth)
-        return self.add_pass("cute-async-pipeline")
-    
-    def cute_warp_specialization(self, enable_producer_consumer: Optional[bool] = None) -> "Pipeline":
-        """Apply warp-level specialization.
-
-        Args:
-            enable_producer_consumer: Enable producer-consumer specialization
-        """
-        options = {}
-        if enable_producer_consumer is not None:
-            options["enable-producer-consumer"] = 1 if enable_producer_consumer else 0
-        return self.add_pass("cute-warp-specialization", **options)
-    
-    def cute_layout_analysis(self, print_analysis: bool = False) -> "Pipeline":
-        """Run layout analysis.
-        
-        Args:
-            print_analysis: Whether to print analysis results.
-        """
-        if print_analysis:
-            return self.add_pass("cute-layout-analysis", print_analysis=1)
-        return self.add_pass("cute-layout-analysis")
-    
-    def cute_atom_validation(self) -> "Pipeline":
-        """Validate layout atom configurations."""
-        return self.add_pass("cute-atom-validation")
-    
     # ========================================================================
     # Standard MLIR optimization passes
     # ========================================================================
@@ -374,15 +289,6 @@ class Pipeline:
     # ========================================================================
     # Convenience/Recipe Methods
     # ========================================================================
-    
-    def lower_cute_nvgpu_to_nvgpu(self, target_arch: Optional[str] = None, enable_pipeline: Optional[bool] = None) -> "Pipeline":
-        """Convenience method for NVGPU lowering pipeline.
-
-        Args:
-            target_arch: Target architecture
-            enable_pipeline: Enable async pipeline
-        """
-        return self.cute_nvgpu_to_nvgpu(target_arch=target_arch).cute_nvgpu_mma_lowering().cute_nvgpu_copy_lowering()
 
 
 # ========================================================================
