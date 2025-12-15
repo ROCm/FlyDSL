@@ -1,60 +1,122 @@
-# ROCDSL - MLIR Compiler Infrastructure for high performance rocm kernels
+# ROCDSL - MLIR Compiler Infrastructure for high performance ROCm kernels
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![MLIR](https://img.shields.io/badge/MLIR-amd--staging-orange)]()
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
+ROCDSL is an MLIR-based compiler infrastructure for high performance ROCm kernels.
+It provides a custom layout-algebra IR (Rocir dialect), a lowering pipeline to GPU/ROCDL,
+and a Python API (`rocdsl`) for constructing and running kernels.
 
-A modern MLIR-based compiler infrastructure for high performance ROCm kernels, providing a high-level IR for layout algebra and tensor operations with hardware-specific optimizations.
+## Features
 
-## 🎯 Features
+- **Rocir Dialect** (layout algebra inspired by CuTe/CUTLASS)
+  - Core abstractions: `!rocir.shape`, `!rocir.stride`, `!rocir.layout`, `!rocir.coord`
+  - Algebra ops: composition/product/divide/partition + coordinate mapping ops
+- **Python bindings** (`python/rocdsl/`) with an embedded MLIR python package
+  - No external `mlir` python wheel is required: MLIR python bindings are built and staged into `build/python_packages/rocdsl/_mlir`
+- **GPU lowering** to HSACO via MLIR GPU → ROCDL pipeline
+- **Tools**: `rocir-opt` for pass testing and IR experimentation
 
-- **Rocir Dialect**: Layout algebra IR inspired by CUTLASS
-  - Core abstractions: `!rocir.shape`, `!rocir.stride`, `!rocir.layout`
-  - Powerful algebra: Composition, Product, Divide, Partition operations
-  - Compile-time + Runtime hybrid evaluation
-- **Python Bindings**: Fluent Python API (`rocdsl`) for kernel construction
-  - `Pipeline` API for easy pass management
-  - `ArithValue` wrapper for intuitive arithmetic expressions
-- **Hardware Support**:
-  - AMD MI300 (gfx942) MI350(gfx950) optimization support (MFMA)
-  - Generic ROCm/HIP support
-- **Transformation Passes**:
-  - `rocir-coord-lowering`: Lowers layout abstractions to efficient arithmetic
-  - `gpu-to-rocdl`: Full lowering pipeline to HSACO binary
-- **Full Hierarchical Control**:
-  - Explicit cluster → block → warp → thread → instruction control to kernel developer
-  - Per-level layout partitioning helpers and predicate builders
-  - Fragment management for vector/MFMA instructions
+## Repository layout (current)
 
-## 🚀 Quick Start
+```
+rocDSL/
+├── CMakeLists.txt
+├── build_llvm.sh              # build/prepare llvm-project (optional helper)
+├── build.sh                   # build rocDSL + python bindings (recommended)
+├── run_tests.sh               # run MLIR + Python tests
+├── include/                   # C++ headers (dialect/pass declarations)
+├── lib/                       # C++ dialect + transforms + CAPI
+├── tools/                     # rocir-opt
+├── python/                    # Python package sources (rocdsl + helpers)
+├── python_bindings/           # CMake targets for python extensions/bindings
+└── tests/                     # mlir + python tests/benchmarks
+```
 
-### Build
+## Prerequisites
+
+- **ROCm**: required for GPU execution tests/benchmarks (IR-only tests do not need a GPU).
+- **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
+- **Python**: Python 3 + `pip`.
+  - `build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
+  - `python/requirements.txt` exists for auxiliary deps (`pybind11`, `hip-python`).
+
+## Build
+
+### A) Build / use an existing llvm-project (MLIR)
+
+If you already have an MLIR build, set:
 
 ```bash
-# Inside Docker container or environment
+export MLIR_PATH=/path/to/llvm-project/build
+```
 
-# 1. Build the llvm-project (if needed)
-cd rocdsl
+Or use the helper script (clones ROCm llvm-project and builds MLIR):
+
+```bash
 ./build_llvm.sh
-
-# 2. Build the rocdsl project (C++ and Python bindings)
-./build.sh
-
 ```
 
-### Run Tests
+### B) Build rocDSL (C++ + embedded python package)
 
 ```bash
-# Run the full test suite (C++ and Python tests)
-./run_tests.sh
-
-# Run specific Python benchmark
-python tests/benchmark/vecAdd.py
+./build.sh
 ```
+
+After a successful build, you will have:
+
+- `build/bin/rocir-opt`
+- Python package root at:
+  - `build/python_packages/rocdsl/`
+  - This contains:
+    - `rocdsl/` (your Python API)
+    - `_mlir/` (embedded MLIR python bindings)
+    - optional `mlir/` shim (if present)
+
+## Using the Python bindings
+
+Always point `PYTHONPATH` at the build-staged package:
+
+```bash
+export PYTHONPATH="$(pwd)/build/python_packages/rocdsl:${PYTHONPATH}"
+```
+
+If you see dynamic loader errors for MLIR shared libraries, also set:
+
+```bash
+export LD_LIBRARY_PATH="${MLIR_PATH:-$(pwd)/../llvm-project/buildmlir}/lib:${LD_LIBRARY_PATH}"
+```
+
+## Run tests
+
+```bash
+./run_tests.sh
+```
+
+What `run_tests.sh` does (high level):
+
+- **MLIR file tests**: runs `tests/mlir/*.mlir` through `rocir-opt --rocir-coord-lowering`
+- **Python IR tests**: runs `tests/python/ir/test_*.py` (no GPU required)
+- **Python examples**: runs `tests/python/examples/test_*.py`
+- **GPU execution tests** (only if ROCm is detected): runs `tests/python/gpu/test_*.py`
+- **Benchmarks** (only if ROCm is detected): runs `tests/benchmark/*.py` via `pytest`
+
+For the Python test folder organization, see `tests/python/README.md`.
+
+## Troubleshooting
+
+- **`rocir-opt not found`**
+  - Run `./build.sh`, or build it explicitly:
+    - `cmake --build build --target rocir-opt -j$(nproc)`
+
+- **Python import issues (`No module named rocdsl` / `No module named mlir`)**
+  - Ensure you are using the embedded package:
+    - `export PYTHONPATH=$(pwd)/build/python_packages/rocdsl:$PYTHONPATH`
+
+- **MLIR `.so` load errors**
+  - Add MLIR build lib dir to the loader path:
+    - `export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH`
 
 ## 📐 Layout System
 
-ROCDSL introduces a powerful layout system to manage complex data mapping patterns on GPUs (tiling, swizzling, vectorization).
+ROCDSL introduces a layout system to express complex data mapping patterns on GPUs (tiling, swizzling, vectorization).
 
 ### Core Abstractions
 
@@ -211,7 +273,8 @@ def vecAdd(A: T.memref(20480000, T.f32()),
     # repeat for B/C fragments, add, then store results
 ```
 
-Compile the module with `compile_to_hsaco`, set up HIP device buffers, and invoke the shared `perftest` helper to collect deterministic timing—just like the full benchmark.
+Compile the module with the pipeline, set up HIP device buffers, and invoke the helper utilities
+in the tests/benchmarks for timing—just like the full benchmark.
 
 ## ✅ Testing Status
 
@@ -226,27 +289,6 @@ Compile the module with `compile_to_hsaco`, set up HIP device buffers, and invok
 *   AMD MI300X (gfx942), AMD MI350 (gfx950)
 *   Linux / ROCm 6.x, 7.x
 
-## 🗂️ Project Structure
-
-```
-rocdsl/
-├── include/rocir/          # C++ Dialect definitions
-├── lib/                    # C++ Implementation (Dialect, Transforms)
-├── python/                 # Python bindings package (rocdsl)
-│   ├── rocdsl/
-│   │   ├── dialects/       # MLIR Dialect wrappers
-│   │   └── compiler/       # Pipeline and Context utilities
-│   ├── requirements.txt    # Python dependencies
-│   └── setup.py            # Build script
-├── tools/                  # CLI tools (rocir-opt)
-└── tests/                  # Test suite
-    ├── mlir/               # Lit tests for C++ components
-    └── python/             # Pytest suite for Python API
-        ├── ir/             # IR generation tests
-        ├── gpu/            # GPU execution tests
-        └── benchmark/      # Performance benchmarks
-```
-
-## 📄 License
+## License
 
 Apache License 2.0
