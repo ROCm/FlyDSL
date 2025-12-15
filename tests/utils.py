@@ -8,8 +8,9 @@ import os
 import torch
 import functools
 import time
+from typing import Optional
 
-def compile_to_hsaco(mlir_module, kernel_name="kernel"):
+def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """
     Compile MLIR module to HSACO binary for AMD GPUs.
     
@@ -69,6 +70,45 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
                 print(f"{'='*80}")
                 print(ir_str)
                 print(f"{'='*80}\n")
+
+    def _apply_waves_per_eu_on_llvm_funcs(module):
+        """Apply AMDGPU waves-per-eu hint to llvm.func ops via LLVM passthrough."""
+        if waves_per_eu is None:
+            return
+        w = int(waves_per_eu)
+        new_entry = ir.StringAttr.get(f"amdgpu-waves-per-eu={w},{w}")
+        new_entry_str = str(new_entry).strip('"')
+
+        def _append_passthrough(func_op):
+            existing = func_op.attributes.get("passthrough", None)
+            if existing is None:
+                func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+                return
+
+            # Best-effort: if it's not an ArrayAttr-like object, just overwrite.
+            try:
+                existing_entries = list(existing)
+            except TypeError:
+                func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+                return
+
+            if any(str(a).strip('"') == new_entry_str for a in existing_entries):
+                return
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get(existing_entries + [new_entry])
+
+        try:
+            for op in module.body.operations:
+                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                    continue
+                for inner_op in op.body.blocks[0].operations:
+                    if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                        continue
+                    if "gpu.kernel" not in inner_op.attributes:
+                        continue
+                    _append_passthrough(inner_op)
+        except Exception:
+            # Best-effort only.
+            return
     
     # Dump initial IR (with rocir ops)
     dump_stage(mlir_module, "01_initial")
@@ -129,6 +169,7 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel"):
         "08_lower_to_llvm",
         lambda: run_pipeline(llvm_converted, Pipeline().lower_to_llvm().reconcile_unrealized_casts()),
     )
+    _apply_waves_per_eu_on_llvm_funcs(llvm_lowered)
     dump_stage(llvm_lowered, "08_llvm_final")
     
     # Stage 7: Generate binary (ISA/assembly)

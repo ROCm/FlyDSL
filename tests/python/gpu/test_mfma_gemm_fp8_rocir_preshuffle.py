@@ -537,12 +537,24 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         b5 = _arith_mlir.AndIOp(unwrap(col_idx), unwrap(c32)).result
                         b5_shift = _arith_mlir.DivUIOp(unwrap(b5), unwrap(c4)).result 
                         
-                        res1 = _arith_mlir.OrIOp(unwrap(base), unwrap(b3_shift)).result
-                        res2 = _arith_mlir.OrIOp(unwrap(res1), unwrap(b5_shift)).result
+                        # NOTE: These bit-fields are disjoint because we cleared them from `base`
+                        # (x & ~40). So OR and ADD are equivalent here. Using ADD helps LLVM
+                        # recognize base+const patterns and fold them into ds_read offset immediates,
+                        # reducing the number of address VGPRs for LDS reads.
+                        res1 = _arith_mlir.AddIOp(unwrap(base), unwrap(b3_shift)).result
+                        res2 = _arith_mlir.AddIOp(unwrap(res1), unwrap(b5_shift)).result
                         return res2
 
                     col_lds0_swizzled = swizzle_idx(col_lds0)
                     col_lds1_swizzled = swizzle_idx(col_lds1)
+
+                    # Compute a single lane-dependent base index for A in LDS, then add
+                    # compile-time constant row-stride offsets for each `mi`. This helps the
+                    # backend select ds_read with `offset:` immediates instead of materializing
+                    # many distinct base address VGPRs.
+                    coord_a0_base = rocir.make_coord(unwrap(row_a_lds), unwrap(col_lds0_swizzled))
+                    idx_a0_base = rocir.crd2idx(coord_a0_base, layout_lds)
+                    idx_a0_base_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0_base)).result
 
                     for mi in range(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
@@ -551,9 +563,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         # Load A operands for the K64 micro-step.
                         # In LDS we swizzle so K and K+32 are adjacent (8B apart), so we can do one
                         # 16B LDS read (ds_read_b128) and split into two i64 packs.
-                        coord_a0 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
-                        idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
-                        idx_a0_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0)).result
+                        # idx(row_a_lds + mi*16, col) = idx_base + (mi*16)*lds_stride
+                        mi_linear_off = arith.constant(mi * 16 * lds_stride, index=True)
+                        idx_a0_idx = _arith_mlir.AddIOp(unwrap(idx_a0_base_idx), unwrap(mi_linear_off)).result
 
                         loaded_a16 = vector.LoadOp(vec16_f8, lds_a, [unwrap(idx_a0_idx)]).result
                         a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
@@ -643,7 +655,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                         idx = rocir.crd2idx(rocir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
-    hsaco = compile_to_hsaco(ctx.module)
+    # Request occupancy hint: waves-per-eu=2
+    # Use a unique kernel_name so IR/asm dumps don't get overwritten by other tests.
+    hsaco = compile_to_hsaco(ctx.module, kernel_name="mfma_fp8_preshuffle", waves_per_eu=2)
     print(f"✓ Compiled ({len(hsaco)} bytes)")
     
     grid_x = M // tile_m
@@ -736,7 +750,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
     bw = bytes_moved / 1e9 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
 
-    if False:
+    if HAS_AITER:
         print("-" * 40)
         print("Running Aiter Benchmark...")
         
