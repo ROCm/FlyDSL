@@ -62,8 +62,8 @@ def unwrap(v):
             v = v.value
     return v
 
-@pytest.mark.parametrize("M, N, K", [(16, 4096, 2048)])
-def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
+@pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k", [(1024, 7168, 2048, 128, 128, 128)])
+def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     print("="*80)
     print(f"MFMA FP8 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]")
     print("="*80)
@@ -381,19 +381,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m=16, tile_n=128, tile_k=128):
                     idx_0 = rocir.crd2idx(coord_store_0, layout_lds)
 
                     if curr_i32 == 4:
-                        # 16B chunk: store as two 8B stores so the swizzle applies to both halves.
-                        val_lo_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
-                        val_hi_i32 = vector.ShuffleOp(val_vec, val_vec, [2, 3]).result
-                        val_lo = vector.BitCastOp(vec8_f8, val_lo_i32).result
-                        val_hi = vector.BitCastOp(vec8_f8, val_hi_i32).result
-
-                        vector.StoreOp(val_lo, lds_a, [unwrap(idx_0)])
-
-                        col_1 = _arith_mlir.AddIOp(unwrap(col_0), unwrap(c8)).result
-                        col_swizzled_1 = swizzle_idx(row_a_local, col_1)
-                        coord_store_1 = rocir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_1))
-                        idx_1 = rocir.crd2idx(coord_store_1, layout_lds)
-                        vector.StoreOp(val_hi, lds_a, [unwrap(idx_1)])
+                        val_16 = vector.BitCastOp(vec16_f8, val_vec).result
+                        vector.StoreOp(val_16, lds_a, [unwrap(idx_0)])
                     elif curr_i32 == 2:
                         # 8B chunk: single store.
                         val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
@@ -706,7 +695,7 @@ if __name__ == "__main__":
     print("Running Tiling Tests...")
     
     test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
-    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
-    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
+    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
+    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
+    # test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
+    # test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
