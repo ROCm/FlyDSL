@@ -36,7 +36,7 @@ def create_vecadd_kernel(
     vec_width: int = 4,
     threads_per_block: int = 256,
 ):
-    """Create a RocIR tiled copy kernel mirroring 1-D vecAdd behavior."""
+    """Create a RocIR tiled copy kernel mirroring 1-D vec_add behavior."""
     if tile_size % vec_width != 0:
         raise ValueError("tile_size must be divisible by vec_width")
 
@@ -57,9 +57,9 @@ def create_vecadd_kernel(
     ip.__enter__()
 
     @gpu.func(emit=True)
-    def vecAdd(A: T.memref(size, dtype.get()),
-               B: T.memref(size, dtype.get()),
-               C: T.memref(size, dtype.get())):
+    def vec_add(A: T.memref(size, dtype.get()),
+                B: T.memref(size, dtype.get()),
+                C: T.memref(size, dtype.get())):
         tid_x = rocir.thread_idx("x")
         tid_y = rocir.thread_idx("y")
         bid_x = rocir.block_idx("x")
@@ -213,7 +213,7 @@ def benchmark_vector_add(tile_size: int = 4):
     module = create_vecadd_kernel(SIZE, tile_size=TILE_SIZE, dtype=F32Type)
     print("  Running canonicalize + CSE pipeline...")
     optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-    hsaco = compile_to_hsaco(optimized, kernel_name="vecAdd")
+    hsaco = compile_to_hsaco(optimized, kernel_name="vec_add")
     print(f"  Compiled to HSACO: {len(hsaco)} bytes")
     
     threads_per_block = THREADS_PER_BLOCK
@@ -242,7 +242,7 @@ def benchmark_vector_add(tile_size: int = 4):
     hip_check(hip.hipMemcpy(d_b, b_host.ctypes.data, SIZE * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
     
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"vecAdd"))
+    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"vec_add"))
     
     arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_b)), ctypes.c_void_p(int(d_c))]
     args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
