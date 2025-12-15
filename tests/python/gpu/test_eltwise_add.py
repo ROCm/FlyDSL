@@ -147,7 +147,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
                 coords = (idx_i, idx_j)
                 a_val = frgA[coords]
                 b_val = frgB[coords]
-                c_val = arith.AddFOp(a_val, b_val).result
+                c_val = a_val + b_val
                 frgC[coords] = c_val
         
         rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)

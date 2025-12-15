@@ -261,10 +261,13 @@ class TensorView:
         strides=None,
         base_indices=None,
         element_type=None,
+        *,
+        wrap_arith: bool = False,
     ):
         self.memref = _unwrap_value(memref_value) if memref_value is not None else None
         self.shape = tuple(int(s) for s in shape) if shape is not None else ()
         self.rank = len(self.shape)
+        self.wrap_arith = bool(wrap_arith)
         if strides is None:
             strides = []
             stride = 1
@@ -319,7 +322,15 @@ class TensorView:
         coords = self._normalize_coords(coords)
         with ip or InsertionPoint.current:
             op = memref.load(self.memref, coords, loc=loc)
-        return _unwrap_value(op.result if hasattr(op, "result") else op)
+        val = _unwrap_value(op.result if hasattr(op, "result") else op)
+        if self.wrap_arith:
+            # Local import to avoid circular import issues.
+            try:
+                from rocdsl.dialects.ext import arith as _arith_ext
+            except Exception:  # pragma: no cover
+                from . import arith as _arith_ext
+            return _arith_ext.ArithValue(val)
+        return val
 
     def store(self, value, coords, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
         if self.memref is None:
@@ -1500,7 +1511,14 @@ def make_fragment_like(template, element_type: Type = None, loc: Optional[Locati
         with ip or InsertionPoint.current:
             buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
         zeros = [0] * template.rank
-        return TensorView(buffer, template.shape, strides=template.strides, base_indices=zeros, element_type=elem_ty)
+        return TensorView(
+            buffer,
+            template.shape,
+            strides=template.strides,
+            base_indices=zeros,
+            element_type=elem_ty,
+            wrap_arith=True,
+        )
     if isinstance(template, TiledCopy):
         if element_type is None:
             raise ValueError("make_fragment_like(tiled_copy, element_type=...) requires element_type")
@@ -1509,7 +1527,14 @@ def make_fragment_like(template, element_type: Type = None, loc: Optional[Locati
         with ip or InsertionPoint.current:
             buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
         zeros = [0] * len(val_shape)
-        return TensorView(buffer, val_shape, strides=None, base_indices=zeros, element_type=element_type)
+        return TensorView(
+            buffer,
+            val_shape,
+            strides=None,
+            base_indices=zeros,
+            element_type=element_type,
+            wrap_arith=True,
+        )
     raise ValueError("Unsupported template type for make_fragment_like")
 
 
