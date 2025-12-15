@@ -9,9 +9,7 @@ import functools
 # Configure logging to show INFO level messages
 logging.basicConfig(level=logging.INFO)
 
-sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH'), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
+
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch

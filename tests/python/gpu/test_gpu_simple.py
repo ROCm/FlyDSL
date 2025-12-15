@@ -4,9 +4,7 @@ Vector addition test with clean, readable syntax
 """
 
 import sys
-sys.path.insert(0, "/mnt/raid0/felix/llvm-project/buildmlir/tools/mlir/python_packages/mlir_core")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/build/python_bindings")
-sys.path.insert(0, "/mnt/raid0/felix/rocDSL/python")
+
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline

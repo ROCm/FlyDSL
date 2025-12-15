@@ -12,10 +12,7 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 import sys
 import os
 
-# Add paths to find rocdsl and mlir packages
-sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
+
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import gpu, scf, rocir

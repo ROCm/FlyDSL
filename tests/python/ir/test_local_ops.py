@@ -1,12 +1,6 @@
 """Test local operations: local_partition and local_tile with Pythonic operators."""
 
 import pytest
-import sys
-import os
-sys.path.insert(0, os.environ['MLIR_PATH'] + '/tools/mlir/python_packages/mlir_core')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
-
 from mlir.ir import InsertionPoint
 from mlir.dialects import func
 

@@ -3,9 +3,7 @@
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH'), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from rocdsl.compiler.context import RAIIMLIRContextModule

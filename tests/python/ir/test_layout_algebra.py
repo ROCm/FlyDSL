@@ -6,13 +6,6 @@ Exactly following the layout algebra notebook examples from the CUTLASS tree.
 Each test corresponds to a specific cell in the notebook.
 """
 
-import sys
-import os
-import traceback
-sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
-
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.dialects.ext import rocir

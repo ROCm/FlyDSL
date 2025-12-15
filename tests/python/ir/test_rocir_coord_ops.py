@@ -3,9 +3,7 @@
 
 import sys
 import os
-sys.path.insert(0, os.environ['MLIR_PATH'] + '/tools/mlir/python_packages/mlir_core')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/build/python_bindings')
-sys.path.insert(0, '/mnt/raid0/felix/rocDSL/python')
+
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import rocir

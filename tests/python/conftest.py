@@ -1,53 +1,22 @@
-"""Pytest configuration for RocDSL tests."""
+"""Pytest configuration for RocDSL tests.
+
+This test suite now uses RocDSL's embedded MLIR Python bindings (the `_mlir`
+package under `build/python_packages/rocdsl`) and no longer relies on an
+external MLIR Python installation.
+"""
 
 import pytest
+
+from rocdsl.compiler.context import ensure_rocir_python_extensions
 from mlir.ir import Context, Location, Module, InsertionPoint
-import ctypes
-import os
-
-# Register Rocir passes by loading the shared library
-def register_cute_passes():
-    """Register Rocir passes with MLIR."""
-    try:
-        # Try to find and load the Rocir dialect library
-        lib_paths = [
-            '/mnt/raid0/felix/rocDSL/build/lib/Dialect/Rocir/libRocirDialect.so',
-            '/mnt/raid0/felix/rocDSL/build/lib/libRocirDialect.so',
-        ]
-        
-        for lib_path in lib_paths:
-            if os.path.exists(lib_path):
-                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-                break
-                
-        # Also try loading transforms library
-        transform_paths = [
-            '/mnt/raid0/felix/rocDSL/build/lib/Transforms/libCuteTransforms.so',
-            '/mnt/raid0/felix/rocDSL/build/lib/libCuteTransforms.so',
-        ]
-        
-        for lib_path in transform_paths:
-            if os.path.exists(lib_path):
-                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-                break
-                
-    except Exception as e:
-        import warnings
-        warnings.warn(f"Could not load Rocir libraries: {e}")
-
-# Register passes at module import time
-register_cute_passes()
 
 
 @pytest.fixture
 def ctx():
     """Provide a fresh MLIR context for each test."""
     with Context() as context:
-        # Allow unregistered dialects (for external Rocir extensions)
-        context.allow_unregistered_dialects = True
-        
-        # Load required dialects
-        context.load_all_available_dialects()
+        # Ensure Rocir + upstream dialects/passes/translations are registered.
+        ensure_rocir_python_extensions(context)
         
         # Set default location
         with Location.unknown(context):

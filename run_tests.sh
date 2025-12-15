@@ -31,10 +31,13 @@ echo "Rocir Test Suite"
 echo "========================================================================"
 echo ""
 
-# Set up Python path for embedded MLIR bindings.
-# - build/python_packages/rocdsl: contains `_mlir/`, and after build.sh also `rocdsl/` and `mlir/` shim
-# - python/: keeps running from sources convenient during development
+# Set up Python path for embedded MLIR bindings only (no external MLIR python).
+# - build/python_packages/rocdsl: contains `_mlir/`, plus `rocdsl/` and `mlir` shim
+# - python/: source tree for development convenience
 export PYTHONPATH="${SCRIPT_DIR}/build/python_packages/rocdsl:${SCRIPT_DIR}/python:${SCRIPT_DIR}:${PYTHONPATH}"
+
+# Make sure any legacy env doesn't accidentally leak an external mlir package.
+unset MLIR_PATH
 
 #=============================================================================
 MLIR_TEST_COUNT=0
