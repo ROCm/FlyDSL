@@ -768,27 +768,33 @@ def make_layout(shape, stride=None, loc: Optional[Location] = None, ip: Optional
         # TODO: Implement proper default stride computation
         raise ValueError("Default stride not yet implemented, please provide explicit stride")
     
-    # Extract rank from shape type
-    shape_type_str = str(shape.type)
-    type_content = shape_type_str.split("<")[1].split(">")[0].strip()
-    # New formats:
-    # - !rocir.shape<(...)> (tuple spec)
-    # - !rocir.shape<"(...)"> (legacy)
-    if type_content.startswith("("):
-        spec = type_content
-        rank = _count_leaves_in_tuple_spec(spec)
-    elif len(type_content) >= 2 and type_content[0] == '"' and type_content[-1] == '"':
-        spec = type_content[1:-1]
-        rank = _count_leaves_in_tuple_spec(spec)
-    elif "," in type_content:
-        # Legacy format: !rocir.shape<rank, ...>
-        rank = int(type_content.split(",")[0].strip())
+    def _extract_spec_and_rank_from_rocir_shape_or_stride_type(type_str: str):
+        """Return (spec, rank) where spec is a tuple-spec like '(9,(4,8))' or None."""
+        type_content = type_str.split("<")[1].split(">")[0].strip()
+        if type_content.startswith("("):
+            spec = type_content
+            rank = _count_leaves_in_tuple_spec(spec)
+            return spec, rank
+        if len(type_content) >= 2 and type_content[0] == '"' and type_content[-1] == '"':
+            spec = type_content[1:-1]
+            rank = _count_leaves_in_tuple_spec(spec)
+            return spec, rank
+        if "," in type_content:
+            # Legacy format: !rocir.shape<rank, ...>
+            return None, int(type_content.split(",")[0].strip())
+        return None, int(type_content)
+
+    shape_spec, rank = _extract_spec_and_rank_from_rocir_shape_or_stride_type(str(shape.type))
+    stride_spec, _ = _extract_spec_and_rank_from_rocir_shape_or_stride_type(str(stride.type))
+
+    # Flyx-like: encode both shape+stride specs into layout type if available.
+    if shape_spec is not None and stride_spec is not None:
+        result_type = Type.parse(f"!rocir.layout<{shape_spec}:{stride_spec}>")
     else:
-        rank = int(type_content)
-    result_type = LayoutType.get(rank)
+        result_type = LayoutType.get(rank)
     
     with ip or InsertionPoint.current:
-        return rocir_ops.MakeLayoutOp(result_type, _unwrap_value(shape), stride, loc=loc).result
+        return rocir_ops.MakeLayoutOp(result_type, _unwrap_value(shape), _unwrap_value(stride), loc=loc).result
 
 
 def make_coord(*coords: Value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:

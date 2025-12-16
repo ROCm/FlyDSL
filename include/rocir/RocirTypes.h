@@ -8,6 +8,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include <algorithm>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -113,6 +115,99 @@ struct StructuredTypeStorage : public TypeStorage {
   llvm::ArrayRef<int64_t> dims;
 };
 
+// Storage for LayoutType:
+// - rank: flattened rank (leaf count)
+// - shape/stride structure+dims: same encoding as StructuredTypeStorage
+// - shape_spec/stride_spec: derived canonical tuple specs (for printing)
+struct LayoutTypeStorage : public TypeStorage {
+  struct KeyTy {
+    int rank;
+    llvm::ArrayRef<int32_t> shapeStructure;
+    llvm::ArrayRef<int64_t> shapeDims;
+    llvm::ArrayRef<int32_t> strideStructure;
+    llvm::ArrayRef<int64_t> strideDims;
+  };
+
+  LayoutTypeStorage(int rank,
+                    llvm::StringRef shapeSpec,
+                    llvm::ArrayRef<int32_t> shapeStructure,
+                    llvm::ArrayRef<int64_t> shapeDims,
+                    llvm::StringRef strideSpec,
+                    llvm::ArrayRef<int32_t> strideStructure,
+                    llvm::ArrayRef<int64_t> strideDims)
+      : rank(rank),
+        shapeSpec(shapeSpec),
+        shapeStructure(shapeStructure),
+        shapeDims(shapeDims),
+        strideSpec(strideSpec),
+        strideStructure(strideStructure),
+        strideDims(strideDims) {}
+
+  bool operator==(const KeyTy &key) const {
+    return rank == key.rank && shapeStructure == key.shapeStructure &&
+           shapeDims == key.shapeDims && strideStructure == key.strideStructure &&
+           strideDims == key.strideDims;
+  }
+
+  static LayoutTypeStorage *construct(TypeStorageAllocator &allocator, const KeyTy &key) {
+    int rank = key.rank;
+    llvm::ArrayRef<int32_t> shapeStructure = allocator.copyInto(key.shapeStructure);
+    llvm::ArrayRef<int64_t> shapeDims = allocator.copyInto(key.shapeDims);
+    llvm::ArrayRef<int32_t> strideStructure = allocator.copyInto(key.strideStructure);
+    llvm::ArrayRef<int64_t> strideDims = allocator.copyInto(key.strideDims);
+
+    auto deriveSpec = [&](llvm::ArrayRef<int32_t> structure,
+                          llvm::ArrayRef<int64_t> dims) -> llvm::StringRef {
+      if (structure.empty())
+        return "";
+      size_t si = 0;
+      size_t di = 0;
+      std::function<std::string()> emit = [&]() -> std::string {
+        if (si >= structure.size())
+          return "?";
+        int32_t code = structure[si++];
+        if (code == -1) {
+          int64_t v = (di < dims.size()) ? dims[di++] : -1;
+          if (v < 0)
+            return "?";
+          return std::to_string(v);
+        }
+        std::string out = "(";
+        for (int32_t i = 0; i < code; ++i) {
+          if (i)
+            out += ",";
+          out += emit();
+        }
+        out += ")";
+        return out;
+      };
+      std::string s = emit();
+      return allocator.copyInto(llvm::StringRef(s));
+    };
+
+    llvm::StringRef shapeSpec = deriveSpec(shapeStructure, shapeDims);
+    llvm::StringRef strideSpec = deriveSpec(strideStructure, strideDims);
+
+    // If we have structure, compute rank from leaf dims sizes when available.
+    if (!shapeStructure.empty())
+      rank = static_cast<int>(shapeDims.size());
+    else if (!strideStructure.empty())
+      rank = static_cast<int>(strideDims.size());
+
+    return new (allocator.allocate<LayoutTypeStorage>())
+        LayoutTypeStorage(rank, shapeSpec, shapeStructure, shapeDims, strideSpec,
+                          strideStructure, strideDims);
+  }
+
+  int rank;
+  llvm::StringRef shapeSpec;
+  llvm::ArrayRef<int32_t> shapeStructure;
+  llvm::ArrayRef<int64_t> shapeDims;
+  llvm::StringRef strideSpec;
+  llvm::ArrayRef<int32_t> strideStructure;
+  llvm::ArrayRef<int64_t> strideDims;
+};
+
 } // namespace detail
 
 } // namespace mlir::rocir
@@ -136,6 +231,33 @@ struct DenseMapInfo<mlir::rocir::detail::StructuredTypeStorage::KeyTy> {
   }
   static bool isEqual(const KeyTy &a, const KeyTy &b) {
     return a.rank == b.rank && a.structure == b.structure && a.dims == b.dims;
+  }
+};
+
+template <>
+struct DenseMapInfo<mlir::rocir::detail::LayoutTypeStorage::KeyTy> {
+  using KeyTy = mlir::rocir::detail::LayoutTypeStorage::KeyTy;
+  static inline KeyTy getEmptyKey() {
+    return KeyTy{/*rank=*/-2, /*shapeStructure=*/{}, /*shapeDims=*/{},
+                 /*strideStructure=*/{}, /*strideDims=*/{}};
+  }
+  static inline KeyTy getTombstoneKey() {
+    return KeyTy{/*rank=*/-3, /*shapeStructure=*/{}, /*shapeDims=*/{},
+                 /*strideStructure=*/{}, /*strideDims=*/{}};
+  }
+  static unsigned getHashValue(const KeyTy &k) {
+    auto h = llvm::hash_combine(
+        k.rank,
+        llvm::hash_combine_range(k.shapeStructure.begin(), k.shapeStructure.end()),
+        llvm::hash_combine_range(k.shapeDims.begin(), k.shapeDims.end()),
+        llvm::hash_combine_range(k.strideStructure.begin(), k.strideStructure.end()),
+        llvm::hash_combine_range(k.strideDims.begin(), k.strideDims.end()));
+    return static_cast<unsigned>(h);
+  }
+  static bool isEqual(const KeyTy &a, const KeyTy &b) {
+    return a.rank == b.rank && a.shapeStructure == b.shapeStructure &&
+           a.shapeDims == b.shapeDims && a.strideStructure == b.strideStructure &&
+           a.strideDims == b.strideDims;
   }
 };
 } // namespace llvm

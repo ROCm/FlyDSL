@@ -17,6 +17,7 @@ def Rocir_Dialect : Dialect {
   let cppNamespace = "::mlir::rocir";
   let useDefaultTypePrinterParser = 0;
   let useDefaultAttributePrinterParser = 1;
+  let usePropertiesForAttributes = 1;
   
   let extraClassDeclaration = [{
     Type parseType(DialectAsmParser &parser) const override;

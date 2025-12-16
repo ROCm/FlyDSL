@@ -51,12 +51,29 @@ public:
   ::llvm::ArrayRef<int64_t> getDims() const;
 };
 
-class LayoutType : public Type::TypeBase<LayoutType, Type, detail::RankedTypeStorage> {
+class LayoutType : public Type::TypeBase<LayoutType, Type, detail::LayoutTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.layout";
+  /// Rank-only layout (backward compatible): layout<rank> / layout<(?,?,?)>
   static LayoutType get(MLIRContext *context, int rank);
+  /// Layout with structured shape/stride type information.
+  static LayoutType get(MLIRContext *context, ShapeType shape, StrideType stride);
+  /// Low-level constructor from tuple encodings (structure + flattened dims).
+  static LayoutType get(MLIRContext *context,
+                        ::llvm::ArrayRef<int32_t> shapeStructure,
+                        ::llvm::ArrayRef<int64_t> shapeDims,
+                        ::llvm::ArrayRef<int32_t> strideStructure,
+                        ::llvm::ArrayRef<int64_t> strideDims);
   int getRank() const;
+  ::llvm::StringRef getShapeSpec() const;
+  ::llvm::ArrayRef<int32_t> getShapeStructure() const;
+  ::llvm::ArrayRef<int64_t> getShapeDims() const;
+  ::llvm::StringRef getStrideSpec() const;
+  ::llvm::ArrayRef<int32_t> getStrideStructure() const;
+  ::llvm::ArrayRef<int64_t> getStrideDims() const;
+  ShapeType getShapeType() const;
+  StrideType getStrideType() const;
 };
 
 class CoordType : public Type::TypeBase<CoordType, Type, detail::RankedTypeStorage> {

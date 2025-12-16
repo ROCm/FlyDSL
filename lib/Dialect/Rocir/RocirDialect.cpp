@@ -205,11 +205,62 @@ ArrayRef<int64_t> StrideType::getDims() const {
 //===----------------------------------------------------------------------===//
 
 LayoutType LayoutType::get(MLIRContext *ctx, int rank) {
-  return Base::get(ctx, rank);
+  return Base::get(ctx, detail::LayoutTypeStorage::KeyTy{/*rank=*/rank,
+                                                         /*shapeStructure=*/{},
+                                                         /*shapeDims=*/{},
+                                                         /*strideStructure=*/{},
+                                                         /*strideDims=*/{}});
 }
 
-int LayoutType::getRank() const {
-  return getImpl()->rank;
+LayoutType LayoutType::get(MLIRContext *ctx, ShapeType shape, StrideType stride) {
+  // If shape/stride do not carry structure (rank-only), structure/dims will be empty.
+  // Keep rank from the flattened rank.
+  int rank = shape.getRank();
+  if (rank < 0)
+    rank = stride.getRank();
+  return Base::get(ctx, detail::LayoutTypeStorage::KeyTy{/*rank=*/rank,
+                                                        /*shapeStructure=*/shape.getStructure(),
+                                                        /*shapeDims=*/shape.getDims(),
+                                                        /*strideStructure=*/stride.getStructure(),
+                                                        /*strideDims=*/stride.getDims()});
+}
+
+LayoutType LayoutType::get(MLIRContext *ctx,
+                           ArrayRef<int32_t> shapeStructure,
+                           ArrayRef<int64_t> shapeDims,
+                           ArrayRef<int32_t> strideStructure,
+                           ArrayRef<int64_t> strideDims) {
+  int rank = static_cast<int>(shapeDims.size());
+  if (rank == 0)
+    rank = static_cast<int>(strideDims.size());
+  return Base::get(ctx, detail::LayoutTypeStorage::KeyTy{/*rank=*/rank,
+                                                        /*shapeStructure=*/shapeStructure,
+                                                        /*shapeDims=*/shapeDims,
+                                                        /*strideStructure=*/strideStructure,
+                                                        /*strideDims=*/strideDims});
+}
+
+int LayoutType::getRank() const { return getImpl()->rank; }
+
+StringRef LayoutType::getShapeSpec() const { return getImpl()->shapeSpec; }
+ArrayRef<int32_t> LayoutType::getShapeStructure() const { return getImpl()->shapeStructure; }
+ArrayRef<int64_t> LayoutType::getShapeDims() const { return getImpl()->shapeDims; }
+StringRef LayoutType::getStrideSpec() const { return getImpl()->strideSpec; }
+ArrayRef<int32_t> LayoutType::getStrideStructure() const { return getImpl()->strideStructure; }
+ArrayRef<int64_t> LayoutType::getStrideDims() const { return getImpl()->strideDims; }
+
+ShapeType LayoutType::getShapeType() const {
+  auto *ctx = getContext();
+  if (getShapeStructure().empty())
+    return ShapeType::get(ctx, getRank());
+  return ShapeType::get(ctx, getShapeStructure(), getShapeDims());
+}
+
+StrideType LayoutType::getStrideType() const {
+  auto *ctx = getContext();
+  if (getStrideStructure().empty())
+    return StrideType::get(ctx, getRank());
+  return StrideType::get(ctx, getStrideStructure(), getStrideDims());
 }
 
 //===----------------------------------------------------------------------===//
@@ -416,12 +467,15 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
   if (mnemonic == "layout") {
     if (succeeded(parser.parseOptionalLess())) {
       // Supported:
-      // - layout<(...)>   (tuple rank spec)
+      // - layout<shapeSpec:strideSpec> (tuple specs, unquoted)
+      // - layout<(...)>   (tuple rank spec, backward compatible)
       // - layout<rank>
       int64_t rank = -1;
       if (succeeded(parser.parseOptionalLParen())) {
-        // Parse tuple purely to count leaf rank (integers or '?').
-        int leafCount = 0;
+        // Parse the first tuple spec (we already consumed '(').
+        llvm::SmallVector<int32_t, 16> shapeStructure;
+        llvm::SmallVector<int64_t, 16> shapeDims;
+
         std::function<ParseResult()> parseElem;
         std::function<ParseResult()> parseTuple;
 
@@ -429,34 +483,101 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
           if (succeeded(parser.parseOptionalLParen()))
             return parseTuple();
           if (succeeded(parser.parseOptionalQuestion())) {
-            ++leafCount;
+            shapeStructure.push_back(-1);
+            shapeDims.push_back(-1);
             return success();
           }
           int64_t v = 0;
           if (parser.parseInteger(v))
             return failure();
-          ++leafCount;
+          shapeStructure.push_back(-1);
+          shapeDims.push_back(v);
           return success();
         };
 
         parseTuple = [&]() -> ParseResult {
-          if (succeeded(parser.parseOptionalRParen()))
+          if (succeeded(parser.parseOptionalRParen())) {
+            shapeStructure.push_back(0);
             return success();
+          }
+          int32_t arity = 0;
+          size_t headerIdx = shapeStructure.size();
+          shapeStructure.push_back(0);
           while (true) {
             if (failed(parseElem()))
               return failure();
+            ++arity;
             if (succeeded(parser.parseOptionalComma()))
               continue;
             break;
           }
           if (parser.parseRParen())
             return failure();
+          shapeStructure[headerIdx] = arity;
           return success();
         };
 
-        if (failed(parseTuple()) || parser.parseGreater())
+        if (failed(parseTuple()))
           return Type();
-        return LayoutType::get(ctx, leafCount);
+
+        // New layout spec form requires ':' followed by another tuple for stride spec.
+        if (succeeded(parser.parseOptionalColon())) {
+          if (failed(parser.parseLParen()))
+            return Type();
+
+          llvm::SmallVector<int32_t, 16> strideStructure;
+          llvm::SmallVector<int64_t, 16> strideDims;
+
+          std::function<ParseResult()> parseElem2;
+          std::function<ParseResult()> parseTuple2;
+
+          parseElem2 = [&]() -> ParseResult {
+            if (succeeded(parser.parseOptionalLParen()))
+              return parseTuple2();
+            if (succeeded(parser.parseOptionalQuestion())) {
+              strideStructure.push_back(-1);
+              strideDims.push_back(-1);
+              return success();
+            }
+            int64_t v = 0;
+            if (parser.parseInteger(v))
+              return failure();
+            strideStructure.push_back(-1);
+            strideDims.push_back(v);
+            return success();
+          };
+
+          parseTuple2 = [&]() -> ParseResult {
+            if (succeeded(parser.parseOptionalRParen())) {
+              strideStructure.push_back(0);
+              return success();
+            }
+            int32_t arity = 0;
+            size_t headerIdx = strideStructure.size();
+            strideStructure.push_back(0);
+            while (true) {
+              if (failed(parseElem2()))
+                return failure();
+              ++arity;
+              if (succeeded(parser.parseOptionalComma()))
+                continue;
+              break;
+            }
+            if (parser.parseRParen())
+              return failure();
+            strideStructure[headerIdx] = arity;
+            return success();
+          };
+
+          if (failed(parseTuple2()) || parser.parseGreater())
+            return Type();
+          return LayoutType::get(ctx, shapeStructure, shapeDims, strideStructure, strideDims);
+        }
+
+        // Backward compatible: layout<(...)> only encodes rank.
+        if (parser.parseGreater())
+          return Type();
+        return LayoutType::get(ctx, static_cast<int>(shapeDims.size()));
       }
 
       if (parser.parseInteger(rank) || parser.parseGreater())
@@ -560,6 +681,11 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &os) const {
       }
     }
   } else if (auto layoutType = llvm::dyn_cast<LayoutType>(type)) {
+    // Prefer printing full shape/stride specs when available (Flyx-like).
+    if (!layoutType.getShapeSpec().empty() && !layoutType.getStrideSpec().empty()) {
+      os << "layout<" << layoutType.getShapeSpec() << ":" << layoutType.getStrideSpec() << ">";
+      return;
+    }
     int r = layoutType.getRank();
     if (r >= 0) {
       os << "layout<(";
