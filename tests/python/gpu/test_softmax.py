@@ -105,7 +105,9 @@ def build_softmax_module(M, N, dtype_str="f32"):
     VEC_ALIGN = 16
 
     # Optional: use LLVM AMDGPU bf16 pack intrinsic (requires LLVM support).
-    # - 0 (default): use manual bf16 pack (works on current toolchain) - 1: use llvm.amdgcn.cvt.pk.bf16.f32 (after you "补上" intrinsic in LLVM build) NOTE: gfx942 不支持 `v_cvt_pk_bf16_f32`（llvm-mc 会报 instruction not supported）， 因此即使我们“补上”了 LLVM intrinsic，也无法在该架构上选指令。 为避免误开导致 codegen 直接 abort，这里在 gfx942 上强制禁用 intrinsic 路径。
+    # - 0 (default): use manual bf16 pack (works on current toolchain) 
+    # - 1: use llvm.amdgcn.cvt.pk.bf16.f32 (after you add the intrinsic to your LLVM build)
+    # - NOTE: gfx942 does not support `v_cvt_pk_bf16_f32` (llvm-mc will report instruction not supported).
     USE_BF16_PACK_INTR = (os.environ.get("ROCDSL_BF16_PACK_INTR", "0") == "1") and (gpu_arch != "gfx942")
 
     # NOTE: Remaining bf16 "unpack/align" ops (e.g. 0xffff0000) mainly come from
