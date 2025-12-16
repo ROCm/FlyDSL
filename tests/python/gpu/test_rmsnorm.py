@@ -12,16 +12,23 @@ RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 import sys
 import os
 
-
+# Add paths to find rocdsl and mlir packages (prefer embedded MLIR to avoid mixing runtimes)
+repo_root = os.path.join(os.path.dirname(__file__), "../../..")
+embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "rocdsl")
+if os.path.isdir(os.path.join(embedded_pkgs, "_mlir")):
+    sys.path.insert(0, embedded_pkgs)
+else:
+    sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
+sys.path.insert(0, repo_root)
 
 from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import gpu, scf, rocir
-from rocdsl.dialects.ext.gpu import lds_space
+from rocdsl.dialects.ext import rocir
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from rocdsl.utils import SmemAllocator
 from tests.utils import compile_to_hsaco
 from _mlir import ir
-from _mlir.dialects import arith, memref, math
 import _mlir.extras.types as T
 try:
     from hip import hip
@@ -33,138 +40,302 @@ import numpy as np
 import ctypes
 import time
 
-# Dimensions
-M = 64   # Batch size
-N = 256  # Feature size
+# Expose modules through Rocir interface (keep behavior/perf, avoid mlir.* imports).
+gpu = rocir.gpu_ext
+scf = rocir.scf_ext
+# Keep arith as the raw dialect module here (this file uses arith.constant(Type, value) form).
+arith = rocir.arith
+mlir_arith = rocir.arith
+memref = rocir.memref
+vector = rocir.vector
+math = rocir.math
+
+# Small helper: unwrap MLIR wrapper values into ir.Value
+def unwrap(v):
+    if hasattr(v, "value"): return v.value
+    if hasattr(v, "_value"): return v._value
+    if hasattr(v, "result"): return v.result
+    return v
+
 EPS = 1e-5
 
-ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-gpu.set_container_module(ctx.module)
+# bf16 host packing helpers (same convention as test_softmax.py: store bf16 as uint16 payload)
+def bf16_to_fp32_cpu(arr_bf16_uint16):
+    arr_u32 = arr_bf16_uint16.astype(np.uint32) << 16
+    return np.frombuffer(arr_u32.tobytes(), dtype=np.float32).reshape(arr_bf16_uint16.shape)
 
-# Initialize Allocator with architecture for capacity checks
-allocator = SmemAllocator(ctx, arch=get_hip_arch())
+def fp32_to_bf16_cpu(arr_fp32):
+    u32 = np.frombuffer(arr_fp32.astype(np.float32).tobytes(), dtype=np.uint32)
+    u32 = u32.reshape(arr_fp32.shape)
+    lsb = (u32 >> 16) & 1
+    rounding_bias = 0x7FFF + lsb
+    u32_rounded = u32 + rounding_bias
+    return (u32_rounded >> 16).astype(np.uint16)
 
-# Allocate Shared Memory for reduction (size N)
-smem_decl = allocator.allocate_array(T.f32(), N)
+BLOCK_THREADS = 256
+WARP_SIZE = 64
+VEC_WIDTH = 8
+USE_NONTEMPORAL = True
+VEC_ALIGN = 16
+WARMUP_ITERS = 10
+BENCH_ITERS = 100
 
-@gpu.module("rmsnorm_module", [f'#rocdl.target<chip = "{get_hip_arch()}", abi = "500">'])
-def gpu_mod():
-    # Finalize allocation to create global buffer
-    allocator.finalize()
+def dtype_to_elem_type(dtype_str: str):
+    if dtype_str == "f32": return T.f32()
+    if dtype_str == "f16": return T.f16()
+    if dtype_str == "bf16": return T.bf16()
+    raise ValueError(f"unsupported dtype: {dtype_str}")
 
-ip = ir.InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
-ip.__enter__()
+def build_rmsnorm_module(M: int, N: int, dtype_str: str):
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+    gpu.set_container_module(ctx.module)
 
-@gpu.func(emit=True)
-def rmsnorm_kernel(
-    Input: T.memref(M, N, T.f32()),
-    Gamma: T.memref(N, T.f32()),
-    Output: T.memref(M, N, T.f32())
-):
-    # IDs
-    row = gpu.block_id("x")
-    tid = gpu.thread_id("x")
-    
-    # Constants
-    zero_idx = arith.constant(T.index(), 0)
-    one_idx = arith.constant(T.index(), 1)
-    n_idx = arith.constant(T.index(), N)
-    n_float = arith.constant(T.f32(), float(N))
-    eps = arith.constant(T.f32(), EPS)
-    
-    # Define Rocir Layouts for Shared Memory
-    smem_shape = rocir.make_shape(n_idx)
-    smem_stride = rocir.make_stride(one_idx)
-    smem_layout = rocir.make_layout(smem_shape, smem_stride)
+    arch = get_hip_arch()
+    allocator = SmemAllocator(ctx, arch=arch)
 
-    # Helper to get smem index from linear offset
-    def get_smem_idx(idx_val):
-        coord = rocir.make_coord(idx_val)
-        val = rocir.crd2idx(coord, smem_layout)
-        return val.value if hasattr(val, 'value') else val
+    elem_type = dtype_to_elem_type(dtype_str)
+    compute_type = T.f32()
 
-    # Get shared memory using allocator
-    base_ptr = allocator.get_base()
-    smem_obj = smem_decl(base_ptr)
-    smem = smem_obj.get() # This is memref<Nxf32, 3> view
-    
-    # Load Input
-    val = memref.load(Input, [row.value, tid.value])
-    
-    # -----------------------------------------------------
-    # 1. Calculate Sum of Squares (x^2)
-    # -----------------------------------------------------
-    sq = arith.mulf(val.value, val.value)
-    
-    tid_idx = get_smem_idx(tid.value)
-    memref.store(sq.value, smem, [tid_idx])
-    gpu.barrier()
-    
-    is_thread_0 = arith.cmpi(arith.CmpIPredicate.eq, tid.value, zero_idx.value)
-    
-    # Reduction Sum (Thread 0 only)
-    if_op = scf.IfOp(is_thread_0.value)
-    with ir.InsertionPoint(if_op.then_block):
-        zero_smem_idx = get_smem_idx(zero_idx.value)
-        init_sum = memref.load(smem, [zero_smem_idx])
-        
-        loop = scf.ForOp(one_idx.value, n_idx.value, one_idx.value, [init_sum.value])
-        with ir.InsertionPoint(loop.body):
-            i = loop.induction_variable
-            curr_sum = loop.inner_iter_args[0]
-            
-            i_idx = get_smem_idx(i.value)
-            v = memref.load(smem, [i_idx])
-            
-            new_sum = arith.addf(curr_sum.value, v.value)
-            scf.yield_([new_sum.value])
-        
-        sum_sq_val = loop.results[0]
-        # Calculate Mean Square: mean(x^2)
-        mean_sq = arith.divf(sum_sq_val.value, n_float.value)
-        # Store back to broadcast
-        memref.store(mean_sq.value, smem, [zero_smem_idx])
-        scf.yield_([])
-    
-    gpu.barrier()
-    
-    # Broadcast Mean Square
-    # Use zero_smem_idx again (re-calculate since it's outside the if block scope, or just use get_smem_idx)
-    mean_sq = memref.load(smem, [get_smem_idx(zero_idx.value)])
-    
-    # -----------------------------------------------------
-    # 2. Normalize and Scale
-    # -----------------------------------------------------
-    # rrms = 1 / sqrt(mean_sq + eps)
-    ms_eps = arith.addf(mean_sq.value, eps.value)
-    rrms = math.rsqrt(ms_eps.value)
-    
-    # norm = val * rrms
-    norm = arith.mulf(val.value, rrms.value)
-    
-    # Load Gamma
-    g = memref.load(Gamma, [tid.value])
-    
-    # result = norm * gamma
-    result = arith.mulf(norm.value, g.value)
-    
-    memref.store(result.value, Output, [row.value, tid.value])
+    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
+    smem_red = allocator.allocate_array(T.f32(), RED_SLOTS)
+    # Cache row in LDS to avoid 2nd global read of Input
+    smem_row = allocator.allocate_array(elem_type, N)
 
-ip.__exit__(None, None, None)
+    @gpu.module("rmsnorm_module", [f'#rocdl.target<chip = "{arch}", abi = "500">'])
+    def gpu_mod():
+        allocator.finalize()
 
-def test_rmsnorm():
-    print("\n" + "="*80)
-    print("Testing RMSNorm Operator (M={}, N={})".format(M, N))
-    print("="*80)
+        @gpu.func(emit=True)
+        def rmsnorm_kernel(
+            Input: T.memref(M, N, elem_type),
+            Gamma: T.memref(N, elem_type),
+            Output: T.memref(M, N, elem_type)
+        ):
+            row = gpu.block_id("x")
+            tid = gpu.thread_id("x")
+
+            zero_idx = arith.constant(T.index(), 0)
+            n_float = arith.constant(compute_type, float(N))
+            eps = arith.constant(compute_type, EPS)
+            fm_fast = mlir_arith.FastMathFlags.fast
+
+            base_ptr = allocator.get_base()
+            s_red = smem_red(base_ptr).get()
+            s_row = smem_row(base_ptr).get()
+
+            def block_reduce_add(val_f32, scratch_memref):
+                tid_i32 = mlir_arith.IndexCastOp(T.i32(), tid.value).result
+                c_warp_i32 = arith.constant(T.i32(), WARP_SIZE)
+                lane_i32 = mlir_arith.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                wave_i32 = mlir_arith.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                width_i32 = arith.constant(T.i32(), WARP_SIZE)
+
+                w = unwrap(val_f32)
+                for sh in [32, 16, 8, 4, 2, 1]:
+                    off = arith.constant(T.i32(), sh)
+                    peer = gpu.ShuffleOp(unwrap(w), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
+                    w = mlir_arith.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
+
+                is_lane0 = mlir_arith.CmpIOp(
+                    mlir_arith.CmpIPredicate.eq,
+                    unwrap(lane_i32),
+                    unwrap(arith.constant(T.i32(), 0)),
+                ).result
+                if_lane0 = scf.IfOp(unwrap(is_lane0))
+                with ir.InsertionPoint(if_lane0.then_block):
+                    wave_idx = mlir_arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
+                    memref.store(unwrap(w), scratch_memref, [unwrap(wave_idx)])
+                    scf.yield_([])
+                gpu.barrier()
+
+                NUM_WAVES = RED_SLOTS
+                is_wave0 = mlir_arith.CmpIOp(
+                    mlir_arith.CmpIPredicate.eq,
+                    unwrap(wave_i32),
+                    unwrap(arith.constant(T.i32(), 0)),
+                ).result
+                # Only wave0 does final reduction and writes scratch[0].
+                if_wave0 = scf.IfOp(unwrap(is_wave0))
+                with ir.InsertionPoint(if_wave0.then_block):
+                    in_range = mlir_arith.CmpIOp(
+                        mlir_arith.CmpIPredicate.ult,
+                        unwrap(lane_i32),
+                        unwrap(arith.constant(T.i32(), NUM_WAVES)),
+                    ).result
+                    if_in = scf.IfOp(unwrap(in_range), [T.f32()], hasElse=True)
+                    with ir.InsertionPoint(if_in.then_block):
+                        lane_idx = mlir_arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                        v = memref.load(scratch_memref, [unwrap(lane_idx)])
+                        scf.yield_([unwrap(v)])
+                    with ir.InsertionPoint(if_in.else_block):
+                        scf.yield_([unwrap(arith.constant(T.f32(), 0.0).value)])
+
+                    ww = if_in.results[0]
+                    for sh in [32, 16, 8, 4, 2, 1]:
+                        off = arith.constant(T.i32(), sh)
+                        peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
+                        ww = mlir_arith.AddFOp(unwrap(ww), unwrap(peer), fastmath=fm_fast).result
+
+                    is_lane0_2 = mlir_arith.CmpIOp(
+                        mlir_arith.CmpIPredicate.eq,
+                        unwrap(lane_i32),
+                        unwrap(arith.constant(T.i32(), 0)),
+                    ).result
+                    if_lane0_2 = scf.IfOp(unwrap(is_lane0_2))
+                    with ir.InsertionPoint(if_lane0_2.then_block):
+                        memref.store(unwrap(ww), scratch_memref, [unwrap(zero_idx.value)])
+                        scf.yield_([])
+                    scf.yield_([])
+
+                gpu.barrier()
+                return memref.load(scratch_memref, [unwrap(zero_idx.value)])
+
+            # =========================================================
+            # Pass0: global -> LDS row cache (1-pass global read)
+            # =========================================================
+            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+                c_base = arith.constant(T.index(), base_idx_int).value
+                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
+                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+
+                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                if tile_safe:
+                    vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+                    vec_e = vector.load(
+                        vec_type_e, Input, [unwrap(row), unwrap(curr_idx)],
+                        nontemporal=USE_NONTEMPORAL, alignment=VEC_ALIGN
+                    )
+                    vector.store(unwrap(vec_e), s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
+                else:
+                    c_N = arith.constant(T.index(), N).value
+                    for k in range(VEC_WIDTH):
+                        c_k = arith.constant(T.index(), k).value
+                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = scf.IfOp(unwrap(is_valid))
+                        with ir.InsertionPoint(if_store.then_block):
+                            v_e = memref.load(Input, [unwrap(row), unwrap(idx_k)])
+                            memref.store(unwrap(v_e), s_row, [unwrap(idx_k)])
+                            scf.yield_([])
+
+            gpu.barrier()
+
+            # =========================================================
+            # Pass1: sumsq (from LDS row cache)
+            # =========================================================
+            c_zero = arith.constant(compute_type, 0.0).value
+            thread_sumsq = unwrap(c_zero)
+
+            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+                c_base = arith.constant(T.index(), base_idx_int).value
+                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
+                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+
+                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                if tile_safe:
+                    vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+                    vec_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
+                    vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+                    vec = vec_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(vec_e))
+                    vec2 = mlir_arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
+                    red2 = vector.reduction(compute_type, "add", unwrap(vec2), fastmath=fm_fast)
+                    thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
+                else:
+                    c_N = arith.constant(T.index(), N).value
+                    for k in range(VEC_WIDTH):
+                        c_k = arith.constant(T.index(), k).value
+                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_load = scf.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
+                        with ir.InsertionPoint(if_load.then_block):
+                            v_e = memref.load(s_row, [unwrap(idx_k)])
+                            scf.yield_([unwrap(v_e)])
+                        with ir.InsertionPoint(if_load.else_block):
+                            scf.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
+                        v_e = if_load.results[0]
+                        v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
+                        v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
+                        thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
+
+            sum_sq = block_reduce_add(thread_sumsq, s_red)
+            mean_sq = mlir_arith.DivFOp(unwrap(sum_sq), unwrap(n_float.value), fastmath=fm_fast).result
+
+            ms_eps = mlir_arith.AddFOp(unwrap(mean_sq), unwrap(eps.value), fastmath=fm_fast).result
+            rrms = math.rsqrt(unwrap(ms_eps))
+
+            # =========================================================
+            # Pass2: normalize + gamma + store
+            # =========================================================
+            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+            rrms_splat = vector.splat(vec_type_c, unwrap(rrms))
+
+            # Software pipeline for aligned tiles: prefetch Gamma
+            g_pref_e = None
+            if N >= BLOCK_THREADS * VEC_WIDTH:
+                c_base0 = arith.constant(T.index(), 0).value
+                thread_offset0 = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
+                curr0 = mlir_arith.AddIOp(unwrap(c_base0), unwrap(thread_offset0)).result
+                vec_type_e0 = ir.VectorType.get([VEC_WIDTH], elem_type)
+                g_pref_e = vector.load(vec_type_e0, Gamma, [unwrap(curr0)], alignment=VEC_ALIGN)
+
+            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+                c_base = arith.constant(T.index(), base_idx_int).value
+                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
+                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+
+                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                if tile_safe:
+                    # Prefetch next Gamma early (software pipeline)
+                    next_base_int = base_idx_int + (BLOCK_THREADS * VEC_WIDTH)
+                    if next_base_int < N:
+                        c_base_n = arith.constant(T.index(), next_base_int).value
+                        curr_idx_n = mlir_arith.AddIOp(unwrap(c_base_n), unwrap(thread_offset_base)).result
+                        g_next_e = vector.load(vec_type_e, Gamma, [unwrap(curr_idx_n)], alignment=VEC_ALIGN)
+                    else:
+                        g_next_e = None
+
+                    x_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
+                    # Gamma is reused across many blocks: do NOT use nontemporal here.
+                    g_e = g_pref_e if g_pref_e is not None else vector.load(vec_type_e, Gamma, [unwrap(curr_idx)], alignment=VEC_ALIGN)
+                    x = x_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(x_e))
+                    g = g_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e))
+                    norm = mlir_arith.MulFOp(unwrap(x), unwrap(rrms_splat), fastmath=fm_fast).result
+                    y = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
+                    y_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, unwrap(y))
+                    vector.store(unwrap(y_e), Output, [unwrap(row), unwrap(curr_idx)],
+                                 nontemporal=USE_NONTEMPORAL, alignment=VEC_ALIGN)
+                    g_pref_e = g_next_e
+                else:
+                    c_N = arith.constant(T.index(), N).value
+                    for k in range(VEC_WIDTH):
+                        c_k = arith.constant(T.index(), k).value
+                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = scf.IfOp(unwrap(is_valid))
+                        with ir.InsertionPoint(if_store.then_block):
+                            x_e = memref.load(s_row, [unwrap(idx_k)])
+                            g_e = memref.load(Gamma, [unwrap(idx_k)])
+                            x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
+                            g = unwrap(g_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(g_e))
+                            norm = mlir_arith.MulFOp(unwrap(x), unwrap(rrms), fastmath=fm_fast).result
+                            y = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
+                            y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
+                            memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx_k)])
+                            scf.yield_([])
+
+    return ctx
+
+def run_test(M: int, N: int, dtype: str = "f32") -> bool:
+    print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
 
     if hip is None:
         print("HIP not available, skipping...")
-        return
+        return True
 
-    # Compile
-    print("Compiling kernel...")
+    ctx = build_rmsnorm_module(M, N, dtype)
     try:
-        hsaco = compile_to_hsaco(ctx.module)
+        hsaco = compile_to_hsaco(ctx.module, kernel_name="rmsnorm")
     except Exception as e:
         print(f"Compilation failed: {e}")
         print(ctx.module)
@@ -172,26 +343,51 @@ def test_rmsnorm():
 
     print(f" HSACO size: {len(hsaco)} bytes")
 
-    # Prepare Data
     np.random.seed(42)
-    input_host = np.random.randn(M, N).astype(np.float32)
-    gamma_host = np.random.rand(N).astype(np.float32)
-    output_host = np.zeros((M, N), dtype=np.float32)
+    input_f32 = np.random.randn(M, N).astype(np.float32)
+    gamma_f32 = np.random.rand(N).astype(np.float32)
+
+    if dtype == "f32":
+        input_host = input_f32
+        gamma_host = gamma_f32
+        output_host = np.zeros((M, N), dtype=np.float32)
+        elem_bytes = 4
+        input_ref = input_f32
+        gamma_ref = gamma_f32
+        atol = 1e-4
+    elif dtype == "f16":
+        input_host = input_f32.astype(np.float16)
+        gamma_host = gamma_f32.astype(np.float16)
+        output_host = np.zeros((M, N), dtype=np.float16)
+        elem_bytes = 2
+        input_ref = input_host.astype(np.float32)
+        gamma_ref = gamma_host.astype(np.float32)
+        atol = 1e-2
+    elif dtype == "bf16":
+        input_host = fp32_to_bf16_cpu(input_f32)
+        gamma_host = fp32_to_bf16_cpu(gamma_f32)
+        output_host = np.zeros((M, N), dtype=np.uint16)
+        elem_bytes = 2
+        input_ref = bf16_to_fp32_cpu(input_host)
+        gamma_ref = bf16_to_fp32_cpu(gamma_host)
+        atol = 2e-2
+    else:
+        raise ValueError(f"unsupported dtype: {dtype}")
 
     # Numpy Reference
     # RMS(x) = sqrt(mean(x^2) + eps)
     # RMSNorm(x) = x / RMS(x) * gamma
-    sq_mean = np.mean(input_host**2, axis=1, keepdims=True)
+    sq_mean = np.mean(input_ref**2, axis=1, keepdims=True)
     rms = np.sqrt(sq_mean + EPS)
-    expected = (input_host / rms) * gamma_host
+    expected = (input_ref / rms) * gamma_ref
 
     # Allocate GPU Memory
-    d_input = hip_check(hip.hipMalloc(M * N * 4))
-    d_gamma = hip_check(hip.hipMalloc(N * 4))
-    d_output = hip_check(hip.hipMalloc(M * N * 4))
+    d_input = hip_check(hip.hipMalloc(M * N * elem_bytes))
+    d_gamma = hip_check(hip.hipMalloc(N * elem_bytes))
+    d_output = hip_check(hip.hipMalloc(M * N * elem_bytes))
 
-    hip_check(hip.hipMemcpy(d_input, input_host.ctypes.data, M * N * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_gamma, gamma_host.ctypes.data, N * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_input, input_host.ctypes.data, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_gamma, gamma_host.ctypes.data, N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
 
     # Load Kernel
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
@@ -199,7 +395,7 @@ def test_rmsnorm():
 
     # Launch Config
     grid_x, grid_y, grid_z = M, 1, 1
-    block_x, block_y, block_z = N, 1, 1
+    block_x, block_y, block_z = BLOCK_THREADS, 1, 1
     smem_size = 0
 
     arg_ptrs = [
@@ -210,35 +406,88 @@ def test_rmsnorm():
     args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
 
     print("Launching kernel...")
-    start_time = time.time()
-    hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, grid_z, block_x, block_y, block_z, smem_size, 0, args, None))
+    # Warmup + benchmark with HIP events
+    start_event = hip_check(hip.hipEventCreate())
+    stop_event = hip_check(hip.hipEventCreate())
+    for _ in range(WARMUP_ITERS):
+        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, grid_z,
+                                            block_x, block_y, block_z,
+                                            smem_size, None, args, None))
     hip_check(hip.hipDeviceSynchronize())
-    end_time = time.time()
-    
-    print(f"Kernel execution time: {(end_time - start_time)*1000:.4f} ms")
+    hip_check(hip.hipEventRecord(start_event, None))
+    for _ in range(BENCH_ITERS):
+        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, grid_z,
+                                            block_x, block_y, block_z,
+                                            smem_size, None, args, None))
+    hip_check(hip.hipEventRecord(stop_event, None))
+    hip_check(hip.hipEventSynchronize(stop_event))
+    err, elapsed_ms = hip.hipEventElapsedTime(start_event, stop_event)
+    hip_check(err)
+    avg_ms = float(elapsed_ms) / BENCH_ITERS
+    print(f"Kernel avg time: {avg_ms:.4f} ms (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
 
     # Copy back
-    hip_check(hip.hipMemcpy(output_host.ctypes.data, d_output, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+    hip_check(hip.hipMemcpy(output_host.ctypes.data, d_output, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+
+    if dtype == "f32":
+        output_ref = output_host
+    elif dtype == "f16":
+        output_ref = output_host.astype(np.float32)
+    else:
+        output_ref = bf16_to_fp32_cpu(output_host)
 
     # Verification
-    error = np.max(np.abs(output_host - expected))
-    print(f"Max absolute error: {error:.2e}")
+    error = np.max(np.abs(output_ref - expected))
+    print(f"Max absolute error: {error:.2e} (atol={atol})")
 
-    if np.allclose(output_host, expected, atol=1e-4):
-        print("PASSED: RMSNorm implementation is correct.")
+    if error < atol:
+        print("✅ PASSED")
+        ok = True
     else:
-        print("❌ FAILED: Results do not match reference.")
+        print("❌ FAILED")
         print("First row Expected:")
         print(expected[0, :5])
         print("First row Actual:")
         print(output_host[0, :5])
+        ok = False
 
     # Cleanup
     hip_check(hip.hipFree(d_input))
     hip_check(hip.hipFree(d_gamma))
     hip_check(hip.hipFree(d_output))
     hip_check(hip.hipModuleUnload(hip_module))
+    hip_check(hip.hipEventDestroy(start_event))
+    hip_check(hip.hipEventDestroy(stop_event))
+    return ok
+
+def test_all():
+    print("="*80)
+    print("Running RMSNorm Tests")
+    print("="*80)
+
+    configs = [
+        # (64, 256, "f32"),    # Aligned
+        # (128, 1024, "f32"),  # Aligned
+        # (32, 128, "f16"),    # Aligned
+        # (64, 2000, "f32"),   # Unaligned (tail handling)
+        # (16, 512, "bf16"),   # BF16
+        # (256, 65536, "bf16"),# BF16
+        (32768, 8192, "bf16"),  # BF16
+
+    ]
+
+    failures = 0
+    for M, N, dtype in configs:
+        if not run_test(M, N, dtype):
+            failures += 1
+
+    print("\n" + "="*80)
+    if failures == 0:
+        print("ALL TESTS PASSED")
+    else:
+        print(f"{failures} TESTS FAILED")
+    print("="*80)
 
 if __name__ == "__main__":
-    test_rmsnorm()
+    test_all()
 

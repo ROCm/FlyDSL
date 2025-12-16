@@ -15,7 +15,19 @@ def ensure_rocir_python_extensions(context: ir.Context):
     """Ensure Rocir passes and dialect are registered for the given context."""
     global _PASSES_MODULE
     if _PASSES_MODULE is None:
-        from _mlir._mlir_libs import _rocirPasses as _PASSES_MODULE
+        # Prefer loading as a submodule of the active `_mlir` runtime.
+        # If that is not available (common in dev builds), fall back to importing
+        # the extension directly from our build tree without shadowing `_mlir`.
+        try:
+            from _mlir._mlir_libs import _rocirPasses as _PASSES_MODULE
+        except Exception:
+            rocdsl_root = Path(__file__).resolve().parents[3]
+            ext_dir = rocdsl_root / "build" / "python_packages" / "rocdsl" / "_mlir" / "_mlir_libs"
+            if ext_dir.exists():
+                ext_dir_str = str(ext_dir)
+                if ext_dir_str not in sys.path:
+                    sys.path.insert(0, ext_dir_str)
+            import _rocirPasses as _PASSES_MODULE
     
     # Register dialects using the new nanobind interface
     from _mlir import ir as mlir_ir

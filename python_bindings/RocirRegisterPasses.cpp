@@ -8,6 +8,8 @@
 #include "rocir/RocirDialect.h"
 #include "rocir/RocirPasses.h"
 
+#include <mutex>
+
 namespace mlir {
 #define GEN_PASS_REGISTRATION
 #include "rocir/RocirPasses.h.inc"
@@ -30,8 +32,12 @@ NB_MODULE(_rocirPasses, m) {
           mlirRegisterAllLLVMTranslations(context); 
         });
 
-  // Register all upstream passes on module load
-  mlirRegisterAllPasses();
+  // Register upstream passes once.
+  //
+  // Note: In some environments, repeatedly registering can crash with
+  // "Option 'basic' already exists!". Guard with std::call_once.
+  static std::once_flag register_all_passes_once;
+  std::call_once(register_all_passes_once, []() { mlirRegisterAllPasses(); });
 
   // Register Rocir-specific passes
   // Manual registration for RocirCoordLoweringPass
