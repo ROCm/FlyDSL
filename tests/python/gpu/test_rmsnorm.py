@@ -111,22 +111,23 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             Gamma: T.memref(N, elem_type),
             Output: T.memref(M, N, elem_type)
         ):
-            row = gpu.block_id("x")
-            tid = gpu.thread_id("x")
+            row = rocir.block_idx("x")
+            tid = rocir.thread_idx("x")
 
-            zero_idx = arith.constant(T.index(), 0)
+            zero_idx = rocir.const_index(0)
             n_float = arith.constant(compute_type, float(N))
             eps = arith.constant(compute_type, EPS)
-            fm_fast = mlir_arith.FastMathFlags.fast
+            fm_fast = rocir.arith.FastMathFlags.fast
 
             base_ptr = allocator.get_base()
             s_red = smem_red(base_ptr).get()
             s_row = smem_row(base_ptr).get()
             # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
-            c0_idx = arith.constant(T.index(), 0).value
+            c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
             tensor_In = rocir.make_tensor(Input, shape=(M, N), strides=(N, 1))
             tensor_Out = rocir.make_tensor(Output, shape=(M, N), strides=(N, 1))
+            tensor_Gamma = rocir.make_tensor(Gamma, shape=(N,), strides=(1,))
             tensor_S = rocir.make_tensor(s_row, shape=(1, N), strides=(N, 1))
             gIn = rocir.zipped_divide(tensor_In, (1, tile_cols))
             gOut = rocir.zipped_divide(tensor_Out, (1, tile_cols))
@@ -142,14 +143,15 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             thr_copy_e = tiled_copy_e.get_slice(unwrap(tid))
 
             def block_reduce_add(val_f32, scratch_memref):
-                tid_i32 = mlir_arith.IndexCastOp(T.i32(), tid.value).result
+                scratch_tv = rocir.make_tensor(scratch_memref, shape=(RED_SLOTS,), strides=(1,))
+                tid_i32 = rocir.arith.IndexCastOp(T.i32(), tid.value).result
                 c_warp_i32 = arith.constant(T.i32(), WARP_SIZE)
-                lane_i32 = mlir_arith.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
-                wave_i32 = mlir_arith.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                lane_i32 = rocir.arith.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                wave_i32 = rocir.arith.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
                 width_i32 = arith.constant(T.i32(), WARP_SIZE)
                 # Use Rocir layout algebra to compute LDS indices for the reduction scratch.
-                c_num_waves = arith.constant(T.index(), RED_SLOTS).value
-                c1 = arith.constant(T.index(), 1).value
+                c_num_waves = rocir.const_index(RED_SLOTS)
+                c1 = rocir.const_index(1)
                 shape_red = rocir.make_shape(unwrap(c_num_waves))
                 stride_red = rocir.make_stride(unwrap(c1))
                 layout_red = rocir.make_layout(shape_red, stride_red)
@@ -158,71 +160,71 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 for sh in [32, 16, 8, 4, 2, 1]:
                     off = arith.constant(T.i32(), sh)
                     peer = gpu.ShuffleOp(unwrap(w), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
-                    w = mlir_arith.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
+                    w = rocir.arith.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
 
-                is_lane0 = mlir_arith.CmpIOp(
-                    mlir_arith.CmpIPredicate.eq,
+                is_lane0 = rocir.arith.CmpIOp(
+                    rocir.arith.CmpIPredicate.eq,
                     unwrap(lane_i32),
                     unwrap(arith.constant(T.i32(), 0)),
                 ).result
-                if_lane0 = scf.IfOp(unwrap(is_lane0))
+                if_lane0 = rocir.scf_ext.IfOp(unwrap(is_lane0))
                 with ir.InsertionPoint(if_lane0.then_block):
-                    wave_idx = mlir_arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
+                    wave_idx = rocir.arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
                     red_idx = rocir.crd2idx(rocir.make_coord(unwrap(wave_idx)), layout_red)
-                    memref.store(unwrap(w), scratch_memref, [unwrap(red_idx)])
-                    scf.yield_([])
+                    scratch_tv[unwrap(red_idx)] = unwrap(w)
+                    rocir.scf_ext.yield_([])
                 gpu.barrier()
 
                 NUM_WAVES = RED_SLOTS
-                is_wave0 = mlir_arith.CmpIOp(
-                    mlir_arith.CmpIPredicate.eq,
+                is_wave0 = rocir.arith.CmpIOp(
+                    rocir.arith.CmpIPredicate.eq,
                     unwrap(wave_i32),
                     unwrap(arith.constant(T.i32(), 0)),
                 ).result
                 # Only wave0 does final reduction and writes scratch[0].
-                if_wave0 = scf.IfOp(unwrap(is_wave0))
+                if_wave0 = rocir.scf_ext.IfOp(unwrap(is_wave0))
                 with ir.InsertionPoint(if_wave0.then_block):
-                    in_range = mlir_arith.CmpIOp(
-                        mlir_arith.CmpIPredicate.ult,
+                    in_range = rocir.arith.CmpIOp(
+                        rocir.arith.CmpIPredicate.ult,
                         unwrap(lane_i32),
                         unwrap(arith.constant(T.i32(), NUM_WAVES)),
                     ).result
-                    if_in = scf.IfOp(unwrap(in_range), [T.f32()], hasElse=True)
+                    if_in = rocir.scf_ext.IfOp(unwrap(in_range), [T.f32()], hasElse=True)
                     with ir.InsertionPoint(if_in.then_block):
-                        lane_idx = mlir_arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                        lane_idx = rocir.arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
                         red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
-                        v = memref.load(scratch_memref, [unwrap(red_idx)])
-                        scf.yield_([unwrap(v)])
+                        v = scratch_tv[unwrap(red_idx)]
+                        rocir.scf_ext.yield_([unwrap(v)])
                     with ir.InsertionPoint(if_in.else_block):
-                        scf.yield_([unwrap(arith.constant(T.f32(), 0.0).value)])
+                        rocir.scf_ext.yield_([unwrap(arith.constant(T.f32(), 0.0).value)])
 
                     ww = if_in.results[0]
                     for sh in [32, 16, 8, 4, 2, 1]:
                         off = arith.constant(T.i32(), sh)
                         peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
-                        ww = mlir_arith.AddFOp(unwrap(ww), unwrap(peer), fastmath=fm_fast).result
+                        ww = rocir.arith.AddFOp(unwrap(ww), unwrap(peer), fastmath=fm_fast).result
 
-                    is_lane0_2 = mlir_arith.CmpIOp(
-                        mlir_arith.CmpIPredicate.eq,
+                    is_lane0_2 = rocir.arith.CmpIOp(
+                        rocir.arith.CmpIPredicate.eq,
                         unwrap(lane_i32),
                         unwrap(arith.constant(T.i32(), 0)),
                     ).result
-                    if_lane0_2 = scf.IfOp(unwrap(is_lane0_2))
+                    if_lane0_2 = rocir.scf_ext.IfOp(unwrap(is_lane0_2))
                     with ir.InsertionPoint(if_lane0_2.then_block):
-                        red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx.value)), layout_red)
-                        memref.store(unwrap(ww), scratch_memref, [unwrap(red_idx0)])
-                        scf.yield_([])
-                    scf.yield_([])
+                        red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
+                        scratch_tv[unwrap(red_idx0)] = unwrap(ww)
+                        rocir.scf_ext.yield_([])
+                    rocir.scf_ext.yield_([])
 
                 gpu.barrier()
-                red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx.value)), layout_red)
-                return memref.load(scratch_memref, [unwrap(red_idx0)])
+                red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
+                return scratch_tv[unwrap(red_idx0)]
 
             # Pass0: global -> LDS row cache (1-pass global read)
             for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
-                c_base = arith.constant(T.index(), base_idx_int).value
-                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
-                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+                c_base = rocir.const_index(base_idx_int)
+                thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
+                curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
@@ -239,16 +241,16 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         alignment=VEC_ALIGN,
                     )
                 else:
-                    c_N = arith.constant(T.index(), N).value
+                    c_N = rocir.const_index(N)
                     for k in range(VEC_WIDTH):
-                        c_k = arith.constant(T.index(), k).value
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        if_store = scf.IfOp(unwrap(is_valid))
+                        c_k = rocir.const_index(k)
+                        idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = rocir.scf_ext.IfOp(unwrap(is_valid))
                         with ir.InsertionPoint(if_store.then_block):
-                            v_e = memref.load(Input, [unwrap(row), unwrap(idx_k)])
-                            memref.store(unwrap(v_e), s_row, [unwrap(idx_k)])
-                            scf.yield_([])
+                            v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
+                            tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
+                            rocir.scf_ext.yield_([])
 
             gpu.barrier()
 
@@ -257,40 +259,40 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             thread_sumsq = unwrap(c_zero)
 
             for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
-                c_base = arith.constant(T.index(), base_idx_int).value
-                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
-                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+                c_base = rocir.const_index(base_idx_int)
+                thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
+                curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
                     vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                     vec_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
                     vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                    vec = vec_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(vec_e))
-                    vec2 = mlir_arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
+                    vec = vec_e if dtype_str == "f32" else rocir.arith.extf(vec_type_c, unwrap(vec_e))
+                    vec2 = rocir.arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
                     red2 = vector.reduction(compute_type, "add", unwrap(vec2), fastmath=fm_fast)
-                    thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
+                    thread_sumsq = rocir.arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                 else:
-                    c_N = arith.constant(T.index(), N).value
+                    c_N = rocir.const_index(N)
                     for k in range(VEC_WIDTH):
-                        c_k = arith.constant(T.index(), k).value
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        if_load = scf.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
+                        c_k = rocir.const_index(k)
+                        idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_load = rocir.scf_ext.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
                         with ir.InsertionPoint(if_load.then_block):
-                            v_e = memref.load(s_row, [unwrap(idx_k)])
-                            scf.yield_([unwrap(v_e)])
+                            v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
+                            rocir.scf_ext.yield_([unwrap(v_e)])
                         with ir.InsertionPoint(if_load.else_block):
-                            scf.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
+                            rocir.scf_ext.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
                         v_e = if_load.results[0]
-                        v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
-                        v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
-                        thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
+                        v = unwrap(v_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(v_e))
+                        v2 = rocir.arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
+                        thread_sumsq = rocir.arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
 
             sum_sq = block_reduce_add(thread_sumsq, s_red)
-            mean_sq = mlir_arith.DivFOp(unwrap(sum_sq), unwrap(n_float.value), fastmath=fm_fast).result
+            mean_sq = rocir.arith.DivFOp(unwrap(sum_sq), unwrap(n_float.value), fastmath=fm_fast).result
 
-            ms_eps = mlir_arith.AddFOp(unwrap(mean_sq), unwrap(eps.value), fastmath=fm_fast).result
+            ms_eps = rocir.arith.AddFOp(unwrap(mean_sq), unwrap(eps.value), fastmath=fm_fast).result
             rrms = math.rsqrt(unwrap(ms_eps))
 
             # Pass2: normalize + gamma + store
@@ -301,24 +303,24 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # Software pipeline for aligned tiles: prefetch Gamma
             g_pref_e = None
             if N >= BLOCK_THREADS * VEC_WIDTH:
-                c_base0 = arith.constant(T.index(), 0).value
-                thread_offset0 = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
-                curr0 = mlir_arith.AddIOp(unwrap(c_base0), unwrap(thread_offset0)).result
+                c_base0 = rocir.const_index(0)
+                thread_offset0 = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
+                curr0 = rocir.arith.AddIOp(unwrap(c_base0), unwrap(thread_offset0)).result
                 vec_type_e0 = ir.VectorType.get([VEC_WIDTH], elem_type)
                 g_pref_e = vector.load(vec_type_e0, Gamma, [unwrap(curr0)], alignment=VEC_ALIGN)
 
             for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
-                c_base = arith.constant(T.index(), base_idx_int).value
-                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.constant(T.index(), VEC_WIDTH).value).result
-                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+                c_base = rocir.const_index(base_idx_int)
+                thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
+                curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
                     # Prefetch next Gamma early (software pipeline)
                     next_base_int = base_idx_int + (BLOCK_THREADS * VEC_WIDTH)
                     if next_base_int < N:
-                        c_base_n = arith.constant(T.index(), next_base_int).value
-                        curr_idx_n = mlir_arith.AddIOp(unwrap(c_base_n), unwrap(thread_offset_base)).result
+                        c_base_n = rocir.const_index(next_base_int)
+                        curr_idx_n = rocir.arith.AddIOp(unwrap(c_base_n), unwrap(thread_offset_base)).result
                         g_next_e = vector.load(vec_type_e, Gamma, [unwrap(curr_idx_n)], alignment=VEC_ALIGN)
                     else:
                         g_next_e = None
@@ -326,11 +328,11 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     x_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
                     # Gamma is reused across many blocks: do NOT use nontemporal here.
                     g_e = g_pref_e if g_pref_e is not None else vector.load(vec_type_e, Gamma, [unwrap(curr_idx)], alignment=VEC_ALIGN)
-                    x = x_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(x_e))
-                    g = g_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e))
-                    norm = mlir_arith.MulFOp(unwrap(x), unwrap(rrms_splat), fastmath=fm_fast).result
-                    y = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
-                    y_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, unwrap(y))
+                    x = x_e if dtype_str == "f32" else rocir.arith.extf(vec_type_c, unwrap(x_e))
+                    g = g_e if dtype_str == "f32" else rocir.arith.extf(vec_type_c, unwrap(g_e))
+                    norm = rocir.arith.MulFOp(unwrap(x), unwrap(rrms_splat), fastmath=fm_fast).result
+                    y = rocir.arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
+                    y_e = y if dtype_str == "f32" else rocir.arith.truncf(vec_type_e, unwrap(y))
                     tile_i = base_idx_int // tile_cols  # python int
                     blkOut = gOut[(unwrap(row), tile_i)]
                     thrOut = thr_copy_e.partition_S(blkOut)
@@ -345,22 +347,22 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     )
                     g_pref_e = g_next_e
                 else:
-                    c_N = arith.constant(T.index(), N).value
+                    c_N = rocir.const_index(N)
                     for k in range(VEC_WIDTH):
-                        c_k = arith.constant(T.index(), k).value
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        if_store = scf.IfOp(unwrap(is_valid))
+                        c_k = rocir.const_index(k)
+                        idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = rocir.scf_ext.IfOp(unwrap(is_valid))
                         with ir.InsertionPoint(if_store.then_block):
-                            x_e = memref.load(s_row, [unwrap(idx_k)])
-                            g_e = memref.load(Gamma, [unwrap(idx_k)])
-                            x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
-                            g = unwrap(g_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(g_e))
-                            norm = mlir_arith.MulFOp(unwrap(x), unwrap(rrms), fastmath=fm_fast).result
-                            y = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
-                            y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
-                            memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx_k)])
-                            scf.yield_([])
+                            x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
+                            g_e = tensor_Gamma[unwrap(idx_k)]
+                            x = unwrap(x_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(x_e))
+                            g = unwrap(g_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(g_e))
+                            norm = rocir.arith.MulFOp(unwrap(x), unwrap(rrms), fastmath=fm_fast).result
+                            y = rocir.arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
+                            y_e = y if dtype_str == "f32" else rocir.arith.truncf(elem_type, unwrap(y))
+                            tensor_Out[(unwrap(row), unwrap(idx_k))] = unwrap(y_e)
+                            rocir.scf_ext.yield_([])
 
     return ctx
 

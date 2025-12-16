@@ -43,7 +43,6 @@ import ctypes
 gpu = rocir.gpu_ext          # extended wrapper (has set_container_module, etc.)
 scf = rocir.scf_ext          # extended wrapper (yield_ helper, etc.)
 arith = rocir.arith_ext      # extended wrapper (arith.constant(...), ArithValue, etc.)
-mlir_arith = rocir.arith     # raw dialect ops (AddFOp/bitcast/etc.)
 memref = rocir.memref        # raw dialect module
 vector = rocir.vector        # raw dialect module
 mlir_math = rocir.math       # raw dialect module
@@ -127,16 +126,17 @@ def build_softmax_module(M, N, dtype_str="f32"):
         
         @gpu.func(emit=True)
         def softmax_kernel(A: T.memref(M, N, elem_type), C: T.memref(M, N, elem_type)):
-            row = gpu.block_id("x")
-            tid = gpu.thread_id("x")
+            row = rocir.block_idx("x")
+            tid = rocir.thread_idx("x")
             
             base_ptr = allocator.get_base()
             s_red = smem_red(base_ptr).get()
             # Rocir-style: tensor views + tiled copies (like elementwise_add_kernel).
-            c0_idx = arith.index(0).value
+            c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_SIZE * VEC_WIDTH  # python int
             tensor_A = rocir.make_tensor(A, shape=(M, N), strides=(N, 1))
             tensor_C = rocir.make_tensor(C, shape=(M, N), strides=(N, 1))
+            s_red_tv = rocir.make_tensor(s_red, shape=(RED_SLOTS,), strides=(1,))
             gA = rocir.zipped_divide(tensor_A, (1, tile_cols))
             gC = rocir.zipped_divide(tensor_C, (1, tile_cols))
 
@@ -158,10 +158,10 @@ def build_softmax_module(M, N, dtype_str="f32"):
             # Element-type constants
             c_zero = arith.constant(0.0, type=compute_type).value
             c_neg_inf = arith.constant(float('-inf'), type=compute_type).value
-            c_zero_idx = arith.index(0)
+            c_zero_idx = rocir.const_index(0)
             # exp(x) -> exp2(x * log2(e))
             c_log2e = arith.constant(1.4426950408889634, type=compute_type).value  # log2(e)
-            fm_fast = mlir_arith.FastMathFlags.fast
+            fm_fast = rocir.arith.FastMathFlags.fast
 
             # Helper: Block Reduction (wave64 shuffle + wave0 finalize)
             def block_reduce(val, reduce_op_name):
@@ -169,16 +169,16 @@ def build_softmax_module(M, N, dtype_str="f32"):
                 WARP_SIZE = 64
                 NUM_WAVES = (BLOCK_SIZE + WARP_SIZE - 1) // WARP_SIZE  # python int
                 # Use Rocir layout algebra to compute LDS indices for the reduction scratch.
-                c_num_waves = arith.index(NUM_WAVES).value
-                c1 = arith.index(1).value
+                c_num_waves = rocir.const_index(NUM_WAVES)
+                c1 = rocir.const_index(1)
                 shape_red = rocir.make_shape(unwrap(c_num_waves))
                 stride_red = rocir.make_stride(unwrap(c1))
                 layout_red = rocir.make_layout(shape_red, stride_red)
 
-                tid_i32 = mlir_arith.IndexCastOp(T.i32(), unwrap(tid)).result
+                tid_i32 = rocir.arith.IndexCastOp(T.i32(), unwrap(tid)).result
                 c_warp_i32 = arith.constant(WARP_SIZE, type=T.i32()).value
-                lane_i32 = mlir_arith.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
-                wave_i32 = mlir_arith.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                lane_i32 = rocir.arith.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+                wave_i32 = rocir.arith.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
 
                 width_i32 = arith.constant(WARP_SIZE, type=T.i32()).value
                 w = unwrap(val)
@@ -188,77 +188,77 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     off = arith.constant(sh, type=T.i32()).value
                     peer = gpu.ShuffleOp(unwrap(w), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
                     if reduce_op_name == "max":
-                        w = mlir_arith.MaximumFOp(unwrap(w), unwrap(peer)).result
+                        w = rocir.arith.MaximumFOp(unwrap(w), unwrap(peer)).result
                     else:
-                        w = mlir_arith.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
+                        w = rocir.arith.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
 
                 # lane0 writes per-wave partial into LDS s_red[wave_id]
-                is_lane0 = mlir_arith.CmpIOp(
-                    mlir_arith.CmpIPredicate.eq,
+                is_lane0 = rocir.arith.CmpIOp(
+                    rocir.arith.CmpIPredicate.eq,
                     unwrap(lane_i32),
                     unwrap(arith.constant(0, type=T.i32()).value),
                 ).result
-                if_lane0 = scf.IfOp(unwrap(is_lane0))
+                if_lane0 = rocir.scf_ext.IfOp(unwrap(is_lane0))
                 with ir.InsertionPoint(if_lane0.then_block):
-                    wave_idx = mlir_arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
+                    wave_idx = rocir.arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
                     red_idx = rocir.crd2idx(rocir.make_coord(unwrap(wave_idx)), layout_red)
-                    memref.store(unwrap(w), s_red, [unwrap(red_idx)])
-                    scf.yield_([])
+                    s_red_tv[unwrap(red_idx)] = unwrap(w)
+                    rocir.scf_ext.yield_([])
                 gpu.barrier()
 
                 # wave0 reduces NUM_WAVES partials (still using shuffle)
-                is_wave0 = mlir_arith.CmpIOp(
-                    mlir_arith.CmpIPredicate.eq,
+                is_wave0 = rocir.arith.CmpIOp(
+                    rocir.arith.CmpIPredicate.eq,
                     unwrap(wave_i32),
                     unwrap(arith.constant(0, type=T.i32()).value),
                 ).result
-                if_wave0 = scf.IfOp(unwrap(is_wave0), [compute_type], hasElse=True)
+                if_wave0 = rocir.scf_ext.IfOp(unwrap(is_wave0), [compute_type], hasElse=True)
                 with ir.InsertionPoint(if_wave0.then_block):
-                    in_range = mlir_arith.CmpIOp(
-                        mlir_arith.CmpIPredicate.ult,
+                    in_range = rocir.arith.CmpIOp(
+                        rocir.arith.CmpIPredicate.ult,
                         unwrap(lane_i32),
                         unwrap(arith.constant(NUM_WAVES, type=T.i32()).value),
                     ).result
-                    if_in = scf.IfOp(unwrap(in_range), [compute_type], hasElse=True)
+                    if_in = rocir.scf_ext.IfOp(unwrap(in_range), [compute_type], hasElse=True)
                     with ir.InsertionPoint(if_in.then_block):
-                        lane_idx = mlir_arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                        lane_idx = rocir.arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
                         red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
-                        v = memref.load(s_red, [unwrap(red_idx)])
-                        scf.yield_([unwrap(v)])
+                        v = s_red_tv[unwrap(red_idx)]
+                        rocir.scf_ext.yield_([unwrap(v)])
                     with ir.InsertionPoint(if_in.else_block):
                         neutral = c_neg_inf if reduce_op_name == "max" else c_zero
-                        scf.yield_([unwrap(neutral)])
+                        rocir.scf_ext.yield_([unwrap(neutral)])
 
                     ww = if_in.results[0]
                     for sh in [32, 16, 8, 4, 2, 1]:
                         off = arith.constant(sh, type=T.i32()).value
                         peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
                         if reduce_op_name == "max":
-                            ww = mlir_arith.MaximumFOp(unwrap(ww), unwrap(peer)).result
+                            ww = rocir.arith.MaximumFOp(unwrap(ww), unwrap(peer)).result
                         else:
-                            ww = mlir_arith.AddFOp(unwrap(ww), unwrap(peer), fastmath=fm_fast).result
+                            ww = rocir.arith.AddFOp(unwrap(ww), unwrap(peer), fastmath=fm_fast).result
 
                     # lane0 writes final to s_red[0]
-                    is_lane0_2 = mlir_arith.CmpIOp(
-                        mlir_arith.CmpIPredicate.eq,
+                    is_lane0_2 = rocir.arith.CmpIOp(
+                        rocir.arith.CmpIPredicate.eq,
                         unwrap(lane_i32),
                         unwrap(arith.constant(0, type=T.i32()).value),
                     ).result
-                    if_lane0_2 = scf.IfOp(unwrap(is_lane0_2))
+                    if_lane0_2 = rocir.scf_ext.IfOp(unwrap(is_lane0_2))
                     with ir.InsertionPoint(if_lane0_2.then_block):
                         red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
-                        memref.store(unwrap(ww), s_red, [unwrap(red_idx0)])
-                        scf.yield_([])
+                        s_red_tv[unwrap(red_idx0)] = unwrap(ww)
+                        rocir.scf_ext.yield_([])
 
-                    scf.yield_([unwrap(ww)])
+                    rocir.scf_ext.yield_([unwrap(ww)])
                 with ir.InsertionPoint(if_wave0.else_block):
                     red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
-                    keep = memref.load(s_red, [unwrap(red_idx0)])
-                    scf.yield_([unwrap(keep)])
+                    keep = s_red_tv[unwrap(red_idx0)]
+                    rocir.scf_ext.yield_([unwrap(keep)])
                 gpu.barrier()
 
                 red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
-                return memref.load(s_red, [unwrap(red_idx0)])
+                return s_red_tv[unwrap(red_idx0)]
 
             # 1. Load Data into Registers (Buffering)
             # List of buffered values (vector or scalar with validity)
@@ -268,14 +268,14 @@ def build_softmax_module(M, N, dtype_str="f32"):
             step = BLOCK_SIZE * VEC_WIDTH
             
             # Base offset for this thread
-            thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.index(VEC_WIDTH).value).result
+            thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
             
             # Loop range(0, N, step)
             for base_idx_int in range(0, N, step):
                 # Current global index base for this thread
                 # global_idx = base_idx_int + thread_offset_base
-                c_base = arith.index(base_idx_int).value
-                curr_idx = mlir_arith.AddIOp(c_base, unwrap(thread_offset_base)).result
+                c_base = rocir.const_index(base_idx_int)
+                curr_idx = rocir.arith.AddIOp(c_base, unwrap(thread_offset_base)).result
                 
                 # Check bounds
                 # If fully within N, vector load We can check statically for the loop unroll? Since N is compile time constant, we check specific offsets. However, thread_id is dynamic. We rely on logic: If (base_idx_int + BLOCK_SIZE*VEC_WIDTH) <= N, then ALL threads are safe? No. tid=255 accesses last chunk. Safe logic: if (base_idx_int + (BLOCK_SIZE-1)*WIDTH + WIDTH) <= N.
@@ -299,7 +299,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     vec_val_e = vector.load(vec_type_e, frgA.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                     if dtype_str == "bf16":
                         vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        vec_val = mlir_arith.extf(vec_type_c, unwrap(vec_val_e))
+                        vec_val = rocir.arith.extf(vec_type_c, unwrap(vec_val_e))
                     else:
                         vec_val = vec_val_e
                     row_buffer.append(vec_val)
@@ -307,22 +307,22 @@ def build_softmax_module(M, N, dtype_str="f32"):
                 else:
                     # Scalar tail handling with validity mask
                     for k in range(VEC_WIDTH):
-                        c_k = arith.index(k).value
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                        c_k = rocir.const_index(k)
+                        idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         
-                        c_N = arith.index(N).value
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        c_N = rocir.const_index(N)
+                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         
-                        if_load = scf.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
+                        if_load = rocir.scf_ext.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
                         with ir.InsertionPoint(if_load.then_block):
-                            val_e = memref.load(A, [unwrap(row), unwrap(idx_k)])
+                            val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
                             if dtype_str == "bf16":
-                                val_c = mlir_arith.extf(compute_type, unwrap(val_e))
-                                scf.yield_([unwrap(val_c)])
+                                val_c = rocir.arith.extf(compute_type, unwrap(val_e))
+                                rocir.scf_ext.yield_([unwrap(val_c)])
                             else:
-                                scf.yield_([unwrap(val_e)])
+                                rocir.scf_ext.yield_([unwrap(val_e)])
                         with ir.InsertionPoint(if_load.else_block):
-                            scf.yield_([unwrap(c_neg_inf)])
+                            rocir.scf_ext.yield_([unwrap(c_neg_inf)])
                         
                         row_buffer.append((if_load.results[0], is_valid))
 
@@ -344,12 +344,12 @@ def build_softmax_module(M, N, dtype_str="f32"):
                 if isinstance(item, tuple): # Scalar with validity mask
                     val, valid = item
                     # Select: if valid, val, else -inf
-                    safe_val = mlir_arith.SelectOp(unwrap(valid), unwrap(val), unwrap(c_neg_inf)).result
-                    thread_max = mlir_arith.MaximumFOp(unwrap(thread_max), unwrap(safe_val)).result
+                    safe_val = rocir.arith.SelectOp(unwrap(valid), unwrap(val), unwrap(c_neg_inf)).result
+                    thread_max = rocir.arith.MaximumFOp(unwrap(thread_max), unwrap(safe_val)).result
                 else: # Vector
                     vec_val = item
                     red = reduce_vec_max(vec_val)
-                    thread_max = mlir_arith.MaximumFOp(unwrap(thread_max), unwrap(red)).result
+                    thread_max = rocir.arith.MaximumFOp(unwrap(thread_max), unwrap(red)).result
 
             # 3. Global Max
             global_max = block_reduce(thread_max, "max")
@@ -366,13 +366,13 @@ def build_softmax_module(M, N, dtype_str="f32"):
             for i, item in enumerate(row_buffer):
                 if isinstance(item, tuple):
                     val, valid = item
-                    sub = mlir_arith.SubFOp(unwrap(val), unwrap(global_max), fastmath=fm_fast).result
-                    scaled = mlir_arith.MulFOp(unwrap(sub), unwrap(c_log2e), fastmath=fm_fast).result
+                    sub = rocir.arith.SubFOp(unwrap(val), unwrap(global_max), fastmath=fm_fast).result
+                    scaled = rocir.arith.MulFOp(unwrap(sub), unwrap(c_log2e), fastmath=fm_fast).result
                     exp_val = mlir_math.exp2(unwrap(scaled), fastmath=fm_fast)
                     
                     # Accumulate sum only if valid
-                    safe_exp = mlir_arith.SelectOp(unwrap(valid), unwrap(exp_val), unwrap(c_zero)).result
-                    thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(safe_exp), fastmath=fm_fast).result
+                    safe_exp = rocir.arith.SelectOp(unwrap(valid), unwrap(exp_val), unwrap(c_zero)).result
+                    thread_sum = rocir.arith.AddFOp(unwrap(thread_sum), unwrap(safe_exp), fastmath=fm_fast).result
                     
                     new_buffer.append((exp_val, valid)) # Store exp
                 else:
@@ -382,12 +382,12 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         g_max_splat_vec = vector.splat(vec_type, unwrap(global_max))
                         log2e_splat = vector.splat(vec_type, unwrap(c_log2e))
                         
-                    sub = mlir_arith.SubFOp(unwrap(vec_val), unwrap(g_max_splat_vec), fastmath=fm_fast).result
-                    scaled = mlir_arith.MulFOp(unwrap(sub), unwrap(log2e_splat), fastmath=fm_fast).result
+                    sub = rocir.arith.SubFOp(unwrap(vec_val), unwrap(g_max_splat_vec), fastmath=fm_fast).result
+                    scaled = rocir.arith.MulFOp(unwrap(sub), unwrap(log2e_splat), fastmath=fm_fast).result
                     exp_vec = mlir_math.exp2(unwrap(scaled), fastmath=fm_fast)
                     
                     red = reduce_vec_sum(exp_vec)
-                    thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
+                    thread_sum = rocir.arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
                     
                     new_buffer.append(exp_vec)
             
@@ -398,17 +398,17 @@ def build_softmax_module(M, N, dtype_str="f32"):
             
             # 6. Normalize & Store
             c_one = arith.constant(1.0, type=compute_type).value
-            inv_sum = mlir_arith.DivFOp(unwrap(c_one), unwrap(global_sum), fastmath=fm_fast).result
+            inv_sum = rocir.arith.DivFOp(unwrap(c_one), unwrap(global_sum), fastmath=fm_fast).result
             
             inv_sum_splat_vec = None
             
             # Reconstruct indices for store
             buf_idx = 0
-            thread_offset_base = mlir_arith.MulIOp(unwrap(tid), arith.index(VEC_WIDTH).value).result
+            thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
             
             for base_idx_int in range(0, N, step):
-                c_base = arith.index(base_idx_int).value
-                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+                c_base = rocir.const_index(base_idx_int)
+                curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
                 
                 is_safe_vector = (base_idx_int + (BLOCK_SIZE - 1) * VEC_WIDTH + VEC_WIDTH) <= N
                 
@@ -421,7 +421,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         inv_sum_splat_vec = vector.splat(vec_type, unwrap(inv_sum))
                     
                     # Prefer fast-math for normalization multiply
-                    norm_vec = mlir_arith.MulFOp(vec_exp, inv_sum_splat_vec, fastmath=fm_fast).result
+                    norm_vec = rocir.arith.MulFOp(vec_exp, inv_sum_splat_vec, fastmath=fm_fast).result
                     
                     if dtype_str == "bf16":
                         if USE_BF16_PACK_INTR:
@@ -462,17 +462,17 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             c7fff_i32_v = vector.splat(vec_i32_ty, unwrap(c7fff_i32))
                             c1_i32_v = vector.splat(vec_i32_ty, unwrap(c1_i32))
 
-                            u = mlir_arith.bitcast(vec_i32_ty, unwrap(norm_vec))
-                            hi = mlir_arith.ShRUIOp(unwrap(u), unwrap(c16_i32_v)).result
-                            lsb = mlir_arith.AndIOp(unwrap(hi), unwrap(c1_i32_v)).result
-                            bias = mlir_arith.AddIOp(unwrap(c7fff_i32_v), unwrap(lsb)).result
-                            u_round = mlir_arith.AddIOp(unwrap(u), unwrap(bias)).result
-                            bf16_bits = mlir_arith.ShRUIOp(unwrap(u_round), unwrap(c16_i32_v)).result
+                            u = rocir.arith.bitcast(vec_i32_ty, unwrap(norm_vec))
+                            hi = rocir.arith.ShRUIOp(unwrap(u), unwrap(c16_i32_v)).result
+                            lsb = rocir.arith.AndIOp(unwrap(hi), unwrap(c1_i32_v)).result
+                            bias = rocir.arith.AddIOp(unwrap(c7fff_i32_v), unwrap(lsb)).result
+                            u_round = rocir.arith.AddIOp(unwrap(u), unwrap(bias)).result
+                            bf16_bits = rocir.arith.ShRUIOp(unwrap(u_round), unwrap(c16_i32_v)).result
 
                             even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                             odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = mlir_arith.ShLIOp(unwrap(odd), unwrap(vector.splat(vec4_i32_ty, unwrap(c16_i32)))).result
-                            packed = mlir_arith.OrIOp(unwrap(even), unwrap(odd_sh)).result
+                            odd_sh = rocir.arith.ShLIOp(unwrap(odd), unwrap(vector.splat(vec4_i32_ty, unwrap(c16_i32)))).result
+                            packed = rocir.arith.OrIOp(unwrap(even), unwrap(odd_sh)).result
                             out_bf16 = vector.bitcast(vec_bf16_ty, unwrap(packed))
 
                         tile_i = base_idx_int // tile_cols  # python int
@@ -494,7 +494,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         thrC = thr_copy_C.partition_S(blkC)
                         frgC = rocir.make_fragment_like(thrC, elem_type)
                         vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                        norm_e = norm_vec if dtype_str != "bf16" else mlir_arith.truncf(vec_type_e, unwrap(norm_vec))
+                        norm_e = norm_vec if dtype_str != "bf16" else rocir.arith.truncf(vec_type_e, unwrap(norm_vec))
                         vector.store(unwrap(norm_e), frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                         rocir.copy(
                             tiled_copy_C,
@@ -511,16 +511,16 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         val_exp, valid = item
                         
                         # If valid, store
-                        if_store = scf.IfOp(unwrap(valid))
+                        if_store = rocir.scf_ext.IfOp(unwrap(valid))
                         with ir.InsertionPoint(if_store.then_block):
-                            norm_val = mlir_arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
+                            norm_val = rocir.arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
                             if dtype_str == "bf16":
-                                norm_val = mlir_arith.truncf(elem_type, unwrap(norm_val))
+                                norm_val = rocir.arith.truncf(elem_type, unwrap(norm_val))
                             
-                            c_k = arith.index(k).value
-                            idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                            memref.store(unwrap(norm_val), C, [unwrap(row), unwrap(idx_k)])
-                            scf.yield_([])
+                            c_k = rocir.const_index(k)
+                            idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
+                            tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
+                            rocir.scf_ext.yield_([])
     
     return ctx
 
