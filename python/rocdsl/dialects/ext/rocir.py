@@ -24,9 +24,9 @@ from _mlir.dialects import rocir as rocir_ops
 
 # Also expose RocDSL "extended" wrappers (like test_eltwise_add.py uses) so
 # tests can route everything through `rocir.*` without importing `mlir.*`.
-from . import arith as arith_ext  # noqa: E402
-from . import scf as scf_ext      # noqa: E402
-from . import gpu as gpu_ext      # noqa: E402
+from . import arith as arith_ext  # noqa: F401,E402  # pyright: ignore[reportUnusedImport]
+from . import scf as scf_ext      # noqa: F401,E402  # pyright: ignore[reportUnusedImport]
+from . import gpu as gpu_ext      # noqa: F401,E402  # pyright: ignore[reportUnusedImport]
 
 
 
