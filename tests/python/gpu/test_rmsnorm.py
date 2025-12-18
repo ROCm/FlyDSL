@@ -13,12 +13,19 @@ import sys
 import os
 
 # Add paths to find rocdsl and mlir packages (prefer embedded MLIR to avoid mixing runtimes)
-repo_root = os.path.join(os.path.dirname(__file__), "../../..")
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "rocdsl")
 if os.path.isdir(os.path.join(embedded_pkgs, "_mlir")):
     sys.path.insert(0, embedded_pkgs)
 else:
-    sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
+    mlir_root = os.environ.get("MLIR_PATH")
+    mlir_core = (
+        os.path.join(mlir_root, "tools", "mlir", "python_packages", "mlir_core")
+        if mlir_root
+        else os.path.join(repo_root, "tools", "mlir", "python_packages", "mlir_core")
+    )
+    if os.path.isdir(mlir_core):
+        sys.path.insert(0, mlir_core)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 sys.path.insert(0, repo_root)
