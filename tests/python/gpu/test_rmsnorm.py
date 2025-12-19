@@ -48,6 +48,15 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
         print("HIP not available, skipping...")
         return True
 
+    # Reference + benchmark both rely on torch (reference uses CPU; benchmark uses run_perftest).
+    try:
+        import torch
+    except Exception as e:
+        raise RuntimeError(
+            "test_rmsnorm requires torch (ROCm build recommended). "
+            "It is used for the PyTorch reference implementation and for run_perftest."
+        ) from e
+
     ctx = build_rmsnorm_module(M, N, dtype)
     try:
         hsaco = compile_to_hsaco(ctx.module, kernel_name=RMSNORM_KERNEL_NAME)
@@ -89,11 +98,14 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
-    # Numpy Reference
-    # RMS(x) = sqrt(mean(x^2) + eps) RMSNorm(x) = x / RMS(x) * gamma
-    sq_mean = np.mean(input_ref**2, axis=1, keepdims=True)
-    rms = np.sqrt(sq_mean + EPS)
-    expected = (input_ref / rms) * gamma_ref
+    # PyTorch CPU Reference:
+    # RMS(x) = sqrt(mean(x^2) + eps) ; RMSNorm(x) = x / RMS(x) * gamma
+    x = torch.from_numpy(input_ref.astype(np.float32))
+    gamma = torch.from_numpy(gamma_ref.astype(np.float32))
+    sq_mean = (x * x).mean(dim=1, keepdim=True)
+    rms = torch.sqrt(sq_mean + EPS)
+    expected = (x / rms) * gamma
+    expected = expected.cpu().numpy()
 
     # Allocate GPU Memory
     d_input = hip_check(hip.hipMalloc(M * N * elem_bytes))
@@ -122,14 +134,6 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     print("Launching kernel...")
     # Benchmark using the shared perf harness so results are comparable across tests.
     # NOTE: run_perftest uses torch.profiler on ROCm; it expects torch to be installed.
-    try:
-        import torch  # noqa: F401
-    except Exception as e:
-        raise RuntimeError(
-            "RMSNorm benchmark requires torch (ROCm build) because it uses tests.test_common.run_perftest. "
-            "Install torch or remove benchmarking from this test."
-        ) from e
-
     def hip_kernel_launch():
         hip_check(
             hip.hipModuleLaunchKernel(
