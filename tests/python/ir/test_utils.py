@@ -5,7 +5,7 @@ def unwrap_values(*values):
     """Unwrap ArithValue objects to get underlying MLIR Values.
     
     This is needed because ArithValue wraps MLIR Values for operator
-    overloading, but func.FuncOp.from_py_func expects raw MLIR Values.
+    overloading, but some MLIR op builders expect raw MLIR Values.
     
     Args:
         *values: One or more values (may be ArithValue or MLIR Value)
@@ -14,11 +14,8 @@ def unwrap_values(*values):
         Tuple of unwrapped MLIR Values
     
     Example:
-        >>> @func.FuncOp.from_py_func()
-        >>> def my_func():
-        >>>     result1 = some_operation()
-        >>>     result2 = another_operation()
-        >>>     return unwrap_values(result1, result2)
+        >>> # In a @rocir.jit body, return raw Values:
+        >>> # return unwrap_values(result1, result2)
     """
     unwrapped = []
     for val in values:

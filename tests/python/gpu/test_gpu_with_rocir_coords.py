@@ -75,18 +75,18 @@ def test_matmul_with_rocir():
                 k0 = arith.index(0)
 
                 for_op = scf.ForOp(k0.value, k_c.value, one.value, [sum_val.value])
-                with ir.InsertionPoint(for_op.body):
-                    k = for_op.induction_variable
-                    acc = for_op.inner_iter_args[0]
+            with ir.InsertionPoint(for_op.body):
+                k = for_op.induction_variable
+                acc = for_op.inner_iter_args[0]
 
                     k_val = k.value if hasattr(k, "value") else k
                     a_val = memref.load(A, [row.value, k_val])
                     b_val = memref.load(B, [k_val, col.value])
 
                     new_acc = acc + (a_val * b_val)
-                    scf.yield_([new_acc.value])
+                scf.yield_([new_acc.value])
 
-                result = for_op.results[0]
+            result = for_op.results[0]
                 result_val = result.value if hasattr(result, "value") else result
                 memref.store(result_val, C, [row.value, col.value])
                 scf.yield_()

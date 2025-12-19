@@ -1,198 +1,120 @@
-"""Tests for Rocir product operations (tiling)."""
+"""Tests for Rocir product operations (Flyx style)."""
 
-import pytest
-from _mlir.ir import IndexType
-from _mlir.dialects import func, arith
-
-import rocdsl.dialects.ext.rocir as rocir
+from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.arith import Index
 
-def _unwrap(val):
-    """Unwrap ArithValue to get underlying MLIR Value."""
-    if hasattr(val, "value"):
-        return val.value
-    return val
-from test_utils import unwrap_values
+
+def test_logical_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def logical_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(16), Index(32)),
+                rocir.make_stride(Index(1), Index(16)),
+            )
+            tiler = rocir.make_layout(
+                rocir.make_shape(Index(4), Index(8)),
+                rocir.make_stride(Index(1), Index(4)),
+            )
+            tiled = rocir.logical_product(base, tiler)
+            return [rocir.size(tiled).value]
+
+    s = str(_M().module)
+    assert "rocir.logical_product" in s
 
 
-def test_logical_product(ctx, insert_point):
-    """Test logical product for basic tiling."""
-    
-    @func.FuncOp.from_py_func()
-    def tile_layout():
-        # Base layout: 16x32
-        c16 = Index(16)
-        c32 = Index(32)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c16, c32)
-        base_stride = rocir.make_stride(c1, c16)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        # Tiler: 4x8
-        c4 = Index(4)
-        c8 = Index(8)
-        
-        tile_shape = rocir.make_shape(c4, c8)
-        tile_stride = rocir.make_stride(c1, c4)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        # Product creates 4D tiled layout
-        tiled = rocir.logical_product(base, tiler)
-        
-        size = rocir.size(tiled)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+def test_zipped_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def zipped_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(8), Index(16)),
+                rocir.make_stride(Index(1), Index(8)),
+            )
+            tiler = rocir.make_layout(
+                rocir.make_shape(Index(2), Index(4)),
+                rocir.make_stride(Index(1), Index(2)),
+            )
+            zipped = rocir.zipped_product(base, tiler)
+            return [rocir.size(zipped).value]
 
-    
+    s = str(_M().module)
+    assert "rocir.zipped_product" in s
 
 
-def test_zipped_product(ctx, insert_point):
-    """Test zipped product for interleaved tiling."""
-    
-    @func.FuncOp.from_py_func()
-    def zipped_tile():
-        c8 = Index(8)
-        c16 = Index(16)
-        c2 = Index(2)
-        c4 = Index(4)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c8, c16)
-        base_stride = rocir.make_stride(c1, c8)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        tile_shape = rocir.make_shape(c2, c4)
-        tile_stride = rocir.make_stride(c1, c2)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        zipped = rocir.zipped_product(base, tiler)
-        
-        size = rocir.size(zipped)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+def test_tiled_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def tiled_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(32), Index(64)),
+                rocir.make_stride(Index(1), Index(32)),
+            )
+            tiler = rocir.make_layout(
+                rocir.make_shape(Index(8), Index(16)),
+                rocir.make_stride(Index(1), Index(8)),
+            )
+            tiled = rocir.tiled_product(base, tiler)
+            return [rocir.size(tiled).value]
 
-    
+    s = str(_M().module)
+    assert "rocir.tiled_product" in s
 
 
-def test_tiled_product(ctx, insert_point):
-    """Test tiled product."""
-    
-    @func.FuncOp.from_py_func()
-    def tiled_layout():
-        c32 = Index(32)
-        c64 = Index(64)
-        c8 = Index(8)
-        c16 = Index(16)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c32, c64)
-        base_stride = rocir.make_stride(c1, c32)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        tile_shape = rocir.make_shape(c8, c16)
-        tile_stride = rocir.make_stride(c1, c8)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        tiled = rocir.tiled_product(base, tiler)
-        
-        size = rocir.size(tiled)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+def test_flat_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def flat_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(16), Index(8)),
+                rocir.make_stride(Index(1), Index(16)),
+            )
+            tiler = rocir.make_layout(
+                rocir.make_shape(Index(4), Index(2)),
+                rocir.make_stride(Index(1), Index(4)),
+            )
+            flat = rocir.flat_product(base, tiler)
+            return [rocir.size(flat).value]
 
-    
+    s = str(_M().module)
+    assert "rocir.flat_product" in s
 
 
-def test_flat_product(ctx, insert_point):
-    """Test flat product."""
-    
-    @func.FuncOp.from_py_func()
-    def flat_layout():
-        c16 = Index(16)
-        c8 = Index(8)
-        c4 = Index(4)
-        c2 = Index(2)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c16, c8)
-        base_stride = rocir.make_stride(c1, c16)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        tile_shape = rocir.make_shape(c4, c2)
-        tile_stride = rocir.make_stride(c1, c4)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        flat = rocir.flat_product(base, tiler)
-        
-        size = rocir.size(flat)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+def test_raked_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def raked_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(32), Index(32)),
+                rocir.make_stride(Index(1), Index(32)),
+            )
+            raker = rocir.make_layout(
+                rocir.make_shape(Index(4), Index(8)),
+                rocir.make_stride(Index(1), Index(4)),
+            )
+            raked = rocir.raked_product(base, raker)
+            return [rocir.size(raked).value]
 
-    
+    s = str(_M().module)
+    assert "rocir.raked_product" in s
 
 
-def test_raked_product(ctx, insert_point):
-    """Test raked product."""
-    
-    @func.FuncOp.from_py_func()
-    def raked_layout():
-        c32 = Index(32)
-        c8 = Index(8)
-        c4 = Index(4)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c32, c8)
-        base_stride = rocir.make_stride(c1, c32)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        tile_shape = rocir.make_shape(c8, c4)
-        tile_stride = rocir.make_stride(c1, c8)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        raked = rocir.raked_product(base, tiler)
-        
-        size = rocir.size(raked)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+def test_blocked_product():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def blocked_product(self: rocir.T.i64):
+            base = rocir.make_layout(
+                rocir.make_shape(Index(64), Index(128)),
+                rocir.make_stride(Index(1), Index(64)),
+            )
+            blocker = rocir.make_layout(
+                rocir.make_shape(Index(16), Index(16)),
+                rocir.make_stride(Index(1), Index(16)),
+            )
+            blocked = rocir.blocked_product(base, blocker)
+            return [rocir.size(blocked).value]
 
-    
+    s = str(_M().module)
+    assert "rocir.blocked_product" in s
 
 
-def test_blocked_product(ctx, insert_point):
-    """Test blocked product."""
-    
-    @func.FuncOp.from_py_func()
-    def blocked_layout():
-        c64 = Index(64)
-        c16 = Index(16)
-        c8 = Index(8)
-        c4 = Index(4)
-        c1 = Index(1)
-        
-        base_shape = rocir.make_shape(c64, c16)
-        base_stride = rocir.make_stride(c1, c64)
-        base = rocir.make_layout(base_shape, base_stride)
-        
-        tile_shape = rocir.make_shape(c8, c4)
-        tile_stride = rocir.make_stride(c1, c8)
-        tiler = rocir.make_layout(tile_shape, tile_stride)
-        
-        blocked = rocir.blocked_product(base, tiler)
-        
-        size = rocir.size(blocked)
-        return unwrap_values(size)
-    
-    ctx.module.operation.verify()
-    # Apply lowering
-
-    

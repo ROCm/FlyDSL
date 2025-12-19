@@ -140,18 +140,22 @@ class GPUModuleOp(GPUModuleOp):
     def __init__(self, sym_name, targets: Optional[List[Attribute]] = None, *, loc=None, ip=None):
         if loc is None:
             loc = get_user_code_loc()
-        if targets is None:
-            targets = []
-        for i, t in enumerate(targets):
-            if isinstance(t, str):
-                targets[i] = Attribute.parse(t)
+        if targets is not None:
+            for i, t in enumerate(targets):
+                if isinstance(t, str):
+                    targets[i] = Attribute.parse(t)
         _ods_context = get_default_loc_context(loc)
         sym_name = (
             sym_name
             if (issubclass(type(sym_name), Attribute) or not AttrBuilder.contains("SymbolNameAttr"))
             else AttrBuilder.get("SymbolNameAttr")(sym_name, context=_ods_context)
         )
-        super().__init__(sym_name=sym_name, targets=ArrayAttr.get(targets), loc=loc, ip=ip)
+        super().__init__(
+            sym_name=sym_name,
+            targets=None if targets is None else ArrayAttr.get(targets),
+            loc=loc,
+            ip=ip,
+        )
         self.regions[0].blocks.append()
 
     @property

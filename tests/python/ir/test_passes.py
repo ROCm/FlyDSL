@@ -87,6 +87,9 @@ def test_run_pipeline_basic():
     """Test running a simple pipeline on valid IR."""
     ctx = Context()
     ctx.load_all_available_dialects()
+    ctx.allow_unregistered_dialects = True
+    from rocdsl.compiler.context import ensure_rocir_python_extensions
+    ensure_rocir_python_extensions(ctx)
     
     # Create simple func module
     mlir_code = """
@@ -113,6 +116,9 @@ def test_run_pipeline_with_string():
     """Test running pipeline from string."""
     ctx = Context()
     ctx.load_all_available_dialects()
+    ctx.allow_unregistered_dialects = True
+    from rocdsl.compiler.context import ensure_rocir_python_extensions
+    ensure_rocir_python_extensions(ctx)
     
     mlir_code = """
     module {
@@ -199,19 +205,6 @@ def test_complex_pipeline():
     assert "convert-memref-to-llvm" in pipeline_str
     assert "convert-func-to-llvm" in pipeline_str
     assert "reconcile-unrealized-casts" in pipeline_str
-
-
-def test_nvgpu_lowering_pipeline():
-    pytest.skip("NVGPU lowering recipe is not implemented in current Pipeline API", allow_module_level=False)
-
-
-def test_materialize_with_without_module():
-    pytest.skip("Pipeline.materialize is not implemented in current Pipeline API", allow_module_level=False)
-
-
-def test_underscore_to_hyphen_conversion():
-    pytest.skip("Underscore-to-hyphen conversion is not performed by current Pipeline API", allow_module_level=False)
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

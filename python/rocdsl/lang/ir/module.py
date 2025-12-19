@@ -13,6 +13,8 @@ from rocdsl.dialects.ext.func import prep_func_types
 
 class MlirModule:
     GPU_MODULE_NAME = "kernels"
+    GPU_MODULE_TARGETS = None
+    ALLOW_UNREGISTERED_DIALECTS = True
 
     cls_kernel_fn = []
     cls_jit_fn = []
@@ -26,6 +28,9 @@ class MlirModule:
         # some environments crash during interpreter shutdown if a context is left
         # on the thread-local stack.
         cls._context = ir.Context()
+        cls._context.allow_unregistered_dialects = getattr(
+            cls, "ALLOW_UNREGISTERED_DIALECTS", False
+        )
         ensure_rocir_python_extensions(cls._context)
         cls._location = ir.Location.unknown(cls._context)
 
@@ -56,6 +61,25 @@ class MlirModule:
     def __init__(self):
         self.kernel_func_op = {}
         with self._context, self._location:
+            # Create a fresh module per instance so tests/examples can instantiate
+            # the same MlirModule subclass multiple times without symbol redefinition.
+            self.module = ir.Module.create()
+            gpu.set_container_module(self.module)
+
+            # Create gpu.module container.
+            with ir.InsertionPoint(self.module.body):
+                self.gpu_module = gpu.GPUModuleOp(
+                    self.GPU_MODULE_NAME,
+                    targets=getattr(self, "GPU_MODULE_TARGETS", None),
+                )
+
+            # Optional hook: allow subclasses (e.g. shared-memory allocators) to
+            # insert ops into the gpu.module body before kernels are emitted.
+            init_gpu_module = getattr(self, "init_gpu_module", None)
+            if callable(init_gpu_module):
+                with ir.InsertionPoint.at_block_begin(self.gpu_module.body):
+                    init_gpu_module()
+
             # Emit host-side jit functions first.
             for fn in self.cls_jit_fn:
                 fn(self)
@@ -81,7 +105,7 @@ class MlirModule:
             with self._context, self._location:
                 with ir.InsertionPoint.at_block_begin(self.gpu_module.body):
                     # Emit as gpu.func in the gpu.module region.
-                    k = gpu.func(fn, emit=True, lower_range_loops=True)
+                    k = gpu.func(emit=True, lower_range_loops=True)(fn)
                     # Ensure launch path qualifies as `@kernels::fn` when used as GPUFunc callable.
                     try:
                         k.qualname = self.GPU_MODULE_NAME
@@ -135,7 +159,7 @@ class _KernelDescriptor:
                 def wrapper(instance_self, *args, **kwargs):
                     with instance_self._context, instance_self._location:
                         with ir.InsertionPoint.at_block_begin(instance_self.gpu_module.body):
-                            k = gpu.func(fn, emit=True, lower_range_loops=True)
+                            k = gpu.func(emit=True, lower_range_loops=True)(fn)
                             try:
                                 k.qualname = instance_self.GPU_MODULE_NAME
                             except Exception:
@@ -194,14 +218,81 @@ class _JitDescriptor:
         return self.fn.__get__(obj, objtype)
 
 
-def kernel(fn):
-    """Descriptor decorator: use as `@roc.lang.kernel` on methods."""
-    return _KernelDescriptor(fn)
+def _looks_like_method(fn) -> bool:
+    qn = getattr(fn, "__qualname__", "")
+    # Heuristic: "Cls.method" or "<locals>.Cls.method"
+    return "." in qn
 
 
-def jit(fn):
-    """Descriptor decorator: use as `@roc.lang.jit` on methods."""
-    return _JitDescriptor(fn)
+def kernel(fn=None, *, emit: bool = True):
+    """Kernel decorator.
+
+    - **Inside `MlirModule` subclasses**: use as `@rocir.kernel` on methods.
+    - **Elsewhere** (tests/examples): use as a drop-in replacement for
+      `@gpu.func(emit=True, lower_range_loops=True)`.
+    """
+    if fn is None:
+        return lambda real_fn: kernel(real_fn, emit=emit)
+
+    # Class-method form (descriptor).
+    if _looks_like_method(fn):
+        return _KernelDescriptor(fn)
+
+    # Free-function form (emit a gpu.func into the current insertion point).
+    return gpu.func(emit=emit, lower_range_loops=True)(fn)
+
+
+def _materialize_types(fn, types):
+    # `prep_func_types` may return lambdas/strings. Materialize them into MLIR
+    # types inside the active Context.
+    locals_ = {"T": gpu.T} if hasattr(gpu, "T") else {}
+    materialized = []
+    for t in types:
+        if isinstance(t, str):
+            materialized.append(ir.Type(eval(t, fn.__globals__, locals_)))
+        elif callable(t) and getattr(t, "__name__", None) == (lambda: 0).__name__:
+            materialized.append(t())
+        else:
+            materialized.append(t)
+    return materialized
+
+
+def jit(*arg_types, emit: bool = True):
+    """Jit decorator.
+
+    - **Inside `MlirModule` subclasses**: use as `@rocir.jit` on methods.
+    - **Elsewhere** (tests/examples): drop-in replacement for
+      `@func.FuncOp.from_py_func(...)` with either:
+        - `@rocir.jit` (types from annotations), or
+        - `@rocir.jit(type0, type1, ...)` (explicit types).
+    """
+
+    # Called as `@rocir.jit` (no args): arg_types will be (fn,)
+    if len(arg_types) == 1 and callable(arg_types[0]) and not isinstance(arg_types[0], (ir.Type, str)):
+        fn = arg_types[0]
+
+        if _looks_like_method(fn):
+            return _JitDescriptor(fn)
+
+        if not emit:
+            raise ValueError("rocir.jit(emit=False) is only supported on MlirModule methods")
+
+        sig = inspect.signature(fn)
+        input_types, _, _ = prep_func_types(sig, [])
+        materialized_inputs = _materialize_types(fn, input_types)
+        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+
+    # Called as `@rocir.jit(type0, type1, ...)`
+    def _decorator(fn):
+        if _looks_like_method(fn):
+            # Keep MlirModule method behavior annotation-driven (no explicit type list).
+            return _JitDescriptor(fn)
+        if not emit:
+            raise ValueError("rocir.jit(emit=False) is only supported on MlirModule methods")
+        materialized_inputs = _materialize_types(fn, list(arg_types))
+        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+
+    return _decorator
 
 
 

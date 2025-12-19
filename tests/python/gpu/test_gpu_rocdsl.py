@@ -116,8 +116,8 @@ def test_vector_add():
         # Create coordinate and convert to linear index using rocir
         thread_coord = rocir.make_coord(tid.value)
         linear_idx = rocir.crd2idx(thread_coord, vec_layout)
-
-        # Use layout-computed linear index for memory access
+        
+            # Use layout-computed linear index for memory access
         idx = linear_idx.value if hasattr(linear_idx, "value") else linear_idx
         a = memref.load(A, [idx])
         b = memref.load(B, [idx])
@@ -328,33 +328,33 @@ def test_matmul():
         
         with scf.if_(valid.value) as then_block:
             with ir.InsertionPoint(then_block):
-                sum_val = arith.f32(0.0)
+            sum_val = arith.f32(0.0)
                 k0 = arith.index(0)
-                
+            
                 for_op = scf.ForOp(k0.value, arith.index(k_c).value, arith.index(one).value, [sum_val.value])
-                with ir.InsertionPoint(for_op.body):
-                    k = for_op.induction_variable
-                    acc = for_op.inner_iter_args[0]
-                    
-                    # Use layout to compute A[row, k] linear address
+            with ir.InsertionPoint(for_op.body):
+                k = for_op.induction_variable
+                acc = for_op.inner_iter_args[0]
+                
+                # Use layout to compute A[row, k] linear address
                     a_coord = rocir.make_coord(row.value, k.value if hasattr(k, "value") else k)
-                    a_idx = rocir.crd2idx(a_coord, a_layout)
-                    a_val = memref.load(A, [a_idx.value if hasattr(a_idx, "value") else a_idx])
-                    
-                    # Use layout to compute B[k, col] linear address
+                a_idx = rocir.crd2idx(a_coord, a_layout)
+                a_val = memref.load(A, [a_idx.value if hasattr(a_idx, "value") else a_idx])
+                
+                # Use layout to compute B[k, col] linear address
                     b_coord = rocir.make_coord(k.value if hasattr(k, "value") else k, col.value)
-                    b_idx = rocir.crd2idx(b_coord, b_layout)
-                    b_val = memref.load(B, [b_idx.value if hasattr(b_idx, "value") else b_idx])
-                    
+                b_idx = rocir.crd2idx(b_coord, b_layout)
+                b_val = memref.load(B, [b_idx.value if hasattr(b_idx, "value") else b_idx])
+                
                     prod = a_val * b_val
                     new_acc = acc + prod
-                    
-                    scf.yield_([new_acc.value])
                 
-                result = for_op.results[0]
+                scf.yield_([new_acc.value])
+            
+            result = for_op.results[0]
                 result_val = result.value if hasattr(result, "value") else result
                 c_idx_val = c_idx.value if hasattr(c_idx, "value") else c_idx
-                # Use layout-computed linear index for C
+            # Use layout-computed linear index for C
                 memref.store(result_val, C, [c_idx_val])
                 scf.yield_()
 

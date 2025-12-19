@@ -1,206 +1,134 @@
 """Test basic Rocir operations: make_shape, make_stride, make_layout, size, rank, etc."""
 
 import pytest
-import sys
-import os
-
-
-from _mlir.ir import Context, Location, Module, InsertionPoint
-from _mlir.dialects import func
-
 from rocdsl.dialects.ext import arith, rocir
 
 
-def test_make_shape(ctx):
+class _BasicOps(rocir.MlirModule):
+    @rocir.jit
+    def shape_rank2(self: rocir.T.i64):
+        c8 = 8
+        c16 = 16
+        shape = rocir.make_shape(c8, c16)
+        rank = rocir.rank(shape)
+        return rank.value
+
+    @rocir.jit
+    def layout_creation(self: rocir.T.i64):
+        c8 = 8
+        c16 = 16
+        c1 = 1
+        shape = rocir.make_shape(c8, c16)
+        stride = rocir.make_stride(c1, c8)
+        layout = rocir.make_layout(shape, stride)
+        return [layout]
+
+    @rocir.jit
+    def size(self: rocir.T.i64):
+        c4 = 4
+        c8 = 8
+        shape = rocir.make_shape(c4, c8)
+        total_size = rocir.size(shape)
+        return total_size.value
+
+    @rocir.jit
+    def extract(self: rocir.T.i64):
+        c8 = 8
+        c16 = 16
+        c1 = 1
+        shape = rocir.make_shape(c8, c16)
+        stride = rocir.make_stride(c1, c8)
+        layout = rocir.make_layout(shape, stride)
+        extracted_shape = rocir.get_shape(layout)
+        extracted_stride = rocir.get_stride(layout)
+        size_val = rocir.size(extracted_shape)
+        return size_val.value
+
+    @rocir.jit
+    def rank(self: rocir.T.i64):
+        c2 = 2
+        c3 = 3
+        c4 = 4
+        shape = rocir.make_shape(c2, c3, c4)
+        rank_val = rocir.rank(shape)
+        return rank_val.value
+
+    @rocir.jit
+    def cosize(self: rocir.T.i64):
+        c8 = 8
+        c16 = 16
+        c1 = 1
+        shape = rocir.make_shape(c8, c16)
+        stride = rocir.make_stride(c1, c8)
+        layout = rocir.make_layout(shape, stride)
+        cosize_val = rocir.cosize(layout)
+        return cosize_val.value
+
+    @rocir.jit
+    def compose(self: rocir.T.i64):
+        c8 = 8
+        c16 = 16
+        c4 = 4
+        c2 = 2
+        c1 = 1
+        shape_a = rocir.make_shape(c8, c16)
+        stride_a = rocir.make_stride(c1, c8)
+        layout_a = rocir.make_layout(shape_a, stride_a)
+        shape_b = rocir.make_shape(c4, c2)
+        stride_b = rocir.make_stride(c2, c1)
+        layout_b = rocir.make_layout(shape_b, stride_b)
+        composed = rocir.composition(layout_a, layout_b)
+        return [composed]
+
+
+def test_make_shape():
     """Test creating shapes with different ranks."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_shape_rank2")
-        def test_shape():
-            c8 = 8
-            c16 = 16
-            
-            # Create 2D shape
-            shape = rocir.make_shape(c8, c16)
-            
-            # Verify rank
-            rank = rocir.rank(shape)
-            return [rank.value]
-    
-    # Verify the module
-    ctx.module.operation.verify()
-    # Apply lowering
-
-    
-    
-    # Check IR contains make_shape before lowering
-    ir = str(ctx.module)
-    
-    # Check lowered IR
-    # After lowering, Rocir ops should be converted to standard dialects
+    m = _BasicOps()
+    assert "rocir.make_shape" in str(m.module)
 
 
-def test_make_layout(ctx):
+def test_make_layout():
     """Test creating layouts from shape and stride."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_layout_creation")
-        def test_layout():
-            c8 = 8
-            c16 = 16
-            c1 = 1
-            
-            # Create shape and stride
-            shape = rocir.make_shape(c8, c16)
-            stride = rocir.make_stride(c1, c8)
-            
-            # Create layout (column-major 8x16)
-            layout = rocir.make_layout(shape, stride)
-            
-            return [layout]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
-
-    
-    
-    ir = str(ctx.module)
+    m = _BasicOps()
+    assert "rocir.make_layout" in str(m.module)
 
 
-def test_size_operation(ctx):
+def test_size_operation():
     """Test size computation for shapes and layouts."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_size")
-        def test_size():
-            c4 = 4
-            c8 = 8
-            
-            # Create shape
-            shape = rocir.make_shape(c4, c8)
-            
-            # Compute size (should be 32) - Pythonic way!
-            total_size = rocir.size(shape)
-            
-            # Could also verify: 4 * 8 = 32
-            expected = c4 * c8  # Using * operator instead of MulIOp!
-            
-            return [total_size.value]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
-
-    
-    
-    ir = str(ctx.module)
+    m = _BasicOps()
+    assert "rocir.size" in str(m.module)
 
 
-def test_get_shape_stride(ctx):
+def test_get_shape_stride():
     """Test extracting shape and stride from layout."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_extract")
-        def test_extract():
-            c8 = 8
-            c16 = 16
-            c1 = 1
-            
-            shape = rocir.make_shape(c8, c16)
-            stride = rocir.make_stride(c1, c8)
-            layout = rocir.make_layout(shape, stride)
-            
-            # Extract shape and stride
-            extracted_shape = rocir.get_shape(layout)
-            extracted_stride = rocir.get_stride(layout)
-            
-            # Compute size from extracted shape
-            size_val = rocir.size(extracted_shape)
-            
-            return [size_val.value]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
-
-    
-    
+    m = _BasicOps()
+    s = str(m.module)
+    assert "rocir.get_shape" in s
+    assert "rocir.get_stride" in s
 
 
-def test_rank_operation(ctx):
+def test_rank_operation():
     """Test rank operation on shapes and layouts."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_rank")
-        def test_rank_func():
-            c2 = 2
-            c3 = 3
-            c4 = 4
-            
-            # Create 3D shape
-            shape = rocir.make_shape(c2, c3, c4)
-            
-            # Get rank (should be 3)
-            rank_val = rocir.rank(shape)
-            
-            return [rank_val.value]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+    m = _BasicOps()
+    assert "rocir.rank" in str(m.module)
 
     
     
 
 
-def test_cosize_operation(ctx):
+def test_cosize_operation():
     """Test cosize (stride extent) computation."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_cosize")
-        def test_cosize_func():
-            c8 = 8
-            c16 = 16
-            c1 = 1
-            
-            shape = rocir.make_shape(c8, c16)
-            stride = rocir.make_stride(c1, c8)
-            layout = rocir.make_layout(shape, stride)
-            
-            # Compute cosize
-            cosize_val = rocir.cosize(layout)
-            
-            return [cosize_val.value]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+    m = _BasicOps()
+    assert "rocir.cosize" in str(m.module)
 
     
     
 
 
-def test_composition(ctx):
+def test_composition():
     """Test layout composition with Pythonic operators."""
-    with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_compose")
-        def test_compose():
-            c8 = 8
-            c16 = 16
-            c4 = 4
-            c2 = 2
-            c1 = 1
-            
-            # First layout
-            shape_a = rocir.make_shape(c8, c16)
-            stride_a = rocir.make_stride(c1, c8)
-            layout_a = rocir.make_layout(shape_a, stride_a)
-            
-            # Second layout
-            shape_b = rocir.make_shape(c4, c2)
-            stride_b = rocir.make_stride(c2, c1)
-            layout_b = rocir.make_layout(shape_b, stride_b)
-            
-            # Compose
-            composed = rocir.composition(layout_a, layout_b)
-            
-            # Use Pythonic operator for verification
-            total_elements = c8 * c16  # Instead of MulIOp(c8, c16)
-            
-            return [composed]
-    
-    ctx.module.operation.verify()
-    # Apply lowering
+    m = _BasicOps()
+    assert "rocir.composition" in str(m.module)
 
     
     

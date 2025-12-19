@@ -2,7 +2,7 @@
 
 import pytest
 from _mlir.ir import Context, Location, Module, InsertionPoint, IndexType
-from _mlir.dialects import func, arith
+from _mlir.dialects import arith
 
 # Import Rocir wrappers
 import rocdsl.dialects.ext.rocir as rocir
@@ -19,7 +19,7 @@ def _unwrap(val):
 def test_make_shape(ctx, insert_point):
     """Test shape creation."""
     
-    @func.FuncOp.from_py_func(IndexType.get(), IndexType.get())
+    @rocir.jit(IndexType.get(), IndexType.get())
     def create_shape(dim0, dim1):
         shape = rocir.make_shape(dim0, dim1)
         size = rocir.size(shape)
@@ -35,7 +35,7 @@ def test_make_shape(ctx, insert_point):
 def test_make_layout(ctx, insert_point):
     """Test layout creation from shape and stride."""
     
-    @func.FuncOp.from_py_func(IndexType.get(), IndexType.get(), IndexType.get())
+    @rocir.jit(IndexType.get(), IndexType.get(), IndexType.get())
     def create_layout(dim0, dim1, stride_val):
         shape = rocir.make_shape(dim0, dim1)
         stride = rocir.make_stride(stride_val, dim0)
@@ -52,7 +52,7 @@ def test_make_layout(ctx, insert_point):
 def test_constant_shape(ctx, insert_point):
     """Test shape with constant dimensions."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def constant_shape():
         c8 = Index(8)
         c16 = Index(16)
@@ -71,7 +71,7 @@ def test_constant_shape(ctx, insert_point):
 def test_rank_operation(ctx, insert_point):
     """Test rank operation."""
     
-    @func.FuncOp.from_py_func(IndexType.get(), IndexType.get(), IndexType.get())
+    @rocir.jit(IndexType.get(), IndexType.get(), IndexType.get())
     def get_rank(dim0, dim1, dim2):
         shape = rocir.make_shape(dim0, dim1, dim2)
         rank_val = rocir.rank(shape)
@@ -86,7 +86,7 @@ def test_rank_operation(ctx, insert_point):
 def test_get_shape_stride(ctx, insert_point):
     """Test extracting shape and stride from layout."""
     
-    @func.FuncOp.from_py_func(IndexType.get(), IndexType.get())
+    @rocir.jit(IndexType.get(), IndexType.get())
     def extract_components(dim0, dim1):
         c1 = Index(1)
         
@@ -112,7 +112,7 @@ def test_get_shape_stride(ctx, insert_point):
 def test_2d_layout(ctx, insert_point):
     """Test 2D column-major layout."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def layout_2d():
         # Create 8x16 column-major layout
         c8 = Index(8)

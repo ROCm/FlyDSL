@@ -2,7 +2,7 @@
 
 import pytest
 from _mlir.ir import IndexType
-from _mlir.dialects import func, arith
+from _mlir.dialects import arith
 
 import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.dialects.ext.arith import Index
@@ -18,7 +18,7 @@ from test_utils import unwrap_values
 def test_logical_divide(ctx, insert_point):
     """Test logical divide for basic partitioning."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def partition_layout():
         # Global layout: 128x256
         c128 = Index(128)
@@ -51,7 +51,7 @@ def test_logical_divide(ctx, insert_point):
 def test_zipped_divide(ctx, insert_point):
     """Test zipped divide."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def zipped_partition():
         c64 = Index(64)
         c128 = Index(128)
@@ -81,7 +81,7 @@ def test_zipped_divide(ctx, insert_point):
 def test_tiled_divide(ctx, insert_point):
     """Test tiled divide."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def tiled_partition():
         c32 = Index(32)
         c64 = Index(64)
@@ -111,7 +111,7 @@ def test_tiled_divide(ctx, insert_point):
 def test_flat_divide(ctx, insert_point):
     """Test flat divide."""
     
-    @func.FuncOp.from_py_func()
+    @rocir.jit
     def flat_partition():
         c16 = Index(16)
         c32 = Index(32)

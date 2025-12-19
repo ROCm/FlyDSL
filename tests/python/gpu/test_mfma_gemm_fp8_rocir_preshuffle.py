@@ -57,7 +57,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
 def unwrap(v):
     if isinstance(v, int): return arith.constant(v, index=True).value
     while hasattr(v, "value"):
-        v = v.value
+            v = v.value
     return v
 
 @pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k", [(1024, 7168, 2048, 128, 128, 128)])
@@ -629,18 +629,18 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     try:
-        kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
-
-        def launch_kernel(c, a, b, sa, sb):
-            arg_ptrs = [
-                ctypes.c_void_p(c.data_ptr()),
-                ctypes.c_void_p(a.data_ptr()),
-                ctypes.c_void_p(b.data_ptr()),
-                ctypes.c_void_p(sa.data_ptr()),
-                ctypes.c_void_p(sb.data_ptr()),
+    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
+    
+    def launch_kernel(c, a, b, sa, sb):
+        arg_ptrs = [
+            ctypes.c_void_p(c.data_ptr()),
+            ctypes.c_void_p(a.data_ptr()),
+            ctypes.c_void_p(b.data_ptr()),
+            ctypes.c_void_p(sa.data_ptr()),
+            ctypes.c_void_p(sb.data_ptr()),
                 ctypes.c_long(M), ctypes.c_long(N), ctypes.c_long(K),
-            ]
-            current_args_array = (ctypes.c_void_p * 8)(*[ctypes.addressof(p) for p in arg_ptrs])
+        ]
+        current_args_array = (ctypes.c_void_p * 8)(*[ctypes.addressof(p) for p in arg_ptrs])
             hip_check(
                 hip.hipModuleLaunchKernel(
                     kernel_func,
@@ -656,46 +656,46 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     None,
                 )
             )
+    
+    _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
+    c_out_scaled = c_out_raw.to(torch.float32)
+    
+    # 7. Verify
+    # Keep output clean; enable these for debugging.
+    # print(f"c_out_scaled: {c_out_scaled}")
+    # print(f"c_ref: {c_ref}")
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
-        _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
-        c_out_scaled = c_out_raw.to(torch.float32)
-
-        # 7. Verify
-        # Keep output clean; enable these for debugging.
-        # print(f"c_out_scaled: {c_out_scaled}")
-        # print(f"c_ref: {c_ref}")
-        assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-
-        # Benchmark
-        bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
-        flops = 2 * M * N * K
-        tflops = flops / (us / 1e6) / 1e12
-        bw = bytes_moved / 1e9 / (us / 1e6)
-        print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
+    # Benchmark
+    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    bw = bytes_moved / 1e9 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
 
         if HAS_AITER and RUN_AITER_BENCH:
-            print("-" * 40)
-            print("Running Aiter Benchmark...")
-
-            def launch_aiter(a, b, sa, sb):
-                return aiter.gemm_a8w8_bpreshuffle(
-                    a,
-                    b,
-                    sa,
-                    sb,
+        print("-" * 40)
+        print("Running Aiter Benchmark...")
+        
+        def launch_aiter(a, b, sa, sb):
+            return aiter.gemm_a8w8_bpreshuffle(
+                    a, 
+                    b, 
+                    sa, 
+                    sb, 
                     None,  # bias
                     torch.float16,
                 )
-
-            # Verify Aiter output first
-            c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
-            verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
-
-            tflops_aiter = flops / (us1 / 1e6) / 1e12
-            bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
-            print(f"Aiter: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s")
-            print(f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}")
-            print("-" * 40)
+            
+        # Verify Aiter output first
+        c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
+        verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+        
+        tflops_aiter = flops / (us1 / 1e6) / 1e12
+        bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
+        print(f"Aiter: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s")
+        print(f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}")
+        print("-" * 40)
         elif HAS_AITER and not RUN_AITER_BENCH:
             print("-" * 40)
             print("Skipping Aiter benchmark (set ROCDSL_RUN_AITER_BENCH=1 to enable)")
