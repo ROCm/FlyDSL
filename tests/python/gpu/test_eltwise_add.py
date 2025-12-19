@@ -18,14 +18,16 @@ import pytest
 # Setup paths
 
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import func, gpu, rocir, rocm
+from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.arith import Index
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from _mlir.ir import F16Type, F32Type, IntegerType, InsertionPoint
+from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
 import _mlir.extras.types as T
-from hip import hip
+try:
+    from hip import hip
+except ImportError:
+    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
 from tests.test_common import run_perftest
 
 
@@ -46,115 +48,122 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     print(f"\n[RocDSL INFO] Creating elementwise add kernel for {M}x{N}")
     print(f"[RocDSL INFO] Element type: {dtype}")
     
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
-    
-    # Create GPU module
-    @gpu.module("elementwise_kernels", ["#rocdl.target<abi = \"500\">"])
-    def gpu_mod():
-        pass
-    
-    # Set insertion point
-    ip = InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
-    ip.__enter__()
-    
-    @gpu.func(emit=True)
-    def elementwise_add_kernel(A: T.memref(M, N, dtype.get()), 
-                               B: T.memref(M, N, dtype.get()), 
-                               C: T.memref(M, N, dtype.get())):
-        # ===== Step 1: Thread and Block IDs =====
-        tid_x = rocir.thread_idx("x")
-        tid_y = rocir.thread_idx("y")
-        bid_x = rocir.block_idx("x")
-        bid_y = rocir.block_idx("y")
-        
-        # Calculate linear thread index
-        bdim_x = rocir.block_dim("x")
-        tidx = (tid_y * bdim_x + tid_x).value
-        
-        # Block coordinates
-        blk_coord_y = bid_y
-        blk_coord_x = bid_x
-        
-        # ===== Step 2: TiledCopy + Layouts =====
-        thr_layout = rocir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
-        val_layout = rocir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
-        
-        # Atoms
-        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
-        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
-        
-        # Tiled Copies
-        tiled_copy_A = rocir.make_tiled_copy_tv(copy_atom_load, thr_layout, val_layout,
-                                               thr_shape=(THR_M, THR_N), val_shape=(VAL_M, VAL_N))
-        tiled_copy_B = rocir.make_tiled_copy_tv(copy_atom_load, thr_layout, val_layout,
-                                               thr_shape=(THR_M, THR_N), val_shape=(VAL_M, VAL_N))
-        tiled_copy_C = rocir.make_tiled_copy_tv(copy_atom_store, thr_layout, val_layout,
-                                               thr_shape=(THR_M, THR_N), val_shape=(VAL_M, VAL_N))
-        
-        tensor_A = rocir.make_tensor(A, shape=(M, N), strides=(N, 1))
-        tensor_B = rocir.make_tensor(B, shape=(M, N), strides=(N, 1))
-        tensor_C = rocir.make_tensor(C, shape=(M, N), strides=(N, 1))
-        
-        TILE_M = THR_M * VAL_M
-        TILE_N = THR_N * VAL_N
-        tile_shape = (TILE_M, TILE_N)
-        gA = rocir.zipped_divide(tensor_A, tile_shape)
-        gB = rocir.zipped_divide(tensor_B, tile_shape)
-        gC = rocir.zipped_divide(tensor_C, tile_shape)
-        idC = rocir.make_identity_tensor((M, N))
-        cC = rocir.zipped_divide(idC, tile_shape)
-        
-        blk_coord = (blk_coord_y, blk_coord_x)
-        blkA = gA[blk_coord]
-        blkB = gB[blk_coord]
-        blkC = gC[blk_coord]
-        blkCrd = cC[blk_coord]
-        
-        thr_copy_A = tiled_copy_A.get_slice(tidx)
-        thr_copy_B = tiled_copy_B.get_slice(tidx)
-        thr_copy_C = tiled_copy_C.get_slice(tidx)
-        
-        thrA = thr_copy_A.partition_S(blkA)
-        thrB = thr_copy_B.partition_S(blkB)
-        thrC = thr_copy_C.partition_S(blkC)
-        thrCrd = thr_copy_C.partition_S(blkCrd)
-        
-        val_shape = tiled_copy_A.val_shape
-        frgA = rocir.make_fragment_like(thrA, dtype.get())
-        frgB = rocir.make_fragment_like(thrB, dtype.get())
-        frgC = rocir.make_fragment_like(thrC, dtype.get())
-        
-        pred_ty = IntegerType.get_signless(1)
-        frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
-        total_vals = val_shape[0] * val_shape[1]
-        for linear in range(total_vals):
-            lin_idx = rocir.const_index(linear)
-            coords = thrCrd.coords_from_linear(lin_idx)
-            pred_val = rocir.elem_less(coords, (M, N))
-            pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
-            frgPred[pred_offsets] = pred_val
-        
-        rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
-        rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
-        
-        for i in range(val_shape[0]):
-            idx_i = rocir.const_index(i)
-            for j in range(val_shape[1]):
-                idx_j = rocir.const_index(j)
-                coords = (idx_i, idx_j)
-                a_val = frgA[coords]
-                b_val = frgB[coords]
-                c_val = a_val + b_val
-                frgC[coords] = c_val
-        
-        rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
-    
-    ip.__exit__(None, None, None)
-    
-    print(f"[RocDSL INFO] Generated MLIR module")
-    
-    return ctx.module
+    class _EltwiseAdd(rocir.MlirModule):
+        GPU_MODULE_NAME = "elementwise_kernels"
+        GPU_MODULE_TARGETS = ['#rocdl.target<abi = "500">']
+
+        @rocir.kernel
+        def elementwise_add_kernel(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, dtype.get()),
+            B: lambda: T.memref(M, N, dtype.get()),
+            C: lambda: T.memref(M, N, dtype.get()),
+        ):
+            # ===== Step 1: Thread and Block IDs =====
+            tid_x = rocir.thread_idx("x")
+            tid_y = rocir.thread_idx("y")
+            bid_x = rocir.block_idx("x")
+            bid_y = rocir.block_idx("y")
+
+            # Calculate linear thread index
+            bdim_x = rocir.block_dim("x")
+            tidx = (tid_y * bdim_x + tid_x).value
+
+            # Block coordinates
+            blk_coord_y = bid_y
+            blk_coord_x = bid_x
+
+            # ===== Step 2: TiledCopy + Layouts =====
+            thr_layout = rocir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
+            val_layout = rocir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
+
+            # Atoms
+            copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+            copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+
+            # Tiled Copies
+            tiled_copy_A = rocir.make_tiled_copy_tv(
+                copy_atom_load,
+                thr_layout,
+                val_layout,
+                thr_shape=(THR_M, THR_N),
+                val_shape=(VAL_M, VAL_N),
+            )
+            tiled_copy_B = rocir.make_tiled_copy_tv(
+                copy_atom_load,
+                thr_layout,
+                val_layout,
+                thr_shape=(THR_M, THR_N),
+                val_shape=(VAL_M, VAL_N),
+            )
+            tiled_copy_C = rocir.make_tiled_copy_tv(
+                copy_atom_store,
+                thr_layout,
+                val_layout,
+                thr_shape=(THR_M, THR_N),
+                val_shape=(VAL_M, VAL_N),
+            )
+
+            tensor_A = rocir.make_tensor(A, shape=(M, N), strides=(N, 1))
+            tensor_B = rocir.make_tensor(B, shape=(M, N), strides=(N, 1))
+            tensor_C = rocir.make_tensor(C, shape=(M, N), strides=(N, 1))
+
+            TILE_M = THR_M * VAL_M
+            TILE_N = THR_N * VAL_N
+            tile_shape = (TILE_M, TILE_N)
+            gA = rocir.zipped_divide(tensor_A, tile_shape)
+            gB = rocir.zipped_divide(tensor_B, tile_shape)
+            gC = rocir.zipped_divide(tensor_C, tile_shape)
+            idC = rocir.make_identity_tensor((M, N))
+            cC = rocir.zipped_divide(idC, tile_shape)
+
+            blk_coord = (blk_coord_y, blk_coord_x)
+            blkA = gA[blk_coord]
+            blkB = gB[blk_coord]
+            blkC = gC[blk_coord]
+            blkCrd = cC[blk_coord]
+
+            thr_copy_A = tiled_copy_A.get_slice(tidx)
+            thr_copy_B = tiled_copy_B.get_slice(tidx)
+            thr_copy_C = tiled_copy_C.get_slice(tidx)
+
+            thrA = thr_copy_A.partition_S(blkA)
+            thrB = thr_copy_B.partition_S(blkB)
+            thrC = thr_copy_C.partition_S(blkC)
+            thrCrd = thr_copy_C.partition_S(blkCrd)
+
+            val_shape = tiled_copy_A.val_shape
+            frgA = rocir.make_fragment_like(thrA, dtype.get())
+            frgB = rocir.make_fragment_like(thrB, dtype.get())
+            frgC = rocir.make_fragment_like(thrC, dtype.get())
+
+            pred_ty = IntegerType.get_signless(1)
+            frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
+            total_vals = val_shape[0] * val_shape[1]
+            for linear in range(total_vals):
+                lin_idx = rocir.const_index(linear)
+                coords = thrCrd.coords_from_linear(lin_idx)
+                pred_val = rocir.elem_less(coords, (M, N))
+                pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
+                frgPred[pred_offsets] = pred_val
+
+            rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
+            rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
+
+            for i in range(val_shape[0]):
+                idx_i = rocir.const_index(i)
+                for j in range(val_shape[1]):
+                    idx_j = rocir.const_index(j)
+                    coords = (idx_i, idx_j)
+                    a_val = frgA[coords]
+                    b_val = frgB[coords]
+                    c_val = a_val + b_val
+                    frgC[coords] = c_val
+
+            rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
+
+    print("[RocDSL INFO] Generated MLIR module")
+    return _EltwiseAdd()
 
 
 # Test cases
@@ -180,7 +189,8 @@ def get_or_compile_kernel(dtype=F32Type):
         print(f"\n[RocDSL INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
         
         # Create kernel with MAX dimensions
-        module = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
+        m = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
+        module = m.module
         
         # Compile to HSACO  
         import sys
@@ -229,7 +239,8 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         print(f"\n[RocDSL INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
         from rocdsl.compiler.pipeline import run_pipeline, Pipeline
         from tests.utils import compile_to_hsaco
-        module = create_elementwise_add_kernel(M, N, dtype)
+        m = create_elementwise_add_kernel(M, N, dtype)
+        module = m.module
         optimized = run_pipeline(module, Pipeline().canonicalize().cse())
         hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
         compile_M, compile_N = M, N

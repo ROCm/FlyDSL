@@ -1,5 +1,3 @@
-"""Tests for Rocir product operations (Flyx style)."""
-
 from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.arith import Index
 
@@ -116,5 +114,7 @@ def test_blocked_product():
 
     s = str(_M().module)
     assert "rocir.blocked_product" in s
+
+
 
 

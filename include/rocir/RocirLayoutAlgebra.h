@@ -1,7 +1,5 @@
 //===- RocirLayoutAlgebra.h - Type-level layout algebra helpers -----------===//
 //
-// Helpers for inferring Rocir layout result types (shape/stride patterns)
-// directly from operand types, similar to Flyx.
 //
 // These helpers are intentionally pure (no IR mutation) and operate on the
 // structure/dims stored in Rocir types.

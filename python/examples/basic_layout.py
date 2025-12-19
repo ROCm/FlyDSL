@@ -1,4 +1,4 @@
-"""Basic example of using RocDSL Python bindings for layout algebra (Flyx style)."""
+"""Basic example of using RocDSL Python bindings for layout algebra."""
 
 from rocdsl.dialects.ext import arith, rocir
 

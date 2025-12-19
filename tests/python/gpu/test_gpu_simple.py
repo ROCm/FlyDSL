@@ -3,68 +3,38 @@ Simple GPU kernel tests using rocdsl Python API
 Vector addition test with clean, readable syntax
 """
 
-import sys
-
-
-from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import gpu, arith
-
-import numpy as np
-from _mlir import ir
-from _mlir.dialects import memref
+from rocdsl.dialects.ext import rocir
 import _mlir.extras.types as T
 
 
 def test_vector_add():
     """Vector addition test: C = A + B"""
-    print("\n" + "="*80)
-    print("Test: Vector Addition (C = A + B)")
-    print("="*80)
-    
     M, N = 32, 64
-    
-    ctx = RAIIMLIRContextModule()
-    gpu.set_container_module(ctx.module)
-    
-    @gpu.module("kernels", ["#rocdl.target<abi = \"500\">"])
-    def gpu_module():
-        pass
-    
-    ip = ir.InsertionPoint.at_block_begin(gpu_module.regions[0].blocks[0])
-    ip.__enter__()
-    
-    @gpu.func(emit=True)
-    def vecAdd(A: T.memref(M, N, T.f32()), B: T.memref(M, N, T.f32()), C: T.memref(M, N, T.f32())):
-        # Get block/thread IDs and dimensions
-        bx, by = gpu.block_id("x"), gpu.block_id("y")
-        tx, ty = gpu.thread_id("x"), gpu.thread_id("y")
-        bdx, bdy = gpu.block_dim("x"), gpu.block_dim("y")
-        
-        # Calculate global thread index
-        row = (by * bdy + ty)
-        col = (bx * bdx + tx)
-        
-        # Vector addition: C[row,col] = A[row,col] + B[row,col]
-        a = memref.load(A, [row.value, col.value])
-        b = memref.load(B, [row.value, col.value])
-        c = a + b
-        memref.store(c.value, C, [row.value, col.value])
-    
-    ip.__exit__(None, None, None)
-    assert gpu_module.operation.verify()
-    
-    print(" GPU module created successfully!")
-    print(ctx.module)
-    
-    print("\nCompiling...")
-    compiled = run_pipeline(ctx.module, Pipeline().canonicalize().cse())
-    print(" Compilation successful!")
-    
-    print("\n" + "="*80)
-    print("PASSED: Vector Addition Test")
-    print("="*80)
 
+    class _VecAdd(rocir.MlirModule):
+        @rocir.kernel
+        def vecAdd(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, T.f32()),
+            B: lambda: T.memref(M, N, T.f32()),
+            C: lambda: T.memref(M, N, T.f32()),
+        ):
+            # Get block/thread IDs and dimensions
+            bx, by = rocir.block_idx("x"), rocir.block_idx("y")
+            tx, ty = rocir.thread_idx("x"), rocir.thread_idx("y")
+            bdx, bdy = rocir.block_dim("x"), rocir.block_dim("y")
 
-if __name__ == "__main__":
-    test_vector_add()
+            # Calculate global thread index
+            row = (by * bdy + ty)
+            col = (bx * bdx + tx)
+
+            # Vector addition: C[row,col] = A[row,col] + B[row,col]
+            a = rocir.memref.load(A, [row.value, col.value])
+            b = rocir.memref.load(B, [row.value, col.value])
+            c = a + b
+            rocir.memref.store(c.value, C, [row.value, col.value])
+
+    m = _VecAdd()
+    assert m.module.operation.verify()
+    run_pipeline(m.module, Pipeline().canonicalize().cse())

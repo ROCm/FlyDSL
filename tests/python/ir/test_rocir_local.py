@@ -1,5 +1,3 @@
-"""Tests for Rocir local operations (Flyx style)."""
-
 from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.arith import Index
 
@@ -82,5 +80,7 @@ def test_thread_block_hierarchy():
     s = str(_M().module)
     assert "rocir.local_partition" in s
     assert "rocir.local_tile" in s
+
+
 
 

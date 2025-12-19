@@ -161,7 +161,6 @@ class SmemAllocator:
         Returns the 'base' pointer generator for dynamic shared memory.
         
         Currently, MLIR GPU dialect usually handles dynamic smem via `gpu.dynamic_shared_memory`.
-        This method is a placeholder to align with CuTe semantics.
         """
         if dtype is None:
             dtype = T.i8()

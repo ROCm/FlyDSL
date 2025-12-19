@@ -681,7 +681,6 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &os) const {
       }
     }
   } else if (auto layoutType = llvm::dyn_cast<LayoutType>(type)) {
-    // Prefer printing full shape/stride specs when available (Flyx-like).
     if (!layoutType.getShapeSpec().empty() && !layoutType.getStrideSpec().empty()) {
       os << "layout<" << layoutType.getShapeSpec() << ":" << layoutType.getStrideSpec() << ">";
       return;

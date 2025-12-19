@@ -9,6 +9,44 @@ from _mlir.dialects import func as mlir_func
 from rocdsl.compiler.context import ensure_rocir_python_extensions
 from rocdsl.dialects.ext import gpu
 from rocdsl.dialects.ext.func import prep_func_types
+from rocdsl.dialects.ext.python_control_flow import lower_range_for_loops
+
+
+def _bind_method_builder(fn, instance_self, *, lower_range_loops: bool):
+    """Return a plain Python function suitable for mlir-extras FuncBase/GPUFunc.
+
+    - Ensures `inspect.isfunction(...)` is true (mlir-extras asserts this).
+    - If `fn` is a method (`self` parameter), binds `instance_self` so `self` is
+      NOT materialized as an MLIR function argument.
+    - Optionally applies range-loop lowering prior to binding.
+    """
+    f = lower_range_for_loops(fn) if lower_range_loops else fn
+    sig = inspect.signature(f)
+    params = list(sig.parameters.values())
+    drop_self = bool(params) and params[0].name == "self"
+    if drop_self:
+        sig = sig.replace(parameters=params[1:])
+
+    def body_builder(*args, **kwargs):
+        if drop_self:
+            return f(instance_self, *args, **kwargs)
+        return f(*args, **kwargs)
+
+    # Make introspection see the original argument list (minus `self`).
+    body_builder.__signature__ = sig  # type: ignore[attr-defined]
+    try:
+        anns = dict(getattr(f, "__annotations__", {}))
+        if drop_self:
+            anns.pop("self", None)
+        body_builder.__annotations__ = anns
+    except Exception:
+        pass
+    for attr in ("__name__", "__qualname__", "__doc__", "__module__"):
+        try:
+            setattr(body_builder, attr, getattr(fn, attr))
+        except Exception:
+            pass
+    return body_builder
 
 
 class MlirModule:
@@ -91,7 +129,6 @@ class MlirModule:
         return str(self.module)
 
     def __getattr__(self, name: str):
-        # Match Flyx: resolve kernel symbol reference via attribute.
         if name in self.cls_kernel_sym:
             with self._context, self._location:
                 return ir.SymbolRefAttr.get([self.GPU_MODULE_NAME, self.cls_kernel_sym[name]])
@@ -105,7 +142,8 @@ class MlirModule:
             with self._context, self._location:
                 with ir.InsertionPoint.at_block_begin(self.gpu_module.body):
                     # Emit as gpu.func in the gpu.module region.
-                    k = gpu.func(emit=True, lower_range_loops=True)(fn)
+                    body_builder = _bind_method_builder(fn, self, lower_range_loops=True)
+                    k = gpu.func(emit=True, lower_range_loops=False)(body_builder)
                     # Ensure launch path qualifies as `@kernels::fn` when used as GPUFunc callable.
                     try:
                         k.qualname = self.GPU_MODULE_NAME
@@ -124,7 +162,8 @@ class MlirModule:
         def wrapper(self):
             with self._context, self._location:
                 with ir.InsertionPoint.at_block_begin(self.module.body):
-                    sig = inspect.signature(fn)
+                    body_builder = _bind_method_builder(fn, self, lower_range_loops=False)
+                    sig = inspect.signature(body_builder)
                     input_types, _, _ = prep_func_types(sig, [])
                     # `prep_func_types` may return lambdas/strings. Materialize them
                     # into concrete MLIR types inside the active Context.
@@ -137,7 +176,7 @@ class MlirModule:
                             materialized_inputs.append(t())
                         else:
                             materialized_inputs.append(t)
-                    mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+                    mlir_func.FuncOp.from_py_func(*materialized_inputs)(body_builder)
 
         cls.cls_jit_fn.append(wrapper)
         return fn
@@ -159,7 +198,8 @@ class _KernelDescriptor:
                 def wrapper(instance_self, *args, **kwargs):
                     with instance_self._context, instance_self._location:
                         with ir.InsertionPoint.at_block_begin(instance_self.gpu_module.body):
-                            k = gpu.func(emit=True, lower_range_loops=True)(fn)
+                            body_builder = _bind_method_builder(fn, instance_self, lower_range_loops=True)
+                            k = gpu.func(emit=True, lower_range_loops=False)(body_builder)
                             try:
                                 k.qualname = instance_self.GPU_MODULE_NAME
                             except Exception:
@@ -193,7 +233,8 @@ class _JitDescriptor:
                 def wrapper(instance_self):
                     with instance_self._context, instance_self._location:
                         with ir.InsertionPoint.at_block_begin(instance_self.module.body):
-                            sig = inspect.signature(fn)
+                            body_builder = _bind_method_builder(fn, instance_self, lower_range_loops=False)
+                            sig = inspect.signature(body_builder)
                             input_types, _, _ = prep_func_types(sig, [])
                             # `prep_func_types` may return lambdas/strings. Materialize them
                             # into concrete MLIR types inside the active Context.
@@ -206,7 +247,7 @@ class _JitDescriptor:
                                     materialized_inputs.append(t())
                                 else:
                                     materialized_inputs.append(t)
-                            mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+                            mlir_func.FuncOp.from_py_func(*materialized_inputs)(body_builder)
 
                 self._wrapper = wrapper
         except TypeError:

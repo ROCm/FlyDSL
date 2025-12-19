@@ -35,6 +35,20 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
     Returns:
         bytes: HSACO binary object
     """
+    _ctx = getattr(mlir_module, "context", None)
+    if _ctx is None and hasattr(mlir_module, "operation"):
+        _ctx = getattr(mlir_module.operation, "context", None)
+
+    if _ctx is None:
+        # Best-effort fallback (older callsites may rely on an ambient default context).
+        return _compile_to_hsaco_impl(mlir_module, kernel_name=kernel_name, waves_per_eu=waves_per_eu)
+
+    with _ctx:
+        return _compile_to_hsaco_impl(mlir_module, kernel_name=kernel_name, waves_per_eu=waves_per_eu)
+
+
+def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
+    """Implementation of compile_to_hsaco; assumes an MLIR context is already active."""
     # Check environment variables for IR dumping
     dump_ir = os.environ.get('ROCDSL_DUMP_IR', '0') == '1'
     dump_dir = os.environ.get('ROCDSL_DUMP_DIR', '/tmp/rocdsl_dump')

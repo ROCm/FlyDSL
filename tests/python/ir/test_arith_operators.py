@@ -1,97 +1,122 @@
-"""Test operator overloading for elegant Pythonic syntax (Flyx style)."""
+"""Test operator overloading for elegant Pythonic syntax."""
 
 import pytest
 from _mlir.ir import Context, Location, Module, InsertionPoint
+from _mlir.dialects import func
 
 try:
-    from rocdsl.dialects.ext import arith, rocir
+    from rocdsl.dialects.ext import arith
 except ImportError:
     pytest.skip("RocDSL dialect not available", allow_module_level=True)
 
 
-class _ArithOps(rocir.MlirModule):
-    @rocir.jit
-    def test_arithmetic(
-        self: rocir.T.i64,
-    ):
-        a = arith.index(10)
-        b = arith.index(3)
-        c = a + b
-        return c.value
-
-    @rocir.jit
-    def test_mixed(
-        self: rocir.T.i64,
-    ):
-        a = arith.index(100)
-        b = a + 50
-        return b.value
-
-    @rocir.jit
-    def test_comparison(
-        self: rocir.T.i64,
-    ):
-        a = arith.index(10)
-        b = arith.index(5)
-        lt = a < b
-        return lt.value
-
-    @rocir.jit
-    def test_float_ops(
-        self: rocir.T.i64,
-    ):
-        a = arith.f32(3.14)
-        b = arith.f32(2.0)
-        c = a + b
-        return c.value
-
-    @rocir.jit
-    def test_chained(
-        self: rocir.T.i64,
-    ):
-        a = arith.index(10)
-        b = arith.index(5)
-        c = arith.index(2)
-        result = (a + b) * c - 3
-        return result.value
-
-
 def test_arithmetic_operators(ctx):
-    m = _ArithOps()
-    s = str(m.module)
-    assert "func.func" in s
+    """Test +, -, *, / operators."""
+    with InsertionPoint(ctx.module.body):
+        @func.FuncOp.from_py_func(name="test_arithmetic")
+        def test_ops():
+            # Create constants
+            a = arith.index(10)
+            b = arith.index(3)
+            
+            # Use Python operators instead of explicit ops
+            c = a + b      # AddIOp
+            d = a - b      # SubIOp
+            e = a * b      # MulIOp
+            f = a // b     # DivSIOp
+            
+            return c.value
+    
+    ctx.module.operation.verify()
+    # Apply lowering
 
     
 
 
 def test_mixed_operators(ctx):
-    m = _ArithOps()
-    s = str(m.module)
-    assert "arith.addi" in s or "arith.addf" in s
+    """Test operators with Python literals."""
+    with InsertionPoint(ctx.module.body):
+        @func.FuncOp.from_py_func(name="test_mixed")
+        def test_mixed():
+            a = arith.index(100)
+            
+            # Mix with Python int
+            b = a + 50     # Should create constant 50 and add
+            c = a * 2      # Should create constant 2 and multiply
+            d = 10 + a     # Reverse operator
+            
+            return b.value
+    
+    ctx.module.operation.verify()
+    # Apply lowering
 
     
 
 
 def test_comparison_operators(ctx):
-    m = _ArithOps()
-    s = str(m.module)
-    assert "arith.cmpi" in s or "arith.cmpf" in s
+    """Test <, >, <=, >=, ==, != operators."""
+    with InsertionPoint(ctx.module.body):
+        @func.FuncOp.from_py_func(name="test_comparison")
+        def test_cmp():
+            a = arith.index(10)
+            b = arith.index(5)
+            
+            # Comparison operators
+            lt = a < b     # CmpIOp(slt)
+            le = a <= b    # CmpIOp(sle)
+            gt = a > b     # CmpIOp(sgt)
+            ge = a >= b    # CmpIOp(sge)
+            eq = a == b    # CmpIOp(eq)
+            ne = a != b    # CmpIOp(ne)
+            
+            return lt.value
+    
+    ctx.module.operation.verify()
+    # Apply lowering
 
     
 
 
 def test_float_operators(ctx):
-    m = _ArithOps()
-    s = str(m.module)
-    assert "arith.addf" in s
+    """Test operators with floating point values."""
+    with InsertionPoint(ctx.module.body):
+        @func.FuncOp.from_py_func(name="test_float_ops")
+        def test_float():
+            a = arith.f32(3.14)
+            b = arith.f32(2.0)
+            
+            # Float arithmetic
+            c = a + b      # AddFOp
+            d = a * b      # MulFOp
+            e = a / b      # DivFOp
+            
+            # Float comparison
+            gt = a > b     # CmpFOp(ogt)
+            
+            return c.value
+    
+    ctx.module.operation.verify()
+    # Apply lowering
 
     
 
 
 def test_chained_operations(ctx):
-    m = _ArithOps()
-    s = str(m.module)
-    assert "arith.muli" in s or "arith.mulf" in s
+    """Test chaining multiple operators."""
+    with InsertionPoint(ctx.module.body):
+        @func.FuncOp.from_py_func(name="test_chained")
+        def test_chain():
+            a = arith.index(10)
+            b = arith.index(5)
+            c = arith.index(2)
+            
+            # Complex expression: (a + b) * c - 3
+            result = (a + b) * c - 3
+            
+            return result.value
+    
+    ctx.module.operation.verify()
+    # Apply lowering
 
     
 

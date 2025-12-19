@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.INFO)
 
 
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
@@ -29,7 +28,10 @@ from rocdsl.dialects.ext import arith, scf, gpu
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
-from hip import hip
+try:
+    from hip import hip
+except ImportError:
+    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
 import ctypes
 
 class DType(Enum):
@@ -84,57 +86,50 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
     print(f"Detected HIP Arch: {gpu_arch}")
     print(f"MFMA K dimension: {mfma_k}, Tile K: {tile_k}")
     
-    ctx = RAIIMLIRContextModule()
-    
-    # Get MLIR dtype inside context
-    if dtype_config == DType.FP8:
-        mlir_dtype = ir.Float8E4M3FNType.get()
-    else:
-        mlir_dtype = ir.F16Type.get()
-    
-    # Register Rocir dialect
-    try:
-        import _rocirPassesExt
-        _rocirPassesExt.register_dialect(ctx.module.context)
-        print("✓ Registered Rocir dialect")
-    except Exception as e:
-        print(f"Warning: Could not register Rocir dialect: {e}")
-    
-    f32 = ir.F32Type.get()
+    def _mlir_dtype():
+        return ir.Float8E4M3FNType.get() if dtype_config == DType.FP8 else ir.F16Type.get()
     
     size_c = M * N
     size_a = M * K
     size_b = N * K  # Transposed B (NxK)
     
-    # 1. Initialize Allocator
-    allocator = SmemAllocator(ctx, arch=gpu_arch)
+    # 1. Initialize Allocator (emit globals via MlirModule.init_gpu_module)
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
 
-    # 2. Allocate Arrays (Tile size: tile_m x tile_k)
+    # 2. Allocate Arrays (Tile size: tile_m x tile_k) - sizes are python ints
     pad_k = 8
     lds_stride = tile_k + pad_k
     lds_size_a = tile_m * lds_stride
     lds_size_b = tile_n * lds_stride
-    lds_a_decl = allocator.allocate_array(mlir_dtype, lds_size_a)
-    lds_b_decl = allocator.allocate_array(mlir_dtype, lds_size_b)
-    
-    @gpu.module("mfma_mod", [f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'])
-    def gpu_mod():
-        # 3. Finalize: Automatically create underlying memref.GlobalOp
-        allocator.finalize()
-        
-        # Always include scale parameters for uniform signature
-        # For FP16, we'll pass dummy arrays but not use them
-        @gpu.func(emit=True)
+
+    class _MFMA(rocir.MlirModule):
+        GPU_MODULE_NAME = "mfma_mod"
+        GPU_MODULE_TARGETS = [
+            f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
+        ]
+
+        def init_gpu_module(self):
+            _state["lds_a_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_a)
+            _state["lds_b_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_b)
+            allocator.finalize()
+
+        # Always include scale parameters for uniform signature.
+        # For FP16, we pass dummy scale arrays but don't use them.
+        @rocir.kernel
         def kernel(
-            arg_c: T.memref(size_c, T.f32()),
-            arg_a: T.memref(size_a, mlir_dtype),
-            arg_b: T.memref(size_b, mlir_dtype),
-            arg_scale_a: T.memref(M, T.f32()),
-            arg_scale_b: T.memref(N, T.f32()),
-            m_in: T.index(),
-            n_in: T.index(),
-            k_in: T.index()
+            self: rocir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f32()),
+            arg_a: lambda: T.memref(size_a, _mlir_dtype()),
+            arg_b: lambda: T.memref(size_b, _mlir_dtype()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
         ):
+            f32 = ir.F32Type.get()
+            mlir_dtype = _mlir_dtype()
             c0, c1 = 0, 1
             c_m, c_n, c_k = m_in, n_in, k_in
             c_tile_k = arith.constant(tile_k, index=True)
@@ -174,8 +169,8 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             
             # 4. Get Shared Memory Pointers
             base_ptr = allocator.get_base()
-            lds_a = lds_a_decl(base_ptr).get()
-            lds_b = lds_b_decl(base_ptr).get()
+            lds_a = _state["lds_a_decl"](base_ptr).get()
+            lds_b = _state["lds_b_decl"](base_ptr).get()
             
             # Accumulator Init
             vec4_f32 = ir.VectorType.get([4], f32)
@@ -381,11 +376,21 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                     # No scaling, direct store
                     memref.StoreOp(unwrap(val), arg_c, [unwrap(idx)])
     
-    print("✓ MLIR module constructed via @gpu.func decorator")
+    m = _MFMA()
+
+    # Register Rocir dialect for downstream passes (best-effort).
+    try:
+        import _rocirPassesExt
+        _rocirPassesExt.register_dialect(m.module.context)
+        print("✓ Registered Rocir dialect")
+    except Exception as e:
+        print(f"Warning: Could not register Rocir dialect: {e}")
+
+    print("✓ MLIR module constructed via rocir.MlirModule/@rocir.kernel")
     
     # Set kernel attributes on the GPU function
     gpu_func_op = None
-    for op in ctx.module.body.operations:
+    for op in m.module.body.operations:
         if isinstance(op, ir.OpView) and op.OPERATION_NAME == "gpu.module":
             # op.body is a Region, need to access its first block
             body_block = op.body.blocks[0] if hasattr(op.body, 'blocks') else op.body
@@ -395,12 +400,13 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                     break
     
     if gpu_func_op:
-        gpu_func_op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get("256,256")
-        gpu_func_op.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([256, 1, 1])
-        gpu_func_op.attributes["gpu.kernel"] = ir.UnitAttr.get()
+        with m.module.context:
+            gpu_func_op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get("256,256")
+            gpu_func_op.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([256, 1, 1])
+            gpu_func_op.attributes["gpu.kernel"] = ir.UnitAttr.get()
     
     print("Compiling...")
-    hsaco = compile_to_hsaco(ctx.module)
+    hsaco = compile_to_hsaco(m.module, kernel_name="kernel")
     print(f"✓ Compiled to HSACO: {len(hsaco)} bytes")
     
     print("Executing kernel...")

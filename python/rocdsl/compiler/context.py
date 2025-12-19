@@ -78,11 +78,11 @@ class RAIIMLIRContext:
             return
 
         try:
-        self.location.__exit__(None, None, None)
+            self.location.__exit__(None, None, None)
         except Exception:
             pass
         try:
-        self.context.__exit__(None, None, None)
+            self.context.__exit__(None, None, None)
         except Exception:
             pass
         if ir is not None:
@@ -119,15 +119,15 @@ class RAIIMLIRContextModule:
             return
 
         try:
-        self.insertion_point.__exit__(None, None, None)
+            self.insertion_point.__exit__(None, None, None)
         except Exception:
             pass
         try:
-        self.location.__exit__(None, None, None)
+            self.location.__exit__(None, None, None)
         except Exception:
             pass
         try:
-        self.context.__exit__(None, None, None)
+            self.context.__exit__(None, None, None)
         except Exception:
             pass
         if ir is not None:

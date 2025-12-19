@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test rocir coordinate operations (make_coord, crd2idx, idx2crd) (Flyx style)."""
+"""Test the new rocir coordinate operations (make_coord, crd2idx, idx2crd)"""
 
 from rocdsl.dialects.ext import arith, rocir
 

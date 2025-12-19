@@ -5,15 +5,18 @@ import sys
 import os
 
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import gpu, rocir
+from rocdsl.dialects.ext import rocir
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from tests.utils import compile_to_hsaco
 from _mlir import ir
 from _mlir.dialects import memref
 from rocdsl.dialects.ext import arith, scf
 import _mlir.extras.types as T
-from hip import hip
+import pytest
+try:
+    from hip import hip
+except ImportError:
+    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
 import numpy as np
 import ctypes
 
@@ -27,71 +30,68 @@ def test_matmul_with_rocir():
 
     M, N, K = 32, 32, 64
 
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
+    class _Matmul(rocir.MlirModule):
+        @rocir.kernel
+        def matmul(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, K, T.f32()),
+            B: lambda: T.memref(K, N, T.f32()),
+            C: lambda: T.memref(M, N, T.f32()),
+        ):
+            bx = rocir.block_idx("x")
+            by = rocir.block_idx("y")
+            tx = rocir.thread_idx("x")
+            ty = rocir.thread_idx("y")
 
-    @gpu.module("matmul_kernels", ["#rocdl.target<abi = \"500\">"])
-    def gpu_mod():
-        pass
+            # Compute thread coordinates
+            tile = arith.index(16)
+            row = (by * tile + ty)
+            col = (bx * tile + tx)
 
-    ip = ir.InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
-    ip.__enter__()
+            m_c = arith.index(M)
+            n_c = arith.index(N)
+            k_c = arith.index(K)
+            one = arith.index(1)
 
-    @gpu.func(emit=True)
-    def matmul(A: T.memref(M, K, T.f32()), B: T.memref(K, N, T.f32()), C: T.memref(M, N, T.f32())):
-        bx = gpu.block_id("x")
-        by = gpu.block_id("y")
-        tx = gpu.thread_id("x")
-        ty = gpu.thread_id("y")
+            # Create rocir layout for output matrix C
+            c_shape = rocir.make_shape(m_c, n_c)
+            c_stride = rocir.make_stride(n_c, one)  # Row-major: stride=(32, 1)
+            c_layout = rocir.make_layout(c_shape, c_stride)
 
-        # Compute thread coordinates
-        tile = arith.index(16)
-        row = (by * tile + ty)
-        col = (bx * tile + tx)
+            # Create coordinate for current thread's position
+            thread_coord = rocir.make_coord(row.value, col.value)
 
-        m_c = arith.index(M)
-        n_c = arith.index(N)
-        k_c = arith.index(K)
-        one = arith.index(1)
+            # Use crd2idx to compute linear index (will be lowered to arith ops)
+            _ = rocir.crd2idx(thread_coord, c_layout)
 
-        # Create rocir layout for output matrix C
-        c_shape = rocir.make_shape(m_c, n_c)
-        c_stride = rocir.make_stride(n_c, one)  # Row-major: stride=(32, 1)
-        c_layout = rocir.make_layout(c_shape, c_stride)
+            row_valid = (row < m_c)
+            col_valid = (col < n_c)
+            valid = (row_valid & col_valid)
 
-        # Create coordinate for current thread's position
-        thread_coord = rocir.make_coord(row.value, col.value)
-        
-        # Use crd2idx to compute linear index (will be lowered to arith ops)
-        linear_idx = rocir.crd2idx(thread_coord, c_layout)
-
-        row_valid = (row < m_c)
-        col_valid = (col < n_c)
-        valid = (row_valid & col_valid)
-
-        with scf.if_(valid.value) as then_block:
-            with ir.InsertionPoint(then_block):
+            # NOTE: Use scf_ext.IfOp instead of the scf.if_ helper; the helper can
+            # leave an insertion-point/terminator state that conflicts with the
+            # implicit gpu.return insertion in @rocir.kernel lowering.
+            if_op = rocir.scf_ext.IfOp(valid.value)
+            with ir.InsertionPoint(if_op.then_block):
                 sum_val = arith.f32(0.0)
                 k0 = arith.index(0)
-
                 for_op = scf.ForOp(k0.value, k_c.value, one.value, [sum_val.value])
             with ir.InsertionPoint(for_op.body):
                 k = for_op.induction_variable
                 acc = for_op.inner_iter_args[0]
 
-                    k_val = k.value if hasattr(k, "value") else k
-                    a_val = memref.load(A, [row.value, k_val])
-                    b_val = memref.load(B, [k_val, col.value])
+                k_val = k.value if hasattr(k, "value") else k
+                a_val = memref.load(A, [row.value, k_val])
+                b_val = memref.load(B, [k_val, col.value])
 
-                    new_acc = acc + (a_val * b_val)
+                new_acc = acc + (a_val * b_val)
                 scf.yield_([new_acc.value])
 
-            result = for_op.results[0]
+            with ir.InsertionPoint(if_op.then_block):
+                result = for_op.results[0]
                 result_val = result.value if hasattr(result, "value") else result
                 memref.store(result_val, C, [row.value, col.value])
-                scf.yield_()
-
-    ip.__exit__(None, None, None)
+                rocir.scf_ext.yield_([])
 
     print("\n Generated MLIR with rocir coordinate operations:")
     print("- rocir.make_shape: Defines matrix dimensions")
@@ -100,8 +100,9 @@ def test_matmul_with_rocir():
     print("- rocir.make_coord: Creates 2D thread coordinates")
     print("- rocir.crd2idx: Converts coord to linear index\n")
 
+    m_mod = _Matmul()
     print("Compiling to GPU binary...")
-    hsaco = compile_to_hsaco(ctx.module)
+    hsaco = compile_to_hsaco(m_mod.module)
     print(f" Compiled to HSACO: {len(hsaco)} bytes\n")
 
     # Run computation

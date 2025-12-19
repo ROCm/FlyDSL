@@ -25,11 +25,11 @@ sys.path.insert(0, repo_root)
 
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from tests.utils import compile_to_hsaco
+import pytest
 try:
     from hip import hip
 except ImportError:
-    print("HIP module not found. Skipping GPU tests.")
-    sys.exit(0)
+    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
 
 import numpy as np
 import ctypes

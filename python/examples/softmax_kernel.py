@@ -7,7 +7,6 @@ performance. Only test-only helpers/imports are removed.
 
 import os
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import rocir
 from . import reduce as reduce_utils
 from rocdsl.runtime.hip_util import get_hip_arch
@@ -42,26 +41,7 @@ llvm = rocir.llvm            # raw dialect module
 
 
 def build_softmax_module(M, N, dtype_str="f32"):
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
     gpu_arch = get_hip_arch()
-
-    # Types
-    if dtype_str == "f32":
-        elem_type = T.f32()
-    elif dtype_str == "f16":
-        elem_type = T.f16()
-    elif dtype_str == "bf16":
-        elem_type = ir.BF16Type.get()
-    else:
-        raise ValueError(f"Unsupported dtype: {dtype_str}")
-
-    # For bf16, avoid repeated bf16<->f32 "unpack/align" sequences in ISA by doing all
-    # math in f32 and only converting at load/store boundaries.
-    compute_type = T.f32() if dtype_str == "bf16" else elem_type
-
-    f32 = T.f32()  # still used for comparisons in tests
-    idx = T.index()
 
     # Kernel Config
     # Adaptive Block Size
@@ -91,23 +71,46 @@ def build_softmax_module(M, N, dtype_str="f32"):
     BF16_SCALARIZE_VEC_LOAD = False
 
     # Allocator for Shared Memory (Warp Reductions)
-    allocator = SmemAllocator(ctx, arch=gpu_arch)
+    allocator = SmemAllocator(None, arch=gpu_arch)
     # Reduction scratch: one slot per wave (lane0 writes partials) + reuse slot 0 for broadcast.
     WARP_SIZE = 64
     RED_SLOTS = max(1, (BLOCK_SIZE + WARP_SIZE - 1) // WARP_SIZE)
-    smem_red = allocator.allocate_array(compute_type, RED_SLOTS)
+    _state = {}
 
-    @gpu.module(f"softmax_{dtype_str}", [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">'])
-    def gpu_mod():
-        allocator.finalize()
+    class _Softmax(rocir.MlirModule):
+        GPU_MODULE_NAME = f"softmax_{dtype_str}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
-        @gpu.func(emit=True)
-        def softmax_kernel(A: T.memref(M, N, elem_type), C: T.memref(M, N, elem_type)):
+        def init_gpu_module(self):
+            # Materialize types under the active MLIR Context.
+            if dtype_str == "f32":
+                elem_type = T.f32()
+            elif dtype_str == "f16":
+                elem_type = T.f16()
+            elif dtype_str == "bf16":
+                elem_type = ir.BF16Type.get()
+            else:
+                raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+            compute_type = T.f32() if dtype_str == "bf16" else elem_type
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+            _state["smem_red"] = allocator.allocate_array(compute_type, RED_SLOTS)
+            allocator.finalize()
+
+        @rocir.kernel
+        def softmax_kernel(
+            self,
+            A: lambda: T.memref(M, N, _state["elem_type"]),
+            C: lambda: T.memref(M, N, _state["elem_type"]),
+        ):
             row = rocir.block_idx("x")
             tid = rocir.thread_idx("x")
+            elem_type = _state["elem_type"]
+            compute_type = _state["compute_type"]
 
             base_ptr = allocator.get_base()
-            s_red = smem_red(base_ptr).get()
+            s_red = _state["smem_red"](base_ptr).get()
             # Rocir-style: tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_SIZE * VEC_WIDTH  # python int
@@ -434,6 +437,6 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
                             rocir.scf_ext.yield_([])
 
-    return ctx
+    return _Softmax()
 
 
