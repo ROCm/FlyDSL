@@ -15,6 +15,7 @@ from _mlir.ir import (
     Block,
 )
 from _mlir.dialects import scf as _scf
+from _mlir.dialects import arith as _arith
 
 from .arith import constant
 
@@ -26,6 +27,10 @@ def canonicalize_range(start, stop=None, step=None):
     if stop is None:
         stop = start
         start = 0
+
+    # Match Python semantics: range(step=0) is an error.
+    if isinstance(step, int) and step == 0:
+        raise ValueError("range() arg 3 must not be zero")
     
     # Convert to Value if needed
     params = []
@@ -35,6 +40,34 @@ def canonicalize_range(start, stop=None, step=None):
         params.append(p)
     
     return params[0], params[1], params[2]
+
+
+class _ForOpView:
+    """A small facade over scf.ForOp that can override the exposed induction var.
+
+    Used to implement full Python `range` semantics (e.g. negative step) while still
+    providing a scf.ForOp-like surface area to callers.
+    """
+
+    def __init__(self, op: _scf.ForOp, *, induction_variable: Value):
+        self.op = op
+        self.induction_variable = induction_variable
+
+    def __getattr__(self, name):
+        # Delegate everything else to the underlying op.
+        return getattr(self.op, name)
+
+    @property
+    def inner_iter_args(self):
+        return self.op.inner_iter_args
+
+    @property
+    def results(self):
+        return self.op.results
+
+    @property
+    def body(self):
+        return self.op.body
 
 
 @contextmanager
@@ -71,7 +104,58 @@ def range_(
     """
     if loc is None:
         loc = Location.unknown()
-    
+
+    # Implement Python `range` semantics for negative constant steps.
+    # - For positive steps, we emit scf.for(start, stop, step) directly.
+    # - For negative steps with *int* bounds, we synthesize:
+    #     for t in range(0, trip_count, 1):
+    #         i = start + t * step
+    #   and expose `i` as the induction variable to the user's body builder.
+    # - For negative steps with dynamic bounds, we currently do not implement the
+    #   trip-count computation (would require signed comparisons/division).
+    if step is None:
+        raw_step = 1
+    else:
+        raw_step = step
+    raw_start = start
+    raw_stop = stop
+    if raw_stop is None:
+        raw_stop = raw_start
+        raw_start = 0
+
+    if isinstance(raw_step, int) and raw_step < 0:
+        if not (isinstance(raw_start, int) and isinstance(raw_stop, int)):
+            raise NotImplementedError(
+                "scf.range_ negative step currently supports only int bounds; "
+                "use a positive step or an explicit scf.while_ for dynamic bounds."
+            )
+
+        trip_count = len(range(raw_start, raw_stop, raw_step))
+        # Build an increasing scf.for over [0, trip_count).
+        start_t = constant(0, index=True).value
+        stop_t = constant(trip_count, index=True).value
+        step_t = constant(1, index=True).value
+        iter_args = iter_args or []
+        iter_args = [a.value if hasattr(a, "value") else a for a in iter_args]
+        for_op = _scf.ForOp(start_t, stop_t, step_t, iter_args, loc=loc, ip=ip)
+
+        start_i = constant(raw_start, index=True).value
+        step_i = constant(raw_step, index=True).value  # negative
+
+        with InsertionPoint(for_op.body):
+            try:
+                t = for_op.induction_variable
+                i = _arith.AddIOp(start_i, _arith.MulIOp(t, step_i).result).result
+                if iter_args:
+                    yield (i, *for_op.inner_iter_args)
+                else:
+                    yield i
+            finally:
+                block = for_op.body
+                if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
+                    _scf.YieldOp(list(for_op.inner_iter_args))
+        return
+
     start, stop, step = canonicalize_range(start, stop, step)
     # Unwrap ArithValue-like wrappers.
     if hasattr(start, "value"):
@@ -116,6 +200,40 @@ def for_(
     """
     if loc is None:
         loc = Location.unknown()
+
+    # Mirror `range_` negative-step handling.
+    raw_step = 1 if step is None else step
+    raw_start = start
+    raw_stop = stop
+    if raw_stop is None:
+        raw_stop = raw_start
+        raw_start = 0
+    if isinstance(raw_step, int) and raw_step < 0:
+        if not (isinstance(raw_start, int) and isinstance(raw_stop, int)):
+            raise NotImplementedError(
+                "scf.for_ negative step currently supports only int bounds; "
+                "use a positive step or an explicit scf.while_ for dynamic bounds."
+            )
+        trip_count = len(range(raw_start, raw_stop, raw_step))
+        start_t = constant(0, index=True).value
+        stop_t = constant(trip_count, index=True).value
+        step_t = constant(1, index=True).value
+        iter_args = iter_args or []
+        iter_args = [a.value if hasattr(a, "value") else a for a in iter_args]
+        for_op = _scf.ForOp(start_t, stop_t, step_t, iter_args, loc=loc, ip=ip)
+
+        start_i = constant(raw_start, index=True).value
+        step_i = constant(raw_step, index=True).value  # negative
+        with InsertionPoint(for_op.body):
+            try:
+                t = for_op.induction_variable
+                i = _arith.AddIOp(start_i, _arith.MulIOp(t, step_i).result).result
+                yield _ForOpView(for_op, induction_variable=i)
+            finally:
+                block = for_op.body
+                if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
+                    _scf.YieldOp(list(for_op.inner_iter_args))
+        return
 
     start, stop, step = canonicalize_range(start, stop, step)
     # Unwrap ArithValue-like wrappers.
