@@ -51,7 +51,7 @@ def test_matmul_shared_working():
             C: lambda: T.memref(M, N, T.f32()),
         ):
             gpu = rocir.gpu_ext
-            scf = rocir.scf
+            scf = rocir.scf_ext
 
             # Get references to shared memory using Allocator
             base_ptr = allocator.get_base()
@@ -82,8 +82,7 @@ def test_matmul_shared_working():
                 idx_val = rocir.crd2idx(coord, tile_layout)
                 return idx_val.value if hasattr(idx_val, "value") else idx_val
 
-            for_tiles = scf.ForOp(zero.value, num_tiles.value, one.value, [acc.value])
-            with ir.InsertionPoint(for_tiles.body):
+            with scf.for_(zero.value, num_tiles.value, one.value, iter_args=[acc.value]) as for_tiles:
                 t = for_tiles.induction_variable
                 acc_val = for_tiles.inner_iter_args[0]
                 k_base = (t * tile_c)
@@ -98,8 +97,7 @@ def test_matmul_shared_working():
 
                 gpu.barrier()
 
-                for_k = scf.ForOp(zero.value, tile_c.value, one.value, [acc_val.value])
-                with ir.InsertionPoint(for_k.body):
+                with scf.for_(zero.value, tile_c.value, one.value, iter_args=[acc_val.value]) as for_k:
                     k_local = for_k.induction_variable
                     acc_k = for_k.inner_iter_args[0]
 

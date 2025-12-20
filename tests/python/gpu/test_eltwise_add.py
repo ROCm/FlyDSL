@@ -19,6 +19,7 @@ import pytest
 
 
 from rocdsl.dialects.ext import rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.dialects.ext.arith import Index
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from _mlir.ir import F16Type, F32Type, IntegerType
@@ -140,7 +141,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             pred_ty = IntegerType.get_signless(1)
             frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
             total_vals = val_shape[0] * val_shape[1]
-            for linear in range(total_vals):
+            for linear in range_constexpr(total_vals):
                 lin_idx = rocir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
                 pred_val = rocir.elem_less(coords, (M, N))
@@ -150,9 +151,9 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
             rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
 
-            for i in range(val_shape[0]):
+            for i in range_constexpr(val_shape[0]):
                 idx_i = rocir.const_index(i)
-                for j in range(val_shape[1]):
+                for j in range_constexpr(val_shape[1]):
                     idx_j = rocir.const_index(j)
                     coords = (idx_i, idx_j)
                     a_val = frgA[coords]

@@ -116,20 +116,17 @@ def test_matmul_uses_scf_for_and_rocir_layout():
             _ = rocir.crd2idx(thread_coord, c_layout)
 
             valid = (row < m_c) & (col < n_c)
-            if_op = rocir.scf_ext.IfOp(valid.value)
-            with ir.InsertionPoint(if_op.then_block):
+            with rocir.scf_ext.IfOp(valid.value):
                 sum_val = arith.f32(0.0)
                 k0 = arith.index(0)
-                for_op = rocir.scf.ForOp(k0.value, k_c.value, one.value, [sum_val.value])
-            with ir.InsertionPoint(for_op.body):
-                k = for_op.induction_variable
-                acc = for_op.inner_iter_args[0]
-                k_v = k.value if hasattr(k, "value") else k
-                a_val = rocir.memref.load(A, [row.value, k_v])
-                b_val = rocir.memref.load(B, [k_v, col.value])
-                new_acc = acc + (a_val * b_val)
-                rocir.scf.yield_([new_acc.value])
-            with ir.InsertionPoint(if_op.then_block):
+                with rocir.scf_ext.for_(k0.value, k_c.value, one.value, iter_args=[sum_val.value]) as for_op:
+                    k = for_op.induction_variable
+                    acc = for_op.inner_iter_args[0]
+                    k_v = k.value if hasattr(k, "value") else k
+                    a_val = rocir.memref.load(A, [row.value, k_v])
+                    b_val = rocir.memref.load(B, [k_v, col.value])
+                    new_acc = acc + (a_val * b_val)
+                    rocir.scf_ext.yield_([new_acc.value])
                 out = for_op.results[0]
                 out_v = out.value if hasattr(out, "value") else out
                 rocir.memref.store(out_v, C, [row.value, col.value])

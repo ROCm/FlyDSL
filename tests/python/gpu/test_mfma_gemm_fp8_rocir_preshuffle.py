@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.utils import SmemAllocator
 from tests.utils import compile_to_hsaco, pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
@@ -242,7 +243,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             n_intra_list = []
             n_blk_list = []
             
-            for i in range(num_acc_n):
+            for i in range_constexpr(num_acc_n):
                 offset = i * 16
                 c_offset = arith.constant(offset, index=True)
                 
@@ -257,11 +258,11 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 n_intra_list.append(n_intra)
                 n_blk_list.append(n_blk)
 
-            for mi in range(m_repeat):
+            for mi in range_constexpr(m_repeat):
                 mi_val = arith.constant(mi * 16, index=True)
                 curr_row_a_lds = row_a_lds + mi_val
                 
-                for ki_step in range(k_unroll):
+                for ki_step in range_constexpr(k_unroll):
                     # Each MFMA step advances K by 32 for fp8 x32
                     ki = ki_step * 32
                     ki_val = arith.constant(ki, index=True)
@@ -281,10 +282,10 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 k1 = lane_div_16  # 0..3
                 k2_base = c0
 
-                for i in range(num_acc_n):
+                for i in range_constexpr(num_acc_n):
                     n_intra = n_intra_list[i]
                     n_blk = n_blk_list[i]
-                    for ki_step in range(k_unroll):
+                    for ki_step in range_constexpr(k_unroll):
                         k0 = _arith_mlir.AddIOp(unwrap(k0_base), unwrap(arith.constant(ki_step, index=True))).result
                         coord_b = rocir.make_coord(n_blk, k0, k1, n_intra, k2_base)
                         idx_bytes = rocir.crd2idx(coord_b, layout_b)
@@ -306,7 +307,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             vec_a_parts_lens = []
             
             remaining_bytes = bytes_per_thread_a
-            for i in range(num_a_loads):
+            for i in range_constexpr(num_a_loads):
                 curr_bytes = min(remaining_bytes, max_bytes_per_load)
                 vec_a_parts_lens.append(curr_bytes)
                 # Force global dwordx4 loads: carry vector<4xi32> through the loop state.
@@ -318,7 +319,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             def load_a_split(idx_div4):
                 parts = []
                 curr_off_i32 = 0
-                for i in range(num_a_loads):
+                for i in range_constexpr(num_a_loads):
                     curr_bytes = vec_a_parts_lens[i]
                     
                     curr_idx = idx_div4
@@ -353,7 +354,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 c8 = arith.constant(8, index=True)
                 c32 = arith.constant(32, index=True)
                 
-                for i in range(num_a_loads):
+                for i in range_constexpr(num_a_loads):
                     val_vec = vec_a_in_parts[i]
                     # `val_vec` is a vector<i32> of length (curr_bytes/4).
                     # For many tiles (e.g. 16x128), each thread only owns 8 bytes => vector<2xi32>.
@@ -427,7 +428,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     # --- PREFETCH SCALES (Last Iteration) ---
                     # Prefetch Scale B (invariant for thread)
                     s_b_vals = []
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         offset = ni * 16
                         c_offset = arith.constant(offset, index=True)
                         tmp1 = _arith_mlir.AddIOp(unwrap(by_n), unwrap(n_tile_base)).result
@@ -442,7 +443,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     
                     # Pre-load Scale A vectors
                     row_off_base = (lane_div_16 * 4)
-                    for mi in range(m_repeat):
+                    for mi in range_constexpr(m_repeat):
                         row_base_m = bx_m + (mi * 16)
                         row_g_base = row_base_m + row_off_base
                         s_a_vec = buffer_ops.buffer_load(scale_a_rsrc, row_g_base, vec_width=4, dtype=f32)
@@ -453,12 +454,12 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 
                 # Loop Swap: Iterate K_step (outer) -> MI (inner)
                 # To reuse B
-                for ki_step in range(k_unroll):
+                for ki_step in range_constexpr(k_unroll):
                     # b_vals_in already contains i64 packs per ni:
                     # for each ni: [b0(step0), b1(step0), b0(step1), b1(step1), ...]
                     b0_packs = []
                     b1_packs = []
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         base = ni * (2 * k_unroll)
                         b0_packs.append(b_vals_in[base + (2 * ki_step + 0)])
                         b1_packs.append(b_vals_in[base + (2 * ki_step + 1)])
@@ -475,7 +476,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         xor_mask = _arith_mlir.MulIOp(unwrap(row_mod), unwrap(c16)).result
                         return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
 
-                    for mi in range(m_repeat):
+                    for mi in range_constexpr(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
                         
@@ -490,7 +491,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         a0_pack = vector.ExtractOp(a_vec128, static_position=[0], dynamic_position=[]).result
                         a1_pack = vector.ExtractOp(a_vec128, static_position=[1], dynamic_position=[]).result
                         
-                        for ni in range(num_acc_n):
+                        for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             curr_acc = current_accs_list[acc_idx]
                             b0_pack = b0_packs[ni]
@@ -513,9 +514,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             # Peel off the last iteration
             c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
             
-            for_op = scf.ForOp(c0, c_k_main, c_tile_k, iter_args)
-            
-            with ir.InsertionPoint(for_op.body):
+            with scf.for_(c0, c_k_main, c_tile_k, iter_args=iter_args) as for_op:
                 k_iv = for_op.induction_variable
                 args = for_op.inner_iter_args
                 
@@ -542,17 +541,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             s_b_vals = scales['s_b_vals']
             s_a_vecs = scales['s_a_vecs']
             
-            for mi in range(m_repeat):
+            for mi in range_constexpr(m_repeat):
                 row_base_m = bx_m + (mi * 16)
                 s_a_vec4 = s_a_vecs[mi]
                 
-                for i in range(4):
+                for i in range_constexpr(4):
                     row_off = (lane_div_16 * 4) + i
                     row_g = row_base_m + row_off
                     
                     s_a = vector.ExtractOp(s_a_vec4, static_position=[i], dynamic_position=[]).result
                     
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
                         

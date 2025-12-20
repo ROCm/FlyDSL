@@ -6,11 +6,10 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.dialects.ext import gpu, rocir, arith
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from _mlir.ir import F32Type, InsertionPoint, IntegerType
+from _mlir.ir import F32Type, IntegerType
 from _mlir.dialects import arith as std_arith
 import _mlir.extras.types as T
 from hip import hip
@@ -44,107 +43,114 @@ def create_vec_add_kernel(
     TILE_ELEMS = THREADS_PER_BLOCK * TILE_SIZE
     ITERS_PER_THREAD = TILE_SIZE // VEC_WIDTH
 
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
+    gpu_arch = get_hip_arch()
 
-    @gpu.module("vec_kernels", ["#rocdl.target<abi = \"500\">"])
-    def gpu_mod():
-        pass
+    class _VecAdd(rocir.MlirModule):
+        GPU_MODULE_NAME = "vec_kernels"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
-    ip = InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
-    ip.__enter__()
+        @rocir.kernel
+        def vec_add(
+            self,
+            A: lambda: T.memref(size, dtype.get()),
+            B: lambda: T.memref(size, dtype.get()),
+            C: lambda: T.memref(size, dtype.get()),
+        ):
+            tid_x = rocir.thread_idx("x")
+            tid_y = rocir.thread_idx("y")
+            bid_x = rocir.block_idx("x")
+            bdim_x = rocir.block_dim("x")
+            tid_linear = (tid_y * bdim_x + tid_x).value
 
-    @gpu.func(emit=True)
-    def vec_add(A: T.memref(size, dtype.get()),
-                B: T.memref(size, dtype.get()),
-                C: T.memref(size, dtype.get())):
-        tid_x = rocir.thread_idx("x")
-        tid_y = rocir.thread_idx("y")
-        bid_x = rocir.block_idx("x")
-        bdim_x = rocir.block_dim("x")
-        tid_linear = (tid_y * bdim_x + tid_x).value
+            thr_layout = rocir.make_ordered_layout((THREADS_PER_BLOCK,), order=(0,))
+            val_layout = rocir.make_ordered_layout((TILE_SIZE,), order=(0,))
 
-        thr_layout = rocir.make_ordered_layout((THREADS_PER_BLOCK,), order=(0,))
-        val_layout = rocir.make_ordered_layout((TILE_SIZE,), order=(0,))
+            copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
+            copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
 
-        copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
-        copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
+            tiled_copy_A = rocir.make_tiled_copy_tv(
+                copy_atom_load,
+                thr_layout,
+                val_layout,
+                thr_shape=(THREADS_PER_BLOCK,),
+                val_shape=(TILE_SIZE,),
+            )
+            tiled_copy_B = rocir.make_tiled_copy_tv(
+                copy_atom_load,
+                thr_layout,
+                val_layout,
+                thr_shape=(THREADS_PER_BLOCK,),
+                val_shape=(TILE_SIZE,),
+            )
+            tiled_copy_C = rocir.make_tiled_copy_tv(
+                copy_atom_store,
+                thr_layout,
+                val_layout,
+                thr_shape=(THREADS_PER_BLOCK,),
+                val_shape=(TILE_SIZE,),
+            )
 
-        tiled_copy_A = rocir.make_tiled_copy_tv(
-            copy_atom_load, thr_layout, val_layout,
-            thr_shape=(THREADS_PER_BLOCK,), val_shape=(TILE_SIZE,)
-        )
-        tiled_copy_B = rocir.make_tiled_copy_tv(
-            copy_atom_load, thr_layout, val_layout,
-            thr_shape=(THREADS_PER_BLOCK,), val_shape=(TILE_SIZE,)
-        )
-        tiled_copy_C = rocir.make_tiled_copy_tv(
-            copy_atom_store, thr_layout, val_layout,
-            thr_shape=(THREADS_PER_BLOCK,), val_shape=(TILE_SIZE,)
-        )
+            tensor_A = rocir.make_tensor(A, shape=(size,), strides=(1,))
+            tensor_B = rocir.make_tensor(B, shape=(size,), strides=(1,))
+            tensor_C = rocir.make_tensor(C, shape=(size,), strides=(1,))
 
-        tensor_A = rocir.make_tensor(A, shape=(size,), strides=(1,))
-        tensor_B = rocir.make_tensor(B, shape=(size,), strides=(1,))
-        tensor_C = rocir.make_tensor(C, shape=(size,), strides=(1,))
+            tile_shape = (TILE_ELEMS,)
 
-        tile_shape = (TILE_ELEMS,)
+            gA = rocir.zipped_divide(tensor_A, tile_shape)
+            gB = rocir.zipped_divide(tensor_B, tile_shape)
+            gC = rocir.zipped_divide(tensor_C, tile_shape)
 
-        gA = rocir.zipped_divide(tensor_A, tile_shape)
-        gB = rocir.zipped_divide(tensor_B, tile_shape)
-        gC = rocir.zipped_divide(tensor_C, tile_shape)
+            idC = rocir.make_identity_tensor((size,))
+            cC = rocir.zipped_divide(idC, tile_shape)
 
-        idC = rocir.make_identity_tensor((size,))
-        cC = rocir.zipped_divide(idC, tile_shape)
+            blk_coord = (bid_x,)
+            blkA = gA[blk_coord]
+            blkB = gB[blk_coord]
+            blkC = gC[blk_coord]
+            blkCrd = cC[blk_coord]
 
-        blk_coord = (bid_x,)
-        blkA = gA[blk_coord]
-        blkB = gB[blk_coord]
-        blkC = gC[blk_coord]
-        blkCrd = cC[blk_coord]
+            thr_copy_A = tiled_copy_A.get_slice(tid_linear)
+            thr_copy_B = tiled_copy_B.get_slice(tid_linear)
+            thr_copy_C = tiled_copy_C.get_slice(tid_linear)
 
-        thr_copy_A = tiled_copy_A.get_slice(tid_linear)
-        thr_copy_B = tiled_copy_B.get_slice(tid_linear)
-        thr_copy_C = tiled_copy_C.get_slice(tid_linear)
+            thrA = thr_copy_A.partition_S(blkA)
+            thrB = thr_copy_B.partition_S(blkB)
+            thrC = thr_copy_C.partition_S(blkC)
+            thrCrd = thr_copy_C.partition_S(blkCrd)
 
-        thrA = thr_copy_A.partition_S(blkA)
-        thrB = thr_copy_B.partition_S(blkB)
-        thrC = thr_copy_C.partition_S(blkC)
-        thrCrd = thr_copy_C.partition_S(blkCrd)
+            val_shape = tiled_copy_A.val_shape
+            frgA = rocir.make_fragment_like(thrA, dtype.get())
+            frgB = rocir.make_fragment_like(thrB, dtype.get())
+            frgC = rocir.make_fragment_like(thrC, dtype.get())
 
-        val_shape = tiled_copy_A.val_shape
-        frgA = rocir.make_fragment_like(thrA, dtype.get())
-        frgB = rocir.make_fragment_like(thrB, dtype.get())
-        frgC = rocir.make_fragment_like(thrC, dtype.get())
+            pred_ty = IntegerType.get_signless(1)
+            frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
+            total_vals = val_shape[0]
 
-        pred_ty = IntegerType.get_signless(1)
-        frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
-        total_vals = val_shape[0]
+            for linear in range(total_vals):
+                lin_idx = rocir.const_index(linear)
+                coords = thrCrd.coords_from_linear(lin_idx)
+                pred_val = rocir.elem_less(coords, (size,))
+                pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
+                frgPred[pred_offsets] = pred_val
 
-        for linear in range(total_vals):
-            lin_idx = rocir.const_index(linear)
-            coords = thrCrd.coords_from_linear(lin_idx)
-            pred_val = rocir.elem_less(coords, (size,))
-            pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
-            frgPred[pred_offsets] = pred_val
+            rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
+            rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
 
-        rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
-        rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
+            for iter_idx in range(ITERS_PER_THREAD):
+                iter_base = iter_idx * VEC_WIDTH
+                for lane in range(VEC_WIDTH):
+                    lin = iter_base + lane
+                    idx = rocir.const_index(lin)
+                    coords = (idx,)
+                    a_val = frgA[coords]
+                    b_val = frgB[coords]
+                    c_val = a_val + b_val
+                    frgC[coords] = c_val
 
-        for iter_idx in range(ITERS_PER_THREAD):
-            iter_base = iter_idx * VEC_WIDTH
-            for lane in range(VEC_WIDTH):
-                lin = iter_base + lane
-                idx = rocir.const_index(lin)
-                coords = (idx,)
-                a_val = frgA[coords]
-                b_val = frgB[coords]
-                c_val = a_val + b_val
-                frgC[coords] = c_val
+            rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
 
-        rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
-
-    ip.__exit__(None, None, None)
-    return ctx.module
+    return _VecAdd().module
 
 
 def benchmark_pytorch_add(size: int):

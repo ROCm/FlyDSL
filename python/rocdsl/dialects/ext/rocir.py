@@ -399,9 +399,21 @@ def _scale_index(value, factor):
 
 
 def const_index(value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
-    """Create an index-typed constant Value."""
+    """Create an index-typed constant Value.
+
+    Compatibility note: with Python range-loop lowering enabled, loop induction
+    variables are MLIR Values. In that case, `const_index(v)` will behave like
+    `to_index(v)`.
+    """
     loc = _get_location(loc)
     with ip or InsertionPoint.current:
+        # If `value` is already an MLIR value (or a wrapper around one), just cast.
+        try:
+            from _mlir.ir import Value as _MlirValue  # local import to avoid import cycles
+            if isinstance(value, _MlirValue) or (hasattr(value, "value") and isinstance(value.value, _MlirValue)):
+                return _unwrap_value(_to_index_value(value, loc))
+        except Exception:
+            pass
         op = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), int(value)), loc=loc)
         return _unwrap_value(op.result if hasattr(op, "result") else op)
 

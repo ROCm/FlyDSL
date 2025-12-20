@@ -8,7 +8,6 @@ import os
 from rocdsl.dialects.ext import rocir
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from tests.utils import compile_to_hsaco
-from _mlir import ir
 from _mlir.dialects import memref
 from rocdsl.dialects.ext import arith, scf
 import _mlir.extras.types as T
@@ -68,26 +67,21 @@ def test_matmul_with_rocir():
             col_valid = (col < n_c)
             valid = (row_valid & col_valid)
 
-            # NOTE: Use scf_ext.IfOp instead of the scf.if_ helper; the helper can
-            # leave an insertion-point/terminator state that conflicts with the
-            # implicit gpu.return insertion in @rocir.kernel lowering.
-            if_op = rocir.scf_ext.IfOp(valid.value)
-            with ir.InsertionPoint(if_op.then_block):
+            # Avoid explicit InsertionPoint usage by using scf_ext context managers.
+            with rocir.scf_ext.IfOp(valid.value):
                 sum_val = arith.f32(0.0)
                 k0 = arith.index(0)
-                for_op = scf.ForOp(k0.value, k_c.value, one.value, [sum_val.value])
-            with ir.InsertionPoint(for_op.body):
-                k = for_op.induction_variable
-                acc = for_op.inner_iter_args[0]
+                with rocir.scf_ext.for_(k0.value, k_c.value, one.value, iter_args=[sum_val.value]) as for_op:
+                    k = for_op.induction_variable
+                    acc = for_op.inner_iter_args[0]
 
-                k_val = k.value if hasattr(k, "value") else k
-                a_val = memref.load(A, [row.value, k_val])
-                b_val = memref.load(B, [k_val, col.value])
+                    k_val = k.value if hasattr(k, "value") else k
+                    a_val = memref.load(A, [row.value, k_val])
+                    b_val = memref.load(B, [k_val, col.value])
 
-                new_acc = acc + (a_val * b_val)
-                scf.yield_([new_acc.value])
+                    new_acc = acc + (a_val * b_val)
+                    rocir.scf_ext.yield_([new_acc.value])
 
-            with ir.InsertionPoint(if_op.then_block):
                 result = for_op.results[0]
                 result_val = result.value if hasattr(result, "value") else result
                 memref.store(result_val, C, [row.value, col.value])

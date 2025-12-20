@@ -1,13 +1,17 @@
-"""Extended scf dialect with convenience wrappers."""
+"""Extended scf dialect with convenience wrappers.
 
-from typing import Optional, Sequence, Callable
+This module intentionally provides context-manager wrappers that manage
+insertion points and terminators so callers don't need to use
+`ir.InsertionPoint(...)` directly.
+"""
+
+from typing import Optional, Sequence
 from contextlib import contextmanager
 
 from _mlir.ir import (
     Value,
     Location,
     InsertionPoint,
-    IndexType,
     Block,
 )
 from _mlir.dialects import scf as _scf
@@ -69,16 +73,69 @@ def range_(
         loc = Location.unknown()
     
     start, stop, step = canonicalize_range(start, stop, step)
+    # Unwrap ArithValue-like wrappers.
+    if hasattr(start, "value"):
+        start = start.value
+    if hasattr(stop, "value"):
+        stop = stop.value
+    if hasattr(step, "value"):
+        step = step.value
     
     iter_args = iter_args or []
+    iter_args = [a.value if hasattr(a, "value") else a for a in iter_args]
     for_op = _scf.ForOp(start, stop, step, iter_args, loc=loc, ip=ip)
-    
+
+    # Enter the for-op body insertion point for the duration of the context.
     with InsertionPoint(for_op.body):
-        # Yield induction variable and iter args
-        if iter_args:
-            yield (for_op.induction_variable, *for_op.inner_iter_args)
-        else:
-            yield for_op.induction_variable
+        try:
+            # Yield induction variable and iter args
+            if iter_args:
+                yield (for_op.induction_variable, *for_op.inner_iter_args)
+            else:
+                yield for_op.induction_variable
+        finally:
+            # Ensure scf.for body is terminated.
+            block = for_op.body
+            if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
+                _scf.YieldOp(list(for_op.inner_iter_args))
+
+
+@contextmanager
+def for_(
+    start,
+    stop=None,
+    step=None,
+    iter_args: Optional[Sequence[Value]] = None,
+    *,
+    loc: Location = None,
+    ip: InsertionPoint = None,
+):
+    """Create an scf.for op and enter its body insertion point.
+
+    This is like `range_`, but yields the `for_op` so callers can access `.results`.
+    """
+    if loc is None:
+        loc = Location.unknown()
+
+    start, stop, step = canonicalize_range(start, stop, step)
+    # Unwrap ArithValue-like wrappers.
+    if hasattr(start, "value"):
+        start = start.value
+    if hasattr(stop, "value"):
+        stop = stop.value
+    if hasattr(step, "value"):
+        step = step.value
+    iter_args = iter_args or []
+    iter_args = [a.value if hasattr(a, "value") else a for a in iter_args]
+    for_op = _scf.ForOp(start, stop, step, iter_args, loc=loc, ip=ip)
+
+    with InsertionPoint(for_op.body):
+        try:
+            yield for_op
+        finally:
+            block = for_op.body
+            if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
+                _scf.YieldOp(list(for_op.inner_iter_args))
 
 
 @contextmanager  
@@ -122,6 +179,80 @@ def if_(
         yield (if_op.then_block, if_op.else_block)
     else:
         yield if_op.then_block
+
+
+class IfOp:
+    """Context-manager wrapper around scf.if that manages insertion point + yield.
+
+    Typical usage:
+
+      if_op = scf.IfOp(cond)
+      with if_op:
+          ...  # inserts into then_block
+
+      if_op = scf.IfOp(cond, hasElse=True)
+      with if_op.then():
+          ...
+      with if_op.else_():
+          ...
+    """
+
+    def __init__(
+        self,
+        condition: Value,
+        results: Optional[Sequence] = None,
+        *,
+        hasElse: bool = False,
+        loc: Location = None,
+        ip: InsertionPoint = None,
+    ):
+        if loc is None:
+            loc = Location.unknown()
+        results = results or []
+        self.op = _scf.IfOp(condition, results, hasElse=hasElse, loc=loc, ip=ip)
+        self._ip = None
+
+    def __getattr__(self, name):
+        return getattr(self.op, name)
+
+    @contextmanager
+    def then(self):
+        with InsertionPoint(self.op.then_block):
+            try:
+                yield self.op.then_block
+            finally:
+                blk = self.op.then_block
+                if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
+                    _scf.YieldOp([])
+
+    @contextmanager
+    def else_(self):
+        if not hasattr(self.op, "else_block") or self.op.else_block is None:
+            raise RuntimeError("IfOp has no else block (use hasElse=True)")
+        with InsertionPoint(self.op.else_block):
+            try:
+                yield self.op.else_block
+            finally:
+                blk = self.op.else_block
+                if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
+                    _scf.YieldOp([])
+
+    def __enter__(self):
+        # Default context is then-block.
+        self._ip = InsertionPoint(self.op.then_block)
+        self._ip.__enter__()
+        return self.op
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._ip is not None:
+            # Ensure then-block is terminated.
+            if exc_type is None:
+                blk = self.op.then_block
+                if (not blk.operations) or not isinstance(blk.operations[-1], _scf.YieldOp):
+                    _scf.YieldOp([])
+            self._ip.__exit__(exc_type, exc, tb)
+        self._ip = None
+        return False
 
 
 @contextmanager
@@ -176,7 +307,6 @@ def yield_(
 
 # Re-export common scf operations
 from _mlir.dialects.scf import (
-    IfOp,
     WhileOp,
     YieldOp,
     ExecuteRegionOp,
@@ -206,11 +336,12 @@ class ForOp(_scf.ForOp):
 
 __all__ = [
     "range_",
+    "for_",
     "if_",
+    "IfOp",
     "while_",
     "yield_",
     "ForOp",
-    "IfOp",
     "WhileOp",
     "YieldOp",
     "ExecuteRegionOp",

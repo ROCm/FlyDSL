@@ -6,6 +6,7 @@ codegen and performance. Only test-only helpers/imports are removed.
 """
 
 from rocdsl.dialects.ext import rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
@@ -129,7 +130,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             )
 
             # Pass0: global -> LDS row cache (1-pass global read)
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -150,12 +151,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     )
                 else:
                     c_N = rocir.const_index(N)
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         if_store = rocir.scf_ext.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        with if_store:
                             v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
                             tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
                             rocir.scf_ext.yield_([])
@@ -166,7 +167,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             c_zero = arith.constant(compute_type, 0.0).value
             thread_sumsq = unwrap(c_zero)
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -184,15 +185,15 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     thread_sumsq = rocir.arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                 else:
                     c_N = rocir.const_index(N)
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         if_load = rocir.scf_ext.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
-                        with ir.InsertionPoint(if_load.then_block):
+                        with if_load.then():
                             v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                             rocir.scf_ext.yield_([unwrap(v_e)])
-                        with ir.InsertionPoint(if_load.else_block):
+                        with if_load.else_():
                             rocir.scf_ext.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
                         v_e = if_load.results[0]
                         v = unwrap(v_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(v_e))
@@ -219,7 +220,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                 vec_type_e0 = ir.VectorType.get([VEC_WIDTH], elem_type)
                 g_pref_e = vector.load(vec_type_e0, Gamma, [unwrap(curr0)], alignment=VEC_ALIGN)
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -260,12 +261,12 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     g_pref_e = g_next_e
                 else:
                     c_N = rocir.const_index(N)
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         if_store = rocir.scf_ext.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        with if_store:
                             x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                             g_e = tensor_Gamma[unwrap(idx_k)]
                             x = unwrap(x_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(x_e))

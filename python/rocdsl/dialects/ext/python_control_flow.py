@@ -7,21 +7,23 @@ RocDSL executes Python code to build MLIR IR. A plain Python loop like:
 
 is executed by the Python interpreter, effectively *unrolling* IR construction.
 
-Sometimes we want a dynamic loop bound (an MLIR value) to become an IR loop
-(`scf.for`) while keeping static-int loops as Python unroll. This module provides
-an opt-in AST rewrite that transforms:
+Sometimes we want loops written with Python syntax to become IR loops (`scf.for`)
+instead of Python unrolling. This module provides an opt-in AST rewrite that
+transforms:
 
   for i in range(bound):
       body(i)
 
 into:
 
-  if any(range_arg is dynamic):
-      with scf.range_(...) as i:   # emits scf.for
-          body(i)
-  else:
-      for i in range(...):        # python unroll
-          body(i)
+  with scf.range_(...) as i:   # emits scf.for
+      body(i)
+
+To explicitly request Python unrolling (compile-time loop expansion), use
+`range_constexpr(...)` in the loop iterable:
+
+  for i in range_constexpr(10):
+      ...
 
 Limitations (current):
   - `break` / `continue` inside rewritten loops are not supported.
@@ -74,91 +76,18 @@ class _RangeForLowerer(ast.NodeTransformer):
         # Inject imports and helpers at function entry so the transformed code is self-contained.
         injected = [
             ast.ImportFrom(
-                module="_mlir.ir",
-                names=[ast.alias(name="Value", asname=self.opts.value_alias)],
-                level=0,
-            ),
-            ast.ImportFrom(
                 module="rocdsl.dialects.ext",
                 names=[ast.alias(name="scf", asname=self.opts.scf_alias)],
                 level=0,
             ),
+            ast.ImportFrom(
+                module="rocdsl.dialects.ext.python_control_flow",
+                names=[ast.alias(name="range_constexpr", asname="range_constexpr")],
+                level=0,
+            ),
         ]
 
-        # def __rocdsl_is_value(x):
-        #   if isinstance(x, Value): return True
-        #   if hasattr(x, "_value") and isinstance(x._value, Value): return True
-        #   if hasattr(x, "value") and isinstance(x.value, Value): return True
-        #   return False
-        is_value_def = ast.FunctionDef(
-            name=self.opts.is_value_fn,
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[ast.arg(arg="x")],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-                vararg=None,
-                kwarg=None,
-            ),
-            body=[
-                ast.If(
-                    test=ast.Call(
-                        func=ast.Name(id="isinstance", ctx=ast.Load()),
-                        args=[
-                            ast.Name(id="x", ctx=ast.Load()),
-                            ast.Name(id=self.opts.value_alias, ctx=ast.Load()),
-                        ],
-                        keywords=[],
-                    ),
-                    body=[ast.Return(value=ast.Constant(True))],
-                    orelse=[],
-                ),
-                ast.If(
-                    test=ast.BoolOp(
-                        op=ast.And(),
-                        values=[
-                            ast.Call(func=ast.Name(id="hasattr", ctx=ast.Load()), args=[ast.Name(id="x", ctx=ast.Load()), ast.Constant("_value")], keywords=[]),
-                            ast.Call(
-                                func=ast.Name(id="isinstance", ctx=ast.Load()),
-                                args=[
-                                    ast.Attribute(value=ast.Name(id="x", ctx=ast.Load()), attr="_value", ctx=ast.Load()),
-                                    ast.Name(id=self.opts.value_alias, ctx=ast.Load()),
-                                ],
-                                keywords=[],
-                            ),
-                        ],
-                    ),
-                    body=[ast.Return(value=ast.Constant(True))],
-                    orelse=[],
-                ),
-                ast.If(
-                    test=ast.BoolOp(
-                        op=ast.And(),
-                        values=[
-                            ast.Call(func=ast.Name(id="hasattr", ctx=ast.Load()), args=[ast.Name(id="x", ctx=ast.Load()), ast.Constant("value")], keywords=[]),
-                            ast.Call(
-                                func=ast.Name(id="isinstance", ctx=ast.Load()),
-                                args=[
-                                    ast.Attribute(value=ast.Name(id="x", ctx=ast.Load()), attr="value", ctx=ast.Load()),
-                                    ast.Name(id=self.opts.value_alias, ctx=ast.Load()),
-                                ],
-                                keywords=[],
-                            ),
-                        ],
-                    ),
-                    body=[ast.Return(value=ast.Constant(True))],
-                    orelse=[],
-                ),
-                ast.Return(value=ast.Constant(False)),
-            ],
-            decorator_list=[],
-            returns=None,
-            type_comment=None,
-        )
-        is_value_def = ast.fix_missing_locations(is_value_def)
-
-        node.body = injected + [is_value_def] + node.body
+        node.body = injected + node.body
         return ast.fix_missing_locations(node)
 
     def visit_For(self, node: ast.For):  # noqa: N802
@@ -170,7 +99,12 @@ class _RangeForLowerer(ast.NodeTransformer):
         # Only handle builtin `range(...)` for now.
         if not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)):
             return node
-        if node.iter.func.id != "range" or not self.opts.lower_builtin_range:
+        func_id = node.iter.func.id
+        if func_id == "range_constexpr":
+            # Explicit opt-out: keep Python unrolling semantics.
+            node.iter.func.id = "range"
+            return node
+        if func_id != "range" or not self.opts.lower_builtin_range:
             return node
 
         # Reject break/continue (they won't map to scf semantics in this simple rewrite).
@@ -191,19 +125,6 @@ class _RangeForLowerer(ast.NodeTransformer):
             for n, a in zip(tmp_names, args)
         ]
 
-        # condition: any(is_value(tmp))
-        cond_terms = [
-            ast.Call(
-                func=ast.Name(id=self.opts.is_value_fn, ctx=ast.Load()),
-                args=[ast.Name(id=n, ctx=ast.Load())],
-                keywords=[],
-            )
-            for n in tmp_names
-        ]
-        cond = cond_terms[0]
-        for t in cond_terms[1:]:
-            cond = ast.BoolOp(op=ast.Or(), values=[cond, t])
-
         # with scf.range_(args...) as <target>: body
         with_call = ast.Call(
             func=ast.Attribute(
@@ -220,23 +141,21 @@ class _RangeForLowerer(ast.NodeTransformer):
             type_comment=None,
         )
 
-        # else: fallback to python for-loop (unroll)
-        py_for = ast.For(
-            target=node.target,
-            iter=ast.Call(
-                func=ast.Name(id="range", ctx=ast.Load()),
-                args=[ast.Name(id=n, ctx=ast.Load()) for n in tmp_names],
-                keywords=[],
-            ),
-            body=node.body,
-            orelse=[],
-            type_comment=node.type_comment,
-        )
-
-        lowered = assigns + [ast.If(test=cond, body=[with_stmt], orelse=[py_for])]
+        lowered = assigns + [with_stmt]
         for n in lowered:
             ast.copy_location(n, node)
         return lowered
+
+
+def range_constexpr(*args):
+    """Marker iterable to keep Python unrolling semantics for a `for` loop.
+
+    This is intended to be used in code that otherwise enables range-loop lowering:
+
+      for i in range_constexpr(4):
+          ...
+    """
+    return range(*args)
 
 
 def lower_range_for_loops(fn: Callable, *, options: Optional[LoweringOptions] = None) -> Callable:

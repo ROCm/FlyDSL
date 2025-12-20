@@ -43,41 +43,17 @@ except ImportError:
     HAS_AITER = False
 
 from hip import hip
-from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.dialects.ext import arith, gpu, rocir, block_reduce_ops
+from rocdsl.dialects.ext import arith, gpu, rocir, block_reduce_ops, scf as scf_ext
 from rocdsl.dialects.ext.gpu import lds_space
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 from rocdsl.utils import SmemAllocator
-from _mlir import ir
 from _mlir.dialects import (
-    scf,
     vector,
     memref,
 )
 import _mlir.extras.types as T
 from utils import compile_to_hsaco
 from test_common import run_perftest
-
-
-class scf_if:
-    """Helper to restore scf.if_ like syntax using scf.IfOp context manager."""
-
-    def __init__(self, cond):
-        self.op = scf.IfOp(cond)
-
-    def __enter__(self):
-        self.ip = ir.InsertionPoint(self.op.then_block)
-        self.ip.__enter__()
-        return self.op
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None:
-            if not self.op.then_block.operations or not isinstance(
-                self.op.then_block.operations[-1], scf.YieldOp
-            ):
-                scf.YieldOp([])
-        self.ip.__exit__(exc_type, exc_val, exc_tb)
-
 
 class KernelCompilationCache:
     
@@ -110,28 +86,10 @@ def compile_kernel_for_n(N, gpu_arch=None):
     
     M_compile = 16384
     
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
-    allocator = SmemAllocator(ctx, arch=gpu_arch)
-    f32_type = ir.F32Type.get()
-    red_buffer_decl = allocator.allocate_array(f32_type, 64)
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
 
-    @gpu.module("quant_mod", [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">'])
-    def gpu_mod():
-        allocator.finalize()
-
-    ip = ir.InsertionPoint.at_block_begin(gpu_mod.regions[0].blocks[0])
-    ip.__enter__()
-
-    red_type = T.memref(NUM_WARPS, T.f32(), memory_space=lds_space())
-    memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
-
-    @gpu.func(emit=True)
-    def quant_kernel(
-        input: T.memref(M_compile * N, T.f16()),
-        output: T.memref(M_compile * N, T.i8()),
-        scales: T.memref(M_compile, T.f32()),
-    ):
+    def _quant_kernel_impl(input, output, scales):
         tid_x = rocir.thread_idx("x")
         bid_x = rocir.block_idx("x")
         tid_linear = tid_x
@@ -170,7 +128,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
         thr_copy_output = tiled_copy_output.get_slice(tid_linear)
 
         base_ptr = allocator.get_base()
-        red_val = red_buffer_decl(base_ptr).get()
+        red_val = _state["red_buffer_decl"](base_ptr).get()
 
         f_0 = arith.f32(0.0)
         f_1 = arith.f32(1.0)
@@ -224,7 +182,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
         c_0_idx = arith.index(0)
         is_thread_0 = tid_linear == c_0_idx
 
-        with scf_if(is_thread_0.value):
+        with scf_ext.IfOp(is_thread_0.value):
             tensor_scales[bid_x] = final_scale
 
         vec_scale = vector.BroadcastOp(vec_type_f32, final_scale.value).result
@@ -258,9 +216,27 @@ def compile_kernel_for_n(N, gpu_arch=None):
             vector.store(vec_quant.value, frg_out_memref, [c_0.value, c_0.value])
             rocir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid.value)
 
-    ip.__exit__(None, None, None)
+    class _Quant(rocir.MlirModule):
+        GPU_MODULE_NAME = "quant_mod"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
-    hsaco = compile_to_hsaco(ctx.module)
+        def init_gpu_module(self):
+            _state["red_buffer_decl"] = allocator.allocate_array(T.f32(), 64)
+            allocator.finalize()
+            red_type = T.memref(NUM_WARPS, T.f32(), memory_space=lds_space())
+            memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
+
+        @rocir.kernel
+        def quant_kernel(
+            self,
+            input: lambda: T.memref(M_compile * N, T.f16()),
+            output: lambda: T.memref(M_compile * N, T.i8()),
+            scales: lambda: T.memref(M_compile, T.f32()),
+        ):
+            _quant_kernel_impl(input, output, scales)
+
+    m = _Quant()
+    hsaco = compile_to_hsaco(m.module, kernel_name="quant_kernel")
     
     config = {
         'N': N,

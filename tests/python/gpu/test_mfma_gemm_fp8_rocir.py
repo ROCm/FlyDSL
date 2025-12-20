@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.INFO)
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.utils import SmemAllocator
 from tests.utils import compile_to_hsaco, pertoken_quant
 from tests.test_common import run_perftest, verify_output
@@ -240,7 +241,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             # --- HELPER: Compute Tile ---
             def compute_tile(acc_in):
                 acc_curr = acc_in
-                for ki in range(0, tile_k, mfma_k):
+                for ki in range_constexpr(0, tile_k, mfma_k):
                     col_lds = ki + col_offset_base
                     
                     # A LDS Index (uses layout_lds which has stride padding)
@@ -291,8 +292,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             
             iter_args = [acc_init, vec_a_init, vec_b_init]
             
-            for_op = scf.ForOp(c_k_idx, c_k_main, c_tile_k, iter_args)
-            with ir.InsertionPoint(for_op.body):
+            with scf.for_(c_k_idx, c_k_main, c_tile_k, iter_args=iter_args) as for_op:
                 k_curr = for_op.induction_variable
                 acc_iter = for_op.inner_iter_args[0]
                 vec_a_curr = for_op.inner_iter_args[1]
@@ -340,7 +340,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             row_base_g = bx_tile_m + row_wave_base
             col_base_g = by_tile_n + col_wave_base
             
-            for i in range(4):
+            for i in range_constexpr(4):
                 val = vector.ExtractOp(final_acc, [], [i]).result
                 
                 # Row offset = (lane_div_16 * 4) + i

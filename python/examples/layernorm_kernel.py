@@ -6,6 +6,7 @@ codegen and performance. Only test-only helpers/imports are removed.
 """
 
 from rocdsl.dialects.ext import rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
@@ -170,7 +171,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             thread_sum = unwrap(c_zero)
             thread_sumsq = unwrap(c_zero)
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -201,12 +202,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                 else:
                     c_N = rocir.const_index(N)
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         if_store = scf.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        with if_store:
                             v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
                             tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
                             scf.yield_([])
@@ -219,7 +220,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 thread_sum = unwrap(c_zero)
                 thread_sumsq = unwrap(c_zero)
 
-                for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                     c_base = rocir.const_index(base_idx_int)
                     thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                     curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -239,15 +240,15 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                     else:
                         c_N = rocir.const_index(N)
-                        for k in range(VEC_WIDTH):
+                        for k in range_constexpr(VEC_WIDTH):
                             c_k = rocir.const_index(k)
                             idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                             is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                             if_load = scf.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
-                            with ir.InsertionPoint(if_load.then_block):
+                            with if_load.then():
                                 v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                                 scf.yield_([unwrap(v_e)])
-                            with ir.InsertionPoint(if_load.else_block):
+                            with if_load.else_():
                                 # dummy (won't be used)
                                 scf.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
                             v_e = if_load.results[0]
@@ -273,7 +274,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             mean_splat = vector.splat(vec_type_c, unwrap(mean))
             rstd_splat = vector.splat(vec_type_c, unwrap(rstd))
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -328,12 +329,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 else:
                     c_N = rocir.const_index(N)
                     # scalar tail
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                         if_store = scf.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        with if_store:
                             x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                             g_e = tensor_Gamma[unwrap(idx_k)]
                             b_e = tensor_Beta[unwrap(idx_k)]

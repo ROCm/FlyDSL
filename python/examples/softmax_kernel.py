@@ -8,6 +8,7 @@ performance. Only test-only helpers/imports are removed.
 import os
 
 from rocdsl.dialects.ext import rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
@@ -177,7 +178,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
 
             # Loop range(0, N, step)
-            for base_idx_int in range(0, N, step):
+            for base_idx_int in range_constexpr(0, N, step):
                 # Current global index base for this thread
                 # global_idx = base_idx_int + thread_offset_base
                 c_base = rocir.const_index(base_idx_int)
@@ -212,7 +213,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                 else:
                     # Scalar tail handling with validity mask
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
 
@@ -220,14 +221,14 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
 
                         if_load = rocir.scf_ext.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
-                        with ir.InsertionPoint(if_load.then_block):
+                        with if_load.then():
                             val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
                             if dtype_str == "bf16":
                                 val_c = rocir.arith.extf(compute_type, unwrap(val_e))
                                 rocir.scf_ext.yield_([unwrap(val_c)])
                             else:
                                 rocir.scf_ext.yield_([unwrap(val_e)])
-                        with ir.InsertionPoint(if_load.else_block):
+                        with if_load.else_():
                             rocir.scf_ext.yield_([unwrap(c_neg_inf)])
 
                         row_buffer.append((if_load.results[0], is_valid))
@@ -308,7 +309,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             buf_idx = 0
             thread_offset_base = rocir.arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
 
-            for base_idx_int in range(0, N, step):
+            for base_idx_int in range_constexpr(0, N, step):
                 c_base = rocir.const_index(base_idx_int)
                 curr_idx = rocir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
@@ -336,7 +337,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             pair_ty = ir.VectorType.get([2], elem_type)
                             intr = "llvm.amdgcn.cvt.pk.bf16.f32"
 
-                            for pj in range(VEC_WIDTH // 2):
+                            for pj in range_constexpr(VEC_WIDTH // 2):
                                 f0 = vector.extract(norm_vec, static_position=[2 * pj], dynamic_position=[])
                                 f1 = vector.extract(norm_vec, static_position=[2 * pj + 1], dynamic_position=[])
                                 pair = llvm.call_intrinsic(
@@ -420,14 +421,14 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         )
 
                 else:
-                    for k in range(VEC_WIDTH):
+                    for k in range_constexpr(VEC_WIDTH):
                         item = row_buffer[buf_idx]
                         buf_idx += 1
                         val_exp, valid = item
 
                         # If valid, store
                         if_store = rocir.scf_ext.IfOp(unwrap(valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        with if_store:
                             norm_val = rocir.arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
                             if dtype_str == "bf16":
                                 norm_val = rocir.arith.truncf(elem_type, unwrap(norm_val))
