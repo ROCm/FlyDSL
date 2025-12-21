@@ -1004,22 +1004,22 @@ if __name__ == "__main__":
     print("="*80)
     
     all_tests = [
-        # ("Coalesce Basic", test_coalesce_basic),
-        # ("Coalesce Dynamic Stride", test_coalesce_dynamic_stride),
-        # ("Composition Basic", test_composition_basic),
-        # ("Composition Static vs Dynamic", test_composition_static_vs_dynamic),
-        # ("Composition By-Mode", test_composition_bymode),
-        # ("Composition with Tuple", test_composition_with_tuple),
+        ("Coalesce Basic", test_coalesce_basic),
+        ("Coalesce Dynamic Stride", test_coalesce_dynamic_stride),
+        ("Composition Basic", test_composition_basic),
+        ("Composition Static vs Dynamic", test_composition_static_vs_dynamic),
+        ("Composition By-Mode", test_composition_bymode),
+        ("Composition with Tuple", test_composition_with_tuple),
         ("Complement Simple", test_complement_simple),
-        # ("Complement with Divide", test_complement_with_divide),
-        # ("Logical Divide 1D", test_logical_divide_1d),
-        # ("Logical Divide 2D", test_logical_divide_2d),
-        # ("Zipped Divide", test_zipped_divide),
-        # ("Tiled Divide", test_tiled_divide),
-        # ("Flat Divide", test_flat_divide),
-        # ("Logical Product 1D", test_logical_product_1d),
-        # ("Blocked/Raked Product", test_blocked_raked_product),
-        # ("Zipped/Tiled/Flat Product", test_zipped_tiled_flat_product),
+        ("Complement with Divide", test_complement_with_divide),
+        ("Logical Divide 1D", test_logical_divide_1d),
+        ("Logical Divide 2D", test_logical_divide_2d),
+        ("Zipped Divide", test_zipped_divide),
+        ("Tiled Divide", test_tiled_divide),
+        ("Flat Divide", test_flat_divide),
+        ("Logical Product 1D", test_logical_product_1d),
+        ("Blocked/Raked Product", test_blocked_raked_product),
+        ("Zipped/Tiled/Flat Product", test_zipped_tiled_flat_product),
     ]
     
     passed = 0
