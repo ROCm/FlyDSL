@@ -26,13 +26,13 @@ except ImportError:
     print("HIP module not found. Skipping GPU tests.")
     sys.exit(0)
 
-import numpy as np
 import ctypes
 
-from gpu_common import bf16_to_fp32_cpu, fp32_to_bf16_trunc_cpu, next_power_of_2
+def next_power_of_2(x: int) -> int:
+    return 1 if x == 0 else 2 ** (x - 1).bit_length()
+
 from examples.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
 
-fp32_to_bf16_cpu = fp32_to_bf16_trunc_cpu
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
 
@@ -57,29 +57,30 @@ def run_test(M, N, dtype_str):
         traceback.print_exc()
         return False
         
-    np.random.seed(42)
-    a_f32 = (np.random.rand(M, N).astype(np.float32) * 4.0) - 2.0
+    torch.manual_seed(42)
+    a_t = (torch.rand((M, N), dtype=torch.float32) * 4.0) - 2.0
 
     # PyTorch CPU reference (stable softmax)
-    expected_f32 = torch.softmax(torch.from_numpy(a_f32), dim=1).cpu().numpy()
+    expected = torch.softmax(a_t, dim=1).to(torch.float32)
     
     if dtype_str == "f32":
-        a_host = a_f32
-        c_host = np.zeros_like(a_f32)
+        a_host = a_t.contiguous()
+        c_host = torch.empty((M, N), dtype=torch.float32)
         nbytes = M * N * 4
     elif dtype_str == "f16":
-        a_host = a_f32.astype(np.float16)
-        c_host = np.zeros_like(a_host)
+        a_host = a_t.to(torch.float16).contiguous()
+        c_host = torch.empty((M, N), dtype=torch.float16)
         nbytes = M * N * 2
     elif dtype_str == "bf16":
-        a_host = fp32_to_bf16_cpu(a_f32)
-        c_host = np.zeros_like(a_host)
+        # BF16 host buffer uses uint16 payload holding raw bf16 bits.
+        a_host = a_t.to(torch.bfloat16).view(torch.uint16).contiguous()
+        c_host = torch.empty((M, N), dtype=torch.uint16)
         nbytes = M * N * 2
     
     d_a = hip_check(hip.hipMalloc(nbytes))
     d_c = hip_check(hip.hipMalloc(nbytes))
     
-    hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, nbytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_a, int(a_host.data_ptr()), nbytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
     
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
     kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, SOFTMAX_KERNEL_NAME.encode("utf-8")))
@@ -113,20 +114,21 @@ def run_test(M, N, dtype_str):
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     
-    hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, nbytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-    
+    hip_check(hip.hipMemcpy(int(c_host.data_ptr()), d_c, nbytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+
+    # Verify in pure torch style (keep tensors, compute max error in torch), similar to test_mfma_gemm_fp8_rocir.py
     if dtype_str == "f32":
-        res_f32 = c_host
+        res = c_host.to(torch.float32)
         atol = 1e-5
     elif dtype_str == "f16":
-        res_f32 = c_host.astype(np.float32)
-        atol = 1e-2 
+        res = c_host.to(torch.float32)
+        atol = 1e-2
     elif dtype_str == "bf16":
-        res_f32 = bf16_to_fp32_cpu(c_host)
-        atol = 2e-2 
-        
-    diff = np.abs(res_f32 - expected_f32)
-    max_err = np.max(diff)
+        # BF16 payload stored as uint16; reinterpret then convert to fp32
+        res = c_host.view(torch.bfloat16).to(torch.float32)
+        atol = 2e-2
+
+    max_err = (res - expected).abs().max().item()
     print(f"  Max Absolute Error: {max_err:.2e} (atol={atol})")
     
     hip_check(hip.hipFree(d_a))

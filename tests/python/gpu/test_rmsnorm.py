@@ -27,10 +27,9 @@ except ImportError:
     print("HIP module not found. Skipping GPU tests.")
     sys.exit(0)
 
-import numpy as np
 import ctypes
 
-from gpu_common import EPS, bf16_to_fp32_cpu, fp32_to_bf16_rne_cpu
+EPS: float = 1e-5
 from examples.rmsnorm_kernel import (
     build_rmsnorm_module,
     KERNEL_NAME as RMSNORM_KERNEL_NAME,
@@ -39,7 +38,6 @@ from examples.rmsnorm_kernel import (
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
-fp32_to_bf16_cpu = fp32_to_bf16_rne_cpu
 
 def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
@@ -67,53 +65,53 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
 
     print(f" HSACO size: {len(hsaco)} bytes")
 
-    np.random.seed(42)
-    input_f32 = np.random.randn(M, N).astype(np.float32)
-    gamma_f32 = np.random.rand(N).astype(np.float32)
+    torch.manual_seed(42)
+    input_t = torch.randn((M, N), dtype=torch.float32)
+    gamma_t = torch.rand((N,), dtype=torch.float32)
 
     if dtype == "f32":
-        input_host = input_f32
-        gamma_host = gamma_f32
-        output_host = np.zeros((M, N), dtype=np.float32)
+        input_host = input_t.contiguous()
+        gamma_host = gamma_t.contiguous()
+        output_host = torch.empty((M, N), dtype=torch.float32)
         elem_bytes = 4
-        input_ref = input_f32
-        gamma_ref = gamma_f32
+        input_ref = input_host.to(torch.float32)
+        gamma_ref = gamma_host.to(torch.float32)
         atol = 1e-4
     elif dtype == "f16":
-        input_host = input_f32.astype(np.float16)
-        gamma_host = gamma_f32.astype(np.float16)
-        output_host = np.zeros((M, N), dtype=np.float16)
+        input_host = input_t.to(torch.float16).contiguous()
+        gamma_host = gamma_t.to(torch.float16).contiguous()
+        output_host = torch.empty((M, N), dtype=torch.float16)
         elem_bytes = 2
-        input_ref = input_host.astype(np.float32)
-        gamma_ref = gamma_host.astype(np.float32)
+        input_ref = input_host.to(torch.float32)
+        gamma_ref = gamma_host.to(torch.float32)
         atol = 1e-2
     elif dtype == "bf16":
-        input_host = fp32_to_bf16_cpu(input_f32)
-        gamma_host = fp32_to_bf16_cpu(gamma_f32)
-        output_host = np.zeros((M, N), dtype=np.uint16)
+        input_host = input_t.to(torch.bfloat16).view(torch.uint16).contiguous()
+        gamma_host = gamma_t.to(torch.bfloat16).view(torch.uint16).contiguous()
+        output_host = torch.empty((M, N), dtype=torch.uint16)
         elem_bytes = 2
-        input_ref = bf16_to_fp32_cpu(input_host)
-        gamma_ref = bf16_to_fp32_cpu(gamma_host)
+        input_ref = input_host.view(torch.bfloat16).to(torch.float32)
+        gamma_ref = gamma_host.view(torch.bfloat16).to(torch.float32)
         atol = 2e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
 
     # PyTorch CPU Reference:
     # RMS(x) = sqrt(mean(x^2) + eps) ; RMSNorm(x) = x / RMS(x) * gamma
-    x = torch.from_numpy(input_ref.astype(np.float32))
-    gamma = torch.from_numpy(gamma_ref.astype(np.float32))
+    x = input_ref
+    gamma = gamma_ref
     sq_mean = (x * x).mean(dim=1, keepdim=True)
     rms = torch.sqrt(sq_mean + EPS)
     expected = (x / rms) * gamma
-    expected = expected.cpu().numpy()
+    expected = expected.to(torch.float32)
 
     # Allocate GPU Memory
     d_input = hip_check(hip.hipMalloc(M * N * elem_bytes))
     d_gamma = hip_check(hip.hipMalloc(N * elem_bytes))
     d_output = hip_check(hip.hipMalloc(M * N * elem_bytes))
 
-    hip_check(hip.hipMemcpy(d_input, input_host.ctypes.data, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_gamma, gamma_host.ctypes.data, N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_input, int(input_host.data_ptr()), M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    hip_check(hip.hipMemcpy(d_gamma, int(gamma_host.data_ptr()), N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
 
     # Load Kernel
     hip_module = hip_check(hip.hipModuleLoadData(hsaco))
@@ -160,17 +158,17 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
 
     # Copy back
-    hip_check(hip.hipMemcpy(output_host.ctypes.data, d_output, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+    hip_check(hip.hipMemcpy(int(output_host.data_ptr()), d_output, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
 
+    # Verification (pure torch style; compute max error in torch)
     if dtype == "f32":
-        output_ref = output_host
+        output_ref = output_host.to(torch.float32)
     elif dtype == "f16":
-        output_ref = output_host.astype(np.float32)
-    else:
-        output_ref = bf16_to_fp32_cpu(output_host)
+        output_ref = output_host.to(torch.float32)
+    else:  # bf16 payload
+        output_ref = output_host.view(torch.bfloat16).to(torch.float32)
 
-    # Verification
-    error = np.max(np.abs(output_ref - expected))
+    error = (output_ref - expected).abs().max().item()
     print(f"Max absolute error: {error:.2e} (atol={atol})")
 
     if error < atol:
