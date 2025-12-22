@@ -1,7 +1,6 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.compiler.rocir_opt_helper import apply_rocir_coord_lowering
 from rocdsl.runtime.hip_util import get_hip_arch
 from _mlir import ir
 import os
@@ -128,16 +127,10 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
     # Dump initial IR (with rocir ops)
     dump_stage(mlir_module, "01_initial")
     
-    # Apply rocir coordinate lowering first
-    lowered_module = _timeit("02_rocir_coord_lowering", lambda: apply_rocir_coord_lowering(mlir_module))
-    dump_stage(lowered_module, "02_rocir_lowered")
-
-    # Lower remaining Rocir ops before any GPU/LLVM conversion.
-    # This keeps Rocir dialect ops from leaking into LLVM translation (which would
-    # otherwise fail with leftover unrealized conversion casts).
-    lowered_module = _timeit("02b_rocir_to_standard",
-                             lambda: run_pipeline(lowered_module, Pipeline().rocir_to_standard()))
-    dump_stage(lowered_module, "02b_rocir_to_standard")
+    # Lower Rocir ops (includes coordinate lowering) before any GPU/LLVM conversion.
+    lowered_module = _timeit("02_rocir_to_standard",
+                             lambda: run_pipeline(mlir_module, Pipeline().rocir_to_standard()))
+    dump_stage(lowered_module, "02_rocir_to_standard")
 
     # Dead-code elimination (module-level). In our embedded environment upstream
     # MLIR does not register a generic 'dce/adce', so we provide a standalone

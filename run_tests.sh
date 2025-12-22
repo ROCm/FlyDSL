@@ -30,7 +30,7 @@ if [ ! -x "${ROCIR_OPT}" ]; then
     exit 1
   fi
 fi
-PASS="--rocir-coord-lowering"
+PASS="--rocir-to-standard"
 
 echo "========================================================================"
 echo "Rocir Test Suite"

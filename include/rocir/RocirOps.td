@@ -66,7 +66,8 @@ def Rocir_MakeCoordOp : Rocir_Op<"make_coord", [Pure]> {
     Creates a coordinate value from runtime index values.
     Example: rocir.make_coord %i, %j : (index, index) -> !rocir.coord<2>
   }];
-  let arguments = (ins Variadic<Index>:$values);
+  // Support nested coord trees by allowing !rocir.coord operands (like make_shape/make_stride).
+  let arguments = (ins Variadic<AnyTypeOf<[Index, Rocir_CoordType]>>:$values);
   let results = (outs Rocir_CoordType:$result);
   let assemblyFormat = "$values attr-dict `:` functional-type($values, $result)";
 }

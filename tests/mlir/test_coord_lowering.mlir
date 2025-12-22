@@ -1,4 +1,4 @@
-// RUN: rocir-opt %s --rocir-coord-lowering | FileCheck %s
+// RUN: rocir-opt %s --rocir-to-standard | FileCheck %s
 
 module {
   func.func @test_crd2idx_2d() -> index {

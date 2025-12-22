@@ -27,15 +27,8 @@ PYBIND11_MODULE(_rocirPassesExt, m) {
 
   // Register all passes at module load time
   
-  // Manual registration for RocirCoordLoweringPass (not in TableGen)
-  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
-    return ::mlir::rocir::createRocirCoordLoweringPass();
-  });
-  
   // TableGen-generated registrations
   registerRocirToStandardPass();           // To standard dialect
-  // registerRocirLayoutCanonicalizePass();  // TODO: Enable when needed
-  // registerRocirRocmToGPUPass();           // TODO: Enable when RocirRocm is enabled
 
   m.def(
       "register_dialect",

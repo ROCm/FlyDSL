@@ -66,99 +66,34 @@ struct LayoutNode {
 // Helper to deserialize from MakeShape/MakeStride ops
 static LayoutNode deserializeLayoutNode(Operation* op, PatternRewriter& rewriter, Location loc) {
     SmallVector<Value> values;
-    ArrayRef<int32_t> structure;
-    ArrayRef<int64_t> dims;
-    
+
     if (isa<MakeShapeOp>(op)) {
         auto makeShape = cast<MakeShapeOp>(op);
         values = makeShape.getValues();
-        if (auto type = dyn_cast<ShapeType>(makeShape.getResult().getType())) {
-            structure = type.getStructure();
-            dims = type.getDims();
-        }
     } else if (isa<MakeStrideOp>(op)) {
         auto makeStride = cast<MakeStrideOp>(op);
         values = makeStride.getValues();
-        if (auto type = dyn_cast<StrideType>(makeStride.getResult().getType())) {
-            structure = type.getStructure();
-            dims = type.getDims();
-        }
     } else {
-        if (!op) return LayoutNode(Value()); 
-        return LayoutNode(op->getResult(0)); 
+        if (!op) return LayoutNode(Value());
+        return LayoutNode(op->getResult(0));
     }
-    
-    if (structure.empty()) {
-        // Assume flat structure - but values might be nested shapes/strides!
-        std::vector<LayoutNode> children;
-        for (auto v : values) {
-            if (auto *defOp = v.getDefiningOp()) {
-                auto opName = defOp->getName().getStringRef();
-                if (opName == "rocir.make_shape" || opName == "rocir.make_stride") {
-                    children.push_back(deserializeLayoutNode(defOp, rewriter, loc));
-                    continue;
-                }
+
+    // "Structure in operands" mode: nested tuple nodes are represented by nested
+    // rocir.make_shape / rocir.make_stride operands. We reconstruct the tree
+    // purely from operands (no structured-type parsing).
+    std::vector<LayoutNode> children;
+    children.reserve(values.size());
+    for (auto v : values) {
+        if (auto *defOp = v.getDefiningOp()) {
+            auto opName = defOp->getName().getStringRef();
+            if (opName == "rocir.make_shape" || opName == "rocir.make_stride") {
+                children.push_back(deserializeLayoutNode(defOp, rewriter, loc));
+                continue;
             }
-            children.push_back(LayoutNode(v));
         }
-        if (children.empty()) {
-             return LayoutNode(std::vector<LayoutNode>{});
-        }
-        return LayoutNode(children);
+        children.push_back(LayoutNode(v));
     }
-    
-    // Parse structure
-    int valueIdx = 0;
-    int structIdx = 0;
-    int dimIdx = 0;
-    
-    std::function<LayoutNode()> parse = [&]() -> LayoutNode {
-        if (structIdx >= static_cast<int>(structure.size())) return LayoutNode(Value());
-        
-        int32_t code = structure[structIdx++];
-        if (code == -1) {
-            // Leaf
-            int64_t dimVal = (dimIdx < static_cast<int>(dims.size())) ? dims[dimIdx++] : -1;
-
-            // IMPORTANT: keep operands aligned with leaf positions even when the type provides
-            // a constant dimVal. Our Python builders currently keep all leaf operands (dense),
-            // including constants, so we must always consume one operand per leaf when available.
-            Value v;
-            if (valueIdx < static_cast<int>(values.size()))
-                v = values[valueIdx++];
-
-            // If the operand itself is a nested make_shape/make_stride, recurse (even if type had a constant).
-            if (v) {
-                if (auto *defOp = v.getDefiningOp()) {
-                    auto opName = defOp->getName().getStringRef();
-                    if (opName == "rocir.make_shape" || opName == "rocir.make_stride") {
-                        return deserializeLayoutNode(defOp, rewriter, loc);
-                    }
-                }
-            }
-
-            if (dimVal != -1) {
-                // Prefer the type-provided constant.
-                Value c = rewriter.create<arith::ConstantIndexOp>(loc, dimVal);
-                return LayoutNode(c);
-            }
-
-            // Dynamic from operands
-            if (!v) {
-                // This should not happen if IR is valid vs Type
-                return LayoutNode(Value());
-            }
-            return LayoutNode(v);
-        } else {
-            std::vector<LayoutNode> children;
-            for (int i = 0; i < code; ++i) {
-                children.push_back(parse());
-            }
-            return LayoutNode(children);
-        }
-    };
-    
-    return parse();
+    return LayoutNode(children);
 }
 
 // Forward declaration
@@ -1159,7 +1094,7 @@ struct GetOpLowering : public RewritePattern {
       // Check if this value is a shape/stride (nested)
       if (auto *vDefOp = v.getDefiningOp()) {
         auto vOpName = vDefOp->getName().getStringRef();
-        if (vOpName == "rocir.make_shape" || vOpName == "rocir.make_stride") {
+        if (vOpName == "rocir.make_shape" || vOpName == "rocir.make_stride" || vOpName == "rocir.make_coord") {
           // Recursively flatten
           for (auto operand : vDefOp->getOperands()) {
             flattenValue(operand);
@@ -1244,6 +1179,112 @@ static int64_t countLeaves(const LayoutNode &n) {
   return c;
 }
 
+// Deserialize a nested coord tree from rocir.make_coord operands.
+// In "structure-in-operands" mode, nested tuples are represented by nested make_coord ops.
+static LayoutNode deserializeCoordNode(Operation *op, PatternRewriter &rewriter, Location loc) {
+  if (!op)
+    return LayoutNode(Value());
+  if (op->getName().getStringRef() != "rocir.make_coord")
+    return LayoutNode(op->getResult(0));
+  std::vector<LayoutNode> children;
+  children.reserve(op->getNumOperands());
+  for (auto v : op->getOperands()) {
+    if (auto *defOp = v.getDefiningOp()) {
+      if (defOp->getName().getStringRef() == "rocir.make_coord") {
+        children.push_back(deserializeCoordNode(defOp, rewriter, loc));
+        continue;
+      }
+    }
+    children.push_back(LayoutNode(v));
+  }
+  return LayoutNode(children);
+}
+
+// Streaming leaf iterator for LayoutNode (left-to-right).
+struct LeafCursor {
+  SmallVector<std::pair<const LayoutNode *, size_t>, 32> stack;
+  const LayoutNode *leaf = nullptr;
+
+  explicit LeafCursor(const LayoutNode &root) { descendLeft(&root); }
+
+  void descendLeft(const LayoutNode *n) {
+    const LayoutNode *cur = n;
+    while (cur && !cur->isLeaf) {
+      if (cur->children.empty()) {
+        leaf = nullptr;
+        return;
+      }
+      stack.push_back({cur, 0});
+      cur = &cur->children[0];
+    }
+    leaf = cur;
+  }
+
+  Value next() {
+    if (!leaf)
+      return Value();
+    Value out = leaf->value;
+    advance();
+    return out;
+  }
+
+  void advance() {
+    while (!stack.empty()) {
+      auto &top = stack.back();
+      const LayoutNode *parent = top.first;
+      size_t idx = top.second;
+      if (idx + 1 < parent->children.size()) {
+        top.second = idx + 1;
+        descendLeft(&parent->children[top.second]);
+        return;
+      }
+      stack.pop_back();
+    }
+    leaf = nullptr;
+  }
+};
+
+// Rebuild a tree with the same structure as `profile`, but with leaf values taken
+// from `leafValues` in left-to-right order.
+static LayoutNode rebuildTreeWithLeaves(const LayoutNode &profile,
+                                       ArrayRef<Value> leafValues,
+                                       int64_t &leafIdx) {
+  if (profile.isLeaf) {
+    Value v = (leafIdx < (int64_t)leafValues.size()) ? leafValues[leafIdx] : Value();
+    ++leafIdx;
+    return LayoutNode(v);
+  }
+  std::vector<LayoutNode> children;
+  children.reserve(profile.children.size());
+  for (auto &c : profile.children)
+    children.push_back(rebuildTreeWithLeaves(c, leafValues, leafIdx));
+  return LayoutNode(children);
+}
+
+// Build nested rocir.make_coord ops from a LayoutNode tree whose leaves are index Values.
+// - For tuple nodes, returns a CoordType value (MakeCoordOp result).
+// - For leaf nodes, returns the leaf index Value (used as operand to parent).
+static Value buildCoordValueForNode(const LayoutNode &node,
+                                   Type tupleType,
+                                   Location loc,
+                                   PatternRewriter &rewriter,
+                                   MLIRContext *ctx) {
+  if (node.isLeaf)
+    return node.value;
+  SmallVector<Value> ops;
+  ops.reserve(node.children.size());
+  for (auto &c : node.children) {
+    if (c.isLeaf) {
+      ops.push_back(c.value);
+    } else {
+      int64_t subLeaves = countLeaves(c);
+      auto subType = CoordType::get(ctx, (int)subLeaves);
+      ops.push_back(buildCoordValueForNode(c, subType, loc, rewriter, ctx));
+    }
+  }
+  return rewriter.create<MakeCoordOp>(loc, tupleType, ops).getResult();
+}
+
 
 // Lower rank to a constant.
 struct RankOpLowering : public RewritePattern {
@@ -1295,23 +1336,31 @@ struct Crd2IdxOpLowering : public RewritePattern {
     if (!strideOp || strideOp->getName().getStringRef() != "rocir.make_stride")
       return failure();
     
-    auto coordValues = coordOp->getOperands();
-
     // Deserialize stride into a nested tree and traverse leaves without flattening into a list.
     LayoutNode strideNode = deserializeLayoutNode(strideOp, rewriter, loc);
     int64_t strideLeaves = countLeaves(strideNode);
-    if ((int64_t)coordValues.size() != strideLeaves)
+
+    // Deserialize coord into a nested tree and stream leaf coordinate values in order.
+    LayoutNode coordNode = deserializeCoordNode(coordOp, rewriter, loc);
+    int64_t coordLeaves = countLeaves(coordNode);
+    if (coordLeaves != strideLeaves)
       return failure();
+
+    // 0D case: empty coord/stride => index 0.
+    if (strideLeaves == 0) {
+      auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      rewriter.replaceOp(op, zero.getResult());
+      return success();
+    }
+
+    LeafCursor coordIt(coordNode);
 
     // Compute sum(coord_leaf[i] * stride_leaf[i]) in leaf order.
     Value acc = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
-    int64_t coordIdx = 0;
     auto walkResult = forEachLeafInOrder(strideNode, [&](Value strideLeaf) -> LogicalResult {
       if (!strideLeaf || !strideLeaf.getType().isIndex())
         return failure();
-      if (coordIdx >= (int64_t)coordValues.size())
-        return failure();
-      Value coordLeaf = coordValues[coordIdx++];
+      Value coordLeaf = coordIt.next();
       if (!coordLeaf || !coordLeaf.getType().isIndex())
         return failure();
       auto prod = rewriter.create<arith::MulIOp>(loc, coordLeaf, strideLeaf).getResult();
@@ -1320,7 +1369,8 @@ struct Crd2IdxOpLowering : public RewritePattern {
     });
     if (failed(walkResult))
       return failure();
-    if (coordIdx != (int64_t)coordValues.size())
+    // Ensure coord leaves fully consumed.
+    if (coordIt.leaf != nullptr)
       return failure();
 
     rewriter.replaceOp(op, acc);
@@ -1395,10 +1445,26 @@ struct Idx2CrdOpLowering : public RewritePattern {
     for (auto it = coordsReversed.rbegin(); it != coordsReversed.rend(); ++it)
       coords.push_back(*it);
 
-    // Create make_coord with computed coordinates (operands are leaf values; nested structure lives in the type).
-    auto coordType = op->getResult(0).getType();
-    auto makeCoord = rewriter.create<MakeCoordOp>(loc, coordType, coords);
-    rewriter.replaceOp(op, makeCoord.getResult());
+    // Rebuild a nested coord tree matching the shape's nested structure, then create
+    // nested make_coord ops so structure is also represented in operands.
+    int64_t leafIdx = 0;
+    LayoutNode coordTree = rebuildTreeWithLeaves(shapeNode, coords, leafIdx);
+    if (leafIdx != (int64_t)coords.size())
+      return failure();
+    // Ensure root is a tuple node (make_coord returns a CoordType value, not an index).
+    if (coordTree.isLeaf) {
+      std::vector<LayoutNode> ch;
+      ch.push_back(coordTree);
+      coordTree = LayoutNode(std::move(ch));
+    }
+
+    auto *ctx = rewriter.getContext();
+    Type coordType = op->getResult(0).getType();
+    Value coordVal = buildCoordValueForNode(coordTree, coordType, loc, rewriter, ctx);
+    if (!coordVal || !llvm::isa<CoordType>(coordVal.getType()))
+      return failure();
+
+    rewriter.replaceOp(op, coordVal);
     return success();
   }
 };

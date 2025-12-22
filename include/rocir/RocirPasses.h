@@ -8,11 +8,7 @@ namespace rocir {
 
 // Lowering passes
 std::unique_ptr<Pass> createRocirToStandardPass();
-std::unique_ptr<Pass> createRocirCoordLoweringPass();
 std::unique_ptr<Pass> createRocirTrivialDCEPass();
-std::unique_ptr<Pass> createRocirLayoutCanonicalizePass();
-std::unique_ptr<Pass> createRocirToRocmPass();
-std::unique_ptr<Pass> createRocirRocmToGPUPass();
 
 } // namespace rocir
 } // namespace mlir

@@ -35,7 +35,7 @@ _mlir_libs = _alias("mlir._mlir_libs", "_mlir._mlir_libs")
 dialects = _alias("mlir.dialects", "_mlir.dialects")
 extras = _alias("mlir.extras", "_mlir.extras")
 try:
-    runtime = _alias("mlir.runtime", "_mlir.runtime")
+runtime = _alias("mlir.runtime", "_mlir.runtime")
 except ModuleNotFoundError:
     runtime = None
 

@@ -22,11 +22,11 @@ def example_single_pass():
     ctx = RAIIMLIRContextModule()
     # ... build your MLIR module here ...
     
-    pipeline = Pipeline().rocir_coord_lowering()
+    pipeline = Pipeline().rocir_to_standard()
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline: {pipeline}")
-    # Output: builtin.module(rocir-coord-lowering)
+    # Output: builtin.module(rocir-to-standard)
 
 
 # ============================================================================
@@ -39,7 +39,6 @@ def example_sequential_passes():
     
     # Build a pipeline with multiple passes
     pipeline = (Pipeline()
-                .rocir_coord_lowering()
                 .rocir_to_standard()
                 .canonicalize()
                 .cse())
@@ -47,7 +46,7 @@ def example_sequential_passes():
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline: {pipeline}")
-    # Output: builtin.module(rocir-coord-lowering,rocir-to-standard,canonicalize,cse)
+    # Output: builtin.module(rocir-to-standard,canonicalize,cse)
 
 
 # ============================================================================
@@ -161,7 +160,7 @@ def example_error_handling():
     
     ctx = RAIIMLIRContextModule()
     
-    pipeline = Pipeline().rocir_coord_lowering()
+    pipeline = Pipeline().rocir_to_standard()
     
     try:
         result = pipeline.run(ctx.module)
@@ -183,13 +182,13 @@ def example_string_pipeline():
     # Can pass a Pipeline object or a string
     result = run_pipeline(
         ctx.module,
-        "builtin.module(rocir-coord-lowering,canonicalize)"
+        "builtin.module(rocir-to-standard,canonicalize)"
     )
     
     # Or use Pipeline object
     result = run_pipeline(
         ctx.module,
-        Pipeline().rocir_coord_lowering().canonicalize()
+        Pipeline().rocir_to_standard().canonicalize()
     )
 
 
@@ -200,7 +199,7 @@ def example_string_pipeline():
 def example_pipeline_inspection():
     """Inspect a pipeline before executing it."""
     pipeline = (Pipeline()
-                .rocir_coord_lowering()
+                .rocir_to_standard()
                 .Func(Pipeline().canonicalize())
                 .cse())
     

@@ -1,8 +1,6 @@
 add_mlir_library(RocirTransforms
   RocirToStandard.cpp
-  RocirCoordLowering.cpp
   RocirDCE.cpp
-  RocirLayoutCanonicalize.cpp
   
   PARTIAL_SOURCES_INTENDED
   

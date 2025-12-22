@@ -40,11 +40,6 @@ NB_MODULE(_rocirPasses, m) {
   std::call_once(register_all_passes_once, []() { mlirRegisterAllPasses(); });
 
   // Register Rocir-specific passes
-  // Manual registration for RocirCoordLoweringPass
-  ::mlir::registerPass([]() -> std::unique_ptr<::mlir::Pass> {
-    return ::mlir::rocir::createRocirCoordLoweringPass();
-  });
-
   // TableGen-generated registrations
   ::mlir::registerRocirToStandardPass();
   ::mlir::registerRocirTrivialDCEPass();

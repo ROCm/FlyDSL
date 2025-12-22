@@ -971,9 +971,17 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
             nested_leaf_vals = None
 
     if nested_spec is not None and nested_leaf_vals is not None:
-        # Type carries structure; rank is implied by leaf count.
         result_type = Type.parse(f'!rocir.shape<{nested_spec}>')
-        flat_dims = nested_leaf_vals
+
+        def pack_operands(node):
+            if isinstance(node, (tuple, list)):
+                return make_shape(*node, loc=loc, ip=ip)
+            v = _unwrap_value(node)
+            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.shape<"):
+                return v
+            return v
+
+        operands = [_unwrap_value(pack_operands(d)) for d in dims_list]
     else:
         # Fallback: flat shape only
         flat_dims = _flatten_nested(dims)
@@ -1001,8 +1009,8 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
         else:
             result_type = ShapeType.get(rank)
     
-    # Keep all operands (dense) for compatibility with existing lowering passes
-    operands = [_unwrap_value(d) for d in flat_dims]
+    if nested_spec is None or nested_leaf_vals is None:
+        operands = [_unwrap_value(d) for d in flat_dims]
 
     with ip or InsertionPoint.current:
         return rocir_ops.MakeShapeOp(result_type, operands, loc=loc).result
@@ -1086,8 +1094,19 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
             nested_leaf_vals = None
 
     if nested_spec is not None and nested_leaf_vals is not None:
+        # Type carries structure. Prefer representing structure in operands too by
+        # passing nested !rocir.stride operands for tuple nodes.
         result_type = Type.parse(f'!rocir.stride<{nested_spec}>')
-        flat_strides = nested_leaf_vals
+
+        def pack_operands(node):
+            if isinstance(node, (tuple, list)):
+                return make_stride(*node, loc=loc, ip=ip)
+            v = _unwrap_value(node)
+            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.stride<"):
+                return v
+            return v
+
+        operands = [_unwrap_value(pack_operands(s)) for s in strides_list]
     else:
         flat_strides = _flatten_nested(strides)
         rank = len(flat_strides)
@@ -1113,8 +1132,9 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
         else:
             result_type = StrideType.get(rank)
     
-    # Keep all operands (dense) for compatibility with existing lowering passes
-    operands = [_unwrap_value(s) for s in flat_strides]
+    if nested_spec is None or nested_leaf_vals is None:
+        # Flat: keep dense leaf operands.
+        operands = [_unwrap_value(s) for s in flat_strides]
 
     with ip or InsertionPoint.current:
         return rocir_ops.MakeStrideOp(result_type, operands, loc=loc).result
@@ -1221,42 +1241,46 @@ def make_coord(*coords: Value, loc: Optional[Location] = None, ip: Optional[Inse
     if len(coords) == 1 and isinstance(coords[0], (tuple, list)):
         coords = tuple(coords[0])
 
-    # Build a nested coord type spec (domain unknown => '?' leaves) while flattening leaf values.
-    has_nested = any(isinstance(c, (tuple, list)) for c in coords)
-    if has_nested:
-        child_specs: List[str] = []
-        leaf_vals: List[Value] = []
-
-        def consume_node(node):
-            nonlocal child_specs, leaf_vals
-            if isinstance(node, (tuple, list)):
-                sub_child_specs = []
-                for x in node:
-                    consume_node(x)
-                    sub_child_specs.append(child_specs.pop())
-                child_specs.append("(" + ",".join(sub_child_specs) + ")")
-                return
-
-            v = _unwrap_value(node)
-            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.coord<"):
-                raise ValueError(
-                    "Nested rocir.coord values are not supported as inputs to make_coord; pass leaf index Values instead."
-                )
-            child_specs.append("?")
-            leaf_vals.append(v)
-
-        for c in coords:
-            consume_node(c)
-
-        nested_spec = "(" + ",".join(child_specs) + ")"
-        result_type = Type.parse(f"!rocir.coord<{nested_spec}>")
-        operands = leaf_vals
-    else:
-        rank = len(coords)
-        result_type = CoordType.get(rank)
-        operands = [_unwrap_value(c) for c in coords]
-
     with ip or InsertionPoint.current:
+        # Build a nested coord type spec (domain unknown => '?' leaves). Prefer encoding
+        # structure in operands by nesting rocir.make_coord ops for tuple nodes.
+        has_nested = any(isinstance(c, (tuple, list)) for c in coords)
+        if has_nested:
+            child_specs: List[str] = []
+
+            def build_operand(node):
+                nonlocal child_specs
+                if isinstance(node, (tuple, list)):
+                    sub_specs = []
+                    sub_operands = []
+                    for x in node:
+                        sub_operands.append(build_operand(x))
+                        sub_specs.append(child_specs.pop())
+                    sub_spec = "(" + ",".join(sub_specs) + ")"
+                    child_specs.append(sub_spec)
+                    # For sub-coords, preserve the subtree shape in the type as well.
+                    sub_type = Type.parse(f"!rocir.coord<{sub_spec}>")
+                    return rocir_ops.MakeCoordOp(sub_type, sub_operands, loc=loc, ip=ip).result
+
+                v = _unwrap_value(node)
+                if isinstance(v, Value) and _is_rocir_type(v, "!rocir.coord<"):
+                    # Allow passing a pre-built coord subtree.
+                    child_specs.append("?")
+                    return v
+                child_specs.append("?")
+                return v
+
+            operands = []
+            for c in coords:
+                operands.append(build_operand(c))
+
+            nested_spec = "(" + ",".join(child_specs) + ")"
+            result_type = Type.parse(f"!rocir.coord<{nested_spec}>")
+        else:
+            rank = len(coords)
+            result_type = CoordType.get(rank)
+            operands = [_unwrap_value(c) for c in coords]
+
         return rocir_ops.MakeCoordOp(result_type, operands, loc=loc).result
 
 

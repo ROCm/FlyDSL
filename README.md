@@ -92,7 +92,7 @@ ls dist/
 
 What `run_tests.sh` does (high level):
 
-- **MLIR file tests**: runs `tests/mlir/*.mlir` through `rocir-opt --rocir-coord-lowering`
+- **MLIR file tests**: runs `tests/mlir/*.mlir` through `rocir-opt --rocir-to-standard`
 - **Python IR tests**: runs `tests/python/ir/test_*.py` (no GPU required)
 - **Python examples**: runs `tests/python/examples/test_*.py`
 - **GPU execution tests** (only if ROCm is detected): runs `tests/python/gpu/test_*.py`
@@ -188,7 +188,7 @@ from rocdsl.compiler.pipeline import Pipeline
 
 # Build and run optimization pipeline
 pipeline = Pipeline() \
-    .rocir_coord_lowering() \
+    .rocir_to_standard() \
     .canonicalize() \
     .cse() \
     .rocdl_attach_target(chip="gfx942") \

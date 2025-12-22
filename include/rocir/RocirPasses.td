@@ -47,46 +47,5 @@ def RocirTrivialDCEPass : Pass<"trivial-dce", "::mlir::ModuleOp"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Layout Canonicalization
-//===----------------------------------------------------------------------===//
-
-def RocirLayoutCanonicalizePass : Pass<"rocir-layout-canonicalize", "::mlir::func::FuncOp"> {
-  let summary = "Canonicalize and simplify Layout operations";
-  let description = [{
-    Simplifies layout algebra operations through algebraic identities.
-  }];
-  
-  let constructor = "mlir::rocir::createRocirLayoutCanonicalizePass()";
-}
-
-//===----------------------------------------------------------------------===//
-// Rocir ROCm IR → gpu/rocdl dialect (AMD GPU specific)
-//===----------------------------------------------------------------------===//
-
-def RocirRocmToGPUPass : Pass<"rocir-rocm-to-gpu", "::mlir::gpu::GPUModuleOp"> {
-  let summary = "Lower Rocir ROCm IR to MLIR GPU/ROCDL dialect";
-  let description = [{
-    Converts Rocir ROCm operations to GPU and ROCDL operations for AMD GPUs.
-    
-    Key Transformations:
-    - rocir.rocm.mfma → rocdl.mfma
-    - rocir.rocm.lds_* → gpu.barrier + rocdl.ds_*
-    - rocir.rocm.async_copy → rocdl.buffer_load with async
-    - rocir.rocm.barrier → gpu.barrier
-  }];
-  
-  let constructor = "mlir::rocir::createRocirRocmToGPUPass()";
-  let dependentDialects = [
-    "::mlir::gpu::GPUDialect",
-    "::mlir::ROCDL::ROCDLDialect",
-    "::mlir::vector::VectorDialect"
-  ];
-  
-  let options = [
-    Option<"targetArch", "target-arch", "std::string",
-           /*default=*/"\"gfx942\"",
-           "Target AMD GPU architecture (gfx90a, gfx942, etc.)">
-  ];
-}
 
 #endif // ROCIR_PASSES

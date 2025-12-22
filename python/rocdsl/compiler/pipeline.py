@@ -87,8 +87,13 @@ class Pipeline:
     # ========================================================================
     
     def rocir_coord_lowering(self) -> "Pipeline":
-        """Lower Rocir coordinate operations to arithmetic."""
-        return self.add_pass("rocir-coord-lowering")
+        """Lower Rocir coordinate operations to arithmetic.
+
+        NOTE: This pass used to be a standalone C++ pass (`rocir-coord-lowering`).
+        Coordinate lowering is now included in `rocir-to-standard`, so this method
+        is kept for backward compatibility and is an alias to `rocir_to_standard()`.
+        """
+        return self.rocir_to_standard()
     
     def rocir_to_standard(self) -> "Pipeline":
         """Lower Rocir dialect operations to standard dialects."""
@@ -341,7 +346,7 @@ def lower_rocir_to_standard(module: ir_Module) -> ir_Module:
 
 
 def apply_rocir_coord_lowering(module: ir_Module) -> ir_Module:
-    """Apply the rocir-coord-lowering pass (backward compatibility).
+    """Apply Rocir coordinate lowering (backward compatibility).
     
         Args:
         module: MLIR module containing Rocir coordinate operations.
@@ -349,5 +354,6 @@ def apply_rocir_coord_lowering(module: ir_Module) -> ir_Module:
     Returns:
         The transformed module.
     """
-    pipeline = Pipeline().rocir_coord_lowering()
+    # Coordinate lowering is part of rocir-to-standard now.
+    pipeline = Pipeline().rocir_to_standard()
     return pipeline.run(module)

@@ -16,8 +16,8 @@ branch selection. This module provides an opt-in AST rewrite that transforms:
 
 into:
 
-  with scf.range_(...) as i:   # emits scf.for
-      body(i)
+      with scf.range_(...) as i:   # emits scf.for
+          body(i)
 
 To explicitly request Python unrolling (compile-time loop expansion), use
 `range_constexpr(...)` in the loop iterable:
@@ -912,7 +912,7 @@ def __rocdsl_tree_unflatten(spec, flat):
                                 ctx=ast.Load(),
                             )
                         ],
-                        keywords=[],
+                keywords=[],
                     ),
                 )
             )
@@ -1047,20 +1047,20 @@ def __rocdsl_tree_unflatten(spec, flat):
             lowered = assigns + pre + [with_stmt] + post
         else:
             # No loop-carried vars: use simple scf.range_ lowering.
-            with_call = ast.Call(
-                func=ast.Attribute(
-                    value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
-                    attr="range_",
-                    ctx=ast.Load(),
-                ),
-                args=[ast.Name(id=n, ctx=ast.Load()) for n in tmp_names],
-                keywords=[],
-            )
-            with_stmt = ast.With(
-                items=[ast.withitem(context_expr=with_call, optional_vars=node.target)],
-                body=node.body,
-                type_comment=None,
-            )
+        with_call = ast.Call(
+            func=ast.Attribute(
+                value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
+                attr="range_",
+                ctx=ast.Load(),
+            ),
+            args=[ast.Name(id=n, ctx=ast.Load()) for n in tmp_names],
+            keywords=[],
+        )
+        with_stmt = ast.With(
+            items=[ast.withitem(context_expr=with_call, optional_vars=node.target)],
+            body=node.body,
+            type_comment=None,
+        )
             lowered = assigns + [with_stmt]
 
         for n in lowered:
