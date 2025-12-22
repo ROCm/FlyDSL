@@ -219,19 +219,17 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                         c_N = rocir.const_index(N)
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-
-                        if_load = rocir.scf_ext.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
-                        with if_load.then():
-                            val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
-                            if dtype_str == "bf16":
-                                val_c = rocir.arith.extf(compute_type, unwrap(val_e))
-                                rocir.scf_ext.yield_([unwrap(val_c)])
-                            else:
-                                rocir.scf_ext.yield_([unwrap(val_e)])
-                        with if_load.else_():
-                            rocir.scf_ext.yield_([unwrap(c_neg_inf)])
-
-                        row_buffer.append((if_load.results[0], is_valid))
+                        # Avoid value-yielding scf.if here: clamp index to stay in-bounds,
+                        # then mask the loaded value with select.
+                        #
+                        # NOTE: This may issue an extra in-bounds load for invalid lanes on
+                        # the tail tile, but keeps codegen simple and avoids explicit IfOp.
+                        c_last = rocir.const_index(N - 1)
+                        idx_safe = rocir.arith.SelectOp(unwrap(is_valid), unwrap(idx_k), unwrap(c_last)).result
+                        val_e = tensor_A[(unwrap(row), unwrap(idx_safe))]
+                        val = unwrap(val_e) if dtype_str != "bf16" else rocir.arith.extf(compute_type, unwrap(val_e))
+                        val = rocir.arith.SelectOp(unwrap(is_valid), unwrap(val), unwrap(c_neg_inf)).result
+                        row_buffer.append((val, is_valid))
 
             # 2. Local Max
             thread_max = unwrap(c_neg_inf)
@@ -427,8 +425,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         val_exp, valid = item
 
                         # If valid, store
-                        if_store = rocir.scf_ext.IfOp(unwrap(valid))
-                        with if_store:
+                        if valid:
                             norm_val = rocir.arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
                             if dtype_str == "bf16":
                                 norm_val = rocir.arith.truncf(elem_type, unwrap(norm_val))
@@ -436,7 +433,6 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             c_k = rocir.const_index(k)
                             idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                             tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
-                            rocir.scf_ext.yield_([])
 
     return _Softmax()
 
