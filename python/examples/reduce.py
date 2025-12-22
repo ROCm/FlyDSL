@@ -83,14 +83,13 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, rocir, s_red
                 unwrap(lane_i32),
                 unwrap(arith.constant(NUM_WAVES, type=T.i32()).value),
             ).result
-            # Avoid value-yielding scf.if: clamp lane index and mask via select.
-            lane_idx = rocir.arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
-            lane_idx0 = unwrap(c_zero_idx)
-            lane_idx_safe = rocir.arith.SelectOp(unwrap(in_range), unwrap(lane_idx), unwrap(lane_idx0)).result
-            red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx_safe)), layout_red)
-            v = s_red_tv[unwrap(red_idx)]
             neutral = c_neg_inf if reduce_op_name == "max" else c_zero
-            ww = rocir.arith.SelectOp(unwrap(in_range), unwrap(v), unwrap(neutral)).result
+            ww = unwrap(neutral)
+            if in_range:
+                lane_idx = rocir.arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
+                v = s_red_tv[unwrap(red_idx)]
+                ww = unwrap(v)
             for sh in [32, 16, 8, 4, 2, 1]:
                 off = arith.constant(sh, type=T.i32()).value
                 peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
@@ -166,17 +165,12 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
                 unwrap(lane_i32),
                 unwrap(arith.constant(T.i32(), NUM_WAVES)),
             ).result
-            # Avoid value-yielding scf.if: clamp lane index and mask via select.
-            lane_idx = arith_ops.IndexCastOp(T.index(), unwrap(lane_i32)).result
-            lane_idx0 = unwrap(zero_idx)
-            lane_idx_safe = arith_ops.SelectOp(unwrap(in_range), unwrap(lane_idx), unwrap(lane_idx0)).result
-            red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx_safe)), layout_red)
-            v = scratch_tv[unwrap(red_idx)]
-            ww = arith_ops.SelectOp(
-                unwrap(in_range),
-                unwrap(v),
-                unwrap(arith.constant(T.f32(), 0.0).value),
-            ).result
+            ww = unwrap(arith.constant(T.f32(), 0.0).value)
+            if in_range:
+                lane_idx = arith_ops.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
+                v = scratch_tv[unwrap(red_idx)]
+                ww = unwrap(v)
             for sh in [32, 16, 8, 4, 2, 1]:
                 off = arith.constant(T.i32(), sh)
                 peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult

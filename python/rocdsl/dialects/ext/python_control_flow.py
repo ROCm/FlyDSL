@@ -261,34 +261,279 @@ def __rocdsl_tree_unflatten(spec, flat):
             keywords=[],
         )
 
+        # Detect simple assignments to names in the top-level of the branches.
+        # These are candidates for phi-style lowering (scf.if results) so that
+        # Python variables assigned in a dynamic if behave like SSA values.
+        def _assigned_simple_names(stmts: list[ast.stmt]) -> set[str]:
+            out: set[str] = set()
+            for s in stmts:
+                if isinstance(s, ast.Assign):
+                    for t in s.targets:
+                        if isinstance(t, ast.Name):
+                            out.add(t.id)
+                elif isinstance(s, ast.AnnAssign):
+                    if isinstance(s.target, ast.Name):
+                        out.add(s.target.id)
+                elif isinstance(s, ast.AugAssign):
+                    if isinstance(s.target, ast.Name):
+                        out.add(s.target.id)
+            return out
+
+        carry_vars = sorted(_assigned_simple_names(list(node.body)) | _assigned_simple_names(list(node.orelse)))
         has_else = bool(node.orelse)
         ifop_tmp = self._fresh("ifop")
-        create_ifop = ast.Assign(
-            targets=[ast.Name(id=ifop_tmp, ctx=ast.Store())],
-            value=ast.Call(
-                func=ast.Attribute(value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()), attr="IfOp", ctx=ast.Load()),
-                args=[ast.Name(id=cond_tmp, ctx=ast.Load())],
-                keywords=[ast.keyword(arg="hasElse", value=ast.Constant(True))] if has_else else [],
-            ),
-        )
 
-        with_then = ast.With(
-            items=[
-                ast.withitem(
-                    context_expr=ast.Call(
-                        func=ast.Attribute(value=ast.Name(id=ifop_tmp, ctx=ast.Load()), attr="then", ctx=ast.Load()),
-                        args=[],
-                        keywords=[],
+        dyn_body: list[ast.stmt] = []
+
+        if carry_vars:
+            # Save pre-if values so we can:
+            # - compute result types from the pre-state
+            # - reset Python variables before building the else-region (since both
+            #   regions are built sequentially in Python)
+            pre_names: dict[str, str] = {}
+            spec_names: dict[str, str] = {}
+            types_names: dict[str, str] = {}
+            flag_names: dict[str, str] = {}
+            had_names: dict[str, str] = {}
+
+            for v in carry_vars:
+                pre_n = self._fresh(f"if_pre_{v}")
+                pre_names[v] = pre_n
+                spec_n = self._fresh(f"if_spec_{v}")
+                spec_names[v] = spec_n
+                types_n = self._fresh(f"if_types_{v}")
+                types_names[v] = types_n
+                flag_n = self._fresh(f"if_carry_{v}")
+                flag_names[v] = flag_n
+                had_n = self._fresh(f"if_had_{v}")
+                had_names[v] = had_n
+                flat_n = self._fresh(f"if_flat_{v}")
+
+                # Default: not carried.
+                dyn_body.append(ast.Assign(targets=[ast.Name(id=flag_n, ctx=ast.Store())], value=ast.Constant(False)))
+                dyn_body.append(ast.Assign(targets=[ast.Name(id=types_n, ctx=ast.Store())], value=ast.List(elts=[], ctx=ast.Load())))
+                dyn_body.append(ast.Assign(targets=[ast.Name(id=had_n, ctx=ast.Store())], value=ast.Constant(False)))
+                dyn_body.append(ast.Assign(targets=[ast.Name(id=pre_n, ctx=ast.Store())], value=ast.Constant(None)))
+
+                # Try to capture/flatten the pre-state. If the variable is not yet bound
+                # (NameError/UnboundLocalError) or not a tree of MLIR Values (TypeError),
+                # we simply don't treat it as a phi variable.
+                try_body = [
+                    ast.Assign(
+                        targets=[ast.Name(id=pre_n, ctx=ast.Store())],
+                        value=ast.Name(id=v, ctx=ast.Load()),
                     ),
-                    optional_vars=None,
+                    ast.Assign(targets=[ast.Name(id=had_n, ctx=ast.Store())], value=ast.Constant(True)),
+                    ast.Assign(
+                        targets=[
+                            ast.Tuple(
+                                elts=[
+                                    ast.Name(id=flat_n, ctx=ast.Store()),
+                                    ast.Name(id=spec_n, ctx=ast.Store()),
+                                ],
+                                ctx=ast.Store(),
+                            )
+                        ],
+                        value=ast.Call(
+                            func=ast.Name(id="__rocdsl_tree_flatten", ctx=ast.Load()),
+                            args=[ast.Name(id=pre_n, ctx=ast.Load())],
+                            keywords=[],
+                        ),
+                    ),
+                    ast.Assign(
+                        targets=[ast.Name(id=types_n, ctx=ast.Store())],
+                        value=ast.ListComp(
+                            elt=ast.Attribute(
+                                value=ast.Call(
+                                    func=ast.Name(id="__rocdsl_unwrap", ctx=ast.Load()),
+                                    args=[ast.Name(id="__rocdsl_x", ctx=ast.Load())],
+                                    keywords=[],
+                                ),
+                                attr="type",
+                                ctx=ast.Load(),
+                            ),
+                            generators=[
+                                ast.comprehension(
+                                    target=ast.Name(id="__rocdsl_x", ctx=ast.Store()),
+                                    iter=ast.Name(id=flat_n, ctx=ast.Load()),
+                                    ifs=[],
+                                    is_async=0,
+                                )
+                            ],
+                        ),
+                    ),
+                    ast.Assign(targets=[ast.Name(id=flag_n, ctx=ast.Store())], value=ast.Constant(True)),
+                ]
+                exc_tuple = ast.Tuple(
+                    elts=[ast.Name(id="NameError", ctx=ast.Load()), ast.Name(id="UnboundLocalError", ctx=ast.Load()), ast.Name(id="TypeError", ctx=ast.Load())],
+                    ctx=ast.Load(),
                 )
-            ],
-            body=node.body,
-            type_comment=None,
-        )
+                dyn_body.append(
+                    ast.Try(
+                        body=try_body,
+                        handlers=[ast.ExceptHandler(type=exc_tuple, name=None, body=[ast.Pass()])],
+                        orelse=[],
+                        finalbody=[],
+                    )
+                )
 
-        dyn_body = [create_ifop, with_then]
-        if has_else:
+            # Build results type list dynamically from successfully-carried vars.
+            results_types_name = self._fresh("if_result_types")
+            dyn_body.append(ast.Assign(targets=[ast.Name(id=results_types_name, ctx=ast.Store())], value=ast.List(elts=[], ctx=ast.Load())))
+            for v in carry_vars:
+                dyn_body.append(
+                    ast.If(
+                        test=ast.Name(id=flag_names[v], ctx=ast.Load()),
+                        body=[
+                            ast.AugAssign(
+                                target=ast.Name(id=results_types_name, ctx=ast.Store()),
+                                op=ast.Add(),
+                                value=ast.Name(id=types_names[v], ctx=ast.Load()),
+                            )
+                        ],
+                        orelse=[],
+                    )
+                )
+
+            # ifop = scf.IfOp(cond, results_types, hasElse=True)
+            dyn_body.append(
+                ast.Assign(
+                    targets=[ast.Name(id=ifop_tmp, ctx=ast.Store())],
+                    value=ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
+                            attr="IfOp",
+                            ctx=ast.Load(),
+                        ),
+                        args=[
+                            ast.Name(id=cond_tmp, ctx=ast.Load()),
+                            ast.Name(id=results_types_name, ctx=ast.Load()),
+                        ],
+                        keywords=[ast.keyword(arg="hasElse", value=ast.Constant(True))],
+                    ),
+                )
+            )
+
+            # then:
+            yield_vals_name = self._fresh("if_yield_vals")
+            then_yield_build: list[ast.stmt] = [
+                ast.Assign(targets=[ast.Name(id=yield_vals_name, ctx=ast.Store())], value=ast.List(elts=[], ctx=ast.Load()))
+            ]
+            for v in carry_vars:
+                flatcur = self._fresh(f"if_flatcur_{v}")
+                speccur = self._fresh(f"if_speccur_{v}")
+                then_yield_build.append(
+                    ast.If(
+                        test=ast.Name(id=flag_names[v], ctx=ast.Load()),
+                        body=[
+                            ast.Assign(
+                                targets=[
+                                    ast.Tuple(
+                                        elts=[ast.Name(id=flatcur, ctx=ast.Store()), ast.Name(id=speccur, ctx=ast.Store())],
+                                        ctx=ast.Store(),
+                                    )
+                                ],
+                                value=ast.Call(
+                                    func=ast.Name(id="__rocdsl_tree_flatten", ctx=ast.Load()),
+                                    args=[ast.Name(id=v, ctx=ast.Load())],
+                                    keywords=[],
+                                ),
+                            ),
+                            ast.AugAssign(
+                                target=ast.Name(id=yield_vals_name, ctx=ast.Store()),
+                                op=ast.Add(),
+                                value=ast.Name(id=flatcur, ctx=ast.Load()),
+                            ),
+                        ],
+                        orelse=[],
+                    )
+                )
+            then_yield_build.append(
+                ast.Expr(
+                    value=ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
+                            attr="yield_",
+                            ctx=ast.Load(),
+                        ),
+                        args=[ast.Name(id=yield_vals_name, ctx=ast.Load())],
+                        keywords=[],
+                    )
+                )
+            )
+
+            with_then = ast.With(
+                items=[
+                    ast.withitem(
+                        context_expr=ast.Call(
+                            func=ast.Attribute(value=ast.Name(id=ifop_tmp, ctx=ast.Load()), attr="then", ctx=ast.Load()),
+                            args=[],
+                            keywords=[],
+                        ),
+                        optional_vars=None,
+                    )
+                ],
+                body=list(node.body) + then_yield_build,
+                type_comment=None,
+            )
+
+            # else: reset python vars back to pre-state, then build else body, then yield.
+            else_reset: list[ast.stmt] = []
+            for v in carry_vars:
+                else_reset.append(
+                    ast.If(
+                        test=ast.Name(id=had_names[v], ctx=ast.Load()),
+                        body=[ast.Assign(targets=[ast.Name(id=v, ctx=ast.Store())], value=ast.Name(id=pre_names[v], ctx=ast.Load()))],
+                        orelse=[ast.Assign(targets=[ast.Name(id=v, ctx=ast.Store())], value=ast.Constant(None))],
+                    )
+                )
+
+            else_yield_build: list[ast.stmt] = [
+                ast.Assign(targets=[ast.Name(id=yield_vals_name, ctx=ast.Store())], value=ast.List(elts=[], ctx=ast.Load()))
+            ]
+            for v in carry_vars:
+                flatcur = self._fresh(f"if_flatcur_else_{v}")
+                speccur = self._fresh(f"if_speccur_else_{v}")
+                else_yield_build.append(
+                    ast.If(
+                        test=ast.Name(id=flag_names[v], ctx=ast.Load()),
+                        body=[
+                            ast.Assign(
+                                targets=[
+                                    ast.Tuple(
+                                        elts=[ast.Name(id=flatcur, ctx=ast.Store()), ast.Name(id=speccur, ctx=ast.Store())],
+                                        ctx=ast.Store(),
+                                    )
+                                ],
+                                value=ast.Call(
+                                    func=ast.Name(id="__rocdsl_tree_flatten", ctx=ast.Load()),
+                                    args=[ast.Name(id=v, ctx=ast.Load())],
+                                    keywords=[],
+                                ),
+                            ),
+                            ast.AugAssign(
+                                target=ast.Name(id=yield_vals_name, ctx=ast.Store()),
+                                op=ast.Add(),
+                                value=ast.Name(id=flatcur, ctx=ast.Load()),
+                            ),
+                        ],
+                        orelse=[],
+                    )
+                )
+            else_yield_build.append(
+                ast.Expr(
+                    value=ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
+                            attr="yield_",
+                            ctx=ast.Load(),
+                        ),
+                        args=[ast.Name(id=yield_vals_name, ctx=ast.Load())],
+                        keywords=[],
+                    )
+                )
+            )
+
             with_else = ast.With(
                 items=[
                     ast.withitem(
@@ -300,10 +545,110 @@ def __rocdsl_tree_unflatten(spec, flat):
                         optional_vars=None,
                     )
                 ],
-                body=node.orelse,
+                body=else_reset + list(node.orelse) + else_yield_build,
                 type_comment=None,
             )
-            dyn_body.append(with_else)
+
+            dyn_body.extend([with_then, with_else])
+
+            # After building both regions, restore all branch-assigned Python names to
+            # their pre-state (or None) to avoid leaking Values defined in one region
+            # into later codegen (which can cause dominance issues).
+            for v in carry_vars:
+                dyn_body.append(
+                    ast.If(
+                        test=ast.Name(id=had_names[v], ctx=ast.Load()),
+                        body=[ast.Assign(targets=[ast.Name(id=v, ctx=ast.Store())], value=ast.Name(id=pre_names[v], ctx=ast.Load()))],
+                        orelse=[ast.Assign(targets=[ast.Name(id=v, ctx=ast.Store())], value=ast.Constant(None))],
+                    )
+                )
+
+            # Unflatten results back into variables.
+            post_rest = self._fresh("if_post_rest")
+            dyn_body.append(
+                ast.Assign(
+                    targets=[ast.Name(id=post_rest, ctx=ast.Store())],
+                    value=ast.Call(
+                        func=ast.Name(id="list", ctx=ast.Load()),
+                        args=[
+                            ast.Attribute(value=ast.Name(id=ifop_tmp, ctx=ast.Load()), attr="results", ctx=ast.Load())
+                        ],
+                        keywords=[],
+                    ),
+                )
+            )
+            for v in carry_vars:
+                obj_n = self._fresh(f"if_post_obj_{v}")
+                dyn_body.append(
+                    ast.If(
+                        test=ast.Name(id=flag_names[v], ctx=ast.Load()),
+                        body=[
+                            ast.Assign(
+                                targets=[
+                                    ast.Tuple(
+                                        elts=[ast.Name(id=obj_n, ctx=ast.Store()), ast.Name(id=post_rest, ctx=ast.Store())],
+                                        ctx=ast.Store(),
+                                    )
+                                ],
+                                value=ast.Call(
+                                    func=ast.Name(id="__rocdsl_tree_unflatten", ctx=ast.Load()),
+                                    args=[ast.Name(id=spec_names[v], ctx=ast.Load()), ast.Name(id=post_rest, ctx=ast.Load())],
+                                    keywords=[],
+                                ),
+                            ),
+                            ast.Assign(
+                                targets=[ast.Name(id=v, ctx=ast.Store())],
+                                value=ast.Name(id=obj_n, ctx=ast.Load()),
+                            ),
+                        ],
+                        orelse=[],
+                    )
+                )
+        else:
+            # No tracked assignments: just emit scf.if for side effects / control.
+            create_ifop = ast.Assign(
+                targets=[ast.Name(id=ifop_tmp, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id=self.opts.scf_alias, ctx=ast.Load()),
+                        attr="IfOp",
+                        ctx=ast.Load(),
+                    ),
+                    args=[ast.Name(id=cond_tmp, ctx=ast.Load())],
+                    keywords=[ast.keyword(arg="hasElse", value=ast.Constant(True))] if has_else else [],
+                ),
+            )
+            with_then = ast.With(
+                items=[
+                    ast.withitem(
+                        context_expr=ast.Call(
+                            func=ast.Attribute(value=ast.Name(id=ifop_tmp, ctx=ast.Load()), attr="then", ctx=ast.Load()),
+                            args=[],
+                            keywords=[],
+                        ),
+                        optional_vars=None,
+                    )
+                ],
+                body=node.body,
+                type_comment=None,
+            )
+            dyn_body = [create_ifop, with_then]
+            if has_else:
+                with_else = ast.With(
+                    items=[
+                        ast.withitem(
+                            context_expr=ast.Call(
+                                func=ast.Attribute(value=ast.Name(id=ifop_tmp, ctx=ast.Load()), attr="else_", ctx=ast.Load()),
+                                args=[],
+                                keywords=[],
+                            ),
+                            optional_vars=None,
+                        )
+                    ],
+                    body=node.orelse,
+                    type_comment=None,
+                )
+                dyn_body.append(with_else)
 
         # else: keep python if semantics (compile-time selection)
         py_if = ast.If(

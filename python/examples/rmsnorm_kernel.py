@@ -187,15 +187,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        # Avoid value-yielding scf.if: clamp index and mask with select.
-                        c_last = rocir.const_index(N - 1)
-                        idx_safe = rocir.arith.SelectOp(unwrap(is_valid), unwrap(idx_k), unwrap(c_last)).result
-                        v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_safe))]
-                        v_e = rocir.arith.SelectOp(
-                            unwrap(is_valid),
-                            unwrap(v_e),
-                            unwrap(arith.constant(elem_type, 0.0).value),
-                        ).result
+                        v_e = arith.constant(elem_type, 0.0).value
+                        if is_valid:
+                            v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                         v = unwrap(v_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(v_e))
                         v2 = rocir.arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
                         thread_sumsq = rocir.arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result

@@ -112,7 +112,6 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
             base_ptr = allocator.get_base()
             s_red = _state["smem_red"](base_ptr).get()
-            # Rocir-style: tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_SIZE * VEC_WIDTH  # python int
             tensor_A = rocir.make_tensor(A, shape=(M, N), strides=(N, 1))
@@ -219,16 +218,13 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                         c_N = rocir.const_index(N)
                         is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        # Avoid value-yielding scf.if here: clamp index to stay in-bounds,
-                        # then mask the loaded value with select.
-                        #
-                        # NOTE: This may issue an extra in-bounds load for invalid lanes on
-                        # the tail tile, but keeps codegen simple and avoids explicit IfOp.
-                        c_last = rocir.const_index(N - 1)
-                        idx_safe = rocir.arith.SelectOp(unwrap(is_valid), unwrap(idx_k), unwrap(c_last)).result
-                        val_e = tensor_A[(unwrap(row), unwrap(idx_safe))]
-                        val = unwrap(val_e) if dtype_str != "bf16" else rocir.arith.extf(compute_type, unwrap(val_e))
-                        val = rocir.arith.SelectOp(unwrap(is_valid), unwrap(val), unwrap(c_neg_inf)).result
+                        val = unwrap(c_neg_inf)
+                        if is_valid:
+                            val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
+                            if dtype_str == "bf16":
+                                val = rocir.arith.extf(compute_type, unwrap(val_e)).result
+                            else:
+                                val = unwrap(val_e)
                         row_buffer.append((val, is_valid))
 
             # 2. Local Max
