@@ -119,27 +119,36 @@ static LayoutNode deserializeLayoutNode(Operation* op, PatternRewriter& rewriter
         if (code == -1) {
             // Leaf
             int64_t dimVal = (dimIdx < static_cast<int>(dims.size())) ? dims[dimIdx++] : -1;
-            
-            if (dimVal != -1) {
-                // Constant from Type
-                Value c = rewriter.create<arith::ConstantIndexOp>(loc, dimVal);
-                return LayoutNode(c);
-            } else {
-                // Dynamic from operands
-                if (valueIdx >= static_cast<int>(values.size())) {
-                    // This should not happen if IR is valid vs Type
-                    return LayoutNode(Value()); 
-                }
-                Value v = values[valueIdx++];
-                
+
+            // IMPORTANT: keep operands aligned with leaf positions even when the type provides
+            // a constant dimVal. Our Python builders currently keep all leaf operands (dense),
+            // including constants, so we must always consume one operand per leaf when available.
+            Value v;
+            if (valueIdx < static_cast<int>(values.size()))
+                v = values[valueIdx++];
+
+            // If the operand itself is a nested make_shape/make_stride, recurse (even if type had a constant).
+            if (v) {
                 if (auto *defOp = v.getDefiningOp()) {
                     auto opName = defOp->getName().getStringRef();
                     if (opName == "rocir.make_shape" || opName == "rocir.make_stride") {
                         return deserializeLayoutNode(defOp, rewriter, loc);
                     }
                 }
-                return LayoutNode(v);
             }
+
+            if (dimVal != -1) {
+                // Prefer the type-provided constant.
+                Value c = rewriter.create<arith::ConstantIndexOp>(loc, dimVal);
+                return LayoutNode(c);
+            }
+
+            // Dynamic from operands
+            if (!v) {
+                // This should not happen if IR is valid vs Type
+                return LayoutNode(Value());
+            }
+            return LayoutNode(v);
         } else {
             std::vector<LayoutNode> children;
             for (int i = 0; i < code; ++i) {
@@ -1200,6 +1209,41 @@ struct GetOpLowering : public RewritePattern {
   }
 };
 
+// Traverse a LayoutNode and apply a callback to each leaf in left-to-right order.
+template <typename F>
+static LogicalResult forEachLeafInOrder(const LayoutNode &n, F &&f) {
+  if (n.isLeaf) {
+    return f(n.value);
+  }
+  for (auto &c : n.children) {
+    if (failed(forEachLeafInOrder(c, f)))
+      return failure();
+  }
+  return success();
+}
+
+// Traverse a LayoutNode in reverse leaf order (right-to-left) and apply a callback.
+template <typename F>
+static LogicalResult forEachLeafInReverseOrder(const LayoutNode &n, F &&f) {
+  if (n.isLeaf) {
+    return f(n.value);
+  }
+  for (auto it = n.children.rbegin(); it != n.children.rend(); ++it) {
+    if (failed(forEachLeafInReverseOrder(*it, f)))
+      return failure();
+  }
+  return success();
+}
+
+static int64_t countLeaves(const LayoutNode &n) {
+  if (n.isLeaf)
+    return 1;
+  int64_t c = 0;
+  for (auto &x : n.children)
+    c += countLeaves(x);
+  return c;
+}
+
 
 // Lower rank to a constant.
 struct RankOpLowering : public RewritePattern {
@@ -1252,31 +1296,34 @@ struct Crd2IdxOpLowering : public RewritePattern {
       return failure();
     
     auto coordValues = coordOp->getOperands();
-    auto strideValues = strideOp->getOperands();
-    
-    if (coordValues.size() != strideValues.size())
+
+    // Deserialize stride into a nested tree and traverse leaves without flattening into a list.
+    LayoutNode strideNode = deserializeLayoutNode(strideOp, rewriter, loc);
+    int64_t strideLeaves = countLeaves(strideNode);
+    if ((int64_t)coordValues.size() != strideLeaves)
       return failure();
-    
-    if (coordValues.empty()) {
-      auto zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-      rewriter.replaceOp(op, zero.getResult());
+
+    // Compute sum(coord_leaf[i] * stride_leaf[i]) in leaf order.
+    Value acc = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+    int64_t coordIdx = 0;
+    auto walkResult = forEachLeafInOrder(strideNode, [&](Value strideLeaf) -> LogicalResult {
+      if (!strideLeaf || !strideLeaf.getType().isIndex())
+        return failure();
+      if (coordIdx >= (int64_t)coordValues.size())
+        return failure();
+      Value coordLeaf = coordValues[coordIdx++];
+      if (!coordLeaf || !coordLeaf.getType().isIndex())
+        return failure();
+      auto prod = rewriter.create<arith::MulIOp>(loc, coordLeaf, strideLeaf).getResult();
+      acc = rewriter.create<arith::AddIOp>(loc, acc, prod).getResult();
       return success();
-    }
-    
-    // Compute sum(coord[i] * stride[i])
-    Value result = nullptr;
-    for (size_t i = 0; i < coordValues.size(); ++i) {
-      auto product = rewriter.create<arith::MulIOp>(loc, 
-        coordValues[i], strideValues[i]);
-      
-      if (result) {
-        result = rewriter.create<arith::AddIOp>(loc, result, product.getResult());
-      } else {
-        result = product.getResult();
-      }
-    }
-    
-    rewriter.replaceOp(op, result);
+    });
+    if (failed(walkResult))
+      return failure();
+    if (coordIdx != (int64_t)coordValues.size())
+      return failure();
+
+    rewriter.replaceOp(op, acc);
     return success();
   }
 };
@@ -1300,37 +1347,55 @@ struct Idx2CrdOpLowering : public RewritePattern {
     if (!shapeOp || shapeOp->getName().getStringRef() != "rocir.make_shape")
       return failure();
     
-    auto shapes = shapeOp->getOperands();
-    if (shapes.empty())
+    // Deserialize shape into a nested tree and traverse leaves in reverse order.
+    LayoutNode shapeNode = deserializeLayoutNode(shapeOp, rewriter, loc);
+    int64_t totalLeaves = countLeaves(shapeNode);
+    if (totalLeaves <= 0)
       return failure();
-    
-    // Compute coordinate: for row-major (stride-1 last dim):
-    // coord[n-1] = idx % shape[n-1]
-    // coord[n-2] = (idx / shape[n-1]) % shape[n-2]
-    // coord[0] = idx / (shape[1] * ... * shape[n-1])
-    
-    SmallVector<Value> coords;
-    Value remaining = idx;
-    
-    // For each dimension from last to first
-    for (int i = shapes.size() - 1; i >= 0; --i) {
-      if (i == static_cast<int>(shapes.size()) - 1) {
-        // Last dimension: coord = idx % shape
-        auto coord = rewriter.create<arith::RemSIOp>(loc, remaining, shapes[i]);
-        coords.insert(coords.begin(), coord.getResult());
-        remaining = rewriter.create<arith::DivSIOp>(loc, remaining, shapes[i]);
-      } else if (i == 0) {
-        // First dimension: coord = remaining
-        coords.insert(coords.begin(), remaining);
-      } else {
-        // Middle dimensions: coord = remaining % shape, then div
-        auto coord = rewriter.create<arith::RemSIOp>(loc, remaining, shapes[i]);
-        coords.insert(coords.begin(), coord.getResult());
-        remaining = rewriter.create<arith::DivSIOp>(loc, remaining, shapes[i]);
-      }
+
+    // Ensure result coord type rank matches leaf count when available.
+    if (auto ct = dyn_cast<CoordType>(op->getResult(0).getType())) {
+      if (ct.getRank() >= 0 && ct.getRank() != (int)totalLeaves)
+        return failure();
     }
-    
-    // Create make_coord with computed coordinates
+
+    // Compute row-major coordinates over the leaf dimensions in left-to-right order,
+    // without flattening the shape tree into a list.
+    //
+    // Process leaves in reverse order:
+    //   for last..1: coord = remaining % dim; remaining = remaining / dim
+    //   for first:   coord = remaining
+    SmallVector<Value> coordsReversed;
+    coordsReversed.reserve(totalLeaves);
+    Value remaining = idx;
+    int64_t processed = 0;
+
+    auto walkResult = forEachLeafInReverseOrder(shapeNode, [&](Value dim) -> LogicalResult {
+      if (!dim || !dim.getType().isIndex())
+        return failure();
+
+      if (processed == totalLeaves - 1) {
+        // First dimension (in forward order): coord = remaining.
+        coordsReversed.push_back(remaining);
+      } else {
+        auto coord = rewriter.create<arith::RemSIOp>(loc, remaining, dim).getResult();
+        coordsReversed.push_back(coord);
+        remaining = rewriter.create<arith::DivSIOp>(loc, remaining, dim).getResult();
+      }
+      ++processed;
+      return success();
+    });
+    if (failed(walkResult))
+      return failure();
+    if (processed != totalLeaves)
+      return failure();
+
+    SmallVector<Value> coords;
+    coords.reserve(totalLeaves);
+    for (auto it = coordsReversed.rbegin(); it != coordsReversed.rend(); ++it)
+      coords.push_back(*it);
+
+    // Create make_coord with computed coordinates (operands are leaf values; nested structure lives in the type).
     auto coordType = op->getResult(0).getType();
     auto makeCoord = rewriter.create<MakeCoordOp>(loc, coordType, coords);
     rewriter.replaceOp(op, makeCoord.getResult());
@@ -1416,11 +1481,36 @@ struct CoalesceOpLowering : public OpRewritePattern<CoalesceOp> {
         strideOp->getName().getStringRef() != "rocir.make_stride")
       return failure();
     
-    auto shapeDims = shapeOp->getOperands();
-    auto strideDims = strideOp->getOperands();
+    // Collect leaf index values without flattening into a list first:
+    // We deserialize to a nested tree and then iterate leaves in order.
+    LayoutNode shapeNode = deserializeLayoutNode(shapeOp, rewriter, loc);
+    LayoutNode strideNode = deserializeLayoutNode(strideOp, rewriter, loc);
+
+    SmallVector<Value> shapeDims;
+    SmallVector<Value> strideDims;
+    shapeDims.reserve(countLeaves(shapeNode));
+    strideDims.reserve(countLeaves(strideNode));
+
+    if (failed(forEachLeafInOrder(shapeNode, [&](Value v) -> LogicalResult {
+          if (!v || !v.getType().isIndex())
+            return failure();
+          shapeDims.push_back(v);
+          return success();
+        })))
+      return failure();
+
+    if (failed(forEachLeafInOrder(strideNode, [&](Value v) -> LogicalResult {
+          if (!v || !v.getType().isIndex())
+            return failure();
+          strideDims.push_back(v);
+          return success();
+        })))
+      return failure();
     
     if (shapeDims.size() != strideDims.size() || shapeDims.empty())
       return failure();
+
+    // (types already checked during leaf collection)
     
     // Coalesce: combine consecutive modes where stride[i]*shape[i] == stride[i+1]
     SmallVector<Value> coalescedShape;

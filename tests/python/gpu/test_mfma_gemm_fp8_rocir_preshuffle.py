@@ -342,7 +342,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             # b_vals_init = []
             # for b_list in b_vals_init_raw:
             #     b_vals_init.extend(b_list)
-
+            
             # Loop-carried state (lists of MLIR Values)
             accs = acc_inits
             vec_a_parts = vec_a_inits
@@ -516,7 +516,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             # Main Loop (runs 0 to K-tile_k)
             # Peel off the last iteration
             c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
-
+            
             for k_iv in range(c0, c_k_main, c_tile_k):
                 accs, vec_a_parts, b_vals, _ = emit_tile(k_iv, accs, vec_a_parts, b_vals, is_last_tile=False)
             

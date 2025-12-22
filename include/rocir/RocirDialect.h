@@ -76,12 +76,22 @@ public:
   StrideType getStrideType() const;
 };
 
-class CoordType : public Type::TypeBase<CoordType, Type, detail::RankedTypeStorage> {
+class CoordType : public Type::TypeBase<CoordType, Type, detail::StructuredTypeStorage> {
 public:
   using Base::Base;
   static constexpr ::llvm::StringLiteral name = "rocir.coord";
   static CoordType get(MLIRContext *context, int rank);
+  /// Create a CoordType from a canonical textual spec, e.g. "(9,(4,8))" or "(?,(?,?))".
+  /// For CoordType, the spec represents the *domain shape* (not concrete coordinate values).
+  static CoordType get(MLIRContext *context, ::llvm::StringRef spec);
+  /// Create a CoordType from a tuple key (structure encoding + flattened dims).
+  static CoordType get(MLIRContext *context,
+                       ::llvm::ArrayRef<int32_t> structure,
+                       ::llvm::ArrayRef<int64_t> dims);
   int getRank() const;
+  ArrayRef<int32_t> getStructure() const;
+  ::llvm::StringRef getSpec() const;
+  ::llvm::ArrayRef<int64_t> getDims() const;
 };
 
 } // namespace mlir::rocir

@@ -289,7 +289,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             # Main Loop: 0 to K-tile_k
             # c_k_main = c_k - c_tile_k_idx
             c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
-
+            
             # Python `for` + reassignment is auto-lowered into scf.for with iter_args/yield/results.
             acc_iter = acc_init
             vec_a_curr = vec_a_init
@@ -298,27 +298,27 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                 # 1. Store current to LDS
                 vector.StoreOp(vec_a_curr, lds_a, [unwrap(lds_write_idx)])
                 vector.StoreOp(vec_b_curr, lds_b, [unwrap(lds_write_idx)])
-
+                
                 # 2. Prefetch Next
                 k_next = _arith_mlir.AddIOp(unwrap(k_curr), unwrap(c_tile_k)).result
                 vec_a_next, vec_b_next = load_global(k_next)
-
+                
                 gpu.barrier()
-
+                
                 # 3. Compute
                 acc_iter = compute_tile(acc_iter)
-
+                
                 gpu.barrier()
-
+                
                 # Carry
                 vec_a_curr = vec_a_next
                 vec_b_curr = vec_b_next
-
+            
             # Epilogue: Last Tile
             final_acc = acc_iter
             last_vec_a = vec_a_curr
             last_vec_b = vec_b_curr
-
+            
             vector.StoreOp(last_vec_a, lds_a, [unwrap(lds_write_idx)])
             vector.StoreOp(last_vec_b, lds_b, [unwrap(lds_write_idx)])
             

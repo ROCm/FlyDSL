@@ -179,10 +179,31 @@ def _extract_rank_from_rocir_type_str(type_str: str) -> int:
     if "<" not in type_str or ">" not in type_str:
         raise ValueError(f"Cannot extract rank from type string: {type_str}")
     inner = type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
+    # Layout types may encode both shape and stride specs:
+    #   !rocir.layout<(9,(4,8)):(59,(13,1))>
+    # Rank should be derived from the *shape* side only.
+    def _split_top_level_colon(s: str) -> tuple[str, str] | None:
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(0, depth - 1)
+            elif ch == ":" and depth == 0:
+                return s[:i], s[i + 1 :]
+        return None
+
     if inner.startswith("("):
+        parts = _split_top_level_colon(inner)
+        if parts is not None:
+            inner = parts[0].strip()
         return _count_leaves_in_tuple_spec(inner)
     if len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
-        return _count_leaves_in_tuple_spec(inner[1:-1])
+        inner2 = inner[1:-1]
+        parts = _split_top_level_colon(inner2)
+        if parts is not None:
+            inner2 = parts[0].strip()
+        return _count_leaves_in_tuple_spec(inner2)
     # numeric
     return int(inner)
 
@@ -494,6 +515,348 @@ class CoordType(Type):
         if context is None:
             context = Context.current
         return Type.parse(f"!rocir.coord<{rank}>", context=context)
+
+
+# -----------------------------------------------------------------------------
+# Type-level layout algebra inference (Python-side, for wrappers)
+# -----------------------------------------------------------------------------
+
+def _split_top_level_colon(spec: str) -> Optional[tuple[str, str]]:
+    depth = 0
+    for i, ch in enumerate(spec):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ":" and depth == 0:
+            return spec[:i], spec[i + 1 :]
+    return None
+
+
+class _PatternNode:
+    __slots__ = ("is_leaf", "value", "children")
+
+    def __init__(self, is_leaf: bool, value: Optional[int] = None, children: Optional[List["_PatternNode"]] = None):
+        self.is_leaf = is_leaf
+        self.value = value
+        self.children = children or []
+
+    @staticmethod
+    def leaf(v: Optional[int]) -> "_PatternNode":
+        return _PatternNode(True, value=v, children=[])
+
+    @staticmethod
+    def tup(children: List["_PatternNode"]) -> "_PatternNode":
+        return _PatternNode(False, children=children)
+
+    def flatten_leaves(self, out: List[Optional[int]]) -> None:
+        if self.is_leaf:
+            out.append(self.value)
+            return
+        for c in self.children:
+            c.flatten_leaves(out)
+
+    def leaf_count(self) -> int:
+        leaves: List[Optional[int]] = []
+        self.flatten_leaves(leaves)
+        return len(leaves)
+
+    def to_tuple_root(self) -> "_PatternNode":
+        # layout<shapeSpec:strideSpec> syntax requires tuple-root specs (leading '(').
+        if self.is_leaf:
+            return _PatternNode.tup([self])
+        return self
+
+    def to_spec(self) -> str:
+        def emit(n: "_PatternNode") -> str:
+            if n.is_leaf:
+                return "?" if n.value is None else str(n.value)
+            return "(" + ",".join(emit(c) for c in n.children) + ")"
+
+        return emit(self.to_tuple_root())
+
+
+def _parse_tuple_spec(spec: str) -> _PatternNode:
+    # Supports "(9,(4,8))" and "(?,(?,?))". Also accepts leaf specs like "?" or "4".
+    s = "".join(ch for ch in spec if not ch.isspace())
+    i = 0
+
+    def peek() -> str:
+        return s[i] if i < len(s) else "\0"
+
+    def consume(expected: Optional[str] = None) -> str:
+        nonlocal i
+        if i >= len(s):
+            raise ValueError("unexpected end of spec")
+        ch = s[i]
+        if expected is not None and ch != expected:
+            raise ValueError(f"expected '{expected}' but got '{ch}'")
+        i += 1
+        return ch
+
+    def parse_int() -> int:
+        nonlocal i
+        neg = False
+        if peek() == "-":
+            consume("-")
+            neg = True
+        if not peek().isdigit():
+            raise ValueError("expected integer")
+        v = 0
+        while peek().isdigit():
+            v = v * 10 + int(consume())
+        return -v if neg else v
+
+    def parse_elem() -> _PatternNode:
+        if peek() == "(":
+            return parse_tuple()
+        if peek() == "?":
+            consume("?")
+            return _PatternNode.leaf(None)
+        return _PatternNode.leaf(parse_int())
+
+    def parse_tuple() -> _PatternNode:
+        consume("(")
+        if peek() == ")":
+            consume(")")
+            return _PatternNode.tup([])
+        children: List[_PatternNode] = []
+        while True:
+            children.append(parse_elem())
+            if peek() == ",":
+                consume(",")
+                continue
+            break
+        consume(")")
+        return _PatternNode.tup(children)
+
+    if peek() == "(":
+        node = parse_tuple()
+    elif peek() == "?":
+        consume("?")
+        node = _PatternNode.leaf(None)
+    else:
+        node = _PatternNode.leaf(parse_int())
+
+    if i != len(s):
+        raise ValueError(f"trailing characters in spec: {s[i:]}")
+    return node
+
+
+def _parse_layout_type(type_str: str) -> tuple[int, _PatternNode, _PatternNode]:
+    """Return (rank, shapeNode, strideNode).
+
+    - For layout<shapeSpec:strideSpec>, rank is leaf count in shape spec.
+    - For layout<(...)> (rank-only tuple form), rank is leaf count of that tuple spec, and
+      shape/stride are treated as flat tuples of '?' leaves.
+    - For layout<rank>, shape/stride are treated as flat tuples of '?' leaves.
+    """
+    inner = type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
+    if inner.startswith("("):
+        split = _split_top_level_colon(inner)
+        if split is None:
+            # Backward compatible: layout<(...)> only encodes rank.
+            rank = _count_leaves_in_tuple_spec(inner)
+            flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
+            return rank, flat, flat
+        shape_spec, stride_spec = split
+        shape = _parse_tuple_spec(shape_spec)
+        stride = _parse_tuple_spec(stride_spec)
+        return shape.leaf_count(), shape, stride
+    try:
+        rank = int(inner)
+    except Exception:
+        rank = -1
+    if rank < 0:
+        return -1, _PatternNode.leaf(None), _PatternNode.leaf(None)
+    flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
+    return rank, flat, flat
+
+
+def _mul(a: Optional[int], b: Optional[int]) -> Optional[int]:
+    return None if (a is None or b is None) else a * b
+
+
+def _div_ui(a: Optional[int], b: Optional[int]) -> Optional[int]:
+    if a is None or b is None or b == 0:
+        return None
+    return a // b
+
+
+def _ceil_div_ui(a: Optional[int], b: Optional[int]) -> Optional[int]:
+    if a is None or b is None or b == 0:
+        return None
+    return (a + b - 1) // b
+
+
+def _min_ui(a: Optional[int], b: Optional[int]) -> Optional[int]:
+    if a is None or b is None:
+        return None
+    return a if a < b else b
+
+
+def _composition_impl(lhs_shape: _PatternNode, lhs_stride: _PatternNode, rhs_shape: _PatternNode, rhs_stride: _PatternNode):
+    # Mirrors RocirToStandard's composition_impl structural behavior:
+    # - distribute when RHS is tuple
+    # - fold over flattened LHS when RHS is leaf
+    if not rhs_shape.is_leaf:
+        out_shapes: List[_PatternNode] = []
+        out_strides: List[_PatternNode] = []
+        for i, sub_shape in enumerate(rhs_shape.children):
+            sub_stride = rhs_stride.children[i] if (not rhs_stride.is_leaf and i < len(rhs_stride.children)) else rhs_stride
+            s, d = _composition_impl(lhs_shape, lhs_stride, sub_shape, sub_stride)
+            out_shapes.append(s)
+            out_strides.append(d)
+        return _PatternNode.tup(out_shapes), _PatternNode.tup(out_strides)
+
+    if (not rhs_shape.is_leaf) or (not rhs_stride.is_leaf):
+        return rhs_shape, rhs_stride
+
+    lhs_shapes: List[Optional[int]] = []
+    lhs_strides: List[Optional[int]] = []
+    lhs_shape.flatten_leaves(lhs_shapes)
+    lhs_stride.flatten_leaves(lhs_strides)
+
+    rest_shape = rhs_shape.value
+    rest_stride = rhs_stride.value
+
+    out_shape_leaves: List[Optional[int]] = []
+    out_stride_leaves: List[Optional[int]] = []
+
+    for i in range(len(lhs_shapes)):
+        curr_shape = lhs_shapes[i]
+        curr_stride = lhs_strides[i] if i < len(lhs_strides) else None
+
+        next_shape = _ceil_div_ui(curr_shape, rest_stride)
+        next_stride = _ceil_div_ui(rest_stride, curr_shape)
+
+        # Only apply simplifications when statically provable.
+        if rest_shape == 1:
+            rest_stride = next_stride
+            break
+        if next_shape == 1:
+            rest_stride = next_stride
+            continue
+
+        new_shape = _min_ui(next_shape, rest_shape)
+        new_stride = _mul(curr_stride, rest_stride)
+        out_shape_leaves.append(new_shape)
+        out_stride_leaves.append(new_stride)
+
+        rest_shape = _div_ui(rest_shape, new_shape)
+        rest_stride = next_stride
+
+    if len(out_shape_leaves) == 0:
+        last_lhs_stride = lhs_strides[-1] if lhs_strides else 1
+        tail_stride = _mul(rest_stride, last_lhs_stride)
+        return _PatternNode.leaf(rest_shape), _PatternNode.leaf(tail_stride)
+
+    if rest_shape == 1:
+        return _PatternNode.tup([_PatternNode.leaf(v) for v in out_shape_leaves]), _PatternNode.tup(
+            [_PatternNode.leaf(v) for v in out_stride_leaves]
+        )
+
+    out_shape_leaves.append(rest_shape)
+    last_lhs_stride = lhs_strides[-1] if lhs_strides else 1
+    tail_stride = _mul(rest_stride, last_lhs_stride)
+    out_stride_leaves.append(tail_stride)
+    return _PatternNode.tup([_PatternNode.leaf(v) for v in out_shape_leaves]), _PatternNode.tup(
+        [_PatternNode.leaf(v) for v in out_stride_leaves]
+    )
+
+
+def _size_of_shape(shape: _PatternNode) -> Optional[int]:
+    leaves: List[Optional[int]] = []
+    shape.flatten_leaves(leaves)
+    prod: Optional[int] = 1
+    for v in leaves:
+        prod = _mul(prod, v)
+    return prod
+
+
+def _complement_impl(shape: _PatternNode, stride: _PatternNode, cosize_hi: Optional[int]) -> tuple[_PatternNode, _PatternNode]:
+    # Type-level complement used by logical_divide: produces flat tuple leaves.
+    shapes: List[Optional[int]] = []
+    strides: List[Optional[int]] = []
+    shape.flatten_leaves(shapes)
+    stride.flatten_leaves(strides)
+    if cosize_hi is None:
+        return _PatternNode.leaf(None), _PatternNode.leaf(None)
+
+    modes = list(zip(shapes, strides))
+    all_static = all(s is not None for _, s in modes)
+    if all_static:
+        modes.sort(key=lambda x: int(x[1]))  # type: ignore[arg-type]
+
+    curr_stride: Optional[int] = 1
+    out_shape_leaves: List[Optional[int]] = []
+    out_stride_leaves: List[Optional[int]] = []
+
+    for (m_shape, m_stride) in modes:
+        gap = _div_ui(m_stride, curr_stride)
+        out_shape_leaves.append(gap)
+        out_stride_leaves.append(curr_stride)
+        curr_stride = _mul(m_stride, m_shape)
+
+    final_rest = _ceil_div_ui(cosize_hi, curr_stride)
+    out_shape_leaves.append(final_rest)
+    out_stride_leaves.append(curr_stride)
+
+    return _PatternNode.tup([_PatternNode.leaf(v) for v in out_shape_leaves]), _PatternNode.tup(
+        [_PatternNode.leaf(v) for v in out_stride_leaves]
+    )
+
+
+def _infer_layout_type_composition(a: Value, b: Value) -> Type:
+    a_rank, a_shape, a_stride = _parse_layout_type(str(a.type))
+    b_rank, b_shape, b_stride = _parse_layout_type(str(b.type))
+    if a_rank < 0 or b_rank < 0:
+        return LayoutType.get(-1)
+    out_shape, out_stride = _composition_impl(a_shape, a_stride, b_shape, b_stride)
+    return Type.parse(f"!rocir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+
+
+def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
+    b_rank, b_shape, b_stride = _parse_layout_type(str(block.type))
+    t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+    if b_rank < 0 or t_rank < 0:
+        return LayoutType.get(-1)
+
+    # Flatten then concatenate. Shapes: [block..., tiler...]
+    b_shape_leaves: List[Optional[int]] = []
+    b_stride_leaves: List[Optional[int]] = []
+    t_shape_leaves: List[Optional[int]] = []
+    t_stride_leaves: List[Optional[int]] = []
+    b_shape.flatten_leaves(b_shape_leaves)
+    b_stride.flatten_leaves(b_stride_leaves)
+    t_shape.flatten_leaves(t_shape_leaves)
+    t_stride.flatten_leaves(t_stride_leaves)
+
+    block_size = _size_of_shape(b_shape)
+    out_shape_leaves = b_shape_leaves + t_shape_leaves
+    out_stride_leaves: List[Optional[int]] = list(b_stride_leaves)
+    for s in t_stride_leaves:
+        out_stride_leaves.append(_mul(s, block_size))
+
+    out_shape = _PatternNode.tup([_PatternNode.leaf(v) for v in out_shape_leaves])
+    out_stride = _PatternNode.tup([_PatternNode.leaf(v) for v in out_stride_leaves])
+    return Type.parse(f"!rocir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+
+
+def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
+    l_rank, l_shape, l_stride = _parse_layout_type(str(layout.type))
+    t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+    if l_rank < 0 or t_rank < 0:
+        return LayoutType.get(-1)
+
+    input_size = _size_of_shape(l_shape)
+    comp_shape, comp_stride = _complement_impl(t_shape, t_stride, input_size)
+
+    rhs_shape = _PatternNode.tup([t_shape, comp_shape])
+    rhs_stride = _PatternNode.tup([t_stride, comp_stride])
+
+    out_shape, out_stride = _composition_impl(l_shape, l_stride, rhs_shape, rhs_stride)
+    return Type.parse(f"!rocir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
 
 
 
@@ -853,11 +1216,48 @@ def make_coord(*coords: Value, loc: Optional[Location] = None, ip: Optional[Inse
     """
     
     loc = _get_location(loc)
-    rank = len(coords)
-    result_type = CoordType.get(rank)
-    
+
+    # If a single tuple/list is passed, unpack it
+    if len(coords) == 1 and isinstance(coords[0], (tuple, list)):
+        coords = tuple(coords[0])
+
+    # Build a nested coord type spec (domain unknown => '?' leaves) while flattening leaf values.
+    has_nested = any(isinstance(c, (tuple, list)) for c in coords)
+    if has_nested:
+        child_specs: List[str] = []
+        leaf_vals: List[Value] = []
+
+        def consume_node(node):
+            nonlocal child_specs, leaf_vals
+            if isinstance(node, (tuple, list)):
+                sub_child_specs = []
+                for x in node:
+                    consume_node(x)
+                    sub_child_specs.append(child_specs.pop())
+                child_specs.append("(" + ",".join(sub_child_specs) + ")")
+                return
+
+            v = _unwrap_value(node)
+            if isinstance(v, Value) and _is_rocir_type(v, "!rocir.coord<"):
+                raise ValueError(
+                    "Nested rocir.coord values are not supported as inputs to make_coord; pass leaf index Values instead."
+                )
+            child_specs.append("?")
+            leaf_vals.append(v)
+
+        for c in coords:
+            consume_node(c)
+
+        nested_spec = "(" + ",".join(child_specs) + ")"
+        result_type = Type.parse(f"!rocir.coord<{nested_spec}>")
+        operands = leaf_vals
+    else:
+        rank = len(coords)
+        result_type = CoordType.get(rank)
+        operands = [_unwrap_value(c) for c in coords]
+
     with ip or InsertionPoint.current:
-        return rocir_ops.MakeCoordOp(result_type, [_unwrap_value(c) for c in coords], loc=loc).result
+        return rocir_ops.MakeCoordOp(result_type, operands, loc=loc).result
 
 
 def crd2idx(coord: Value, layout: Value, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
@@ -909,10 +1309,41 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
     """
     
     loc = _get_location(loc)
-    # Extract rank from layout type
+    # Prefer preserving nested coord structure (domain shape) when layout type carries a shape spec.
     layout_type_str = str(layout.type)
-    rank = _extract_rank_from_rocir_type_str(layout_type_str)
-    result_type = CoordType.get(rank)
+    if "<" not in layout_type_str or ">" not in layout_type_str:
+        rank = _extract_rank_from_rocir_type_str(layout_type_str)
+        result_type = CoordType.get(rank)
+    else:
+        inner = layout_type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
+
+        def _split_top_level_colon(s: str) -> Optional[tuple[str, str]]:
+            depth = 0
+            for i, ch in enumerate(s):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth = max(0, depth - 1)
+                elif ch == ":" and depth == 0:
+                    return s[:i], s[i + 1 :]
+            return None
+
+        shape_spec = None
+        if inner.startswith("("):
+            parts = _split_top_level_colon(inner)
+            if parts is not None:
+                shape_spec = parts[0].strip()
+        elif len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
+            inner2 = inner[1:-1]
+            parts = _split_top_level_colon(inner2)
+            if parts is not None and inner2.strip().startswith("("):
+                shape_spec = parts[0].strip()
+
+        if shape_spec is not None:
+            result_type = Type.parse(f"!rocir.coord<{shape_spec}>")
+        else:
+            rank = _extract_rank_from_rocir_type_str(layout_type_str)
+            result_type = CoordType.get(rank)
     
     with ip or InsertionPoint.current:
         op = rocir_ops.Idx2CrdOp(result_type, _unwrap_value(idx), _unwrap_value(layout), loc=loc, ip=ip)
@@ -1085,8 +1516,14 @@ def composition(layout_a: Value, layout_b: Value, loc: Optional[Location] = None
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        result_type = _infer_layout_type_composition(layout_a, layout_b)
+    except Exception:
+        ra = _extract_rank_from_rocir_type_str(str(layout_a.type))
+        rb = _extract_rank_from_rocir_type_str(str(layout_b.type))
+        r = max(ra, rb) if (ra is not None and rb is not None) else -1
+        result_type = LayoutType.get(r)
+
     with ip or InsertionPoint.current:
         return rocir_ops.CompositionOp(result_type, _unwrap_value(layout_a), _unwrap_value(layout_b), loc=loc).result
 
@@ -1179,9 +1616,13 @@ def logical_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
         The tiled layout
     """
     
-    loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        loc = _get_location(loc)
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        loc = _get_location(loc)
+        result_type = LayoutType.get(-1)
+
     with ip or InsertionPoint.current:
         return rocir_ops.LogicalProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1190,8 +1631,11 @@ def zipped_product(block: Value, tiler: Value, loc: Optional[Location] = None, i
     """Compute the zipped product of two layouts."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    # Lowering currently treats zipped_product as logical_product.
+    try:
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.ZippedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1200,8 +1644,11 @@ def tiled_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     """Compute the tiled product of two layouts."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    # Lowering currently treats tiled_product as logical_product.
+    try:
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.TiledProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1210,8 +1657,11 @@ def flat_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip:
     """Compute the flat product of two layouts."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    # Lowering currently treats flat_product as logical_product (flattening happens later).
+    try:
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.FlatProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1220,8 +1670,11 @@ def raked_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     """Compute the raked product of two layouts."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    # Lowering currently treats raked_product as logical_product.
+    try:
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.RakedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1230,8 +1683,11 @@ def blocked_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
     """Compute the blocked product of two layouts."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    # Lowering currently treats blocked_product as logical_product.
+    try:
+        result_type = _infer_layout_type_logical_product(block, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.BlockedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1251,9 +1707,13 @@ def logical_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, 
         The partitioned layout
     """
     
-    loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        loc = _get_location(loc)
+        result_type = _infer_layout_type_logical_divide(layout, tiler)
+    except Exception:
+        loc = _get_location(loc)
+        result_type = LayoutType.get(-1)
+
     with ip or InsertionPoint.current:
         return rocir_ops.LogicalDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1279,10 +1739,12 @@ def zipped_divide(layout_or_tensor, tiler_or_shape, loc: Optional[Location] = No
         # TensorView partitioning case
         return ZippedTensor(layout_or_tensor, tiler_or_shape)
     
-    # Layout division case
+    # Layout division case (lowering treats zipped_divide as logical_divide).
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        result_type = _infer_layout_type_logical_divide(layout_or_tensor, tiler_or_shape)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.ZippedDivideOp(result_type, _unwrap_value(layout_or_tensor), _unwrap_value(tiler_or_shape), loc=loc).result
 
@@ -1291,8 +1753,10 @@ def tiled_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip
     """Compute the tiled divide of a layout."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        result_type = _infer_layout_type_logical_divide(layout, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.TiledDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1301,8 +1765,10 @@ def flat_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip:
     """Compute the flat divide of a layout."""
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
-    
+    try:
+        result_type = _infer_layout_type_logical_divide(layout, tiler)
+    except Exception:
+        result_type = LayoutType.get(-1)
     with ip or InsertionPoint.current:
         return rocir_ops.FlatDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 

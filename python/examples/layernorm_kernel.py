@@ -244,10 +244,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                             is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
                             if is_valid:
                                 v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
-                                v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
-                                v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
-                                thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(v), fastmath=fm_fast).result
-                                thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
+                            v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
+                            v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
+                            thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(v), fastmath=fm_fast).result
+                            thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
 
             sum_val = block_reduce_add(thread_sum, s_sum)
             sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)

@@ -268,11 +268,36 @@ StrideType LayoutType::getStrideType() const {
 //===----------------------------------------------------------------------===//
 
 CoordType CoordType::get(MLIRContext *ctx, int rank) {
-  return Base::get(ctx, rank);
+  return Base::get(ctx, detail::StructuredTypeStorage::KeyTy{rank, /*structure=*/{}, /*dims=*/{}});
 }
 
 int CoordType::getRank() const {
   return getImpl()->rank;
+}
+
+CoordType CoordType::get(MLIRContext *ctx, StringRef spec) {
+  auto parsed = parseTupleSpec(spec);
+  if (failed(parsed))
+    return get(ctx, -1);
+  return get(ctx, parsed->structure, parsed->dims);
+}
+
+CoordType CoordType::get(MLIRContext *ctx,
+                         ArrayRef<int32_t> structure,
+                         ArrayRef<int64_t> dims) {
+  return Base::get(ctx, detail::StructuredTypeStorage::KeyTy{static_cast<int>(dims.size()), structure, dims});
+}
+
+ArrayRef<int32_t> CoordType::getStructure() const {
+  return getImpl()->structure;
+}
+
+StringRef CoordType::getSpec() const {
+  return getImpl()->spec;
+}
+
+ArrayRef<int64_t> CoordType::getDims() const {
+  return getImpl()->dims;
 }
 
 //===----------------------------------------------------------------------===//
@@ -590,11 +615,14 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
   if (mnemonic == "coord") {
     if (succeeded(parser.parseOptionalLess())) {
       // Supported:
-      // - coord<(...)>   (tuple rank spec)
+      // - coord<(...)>   (tuple spec, unquoted)
       // - coord<rank>
       int64_t rank = -1;
       if (succeeded(parser.parseOptionalLParen())) {
-        int leafCount = 0;
+        // Parse tuple spec into structure+dims (same encoding as Shape/Stride).
+        llvm::SmallVector<int32_t, 16> coordStructure;
+        llvm::SmallVector<int64_t, 16> coordDims;
+
         std::function<ParseResult()> parseElem;
         std::function<ParseResult()> parseTuple;
 
@@ -602,34 +630,43 @@ Type RocirDialect::parseType(DialectAsmParser &parser) const {
           if (succeeded(parser.parseOptionalLParen()))
             return parseTuple();
           if (succeeded(parser.parseOptionalQuestion())) {
-            ++leafCount;
+            coordStructure.push_back(-1);
+            coordDims.push_back(-1);
             return success();
           }
           int64_t v = 0;
           if (parser.parseInteger(v))
             return failure();
-          ++leafCount;
+          coordStructure.push_back(-1);
+          coordDims.push_back(v);
           return success();
         };
 
         parseTuple = [&]() -> ParseResult {
-          if (succeeded(parser.parseOptionalRParen()))
+          if (succeeded(parser.parseOptionalRParen())) {
+            coordStructure.push_back(0);
             return success();
+          }
+          int32_t arity = 0;
+          size_t headerIdx = coordStructure.size();
+          coordStructure.push_back(0);
           while (true) {
             if (failed(parseElem()))
               return failure();
+            ++arity;
             if (succeeded(parser.parseOptionalComma()))
               continue;
             break;
           }
           if (parser.parseRParen())
             return failure();
+          coordStructure[headerIdx] = arity;
           return success();
         };
 
         if (failed(parseTuple()) || parser.parseGreater())
           return Type();
-        return CoordType::get(ctx, leafCount);
+        return CoordType::get(ctx, coordStructure, coordDims);
       }
 
       if (parser.parseInteger(rank) || parser.parseGreater())
@@ -697,6 +734,10 @@ void RocirDialect::printType(Type type, DialectAsmPrinter &os) const {
       os << "layout<" << r << ">";
     }
   } else if (auto coordType = llvm::dyn_cast<CoordType>(type)) {
+    if (!coordType.getSpec().empty()) {
+      os << "coord<" << coordType.getSpec() << ">";
+      return;
+    }
     int r = coordType.getRank();
     if (r >= 0) {
       os << "coord<(";

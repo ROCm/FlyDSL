@@ -130,19 +130,28 @@ def _ensure_python_embedded_mlir_package() -> None:
     """
     dst = PY_SRC / "_mlir"
     # `Path.exists()` follows symlinks; for a broken symlink it returns False.
-    # We want to treat an existing symlink as "present" (or repair it).
-    if dst.exists() or dst.is_symlink():
-        return
-    if os.path.lexists(dst):  # path exists but is broken symlink or non-symlink
-        # If it's a broken symlink, replace it. If it's a real file/dir, fail loudly.
-        if dst.is_symlink():
-            dst.unlink()
-        else:
-            raise RuntimeError(
-                f"{dst} exists but is not a symlink. Please remove it and retry."
-            )
-    # Prefer a relative symlink so the repo remains relocatable.
+    # We want to repair broken/outdated symlinks automatically.
     target = Path("..") / EMBEDDED__MLIR_REL
+
+    if dst.is_symlink():
+        try:
+            current_target = Path(os.readlink(dst))
+        except Exception:
+            current_target = None
+        # If it's already correct and resolves, keep it.
+        if current_target == target and dst.exists():
+            return
+        # Otherwise replace it (covers broken links and moved build dirs).
+        dst.unlink()
+
+    if dst.exists():
+        # A real directory/file exists here; don't overwrite silently.
+        return
+
+    if os.path.lexists(dst):
+        # Path exists but is neither a working directory nor a symlink we can manage.
+        raise RuntimeError(f"{dst} exists but is not a usable symlink/directory; please remove it and retry.")
+    # Prefer a relative symlink so the repo remains relocatable.
     try:
         dst.symlink_to(target, target_is_directory=True)
     except Exception as e:

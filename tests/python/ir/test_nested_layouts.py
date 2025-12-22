@@ -110,5 +110,59 @@ def test_logical_divide_2d_nested():
     assert _lower_and_get_single_return_int(_M().module) == 9 * 4 * 8
 
 
+def test_idx2crd_crd2idx_with_nested_layout_rank():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def roundtrip(self: rocir.T.i64):
+            layout = rocir.make_layout(
+                (Index(9), (Index(4), Index(8))),
+                stride=(Index(59), (Index(13), Index(1))),
+            )
+            idx = Index(50)
+            c = rocir.idx2crd(idx.value, layout)
+            back = rocir.crd2idx(c, layout)
+            return [back.value]
+
+    # Make sure idx2crd uses the shape-rank (3 leaves), not shape+stride (6 leaves).
+    ir_text = str(_M().module)
+    assert "rocir.idx2crd" in ir_text
+    # Coord type should preserve nested structure (domain shape), matching the layout's shape spec.
+    assert "!rocir.coord<(9,(4,8))>" in ir_text
+
+
+def test_composition_infers_structured_layout_type():
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def composed(self: rocir.T.i64):
+            A = rocir.make_layout((Index(6), Index(2)), stride=(Index(8), Index(2)))
+            B = rocir.make_layout((Index(4), Index(3)), stride=(Index(3), Index(1)))
+            R = rocir.composition(A, B)
+            return [rocir.size(R).value]
+
+    ir_text = str(_M().module)
+    # Wrapper should infer a structured result type, not layout<-1>.
+    assert "rocir.composition" in ir_text
+    assert "!rocir.layout<-1>" not in ir_text
+    # This is the canonical expected structure from the reference notebook/tests.
+    assert "!rocir.layout<((2,2),3):((24,2),8)>" in ir_text
+
+
+def test_crd2idx_on_composed_layout_pipeline_does_not_crash():
+    # Regression test for the previous crash when crd2idx saw nested strides produced by composition lowering.
+    class _M(rocir.MlirModule):
+        @rocir.jit
+        def f(self: rocir.T.i64):
+            A = rocir.make_layout((Index(6), Index(2)), stride=(Index(8), Index(2)))
+            B = rocir.make_layout((Index(4), Index(3)), stride=(Index(3), Index(1)))
+            R = rocir.composition(A, B)
+            # Composition above yields rank-3 (flattened leaf count), so use a rank-3 coord.
+            c = rocir.make_coord(Index(1).value, Index(2).value, Index(0).value)
+            out = rocir.crd2idx(c, R)
+            return [out.value]
+
+    m = _M()
+    pipeline = Pipeline().rocir_to_standard().canonicalize().cse()
+    run_pipeline(m.module, pipeline)
+    assert m.module.operation.verify()
 
 

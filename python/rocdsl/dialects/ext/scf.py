@@ -121,7 +121,7 @@ def range_(
     """
     if loc is None:
         loc = Location.unknown()
-
+    
     # Implement Python `range` semantics for negative constant steps.
     # - For positive steps, we emit scf.for(start, stop, step) directly.
     # - For negative steps with *int* bounds, we synthesize:
