@@ -5,11 +5,10 @@ embedded in `tests/python/gpu/test_layernorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
+from rocdsl.compiler.context import RAIIMLIRContextModule
 from rocdsl.dialects.ext import rocir
-from rocdsl.dialects.ext import scf
-from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
-from rocdsl.runtime.device import get_rocm_arch
+from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
 from _mlir import ir
 import _mlir.extras.types as T
@@ -21,6 +20,8 @@ KERNEL_NAME = "layernorm"
 def unwrap(v):
     if hasattr(v, "value"):
         return v.value
+    if hasattr(v, "_value"):
+        return v._value
     if hasattr(v, "result"):
         return v.result
     return v
@@ -58,38 +59,39 @@ VEC_ALIGN = 16
 
 
 def build_layernorm_module(M: int, N: int, dtype_str: str):
-    arch = get_rocm_arch()
-    allocator = SmemAllocator(None, arch=arch)
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+    gpu.set_container_module(ctx.module)
+
+    arch = get_hip_arch()
+    # gfx950 supports efficient BF16 pack via v_cvt_pk_bf16_f32.
+    # gfx942 does *not* support it and tends to lower f32->bf16 to heavier sequences,
+    # so we keep the manual pack there for performance.
+    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or arch.startswith("gfx95")
+    allocator = SmemAllocator(ctx, arch=arch)
+
+    elem_type = dtype_to_elem_type(dtype_str)
+    compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
+
+    # Allocate Shared Memory for block reductions (one slot per wave)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    _state = {}
+    smem_red_sum = allocator.allocate_array(T.f32(), RED_SLOTS)
+    smem_red_sumsq = allocator.allocate_array(T.f32(), RED_SLOTS)
+    # Cache row in LDS to avoid 2nd global read of Input
+    smem_row = allocator.allocate_array(elem_type, N)
 
-    class _LayerNorm(rocir.MlirModule):
-        GPU_MODULE_NAME = "layernorm_module"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{arch}">']
+    @gpu.module("layernorm_module", [f'#rocdl.target<chip = "{arch}", abi = "500">'])
+    def gpu_mod():
+        allocator.finalize()
 
-        def init_gpu_module(self):
-            elem_type = dtype_to_elem_type(dtype_str)
-            compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
-            _state["smem_red_sum"] = allocator.allocate_array(T.f32(), RED_SLOTS)
-            _state["smem_red_sumsq"] = allocator.allocate_array(T.f32(), RED_SLOTS)
-            # Represent LDS row cache as a 2D (1, N) memref so tensor indexing uses 2 indices.
-            _state["smem_row"] = allocator.allocate_tensor((1, N), elem_type)
-            allocator.finalize()
-
-        @rocir.kernel
+        @gpu.func(emit=True)
         def layernorm_kernel(
-            self: rocir.T.i64,
-            Input: lambda: T.memref(M, N, _state["elem_type"]),
-            Gamma: lambda: T.memref(N, _state["elem_type"]),
-            Beta: lambda: T.memref(N, _state["elem_type"]),
-            Output: lambda: T.memref(M, N, _state["elem_type"]),
+            Input: T.memref(M, N, elem_type),
+            Gamma: T.memref(N, elem_type),
+            Beta: T.memref(N, elem_type),
+            Output: T.memref(M, N, elem_type)
         ):
             row = rocir.block_idx("x")
             tid = rocir.thread_idx("x")
-            elem_type = _state["elem_type"]
-            compute_type = _state["compute_type"]
 
             zero_idx = rocir.const_index(0)
             n_float = arith.constant(compute_type, float(N))
@@ -97,9 +99,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             fm_fast = mlir_arith.FastMathFlags.fast
 
             base_ptr = allocator.get_base()
-            s_sum = _state["smem_red_sum"](base_ptr).get()
-            s_sumsq = _state["smem_red_sumsq"](base_ptr).get()
-            s_row = _state["smem_row"](base_ptr).get()
+            s_sum = smem_red_sum(base_ptr).get()
+            s_sumsq = smem_red_sumsq(base_ptr).get()
+            s_row = smem_row(base_ptr).get()
             # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
@@ -172,7 +174,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             thread_sum = unwrap(c_zero)
             thread_sumsq = unwrap(c_zero)
 
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -203,15 +205,15 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                 else:
                     c_N = rocir.const_index(N)
-                    for k in range_constexpr(VEC_WIDTH):
+                    for k in range(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(
-                            mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
-                        ).result
-                        if is_valid:
+                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = scf.IfOp(unwrap(is_valid))
+                        with ir.InsertionPoint(if_store.then_block):
                             v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
                             tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
+                            scf.yield_([])
 
             gpu.barrier()
 
@@ -221,7 +223,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 thread_sum = unwrap(c_zero)
                 thread_sumsq = unwrap(c_zero)
 
-                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
+                for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
                     c_base = rocir.const_index(base_idx_int)
                     thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                     curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -229,9 +231,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                     if tile_safe:
                         vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                        vec_e = vector.load(
-                            vec_type_e, s_row, [unwrap(c0_idx), unwrap(curr_idx)], alignment=VEC_ALIGN
-                        )
+                        vec_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
                         vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
                         vec = vec_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(vec_e))
                         vec2 = mlir_arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
@@ -241,16 +241,18 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
                     else:
                         c_N = rocir.const_index(N)
-                        for k in range_constexpr(VEC_WIDTH):
+                        for k in range(VEC_WIDTH):
                             c_k = rocir.const_index(k)
                             idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                            is_valid = mlir_arith.CmpIOp(
-                                mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
-                            ).result
-                            if is_valid:
+                            is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                            if_load = scf.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
+                            with ir.InsertionPoint(if_load.then_block):
                                 v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
-                            else:
-                                v_e = arith.constant(elem_type, 0.0).value
+                                scf.yield_([unwrap(v_e)])
+                            with ir.InsertionPoint(if_load.else_block):
+                                # dummy (won't be used)
+                                scf.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
+                            v_e = if_load.results[0]
                             v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
                             v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
                             thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(v), fastmath=fm_fast).result
@@ -273,16 +275,14 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             mean_splat = vector.splat(vec_type_c, unwrap(mean))
             rstd_splat = vector.splat(vec_type_c, unwrap(rstd))
 
-            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
+            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = rocir.const_index(base_idx_int)
                 thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
-                    x_e = vector.load(
-                        vec_type_e, s_row, [unwrap(c0_idx), unwrap(curr_idx)], alignment=VEC_ALIGN
-                    )
+                    x_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
                     # Gamma/Beta are reused across many blocks: do NOT use nontemporal here.
                     # Let caches work for them.
                     g_e = vector.load(vec_type_e, Gamma, [unwrap(curr_idx)], alignment=VEC_ALIGN)
@@ -298,7 +298,13 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     y = mlir_arith.AddFOp(unwrap(scaled), unwrap(b), fastmath=fm_fast).result
 
                     if dtype_str == "bf16":
-                        out_bf16 = bf16_pack_vec8_rne_no_nan(y)
+                        # Arch-dependent BF16 pack:
+                        # - gfx942: use manual RNE pack to avoid heavy lowering.
+                        # - gfx950+: rely on hardware v_cvt_pk_bf16_f32 via truncf lowering.
+                        if USE_HW_CVT_PK_BF16_F32:
+                            out_bf16 = mlir_arith.truncf(vec_type_e, unwrap(y))
+                        else:
+                            out_bf16 = bf16_pack_vec8_rne_no_nan(y)
                         tile_i = base_idx_int // tile_cols  # python int
                         blkOut = gOut[(unwrap(row), tile_i)]
                         thrOut = thr_copy_e.partition_S(blkOut)
@@ -328,13 +334,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 else:
                     c_N = rocir.const_index(N)
                     # scalar tail
-                    for k in range_constexpr(VEC_WIDTH):
+                    for k in range(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(
-                            mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
-                        ).result
-                        if is_valid:
+                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        if_store = scf.IfOp(unwrap(is_valid))
+                        with ir.InsertionPoint(if_store.then_block):
                             x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                             g_e = tensor_Gamma[unwrap(idx_k)]
                             b_e = tensor_Beta[unwrap(idx_k)]
@@ -350,25 +355,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                             ).result
                             y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
                             tensor_Out[(unwrap(row), unwrap(idx_k))] = unwrap(y_e)
+                            scf.yield_([])
 
-        @rocir.jit
-        def __call__(
-            self: rocir.T.i64,
-            Input: lambda: T.memref(M, N, _state["elem_type"]),
-            Gamma: lambda: T.memref(N, _state["elem_type"]),
-            Beta: lambda: T.memref(N, _state["elem_type"]),
-            Output: lambda: T.memref(M, N, _state["elem_type"]),
-        ):
-            c1 = rocir.arith_ext.index(1).value
-            gx = rocir.arith_ext.index(M).value
-            bx = rocir.arith_ext.index(BLOCK_THREADS).value
-            rocir.gpu_ext.LaunchFuncOp(
-                ["layernorm_module", "layernorm_kernel"],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[Input, Gamma, Beta, Output],
-            )
-
-    return _LayerNorm()
+    return ctx
 
 
