@@ -268,7 +268,8 @@ class FuncBase:
                         if isinstance(v, TypeVar):
                             v = v.__name__
                         if isinstance(v, str):
-                            input_types[i] = Type(eval(v, self.body_builder.__globals__, locals))
+                            g = getattr(self.body_builder, "__rocdsl_orig_globals__", self.body_builder.__globals__)
+                            input_types[i] = Type(eval(v, g, locals))
                         elif isalambda(v):
                             input_types[i] = v()
                 else:

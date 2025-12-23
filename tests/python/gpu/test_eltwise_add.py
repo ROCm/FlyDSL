@@ -12,8 +12,9 @@ import sys
 import os
 import argparse
 import numpy as np
-import ctypes
 import pytest
+import torch
+import rocdsl
 
 # Setup paths
 
@@ -21,14 +22,12 @@ import pytest
 from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.dialects.ext.arith import Index
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
+from rocdsl.runtime.hip_util import get_hip_arch
 from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
 import _mlir.extras.types as T
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 from tests.test_common import run_perftest
 
 
@@ -163,6 +162,27 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
 
             rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, dtype.get()),
+            B: lambda: T.memref(M, N, dtype.get()),
+            C: lambda: T.memref(M, N, dtype.get()),
+        ):
+            c1 = Index(1).value
+            tile_m = THR_M * VAL_M
+            tile_n = THR_N * VAL_N
+            gx = Index((N + tile_n - 1) // tile_n).value
+            gy = Index((M + tile_m - 1) // tile_m).value
+            bdx = Index(THR_N).value
+            bdy = Index(THR_M).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["elementwise_kernels", "elementwise_add_kernel"],
+                grid_size=(gx, gy, c1),
+                block_size=(bdx, bdy, c1),
+                kernel_operands=[A, B, C],
+            )
+
     print("[RocDSL INFO] Generated MLIR module")
     return _EltwiseAdd()
 
@@ -179,39 +199,24 @@ TEST_SHAPES = [
 MAX_M = max(s[0] for s in TEST_SHAPES)
 MAX_N = max(s[1] for s in TEST_SHAPES)
 
-# Cache compiled kernel (singleton)
-_compiled_kernel_hsaco = None
+# Cache compiled kernel executor (singleton)
+_compiled_kernel_exe = None
 
 def get_or_compile_kernel(dtype=F32Type):
     """Get or compile the single shared kernel for MAX dimensions."""
-    global _compiled_kernel_hsaco
+    global _compiled_kernel_exe
     
-    if _compiled_kernel_hsaco is None:
+    if _compiled_kernel_exe is None:
         print(f"\n[RocDSL INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
         
         # Create kernel with MAX dimensions
         m = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
-        module = m.module
-        
-        # Compile to HSACO  
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
-        from tests.utils import compile_to_hsaco
-        from rocdsl.compiler.pipeline import run_pipeline, Pipeline
-        
-        # Run optimization pipeline
-        print(f"[RocDSL INFO] Running optimization pipeline...")
-        optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-        
-        # Compile to HSACO
-        print(f"[RocDSL INFO] Compiling to HSACO...")
-        hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
-        print(f"[RocDSL INFO] Compiled to HSACO: {len(hsaco)} bytes")
-        _compiled_kernel_hsaco = hsaco
+        print(f"[RocDSL INFO] Compiling via rocdsl.compile...")
+        _compiled_kernel_exe = rocdsl.compile(m)
     else:
         print(f"[RocDSL INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
     
-    return _compiled_kernel_hsaco
+    return _compiled_kernel_exe
 
 
 @pytest.mark.parametrize(
@@ -234,16 +239,12 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     # - If the requested M or N exceeds MAX, compile an exact-shape kernel and skip padding.
     use_shared_max_kernel = (M <= MAX_M) and (N <= MAX_N)
     if use_shared_max_kernel:
-        hsaco = get_or_compile_kernel(dtype)
+        exe = get_or_compile_kernel(dtype)
         compile_M, compile_N = MAX_M, MAX_N
     else:
         print(f"\n[RocDSL INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
-        from rocdsl.compiler.pipeline import run_pipeline, Pipeline
-        from tests.utils import compile_to_hsaco
         m = create_elementwise_add_kernel(M, N, dtype)
-        module = m.module
-        optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-        hsaco = compile_to_hsaco(optimized, kernel_name="elementwise_add_kernel")
+        exe = rocdsl.compile(m)
         compile_M, compile_N = M, N
     
     # Prepare data
@@ -251,7 +252,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     torch_dtype = np.float32 if dtype == F32Type else np.float16
     a_host = np.random.randn(M, N).astype(torch_dtype)
     b_host = np.random.randn(M, N).astype(torch_dtype)
-    c_host = np.zeros((M, N), dtype=torch_dtype)
+    expected = a_host + b_host
     
     if use_shared_max_kernel:
         # Padded data for shared kernel (must match MAX_M x MAX_N strides)
@@ -263,27 +264,16 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         a_padded[:M, :N] = a_host
         b_padded[:M, :N] = b_host
         
-        # Allocate device memory (full MAX size)
-        max_size_bytes = MAX_M * MAX_N * a_host.itemsize
-        d_a = hip_check(hip.hipMalloc(max_size_bytes))
-        d_b = hip_check(hip.hipMalloc(max_size_bytes))
-        d_c = hip_check(hip.hipMalloc(max_size_bytes))
-        
-        # Copy to device (padded)
-        hip_check(hip.hipMemcpy(d_a, a_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-        hip_check(hip.hipMemcpy(d_b, b_padded.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+        # Device tensors (full MAX size)
+        t_dtype = torch.float32 if dtype == F32Type else torch.float16
+        A = torch.tensor(a_padded, device="cuda", dtype=t_dtype)
+        B = torch.tensor(b_padded, device="cuda", dtype=t_dtype)
+        C = torch.empty((MAX_M, MAX_N), device="cuda", dtype=t_dtype)
     else:
-        # Exact-shape kernel: no padding
-        max_size_bytes = M * N * a_host.itemsize
-        d_a = hip_check(hip.hipMalloc(max_size_bytes))
-        d_b = hip_check(hip.hipMalloc(max_size_bytes))
-        d_c = hip_check(hip.hipMalloc(max_size_bytes))
-        hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-        hip_check(hip.hipMemcpy(d_b, b_host.ctypes.data, max_size_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    
-    # Load kernel
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"elementwise_add_kernel"))
+        t_dtype = torch.float32 if dtype == F32Type else torch.float16
+        A = torch.tensor(a_host, device="cuda", dtype=t_dtype)
+        B = torch.tensor(b_host, device="cuda", dtype=t_dtype)
+        C = torch.empty((M, N), device="cuda", dtype=t_dtype)
     
     # Launch configuration (must match kernel tiling)
     # - blockDim should provide exactly THR_M*THR_N threads (tidx in [0, THR_M*THR_N))
@@ -299,35 +289,16 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, kernel={kernel_tag}]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
-    # Prepare arguments
-    arg_ptrs = [
-        ctypes.c_void_p(int(d_a)),
-        ctypes.c_void_p(int(d_b)),
-        ctypes.c_void_p(int(d_c))
-    ]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-    
-    # Launch kernel
-    hip_check(hip.hipModuleLaunchKernel(
-        kernel_func,
-        grid_x, grid_y, 1,  # grid dim (partial)
-        BLOCK_X, BLOCK_Y, 1,   # block dim
-        0,  # shared mem
-        None,  # stream
-        args,
-        None
-    ))
+    # Launch kernel via executor
+    exe(A, B, C)
+    torch.cuda.synchronize()
     
     if use_shared_max_kernel:
-        # Copy result back (full padded buffer)
-        hip_check(hip.hipMemcpy(c_padded.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-        # Extract relevant part
-        c_host = c_padded[:M, :N]
+        c_host = C[:M, :N].cpu().numpy()
     else:
-        hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, max_size_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
+        c_host = C.cpu().numpy()
     
     # Verify results
-    expected = a_host + b_host
     error = np.max(np.abs(c_host - expected))
     
     print(f"\n[RocDSL INFO] Verification:")
@@ -338,34 +309,13 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         # Use the shared perf harness (same as vecAdd benchmark) so results are comparable.
         # NOTE: run_perftest uses torch.profiler on ROCm; it expects torch to be installed.
         print(f"\n[RocDSL INFO] Running benchmark via run_perftest ({iterations} iterations)...")
-        try:
-            import torch  # noqa: F401
-        except Exception as e:
-            raise RuntimeError(
-                "Benchmark requested but torch is unavailable. "
-                "Install torch ROCm build or run without --benchmark."
-            ) from e
 
-        def hip_kernel_launch():
-            hip_check(
-                hip.hipModuleLaunchKernel(
-                    kernel_func,
-                    grid_x,
-                    grid_y,
-                    1,
-                    BLOCK_X,
-                    BLOCK_Y,
-                    1,
-                    0,
-                    None,
-                    args,
-                    None,
-                )
-            )
+        def kernel_launch():
+            exe(A, B, C)
 
         # run_perftest returns (data, avg_us)
-        _, avg_us = run_perftest(hip_kernel_launch, num_iters=iterations, num_warmup=10)
-        hip_check(hip.hipDeviceSynchronize())
+        _, avg_us = run_perftest(kernel_launch, num_iters=iterations, num_warmup=10)
+        torch.cuda.synchronize()
 
         total_bytes = 3 * M * N * a_host.itemsize
         bandwidth_gb = total_bytes / (avg_us / 1e6) / 1e9
@@ -386,11 +336,6 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         }
         print(f"\n{results}")
     
-    # Cleanup
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_b))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
     assert error < 1e-4
 
 

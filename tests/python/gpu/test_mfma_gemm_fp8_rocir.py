@@ -13,12 +13,12 @@ logging.basicConfig(level=logging.INFO)
 
 
 
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
+from rocdsl.runtime.hip_util import get_hip_arch
+import rocdsl
 import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco, pertoken_quant
+from tests.utils import pertoken_quant
 from tests.test_common import run_perftest, verify_output
 import torch
 import torch.nn.functional as F
@@ -29,11 +29,8 @@ from rocdsl.dialects.ext import arith, scf, gpu
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
-import ctypes
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 class DType(Enum):
     FP8 = "fp8"
@@ -290,7 +287,8 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             # c_k_main = c_k - c_tile_k_idx
             c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
             
-            # Python `for` + reassignment is auto-lowered into scf.for with iter_args/yield/results.
+            # Python `for` + reassignment is auto-lowered into scf.for with
+            # iter_args/yield/results by `lower_range_for_loops`.
             acc_iter = acc_init
             vec_a_curr = vec_a_init
             vec_b_curr = vec_b_init
@@ -373,6 +371,30 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                 else:
                     # No scaling, direct store
                     memref.StoreOp(unwrap(val), arg_c, [unwrap(idx)])
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f32()),
+            arg_a: lambda: T.memref(size_a, _mlir_dtype()),
+            arg_b: lambda: T.memref(size_b, _mlir_dtype()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
+        ):
+            # Describe launch in a host-side function (IR only).
+            c1 = arith.constant(1, index=True).value
+            bdx = arith.constant(256, index=True).value
+            gx = arith.constant((M + tile_m - 1) // tile_m, index=True).value
+            gy = arith.constant((N + tile_n - 1) // tile_n, index=True).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["mfma_mod", "kernel"],
+                grid_size=(gx, gy, c1),
+                block_size=(bdx, c1, c1),
+                kernel_operands=[arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, m_in, n_in, k_in],
+            )
     
     m = _MFMA()
 
@@ -404,9 +426,9 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             gpu_func_op.attributes["gpu.kernel"] = ir.UnitAttr.get()
     
     print("Compiling...")
-    hsaco = compile_to_hsaco(m.module, kernel_name="kernel")
-    print(f"✓ Compiled to HSACO: {len(hsaco)} bytes")
-    
+    exe = rocdsl.compile(m)
+    print("✓ Compiled")
+
     print("Executing kernel...")
     
     # --- Torch Data Gen & Baseline ---
@@ -439,33 +461,11 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
     # 5. Run Kernel (Output F32)
     c_out_raw = torch.zeros((M, N), dtype=torch.float32, device=device)
     
-    # Prepare argument pointers (always include scales for uniform signature)
-    arg_ptrs = [
-        ctypes.c_void_p(c_out_raw.data_ptr()),
-        ctypes.c_void_p(a_q.data_ptr()),
-        ctypes.c_void_p(b_q.data_ptr()),
-        ctypes.c_void_p(scale_a.data_ptr()),
-        ctypes.c_void_p(scale_b.data_ptr()),
-        ctypes.c_long(M),
-        ctypes.c_long(N),
-        ctypes.c_long(K)
-    ]
-    
-    args_array = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-    
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel"))
-    
-    # Grid configuration based on tile sizes
-    grid_x = M // tile_m
-    grid_y = N // tile_n
-    
     def launch_kernel():
-        # Grid based on tile sizes. Block: 256 threads.
-        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, 256, 1, 1, 0, 0, args_array, None))
+        exe(c_out_raw, a_q, b_q, scale_a, scale_b, M, N, K)
     
     launch_kernel()
-    hip_check(hip.hipDeviceSynchronize())
+    torch.cuda.synchronize()
     
     # 7. Verify
     verify_output(c_out_raw, c_ref, rtol=0.1, atol=0.1)

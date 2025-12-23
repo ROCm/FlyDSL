@@ -23,28 +23,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 sys.path.insert(0, repo_root)
 
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from tests.utils import compile_to_hsaco
+import rocdsl
 import pytest
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
+import torch
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 import numpy as np
-import ctypes
 
-from gpu_common import bf16_to_fp32_cpu, fp32_to_bf16_trunc_cpu, next_power_of_2
+from gpu_common import bf16_to_fp32_cpu
 from examples.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
-
-fp32_to_bf16_cpu = fp32_to_bf16_trunc_cpu
 
 def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
     
     try:
-        ctx = build_softmax_module(M, N, dtype_str)
-        hsaco = compile_to_hsaco(ctx.module, kernel_name=SOFTMAX_KERNEL_NAME)
+        m = build_softmax_module(M, N, dtype_str)
+        exe = rocdsl.compile(m)
     except Exception as e:
         print(f"❌ Compilation Failed: {e}")
         import traceback
@@ -60,60 +55,27 @@ def run_test(M, N, dtype_str):
     expected_f32 = exp_vals / sum_vals
     
     if dtype_str == "f32":
-        a_host = a_f32
-        c_host = np.zeros_like(a_f32)
-        nbytes = M * N * 4
-    elif dtype_str == "f16":
-        a_host = a_f32.astype(np.float16)
-        c_host = np.zeros_like(a_host)
-        nbytes = M * N * 2
-    elif dtype_str == "bf16":
-        a_host = fp32_to_bf16_cpu(a_f32)
-        c_host = np.zeros_like(a_host)
-        nbytes = M * N * 2
-    
-    d_a = hip_check(hip.hipMalloc(nbytes))
-    d_c = hip_check(hip.hipMalloc(nbytes))
-    
-    hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, nbytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, SOFTMAX_KERNEL_NAME.encode("utf-8")))
-    
-    arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_c))]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-    
-    # Dynamic block size based on N
-    blk = min(256, next_power_of_2(N))
-    if blk < 32: blk = 32
-    
-    hip_check(hip.hipModuleLaunchKernel(
-        kernel_func, 
-        M, 1, 1, 
-        blk, 1, 1, 
-        0, 0, args, None
-    ))
-    hip_check(hip.hipDeviceSynchronize())
-    
-    hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, nbytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-    
-    if dtype_str == "f32":
-        res_f32 = c_host
+        a = torch.tensor(a_f32, device="cuda", dtype=torch.float32)
+        c = torch.empty((M, N), device="cuda", dtype=torch.float32)
         atol = 1e-5
     elif dtype_str == "f16":
-        res_f32 = c_host.astype(np.float32)
-        atol = 1e-2 
+        a = torch.tensor(a_f32, device="cuda", dtype=torch.float16)
+        c = torch.empty((M, N), device="cuda", dtype=torch.float16)
+        atol = 1e-2
     elif dtype_str == "bf16":
-        res_f32 = bf16_to_fp32_cpu(c_host)
-        atol = 2e-2 
+        a = torch.tensor(a_f32, device="cuda", dtype=torch.bfloat16)
+        c = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+        atol = 2e-2
+    else:
+        raise ValueError(dtype_str)
+
+    exe(a, c)
+    torch.cuda.synchronize()
+    res_f32 = c.float().cpu().numpy()
         
     diff = np.abs(res_f32 - expected_f32)
     max_err = np.max(diff)
     print(f"  Max Absolute Error: {max_err:.2e} (atol={atol})")
-    
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
     
     if max_err < atol:
         print("  ✅ Passed")

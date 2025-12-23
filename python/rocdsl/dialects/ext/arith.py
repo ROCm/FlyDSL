@@ -375,6 +375,47 @@ def _binary_op(
     
     return ArithValue(result)
 
+
+def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = None) -> "ArithValue":
+    """Shift operation for `ArithValue`.
+
+    Notes:
+    - `<<` maps to `arith.shli`
+    - `>>` maps to `arith.shrui` (logical / unsigned right shift)
+    - We keep this separate from `_binary_op` because shifts are not implemented there.
+    """
+    # Coerce operands similar to `_binary_op` so `v << 3` works.
+    if isinstance(lhs, ArithValue) and not isinstance(rhs, ArithValue):
+        if isinstance(rhs, (int, float)):
+            rhs = constant(rhs, type=lhs._value.type, loc=loc)
+        else:
+            rhs = ArithValue(rhs)
+    elif isinstance(rhs, ArithValue) and not isinstance(lhs, ArithValue):
+        if isinstance(lhs, (int, float)):
+            lhs = constant(lhs, type=rhs._value.type, loc=loc)
+        else:
+            lhs = ArithValue(lhs)
+    elif not isinstance(lhs, ArithValue) and not isinstance(rhs, ArithValue):
+        lhs = constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
+        rhs = constant(rhs, type=lhs._value.type, loc=loc) if isinstance(rhs, (int, float)) else ArithValue(rhs)
+
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+
+    lhs_type = lhs_val.type
+    element_type = _get_element_type(lhs_type)
+    if not _is_integer_like_type(element_type):
+        raise NotImplementedError(f"Shift not supported for type: {lhs_type} (element type: {element_type})")
+
+    if op == "shl":
+        op_class = _arith.ShLIOp
+    elif op == "shrui":
+        op_class = _arith.ShRUIOp
+    else:
+        raise ValueError(f"Unknown shift op: {op}")
+
+    return ArithValue(op_class(lhs_val, rhs_val, loc=loc).result)
+
 def _rbinary_op(rhs: "ArithValue", lhs: "ArithValue", op: str, *, loc: Location = None) -> "ArithValue":
     """Reverse binary operation (for right-hand operations)."""
     return _binary_op(lhs, rhs, op, loc=loc)
@@ -418,6 +459,54 @@ def _comparison_op(
         raise NotImplementedError(f"Comparison not supported for type: {lhs._value.type if isinstance(lhs, ArithValue) else lhs.type}")
     
     return ArithValue(result)
+
+
+def cmpu(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    predicate: str,
+    *,
+    loc: Location = None,
+) -> "ArithValue":
+    """Unsigned integer/index comparison.
+
+    This is the "safe" alternative to Python `< <= > >=` on `ArithValue`, which currently lowers
+    to **signed** integer predicates (slt/sle/sgt/sge). For address math / indices we usually want
+    unsigned predicates (ult/ule/ugt/uge).
+
+    Supported predicates:
+    - "ult", "ule", "ugt", "uge"
+    """
+    # Coerce inputs similarly to `_comparison_op`
+    if not isinstance(lhs, ArithValue):
+        lhs = constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
+    if not isinstance(rhs, ArithValue):
+        rhs = constant(rhs, type=lhs._value.type, loc=loc) if isinstance(rhs, (int, float)) else ArithValue(rhs)
+
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+
+    if not _is_integer_like_type(_get_element_type(lhs_val.type)):
+        raise NotImplementedError(f"Unsigned compare not supported for type: {lhs_val.type}")
+
+    pred_attr = getattr(_arith.CmpIPredicate, predicate)
+    return ArithValue(_arith.CmpIOp(pred_attr, lhs_val, rhs_val, loc=loc).result)
+
+
+def ult(lhs, rhs, *, loc: Location = None) -> "ArithValue":
+    return cmpu(lhs, rhs, "ult", loc=loc)
+
+
+def ule(lhs, rhs, *, loc: Location = None) -> "ArithValue":
+    return cmpu(lhs, rhs, "ule", loc=loc)
+
+
+def ugt(lhs, rhs, *, loc: Location = None) -> "ArithValue":
+    return cmpu(lhs, rhs, "ugt", loc=loc)
+
+
+def uge(lhs, rhs, *, loc: Location = None) -> "ArithValue":
+    return cmpu(lhs, rhs, "uge", loc=loc)
 def _minmax_op(
     lhs: "ArithValue",
     rhs: "ArithValue",
@@ -496,6 +585,10 @@ class ArithValue:
     __or__ = partialmethod(_binary_op, op="or")
     __xor__ = partialmethod(_binary_op, op="xor")
 
+    # Shift operators
+    __lshift__ = partialmethod(_shift_op, op="shl")
+    __rshift__ = partialmethod(_shift_op, op="shrui")
+
     # Min/Max methods
     max = partialmethod(_minmax_op, op_type="max")
     min = partialmethod(_minmax_op, op_type="min")
@@ -507,6 +600,7 @@ class ArithValue:
     __rtruediv__ = partialmethod(_rbinary_op, op="div")
     __rfloordiv__ = partialmethod(_rbinary_op, op="div")
     __rmod__ = partialmethod(_rbinary_op, op="mod")
+
     
     # Comparison operators
     __eq__ = partialmethod(_comparison_op, predicate="eq")

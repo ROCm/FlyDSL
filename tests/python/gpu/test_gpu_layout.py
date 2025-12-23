@@ -4,6 +4,8 @@ These are compilation-only smoke tests: they build GPU kernels with layout-based
 indexing and run a light canonicalize/cse pipeline.
 """
 
+import sys
+
 from rocdsl.compiler.pipeline import Pipeline, run_pipeline
 from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.arith import Index
@@ -45,6 +47,23 @@ def test_layout_based_transpose():
             if valid:
                 val = rocir.memref.load(Input, [row.value, col.value])
                 rocir.memref.store(val.value, Output, [col.value, row.value])
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            Input: lambda: T.memref(M, N, T.f32()),
+            Output: lambda: T.memref(N, M, T.f32()),
+        ):
+            c1 = Index(1).value
+            blk = Index(16).value
+            gx = Index((N + 15) // 16).value
+            gy = Index((M + 15) // 16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "transpose_layout"],
+                grid_size=(gx, gy, c1),
+                block_size=(blk, blk, c1),
+                kernel_operands=[Input, Output],
+            )
 
     m = _Transpose()
     assert m.module.operation.verify()
@@ -94,8 +113,33 @@ def test_strided_layout_access():
                 v = rocir.memref.load(Input, [in_idx])
                 rocir.memref.store(v.value, Output, [out_idx])
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            Input: lambda: T.memref(M * in_stride_val, T.f32()),
+            Output: lambda: T.memref(M * out_stride_val, T.f32()),
+        ):
+            c1 = Index(1).value
+            blk = Index(16).value
+            gx = Index((N + 15) // 16).value
+            gy = Index((M + 15) // 16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "copy_with_layout"],
+                grid_size=(gx, gy, c1),
+                block_size=(blk, blk, c1),
+                kernel_operands=[Input, Output],
+            )
+
     m = _StridedCopy()
     assert m.module.operation.verify()
     run_pipeline(m.module, Pipeline().canonicalize().cse())
+
+
+if __name__ == "__main__":
+    # `run_tests.sh` executes these files directly (not via pytest),
+    # so call the test functions explicitly.
+    test_layout_based_transpose()
+    test_strided_layout_access()
+    sys.exit(0)
 
 

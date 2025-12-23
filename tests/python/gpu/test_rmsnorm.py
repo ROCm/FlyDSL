@@ -23,16 +23,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 sys.path.insert(0, repo_root)
 
-from rocdsl.runtime.hip_util import hip_check
-from tests.utils import compile_to_hsaco
+import rocdsl
 import pytest
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
+import torch
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 import numpy as np
-import ctypes
 import time
 
 from gpu_common import EPS, bf16_to_fp32_cpu, fp32_to_bf16_rne_cpu
@@ -49,19 +46,14 @@ fp32_to_bf16_cpu = fp32_to_bf16_rne_cpu
 def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
 
-    if hip is None:
-        print("HIP not available, skipping...")
-        return True
-
     ctx = build_rmsnorm_module(M, N, dtype)
     try:
-        hsaco = compile_to_hsaco(ctx.module, kernel_name=RMSNORM_KERNEL_NAME)
+        exe = rocdsl.compile(ctx)
     except Exception as e:
         print(f"Compilation failed: {e}")
         print(ctx.module)
         raise e
-
-    print(f" HSACO size: {len(hsaco)} bytes")
+    print(" Compiled")
 
     np.random.seed(42)
     input_f32 = np.random.randn(M, N).astype(np.float32)
@@ -100,60 +92,34 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
     rms = np.sqrt(sq_mean + EPS)
     expected = (input_ref / rms) * gamma_ref
 
-    # Allocate GPU Memory
-    d_input = hip_check(hip.hipMalloc(M * N * elem_bytes))
-    d_gamma = hip_check(hip.hipMalloc(N * elem_bytes))
-    d_output = hip_check(hip.hipMalloc(M * N * elem_bytes))
-
-    hip_check(hip.hipMemcpy(d_input, input_host.ctypes.data, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_gamma, gamma_host.ctypes.data, N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-
-    # Load Kernel
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"rmsnorm_kernel"))
-
-    # Launch Config
-    grid_x, grid_y, grid_z = M, 1, 1
-    block_x, block_y, block_z = BLOCK_THREADS, 1, 1
-    smem_size = 0
-
-    arg_ptrs = [
-        ctypes.c_void_p(int(d_input)),
-        ctypes.c_void_p(int(d_gamma)),
-        ctypes.c_void_p(int(d_output))
-    ]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-
     print("Launching kernel...")
-    # Warmup + benchmark with HIP events
-    start_event = hip_check(hip.hipEventCreate())
-    stop_event = hip_check(hip.hipEventCreate())
+    if dtype == "f32":
+        x = torch.tensor(input_host, device="cuda", dtype=torch.float32)
+        gamma = torch.tensor(gamma_host, device="cuda", dtype=torch.float32)
+        y = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    elif dtype == "f16":
+        x = torch.tensor(input_host, device="cuda", dtype=torch.float16)
+        gamma = torch.tensor(gamma_host, device="cuda", dtype=torch.float16)
+        y = torch.empty((M, N), device="cuda", dtype=torch.float16)
+    else:  # bf16
+        x = torch.tensor(input_ref, device="cuda", dtype=torch.bfloat16)
+        gamma = torch.tensor(gamma_ref, device="cuda", dtype=torch.bfloat16)
+        y = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    stop_event = torch.cuda.Event(enable_timing=True)
     for _ in range(WARMUP_ITERS):
-        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, grid_z,
-                                            block_x, block_y, block_z,
-                                            smem_size, None, args, None))
-    hip_check(hip.hipDeviceSynchronize())
-    hip_check(hip.hipEventRecord(start_event, None))
+        exe(x, gamma, y)
+    torch.cuda.synchronize()
+    start_event.record()
     for _ in range(BENCH_ITERS):
-        hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, grid_z,
-                                            block_x, block_y, block_z,
-                                            smem_size, None, args, None))
-    hip_check(hip.hipEventRecord(stop_event, None))
-    hip_check(hip.hipEventSynchronize(stop_event))
-    err, elapsed_ms = hip.hipEventElapsedTime(start_event, stop_event)
-    hip_check(err)
-    avg_ms = float(elapsed_ms) / BENCH_ITERS
+        exe(x, gamma, y)
+    stop_event.record()
+    stop_event.synchronize()
+    avg_ms = start_event.elapsed_time(stop_event) / BENCH_ITERS
     print(f"Kernel avg time: {avg_ms:.4f} ms (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
 
-    # Copy back
-    hip_check(hip.hipMemcpy(output_host.ctypes.data, d_output, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-
-    if dtype == "f32":
-        output_ref = output_host
-    elif dtype == "f16":
-        output_ref = output_host.astype(np.float32)
-    else:
-        output_ref = bf16_to_fp32_cpu(output_host)
+    output_ref = y.float().cpu().numpy()
 
     # Verification
     error = np.max(np.abs(output_ref - expected))
@@ -170,13 +136,6 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
         print(output_host[0, :5])
         ok = False
 
-    # Cleanup
-    hip_check(hip.hipFree(d_input))
-    hip_check(hip.hipFree(d_gamma))
-    hip_check(hip.hipFree(d_output))
-    hip_check(hip.hipModuleUnload(hip_module))
-    hip_check(hip.hipEventDestroy(start_event))
-    hip_check(hip.hipEventDestroy(stop_event))
     return ok
 
 def test_all():

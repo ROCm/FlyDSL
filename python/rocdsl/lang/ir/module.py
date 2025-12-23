@@ -20,7 +20,15 @@ def _bind_method_builder(fn, instance_self, *, lower_range_loops: bool):
       NOT materialized as an MLIR function argument.
     - Optionally applies range-loop lowering prior to binding.
     """
-    f = lower_range_for_loops(fn) if lower_range_loops else fn
+    if lower_range_loops:
+        try:
+            f = lower_range_for_loops(fn)
+        except Exception:
+            # In dynamic contexts (e.g. interactive/closure-defined functions),
+            # `inspect.getsource` can fail. Fall back to the original function.
+            f = fn
+    else:
+        f = fn
     sig = inspect.signature(f)
     params = list(sig.parameters.values())
     drop_self = bool(params) and params[0].name == "self"
@@ -46,6 +54,12 @@ def _bind_method_builder(fn, instance_self, *, lower_range_loops: bool):
             setattr(body_builder, attr, getattr(fn, attr))
         except Exception:
             pass
+    # Preserve the original globals for later type materialization (string annotations).
+    # We can't change `__globals__` of a Python function, so we stash it on the wrapper.
+    try:
+        body_builder.__rocdsl_orig_globals__ = getattr(f, "__globals__", getattr(fn, "__globals__", {}))
+    except Exception:
+        pass
     return body_builder
 
 
@@ -247,7 +261,12 @@ class _JitDescriptor:
                                     materialized_inputs.append(t())
                                 else:
                                     materialized_inputs.append(t)
-                            mlir_func.FuncOp.from_py_func(*materialized_inputs)(body_builder)
+                            wrapped = mlir_func.FuncOp.from_py_func(*materialized_inputs)(body_builder)
+                            # Match ExecutionEngine packed-args calling convention.
+                            try:
+                                wrapped.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+                            except Exception:
+                                pass
 
                 self._wrapper = wrapper
         except TypeError:

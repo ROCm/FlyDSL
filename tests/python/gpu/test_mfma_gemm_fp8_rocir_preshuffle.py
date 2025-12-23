@@ -11,11 +11,12 @@ logging.basicConfig(level=logging.INFO)
 
 
 
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
+from rocdsl.runtime.hip_util import get_hip_arch
+import rocdsl
 import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco, pertoken_quant, shuffle_weight
+from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 import torch
 import torch.nn.functional as F
@@ -26,11 +27,8 @@ from rocdsl.dialects.ext import arith, scf, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
-import ctypes
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 # Aiter imports
 try:
@@ -190,7 +188,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a)
             scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b)
             
-            tx_idx = _arith_mlir.IndexCastOp(index_type, unwrap(tx)).result
+            tx_idx = unwrap(tx)
             vec_len_val = arith.constant(vec_a_load_len, index=True)
             linear_id = _arith_mlir.MulIOp(unwrap(tx_idx), unwrap(vec_len_val)).result
             
@@ -270,7 +268,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     col_lds = col_offset_base + ki_val
                     coord_a_lds = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds))
                     idx_a_mfma = rocir.crd2idx(coord_a_lds, layout_lds)
-                    idx_a_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a_mfma)).result
+                    idx_a_idx = unwrap(idx_a_mfma)
                     lds_a_indices.append(idx_a_idx)
                     
             acc_inits = [acc_init] * (num_acc_n * m_repeat)
@@ -487,7 +485,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         col_lds0_swizzled = swizzle_idx(curr_row_a_lds, col_lds0)
                         coord_a0 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
                         idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
-                        idx_a0_idx = _arith_mlir.IndexCastOp(index_type, unwrap(idx_a0)).result
+                        # idx_a0 is already index-typed.
+                        idx_a0_idx = unwrap(idx_a0)
 
                         loaded_a16 = vector.LoadOp(vec16_f8, lds_a, [unwrap(idx_a0_idx)]).result
                         a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
@@ -516,7 +515,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             # Main Loop (runs 0 to K-tile_k)
             # Peel off the last iteration
             c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
-            
+
+            # Python `for` + reassignment is auto-lowered into scf.for with
+            # iter_args/yield/results by `lower_range_for_loops` (supports list/tuple pytree state).
             for k_iv in range(c0, c_k_main, c_tile_k):
                 accs, vec_a_parts, b_vals, _ = emit_tile(k_iv, accs, vec_a_parts, b_vals, is_last_tile=False)
             
@@ -558,6 +559,40 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         idx = rocir.crd2idx(rocir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f16()),
+            arg_a: lambda: T.memref(size_a, _f8()),
+            arg_b: lambda: T.memref(size_b, _f8()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
+        ):
+            # Describe launch in a host-side function (IR only).
+            c1 = arith.constant(1, index=True).value
+            bdx = arith.constant(256, index=True).value
+            gx = arith.constant(M // tile_m, index=True).value
+            gy = arith.constant(N // tile_n, index=True).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["mfma_mod", "kernel_fixed"],
+                grid_size=(gx, gy, c1),
+                block_size=(bdx, c1, c1),
+                # Ensure we pass raw MLIR Values (not ArithValue wrappers) to gpu.launch_func.
+                kernel_operands=[
+                    unwrap(arg_c),
+                    unwrap(arg_a),
+                    unwrap(arg_b),
+                    unwrap(arg_scale_a),
+                    unwrap(arg_scale_b),
+                    unwrap(m_in),
+                    unwrap(n_in),
+                    unwrap(k_in),
+                ],
+            )
+
     # Request occupancy hint: waves-per-eu=2
     # Use a unique kernel_name so IR/asm dumps don't get overwritten by other tests.
     m = _MFMA()
@@ -568,8 +603,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     except Exception as e:
         print(f"Warning: Could not register Rocir dialect: {e}")
 
-    hsaco = compile_to_hsaco(m.module, kernel_name="mfma_fp8_preshuffle", waves_per_eu=2)
-    print(f"✓ Compiled ({len(hsaco)} bytes)")
+    exe = rocdsl.compile(m)
+    print("✓ Compiled")
     
     grid_x = M // tile_m
     grid_y = N // tile_n
@@ -614,89 +649,50 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     # 5. Run Kernel (f16 output, in-kernel scaling)
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
     
-    arg_ptrs = [
-        ctypes.c_void_p(c_out_raw.data_ptr()),
-        ctypes.c_void_p(a_q_fp8.data_ptr()),
-        ctypes.c_void_p(b_shuffled.data_ptr()),
-        ctypes.c_void_p(scale_a.data_ptr()),
-        ctypes.c_void_p(scale_b.data_ptr()),
-        ctypes.c_long(M), ctypes.c_long(N), ctypes.c_long(K)
-    ]
-    
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    try:
-        kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
+    def launch_kernel(c, a, b, sa, sb):
+        exe(c, a, b, sa, sb, M, N, K)
 
-        def launch_kernel(c, a, b, sa, sb):
-            arg_ptrs = [
-                ctypes.c_void_p(c.data_ptr()),
-                ctypes.c_void_p(a.data_ptr()),
-                ctypes.c_void_p(b.data_ptr()),
-                ctypes.c_void_p(sa.data_ptr()),
-                ctypes.c_void_p(sb.data_ptr()),
-                ctypes.c_long(M),
-                ctypes.c_long(N),
-                ctypes.c_long(K),
-            ]
-            current_args_array = (ctypes.c_void_p * 8)(*[ctypes.addressof(p) for p in arg_ptrs])
-            hip_check(
-                hip.hipModuleLaunchKernel(
-                    kernel_func,
-                    grid_x,
-                    grid_y,
-                    1,
-                    256,
-                    1,
-                    1,
-                    0,
-                    0,
-                    current_args_array,
-                    None,
-                )
+    _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
+    torch.cuda.synchronize()
+    c_out_scaled = c_out_raw.to(torch.float32)
+
+    # 7. Verify
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+
+    # Benchmark
+    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    bw = bytes_moved / 1e9 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
+
+    if HAS_AITER and RUN_AITER_BENCH:
+        print("-" * 40)
+        print("Running Aiter Benchmark...")
+
+        def launch_aiter(a, b, sa, sb):
+            return aiter.gemm_a8w8_bpreshuffle(
+                a,
+                b,
+                sa,
+                sb,
+                None,  # bias
+                torch.float16,
             )
 
-        _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
-        c_out_scaled = c_out_raw.to(torch.float32)
+        c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
+        verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
-        # 7. Verify
-        assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-
-        # Benchmark
-        bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
-        flops = 2 * M * N * K
-        tflops = flops / (us / 1e6) / 1e12
-        bw = bytes_moved / 1e9 / (us / 1e6)
-        print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
-
-        if HAS_AITER and RUN_AITER_BENCH:
-            print("-" * 40)
-            print("Running Aiter Benchmark...")
-
-            def launch_aiter(a, b, sa, sb):
-                return aiter.gemm_a8w8_bpreshuffle(
-                    a,
-                    b,
-                    sa,
-                    sb,
-                    None,  # bias
-                    torch.float16,
-                )
-
-            c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
-            verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
-
-            tflops_aiter = flops / (us1 / 1e6) / 1e12
-            bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
-            print(f"Aiter: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s")
-            print(f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}")
-            print("-" * 40)
-        elif HAS_AITER and not RUN_AITER_BENCH:
-            print("-" * 40)
-            print("Skipping Aiter benchmark (set ROCDSL_RUN_AITER_BENCH=1 to enable)")
-            print("-" * 40)
-    finally:
-        # Explicit unload avoids some HIP binding finalization issues.
-        hip_check(hip.hipModuleUnload(hip_module))
+        tflops_aiter = flops / (us1 / 1e6) / 1e12
+        bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
+        print(f"Aiter: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s")
+        print(f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}")
+        print("-" * 40)
+    elif HAS_AITER and not RUN_AITER_BENCH:
+        print("-" * 40)
+        print("Skipping Aiter benchmark (set ROCDSL_RUN_AITER_BENCH=1 to enable)")
+        print("-" * 40)
+    # Executor manages module lifetime.
 
 
 if __name__ == "__main__":

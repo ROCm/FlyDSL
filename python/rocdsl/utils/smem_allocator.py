@@ -18,7 +18,16 @@ def get_mlir_type_size(mlir_type: ir.Type) -> int:
     if mlir_type == T.f16() or mlir_type == T.bf16() or mlir_type == T.i16(): return 2
     if mlir_type == T.i8(): return 1
     # FP8 types
-    if isinstance(mlir_type, (ir.Float8E4M3FNType, ir.Float8E5M2Type)): return 1
+    if isinstance(
+        mlir_type,
+        (
+            ir.Float8E4M3FNType,
+            ir.Float8E5M2Type,
+            # AMD MFMA uses FNUZ variants on ROCm (1 byte each).
+            ir.Float8E4M3FNUZType,
+        ),
+    ):
+        return 1
     if mlir_type == T.f64() or mlir_type == T.i64(): return 8
     if isinstance(mlir_type, ir.VectorType):
         total = 1

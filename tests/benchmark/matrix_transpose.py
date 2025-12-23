@@ -65,7 +65,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
         f"Config: Block={BLOCK_X}x{BLOCK_Y}, Iters/thread={ITERS}, Smem={BLOCK_TILE}x{BLOCK_TILE+PAD}"
     )
 
-    # Compile kernel (Flyx-style MlirModule)
+    # Compile kernel
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}

@@ -1,9 +1,42 @@
 """Pytest configuration for RocDSL tests.
 
-This test suite uses RocDSL's embedded MLIR Python bindings (the `_mlir`
-package staged under `.rocdsl/build/python_packages/rocdsl` by default; legacy
-`build/` also works) and no longer relies on an external MLIR Python install.
+This test suite now uses RocDSL's embedded MLIR Python bindings (the `_mlir`
+package under `build/python_packages/rocdsl`) and no longer relies on an
+external MLIR Python installation.
 """
+
+import os
+import sys
+from pathlib import Path
+
+# Ensure embedded `_mlir` is importable for the test suite.
+# This must run before importing `rocdsl` (which imports `_mlir` at module import time).
+_repo_root = Path(__file__).resolve().parents[2]
+
+# Preferred build layout (new): `.rocdsl/build` (see build.sh)
+_embedded_pkg_dir = _repo_root / ".rocdsl" / "build" / "python_packages" / "rocdsl"
+# Legacy fallback: `build/python_packages/rocdsl`
+if not _embedded_pkg_dir.exists():
+    _embedded_pkg_dir = _repo_root / "build" / "python_packages" / "rocdsl"
+
+# Prefer in-tree Python sources (so tests exercise source `rocdsl/`), while still
+# making the embedded `_mlir` runtime available for native extensions.
+_src_py_dir = _repo_root / "python"
+if _src_py_dir.exists():
+    _p2 = str(_src_py_dir)
+    if _p2 in sys.path:
+        sys.path.remove(_p2)
+    sys.path.insert(0, _p2)
+
+if _embedded_pkg_dir.exists():
+    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
+    # Help rocdsl locate the embedded python_packages root correctly.
+    os.environ.setdefault("ROCDSL_BUILD_DIR", str(_embedded_pkg_dir.parents[2]))
+    _p = str(_embedded_pkg_dir)
+    if _p in sys.path:
+        sys.path.remove(_p)
+    # Keep embedded after source so `import rocdsl` resolves to in-tree package.
+    sys.path.insert(1, _p)
 
 import pytest
 

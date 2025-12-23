@@ -5,6 +5,7 @@ __version__ = "0.1.0"
 # Setup Python path for embedded MLIR modules
 import sys
 import os
+import importlib
 from pathlib import Path
 
 # IMPORTANT:
@@ -37,20 +38,22 @@ if os.environ.get("ROCDSL_USE_EMBEDDED_MLIR", "0") == "1":
 # Lazy import dialects and passes to avoid requiring MLIR when only using runtime
 def __getattr__(name):
     if name == "rocir":
-        from .dialects.ext import rocir
-        return rocir
+        return importlib.import_module(".dialects.ext.rocir", __name__)
     elif name == "arith":
-        from .dialects.ext import arith
-        return arith
+        return importlib.import_module(".dialects.ext.arith", __name__)
     elif name == "scf":
-        from .dialects.ext import scf
-        return scf
+        return importlib.import_module(".dialects.ext.scf", __name__)
     elif name == "lang":
-        from . import lang
-        return lang
+        return importlib.import_module(".lang", __name__)
     elif name in ["Pipeline", "run_pipeline", "lower_rocir_to_standard"]:
         from . import passes
         return getattr(passes, name)
+    elif name == "compile":
+        from .compiler.compiler import compile
+        return compile
+    elif name == "Executor":
+        from .compiler.executor import Executor
+        return Executor
 
 __all__ = [
     "rocir",
@@ -60,10 +63,12 @@ __all__ = [
     "Pipeline",
     "run_pipeline",
     "lower_rocir_to_standard",
+    "compile",
+    "Executor",
 ]
 
-# Export compiler modules
+# Export compiler modules (safe imports only).
 from .compiler import Pipeline, run_pipeline
 from .compiler.context import RAIIMLIRContextModule
 
-__all__.extend(["Pipeline", "run_pipeline", "RAIIMLIRContextModule"])
+__all__.extend(["Pipeline", "run_pipeline", "RAIIMLIRContextModule", "compile", "Executor"])

@@ -5,6 +5,8 @@ run a light canonicalize/cse pipeline. They intentionally do not depend on HIP
 runtime availability.
 """
 
+import sys
+
 from _mlir import ir
 import _mlir.extras.types as T
 
@@ -34,6 +36,23 @@ def test_vector_add_rocir_crd2idx_emits():
             b = rocir.memref.load(B, [idx])
             c = a + b
             rocir.memref.store(c.value, C, [idx])
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(SIZE, T.f32()),
+            B: lambda: T.memref(SIZE, T.f32()),
+            C: lambda: T.memref(SIZE, T.f32()),
+        ):
+            c1 = arith.index(1).value
+            blk = arith.index(256).value
+            gx = arith.index((SIZE + 255) // 256).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "vecAdd"],
+                grid_size=(gx, c1, c1),
+                block_size=(blk, c1, c1),
+                kernel_operands=[A, B, C],
+            )
 
     m = _VecAdd()
     s = str(m.module)
@@ -78,6 +97,23 @@ def test_matrix_transpose_rocir_layout_emits():
             _ = b_idx
             a_val = rocir.memref.load(A, [row.value, col.value])
             rocir.memref.store(a_val.value, B, [col.value, row.value])
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, T.f32()),
+            B: lambda: T.memref(N, M, T.f32()),
+        ):
+            c1 = arith.index(1).value
+            blk = arith.index(16).value
+            gx = arith.index((N + 15) // 16).value
+            gy = arith.index((M + 15) // 16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "matrixTranspose"],
+                grid_size=(gx, gy, c1),
+                block_size=(blk, blk, c1),
+                kernel_operands=[A, B],
+            )
 
     m = _Transpose()
     s = str(m.module)
@@ -128,10 +164,37 @@ def test_matmul_uses_scf_for_and_rocir_layout():
                 out_v = sum_val.value if hasattr(sum_val, "value") else sum_val
                 rocir.memref.store(out_v, C, [row.value, col.value])
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, K, T.f32()),
+            B: lambda: T.memref(K, N, T.f32()),
+            C: lambda: T.memref(M, N, T.f32()),
+        ):
+            c1 = arith.index(1).value
+            blk = arith.index(16).value
+            gx = arith.index((N + 15) // 16).value
+            gy = arith.index((M + 15) // 16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "matmul"],
+                grid_size=(gx, gy, c1),
+                block_size=(blk, blk, c1),
+                kernel_operands=[A, B, C],
+            )
+
     m = _Matmul()
     s = str(m.module)
     assert "scf.for" in s
     assert "rocir.make_layout" in s
     run_pipeline(m.module, Pipeline().canonicalize().cse())
+
+
+if __name__ == "__main__":
+    # `run_tests.sh` executes these files directly (not via pytest),
+    # so call the test functions explicitly.
+    test_vector_add_rocir_crd2idx_emits()
+    test_matrix_transpose_rocir_layout_emits()
+    test_matmul_uses_scf_for_and_rocir_layout()
+    sys.exit(0)
 
 

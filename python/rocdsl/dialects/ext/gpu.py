@@ -45,6 +45,30 @@ from _mlir.ir import (
 )
 
 
+def _as_mlir_value(x, *, index: bool = False, loc=None, ip=None):
+    """Best-effort normalize common value-like inputs to an MLIR Value.
+
+    Supports:
+    - `ir.Value` / `OpResult`
+    - RocDSL wrappers with `.value` (e.g. ArithValue)
+    - Python `int` (materialized as index const when `index=True`)
+    """
+    if x is None:
+        return None
+    # Unwrap ArithValue-like wrappers (avoid importing rocir/arith to prevent cycles).
+    if hasattr(x, "value"):
+        try:
+            return x.value
+        except Exception:
+            pass
+    if isinstance(x, int):
+        if index:
+            from . import arith as _arith_ext
+            return _arith_ext.index(x, loc=loc, ip=ip).value
+        raise TypeError("expected MLIR Value, got int (use index=True to materialize an index const)")
+    return x
+
+
 def find_ops(op, pred: Callable[[ir.OpView, ir.Operation, ir.Module], bool], single=False):
     if isinstance(op, (ir.OpView, ir.Module)):
         op = op.operation
@@ -313,11 +337,31 @@ class LaunchFuncOp(LaunchFuncOp):
         _ods_context = get_default_loc_context(loc)
         if async_dependencies is None:
             async_dependencies = []
+        else:
+            async_dependencies = [_as_mlir_value(v, loc=loc, ip=ip) for v in async_dependencies]
         async_token = None
         if len(async_dependencies):
             async_token = gpu_async_token()
         grid_size_x, grid_size_y, grid_size_z = grid_size
         block_size_x, block_size_y, block_size_z = block_size
+
+        # gpu.launch_func operands are index-typed; unwrap ArithValue and materialize ints as index consts.
+        grid_size_x = _as_mlir_value(grid_size_x, index=True, loc=loc, ip=ip)
+        grid_size_y = _as_mlir_value(grid_size_y, index=True, loc=loc, ip=ip)
+        grid_size_z = _as_mlir_value(grid_size_z, index=True, loc=loc, ip=ip)
+        block_size_x = _as_mlir_value(block_size_x, index=True, loc=loc, ip=ip)
+        block_size_y = _as_mlir_value(block_size_y, index=True, loc=loc, ip=ip)
+        block_size_z = _as_mlir_value(block_size_z, index=True, loc=loc, ip=ip)
+
+        if kernel_operands is None:
+            kernel_operands = []
+        else:
+            # Some call sites may accidentally pass a single Value; normalize.
+            if isinstance(kernel_operands, Value):
+                kernel_operands = [kernel_operands]
+            kernel_operands = [_as_mlir_value(v, loc=loc, ip=ip) for v in list(kernel_operands)]
+        dynamic_shared_memory_size = _as_mlir_value(dynamic_shared_memory_size, loc=loc, ip=ip)
+        async_object = _as_mlir_value(async_object, loc=loc, ip=ip)
 
         super().__init__(
             async_token,
@@ -349,13 +393,17 @@ class GPUFunc(FuncBase):
         loc=None,
         ip=None,
     ):
-        for size in [grid_size, block_size]:
-            for i, s in enumerate(size):
-                if isinstance(s, int):
-                    size[i] = constant(T.i32(), s)
-
         if loc is None:
             loc = get_user_code_loc()
+        # Normalize sizes/operands to Values (unwrap ArithValue; materialize ints as index consts).
+        grid_size = tuple(_as_mlir_value(s, index=True, loc=loc, ip=ip) for s in grid_size)
+        block_size = tuple(_as_mlir_value(s, index=True, loc=loc, ip=ip) for s in block_size)
+        kernel_operands = [_as_mlir_value(v, loc=loc, ip=ip) for v in kernel_operands]
+        if async_dependencies is None:
+            async_dependencies = []
+        else:
+            async_dependencies = [_as_mlir_value(v, loc=loc, ip=ip) for v in async_dependencies]
+        dynamic_shared_memory_size = _as_mlir_value(dynamic_shared_memory_size, loc=loc, ip=ip)
         return get_op_result_or_op_results(
             LaunchFuncOp(
                 ([self.qualname, self.func_name] if self.qualname is not None else [self.func_name]),

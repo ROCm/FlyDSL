@@ -8,7 +8,7 @@ codegen and performance. Only test-only helpers/imports are removed.
 from rocdsl.dialects.ext import rocir
 from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
-from rocdsl.runtime.hip_util import get_hip_arch
+from rocdsl.runtime.device import get_rocm_arch
 from rocdsl.utils import SmemAllocator
 from _mlir import ir
 import _mlir.extras.types as T
@@ -57,14 +57,14 @@ VEC_ALIGN = 16
 
 
 def build_rmsnorm_module(M: int, N: int, dtype_str: str):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=arch)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     _state = {}
 
     class _RMSNorm(rocir.MlirModule):
         GPU_MODULE_NAME = "rmsnorm_module"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{arch}", abi = "500">']
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{arch}">']
 
         def init_gpu_module(self):
             elem_type = dtype_to_elem_type(dtype_str)
@@ -154,7 +154,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        is_valid = rocir.arith.CmpIOp(
+                            rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
+                        ).result
                         if is_valid:
                             v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
                             tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
@@ -186,10 +188,13 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        v_e = arith.constant(elem_type, 0.0).value
+                        is_valid = rocir.arith.CmpIOp(
+                            rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
+                        ).result
                         if is_valid:
                             v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
+                        else:
+                            v_e = arith.constant(elem_type, 0.0).value
                         v = unwrap(v_e) if dtype_str == "f32" else rocir.arith.extf(compute_type, unwrap(v_e))
                         v2 = rocir.arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
                         thread_sumsq = rocir.arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
@@ -258,7 +263,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     for k in range_constexpr(VEC_WIDTH):
                         c_k = rocir.const_index(k)
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
+                        is_valid = rocir.arith.CmpIOp(
+                            rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
+                        ).result
                         if is_valid:
                             x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
                             g_e = tensor_Gamma[unwrap(idx_k)]
@@ -268,6 +275,23 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                             y = rocir.arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
                             y_e = y if dtype_str == "f32" else rocir.arith.truncf(elem_type, unwrap(y))
                             tensor_Out[(unwrap(row), unwrap(idx_k))] = unwrap(y_e)
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            Input: lambda: T.memref(M, N, _state["elem_type"]),
+            Gamma: lambda: T.memref(N, _state["elem_type"]),
+            Output: lambda: T.memref(M, N, _state["elem_type"]),
+        ):
+            c1 = rocir.arith_ext.index(1).value
+            gx = rocir.arith_ext.index(M).value
+            bx = rocir.arith_ext.index(BLOCK_THREADS).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["rmsnorm_module", "rmsnorm_kernel"],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[Input, Gamma, Output],
+            )
 
     return _RMSNorm()
 

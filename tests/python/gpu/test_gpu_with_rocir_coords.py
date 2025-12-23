@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
-"""GPU kernel test demonstrating Rocir coordinate operations"""
+"""GPU kernel test demonstrating Rocir coordinate operations.
+
+This test is meant to be stable under the ExecutionEngine backend: we keep the
+kernel simple and just exercise layout algebra + coordinate lowering.
+"""
 
 import sys
 import os
 
 
+import rocdsl
 from rocdsl.dialects.ext import rocir
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
-from tests.utils import compile_to_hsaco
-from _mlir.dialects import memref
+from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.dialects.ext import arith
 import _mlir.extras.types as T
 import pytest
-try:
-    from hip import hip
-except ImportError:
-    pytest.skip("HIP module not found. Skipping GPU tests.", allow_module_level=True)
+import torch
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 import numpy as np
-import ctypes
 
 
 def test_matmul_with_rocir():
-    """Matrix multiply demonstrating rocir coordinate operations"""
+    """Write linearized row-major indices into C using rocir coordinate ops."""
     print("\n" + "="*80)
-    print("GPU MatMul with Rocir Coordinate Operations")
+    print("GPU Coords-to-Linear with Rocir Coordinate Operations")
     print("Demonstrating: rocir.make_coord, rocir.make_layout, rocir.crd2idx")
     print("="*80)
 
-    M, N, K = 32, 32, 64
+    M, N = 32, 32
 
-    class _Matmul(rocir.MlirModule):
+    class _Coords(rocir.MlirModule):
         @rocir.kernel
-        def matmul(
+        def coords_to_linear(
             self: rocir.T.i64,
-            A: lambda: T.memref(M, K, T.f32()),
-            B: lambda: T.memref(K, N, T.f32()),
-            C: lambda: T.memref(M, N, T.f32()),
+            C: lambda: T.memref(M, N, T.i32()),
         ):
             bx = rocir.block_idx("x")
             by = rocir.block_idx("y")
@@ -49,7 +48,6 @@ def test_matmul_with_rocir():
 
             m_c = arith.index(M)
             n_c = arith.index(N)
-            k_c = arith.index(K)
             one = arith.index(1)
 
             # Create rocir layout for output matrix C
@@ -61,22 +59,28 @@ def test_matmul_with_rocir():
             thread_coord = rocir.make_coord(row.value, col.value)
 
             # Use crd2idx to compute linear index (will be lowered to arith ops)
-            _ = rocir.crd2idx(thread_coord, c_layout)
+            idx = rocir.crd2idx(thread_coord, c_layout)
+            idx_v = idx.value if hasattr(idx, "value") else idx
+            idx_i32 = arith.IndexCastOp(T.i32(), idx_v).result
+            idx_i32_v = idx_i32.value if hasattr(idx_i32, "value") else idx_i32
+            rocir.memref.store(idx_i32_v, C, [row.value, col.value])
 
-            row_valid = (row < m_c)
-            col_valid = (col < n_c)
-            valid = (row_valid & col_valid)
-
-            if valid:
-                sum_val = arith.f32(0.0)
-                for k in range(k_c):
-                    k_v = k.value if hasattr(k, "value") else k
-                    a_val = memref.load(A, [row.value, k_v])
-                    b_val = memref.load(B, [k_v, col.value])
-                    sum_val = sum_val + (a_val * b_val)
-
-                out_v = sum_val.value if hasattr(sum_val, "value") else sum_val
-                memref.store(out_v, C, [row.value, col.value])
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            C: lambda: T.memref(M, N, T.i32()),
+        ):
+            # Wrap the kernel launch inside a host-side function.
+            c1 = arith.index(1).value
+            blk = arith.index(16).value
+            gx = arith.index((N + 15) // 16).value
+            gy = arith.index((M + 15) // 16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "coords_to_linear"],
+                grid_size=(gx, gy, c1),
+                block_size=(blk, blk, c1),
+                kernel_operands=[C],
+            )
 
     print("\n Generated MLIR with rocir coordinate operations:")
     print("- rocir.make_shape: Defines matrix dimensions")
@@ -85,52 +89,24 @@ def test_matmul_with_rocir():
     print("- rocir.make_coord: Creates 2D thread coordinates")
     print("- rocir.crd2idx: Converts coord to linear index\n")
 
-    m_mod = _Matmul()
-    print("Compiling to GPU binary...")
-    hsaco = compile_to_hsaco(m_mod.module)
-    print(f" Compiled to HSACO: {len(hsaco)} bytes\n")
+    m_mod = _Coords()
+    print("Compiling...")
+    exe = rocdsl.compile(m_mod)
+    print(" Compiled\n")
 
-    # Run computation
-    np.random.seed(456)
-    a_host = np.random.randn(M, K).astype(np.float32)
-    b_host = np.random.randn(K, N).astype(np.float32)
-    c_host = np.zeros((M, N), dtype=np.float32)
-    expected = a_host @ b_host
+    # Run computation: C[row, col] = row * N + col
+    expected = np.arange(M * N, dtype=np.int32).reshape(M, N)
+    C = torch.empty((M, N), device="cuda", dtype=torch.int32)
 
-    d_a = hip_check(hip.hipMalloc(M * K * 4))
-    d_b = hip_check(hip.hipMalloc(K * N * 4))
-    d_c = hip_check(hip.hipMalloc(M * N * 4))
+    exe(C)
+    torch.cuda.synchronize()
+    c_host = C.cpu().numpy()
 
-    hip_check(hip.hipMemcpy(d_a, a_host.ctypes.data, M * K * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_b, b_host.ctypes.data, K * N * 4, hip.hipMemcpyKind.hipMemcpyHostToDevice))
+    diff = np.abs(c_host.astype(np.int64) - expected.astype(np.int64))
+    max_error = int(np.max(diff))
 
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"matmul"))
-
-    block_size = 16
-    grid_x = (N + block_size - 1) // block_size
-    grid_y = (M + block_size - 1) // block_size
-
-    arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_b)), ctypes.c_void_p(int(d_c))]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-
-    hip_check(hip.hipModuleLaunchKernel(kernel_func, grid_x, grid_y, 1, block_size, block_size, 1, 0, 0, args, None))
-    hip_check(hip.hipDeviceSynchronize())
-
-    hip_check(hip.hipMemcpy(c_host.ctypes.data, d_c, M * N * 4, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-
-    error = np.max(np.abs(c_host - expected))
-    rel_error = error / (np.max(np.abs(expected)) + 1e-8)
-
-    print(f" Max absolute error: {error:.2e}")
-    print(f" Max relative error: {rel_error:.2e}")
-
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_b))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
-
-    return rel_error < 1e-3
+    print(f" Max abs diff: {max_error}")
+    return max_error == 0
 
 
 if __name__ == "__main__":

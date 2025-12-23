@@ -13,6 +13,8 @@ from . import reduce as reduce_utils
 from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
 from _mlir import ir
+from _mlir.ir import InsertionPoint
+from _mlir.dialects import scf as scf_mlir
 import _mlir.extras.types as T
 
 
@@ -217,14 +219,20 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
 
                         c_N = rocir.const_index(N)
-                        is_valid = rocir.arith.CmpIOp(rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        val = unwrap(c_neg_inf)
+                        is_valid = rocir.arith.CmpIOp(
+                            rocir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
+                        ).result
+
+                        # Use Python `if` and rely on control-flow lowering to emit scf.if
+                        # (with results) so `val` dominates later uses.
                         if is_valid:
                             val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
                             if dtype_str == "bf16":
                                 val = rocir.arith.extf(compute_type, unwrap(val_e)).result
                             else:
                                 val = unwrap(val_e)
+                        else:
+                            val = unwrap(c_neg_inf)
                         row_buffer.append((val, is_valid))
 
             # 2. Local Max
@@ -240,9 +248,8 @@ def build_softmax_module(M, N, dtype_str="f32"):
             for item in row_buffer:
                 if isinstance(item, tuple):  # Scalar with validity mask
                     val, valid = item
-                    # Select: if valid, val, else -inf
-                    safe_val = rocir.arith.SelectOp(unwrap(valid), unwrap(val), unwrap(c_neg_inf)).result
-                    thread_max = rocir.arith.MaximumFOp(unwrap(thread_max), unwrap(safe_val)).result
+                    # `val` is already -inf when invalid (see the scalar tail load above).
+                    thread_max = rocir.arith.MaximumFOp(unwrap(thread_max), unwrap(val)).result
                 else:  # Vector
                     vec_val = item
                     red = reduce_vec_max(vec_val)
@@ -429,6 +436,22 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             c_k = rocir.const_index(k)
                             idx_k = rocir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                             tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
+
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, _state["elem_type"]),
+            C: lambda: T.memref(M, N, _state["elem_type"]),
+        ):
+            c1 = arith.index(1).value
+            gx = arith.index(M).value
+            bx = arith.index(BLOCK_SIZE).value
+            rocir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, "softmax_kernel"],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[A, C],
+            )
 
     return _Softmax()
 

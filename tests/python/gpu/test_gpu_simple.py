@@ -35,6 +35,24 @@ def test_vector_add():
             c = a + b
             rocir.memref.store(c.value, C, [row.value, col.value])
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            A: lambda: T.memref(M, N, T.f32()),
+            B: lambda: T.memref(M, N, T.f32()),
+            C: lambda: T.memref(M, N, T.f32()),
+        ):
+            c1 = rocir.arith_ext.index(1).value
+            bx = rocir.arith_ext.index(N // 16).value
+            by = rocir.arith_ext.index(M // 16).value
+            b16 = rocir.arith_ext.index(16).value
+            rocir.gpu_ext.LaunchFuncOp(
+                ["kernels", "vecAdd"],
+                grid_size=(bx, by, c1),
+                block_size=(b16, b16, c1),
+                kernel_operands=[A, B, C],
+            )
+
     m = _VecAdd()
     assert m.module.operation.verify()
     run_pipeline(m.module, Pipeline().canonicalize().cse())
