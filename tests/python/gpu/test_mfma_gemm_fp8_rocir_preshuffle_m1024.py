@@ -9,13 +9,12 @@ import functools
 # Configure logging to show INFO level messages
 logging.basicConfig(level=logging.INFO)
 
-
 import rocdsl
-from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.runtime.hip_util import hip_check, get_hip_arch
 import rocdsl.dialects.ext.rocir as rocir
+from rocdsl.dialects.ext.python_control_flow import range_constexpr
+from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
-from tests.utils import compile_to_hsaco, pertoken_quant, shuffle_weight
+from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 import torch
 import torch.nn.functional as F
@@ -26,8 +25,9 @@ from rocdsl.dialects.ext import arith, scf, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
-from hip import hip
-import ctypes
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 # Aiter imports (optional)
 try:
@@ -37,6 +37,8 @@ try:
 except ImportError:
     print("Warning: Aiter not found, skipping comparison")
     HAS_AITER = False
+
+RUN_AITER_BENCH = os.environ.get("ROCDSL_RUN_AITER_BENCH", "0") == "1"
 
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
@@ -71,21 +73,12 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     print(f"MFMA FP8 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]")
     print("=" * 80)
     gpu_arch = get_hip_arch()
-    ctx = RAIIMLIRContextModule()
-    try:
-        import _rocirPassesExt
 
-        _rocirPassesExt.register_dialect(ctx.module.context)
-        print("✓ Registered Rocir dialect")
-    except Exception as e:
-        print(f"Warning: Could not register Rocir dialect: {e}")
+    def _f8():
+        return ir.Float8E4M3FNType.get()
 
-        # NOTE: Kernel correctness here is sensitive to how we pack/load MFMA operands.
-        # `mfma_f32_16x16x32_fp8_fp8` consumes K=32 per invocation (per wave).
-        # This kernel intentionally issues **two** MFMA ops back-to-back into the same accumulator,
-        # making a K=64 micro-step.
-    f8 = ir.Float8E4M3FNType.get()
-    f32 = ir.F32Type.get()
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
 
     size_c = M * N
     size_a = M * K
@@ -105,29 +98,31 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     pad_k = 0  # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
     lds_stride = tile_k + pad_k
 
-    allocator = SmemAllocator(ctx, arch=gpu_arch)
-    lds_a_decl = allocator.allocate_array(f8, tile_m * lds_stride)
-
-    @gpu.module(
-        "mfma_mod",
-        [
+    class _MFMA(rocir.MlirModule):
+        GPU_MODULE_NAME = "mfma_mod"
+        GPU_MODULE_TARGETS = [
             f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-        ],
-    )
-    def gpu_mod():
-        allocator.finalize()
+        ]
 
-        @gpu.func(emit=True)
+        def init_gpu_module(self):
+            _state["lds_a_decl"] = allocator.allocate_array(_f8(), tile_m * lds_stride)
+            allocator.finalize()
+
+        @rocir.kernel
         def kernel_fixed(
-            arg_c: T.memref(size_c, T.f16()),
-            arg_a: T.memref(size_a, f8),
-            arg_b: T.memref(size_b, f8),
-            arg_scale_a: T.memref(M, T.f32()),
-            arg_scale_b: T.memref(N, T.f32()),
-            m_in: T.index(),
-            n_in: T.index(),
-            k_in: T.index(),
+            self: rocir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f16()),
+            arg_a: lambda: T.memref(size_a, _f8()),
+            arg_b: lambda: T.memref(size_b, _f8()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
         ):
+            f8 = _f8()
+            f32 = ir.F32Type.get()
+
             c_m = m_in
             c_n = n_in
             c_k = k_in
@@ -161,6 +156,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             c16 = arith.constant(16, index=True)
             c256 = arith.constant(256, index=True)
             c1024 = arith.constant(1024, index=True)
+            
+            c32 = arith.constant(32, index=True)
 
             c_k0 = c_k / 64
             c_n0 = c_n / 16
@@ -194,7 +191,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             by = gpu.block_id("y")
 
             base_ptr = allocator.get_base()
-            lds_a = lds_a_decl(base_ptr).get()
+            lds_a = _state["lds_a_decl"](base_ptr).get()
 
             a_rsrc = buffer_ops.create_buffer_resource(arg_a)
             b_rsrc = buffer_ops.create_buffer_resource(arg_b)
@@ -202,7 +199,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a)
             scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b)
 
-            tx_idx = _arith_mlir.IndexCastOp(index_type, unwrap(tx)).result
+            tx_idx = unwrap(tx)
             vec_len_val = arith.constant(vec_a_load_len, index=True)
             linear_id = tx_idx * vec_len_val
 
@@ -227,8 +224,6 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
             row_b_lds = lane_mod_16
 
-            c0_i32 = arith.i32(0)
-
             coord_a_base = rocir.make_coord(unwrap(row_a_global), unwrap(col_a_local))
             idx_a_base = rocir.crd2idx(coord_a_base, layout_a)
             idx_a_base_div4 = idx_a_base / 4
@@ -252,7 +247,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             n_intra_list = []
             n_blk_list = []
 
-            for i in range(num_acc_n):
+            for i in range_constexpr(num_acc_n):
                 offset = i * 16
                 c_offset = arith.constant(offset, index=True)
 
@@ -265,11 +260,11 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 n_intra_list.append(n_intra)
                 n_blk_list.append(n_blk)
 
-            for mi in range(m_repeat):
+            for mi in range_constexpr(m_repeat):
                 mi_val = arith.constant(mi * 16, index=True)
                 curr_row_a_lds = row_a_lds + mi_val
 
-                for ki_step in range(k_unroll):
+                for ki_step in range_constexpr(k_unroll):
                     # Each MFMA step advances K by 32 for fp8 x32
                     ki = ki_step * 32
                     ki_val = arith.constant(ki, index=True)
@@ -279,9 +274,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         unwrap(curr_row_a_lds), unwrap(col_lds)
                     )
                     idx_a_mfma = rocir.crd2idx(coord_a_lds, layout_lds)
-                    idx_a_idx = _arith_mlir.IndexCastOp(
-                        index_type, unwrap(idx_a_mfma)
-                    ).result
+                    idx_a_idx = unwrap(idx_a_mfma)
                     lds_a_indices.append(idx_a_idx)
 
             acc_inits = [acc_init] * (num_acc_n * m_repeat)
@@ -328,7 +321,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             vec_a_parts_lens = []
 
             remaining_bytes = bytes_per_thread_a
-            for i in range(num_a_loads):
+            for i in range_constexpr(num_a_loads):
                 curr_bytes = min(remaining_bytes, max_bytes_per_load)
                 vec_a_parts_lens.append(curr_bytes)
                 # Force global dwordx4 loads: carry vector<4xi32> through the loop state.
@@ -340,7 +333,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             def load_a_split(idx_div4):
                 parts = []
                 curr_off_i32 = 0
-                for i in range(num_a_loads):
+                for i in range_constexpr(num_a_loads):
                     curr_bytes = vec_a_parts_lens[i]
 
                     curr_idx = idx_div4
@@ -358,7 +351,10 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
             # Initial Loads (A). B is loaded on-the-fly inside the MFMA loop.
             vec_a_inits = load_a_split(idx_a_base_div4)
-            iter_args = acc_inits + vec_a_inits
+            
+            # Loop-carried state
+            accs = acc_inits
+            vec_a_parts = vec_a_inits
 
             # Helper to emit tile body
             def emit_tile(k_iv, accs_in, vec_a_in_parts, is_last_tile=False):
@@ -369,7 +365,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 c8 = arith.constant(8, index=True)
                 c32 = arith.constant(32, index=True)
 
-                for i in range(num_a_loads):
+                for i in range_constexpr(num_a_loads):
                     val_vec = vec_a_in_parts[i]
                     # `val_vec` is a vector<i32> of length (curr_bytes/4).
                     # For many tiles (e.g. 16x128), each thread only owns 8 bytes => vector<2xi32>.
@@ -445,7 +441,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     # --- PREFETCH SCALES (Last Iteration) ---
                     # Prefetch Scale B (invariant for thread)
                     s_b_vals = []
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         offset = ni * 16
                         c_offset = arith.constant(offset, index=True)
                         col_g = by_n + n_tile_base + c_offset + lane_mod_16
@@ -460,7 +456,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
                     # Pre-load Scale A vectors
                     row_off_base = lane_div_16 * 4
-                    for mi in range(m_repeat):
+                    for mi in range_constexpr(m_repeat):
                         row_base_m = bx_m + (mi * 16)
                         row_g_base = row_base_m + row_off_base
                         s_a_vec = buffer_ops.buffer_load(
@@ -473,11 +469,11 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
                 # Loop Swap: Iterate K_step (outer) -> MI (inner)
                 # To reuse B
-                for ki_step in range(k_unroll):
+                for ki_step in range_constexpr(k_unroll):
                     # Load B packs for this ki_step only (short live range)
                     b0_packs = []
                     b1_packs = []
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         b0, b1 = load_b_step(k_iv, ki_step, ni)
                         b0_packs.append(b0)
                         b1_packs.append(b1)
@@ -496,7 +492,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             unwrap(col_idx), unwrap(xor_mask)
                         ).result
 
-                    for mi in range(m_repeat):
+                    for mi in range_constexpr(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
 
@@ -506,9 +502,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled)
                         )
                         idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
-                        idx_a0_idx = _arith_mlir.IndexCastOp(
-                            index_type, unwrap(idx_a0)
-                        ).result
+                        idx_a0_idx = unwrap(idx_a0)
 
                         loaded_a16 = vector.LoadOp(
                             vec16_f8, lds_a, [unwrap(idx_a0_idx)]
@@ -521,7 +515,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             a_vec128, static_position=[1], dynamic_position=[]
                         ).result
 
-                        for ni in range(num_acc_n):
+                        for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             curr_acc = current_accs_list[acc_idx]
                             b0_pack = b0_packs[ni]
@@ -558,41 +552,24 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             # Peel off the last iteration
             c_k_main = c_k - c_tile_k
 
-            for_op = scf.ForOp(c0, c_k_main, c_tile_k, iter_args)
-
-            with ir.InsertionPoint(for_op.body):
-                k_iv = for_op.induction_variable
-                args = for_op.inner_iter_args
-
-                # Split args
-                num_accs = num_acc_n * m_repeat
-                accs_iter = args[:num_accs]
-                vec_a_iter = args[num_accs : num_accs + num_a_loads]
-
-                accs_next, vec_a_next, _ = emit_tile(
-                    k_iv, accs_iter, vec_a_iter, is_last_tile=False
+            for k_iv in range(c0, c_k_main, c_tile_k):
+                accs, vec_a_parts, _ = emit_tile(
+                    k_iv, accs, vec_a_parts, is_last_tile=False
                 )
-
-                scf.yield_(accs_next + vec_a_next)
-
-            results_list = for_op.results
-            num_accs = num_acc_n * m_repeat
-            final_accs_loop = results_list[:num_accs]
-            vec_a_final_loop = results_list[num_accs : num_accs + num_a_loads]
 
             # Epilogue: Run last tile and prefetch scales
             final_accs, _, scales = emit_tile(
-                c_k_main, final_accs_loop, vec_a_final_loop, is_last_tile=True
+                c_k_main, accs, vec_a_parts, is_last_tile=True
             )
 
             s_b_vals = scales["s_b_vals"]
             s_a_vecs = scales["s_a_vecs"]
 
-            for mi in range(m_repeat):
+            for mi in range_constexpr(m_repeat):
                 row_base_m = bx_m + (mi * 16)
                 s_a_vec4 = s_a_vecs[mi]
 
-                for i in range(4):
+                for i in range_constexpr(4):
                     row_off = (lane_div_16 * 4) + i
                     row_g = row_base_m + row_off
 
@@ -600,7 +577,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         s_a_vec4, static_position=[i], dynamic_position=[]
                     ).result
 
-                    for ni in range(num_acc_n):
+                    for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
 
@@ -621,12 +598,52 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         )
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
+        @rocir.jit
+        def __call__(
+            self: rocir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f16()),
+            arg_a: lambda: T.memref(size_a, _f8()),
+            arg_b: lambda: T.memref(size_b, _f8()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
+        ):
+            c1 = arith.constant(1, index=True).value
+            bdx = arith.constant(256, index=True).value
+            gx = arith.constant(M // tile_m, index=True).value
+            gy = arith.constant(N // tile_n, index=True).value
+            
+            rocir.gpu_ext.LaunchFuncOp(
+                ["mfma_mod", "kernel_fixed"],
+                grid_size=(gx, gy, c1),
+                block_size=(bdx, c1, c1),
+                kernel_operands=[
+                    unwrap(arg_c),
+                    unwrap(arg_a),
+                    unwrap(arg_b),
+                    unwrap(arg_scale_a),
+                    unwrap(arg_scale_b),
+                    unwrap(m_in),
+                    unwrap(n_in),
+                    unwrap(k_in),
+                ],
+            )
+
     # Request occupancy hint: waves-per-eu=2
     # Use a unique kernel_name so IR/asm dumps don't get overwritten by other tests.
-    hsaco = compile_to_hsaco(
-        ctx.module, kernel_name="mfma_fp8_preshuffle", waves_per_eu=2
-    )
-    print(f"✓ Compiled ({len(hsaco)} bytes)")
+    m = _MFMA()
+    try:
+        import _rocirPassesExt
+
+        _rocirPassesExt.register_dialect(m.module.context)
+        print("✓ Registered Rocir dialect")
+    except Exception as e:
+        print(f"Warning: Could not register Rocir dialect: {e}")
+        
+    exe = rocdsl.compile(m)
+    print("✓ Compiled")
 
     grid_x = M // tile_m
     grid_y = N // tile_n
@@ -683,54 +700,13 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     # 5. Run Kernel (f16 output, in-kernel scaling)
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
 
-    arg_ptrs = [
-        ctypes.c_void_p(c_out_raw.data_ptr()),
-        ctypes.c_void_p(a_q_fp8.data_ptr()),
-        ctypes.c_void_p(b_shuffled.data_ptr()),
-        ctypes.c_void_p(scale_a.data_ptr()),
-        ctypes.c_void_p(scale_b.data_ptr()),
-        ctypes.c_long(M),
-        ctypes.c_long(N),
-        ctypes.c_long(K),
-    ]
-
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
-
     def launch_kernel(c, a, b, sa, sb):
-        arg_ptrs = [
-            ctypes.c_void_p(c.data_ptr()),
-            ctypes.c_void_p(a.data_ptr()),
-            ctypes.c_void_p(b.data_ptr()),
-            ctypes.c_void_p(sa.data_ptr()),
-            ctypes.c_void_p(sb.data_ptr()),
-            ctypes.c_long(M),
-            ctypes.c_long(N),
-            ctypes.c_long(K),
-        ]
-        current_args_array = (ctypes.c_void_p * 8)(
-            *[ctypes.addressof(p) for p in arg_ptrs]
-        )
-
-        hip_check(
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                grid_x,
-                grid_y,
-                1,
-                256,
-                1,
-                1,
-                0,
-                0,
-                current_args_array,
-                None,
-            )
-        )
+        exe(c, a, b, sa, sb, M, N, K)
 
     _, us = run_perftest(
         launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b
     )
+    torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
     # 7. Verify
@@ -746,7 +722,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     bw = bytes_moved / 1e9 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
 
-    if HAS_AITER:
+    if HAS_AITER and RUN_AITER_BENCH:
         print("-" * 40)
         print("Running Aiter Benchmark...")
 
@@ -769,6 +745,10 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}"
         )
         print("-" * 40)
+    elif HAS_AITER and not RUN_AITER_BENCH:
+        print("-" * 40)
+        print("Skipping Aiter benchmark (set ROCDSL_RUN_AITER_BENCH=1 to enable)")
+        print("-" * 40)
 
 
 if __name__ == "__main__":
@@ -781,3 +761,8 @@ if __name__ == "__main__":
     # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
     # test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
     # test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
+    
+    # Work around a known finalization crash
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
