@@ -1,14 +1,14 @@
-add_mlir_library(RocirTransforms
-  RocirToStandard.cpp
-  RocirDCE.cpp
+add_mlir_library(FlirTransforms
+  FlirToStandard.cpp
+  FlirDCE.cpp
   
   PARTIAL_SOURCES_INTENDED
   
   DEPENDS
-  RocirPassesIncGen
+  FlirPassesIncGen
   
   LINK_LIBS
-  RocirDialect
+  FlirDialect
   MLIRIR
   MLIRPass
   MLIRTransforms

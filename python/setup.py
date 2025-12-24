@@ -1,11 +1,11 @@
-"""Setup script for RocDSL Python bindings.
+"""Setup script for FLIR Python bindings.
 
 NOTE: Prefer installing from repo root:
   - Editable: `pip install -e .` (or `python setup.py develop`)
   - Wheel:    `python -m build` (or `python setup.py bdist_wheel`)
 
 The root package includes the embedded `_mlir` runtime from
-`build/python_packages/rocdsl/_mlir`, which this `python/setup.py` does not
+`build/python_packages/pyflir/_mlir`, which this `python/setup.py` does not
 package by itself.
 """
 
@@ -26,12 +26,12 @@ def load_requirements():
     return requirements
 
 setup(
-    name="rocdsl",
+    name="pyflir",
     version="0.1.0",
-    description="Python bindings for RocDSL - ROCm Domain Specific Language for layout algebra",
+    description="Python bindings for FLIR - ROCm Domain Specific Language for layout algebra",
     long_description=open("../README.md").read() if os.path.exists("../README.md") else "",
     long_description_content_type="text/markdown",
-    author="RocDSL Contributors",
+    author="FLIR Contributors",
     license="Apache-2.0",
     packages=find_packages(),
     install_requires=load_requirements(),
@@ -50,6 +50,6 @@ setup(
     ],
     keywords="mlir cuda rocm gpu compiler layout",
     project_urls={
-        "Source": "https://github.com/yourusername/rocdsl",
+        "Source": "https://github.com/yourusername/flir",
     },
 )

@@ -5,9 +5,9 @@ from _mlir.ir import Context, Location, Module, InsertionPoint
 from _mlir.dialects import func
 
 try:
-    from rocdsl.dialects.ext import arith
+    from pyflir.dialects.ext import arith
 except ImportError:
-    pytest.skip("RocDSL dialect not available", allow_module_level=True)
+    pytest.skip("FLIR dialect not available", allow_module_level=True)
 
 
 def test_arithmetic_operators(ctx):

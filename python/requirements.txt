@@ -1,5 +1,5 @@
 #
-# RocDSL Python package runtime dependencies.
+# FLIR Python package runtime dependencies.
 #
 # Notes:
 # - Build-time deps (pybind11/nanobind/numpy for native extensions) are declared in

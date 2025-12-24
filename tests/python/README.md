@@ -1,4 +1,4 @@
-# Rocir Python Tests
+# Flir Python Tests
 
 测试文件按功能分类组织:
 
@@ -7,11 +7,11 @@
 ```
 tests/python/
 ├── ir/           # IR测试 (MLIR生成和转换,不涉及GPU执行)
-│   ├── test_rocir_basic.py
-│   ├── test_rocir_product.py
-│   ├── test_rocir_divide.py
-│   ├── test_rocir_local.py
-│   ├── test_rocir_coord_ops.py
+│   ├── test_flir_basic.py
+│   ├── test_flir_product.py
+│   ├── test_flir_divide.py
+│   ├── test_flir_local.py
+│   ├── test_flir_coord_ops.py
 │   ├── test_arith_operators.py
 │   ├── test_basic_ops.py
 │   ├── test_local_ops.py
@@ -19,10 +19,10 @@ tests/python/
 │   └── test_passes.py
 │
 ├── gpu/          # GPU测试 (GPU kernel编译和执行)
-│   ├── test_gpu_rocdsl.py          # Rocir layouts + GPU kernels
+│   ├── test_gpu_flir.py          # Flir layouts + GPU kernels
 │   ├── test_gpu_layout.py          # GPU layout tests
 │   ├── test_gpu_simple.py          # Simple GPU kernel tests
-│   ├── test_gpu_with_rocir_coords.py  # Coordinate ops on GPU
+│   ├── test_gpu_with_flir_coords.py  # Coordinate ops on GPU
 │   └── test_shared_working.py      # Shared memory optimization
 │
 └── examples/     # 示例和演示
@@ -35,7 +35,7 @@ tests/python/
 - **目的**: 测试MLIR IR生成、操作和转换
 - **环境**: 不需要GPU,纯Python + MLIR
 - **内容**:
-  - Rocir dialect操作 (make_shape, make_layout, crd2idx等)
+  - Flir dialect操作 (make_shape, make_layout, crd2idx等)
   - Layout algebra (product, divide, partition等)
   - Pass管道 (lowering, optimization等)
 

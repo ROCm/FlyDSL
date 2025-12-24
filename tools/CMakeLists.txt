@@ -1,1 +1,1 @@
-add_subdirectory(rocir-opt)
+add_subdirectory(flir-opt)

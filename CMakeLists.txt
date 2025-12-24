@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(ROCDSL VERSION 0.1.0 LANGUAGES C CXX)
+project(FLIR VERSION 0.1.0 LANGUAGES C CXX)
 
 # C++ Standard
 set(CMAKE_CXX_STANDARD 17)
@@ -36,7 +36,7 @@ if(MLIR_FOUND)
     add_definitions(${LLVM_DEFINITIONS})
     
     # TableGen targets
-    add_subdirectory(include/rocir)
+    add_subdirectory(include/flir)
     
     message(STATUS "TableGen targets configured")
 else()
@@ -71,7 +71,7 @@ set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 # Configure Python package prefix (embed upstream MLIR under `_mlir` to avoid
 # colliding with MLIR's own exported CMake/Python targets named `mlir.*`).
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
-set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/rocdsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
+set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/pyflir/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
 
 add_subdirectory(lib)
 add_subdirectory(tools)
@@ -81,18 +81,18 @@ endif()
 
 
 # Installation
-install(DIRECTORY include/rocir
+install(DIRECTORY include/flir
     DESTINATION include
     FILES_MATCHING PATTERN "*.td"
 )
 
 install(DIRECTORY docs
-    DESTINATION share/rocir
+    DESTINATION share/flir
 )
 
 # Summary
 message(STATUS "")
-message(STATUS "Rocir Configuration Summary")
+message(STATUS "Flir Configuration Summary")
 message(STATUS "==============================")
 message(STATUS "  Version:           ${PROJECT_VERSION}")
 message(STATUS "  Build Runtime:     ${BUILD_RUNTIME}")

@@ -1,11 +1,11 @@
 module {
-  func.func @test_rocir_ops(%i1: index, %i2: index, %i3: index) {
-    %s = rocir.make_shape %i1, %i2, %i3 : (index, index, index) -> !rocir.shape<(?,?,?)>
-    %st = rocir.make_stride %i1, %i2, %i3 : (index, index, index) -> !rocir.stride<(?,?,?)>
-    %l = rocir.make_layout %s, %st : (!rocir.shape<(?,?,?)>, !rocir.stride<(?,?,?)>) -> !rocir.layout<(?,?,?)>
-    %c = rocir.make_coord %i1, %i2 : (index, index) -> !rocir.coord<(?,?)>
-    %size = rocir.size %s : !rocir.shape<(?,?,?)> -> index
-    %idx = rocir.crd2idx %c, %l : (!rocir.coord<(?,?)>, !rocir.layout<(?,?,?)>) -> index
+  func.func @test_flir_ops(%i1: index, %i2: index, %i3: index) {
+    %s = flir.make_shape %i1, %i2, %i3 : (index, index, index) -> !flir.shape<(?,?,?)>
+    %st = flir.make_stride %i1, %i2, %i3 : (index, index, index) -> !flir.stride<(?,?,?)>
+    %l = flir.make_layout %s, %st : (!flir.shape<(?,?,?)>, !flir.stride<(?,?,?)>) -> !flir.layout<(?,?,?)>
+    %c = flir.make_coord %i1, %i2 : (index, index) -> !flir.coord<(?,?)>
+    %size = flir.size %s : !flir.shape<(?,?,?)> -> index
+    %idx = flir.crd2idx %c, %l : (!flir.coord<(?,?)>, !flir.layout<(?,?,?)>) -> index
     return
   }
 }

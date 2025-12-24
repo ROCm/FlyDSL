@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Test ROCDL dialect operations."""
 
-from rocdsl.dialects.ext import rocdl, rocir
-from rocdsl.dialects.ext import arith as arith_ext
-class _ROCDLOps(rocir.MlirModule):
-    @rocir.jit
-    def thread_test(self: rocir.T.i64):
-        i32 = rocir.T.i32()
+from pyflir.dialects.ext import rocdl, flir
+from pyflir.dialects.ext import arith as arith_ext
+class _ROCDLOps(flir.MlirModule):
+    @flir.jit
+    def thread_test(self: flir.T.i64):
+        i32 = flir.T.i32()
         rocdl.workitem_id_x(i32)
         rocdl.workitem_id_y(i32)
         rocdl.workitem_id_z(i32)
@@ -20,9 +20,9 @@ class _ROCDLOps(rocir.MlirModule):
 
 def test_sync_operations():
     """Test synchronization operations."""
-    class _M(rocir.MlirModule):
-        @rocir.jit
-        def sync_test(self: rocir.T.i64):
+    class _M(flir.MlirModule):
+        @flir.jit
+        def sync_test(self: flir.T.i64):
             rocdl.barrier()
             rocdl.s_barrier()
             rocdl.s_waitcnt(0)
@@ -35,10 +35,10 @@ def test_sync_operations():
 
 def test_lane_operations():
     """Test lane/shuffle operations."""
-    class _M(rocir.MlirModule):
-        @rocir.jit
-        def lane_test(self: rocir.T.i64):
-            i32 = rocir.T.i32()
+    class _M(flir.MlirModule):
+        @flir.jit
+        def lane_test(self: flir.T.i64):
+            i32 = flir.T.i32()
             src = arith_ext.constant(42, type=i32)
             lane = arith_ext.constant(0, type=i32)
             rocdl.readlane(i32, src.value, lane.value)

@@ -4,25 +4,25 @@ import pytest
 from _mlir.ir import Context, Module
 
 try:
-    from rocdsl.passes import (
-        Pipeline, run_pipeline, RocDSLCompilerError,
-        lower_rocir_to_standard
+    from pyflir.passes import (
+        Pipeline, run_pipeline, FLIRCompilerError,
+        lower_flir_to_standard
     )
 except ImportError:
-    pytest.skip("RocDSL passes not available", allow_module_level=True)
+    pytest.skip("FLIR passes not available", allow_module_level=True)
 
 
 def test_pipeline_construction():
     """Test Pipeline fluent API construction."""
     pipeline = (Pipeline()
-                .rocir_to_standard()
+                .flir_to_standard()
                 .Func(Pipeline().canonicalize().cse())
                 .symbol_dce())
     
     pipeline_str = str(pipeline)
     
     # Should contain all passes
-    assert "rocir-to-standard" in pipeline_str
+    assert "flir-to-standard" in pipeline_str
     assert "func.func(canonicalize,cse)" in pipeline_str
     assert "symbol-dce" in pipeline_str
     assert pipeline_str.startswith("builtin.module(")
@@ -42,12 +42,12 @@ def test_pipeline_add_pass_with_options():
 
 def test_pipeline_composition():
     """Test pipeline addition operators."""
-    p1 = Pipeline().rocir_to_standard()
+    p1 = Pipeline().flir_to_standard()
     p2 = Pipeline().canonicalize()
     
     # Test += operator
     p1 += p2
-    assert "rocir-to-standard" in str(p1)
+    assert "flir-to-standard" in str(p1)
     assert "canonicalize" in str(p1)
     
     # Test + operator
@@ -76,9 +76,9 @@ def test_nested_pipelines():
 def test_pipeline_recipes():
     """Test pre-built pipeline recipes."""
     # Simple composed recipe (API-level check)
-    p = Pipeline().rocir_to_standard().canonicalize().cse()
+    p = Pipeline().flir_to_standard().canonicalize().cse()
     s = str(p)
-    assert "rocir-to-standard" in s
+    assert "flir-to-standard" in s
     assert "canonicalize" in s
     assert "cse" in s
 
@@ -88,8 +88,8 @@ def test_run_pipeline_basic():
     ctx = Context()
     ctx.load_all_available_dialects()
     ctx.allow_unregistered_dialects = True
-    from rocdsl.compiler.context import ensure_rocir_python_extensions
-    ensure_rocir_python_extensions(ctx)
+    from pyflir.compiler.context import ensure_flir_python_extensions
+    ensure_flir_python_extensions(ctx)
     
     # Create simple func module
     mlir_code = """
@@ -117,8 +117,8 @@ def test_run_pipeline_with_string():
     ctx = Context()
     ctx.load_all_available_dialects()
     ctx.allow_unregistered_dialects = True
-    from rocdsl.compiler.context import ensure_rocir_python_extensions
-    ensure_rocir_python_extensions(ctx)
+    from pyflir.compiler.context import ensure_flir_python_extensions
+    ensure_flir_python_extensions(ctx)
     
     mlir_code = """
     module {
@@ -137,16 +137,16 @@ def test_run_pipeline_with_string():
         assert isinstance(result, Module)
 
 
-def test_rocir_pass_methods():
-    """Test Rocir-specific pass methods are callable.
+def test_flir_pass_methods():
+    """Test Flir-specific pass methods are callable.
 
-    NOTE: This test should only reference APIs that exist in `rocdsl.compiler.pipeline.Pipeline`.
+    NOTE: This test should only reference APIs that exist in `flir.compiler.pipeline.Pipeline`.
     """
     pipeline = Pipeline()
     
-    # Rocir lowering passes
-    pipeline.rocir_coord_lowering()
-    pipeline.rocir_to_standard()
+    # Flir lowering passes
+    pipeline.flir_coord_lowering()
+    pipeline.flir_to_standard()
     pipeline.convert_gpu_to_rocdl()
     
     assert len(pipeline._passes) >= 3
@@ -182,7 +182,7 @@ def test_complex_pipeline():
     """Test building a non-trivial composed pipeline."""
     pipeline = (
         Pipeline()
-        .rocir_to_standard()
+        .flir_to_standard()
         
         .Func(Pipeline()
               .canonicalize()
@@ -199,7 +199,7 @@ def test_complex_pipeline():
     pipeline_str = str(pipeline)
     
     # Verify all stages present
-    assert "rocir-to-standard" in pipeline_str
+    assert "flir-to-standard" in pipeline_str
     assert "func.func(" in pipeline_str
     assert "convert-scf-to-cf" in pipeline_str
     assert "convert-memref-to-llvm" in pipeline_str

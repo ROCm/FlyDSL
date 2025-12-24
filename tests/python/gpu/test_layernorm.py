@@ -12,9 +12,9 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 import sys
 import os
 
-# Add paths to find rocdsl and mlir packages (prefer embedded MLIR to avoid mixing runtimes)
+# Add paths to find flir and mlir packages (prefer embedded MLIR to avoid mixing runtimes)
 repo_root = os.path.join(os.path.dirname(__file__), "../../..")
-embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "rocdsl")
+embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "flir")
 if os.path.isdir(os.path.join(embedded_pkgs, "_mlir")):
     sys.path.insert(0, embedded_pkgs)
 else:
@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/pytho
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../python'))
 sys.path.insert(0, repo_root)
 
-import rocdsl
+import pyflir
 import pytest
 import torch
 if not torch.cuda.is_available():
@@ -46,7 +46,7 @@ def run_test(M: int, N: int, dtype: str = "f32") -> bool:
 
     ctx = build_layernorm_module(M, N, dtype)
     try:
-        exe = rocdsl.compile(ctx)
+        exe = flir.compile(ctx)
     except Exception as e:
         print(f"Compilation failed: {e}")
         print(ctx.module)

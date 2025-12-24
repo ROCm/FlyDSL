@@ -14,7 +14,7 @@ def unwrap_values(*values):
         Tuple of unwrapped MLIR Values
     
     Example:
-        >>> # In a @rocir.jit body, return raw Values:
+        >>> # In a @flir.jit body, return raw Values:
         >>> # return unwrap_values(result1, result2)
     """
     unwrapped = []

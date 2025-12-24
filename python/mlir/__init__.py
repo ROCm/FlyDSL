@@ -42,7 +42,7 @@ except ModuleNotFoundError:
 # Eagerly alias common dialect modules to avoid importing generated dialect
 # bindings twice under different module names (can crash with
 # "Dialect namespace 'X' is already registered.").
-for _d in ("arith", "scf", "gpu", "func", "memref", "math", "vector", "llvm", "rocdl", "rocir"):
+for _d in ("arith", "scf", "gpu", "func", "memref", "math", "vector", "llvm", "rocdl", "flir"):
     try:
         _alias(f"mlir.dialects.{_d}", f"_mlir.dialects.{_d}")
     except Exception:

@@ -1,48 +1,54 @@
 #!/bin/bash
-# Rocir Test Suite - Organized by test type
+# Flir Test Suite - Organized by test type
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-# Locate the build directory (default: .rocdsl/build; fallback: build/).
-BUILD_DIR="${ROCDSL_BUILD_DIR:-${SCRIPT_DIR}/.rocdsl/build}"
+# Locate the build directory (default: .flir/build; fallback: build/).
+BUILD_DIR="${FLIR_BUILD_DIR:-${ROCDSL_BUILD_DIR:-${SCRIPT_DIR}/.flir/build}}"
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/build" ]; then
   BUILD_DIR="${SCRIPT_DIR}/build"
+fi
+if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/.rocdsl/build" ]; then
+  BUILD_DIR="${SCRIPT_DIR}/.rocdsl/build"
 fi
 
 # Prefer the new tool location (LLVM_RUNTIME_OUTPUT_INTDIR = build/bin),
 # but keep a fallback for older build layouts.
-ROCIR_OPT="${BUILD_DIR}/bin/rocir-opt"
-if [ ! -x "${ROCIR_OPT}" ]; then
-  ROCIR_OPT="${BUILD_DIR}/tools/rocir-opt/rocir-opt"
+FLIR_OPT="${BUILD_DIR}/bin/flir-opt"
+if [ ! -x "${FLIR_OPT}" ]; then
+  FLIR_OPT="${BUILD_DIR}/tools/flir-opt/flir-opt"
 fi
-if [ ! -x "${ROCIR_OPT}" ]; then
+if [ ! -x "${FLIR_OPT}" ]; then
   if [ -d "${BUILD_DIR}" ]; then
-    echo "rocir-opt not found. Building it..."
-    cmake --build "${BUILD_DIR}" --target rocir-opt -j"$(nproc)" || {
-      echo "Error: failed to build rocir-opt"
+    echo "flir-opt not found. Building it..."
+    cmake --build "${BUILD_DIR}" --target flir-opt -j"$(nproc)" || {
+      echo "Error: failed to build flir-opt"
       exit 1
     }
   fi
-  if [ ! -x "${ROCIR_OPT}" ]; then
-    echo "Error: rocir-opt not found."
+  if [ ! -x "${FLIR_OPT}" ]; then
+    echo "Error: flir-opt not found."
     echo "  Try: ./build.sh"
-    echo "  Or:  cmake --build build --target rocir-opt -j\$(nproc)"
+    echo "  Or:  cmake --build build --target flir-opt -j\$(nproc)"
     exit 1
   fi
 fi
-PASS="--rocir-to-standard"
+PASS="--flir-to-standard"
 
 echo "========================================================================"
-echo "Rocir Test Suite"
+echo "Flir Test Suite"
 echo "========================================================================"
 echo ""
 
 # Prefer an installed package if present; otherwise fall back to PYTHONPATH.
-PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/rocdsl"
-if python3 -c "import rocdsl, _mlir; import mlir.ir" >/dev/null 2>&1; then
-  echo "Using installed Python packages (rocdsl/_mlir) - no PYTHONPATH override."
+PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/pyflir"
+if [ ! -d "${PYTHON_PACKAGE_ROOT}" ] && [ -d "${BUILD_DIR}/python_packages/rocdsl" ]; then
+  PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/rocdsl"
+fi
+if python3 -c "import pyflir, _mlir; import mlir.ir" >/dev/null 2>&1; then
+  echo "Using installed Python packages (pyflir/_mlir) - no PYTHONPATH override."
 else
-  # Prefer in-tree Python sources for `rocdsl/`, while still providing the embedded
+  # Prefer in-tree Python sources for `pyflir/`, while still providing the embedded
   # `_mlir` runtime/extensions from the build tree.
   export PYTHONPATH="${SCRIPT_DIR}/python:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
 fi
@@ -57,7 +63,7 @@ for test_file in tests/mlir/*.mlir; do
         MLIR_TEST_COUNT=$((MLIR_TEST_COUNT + 1))
         test_name=$(basename "$test_file" .mlir)
         echo "Running: $test_name"
-        $ROCIR_OPT $PASS "$test_file" > /tmp/${test_name}.out 2>&1
+        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.out 2>&1
         if [ $? -eq 0 ]; then
             echo "   PASS"
             MLIR_PASS_COUNT=$((MLIR_PASS_COUNT + 1))
@@ -255,7 +261,7 @@ if [ $ALL_GPU_PASSED -eq 1 ] && [ $ALL_BENCHMARK_PASSED -eq 1 ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"
-    echo "  * Rocir IR generation and lowering"
+    echo "  * Flir IR generation and lowering"
     echo "  * Coordinate operations (crd2idx, layouts)"
     echo "  * ROCDL dialect operations (381 ops exposed)"
     echo "  * GPU kernel compilation (MLIR → HSACO)"

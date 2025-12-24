@@ -12,7 +12,7 @@ import _mlir.extras.types as T
 
 # Small helper: unwrap MLIR wrapper values into ir.Value
 def unwrap(v):
-    # Prefer the public `.value` interface used by RocDSL wrapper types.
+    # Prefer the public `.value` interface used by FLIR wrapper types.
     if hasattr(v, "value"):
         return v.value
     if hasattr(v, "result"):

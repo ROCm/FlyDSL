@@ -1,5 +1,7 @@
 # Build outputs
 build/
+.flir/
+## Legacy build outputs (pre-rename)
 .rocdsl/
 *.log
 

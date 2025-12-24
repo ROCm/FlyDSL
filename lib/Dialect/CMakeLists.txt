@@ -1,3 +1,3 @@
-add_subdirectory(Rocir)
-# RocirRocm temporarily disabled for build fixes
-# add_subdirectory(RocirRocm)
+add_subdirectory(Flir)
+# FlirRocm temporarily disabled for build fixes
+# add_subdirectory(FlirRocm)
