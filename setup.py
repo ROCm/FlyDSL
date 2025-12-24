@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parent
 # IMPORTANT: setuptools editable builds require *relative* paths in setup()
 # arguments (not absolute paths).
-PY_SRC_REL = Path("python")
+PY_SRC_REL = Path("pyflir") / "src"
 DEFAULT_OUT_DIR_REL = Path(".flir")
 DEFAULT_BUILD_DIR_REL = DEFAULT_OUT_DIR_REL / "build"
 
@@ -65,7 +65,8 @@ def _read_version() -> str:
 
 
 def _load_requirements() -> list[str]:
-    req = PY_SRC / "requirements.txt"
+    # Keep Python requirements alongside the pyflir source root.
+    req = REPO_ROOT / "pyflir" / "requirements.txt"
     if not req.exists():
         return []
     out: list[str] = []
@@ -125,7 +126,7 @@ def _ensure_python_embedded_mlir_package() -> None:
 
     pip's PEP660 editable install mode does not reliably honor multi-root
     `package_dir` mappings. To keep `pip install -e .` and `setup.py develop`
-    working, we create a `_mlir` package entry under `python/_mlir` by
+    working, we create a `_mlir` package entry under `pyflir/src/_mlir` by
     symlinking to the embedded runtime produced by the CMake build.
     """
     dst = PY_SRC / "_mlir"
@@ -165,7 +166,7 @@ def _ensure_python_embedded_mlir_package() -> None:
 
 if not IS_WHEEL_BUILD:
     _ensure_python_embedded_mlir_package()
-    # Editable/dev installs: single-root under `python/` (includes `_mlir` via symlink).
+    # Editable/dev installs: single-root under `pyflir/src/` (includes `_mlir` via symlink).
     all_packages = sorted(
         set(find_packages(where=str(PY_SRC_REL)))
         | set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))

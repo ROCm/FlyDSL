@@ -1,10 +1,10 @@
 //===- FlirRegisterPasses.cpp - Flir Passes Registration ----------------===//
 
 #include "mlir-c/RegisterEverything.h"
+#include "mlir/CAPI/IR.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 
-#include "flir-c/FlirDialect.h"
 #include "flir/FlirDialect.h"
 #include "flir/FlirPasses.h"
 
@@ -22,9 +22,10 @@ NB_MODULE(_flirPasses, m) {
 
   m.def("register_dialects", [](MlirDialectRegistry registry) {
     mlirRegisterAllDialects(registry);
-    
-    MlirDialectHandle flirHandle = mlirGetDialectHandle__flir__();
-    mlirDialectHandleInsertDialect(flirHandle, registry);
+
+    // Register Flir dialect directly via the C++ DialectRegistry (no custom C-API required).
+    auto *cppRegistry = unwrap(registry);
+    cppRegistry->insert<mlir::flir::FlirDialect>();
   });
 
   m.def("register_llvm_translations",

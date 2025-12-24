@@ -50,7 +50,7 @@ if python3 -c "import pyflir, _mlir; import _mlir.ir" >/dev/null 2>&1; then
 else
   # Prefer in-tree Python sources for `pyflir/`, while still providing the embedded
   # `_mlir` runtime/extensions from the build tree.
-  export PYTHONPATH="${SCRIPT_DIR}/python:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
+  export PYTHONPATH="${SCRIPT_DIR}/pyflir/src:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
 fi
 
 

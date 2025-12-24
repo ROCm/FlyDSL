@@ -30,13 +30,17 @@ if(MLIR_FOUND)
     
     include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
     include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
-    include_directories(${PROJECT_SOURCE_DIR}/include)
+    include_directories(${PROJECT_SOURCE_DIR}/flir/include)
+    # Generated TableGen headers land under the subdir build tree:
+    #   ${PROJECT_BINARY_DIR}/flir/include/flir/*.inc
+    # and are included as "flir/*.inc".
+    include_directories(${PROJECT_BINARY_DIR}/flir/include)
     include_directories(${PROJECT_BINARY_DIR}/include)
     
     add_definitions(${LLVM_DEFINITIONS})
     
     # TableGen targets
-    add_subdirectory(include/flir)
+    add_subdirectory(flir/include/flir)
     
     message(STATUS "TableGen targets configured")
 else()
@@ -73,15 +77,15 @@ set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/pyflir/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
 
-add_subdirectory(lib)
-add_subdirectory(tools)
+add_subdirectory(flir/lib)
+add_subdirectory(flir/tools)
 if(BUILD_PYTHON_BINDINGS AND MLIR_FOUND)
     add_subdirectory(python_bindings)
 endif()
 
 
 # Installation
-install(DIRECTORY include/flir
+install(DIRECTORY flir/include/flir
     DESTINATION include
     FILES_MATCHING PATTERN "*.td"
 )

@@ -21,7 +21,7 @@ if not _embedded_pkg_dir.exists():
 
 # Prefer in-tree Python sources (so tests exercise source `flir/`), while still
 # making the embedded `_mlir` runtime available for native extensions.
-_src_py_dir = _repo_root / "python"
+_src_py_dir = _repo_root / "pyflir" / "src"
 if _src_py_dir.exists():
     _p2 = str(_src_py_dir)
     if _p2 in sys.path:

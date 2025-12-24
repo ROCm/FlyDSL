@@ -47,7 +47,6 @@ cmake "${SCRIPT_DIR}" \
 echo "Building core libraries..."
 cmake --build . --target FlirDialect -j$(nproc) || { echo "Failed to build FlirDialect"; exit 1; }
 cmake --build . --target FlirTransforms -j$(nproc) || { echo "Failed to build FlirTransforms"; exit 1; }
-cmake --build . --target MLIRCAPIFlir -j$(nproc) || { echo "Failed to build MLIRCAPIFlir"; exit 1; }
 cmake --build . --target FlirPythonCAPI -j$(nproc) || { echo "Failed to build FlirPythonCAPI"; exit 1; }
 
 # Build Python extension modules
@@ -113,7 +112,7 @@ find "${PYTHON_PACKAGE_DIR}" -mindepth 1 -maxdepth 1 \
     -exec rm -rf {} +
 
 # Copy pyflir python package into the package root as pyflir/
-cp -r "${SCRIPT_DIR}/python/pyflir" "${PYTHON_PACKAGE_DIR}/" || { echo "Failed to copy python/pyflir"; exit 1; }
+cp -r "${SCRIPT_DIR}/pyflir/src/pyflir" "${PYTHON_PACKAGE_DIR}/" || { echo "Failed to copy pyflir/src/pyflir"; exit 1; }
 
 cd "${SCRIPT_DIR}"
 
@@ -132,4 +131,4 @@ echo "  cd ${SCRIPT_DIR} && python3 setup.py bdist_wheel"
 echo "  # wheel will be under: ${SCRIPT_DIR}/dist/"
 echo ""
 echo "Fallback (no install):"
-echo "  export PYTHONPATH=${PYTHON_PACKAGE_DIR}:${SCRIPT_DIR}/python:${SCRIPT_DIR}:\$PYTHONPATH"
+echo "  export PYTHONPATH=${PYTHON_PACKAGE_DIR}:${SCRIPT_DIR}/pyflir/src:${SCRIPT_DIR}:\$PYTHONPATH"

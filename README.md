@@ -1,20 +1,22 @@
-# FLIR - MLIR Compiler Infrastructure for high performance ROCm kernels
+# FLIR (Flexible Layout Intermediate Representation) - MLIR Compiler Infrastructure for high performance ROCm kernels
 
-FLIR is an MLIR-based compiler infrastructure for high performance ROCm kernels.
+FLIR (**F**lexible **L**ayout **I**ntermediate **R**epresentation) is an MLIR-based compiler infrastructure for high performance ROCm kernels.
 It provides a custom layout-algebra IR (Flir dialect), a lowering pipeline to GPU/ROCDL,
 and a Python API (`pyflir`) for constructing and running kernels.
 
-## Features
+## ✨ Features
 
 - **Flir Dialect** (layout algebra inspired by CuTe/CUTLASS)
   - Core abstractions: `!flir.shape`, `!flir.stride`, `!flir.layout`, `!flir.coord`
   - Algebra ops: composition/product/divide/partition + coordinate mapping ops
-- **Python bindings** (`python/pyflir/`) with an embedded MLIR python package
+- **Python bindings** (`pyflir/src/pyflir/`) with an embedded MLIR python package
   - No external `mlir` python wheel is required: MLIR python bindings are built and staged into `.flir/build/python_packages/pyflir/_mlir` (default; legacy `build/` also works)
+- **Python package source**: `pyflir/src/pyflir/`
+- **Examples**: `examples/` (Python scripts)
 - **GPU lowering** to HSACO via MLIR GPU → ROCDL pipeline
 - **Tools**: `flir-opt` for pass testing and IR experimentation
 
-## Repository layout (current)
+## 🗂️ Repository layout (current)
 
 ```
 FLIR/
@@ -22,23 +24,22 @@ FLIR/
 ├── build_llvm.sh              # build/prepare llvm-project (optional helper)
 ├── build.sh                   # build FLIR + python bindings (recommended)
 ├── run_tests.sh               # run MLIR + Python tests
-├── include/                   # C++ headers (dialect/pass declarations)
-├── lib/                       # C++ dialect + transforms + CAPI
-├── tools/                     # flir-opt
-├── python/                    # Python package sources (pyflir + helpers)
+├── examples/                  # Python examples (importable as `examples.*`)
+├── flir/                      # C++ sources (include/, lib/, tools/)
+├── pyflir/                    # Python sources (src/pyflir) + python-only docs/reqs
 ├── python_bindings/           # CMake targets for python extensions/bindings
 └── tests/                     # mlir + python tests/benchmarks
 ```
 
-## Prerequisites
+## 🧰 Prerequisites
 
 - **ROCm**: required for GPU execution tests/benchmarks (IR-only tests do not need a GPU).
 - **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
 - **Python**: Python 3 + `pip`.
   - `build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
-  - `python/requirements.txt` exists for auxiliary deps (`numpy`, `torch`) for runtime data initialize and result check.
+  - `pyflir/requirements.txt` exists for auxiliary deps (`numpy`, `torch`) for runtime data initialize and result check.
 
-## Build
+## 🏗️ Build
 
 ### A) Build / use an existing llvm-project (MLIR)
 
@@ -68,9 +69,8 @@ After a successful build, you will have:
   - This contains:
     - `pyflir/` (your Python API)
     - `_mlir/` (embedded MLIR python bindings)
-    - optional `mlir/` shim (if present)
 
-## Using the Python bindings
+## 📦 Using the Python bindings
 
 
 ```bash
@@ -84,7 +84,7 @@ python3 setup.py bdist_wheel
 ls dist/
 ```
 
-## Run tests
+## ✅ Run tests
 
 ```bash
 ./run_tests.sh
@@ -94,13 +94,13 @@ What `run_tests.sh` does (high level):
 
 - **MLIR file tests**: runs `tests/mlir/*.mlir` through `flir-opt --flir-to-standard`
 - **Python IR tests**: runs `tests/python/ir/test_*.py` (no GPU required)
-- **Python examples**: runs `tests/python/examples/test_*.py`
+- **Python examples**: runs `tests/python/examples/test_*.py` (if present)
 - **GPU execution tests** (only if ROCm is detected): runs `tests/python/gpu/test_*.py`
 - **Benchmarks** (only if ROCm is detected): runs `tests/benchmark/*.py` via `pytest`
 
 For the Python test folder organization, see `tests/python/README.md`.
 
-## Troubleshooting
+## 🛠️ Troubleshooting
 
 - **`flir-opt not found`**
   - Run `./build.sh`, or build it explicitly:
@@ -109,12 +109,16 @@ For the Python test folder organization, see `tests/python/README.md`.
 - **Python import issues (`No module named pyflir` / `No module named mlir`)**
   - Ensure you are using the embedded package:
     - `export PYTHONPATH=$(pwd)/build/python_packages/pyflir:$PYTHONPATH`
+  - Or prefer in-tree sources:
+    - `export PYTHONPATH=$(pwd)/pyflir/src:$(pwd)/.flir/build/python_packages/pyflir:$PYTHONPATH`
 
 - **MLIR `.so` load errors**
   - Add MLIR build lib dir to the loader path:
     - `export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH`
 
 ## 📐 Layout System
+
+> FLIR = **F**lexible **L**ayout **I**ntermediate **R**epresentation.
 
 FLIR introduces a layout system to express complex data mapping patterns on GPUs (tiling, swizzling, vectorization).
 
@@ -157,6 +161,8 @@ func.func @layout_example(%i: !flir.int, %j: !flir.int) -> !flir.int {
 ```
 
 ## 🐍 Python API (`pyflir`)
+
+> Python package: `pyflir` (C++/dialect namespace: `flir`).
 
 FLIR provides a high-level Python API for generating kernels.
 
@@ -289,6 +295,6 @@ in the tests/benchmarks for timing—just like the full benchmark.
 *   AMD MI300X (gfx942), AMD MI350 (gfx950)
 *   Linux / ROCm 6.x, 7.x
 
-## License
+## 📄 License
 
 Apache License 2.0

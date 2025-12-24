@@ -36,7 +36,6 @@ declare_mlir_python_extension(FlirPythonSources.Passes
     FlirTransforms
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
-    MLIRCAPIFlir
     MLIRCAPITransforms
     MLIRCAPIRegisterEverything
 )
@@ -114,12 +113,12 @@ if(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   endif()
 endif()
 
-# Copy the pure Python sources (flir package) to the build directory
+# Copy the pure Python sources (pyflir package) to the build directory
 add_custom_target(CopyFlirPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${PROJECT_SOURCE_DIR}/python/pyflir"
+    "${PROJECT_SOURCE_DIR}/pyflir/src/pyflir"
     "${MLIR_BINARY_DIR}/python_packages/pyflir/pyflir"
-  COMMENT "Copying python/pyflir sources to build/python_packages/pyflir/pyflir"
+  COMMENT "Copying pyflir/src/pyflir sources to build/python_packages/pyflir/pyflir"
   DEPENDS FlirPythonModules
 )
 
