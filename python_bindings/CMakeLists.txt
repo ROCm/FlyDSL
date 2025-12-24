@@ -1,20 +1,20 @@
 include(AddMLIRPython)
 
 # Use the embedded MLIR package name prefix (`_mlir.*`), matching the install
-# layout under build/python_packages/rocdsl/_mlir.
+# layout under build/python_packages/pyflir/_mlir.
 add_compile_definitions("MLIR_PYTHON_PACKAGE_PREFIX=${MLIR_PYTHON_PACKAGE_PREFIX}.")
 
-# Declare Rocir Python sources
-declare_mlir_python_sources(RocirPythonSources)
+# Declare Flir Python sources
+declare_mlir_python_sources(FlirPythonSources)
 
-# Declare Rocir dialect Python bindings
+# Declare Flir dialect Python bindings
 declare_mlir_dialect_python_bindings(
-  ADD_TO_PARENT RocirPythonSources
+  ADD_TO_PARENT FlirPythonSources
   ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
-  TD_FILE dialects/RocirOps.td
+  TD_FILE dialects/FlirOps.td
   SOURCES
-    dialects/rocir.py
-  DIALECT_NAME rocir
+    dialects/flir.py
+  DIALECT_NAME flir
   GEN_ENUM_BINDINGS
 )
 
@@ -24,26 +24,25 @@ declare_mlir_dialect_python_bindings(
 # below instead of re-declaring it here.
 
 # Declare Python extension for pass registration
-declare_mlir_python_extension(RocirPythonSources.Passes
-  MODULE_NAME _rocirPasses
-  ADD_TO_PARENT RocirPythonSources
+declare_mlir_python_extension(FlirPythonSources.Passes
+  MODULE_NAME _flirPasses
+  ADD_TO_PARENT FlirPythonSources
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
-    RocirRegisterPasses.cpp
+    FlirRegisterPasses.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
-    RocirDialect
-    RocirTransforms
+    FlirDialect
+    FlirTransforms
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
-    MLIRCAPIRocir
     MLIRCAPITransforms
     MLIRCAPIRegisterEverything
 )
 
 # Define the Python sources to include from upstream MLIR
-set(RocirMLIRPythonSources
-  RocirPythonSources
+set(FlirMLIRPythonSources
+  FlirPythonSources
   MLIRPythonSources.Core
   MLIRPythonSources.Dialects.builtin
   MLIRPythonSources.Dialects.arith
@@ -60,45 +59,45 @@ set(RocirMLIRPythonSources
 )
 
 # Create common CAPI library for Python bindings
-add_mlir_python_common_capi_library(RocirPythonCAPI
-  INSTALL_COMPONENT RocirPythonModules
+add_mlir_python_common_capi_library(FlirPythonCAPI
+  INSTALL_COMPONENT FlirPythonModules
   INSTALL_DESTINATION "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs"
   OUTPUT_DIRECTORY "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs"
   RELATIVE_INSTALL_ROOT "../../../.."
-  DECLARED_SOURCES ${RocirMLIRPythonSources}
+  DECLARED_SOURCES ${FlirMLIRPythonSources}
 )
 
 # Set the root prefix for Python modules
-set(RocirPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
+set(FlirPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
 # Add MLIR Python modules
-add_mlir_python_modules(RocirPythonModules
-  ROOT_PREFIX "${RocirPythonModules_ROOT_PREFIX}"
+add_mlir_python_modules(FlirPythonModules
+  ROOT_PREFIX "${FlirPythonModules_ROOT_PREFIX}"
   INSTALL_PREFIX "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}"
-  DECLARED_SOURCES "${RocirMLIRPythonSources}"
+  DECLARED_SOURCES "${FlirMLIRPythonSources}"
   COMMON_CAPI_LINK_LIBS
-    RocirPythonCAPI
+    FlirPythonCAPI
 )
 
-option(ROCDSL_SUPPRESS_THIRD_PARTY_WARNINGS
+option(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS
   "Suppress warnings coming from third-party sources used to build the embedded Python bindings (MLIR python binding sources, nanobind)."
   ON
 )
 
-if(ROCDSL_SUPPRESS_THIRD_PARTY_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Suppress noisy third-party warnings when building embedded Python extensions.
   # - nanobind uses some non-ISO constructs that trigger -Wpedantic
   # - MLIR python binding sources may trigger -Waddress / -Wparentheses under GCC
-  set(_rocir_python_extension_targets
-    RocirPythonModules.extension._mlir.dso
-    RocirPythonModules.extension._rocirPasses.dso
-    RocirPythonModules.extension._mlirDialectsGPU.dso
-    RocirPythonModules.extension._mlirDialectsLLVM.dso
-    RocirPythonModules.extension._mlirExecutionEngine.dso
-    RocirPythonModules.extension._mlirGPUPasses.dso
+  set(_flir_python_extension_targets
+    FlirPythonModules.extension._mlir.dso
+    FlirPythonModules.extension._flirPasses.dso
+    FlirPythonModules.extension._mlirDialectsGPU.dso
+    FlirPythonModules.extension._mlirDialectsLLVM.dso
+    FlirPythonModules.extension._mlirExecutionEngine.dso
+    FlirPythonModules.extension._mlirGPUPasses.dso
   )
 
-  foreach(_t IN LISTS _rocir_python_extension_targets)
+  foreach(_t IN LISTS _flir_python_extension_targets)
     if(TARGET "${_t}")
       target_compile_options("${_t}" PRIVATE
         -Wno-pedantic
@@ -114,13 +113,13 @@ if(ROCDSL_SUPPRESS_THIRD_PARTY_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
   endif()
 endif()
 
-# Copy the pure Python sources (rocdsl package) to the build directory
-add_custom_target(CopyRocirPythonSources ALL
+# Copy the pure Python sources (pyflir package) to the build directory
+add_custom_target(CopyFlirPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${PROJECT_SOURCE_DIR}/python/rocdsl"
-    "${MLIR_BINARY_DIR}/python_packages/rocdsl/rocdsl"
-  COMMENT "Copying python/rocdsl sources to build/python_packages/rocdsl/rocdsl"
-  DEPENDS RocirPythonModules
+    "${PROJECT_SOURCE_DIR}/pyflir/src/pyflir"
+    "${MLIR_BINARY_DIR}/python_packages/pyflir/pyflir"
+  COMMENT "Copying pyflir/src/pyflir sources to build/python_packages/pyflir/pyflir"
+  DEPENDS FlirPythonModules
 )
 
-add_dependencies(CopyRocirPythonSources RocirPythonModules)
+add_dependencies(CopyFlirPythonSources FlirPythonModules)

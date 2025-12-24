@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Elementwise Addition Example using RocDSL
-This example demonstrates the RocDSL API pattern
+"""Elementwise Addition Example using FLIR
+This example demonstrates the FLIR API pattern
 - make_ordered_layout, make_layout_tv
 - make_copy_atom, make_tiled_copy_tv
 - get_slice, partition operations
@@ -14,15 +14,15 @@ import argparse
 import numpy as np
 import pytest
 import torch
-import rocdsl
+import pyflir
 
 # Setup paths
 
 
-from rocdsl.dialects.ext import rocir
-from rocdsl.dialects.ext.python_control_flow import range_constexpr
-from rocdsl.dialects.ext.arith import Index
-from rocdsl.runtime.device import get_rocm_arch
+from pyflir.dialects.ext import flir
+from pyflir.dialects.ext.python_control_flow import range_constexpr
+from pyflir.dialects.ext.arith import Index
+from pyflir.runtime.device import get_rocm_arch
 from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
 import _mlir.extras.types as T
@@ -36,7 +36,7 @@ VAL_M, VAL_N = 4, 4
 COPY_VEC = 8
 
 def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
-    """Create elementwise addition kernel demonstrating RocDSL API.
+    """Create elementwise addition kernel demonstrating FLIR API.
     
     Args:
         M, N: Tensor dimensions
@@ -45,28 +45,28 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     Returns:
         Compiled kernel module
     """
-    print(f"\n[RocDSL INFO] Creating elementwise add kernel for {M}x{N}")
-    print(f"[RocDSL INFO] Element type: {dtype}")
+    print(f"\n[FLIR INFO] Creating elementwise add kernel for {M}x{N}")
+    print(f"[FLIR INFO] Element type: {dtype}")
     
-    class _EltwiseAdd(rocir.MlirModule):
+    class _EltwiseAdd(flir.MlirModule):
         GPU_MODULE_NAME = "elementwise_kernels"
         GPU_MODULE_TARGETS = ['#rocdl.target<abi = "500">']
 
-        @rocir.kernel
+        @flir.kernel
         def elementwise_add_kernel(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M, N, dtype.get()),
             B: lambda: T.memref(M, N, dtype.get()),
             C: lambda: T.memref(M, N, dtype.get()),
         ):
             # ===== Step 1: Thread and Block IDs =====
-            tid_x = rocir.thread_idx("x")
-            tid_y = rocir.thread_idx("y")
-            bid_x = rocir.block_idx("x")
-            bid_y = rocir.block_idx("y")
+            tid_x = flir.thread_idx("x")
+            tid_y = flir.thread_idx("y")
+            bid_x = flir.block_idx("x")
+            bid_y = flir.block_idx("y")
 
             # Calculate linear thread index
-            bdim_x = rocir.block_dim("x")
+            bdim_x = flir.block_dim("x")
             tidx = (tid_y * bdim_x + tid_x).value
 
             # Block coordinates
@@ -74,29 +74,29 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             blk_coord_x = bid_x
 
             # ===== Step 2: TiledCopy + Layouts =====
-            thr_layout = rocir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
-            val_layout = rocir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
+            thr_layout = flir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
+            val_layout = flir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
 
             # Atoms
-            copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
-            copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+            copy_atom_load = flir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
+            copy_atom_store = flir.make_copy_atom(dtype.get(), vector_size=COPY_VEC)
 
             # Tiled Copies
-            tiled_copy_A = rocir.make_tiled_copy_tv(
+            tiled_copy_A = flir.make_tiled_copy_tv(
                 copy_atom_load,
                 thr_layout,
                 val_layout,
                 thr_shape=(THR_M, THR_N),
                 val_shape=(VAL_M, VAL_N),
             )
-            tiled_copy_B = rocir.make_tiled_copy_tv(
+            tiled_copy_B = flir.make_tiled_copy_tv(
                 copy_atom_load,
                 thr_layout,
                 val_layout,
                 thr_shape=(THR_M, THR_N),
                 val_shape=(VAL_M, VAL_N),
             )
-            tiled_copy_C = rocir.make_tiled_copy_tv(
+            tiled_copy_C = flir.make_tiled_copy_tv(
                 copy_atom_store,
                 thr_layout,
                 val_layout,
@@ -104,18 +104,18 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
                 val_shape=(VAL_M, VAL_N),
             )
 
-            tensor_A = rocir.make_tensor(A, shape=(M, N), strides=(N, 1))
-            tensor_B = rocir.make_tensor(B, shape=(M, N), strides=(N, 1))
-            tensor_C = rocir.make_tensor(C, shape=(M, N), strides=(N, 1))
+            tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
+            tensor_B = flir.make_tensor(B, shape=(M, N), strides=(N, 1))
+            tensor_C = flir.make_tensor(C, shape=(M, N), strides=(N, 1))
 
             TILE_M = THR_M * VAL_M
             TILE_N = THR_N * VAL_N
             tile_shape = (TILE_M, TILE_N)
-            gA = rocir.zipped_divide(tensor_A, tile_shape)
-            gB = rocir.zipped_divide(tensor_B, tile_shape)
-            gC = rocir.zipped_divide(tensor_C, tile_shape)
-            idC = rocir.make_identity_tensor((M, N))
-            cC = rocir.zipped_divide(idC, tile_shape)
+            gA = flir.zipped_divide(tensor_A, tile_shape)
+            gB = flir.zipped_divide(tensor_B, tile_shape)
+            gC = flir.zipped_divide(tensor_C, tile_shape)
+            idC = flir.make_identity_tensor((M, N))
+            cC = flir.zipped_divide(idC, tile_shape)
 
             blk_coord = (blk_coord_y, blk_coord_x)
             blkA = gA[blk_coord]
@@ -133,38 +133,38 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             thrCrd = thr_copy_C.partition_S(blkCrd)
 
             val_shape = tiled_copy_A.val_shape
-            frgA = rocir.make_fragment_like(thrA, dtype.get())
-            frgB = rocir.make_fragment_like(thrB, dtype.get())
-            frgC = rocir.make_fragment_like(thrC, dtype.get())
+            frgA = flir.make_fragment_like(thrA, dtype.get())
+            frgB = flir.make_fragment_like(thrB, dtype.get())
+            frgC = flir.make_fragment_like(thrC, dtype.get())
 
             pred_ty = IntegerType.get_signless(1)
-            frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
+            frgPred = flir.make_rmem_tensor(val_shape, pred_ty)
             total_vals = val_shape[0] * val_shape[1]
             for linear in range_constexpr(total_vals):
-                lin_idx = rocir.const_index(linear)
+                lin_idx = flir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
-                pred_val = rocir.elem_less(coords, (M, N))
+                pred_val = flir.elem_less(coords, (M, N))
                 pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
                 frgPred[pred_offsets] = pred_val
 
-            rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
-            rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
+            flir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
+            flir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
 
             for i in range_constexpr(val_shape[0]):
-                idx_i = rocir.const_index(i)
+                idx_i = flir.const_index(i)
                 for j in range_constexpr(val_shape[1]):
-                    idx_j = rocir.const_index(j)
+                    idx_j = flir.const_index(j)
                     coords = (idx_i, idx_j)
                     a_val = frgA[coords]
                     b_val = frgB[coords]
                     c_val = a_val + b_val
                     frgC[coords] = c_val
 
-            rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
+            flir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M, N, dtype.get()),
             B: lambda: T.memref(M, N, dtype.get()),
             C: lambda: T.memref(M, N, dtype.get()),
@@ -176,14 +176,14 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             gy = Index((M + tile_m - 1) // tile_m).value
             bdx = Index(THR_N).value
             bdy = Index(THR_M).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 ["elementwise_kernels", "elementwise_add_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, bdy, c1),
                 kernel_operands=[A, B, C],
             )
 
-    print("[RocDSL INFO] Generated MLIR module")
+    print("[FLIR INFO] Generated MLIR module")
     return _EltwiseAdd()
 
 
@@ -207,14 +207,14 @@ def get_or_compile_kernel(dtype=F32Type):
     global _compiled_kernel_exe
     
     if _compiled_kernel_exe is None:
-        print(f"\n[RocDSL INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
+        print(f"\n[FLIR INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
         
         # Create kernel with MAX dimensions
         m = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
-        print(f"[RocDSL INFO] Compiling via rocdsl.compile...")
-        _compiled_kernel_exe = rocdsl.compile(m)
+        print(f"[FLIR INFO] Compiling via pyflir.compile...")
+        _compiled_kernel_exe = pyflir.compile(m)
     else:
-        print(f"[RocDSL INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
+        print(f"[FLIR INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
     
     return _compiled_kernel_exe
 
@@ -227,7 +227,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     """Compile and run the elementwise add kernel."""
     
     print("\n" + "="*80)
-    print("RocDSL Elementwise Addition Test")
+    print("FLIR Elementwise Addition Test")
     print(f"Tensor dimensions: [{M}, {N}]")
     print(f"Element type: {dtype}")
     print(f"GPU: {get_rocm_arch()}")
@@ -242,9 +242,9 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         exe = get_or_compile_kernel(dtype)
         compile_M, compile_N = MAX_M, MAX_N
     else:
-        print(f"\n[RocDSL INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
+        print(f"\n[FLIR INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
         m = create_elementwise_add_kernel(M, N, dtype)
-        exe = rocdsl.compile(m)
+        exe = pyflir.compile(m)
         compile_M, compile_N = M, N
     
     # Prepare data
@@ -284,7 +284,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     grid_x = (N + TILE_N - 1) // TILE_N
     grid_y = (M + TILE_M - 1) // TILE_M
     
-    print(f"\n[RocDSL INFO] Launch configuration:")
+    print(f"\n[FLIR INFO] Launch configuration:")
     kernel_tag = f"{compile_M}x{compile_N}"
     print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, kernel={kernel_tag}]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
@@ -301,14 +301,14 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     # Verify results
     error = np.max(np.abs(c_host - expected))
     
-    print(f"\n[RocDSL INFO] Verification:")
+    print(f"\n[FLIR INFO] Verification:")
     print(f"  Max error: {error:.2e}")
     
     # Benchmark if requested
     if benchmark:
         # Use the shared perf harness (same as vecAdd benchmark) so results are comparable.
         # NOTE: run_perftest uses torch.profiler on ROCm; it expects torch to be installed.
-        print(f"\n[RocDSL INFO] Running benchmark via run_perftest ({iterations} iterations)...")
+        print(f"\n[FLIR INFO] Running benchmark via run_perftest ({iterations} iterations)...")
 
         def kernel_launch():
             exe(A, B, C)
@@ -341,7 +341,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Elementwise add example using RocDSL"
+        description="Elementwise add example using FLIR"
     )
     parser.add_argument("--M", default=129, type=int, help="Number of rows")
     parser.add_argument("--N", default=255, type=int, help="Number of columns")

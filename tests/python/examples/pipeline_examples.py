@@ -1,11 +1,11 @@
-"""Examples demonstrating the Pipeline API for RocDSL compiler.
+"""Examples demonstrating the Pipeline API for FLIR compiler.
 
 This file shows various ways to use the Pipeline class to build
 and execute transformation passes on MLIR modules.
 """
 
-from rocdsl.compiler.pipeline import Pipeline
-from rocdsl.compiler.context import RAIIMLIRContextModule
+from pyflir.compiler.pipeline import Pipeline
+from pyflir.compiler.context import RAIIMLIRContextModule
 
 
 # ============================================================================
@@ -15,18 +15,18 @@ from rocdsl.compiler.context import RAIIMLIRContextModule
 def example_single_pass():
     """Apply a single pass using Pipeline."""
     # Old way (still works for backward compatibility):
-    # from rocdsl.compiler.rocir_opt_helper import apply_rocir_coord_lowering
-    # module = apply_rocir_coord_lowering(module)
+    # from pyflir.compiler.flir_opt_helper import apply_flir_coord_lowering
+    # module = apply_flir_coord_lowering(module)
     
     # New way with Pipeline:
     ctx = RAIIMLIRContextModule()
     # ... build your MLIR module here ...
     
-    pipeline = Pipeline().rocir_to_standard()
+    pipeline = Pipeline().flir_to_standard()
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline: {pipeline}")
-    # Output: builtin.module(rocir-to-standard)
+    # Output: builtin.module(flir-to-standard)
 
 
 # ============================================================================
@@ -39,14 +39,14 @@ def example_sequential_passes():
     
     # Build a pipeline with multiple passes
     pipeline = (Pipeline()
-                .rocir_to_standard()
+                .flir_to_standard()
                 .canonicalize()
                 .cse())
     
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline: {pipeline}")
-    # Output: builtin.module(rocir-to-standard,canonicalize,cse)
+    # Output: builtin.module(flir-to-standard,canonicalize,cse)
 
 
 # ============================================================================
@@ -59,7 +59,7 @@ def example_nested_passes():
     
     # Apply some passes at module level, others at function level
     pipeline = (Pipeline()
-                .rocir_to_standard()
+                .flir_to_standard()
                 .Func(Pipeline()
                       .canonicalize()
                       .cse()
@@ -69,7 +69,7 @@ def example_nested_passes():
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline: {pipeline}")
-    # Output: builtin.module(rocir-to-standard,func.func(canonicalize,cse,loop-invariant-code-motion),symbol-dce)
+    # Output: builtin.module(flir-to-standard,func.func(canonicalize,cse,loop-invariant-code-motion),symbol-dce)
 
 
 # ============================================================================
@@ -81,9 +81,9 @@ def example_full_lowering_pipeline():
     ctx = RAIIMLIRContextModule()
     
     pipeline = (Pipeline()
-        # Stage 1: Lower high-level Rocir operations
-        .rocir_coord_lowering()
-        .rocir_to_standard()
+        # Stage 1: Lower high-level Flir operations
+        .flir_coord_lowering()
+        .flir_to_standard()
         
         # Stage 2: Function-level optimizations
         .Func(Pipeline()
@@ -116,7 +116,7 @@ def example_full_lowering_pipeline():
 def example_pipeline_composition():
     """Combine pipelines using + and += operators."""
     # Create reusable pipeline components
-    lowering = Pipeline().rocir_coord_lowering().rocir_to_standard()
+    lowering = Pipeline().flir_coord_lowering().flir_to_standard()
     
     optimization = Pipeline().canonicalize().cse()
     
@@ -124,7 +124,7 @@ def example_pipeline_composition():
     basic_pipeline = lowering + optimization
     
     # Or use += to extend existing pipeline
-    full_pipeline = Pipeline().rocir_to_standard()
+    full_pipeline = Pipeline().flir_to_standard()
     full_pipeline += Pipeline().canonicalize()
     full_pipeline += Pipeline().cse()
     
@@ -141,13 +141,13 @@ def example_pass_with_options():
     ctx = RAIIMLIRContextModule()
     
     pipeline = (Pipeline()
-                .rocir_to_standard()
+                .flir_to_standard()
                 .add_pass("canonicalize", max_iterations=3))
     
     result = pipeline.run(ctx.module)
     
     print(f"Pipeline with options: {pipeline}")
-    # Output: builtin.module(rocir-to-standard,<async-pipeline pass>,<layout-analysis pass>)
+    # Output: builtin.module(flir-to-standard,<async-pipeline pass>,<layout-analysis pass>)
 
 
 # ============================================================================
@@ -156,15 +156,15 @@ def example_pass_with_options():
 
 def example_error_handling():
     """Demonstrate error handling with pipelines."""
-    from rocdsl.compiler.pipeline import RocDSLCompilerError
+    from pyflir.compiler.pipeline import FLIRCompilerError
     
     ctx = RAIIMLIRContextModule()
     
-    pipeline = Pipeline().rocir_to_standard()
+    pipeline = Pipeline().flir_to_standard()
     
     try:
         result = pipeline.run(ctx.module)
-    except RocDSLCompilerError as e:
+    except FLIRCompilerError as e:
         print(f"Pipeline failed: {e}")
         # This exception includes the full pipeline string for debugging
 
@@ -175,20 +175,20 @@ def example_error_handling():
 
 def example_string_pipeline():
     """Run a pipeline from a string (for advanced users)."""
-    from rocdsl.compiler.pipeline import run_pipeline
+    from pyflir.compiler.pipeline import run_pipeline
     
     ctx = RAIIMLIRContextModule()
     
     # Can pass a Pipeline object or a string
     result = run_pipeline(
         ctx.module,
-        "builtin.module(rocir-to-standard,canonicalize)"
+        "builtin.module(flir-to-standard,canonicalize)"
     )
     
     # Or use Pipeline object
     result = run_pipeline(
         ctx.module,
-        Pipeline().rocir_to_standard().canonicalize()
+        Pipeline().flir_to_standard().canonicalize()
     )
 
 
@@ -199,7 +199,7 @@ def example_string_pipeline():
 def example_pipeline_inspection():
     """Inspect a pipeline before executing it."""
     pipeline = (Pipeline()
-                .rocir_to_standard()
+                .flir_to_standard()
                 .Func(Pipeline().canonicalize())
                 .cse())
     
@@ -218,22 +218,22 @@ def example_pipeline_inspection():
 
 def example_convenience_functions():
     """Use high-level convenience functions."""
-    from rocdsl.compiler.pipeline import (
-        lower_rocir_to_standard,
-        apply_rocir_coord_lowering
+    from pyflir.compiler.pipeline import (
+        lower_flir_to_standard,
+        apply_flir_coord_lowering
     )
     
     ctx = RAIIMLIRContextModule()
     
     # Quick lowering with predefined pipelines
-    result = lower_rocir_to_standard(ctx.module)
+    result = lower_flir_to_standard(ctx.module)
     
     # Or for coordinate lowering only
-    result = apply_rocir_coord_lowering(ctx.module)
+    result = apply_flir_coord_lowering(ctx.module)
 
 
 if __name__ == "__main__":
-    print("=== RocDSL Pipeline API Examples ===\n")
+    print("=== FLIR Pipeline API Examples ===\n")
     
     examples = [
         ("Single Pass", example_single_pass),

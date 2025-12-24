@@ -10,13 +10,13 @@ module {
     %s1 = arith.constant 16 : index
     
     // Make coord and layout
-    %coord = rocir.make_coord %c0, %c1 : (index, index) -> !rocir.coord<(?,?)>
-    %stride = rocir.make_stride %s0, %s1 : (index, index) -> !rocir.stride<(?,?)>
-    %shape = rocir.make_shape %c0, %c1 : (index, index) -> !rocir.shape<(?,?)>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %coord = flir.make_coord %c0, %c1 : (index, index) -> !flir.coord<(?,?)>
+    %stride = flir.make_stride %s0, %s1 : (index, index) -> !flir.stride<(?,?)>
+    %shape = flir.make_shape %c0, %c1 : (index, index) -> !flir.shape<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // Compute linear index: 2*1 + 3*16 = 2 + 48 = 50
-    %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<(?,?)>, !rocir.layout<(?,?)>) -> index
+    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
     
     return %idx : index
   }

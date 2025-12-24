@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MFMA FP8 GEMM Test using Rocir with B preshuffle (variable tiling) - Optimized Torch Version."""
+"""MFMA FP8 GEMM Test using Flir with B preshuffle (variable tiling) - Optimized Torch Version."""
 
 import sys
 import os
@@ -11,11 +11,11 @@ logging.basicConfig(level=logging.INFO)
 
 
 
-from rocdsl.runtime.device import get_rocm_arch
-import rocdsl
-import rocdsl.dialects.ext.rocir as rocir
-from rocdsl.dialects.ext.python_control_flow import range_constexpr
-from rocdsl.utils import SmemAllocator
+from pyflir.runtime.device import get_rocm_arch
+import pyflir
+import pyflir.dialects.ext.flir as flir
+from pyflir.dialects.ext.python_control_flow import range_constexpr
+from pyflir.utils import SmemAllocator
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 import torch
@@ -23,7 +23,7 @@ import torch.nn.functional as F
 import pytest
 from _mlir import ir
 from _mlir.dialects import vector, memref, builtin, llvm
-from rocdsl.dialects.ext import arith, scf, gpu, buffer_ops
+from pyflir.dialects.ext import arith, scf, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
@@ -40,7 +40,7 @@ except ImportError:
     HAS_AITER = False
 
 # Aiter benchmarking can be expensive (JIT build/tuning). Keep it off by default in CI.
-RUN_AITER_BENCH = os.environ.get("ROCDSL_RUN_AITER_BENCH", "0") == "1"
+RUN_AITER_BENCH = os.environ.get("FLIR_RUN_AITER_BENCH", "0") == "1"
 
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
@@ -62,7 +62,7 @@ def unwrap(v):
     return v
 
 @pytest.mark.parametrize("M, N, K, tile_m, tile_n, tile_k", [(1024, 7168, 2048, 128, 128, 128)])
-def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
+def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     print("="*80)
     print(f"MFMA FP8 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]")
     print("="*80)
@@ -95,7 +95,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     pad_k = 0 # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
     lds_stride = tile_k + pad_k
     
-    class _MFMA(rocir.MlirModule):
+    class _MFMA(flir.MlirModule):
         GPU_MODULE_NAME = "mfma_mod"
         GPU_MODULE_TARGETS = [
             f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
@@ -105,9 +105,9 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             _state["lds_a_decl"] = allocator.allocate_array(_f8(), tile_m * lds_stride)
             allocator.finalize()
 
-        @rocir.kernel
+        @flir.kernel
         def kernel_fixed(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             arg_c: lambda: T.memref(size_c, T.f16()),
             arg_a: lambda: T.memref(size_a, _f8()),
             arg_b: lambda: T.memref(size_b, _f8()),
@@ -140,8 +140,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
             acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
             
-            layout_a = rocir.make_layout((c_m, c_k), stride=(c_k, 1))
-            layout_c = rocir.make_layout((c_m, c_n), stride=(c_n, 1))
+            layout_a = flir.make_layout((c_m, c_k), stride=(c_k, 1))
+            layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
             
             c2 = arith.constant(2, index=True)
             c0_i32 = arith.i32(0)
@@ -164,16 +164,16 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 arith.constant(1, index=True),    # k2
             )
             # Shape: (N0, K0, KLane, NLane, KPack)
-            layout_b = rocir.make_layout((_arith_mlir.DivUIOp(unwrap(c_n), unwrap(c16)).result,
+            layout_b = flir.make_layout((_arith_mlir.DivUIOp(unwrap(c_n), unwrap(c16)).result,
                                           c_k0,
                                           arith.constant(4, index=True),
                                           c16,
                                           c16),
                                          stride=stride_b)
             
-            shape_lds = rocir.make_shape(tile_m, tile_k)
-            stride_lds = rocir.make_stride(lds_stride, 1)
-            layout_lds = rocir.make_layout(shape_lds, stride_lds)
+            shape_lds = flir.make_shape(tile_m, tile_k)
+            stride_lds = flir.make_stride(lds_stride, 1)
+            layout_lds = flir.make_layout(shape_lds, stride_lds)
             
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -200,8 +200,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             row_a_global = _arith_mlir.AddIOp(unwrap(bx_m), unwrap(row_a_local)).result
             by_n = _arith_mlir.MulIOp(unwrap(by), unwrap(arith.constant(tile_n, index=True))).result
             
-            coord_store = rocir.make_coord(unwrap(row_a_local), unwrap(col_a_local))
-            lds_write_idx = rocir.crd2idx(coord_store, layout_lds)
+            coord_store = flir.make_coord(unwrap(row_a_local), unwrap(col_a_local))
+            lds_write_idx = flir.crd2idx(coord_store, layout_lds)
             
             wave_id = tx / 64
             lane_id = tx % 64
@@ -218,8 +218,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             c2 = arith.constant(2, index=True)
             c0_i32 = arith.i32(0)
             
-            coord_a_base = rocir.make_coord(unwrap(row_a_global), unwrap(col_a_local))
-            idx_a_base = rocir.crd2idx(coord_a_base, layout_a)
+            coord_a_base = flir.make_coord(unwrap(row_a_global), unwrap(col_a_local))
+            idx_a_base = flir.crd2idx(coord_a_base, layout_a)
             idx_a_base_div4 = _arith_mlir.DivUIOp(unwrap(idx_a_base), unwrap(c4)).result
             
             m_repeat = tile_m // 16
@@ -266,8 +266,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     ki_val = arith.constant(ki, index=True)
                     
                     col_lds = col_offset_base + ki_val
-                    coord_a_lds = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds))
-                    idx_a_mfma = rocir.crd2idx(coord_a_lds, layout_lds)
+                    coord_a_lds = flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds))
+                    idx_a_mfma = flir.crd2idx(coord_a_lds, layout_lds)
                     idx_a_idx = unwrap(idx_a_mfma)
                     lds_a_indices.append(idx_a_idx)
                     
@@ -285,8 +285,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     n_blk = n_blk_list[i]
                     for ki_step in range_constexpr(k_unroll):
                         k0 = _arith_mlir.AddIOp(unwrap(k0_base), unwrap(arith.constant(ki_step, index=True))).result
-                        coord_b = rocir.make_coord(n_blk, k0, k1, n_intra, k2_base)
-                        idx_bytes = rocir.crd2idx(coord_b, layout_b)
+                        coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
+                        idx_bytes = flir.crd2idx(coord_b, layout_b)
                         idx_i32 = _arith_mlir.DivUIOp(unwrap(idx_bytes), unwrap(c4)).result
 
                         b16 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=4, dtype=i32_type)
@@ -380,8 +380,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
 
                     col_swizzled_0 = swizzle_idx(row_a_local, col_0)
-                    coord_store_0 = rocir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_0))
-                    idx_0 = rocir.crd2idx(coord_store_0, layout_lds)
+                    coord_store_0 = flir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_0))
+                    idx_0 = flir.crd2idx(coord_store_0, layout_lds)
 
                     if curr_i32 == 4:
                         val_16 = vector.BitCastOp(vec16_f8, val_vec).result
@@ -483,8 +483,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         
                         # Read A from LDS using the same (row,col)->(row,col') xor swizzle as the store.
                         col_lds0_swizzled = swizzle_idx(curr_row_a_lds, col_lds0)
-                        coord_a0 = rocir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
-                        idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
+                        coord_a0 = flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
+                        idx_a0 = flir.crd2idx(coord_a0, layout_lds)
                         # idx_a0 is already index-typed.
                         idx_a0_idx = unwrap(idx_a0)
 
@@ -556,12 +556,12 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         val_s = _arith_mlir.MulFOp(unwrap(val_s), unwrap(s_b)).result
                         val_f16 = _arith_mlir.TruncFOp(T.f16(), unwrap(val_s)).result
                         
-                        idx = rocir.crd2idx(rocir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
+                        idx = flir.crd2idx(flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             arg_c: lambda: T.memref(size_c, T.f16()),
             arg_a: lambda: T.memref(size_a, _f8()),
             arg_b: lambda: T.memref(size_b, _f8()),
@@ -576,7 +576,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             bdx = arith.constant(256, index=True).value
             gx = arith.constant(M // tile_m, index=True).value
             gy = arith.constant(N // tile_n, index=True).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel_fixed"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, c1, c1),
@@ -597,13 +597,13 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     # Use a unique kernel_name so IR/asm dumps don't get overwritten by other tests.
     m = _MFMA()
     try:
-        import _rocirPassesExt
-        _rocirPassesExt.register_dialect(m.module.context)
-        print("✓ Registered Rocir dialect")
+        import _flirPassesExt
+        _flirPassesExt.register_dialect(m.module.context)
+        print("✓ Registered Flir dialect")
     except Exception as e:
-        print(f"Warning: Could not register Rocir dialect: {e}")
+        print(f"Warning: Could not register Flir dialect: {e}")
 
-    exe = rocdsl.compile(m)
+    exe = pyflir.compile(m)
     print("✓ Compiled")
     
     grid_x = M // tile_m
@@ -690,7 +690,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         print("-" * 40)
     elif HAS_AITER and not RUN_AITER_BENCH:
         print("-" * 40)
-        print("Skipping Aiter benchmark (set ROCDSL_RUN_AITER_BENCH=1 to enable)")
+        print("Skipping Aiter benchmark (set FLIR_RUN_AITER_BENCH=1 to enable)")
         print("-" * 40)
     # Executor manages module lifetime.
 
@@ -700,11 +700,11 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
     
-    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
-    # test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
+    test_mfma_fp8_flir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
+    # test_mfma_fp8_flir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256) 
+    # test_mfma_fp8_flir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
+    # test_mfma_fp8_flir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
+    # test_mfma_fp8_flir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
 
     # Work around a known finalization crash in some environments where native GPU/MLIR
     # bindings execute callbacks while the interpreter is shutting down and the GIL is

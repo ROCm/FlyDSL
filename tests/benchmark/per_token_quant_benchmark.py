@@ -46,11 +46,11 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
-import rocdsl
-from rocdsl.dialects.ext import arith, rocir, block_reduce_ops, scf as scf_ext
-from rocdsl.dialects.ext.gpu import lds_space
-from rocdsl.runtime.device import get_rocm_arch
-from rocdsl.utils import SmemAllocator
+import pyflir
+from pyflir.dialects.ext import arith, flir, block_reduce_ops, scf as scf_ext
+from pyflir.dialects.ext.gpu import lds_space
+from pyflir.runtime.device import get_rocm_arch
+from pyflir.utils import SmemAllocator
 from _mlir.dialects import (
     vector,
     memref,
@@ -93,24 +93,24 @@ def compile_kernel_for_n(N, gpu_arch=None):
     _state = {}
 
     def _quant_kernel_impl(input, output, scales):
-        tid_x = rocir.thread_idx("x")
-        bid_x = rocir.block_idx("x")
+        tid_x = flir.thread_idx("x")
+        bid_x = flir.block_idx("x")
         tid_linear = tid_x
 
-        thr_layout = rocir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0))
-        val_layout = rocir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
+        thr_layout = flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0))
+        val_layout = flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
 
-        copy_atom_load = rocir.make_copy_atom(T.f16(), vector_size=VEC_WIDTH)
-        copy_atom_store = rocir.make_copy_atom(T.i8(), vector_size=VEC_WIDTH)
+        copy_atom_load = flir.make_copy_atom(T.f16(), vector_size=VEC_WIDTH)
+        copy_atom_store = flir.make_copy_atom(T.i8(), vector_size=VEC_WIDTH)
 
-        tiled_copy_input = rocir.make_tiled_copy_tv(
+        tiled_copy_input = flir.make_tiled_copy_tv(
             copy_atom_load,
             thr_layout,
             val_layout,
             thr_shape=(1, BLOCK_SIZE),
             val_shape=(1, VEC_WIDTH),
         )
-        tiled_copy_output = rocir.make_tiled_copy_tv(
+        tiled_copy_output = flir.make_tiled_copy_tv(
             copy_atom_store,
             thr_layout,
             val_layout,
@@ -118,14 +118,14 @@ def compile_kernel_for_n(N, gpu_arch=None):
             val_shape=(1, VEC_WIDTH),
         )
 
-        tensor_input = rocir.make_tensor(input, shape=(M_compile, N), strides=(N, 1))
-        tensor_output = rocir.make_tensor(output, shape=(M_compile, N), strides=(N, 1))
-        tensor_scales = rocir.make_tensor(scales, shape=(M_compile,), strides=(1,))
+        tensor_input = flir.make_tensor(input, shape=(M_compile, N), strides=(N, 1))
+        tensor_output = flir.make_tensor(output, shape=(M_compile, N), strides=(N, 1))
+        tensor_scales = flir.make_tensor(scales, shape=(M_compile,), strides=(1,))
 
         tile_shape = (1, ELEMS_PER_BLOCK_ITER)
 
-        gInput = rocir.zipped_divide(tensor_input, tile_shape)
-        gOutput = rocir.zipped_divide(tensor_output, tile_shape)
+        gInput = flir.zipped_divide(tensor_input, tile_shape)
+        gOutput = flir.zipped_divide(tensor_output, tile_shape)
 
         thr_copy_input = tiled_copy_input.get_slice(tid_linear)
         thr_copy_output = tiled_copy_output.get_slice(tid_linear)
@@ -157,13 +157,13 @@ def compile_kernel_for_n(N, gpu_arch=None):
             blkInput = gInput[blk_coord]
             thrInput = thr_copy_input.partition_S(blkInput)
 
-            frgInput = rocir.make_fragment_like(thrInput, T.f16())
+            frgInput = flir.make_fragment_like(thrInput, T.f16())
 
             zero_vec = arith.constant_vector(0.0, vec_type_f16).value
             frg_memref = frgInput.memref if hasattr(frgInput, "memref") else frgInput
             vector.store(zero_vec, frg_memref, [c_0.value, c_0.value])
 
-            rocir.copy(tiled_copy_input, thrInput, frgInput, pred=is_valid)
+            flir.copy(tiled_copy_input, thrInput, frgInput, pred=is_valid)
 
             vec_val_f16 = vector.load(vec_type_f16, frg_memref, [c_0.value, c_0.value])
             vec_val_f32 = arith.extf(vec_type_f32, vec_val_f16)
@@ -211,15 +211,15 @@ def compile_kernel_for_n(N, gpu_arch=None):
             blkOutput = gOutput[blk_coord]
             thrOutput = thr_copy_output.partition_D(blkOutput)
 
-            frgOutput = rocir.make_fragment_like(thrOutput, T.i8())
+            frgOutput = flir.make_fragment_like(thrOutput, T.i8())
             frg_out_memref = (
                 frgOutput.memref if hasattr(frgOutput, "memref") else frgOutput
             )
 
             vector.store(vec_quant.value, frg_out_memref, [c_0.value, c_0.value])
-            rocir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid.value)
+            flir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid.value)
 
-    class _Quant(rocir.MlirModule):
+    class _Quant(flir.MlirModule):
         GPU_MODULE_NAME = "quant_mod"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
 
@@ -229,7 +229,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
             red_type = T.memref(NUM_WARPS, T.f32(), memory_space=lds_space())
             memref.global_(sym_name="red_buffer", type_=red_type, alignment=16)
 
-        @rocir.kernel
+        @flir.kernel
         def quant_kernel(
             self,
             input: lambda: T.memref(M_compile * N, T.f16()),
@@ -238,9 +238,9 @@ def compile_kernel_for_n(N, gpu_arch=None):
         ):
             _quant_kernel_impl(input, output, scales)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             input: lambda: T.memref(M_compile * N, T.f16()),
             output: lambda: T.memref(M_compile * N, T.i8()),
             scales: lambda: T.memref(M_compile, T.f32()),
@@ -248,7 +248,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
         ):
             c1 = arith.index(1).value
             bx = arith.index(BLOCK_SIZE).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "quant_kernel"],
                 grid_size=(m_in, c1, c1),
                 block_size=(bx, c1, c1),
@@ -256,7 +256,7 @@ def compile_kernel_for_n(N, gpu_arch=None):
             )
 
     m = _Quant()
-    exe = rocdsl.compile(m)
+    exe = pyflir.compile(m)
     
     config = {
         'N': N,
@@ -283,7 +283,7 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
         bool: True if correctness check passed
     """
     print("\n" + "=" * 80)
-    print(f"Benchmark: Per-Token Quantization Performance (RocDSL) [M={M}, N={N}]")
+    print(f"Benchmark: Per-Token Quantization Performance (FLIR) [M={M}, N={N}]")
     print("=" * 80)
 
     # Compile if not provided
@@ -292,7 +292,7 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
         print(f"Detected ROCm Arch: {gpu_arch}")
         print("Compiling MLIR module...")
         exe, config = compile_kernel_for_n(N, gpu_arch)
-        print("Compiled via rocdsl.compile")
+        print("Compiled via flir.compile")
     else:
         print("Using pre-compiled executor")
     
@@ -358,7 +358,7 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
         np.abs(output_host.astype(np.float32) - output_ref.astype(np.float32))
     )
 
-    print(f"\nRocDSL Kernel Results:")
+    print(f"\nFLIR Kernel Results:")
     print(f"  Max Scale Diff:  {scale_diff:.2e}")
     print(f"  Max Output Diff: {output_diff:.2e}")
     # Standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose).
@@ -369,7 +369,7 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
         # `aiter` is an optional reference backend. In practice it may be built
         # against a different PyTorch/ROCm ABI than the active environment,
         # leading to runtime linker errors (ImportError/OSError/undefined symbol).
-        # Treat that as "reference unavailable" instead of failing the RocDSL
+        # Treat that as "reference unavailable" instead of failing the FLIR
         # correctness benchmark.
         try:
             print("\n" + "=" * 80)
@@ -408,14 +408,14 @@ def benchmark_per_token_quant(M=4096, N=8192, exe=None, config=None):
             print(f"  Max Scale Diff:  {scale_diff_ref:.2e}")
             print(f"  Max Output Diff: {output_diff_ref:.2e}")
 
-            rocdsl_time = results["avg_ms"]
+            flir_time = results["avg_ms"]
             aiter_time = aiter_results["avg_ms"]
-            speedup = aiter_time / rocdsl_time
+            speedup = aiter_time / flir_time
 
             print(f"\n" + "=" * 80)
             print(f"Performance Comparison:")
             print(
-                f"  RocDSL:     {rocdsl_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
+                f"  FLIR:     {flir_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
             )
             print(
                 f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)"

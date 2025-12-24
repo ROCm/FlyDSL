@@ -1,0 +1,12 @@
+#
+# FLIR Python package runtime dependencies.
+#
+# Notes:
+# - Build-time deps (pybind11/nanobind/numpy for native extensions) are declared in
+#   `pyproject.toml` under `[build-system].requires`.
+# - GPU execution tests/benchmarks require a working ROCm + PyTorch install, but we
+#   intentionally do not hard-require `torch` here for pure codegen / IR workflows.
+#
+
+numpy
+

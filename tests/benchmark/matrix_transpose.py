@@ -7,11 +7,11 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import rocdsl
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import gpu, rocir, arith
-from rocdsl.dialects.ext.python_control_flow import lower_range_for_loops, range_constexpr
-from rocdsl.runtime.device import get_rocm_arch
+import pyflir
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.dialects.ext import gpu, flir, arith
+from pyflir.dialects.ext.python_control_flow import lower_range_for_loops, range_constexpr
+from pyflir.runtime.device import get_rocm_arch
 from _mlir import ir
 from _mlir.dialects import memref, vector
 from _mlir.ir import F32Type, IntegerType
@@ -19,7 +19,7 @@ import _mlir.extras.types as T
 import numpy as np
 import torch
 
-from rocdsl.utils import SmemAllocator
+from pyflir.utils import SmemAllocator
 
 
 def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
@@ -166,7 +166,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
 
     _matrix_transpose_arith_impl = lower_range_for_loops(_matrix_transpose_arith_impl)
 
-    class _TransposeArith(rocir.MlirModule):
+    class _TransposeArith(flir.MlirModule):
         GPU_MODULE_NAME = "transpose_kernels"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
 
@@ -175,7 +175,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
             allocator.finalize()
 
         # Use flat 1D memrefs as kernel parameters
-        @rocir.kernel
+        @flir.kernel
         def matrix_transpose(
             self,
             A: lambda: T.memref(M * N, T.f32()),
@@ -183,9 +183,9 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
         ):
             _matrix_transpose_arith_impl(A, B)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
@@ -194,7 +194,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
             gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
             bx = arith.index(BLOCK_X).value
             by = arith.index(BLOCK_Y).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "matrix_transpose"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, by, c1),
@@ -203,7 +203,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
 
     m = _TransposeArith()
     run_pipeline(m.module, Pipeline().canonicalize().cse())
-    exe = rocdsl.compile(m)
+    exe = pyflir.compile(m)
     print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
 
     # Allocate device memory
@@ -294,7 +294,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
     )
 
     # Import buffer operations
-    from rocdsl.dialects.ext import buffer_ops
+    from pyflir.dialects.ext import buffer_ops
 
     gpu_arch = get_rocm_arch()
     _state = {}
@@ -302,10 +302,10 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
     def _matrix_transpose_buffer_load_impl(A, B):
         smem = memref.get_global(_state["smem_type"], "tile_smem_buffer_load")
 
-        tx = rocir.thread_idx("x")
-        ty = rocir.thread_idx("y")
-        bx = rocir.block_idx("x")
-        by = rocir.block_idx("y")
+        tx = flir.thread_idx("x")
+        ty = flir.thread_idx("y")
+        bx = flir.block_idx("x")
+        by = flir.block_idx("y")
 
         # Constants
         m_c = arith.index(M)
@@ -387,7 +387,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
                 vec_val, b_rsrc, base_row_b, base_col_b, m_c, mask=mask_val
             )
 
-    class _TransposeBufferLoad(rocir.MlirModule):
+    class _TransposeBufferLoad(flir.MlirModule):
         GPU_MODULE_NAME = "transpose_kernels_buffer_load"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
 
@@ -396,7 +396,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
             _state["smem_type"] = T.memref(SMEM_SIZE, T.f32(), memory_space=gpu.lds_space())
             memref.global_(sym_name="tile_smem_buffer_load", type_=_state["smem_type"], alignment=16)
 
-        @rocir.kernel
+        @flir.kernel
         def matrix_transpose_buffer_load(
             self,
             A: lambda: T.memref(M * N, T.f32()),
@@ -404,9 +404,9 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
         ):
             _matrix_transpose_buffer_load_impl(A, B)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
@@ -415,7 +415,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
             gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
             bx = arith.index(THREADS_PER_BLOCK_X).value
             by = arith.index(THREADS_PER_BLOCK_Y).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "matrix_transpose_buffer_load"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, by, c1),
@@ -434,7 +434,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
         )
         optimized = m.module
 
-    exe = rocdsl.compile(optimized)
+    exe = pyflir.compile(optimized)
     print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
 
     np.random.seed(123)
@@ -488,8 +488,8 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
     return error < 1e-5, results
 
 
-def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
-    """Benchmark matrix transpose using Rocir Layout Algebra."""
+def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
+    """Benchmark matrix transpose using Flir Layout Algebra."""
     from tests.test_common import run_perftest
 
     VEC_WIDTH = 4  # vec4 for float32
@@ -525,21 +525,21 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
     gpu_arch = get_rocm_arch()
     _state = {}
 
-    def _matrix_transpose_rocir_impl(A, B):
+    def _matrix_transpose_flir_impl(A, B):
         # Helpers to keep the kernel code readable.
         def v(x):
             """Unwrap ArithValue (or similar wrappers) to an MLIR Value."""
             return x.value if hasattr(x, "value") else x
 
-        smem = memref.get_global(_state["smem_type"], "tile_smem_rocir")
+        smem = memref.get_global(_state["smem_type"], "tile_smem_flir")
 
-        tensor_A = rocir.TensorView(A, shape=(M * N,))
-        tensor_smem = rocir.TensorView(smem, shape=(BLOCK_TILE * (BLOCK_TILE + PAD),))
+        tensor_A = flir.TensorView(A, shape=(M * N,))
+        tensor_smem = flir.TensorView(smem, shape=(BLOCK_TILE * (BLOCK_TILE + PAD),))
 
-        tx = rocir.thread_idx("x")
-        ty = rocir.thread_idx("y")
-        bx = rocir.block_idx("x")
-        by = rocir.block_idx("y")
+        tx = flir.thread_idx("x")
+        ty = flir.thread_idx("y")
+        bx = flir.block_idx("x")
+        by = flir.block_idx("y")
 
         m_c = arith.index(M)
         n_c = arith.index(N)
@@ -552,18 +552,18 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
 
         vec_type = T.vector(VEC_WIDTH, T.f32())
 
-        # Layouts for index mapping (express address math via rocir ops where possible).
+        # Layouts for index mapping (express address math via flir ops where possible).
         one_c = arith.index(1)
         i0 = arith.index(0)
         i1 = arith.index(1)
 
-        tile_layout = rocir.make_layout(
+        tile_layout = flir.make_layout(
             (block_tile_c, block_tile_c),
             stride=(block_tile_c, one_c),  # row-major
         )
-        a_layout = rocir.make_layout((m_c, n_c), stride=(n_c, one_c))
-        b_layout = rocir.make_layout((n_c, m_c), stride=(m_c, one_c))
-        smem_layout = rocir.make_layout(
+        a_layout = flir.make_layout((m_c, n_c), stride=(n_c, one_c))
+        b_layout = flir.make_layout((n_c, m_c), stride=(m_c, one_c))
+        smem_layout = flir.make_layout(
             (block_tile_c, smem_stride_c), stride=(smem_stride_c, one_c)
         )
 
@@ -572,9 +572,9 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             vec_index = tid + i_c * block_threads_c
             tile_linear = vec_index * vec_width_c
             # (row_off, col_off) = idx2crd(tile_linear, tile_layout)
-            tile_coord = rocir.idx2crd(tile_linear, tile_layout)
-            row_off = rocir.get(tile_coord, i0)
-            col_off = rocir.get(tile_coord, i1)
+            tile_coord = flir.idx2crd(tile_linear, tile_layout)
+            row_off = flir.get(tile_coord, i0)
+            col_off = flir.get(tile_coord, i1)
 
             global_row = by * block_tile_c + row_off
             global_col = bx * block_tile_c + col_off
@@ -587,14 +587,14 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
                 vals = []
                 for t in range_constexpr(VEC_WIDTH):
                     t_c = arith.index(t)
-                    a_coord = rocir.make_coord(global_row, global_col + t_c)
-                    g_idx = rocir.crd2idx(a_coord, a_layout)
+                    a_coord = flir.make_coord(global_row, global_col + t_c)
+                    g_idx = flir.crd2idx(a_coord, a_layout)
                     val = tensor_A[g_idx]
                     vals.append(val)
 
                 vec_val = vector.from_elements(vec_type, vals)
-                s_coord = rocir.make_coord(row_off, col_off)
-                s_idx = rocir.crd2idx(s_coord, smem_layout)
+                s_coord = flir.make_coord(row_off, col_off)
+                s_idx = flir.crd2idx(s_coord, smem_layout)
                 vector.store(vec_val, smem, [v(s_idx)])
 
         gpu.barrier()
@@ -603,9 +603,9 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             i_c = arith.index(i)
             vec_index = tid + i_c * block_threads_c
             tile_linear = vec_index * vec_width_c
-            tile_coord = rocir.idx2crd(tile_linear, tile_layout)
-            row_off = rocir.get(tile_coord, i0)
-            col_off = rocir.get(tile_coord, i1)
+            tile_coord = flir.idx2crd(tile_linear, tile_layout)
+            row_off = flir.get(tile_coord, i0)
+            col_off = flir.get(tile_coord, i1)
 
             base_row_b = bx * block_tile_c + row_off
             base_col_b = by * block_tile_c + col_off
@@ -618,38 +618,38 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
                 vals = []
                 for t in range_constexpr(VEC_WIDTH):
                     t_c = arith.index(t)
-                    s_coord = rocir.make_coord(col_off + t_c, row_off)
-                    s_idx = rocir.crd2idx(s_coord, smem_layout)
+                    s_coord = flir.make_coord(col_off + t_c, row_off)
+                    s_idx = flir.crd2idx(s_coord, smem_layout)
                     val = tensor_smem[s_idx]
                     vals.append(val)
 
                 vec_val = vector.from_elements(vec_type, vals)
-                b_coord = rocir.make_coord(base_row_b, base_col_b)
-                g_idx_b = rocir.crd2idx(b_coord, b_layout)
+                b_coord = flir.make_coord(base_row_b, base_col_b)
+                g_idx_b = flir.crd2idx(b_coord, b_layout)
                 vector.store(vec_val, B, [v(g_idx_b)])
 
-    _matrix_transpose_rocir_impl = lower_range_for_loops(_matrix_transpose_rocir_impl)
+    _matrix_transpose_flir_impl = lower_range_for_loops(_matrix_transpose_flir_impl)
 
-    class _TransposeRocir(rocir.MlirModule):
-        GPU_MODULE_NAME = "transpose_kernels_rocir"
+    class _TransposeFlir(flir.MlirModule):
+        GPU_MODULE_NAME = "transpose_kernels_flir"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
 
         def init_gpu_module(self):
             # Shared memory definition
             _state["smem_type"] = T.memref(SMEM_SIZE, T.f32(), memory_space=gpu.lds_space())
-            memref.global_(sym_name="tile_smem_rocir", type_=_state["smem_type"], alignment=16)
+            memref.global_(sym_name="tile_smem_flir", type_=_state["smem_type"], alignment=16)
 
-        @rocir.kernel
-        def matrix_transpose_rocir(
+        @flir.kernel
+        def matrix_transpose_flir(
             self,
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
-            _matrix_transpose_rocir_impl(A, B)
+            _matrix_transpose_flir_impl(A, B)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
@@ -658,19 +658,19 @@ def benchmark_matrix_transpose_rocir(TILE_SIZE=4, BLOCK_TILE=32):
             gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
             bx = arith.index(THREADS_PER_BLOCK_X).value
             by = arith.index(THREADS_PER_BLOCK_Y).value
-            rocir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, "matrix_transpose_rocir"],
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, "matrix_transpose_flir"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, by, c1),
                 kernel_operands=[A, B],
             )
 
-    m = _TransposeRocir()
+    m = _TransposeFlir()
 
     print("  Running optimization pipeline...")
     optimized = run_pipeline(m.module, Pipeline().canonicalize().cse())
 
-    exe = rocdsl.compile(optimized)
+    exe = pyflir.compile(optimized)
     print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
 
     np.random.seed(123)
@@ -734,7 +734,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Matrix Transpose Benchmark - Compare Arith vs Rocir"
+        description="Matrix Transpose Benchmark - Compare Arith vs Flir"
     )
     parser.add_argument(
         "--tile-size", type=int, default=4, help="Elements per thread (default: 4)"
@@ -753,7 +753,7 @@ if __name__ == "__main__":
     print(f"GPU: {get_rocm_arch()}")
 
     results_arith = None
-    results_rocir = None
+    results_flir = None
     results_buffer_load = None
 
     print("\n" + "=" * 80)
@@ -770,13 +770,13 @@ if __name__ == "__main__":
         traceback.print_exc()
 
     print("\n" + "=" * 80)
-    print("RUNNING: Rocir Layout API Implementation")
+    print("RUNNING: Flir Layout API Implementation")
     try:
-        success, results_rocir = benchmark_matrix_transpose_rocir(
+        success, results_flir = benchmark_matrix_transpose_flir(
             TILE_SIZE=args.tile_size, BLOCK_TILE=args.block_tile
         )
         if not success:
-            print("Rocir implementation failed correctness check")
+            print("Flir implementation failed correctness check")
     except Exception as e:
         import traceback
 
@@ -786,7 +786,7 @@ if __name__ == "__main__":
     print("RUNNING: Buffer Load Implementation (AMD CDNA3)")
     try:
         print("  Importing buffer_ops...")
-        from rocdsl.dialects.ext import buffer_ops
+        from pyflir.dialects.ext import buffer_ops
 
         print("  ✓ buffer_ops imported")
 
@@ -823,11 +823,11 @@ if __name__ == "__main__":
         arith_ms = _metric(results_arith, "avg_ms")
         print(f"{'Arith':<25} {arith_ms:<15.3f} {arith_bw:<20.2f} {'1.00x':<10}")
         
-        if results_rocir:
-            rocir_bw = _metric(results_rocir, "bandwidth_gbs")
-            rocir_ms = _metric(results_rocir, "avg_ms")
-            speedup = rocir_bw / arith_bw
-            print(f"{'Rocir Layout API':<25} {rocir_ms:<15.3f} {rocir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
+        if results_flir:
+            flir_bw = _metric(results_flir, "bandwidth_gbs")
+            flir_ms = _metric(results_flir, "avg_ms")
+            speedup = flir_bw / arith_bw
+            print(f"{'Flir Layout API':<25} {flir_ms:<15.3f} {flir_bw:<20.2f} {f'{speedup:.2f}x':<10}")
         
         if results_buffer_load:
             buffer_bw = _metric(results_buffer_load, "bandwidth_gbs")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MFMA GEMM Test using Rocir with @gpu.func decorator pattern.
+"""MFMA GEMM Test using Flir with @gpu.func decorator pattern.
 Supports FP8 (mfma_16x16x32) and FP16 (mfma_16x16x16)."""
 
 import sys
@@ -13,11 +13,11 @@ logging.basicConfig(level=logging.INFO)
 
 
 
-from rocdsl.runtime.device import get_rocm_arch
-import rocdsl
-import rocdsl.dialects.ext.rocir as rocir
-from rocdsl.dialects.ext.python_control_flow import range_constexpr
-from rocdsl.utils import SmemAllocator
+from pyflir.runtime.device import get_rocm_arch
+import pyflir
+import pyflir.dialects.ext.flir as flir
+from pyflir.dialects.ext.python_control_flow import range_constexpr
+from pyflir.utils import SmemAllocator
 from tests.utils import pertoken_quant
 from tests.test_common import run_perftest, verify_output
 import torch
@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import pytest
 from _mlir import ir
 from _mlir.dialects import vector, memref, builtin
-from rocdsl.dialects.ext import arith, scf, gpu
+from pyflir.dialects.ext import arith, scf, gpu
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
@@ -57,7 +57,7 @@ def unwrap(v):
 
 
 @pytest.mark.parametrize("dtype_config", [DType.FP8, DType.FP16])
-def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n=32, tile_k=128):
+def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n=32, tile_k=128):
     """Test MFMA GEMM with configurable dtype (FP8 or FP16)."""
     
     # Configure based on dtype (non-MLIR parameters)
@@ -101,7 +101,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
     lds_size_a = tile_m * lds_stride
     lds_size_b = tile_n * lds_stride
 
-    class _MFMA(rocir.MlirModule):
+    class _MFMA(flir.MlirModule):
         GPU_MODULE_NAME = "mfma_mod"
         GPU_MODULE_TARGETS = [
             f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
@@ -114,9 +114,9 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
 
         # Always include scale parameters for uniform signature.
         # For FP16, we pass dummy scale arrays but don't use them.
-        @rocir.kernel
+        @flir.kernel
         def kernel(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             arg_c: lambda: T.memref(size_c, T.f32()),
             arg_a: lambda: T.memref(size_a, _mlir_dtype()),
             arg_b: lambda: T.memref(size_b, _mlir_dtype()),
@@ -139,27 +139,27 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             c_tile_m = arith.index(tile_m)
             c_tile_n = arith.index(tile_n)
             
-            # Define Layouts using Rocir
+            # Define Layouts using Flir
             # Layout A: (M, K) with stride (K, 1)
-            shape_a = rocir.make_shape(c_m, c_k)
-            stride_a = rocir.make_stride(c_k, c1)
-            layout_a = rocir.make_layout(shape_a, stride_a)
+            shape_a = flir.make_shape(c_m, c_k)
+            stride_a = flir.make_stride(c_k, c1)
+            layout_a = flir.make_layout(shape_a, stride_a)
             
             # Layout B (Transposed): (N, K) with stride (K, 1)
-            shape_b = rocir.make_shape(c_n, c_k)
-            stride_b = rocir.make_stride(c_k, c1)
-            layout_b = rocir.make_layout(shape_b, stride_b)
+            shape_b = flir.make_shape(c_n, c_k)
+            stride_b = flir.make_stride(c_k, c1)
+            layout_b = flir.make_layout(shape_b, stride_b)
             
             # Layout C: (M, N) with stride (N, 1)
-            shape_c = rocir.make_shape(c_m, c_n)
-            stride_c = rocir.make_stride(c_n, c1)
-            layout_c = rocir.make_layout(shape_c, stride_c)
+            shape_c = flir.make_shape(c_m, c_n)
+            stride_c = flir.make_stride(c_n, c1)
+            layout_c = flir.make_layout(shape_c, stride_c)
             
             # LDS Layout: tile_m x tile_k (Row Major)
             c_lds_stride = arith.constant(lds_stride, index=True)
-            shape_lds = rocir.make_shape(c_tile_m, c_tile_k)
-            stride_lds = rocir.make_stride(c_lds_stride, c1)
-            layout_lds = rocir.make_layout(shape_lds, stride_lds)
+            shape_lds = flir.make_shape(c_tile_m, c_tile_k)
+            stride_lds = flir.make_stride(c_lds_stride, c1)
+            layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -223,14 +223,14 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             def load_global(k_val):
                 # Load A
                 col_a_global_k = k_val + col_a_local
-                coord_a = rocir.make_coord(row_a_global, col_a_global_k)
-                idx_a = rocir.crd2idx(coord_a, layout_a)
+                coord_a = flir.make_coord(row_a_global, col_a_global_k)
+                idx_a = flir.crd2idx(coord_a, layout_a)
                 vec_a = vector.TransferReadOp(vec_type, arg_a, [unwrap(idx_a)], identity_map, unwrap(pad_val), [True]).result
                 
                 # Load B
                 col_b_global_k = k_val + col_b_local
-                coord_b = rocir.make_coord(row_b_global, col_b_global_k)
-                idx_b = rocir.crd2idx(coord_b, layout_b)
+                coord_b = flir.make_coord(row_b_global, col_b_global_k)
+                idx_b = flir.crd2idx(coord_b, layout_b)
                 vec_b = vector.TransferReadOp(vec_type, arg_b, [unwrap(idx_b)], identity_map, unwrap(pad_val), [True]).result
                 
                 return vec_a, vec_b
@@ -242,12 +242,12 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                     col_lds = ki + col_offset_base
                     
                     # A LDS Index (uses layout_lds which has stride padding)
-                    coord_a_lds = rocir.make_coord(row_a_lds, col_lds)
-                    idx_a_mfma = rocir.crd2idx(coord_a_lds, layout_lds)
+                    coord_a_lds = flir.make_coord(row_a_lds, col_lds)
+                    idx_a_mfma = flir.crd2idx(coord_a_lds, layout_lds)
                     
                     # B LDS Index
-                    coord_b_lds = rocir.make_coord(row_b_lds, col_lds)
-                    idx_b_mfma = rocir.crd2idx(coord_b_lds, layout_lds)
+                    coord_b_lds = flir.make_coord(row_b_lds, col_lds)
+                    idx_b_mfma = flir.crd2idx(coord_b_lds, layout_lds)
                     
                     if dtype_config == DType.FP8:
                         vec8_elem = ir.VectorType.get([8], mlir_dtype)
@@ -323,7 +323,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             gpu.barrier()
             final_acc = compute_tile(final_acc)
             
-            # Store Result using Rocir
+            # Store Result using Flir
             lane_div_16 = lane_id // c16
             lane_rem_16 = lane_id % c16
             
@@ -351,9 +351,9 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                 row_g = row_base_g + row_offset
                 col_g = col_base_g + col_offset
                 
-                # Use Rocir for C store index
-                coord_c = rocir.make_coord(row_g, col_g)
-                idx = rocir.crd2idx(coord_c, layout_c)
+                # Use Flir for C store index
+                coord_c = flir.make_coord(row_g, col_g)
+                idx = flir.crd2idx(coord_c, layout_c)
                 
                 # Apply scaling if needed
                 if use_scales:
@@ -372,9 +372,9 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
                     # No scaling, direct store
                     memref.StoreOp(unwrap(val), arg_c, [unwrap(idx)])
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             arg_c: lambda: T.memref(size_c, T.f32()),
             arg_a: lambda: T.memref(size_a, _mlir_dtype()),
             arg_b: lambda: T.memref(size_b, _mlir_dtype()),
@@ -389,7 +389,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             bdx = arith.constant(256, index=True).value
             gx = arith.constant((M + tile_m - 1) // tile_m, index=True).value
             gy = arith.constant((N + tile_n - 1) // tile_n, index=True).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, c1, c1),
@@ -398,15 +398,15 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
     
     m = _MFMA()
 
-    # Register Rocir dialect for downstream passes (best-effort).
+    # Register Flir dialect for downstream passes (best-effort).
     try:
-        import _rocirPassesExt
-        _rocirPassesExt.register_dialect(m.module.context)
-        print("✓ Registered Rocir dialect")
+        import _flirPassesExt
+        _flirPassesExt.register_dialect(m.module.context)
+        print("✓ Registered Flir dialect")
     except Exception as e:
-        print(f"Warning: Could not register Rocir dialect: {e}")
+        print(f"Warning: Could not register Flir dialect: {e}")
 
-    print("✓ MLIR module constructed via rocir.MlirModule/@rocir.kernel")
+    print("✓ MLIR module constructed via flir.MlirModule/@flir.kernel")
     
     # Set kernel attributes on the GPU function
     gpu_func_op = None
@@ -426,7 +426,7 @@ def test_mfma_gemm_rocir(dtype_config, M=1024, N=1024, K=1280, tile_m=32, tile_n
             gpu_func_op.attributes["gpu.kernel"] = ir.UnitAttr.get()
     
     print("Compiling...")
-    exe = rocdsl.compile(m)
+    exe = pyflir.compile(m)
     print("✓ Compiled")
 
     print("Executing kernel...")
@@ -505,11 +505,11 @@ if __name__ == "__main__":
     print("="*80 + "\n")
     
     # Test FP8
-    test_mfma_gemm_rocir(DType.FP8)
+    test_mfma_gemm_flir(DType.FP8)
     
     # Test FP16
     try:
-        test_mfma_gemm_rocir(DType.FP16)
+        test_mfma_gemm_flir(DType.FP16)
     except AssertionError as e:
         print(f"\n[Note] FP16 verification failed: {e}")
         print("This is expected as FP16 support is experimental/WIP.")

@@ -1,1 +1,1 @@
-# RocDSL Python Tests
+# FLIR Python Tests

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Vector Addition Benchmark - GPU kernel with Rocir Layout integration"""
+"""Vector Addition Benchmark - GPU kernel with Flir Layout integration"""
 
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-import rocdsl
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import rocir
-from rocdsl.dialects.ext import arith
-from rocdsl.runtime.device import get_rocm_arch
+import pyflir
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import arith
+from pyflir.runtime.device import get_rocm_arch
 from _mlir.ir import F32Type, IntegerType
 import _mlir.extras.types as T
 import numpy as np
@@ -46,44 +46,44 @@ def create_vec_add_kernel(
     gpu_arch = get_rocm_arch()
     num_blocks = (size + TILE_ELEMS - 1) // TILE_ELEMS
 
-    class _VecAdd(rocir.MlirModule):
+    class _VecAdd(flir.MlirModule):
         GPU_MODULE_NAME = "vec_kernels"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}">']
 
-        @rocir.kernel
+        @flir.kernel
         def vec_add(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(size, dtype.get()),
             B: lambda: T.memref(size, dtype.get()),
             C: lambda: T.memref(size, dtype.get()),
         ):
-            tid_x = rocir.thread_idx("x")
-            tid_y = rocir.thread_idx("y")
-            bid_x = rocir.block_idx("x")
-            bdim_x = rocir.block_dim("x")
+            tid_x = flir.thread_idx("x")
+            tid_y = flir.thread_idx("y")
+            bid_x = flir.block_idx("x")
+            bdim_x = flir.block_dim("x")
             tid_linear = (tid_y * bdim_x + tid_x).value
 
-            thr_layout = rocir.make_ordered_layout((THREADS_PER_BLOCK,), order=(0,))
-            val_layout = rocir.make_ordered_layout((TILE_SIZE,), order=(0,))
+            thr_layout = flir.make_ordered_layout((THREADS_PER_BLOCK,), order=(0,))
+            val_layout = flir.make_ordered_layout((TILE_SIZE,), order=(0,))
 
-            copy_atom_load = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
-            copy_atom_store = rocir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
+            copy_atom_load = flir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
+            copy_atom_store = flir.make_copy_atom(dtype.get(), vector_size=VEC_WIDTH)
 
-            tiled_copy_A = rocir.make_tiled_copy_tv(
+            tiled_copy_A = flir.make_tiled_copy_tv(
                 copy_atom_load,
                 thr_layout,
                 val_layout,
                 thr_shape=(THREADS_PER_BLOCK,),
                 val_shape=(TILE_SIZE,),
             )
-            tiled_copy_B = rocir.make_tiled_copy_tv(
+            tiled_copy_B = flir.make_tiled_copy_tv(
                 copy_atom_load,
                 thr_layout,
                 val_layout,
                 thr_shape=(THREADS_PER_BLOCK,),
                 val_shape=(TILE_SIZE,),
             )
-            tiled_copy_C = rocir.make_tiled_copy_tv(
+            tiled_copy_C = flir.make_tiled_copy_tv(
                 copy_atom_store,
                 thr_layout,
                 val_layout,
@@ -91,18 +91,18 @@ def create_vec_add_kernel(
                 val_shape=(TILE_SIZE,),
             )
 
-            tensor_A = rocir.make_tensor(A, shape=(size,), strides=(1,))
-            tensor_B = rocir.make_tensor(B, shape=(size,), strides=(1,))
-            tensor_C = rocir.make_tensor(C, shape=(size,), strides=(1,))
+            tensor_A = flir.make_tensor(A, shape=(size,), strides=(1,))
+            tensor_B = flir.make_tensor(B, shape=(size,), strides=(1,))
+            tensor_C = flir.make_tensor(C, shape=(size,), strides=(1,))
 
             tile_shape = (TILE_ELEMS,)
 
-            gA = rocir.zipped_divide(tensor_A, tile_shape)
-            gB = rocir.zipped_divide(tensor_B, tile_shape)
-            gC = rocir.zipped_divide(tensor_C, tile_shape)
+            gA = flir.zipped_divide(tensor_A, tile_shape)
+            gB = flir.zipped_divide(tensor_B, tile_shape)
+            gC = flir.zipped_divide(tensor_C, tile_shape)
 
-            idC = rocir.make_identity_tensor((size,))
-            cC = rocir.zipped_divide(idC, tile_shape)
+            idC = flir.make_identity_tensor((size,))
+            cC = flir.zipped_divide(idC, tile_shape)
 
             blk_coord = (bid_x,)
             blkA = gA[blk_coord]
@@ -120,40 +120,40 @@ def create_vec_add_kernel(
             thrCrd = thr_copy_C.partition_S(blkCrd)
 
             val_shape = tiled_copy_A.val_shape
-            frgA = rocir.make_fragment_like(thrA, dtype.get())
-            frgB = rocir.make_fragment_like(thrB, dtype.get())
-            frgC = rocir.make_fragment_like(thrC, dtype.get())
+            frgA = flir.make_fragment_like(thrA, dtype.get())
+            frgB = flir.make_fragment_like(thrB, dtype.get())
+            frgC = flir.make_fragment_like(thrC, dtype.get())
 
             pred_ty = IntegerType.get_signless(1)
-            frgPred = rocir.make_rmem_tensor(val_shape, pred_ty)
+            frgPred = flir.make_rmem_tensor(val_shape, pred_ty)
             total_vals = val_shape[0]
 
             for linear in range(total_vals):
-                lin_idx = rocir.const_index(linear)
+                lin_idx = flir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
-                pred_val = rocir.elem_less(coords, (size,))
+                pred_val = flir.elem_less(coords, (size,))
                 pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
                 frgPred[pred_offsets] = pred_val
 
-            rocir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
-            rocir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
+            flir.copy(tiled_copy_A, thrA, frgA, pred=frgPred)
+            flir.copy(tiled_copy_B, thrB, frgB, pred=frgPred)
 
             for iter_idx in range(ITERS_PER_THREAD):
                 iter_base = iter_idx * VEC_WIDTH
                 for lane in range(VEC_WIDTH):
                     lin = iter_base + lane
-                    idx = rocir.const_index(lin)
+                    idx = flir.const_index(lin)
                     coords = (idx,)
                     a_val = frgA[coords]
                     b_val = frgB[coords]
                     c_val = a_val + b_val
                     frgC[coords] = c_val
 
-            rocir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
+            flir.copy(tiled_copy_C, frgC, thrC, pred=frgPred)
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(size, dtype.get()),
             B: lambda: T.memref(size, dtype.get()),
             C: lambda: T.memref(size, dtype.get()),
@@ -161,7 +161,7 @@ def create_vec_add_kernel(
             c1 = arith.index(1).value
             gx = arith.index(num_blocks).value
             bx = arith.index(THREADS_PER_BLOCK).value
-            rocir.gpu_ext.LaunchFuncOp(
+            flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "vec_add"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
@@ -235,7 +235,7 @@ def benchmark_vector_add(tile_size: int = 4):
     module = create_vec_add_kernel(SIZE, tile_size=TILE_SIZE, dtype=F32Type)
     print("  Running canonicalize + CSE pipeline...")
     optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-    exe = rocdsl.compile(optimized)
+    exe = pyflir.compile(optimized)
     
     threads_per_block = THREADS_PER_BLOCK
     num_blocks = (SIZE + TILE_ELEMS - 1) // TILE_ELEMS
@@ -297,7 +297,7 @@ def benchmark_vector_add(tile_size: int = 4):
         bw_ratio = results["bandwidth_gbs"] / torch_results["bandwidth_gbs"]
         # Avoid "Bandwidth:" here so run_tests.sh doesn't accidentally pick the baseline.
         print(f"  PyTorch BW: {torch_results['bandwidth_gbs']:.2f} GB/s")
-        print(f"  Bandwidth ratio (RocDSL / PyTorch): {bw_ratio:.2f}x")
+        print(f"  Bandwidth ratio (FLIR / PyTorch): {bw_ratio:.2f}x")
     
     return error < 1e-5
 
@@ -305,7 +305,7 @@ def benchmark_vector_add(tile_size: int = 4):
 def test_benchmark_vector_add():
     """Pytest wrapper for vector addition benchmark."""
     print("\n" + "="*80)
-    print("ROCm GPU Benchmark - Vector Addition with Rocir Layout")
+    print("ROCm GPU Benchmark - Vector Addition with Flir Layout")
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
     assert benchmark_vector_add(), "Vector addition benchmark failed correctness check"
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     print("\n" + "="*80)
-    print("ROCm GPU Benchmark - Vector Addition with Rocir Layout")
+    print("ROCm GPU Benchmark - Vector Addition with Flir Layout")
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
     

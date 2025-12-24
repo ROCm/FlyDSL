@@ -3,12 +3,12 @@ func.func @test1() {
   %c16 = arith.constant 16 : index
   %c1 = arith.constant 1 : index
   
-  %shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-  %stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+  %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+  %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
   
-  %extracted_shape = rocir.get_shape %layout : !rocir.layout<(?,?)> -> !rocir.shape<(?,?)>
-  %size = rocir.size %extracted_shape : !rocir.shape<(?,?)> -> index
+  %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?)> -> !flir.shape<(?,?)>
+  %size = flir.size %extracted_shape : !flir.shape<(?,?)> -> index
   
   return
 }

@@ -1,29 +1,29 @@
-"""Sanity test: MlirModule + @kernel/@jit re-exported under `rocir.*`."""
+"""Sanity test: MlirModule + @kernel/@jit re-exported under `flir.*`."""
 
-from rocdsl.dialects.ext import rocir
+from pyflir.dialects.ext import flir
 
 
 def test_mlirmodule_kernel_jit_emits_ops(ctx, insert_point):
     N = 8
 
-    class VecAdd(rocir.MlirModule):
-        @rocir.kernel
+    class VecAdd(flir.MlirModule):
+        @flir.kernel
         def kernel(
-            self: rocir.T.i64(),  # first argument is an MLIR scalar, not a Python instance
-            A: rocir.T.memref(N, element_type=rocir.T.f32()),
-            B: rocir.T.memref(N, element_type=rocir.T.f32()),
-            C: rocir.T.memref(N, element_type=rocir.T.f32()),
+            self: flir.T.i64(),  # first argument is an MLIR scalar, not a Python instance
+            A: flir.T.memref(N, element_type=flir.T.f32()),
+            B: flir.T.memref(N, element_type=flir.T.f32()),
+            C: flir.T.memref(N, element_type=flir.T.f32()),
         ):
-            tid = rocir.thread_idx("x")
-            a = rocir.memref.load(A, [tid.value])
-            rocir.memref.store(a.value if hasattr(a, "value") else a, C, [tid.value])
+            tid = flir.thread_idx("x")
+            a = flir.memref.load(A, [tid.value])
+            flir.memref.store(a.value if hasattr(a, "value") else a, C, [tid.value])
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64(),
-            A: rocir.T.memref(N, element_type=rocir.T.f32()),
-            B: rocir.T.memref(N, element_type=rocir.T.f32()),
-            C: rocir.T.memref(N, element_type=rocir.T.f32()),
+            self: flir.T.i64(),
+            A: flir.T.memref(N, element_type=flir.T.f32()),
+            B: flir.T.memref(N, element_type=flir.T.f32()),
+            C: flir.T.memref(N, element_type=flir.T.f32()),
         ):
             # Just ensure this emits a func.func.
             _ = self

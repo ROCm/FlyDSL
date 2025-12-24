@@ -7,15 +7,15 @@ module {
     %c1 = arith.constant 1 : index
     %c32 = arith.constant 32 : index
     
-    %shape = rocir.make_shape %c32, %c64 : (index, index) -> !rocir.shape<(?,?)>
-    %stride = rocir.make_stride %c64, %c1 : (index, index) -> !rocir.stride<(?,?)>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
+    %stride = flir.make_stride %c64, %c1 : (index, index) -> !flir.stride<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // Create coordinate from dynamic arguments
-    %coord = rocir.make_coord %arg0, %arg1 : (index, index) -> !rocir.coord<(?,?)>
+    %coord = flir.make_coord %arg0, %arg1 : (index, index) -> !flir.coord<(?,?)>
     
     // Convert to linear index
-    %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<(?,?)>, !rocir.layout<(?,?)>) -> index
+    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
     
     return %idx : index
   }

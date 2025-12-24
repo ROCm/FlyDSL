@@ -1,102 +1,102 @@
 #!/usr/bin/env python3
 """Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
 
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import rocir
-from rocdsl.dialects.ext.arith import Index
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.dialects.ext import flir
+from pyflir.dialects.ext.arith import Index
 
 
-_PIPELINE = Pipeline().rocir_to_standard().canonicalize().cse()
+_PIPELINE = Pipeline().flir_to_standard().canonicalize().cse()
 
 
-class _StaticDynamic(rocir.MlirModule):
-    @rocir.jit
-    def static_layout(self: rocir.T.i64):
-        layout = rocir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
-        shape = rocir.get_shape(layout)
-        stride = rocir.get_stride(layout)
+class _StaticDynamic(flir.MlirModule):
+    @flir.jit
+    def static_layout(self: flir.T.i64):
+        layout = flir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
+        shape = flir.get_shape(layout)
+        stride = flir.get_stride(layout)
         return [
-            rocir.get(shape, Index(0)).value,
-            rocir.get(shape, Index(1)).value,
-            rocir.get(stride, Index(0)).value,
-            rocir.get(stride, Index(1)).value,
-            rocir.size(layout).value,
+            flir.get(shape, Index(0)).value,
+            flir.get(shape, Index(1)).value,
+            flir.get(stride, Index(0)).value,
+            flir.get(stride, Index(1)).value,
+            flir.size(layout).value,
         ]
     
-    @rocir.jit
+    @flir.jit
     def dynamic_layout(
-        self: rocir.T.i64,
-        dim0: rocir.T.index,
-        dim1: rocir.T.index,
-        stride0: rocir.T.index,
-        stride1: rocir.T.index,
+        self: flir.T.i64,
+        dim0: flir.T.index,
+        dim1: flir.T.index,
+        stride0: flir.T.index,
+        stride1: flir.T.index,
     ):
-        layout = rocir.make_layout((dim0, dim1), stride=(stride0, stride1))
-        shape = rocir.get_shape(layout)
-        stride = rocir.get_stride(layout)
-        rocir.printf("Dynamic layout: ({},{}):({}{})\n", dim0, dim1, stride0, stride1)
+        layout = flir.make_layout((dim0, dim1), stride=(stride0, stride1))
+        shape = flir.get_shape(layout)
+        stride = flir.get_stride(layout)
+        flir.printf("Dynamic layout: ({},{}):({}{})\n", dim0, dim1, stride0, stride1)
         return [
-            rocir.get(shape, Index(0)).value,
-            rocir.get(shape, Index(1)).value,
-            rocir.get(stride, Index(0)).value,
-            rocir.get(stride, Index(1)).value,
-            rocir.size(layout).value,
+            flir.get(shape, Index(0)).value,
+            flir.get(shape, Index(1)).value,
+            flir.get(stride, Index(0)).value,
+            flir.get(stride, Index(1)).value,
+            flir.size(layout).value,
         ]
     
-    @rocir.jit
-    def static_composition(self: rocir.T.i64):
-        A = rocir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
-        B = rocir.make_layout((Index(5), Index(4)), stride=(Index(1), Index(5)))
-        R = rocir.composition(A, B)
-        shape = rocir.get_shape(R)
-        stride = rocir.get_stride(R)
+    @flir.jit
+    def static_composition(self: flir.T.i64):
+        A = flir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
+        B = flir.make_layout((Index(5), Index(4)), stride=(Index(1), Index(5)))
+        R = flir.composition(A, B)
+        shape = flir.get_shape(R)
+        stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(rocir.get(shape, Index(i)).value)
+            vals.append(flir.get(shape, Index(i)).value)
         for i in range(3):
-            vals.append(rocir.get(stride, Index(i)).value)
+            vals.append(flir.get(stride, Index(i)).value)
         return vals
     
-    @rocir.jit
+    @flir.jit
     def dynamic_composition(
-        self: rocir.T.i64,
-        a_d0: rocir.T.index,
-        a_d1: rocir.T.index,
-        a_s0: rocir.T.index,
-        a_s1: rocir.T.index,
-        b_d0: rocir.T.index,
-        b_d1: rocir.T.index,
-        b_s0: rocir.T.index,
-        b_s1: rocir.T.index,
+        self: flir.T.i64,
+        a_d0: flir.T.index,
+        a_d1: flir.T.index,
+        a_s0: flir.T.index,
+        a_s1: flir.T.index,
+        b_d0: flir.T.index,
+        b_d1: flir.T.index,
+        b_s0: flir.T.index,
+        b_s1: flir.T.index,
     ):
-        A = rocir.make_layout((a_d0, a_d1), stride=(a_s0, a_s1))
-        B = rocir.make_layout((b_d0, b_d1), stride=(b_s0, b_s1))
-        R = rocir.composition(A, B)
-        rocir.printf("Composition: A({},{}) o B({},{})\n", a_d0, a_d1, b_d0, b_d1)
-        shape = rocir.get_shape(R)
-        stride = rocir.get_stride(R)
+        A = flir.make_layout((a_d0, a_d1), stride=(a_s0, a_s1))
+        B = flir.make_layout((b_d0, b_d1), stride=(b_s0, b_s1))
+        R = flir.composition(A, B)
+        flir.printf("Composition: A({},{}) o B({},{})\n", a_d0, a_d1, b_d0, b_d1)
+        shape = flir.get_shape(R)
+        stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(rocir.get(shape, Index(i)).value)
+            vals.append(flir.get(shape, Index(i)).value)
         for i in range(3):
-            vals.append(rocir.get(stride, Index(i)).value)
+            vals.append(flir.get(stride, Index(i)).value)
         return vals
 
-    @rocir.jit
+    @flir.jit
     def mixed_layout(
-        self: rocir.T.i64,
-        runtime_extent: rocir.T.index,
-        runtime_stride: rocir.T.index,
+        self: flir.T.i64,
+        runtime_extent: flir.T.index,
+        runtime_stride: flir.T.index,
     ):
-        layout = rocir.make_layout((runtime_extent, Index(8)), stride=(Index(16), runtime_stride))
-        shape = rocir.get_shape(layout)
-        stride = rocir.get_stride(layout)
-        rocir.printf("Mixed: ({},8):(16,{})\n", runtime_extent, runtime_stride)
+        layout = flir.make_layout((runtime_extent, Index(8)), stride=(Index(16), runtime_stride))
+        shape = flir.get_shape(layout)
+        stride = flir.get_stride(layout)
+        flir.printf("Mixed: ({},8):(16,{})\n", runtime_extent, runtime_stride)
         return [
-            rocir.get(shape, Index(0)).value,
-            rocir.get(shape, Index(1)).value,
-            rocir.get(stride, Index(0)).value,
-            rocir.get(stride, Index(1)).value,
+            flir.get(shape, Index(0)).value,
+            flir.get(shape, Index(1)).value,
+            flir.get(stride, Index(0)).value,
+            flir.get(stride, Index(1)).value,
         ]
     
 

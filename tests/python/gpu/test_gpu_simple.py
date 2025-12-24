@@ -1,10 +1,10 @@
 """
-Simple GPU kernel tests using rocdsl Python API
+Simple GPU kernel tests using flir Python API
 Vector addition test with clean, readable syntax
 """
 
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import rocir
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.dialects.ext import flir
 import _mlir.extras.types as T
 
 
@@ -12,41 +12,41 @@ def test_vector_add():
     """Vector addition test: C = A + B"""
     M, N = 32, 64
 
-    class _VecAdd(rocir.MlirModule):
-        @rocir.kernel
+    class _VecAdd(flir.MlirModule):
+        @flir.kernel
         def vecAdd(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M, N, T.f32()),
             B: lambda: T.memref(M, N, T.f32()),
             C: lambda: T.memref(M, N, T.f32()),
         ):
             # Get block/thread IDs and dimensions
-            bx, by = rocir.block_idx("x"), rocir.block_idx("y")
-            tx, ty = rocir.thread_idx("x"), rocir.thread_idx("y")
-            bdx, bdy = rocir.block_dim("x"), rocir.block_dim("y")
+            bx, by = flir.block_idx("x"), flir.block_idx("y")
+            tx, ty = flir.thread_idx("x"), flir.thread_idx("y")
+            bdx, bdy = flir.block_dim("x"), flir.block_dim("y")
 
             # Calculate global thread index
             row = (by * bdy + ty)
             col = (bx * bdx + tx)
 
             # Vector addition: C[row,col] = A[row,col] + B[row,col]
-            a = rocir.memref.load(A, [row.value, col.value])
-            b = rocir.memref.load(B, [row.value, col.value])
+            a = flir.memref.load(A, [row.value, col.value])
+            b = flir.memref.load(B, [row.value, col.value])
             c = a + b
-            rocir.memref.store(c.value, C, [row.value, col.value])
+            flir.memref.store(c.value, C, [row.value, col.value])
 
-        @rocir.jit
+        @flir.jit
         def __call__(
-            self: rocir.T.i64,
+            self: flir.T.i64,
             A: lambda: T.memref(M, N, T.f32()),
             B: lambda: T.memref(M, N, T.f32()),
             C: lambda: T.memref(M, N, T.f32()),
         ):
-            c1 = rocir.arith_ext.index(1).value
-            bx = rocir.arith_ext.index(N // 16).value
-            by = rocir.arith_ext.index(M // 16).value
-            b16 = rocir.arith_ext.index(16).value
-            rocir.gpu_ext.LaunchFuncOp(
+            c1 = flir.arith_ext.index(1).value
+            bx = flir.arith_ext.index(N // 16).value
+            by = flir.arith_ext.index(M // 16).value
+            b16 = flir.arith_ext.index(16).value
+            flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "vecAdd"],
                 grid_size=(bx, by, c1),
                 block_size=(b16, b16, c1),

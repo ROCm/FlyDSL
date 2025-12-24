@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete tests for Rocir layout algebra operations.
+Complete tests for Flir layout algebra operations.
 Exactly following the layout algebra notebook examples from the CUTLASS tree.
 
 Each test corresponds to a specific cell in the notebook.
@@ -9,10 +9,10 @@ Each test corresponds to a specific cell in the notebook.
 import sys
 import traceback
 
-from rocdsl.compiler.context import RAIIMLIRContextModule
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.dialects.ext import rocir
-from rocdsl.dialects.ext.arith import Index
+from pyflir.compiler.context import RAIIMLIRContextModule
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.dialects.ext import flir
+from pyflir.dialects.ext.arith import Index
 from _mlir.dialects import func
 from _mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
 
@@ -44,9 +44,9 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
 
     print(f"  Running lowering pipeline for {test_name}...")
     
-    # Lower rocir ops to standard arithmetic
-    # RocirToStandardPass runs at module scope (can lower Rocir ops inside gpu.func).
-    pipeline = Pipeline().rocir_to_standard().canonicalize().cse()
+    # Lower flir ops to standard arithmetic
+    # FlirToStandardPass runs at module scope (can lower Flir ops inside gpu.func).
+    pipeline = Pipeline().flir_to_standard().canonicalize().cse()
     run_pipeline(ctx.module, pipeline)
     
     assert ctx.module.operation.verify(), f"{test_name}: IR verification failed."
@@ -203,15 +203,15 @@ def test_coalesce_basic():
     
     @func.FuncOp.from_py_func()
     def test_coalesce():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(2), (Index(1), Index(6))),
             stride=(Index(1), (Index(6), Index(2)))
         )
         
-        coalesced = rocir.coalesce(layout)
+        coalesced = flir.coalesce(layout)
         
         # Verify size is preserved
-        sz = rocir.size(coalesced)
+        sz = flir.size(coalesced)
         return [unwrap(sz)]
     
     # Verify size is preserved: 2 * 1 * 6 = 12
@@ -231,16 +231,16 @@ def test_coalesce_dynamic_stride():
     
     @func.FuncOp.from_py_func(index_type)
     def coalesce_dynamic(runtime_stride):
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(2), (Index(1), Index(6))),
             stride=(Index(1), (runtime_stride, Index(2)))
         )
-        coalesced = rocir.coalesce(layout)
-        stride = rocir.get_stride(coalesced)
+        coalesced = flir.coalesce(layout)
+        stride = flir.get_stride(coalesced)
         return [
-            unwrap(rocir.get(stride, Index(0))),
-            unwrap(rocir.get(stride, Index(1))),
-            unwrap(rocir.get(stride, Index(2))),
+            unwrap(flir.get(stride, Index(0))),
+            unwrap(flir.get(stride, Index(1))),
+            unwrap(flir.get(stride, Index(2))),
         ]
     
     run_lowering_test(
@@ -270,26 +270,26 @@ def test_composition_basic():
     
     @func.FuncOp.from_py_func()
     def run_composition():
-        A = rocir.make_layout(
+        A = flir.make_layout(
             (Index(6), Index(2)),
             stride=(Index(8), Index(2))
         )
-        B = rocir.make_layout(
+        B = flir.make_layout(
             (Index(4), Index(3)),
             stride=(Index(3), Index(1))
         )
-        R = rocir.composition(A, B)
+        R = flir.composition(A, B)
         
         # Extract shape and stride
-        shape = rocir.get_shape(R)
-        stride = rocir.get_stride(R)
+        shape = flir.get_shape(R)
+        stride = flir.get_stride(R)
         
         # Get dimensions (rank 3: (2,2,3))
         vals = []
         for i in range(3):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(3):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -339,28 +339,28 @@ def test_composition_static_vs_dynamic():
     def run_composition_static():
         # Create layouts with STATIC dimensions using Index()
         # These will become arith.constant operations
-        A_static = rocir.make_layout(
+        A_static = flir.make_layout(
             (Index(10), Index(2)),
             stride=(Index(16), Index(4))
         )
-        B_static = rocir.make_layout(
+        B_static = flir.make_layout(
             (Index(5), Index(4)),
             stride=(Index(1), Index(5))
         )
         
         # Compose: R = A ◦ B
-        R_static = rocir.composition(A_static, B_static)
+        R_static = flir.composition(A_static, B_static)
         
         # Extract shape and stride
-        shape = rocir.get_shape(R_static)
-        stride = rocir.get_stride(R_static)
+        shape = flir.get_shape(R_static)
+        stride = flir.get_stride(R_static)
         
         # Get dimensions (rank 3: (5,2,2))
         vals = []
         for i in range(3):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(3):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -393,36 +393,36 @@ def test_composition_static_vs_dynamic():
         """
         # Create layouts with DYNAMIC dimensions using function arguments
         # These remain as block arguments throughout lowering
-        A_dynamic = rocir.make_layout(
+        A_dynamic = flir.make_layout(
             (a_dim0, a_dim1),
             stride=(a_stride0, a_stride1)
         )
-        B_dynamic = rocir.make_layout(
+        B_dynamic = flir.make_layout(
             (b_dim0, b_dim1),
             stride=(b_stride0, b_stride1)
         )
         
         # Compose: R = A ◦ B
-        R_dynamic = rocir.composition(A_dynamic, B_dynamic)
+        R_dynamic = flir.composition(A_dynamic, B_dynamic)
         
-        # Print runtime information using rocir.printf
-        rocir.printf("Dynamic composition: R = A ◦ B\n")
-        rocir.printf("  A: ({},{}):({}{})\n", a_dim0, a_dim1, a_stride0, a_stride1)
-        rocir.printf("  B: ({},{}):({}{})\n", b_dim0, b_dim1, b_stride0, b_stride1)
+        # Print runtime information using flir.printf
+        flir.printf("Dynamic composition: R = A ◦ B\n")
+        flir.printf("  A: ({},{}):({}{})\n", a_dim0, a_dim1, a_stride0, a_stride1)
+        flir.printf("  B: ({},{}):({}{})\n", b_dim0, b_dim1, b_stride0, b_stride1)
         
         # Extract shape and stride
-        shape = rocir.get_shape(R_dynamic)
-        stride = rocir.get_stride(R_dynamic)
+        shape = flir.get_shape(R_dynamic)
+        stride = flir.get_stride(R_dynamic)
         
         # Get dimensions (rank may vary with dynamic composition)
         # For this test, we'll return a simple dynamic layout for verification
         vals = [
-            rocir.get(shape, Index(0)),
-            rocir.get(stride, Index(0)),
+            flir.get(shape, Index(0)),
+            flir.get(stride, Index(0)),
         ]
         
-        rocir.printf("  R shape[0]: {}\n", vals[0])
-        rocir.printf("  R stride[0]: {}\n", vals[1])
+        flir.printf("  R shape[0]: {}\n", vals[0])
+        flir.printf("  R stride[0]: {}\n", vals[1])
         
         return [unwrap(v) for v in vals]
 
@@ -430,12 +430,12 @@ def test_composition_static_vs_dynamic():
     print("  Creating dynamic layout: B_dynamic from function arguments (arg4-arg7)")
     print("  Computing: R_dynamic = composition(A_dynamic, B_dynamic)")
     print("  Expected: Result values will be computed at runtime")
-    print("  Note: rocir.printf() will be lowered to gpu.printf for runtime output")
+    print("  Note: flir.printf() will be lowered to gpu.printf for runtime output")
     
     # For dynamic composition, we don't verify exact values since they're runtime-dependent
     # We just ensure the lowering succeeds and produces valid IR
-    from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-    pipeline = Pipeline().rocir_to_standard().canonicalize().cse()
+    from pyflir.compiler.pipeline import Pipeline, run_pipeline
+    pipeline = Pipeline().flir_to_standard().canonicalize().cse()
     run_pipeline(ctx_dynamic.module, pipeline)
     assert ctx_dynamic.module.operation.verify(), "Dynamic composition IR verification failed"
     print("  ✓ composition_dynamic: Lowering successful!")
@@ -461,7 +461,7 @@ def test_composition_bymode():
     print("  Expected: (3,(4,2)):(59,(13,1))")
     
     # Note: By-mode composition with tuple tiler not yet implemented
-    print("  ⚠ By-mode composition with tuple tiler not yet implemented in rocir")
+    print("  ⚠ By-mode composition with tuple tiler not yet implemented in flir")
     print("  ✓ Test skipped (pending implementation)")
 
 
@@ -484,30 +484,30 @@ def test_logical_divide_1d():
     
     @func.FuncOp.from_py_func()
     def run_logical_divide_1d():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(4), Index(2), Index(3)),
             stride=(Index(2), Index(1), Index(8))
         )
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             Index(4),
             stride=Index(2)
         )
-        res_logical = rocir.logical_divide(layout, tiler)
+        res_logical = flir.logical_divide(layout, tiler)
         
         # Extract shape and stride to check structure
-        shape = rocir.get_shape(res_logical)
-        stride = rocir.get_stride(res_logical)
+        shape = flir.get_shape(res_logical)
+        stride = flir.get_stride(res_logical)
         
-        # Get individual dimensions using rocir.get
-        shape_d0 = rocir.get(shape, Index(0))
-        shape_d1 = rocir.get(shape, Index(1))
-        shape_d2 = rocir.get(shape, Index(2))
-        shape_d3 = rocir.get(shape, Index(3))
+        # Get individual dimensions using flir.get
+        shape_d0 = flir.get(shape, Index(0))
+        shape_d1 = flir.get(shape, Index(1))
+        shape_d2 = flir.get(shape, Index(2))
+        shape_d3 = flir.get(shape, Index(3))
         
-        stride_d0 = rocir.get(stride, Index(0))
-        stride_d1 = rocir.get(stride, Index(1))
-        stride_d2 = rocir.get(stride, Index(2))
-        stride_d3 = rocir.get(stride, Index(3))
+        stride_d0 = flir.get(stride, Index(0))
+        stride_d1 = flir.get(stride, Index(1))
+        stride_d2 = flir.get(stride, Index(2))
+        stride_d3 = flir.get(stride, Index(3))
         
         # Return all values: shape dims, stride dims
         return [unwrap(shape_d0), unwrap(shape_d1), unwrap(shape_d2), unwrap(shape_d3),
@@ -535,29 +535,29 @@ def test_logical_divide_2d():
     @func.FuncOp.from_py_func()
     def run_logical_divide_2d():
         # Input: (9, (4, 8)):(59, (13, 1))
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
             stride=(Index(59), (Index(13), Index(1))),
         )
 
         # Tiler: (3, (2, 4)):(3, (1, 8))
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), (Index(2), Index(4))),
             stride=(Index(3), (Index(1), Index(8))),
         )
 
-        res_logical = rocir.logical_divide(layout, tiler)
+        res_logical = flir.logical_divide(layout, tiler)
         
         # Extract shape and stride
-        shape = rocir.get_shape(res_logical)
-        stride = rocir.get_stride(res_logical)
+        shape = flir.get_shape(res_logical)
+        stride = flir.get_stride(res_logical)
         
         # Get dimensions (rank 6 after flattening)
         vals = []
         for i in range(6):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(6):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -579,10 +579,10 @@ def test_shape_stride_type_nested_spec_printing():
 
     @func.FuncOp.from_py_func()
     def _build():
-        s = rocir.make_shape(Index(9), (Index(4), Index(8)))
-        st = rocir.make_stride(Index(59), (Index(13), Index(1)))
-        assert str(s.type) == '!rocir.shape<(9,(4,8))>'
-        assert str(st.type) == '!rocir.stride<(59,(13,1))>'
+        s = flir.make_shape(Index(9), (Index(4), Index(8)))
+        st = flir.make_stride(Index(59), (Index(13), Index(1)))
+        assert str(s.type) == '!flir.shape<(9,(4,8))>'
+        assert str(st.type) == '!flir.stride<(59,(13,1))>'
         return
 
 
@@ -601,28 +601,28 @@ def test_zipped_divide():
     
     @func.FuncOp.from_py_func()
     def run_zipped_divide():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
             stride=(Index(59), (Index(13), Index(1))),
         )
 
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), (Index(2), Index(4))),
             stride=(Index(3), (Index(1), Index(8))),
         )
 
-        res_zipped = rocir.zipped_divide(layout, tiler)
+        res_zipped = flir.zipped_divide(layout, tiler)
         
         # Extract shape and stride
-        shape = rocir.get_shape(res_zipped)
-        stride = rocir.get_stride(res_zipped)
+        shape = flir.get_shape(res_zipped)
+        stride = flir.get_stride(res_zipped)
         
         # Get dimensions (rank 6)
         vals = []
         for i in range(6):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(6):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -647,28 +647,28 @@ def test_tiled_divide():
     
     @func.FuncOp.from_py_func()
     def run_tiled_divide():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
             stride=(Index(59), (Index(13), Index(1))),
         )
 
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), (Index(2), Index(4))),
             stride=(Index(3), (Index(1), Index(8))),
         )
 
-        res_tiled = rocir.tiled_divide(layout, tiler)
+        res_tiled = flir.tiled_divide(layout, tiler)
         
         # Extract shape and stride
-        shape = rocir.get_shape(res_tiled)
-        stride = rocir.get_stride(res_tiled)
+        shape = flir.get_shape(res_tiled)
+        stride = flir.get_stride(res_tiled)
         
         # Get dimensions (rank 6)
         vals = []
         for i in range(6):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(6):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -692,18 +692,18 @@ def test_flat_divide():
     
     @func.FuncOp.from_py_func()
     def run_flat_divide():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
             stride=(Index(59), (Index(13), Index(1))),
         )
 
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), (Index(2), Index(4))),
             stride=(Index(3), (Index(1), Index(8))),
         )
 
-        res_flat = rocir.flat_divide(layout, tiler)
-        sz = rocir.size(res_flat)
+        res_flat = flir.flat_divide(layout, tiler)
+        sz = flir.size(res_flat)
         return [unwrap(sz)]
 
     # Expected size: 9 * 4 * 8 = 288 (divide preserves total size)
@@ -730,27 +730,27 @@ def test_logical_product_1d():
     
     @func.FuncOp.from_py_func()
     def run_logical_product():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(2), Index(2)),
             stride=(Index(4), Index(1))
         )
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             Index(6),
             stride=Index(1)
         )
-        res_logical = rocir.logical_product(layout, tiler)
+        res_logical = flir.logical_product(layout, tiler)
         
         # Extract shape and stride to check structure
-        shape = rocir.get_shape(res_logical)
-        stride = rocir.get_stride(res_logical)
+        shape = flir.get_shape(res_logical)
+        stride = flir.get_stride(res_logical)
         
         # Get the rank to determine how many dimensions to extract
         # Product of (2,2) with 6 gives rank 3: (2, 2, 6)
         vals = []
         for i in range(3):  # Layout (2,2) + tiler 6 = rank 3
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(3):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -777,27 +777,27 @@ def test_blocked_raked_product():
     
     @func.FuncOp.from_py_func()
     def run_blocked_raked_product():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(2), Index(5)),
             stride=(Index(5), Index(1))
         )
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), Index(4)),
             stride=(Index(1), Index(3))
         )
         
-        res_blocked = rocir.blocked_product(layout, tiler)
+        res_blocked = flir.blocked_product(layout, tiler)
         
         # Extract shape and stride
-        shape = rocir.get_shape(res_blocked)
-        stride = rocir.get_stride(res_blocked)
+        shape = flir.get_shape(res_blocked)
+        stride = flir.get_stride(res_blocked)
         
         # Get dimensions (rank 4: block + tiler)
         vals = []
         for i in range(4):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(4):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -830,27 +830,27 @@ def test_zipped_tiled_flat_product():
     
     @func.FuncOp.from_py_func()
     def run_zipped_tiled_flat_product():
-        layout = rocir.make_layout(
+        layout = flir.make_layout(
             (Index(2), Index(5)),
             stride=(Index(5), Index(1))
         )
-        tiler = rocir.make_layout(
+        tiler = flir.make_layout(
             (Index(3), Index(4)),
             stride=(Index(1), Index(3))
         )
         
-        res_flat = rocir.flat_product(layout, tiler)
+        res_flat = flir.flat_product(layout, tiler)
         
         # Extract shape and stride
-        shape = rocir.get_shape(res_flat)
-        stride = rocir.get_stride(res_flat)
+        shape = flir.get_shape(res_flat)
+        stride = flir.get_stride(res_flat)
         
         # Get dimensions (rank 4: block + tiler)
         vals = []
         for i in range(4):
-            vals.append(unwrap(rocir.get(shape, Index(i))))
+            vals.append(unwrap(flir.get(shape, Index(i))))
         for i in range(4):
-            vals.append(unwrap(rocir.get(stride, Index(i))))
+            vals.append(unwrap(flir.get(stride, Index(i))))
         
         return vals
 
@@ -880,24 +880,24 @@ def test_complement_simple():
         c1 = Index(1)
         c12 = Index(12)
         
-        tiler_shape = rocir.make_shape(c3)
-        tiler_stride = rocir.make_stride(c1)
-        tiler_layout = rocir.make_layout(tiler_shape, tiler_stride)
+        tiler_shape = flir.make_shape(c3)
+        tiler_stride = flir.make_stride(c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
         
         # Compute complement
-        comp_layout = rocir.complement(tiler_layout, c12)
+        comp_layout = flir.complement(tiler_layout, c12)
         
         # Get values to verify: expected Layout(4:3)
         # 1. Shape should be 4
-        comp_shape = rocir.get_shape(comp_layout)
-        val_shape = rocir.get(comp_shape, Index(0))
+        comp_shape = flir.get_shape(comp_layout)
+        val_shape = flir.get(comp_shape, Index(0))
         
         # 2. Stride should be 3
-        comp_stride = rocir.get_stride(comp_layout)
-        val_stride = rocir.get(comp_stride, Index(0))
+        comp_stride = flir.get_stride(comp_layout)
+        val_stride = flir.get(comp_stride, Index(0))
 
         # 3. Size should be 4
-        comp_size = rocir.size(comp_layout)
+        comp_size = flir.size(comp_layout)
         
         vals = []
         vals.append(unwrap(val_shape))
@@ -932,21 +932,21 @@ def test_complement_with_divide():
         c12 = Index(12)
         c1 = Index(1)
         
-        input_shape = rocir.make_shape(c12)
-        input_stride = rocir.make_stride(c1)
-        input_layout = rocir.make_layout(input_shape, input_stride)
+        input_shape = flir.make_shape(c12)
+        input_stride = flir.make_stride(c1)
+        input_layout = flir.make_layout(input_shape, input_stride)
         
         # Create tiler layout: 3:1
         c3 = Index(3)
-        tiler_shape = rocir.make_shape(c3)
-        tiler_stride = rocir.make_stride(c1)
-        tiler_layout = rocir.make_layout(tiler_shape, tiler_stride)
+        tiler_shape = flir.make_shape(c3)
+        tiler_stride = flir.make_stride(c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
         
         # Compute logical_divide (uses complement internally)
-        divided_layout = rocir.logical_divide(input_layout, tiler_layout)
+        divided_layout = flir.logical_divide(input_layout, tiler_layout)
         
         # Get size to verify
-        div_size = rocir.size(divided_layout)
+        div_size = flir.size(divided_layout)
         
         return
     
@@ -973,20 +973,20 @@ def test_composition_with_tuple():
         c1 = Index(1)
         
         # Layout A: 4:1
-        shapeA = rocir.make_shape(c4)
-        strideA = rocir.make_stride(c1)
-        layoutA = rocir.make_layout(shapeA, strideA)
+        shapeA = flir.make_shape(c4)
+        strideA = flir.make_stride(c1)
+        layoutA = flir.make_layout(shapeA, strideA)
         
         # Layout B: 2:1
-        shapeB = rocir.make_shape(c2)
-        strideB = rocir.make_stride(c1)
-        layoutB = rocir.make_layout(shapeB, strideB)
+        shapeB = flir.make_shape(c2)
+        strideB = flir.make_stride(c1)
+        layoutB = flir.make_layout(shapeB, strideB)
         
         # Compose: A ∘ B
-        composed = rocir.composition(layoutA, layoutB)
+        composed = flir.composition(layoutA, layoutB)
         
         # Get size
-        comp_size = rocir.size(composed)
+        comp_size = flir.size(composed)
         
         return
     
@@ -999,7 +999,7 @@ def test_composition_with_tuple():
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("Complete Rocir Layout Algebra Tests")
+    print("Complete Flir Layout Algebra Tests")
     print("Following Layout Algebra Notebook")
     print("="*80)
     

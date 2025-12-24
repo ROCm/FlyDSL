@@ -1,7 +1,7 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
-from rocdsl.compiler.pipeline import Pipeline, run_pipeline
-from rocdsl.runtime.device import get_rocm_arch
+from pyflir.compiler.pipeline import Pipeline, run_pipeline
+from pyflir.runtime.device import get_rocm_arch
 from _mlir import ir
 import os
 import torch
@@ -14,8 +14,8 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
     Compile MLIR module to HSACO binary for AMD GPUs.
     
     Pipeline:
-    1. Apply rocir coordinate lowering (rocir ops -> arithmetic)
-    2. Lower remaining Rocir ops to standard dialects (rocir-to-standard)
+    1. Apply flir coordinate lowering (flir ops -> arithmetic)
+    2. Lower remaining Flir ops to standard dialects (flir-to-standard)
     2. Canonicalize and CSE
     3. Attach ROCDL target for current GPU architecture
     4. Convert GPU dialect to ROCDL
@@ -23,9 +23,9 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
     6. Generate binary
     
     Environment Variables:
-    - ROCDSL_DUMP_IR=1: Enable IR dumping at each compilation stage
-    - ROCDSL_DUMP_DIR=/path/to/dir: Directory to save IR files (default: /tmp/rocdsl_dump)
-    - ROCDSL_ENABLE_IR_PRINTING=1: Print IR to console during compilation
+    - FLIR_DUMP_IR=1: Enable IR dumping at each compilation stage
+    - FLIR_DUMP_DIR=/path/to/dir: Directory to save IR files (default: /tmp/flir_dump)
+    - FLIR_ENABLE_IR_PRINTING=1: Print IR to console during compilation
     
     Args:
         mlir_module: MLIR module containing GPU kernels
@@ -49,10 +49,10 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
 def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """Implementation of compile_to_hsaco; assumes an MLIR context is already active."""
     # Check environment variables for IR dumping
-    dump_ir = os.environ.get('ROCDSL_DUMP_IR', '0') == '1'
-    dump_dir = os.environ.get('ROCDSL_DUMP_DIR', '/tmp/rocdsl_dump')
-    enable_ir_printing = os.environ.get('ROCDSL_ENABLE_IR_PRINTING', '0') == '1'
-    time_stages = os.environ.get("ROCDSL_TIME_COMPILE", "0") == "1"
+    dump_ir = os.environ.get('FLIR_DUMP_IR', '0') == '1'
+    dump_dir = os.environ.get('FLIR_DUMP_DIR', '/tmp/flir_dump')
+    enable_ir_printing = os.environ.get('FLIR_ENABLE_IR_PRINTING', '0') == '1'
+    time_stages = os.environ.get("FLIR_TIME_COMPILE", "0") == "1"
     t0_all = time.perf_counter()
     stage_times_ms = {}
 
@@ -124,13 +124,13 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
             # Best-effort only.
             return
     
-    # Dump initial IR (with rocir ops)
+    # Dump initial IR (with flir ops)
     dump_stage(mlir_module, "01_initial")
     
-    # Lower Rocir ops (includes coordinate lowering) before any GPU/LLVM conversion.
-    lowered_module = _timeit("02_rocir_to_standard",
-                             lambda: run_pipeline(mlir_module, Pipeline().rocir_to_standard()))
-    dump_stage(lowered_module, "02_rocir_to_standard")
+    # Lower Flir ops (includes coordinate lowering) before any GPU/LLVM conversion.
+    lowered_module = _timeit("02_flir_to_standard",
+                             lambda: run_pipeline(mlir_module, Pipeline().flir_to_standard()))
+    dump_stage(lowered_module, "02_flir_to_standard")
 
     # Dead-code elimination (module-level). In our embedded environment upstream
     # MLIR does not register a generic 'dce/adce', so we provide a standalone
@@ -203,7 +203,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
                 ir.Module.parse(str(llvm_lowered), context=llvm_lowered.context),
                 Pipeline().gpu_module_to_binary(format="isa")
             )
-            from rocdsl.dialects.ext.gpu import get_compile_object_bytes
+            from pyflir.dialects.ext.gpu import get_compile_object_bytes
             asm_bytes = get_compile_object_bytes(asm_module)
             asm_filename = os.path.join(dump_dir, f"{kernel_name}_09_assembly.s")
             with open(asm_filename, 'wb') as f:
@@ -219,7 +219,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
     )
     dump_stage(lowered, "10_binary_module")
     
-    from rocdsl.dialects.ext.gpu import get_compile_object_bytes
+    from pyflir.dialects.ext.gpu import get_compile_object_bytes
     hsaco_bytes = _timeit("11_get_compile_object_bytes", lambda: get_compile_object_bytes(lowered))
     
     # Save HSACO binary if dumping
@@ -231,7 +231,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
     
     if time_stages:
         total_ms = (time.perf_counter() - t0_all) * 1e3
-        print(f"\n[ROCDSL TIME] compile_to_hsaco({kernel_name}) arch={gpu_arch}")
+        print(f"\n[FLIR TIME] compile_to_hsaco({kernel_name}) arch={gpu_arch}")
         for k, v in stage_times_ms.items():
             print(f"  - {k}: {v:.1f} ms")
         print(f"  - total: {total_ms:.1f} ms")

@@ -1,4 +1,4 @@
-// RUN: rocir-opt %s --rocir-to-standard | FileCheck %s
+// RUN: flir-opt %s --flir-to-standard | FileCheck %s
 
 // Comprehensive test covering all layout operations and lowering
 
@@ -12,12 +12,12 @@ module {
     %c8 = arith.constant 8 : index
     %c16 = arith.constant 16 : index
     
-    // CHECK: rocir.make_shape
-    %shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
+    // CHECK: flir.make_shape
+    %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     
     // CHECK: arith.muli
     // CHECK: arith.muli
-    %size = rocir.size %shape : !rocir.shape<(?,?)> -> index
+    %size = flir.size %shape : !flir.shape<(?,?)> -> index
     
     // CHECK: return
     return %size : index
@@ -29,16 +29,16 @@ module {
     %c16 = arith.constant 16 : index
     %c1 = arith.constant 1 : index
     
-    // CHECK: rocir.make_shape
-    %shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    // CHECK: rocir.make_stride
-    %stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
+    // CHECK: flir.make_shape
+    %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    // CHECK: flir.make_stride
+    %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
     
-    // CHECK: rocir.make_layout
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    // CHECK: flir.make_layout
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // CHECK: arith.muli
-    %size = rocir.size %layout : !rocir.layout<(?,?)> -> index
+    %size = flir.size %layout : !flir.layout<(?,?)> -> index
     
     return %size : index
   }
@@ -49,17 +49,17 @@ module {
     %c8 = arith.constant 8 : index
     %c1 = arith.constant 1 : index
     
-    %shape = rocir.make_shape %c4, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %stride = rocir.make_stride %c1, %c4 : (index, index) -> !rocir.stride<(?,?)>
-    %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.get_shape
-    %extracted_shape = rocir.get_shape %layout : !rocir.layout<(?,?)> -> !rocir.shape<(?,?)>
-    // CHECK: rocir.get_stride
-    %extracted_stride = rocir.get_stride %layout : !rocir.layout<(?,?)> -> !rocir.stride<(?,?)>
+    // CHECK: flir.get_shape
+    %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?)> -> !flir.shape<(?,?)>
+    // CHECK: flir.get_stride
+    %extracted_stride = flir.get_stride %layout : !flir.layout<(?,?)> -> !flir.stride<(?,?)>
     
-    %size1 = rocir.size %extracted_shape : !rocir.shape<(?,?)> -> index
-    %size2 = rocir.cosize %layout : !rocir.layout<(?,?)> -> index
+    %size1 = flir.size %extracted_shape : !flir.shape<(?,?)> -> index
+    %size2 = flir.cosize %layout : !flir.layout<(?,?)> -> index
     
     %result = arith.addi %size1, %size2 : index
     return %result : index
@@ -78,21 +78,21 @@ module {
     %c1 = arith.constant 1 : index
     
     // Base layout: 16x32 column-major
-    %base_shape = rocir.make_shape %c16, %c32 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // Tiler: 4x8
-    %tile_shape = rocir.make_shape %c4, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c4 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.logical_product
-    // CHECK: rocir.composition
+    // CHECK: flir.logical_product
+    // CHECK: flir.composition
     // CHECK: arith.muli
-    %tiled = rocir.logical_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    %tiled = flir.logical_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %tiled : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -104,19 +104,19 @@ module {
     %c4 = arith.constant 4 : index
     %c1 = arith.constant 1 : index
     
-    %base_shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c2, %c4 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c2 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c2, %c4 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c2 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.zipped_product
-    // CHECK: rocir.logical_product
-    %zipped = rocir.zipped_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.zipped_product
+    // CHECK: flir.logical_product
+    %zipped = flir.zipped_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %zipped : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %zipped : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -128,19 +128,19 @@ module {
     %c16 = arith.constant 16 : index
     %c1 = arith.constant 1 : index
     
-    %base_shape = rocir.make_shape %c32, %c64 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c32 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.tiled_product
-    // CHECK: rocir.logical_product
-    %tiled = rocir.tiled_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.tiled_product
+    // CHECK: flir.logical_product
+    %tiled = flir.tiled_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %tiled : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -152,19 +152,19 @@ module {
     %c2 = arith.constant 2 : index
     %c1 = arith.constant 1 : index
     
-    %base_shape = rocir.make_shape %c16, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c16, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c4, %c2 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c4 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c4, %c2 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.flat_product
-    // CHECK: rocir.logical_product
-    %flat = rocir.flat_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?)>
+    // CHECK: flir.flat_product
+    // CHECK: flir.logical_product
+    %flat = flir.flat_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
     
-    %size = rocir.size %flat : !rocir.layout<(?,?)> -> index
+    %size = flir.size %flat : !flir.layout<(?,?)> -> index
     return %size : index
   }
   
@@ -175,19 +175,19 @@ module {
     %c4 = arith.constant 4 : index
     %c1 = arith.constant 1 : index
     
-    %base_shape = rocir.make_shape %c32, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c32 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c32, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c8, %c4 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c8, %c4 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.raked_product
-    // CHECK: rocir.logical_product
-    %raked = rocir.raked_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.raked_product
+    // CHECK: flir.logical_product
+    %raked = flir.raked_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %raked : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %raked : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -199,19 +199,19 @@ module {
     %c4 = arith.constant 4 : index
     %c1 = arith.constant 1 : index
     
-    %base_shape = rocir.make_shape %c64, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %base_stride = rocir.make_stride %c1, %c64 : (index, index) -> !rocir.stride<(?,?)>
-    %base = rocir.make_layout %base_shape, %base_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %base_shape = flir.make_shape %c64, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %base_stride = flir.make_stride %c1, %c64 : (index, index) -> !flir.stride<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c8, %c4 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %tiler = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c8, %c4 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.blocked_product
-    // CHECK: rocir.logical_product
-    %blocked = rocir.blocked_product %base, %tiler : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.blocked_product
+    // CHECK: flir.logical_product
+    %blocked = flir.blocked_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %blocked : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %blocked : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -228,20 +228,20 @@ module {
     %c1 = arith.constant 1 : index
     
     // Global layout: 128x256
-    %global_shape = rocir.make_shape %c128, %c256 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c128 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // Tile: 16x32
-    %tile_shape = rocir.make_shape %c16, %c32 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-    %tile = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.logical_divide
-    // CHECK: rocir.composition
-    %partitioned = rocir.logical_divide %global, %tile : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.logical_divide
+    // CHECK: flir.composition
+    %partitioned = flir.logical_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %partitioned : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %partitioned : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -253,19 +253,19 @@ module {
     %c16 = arith.constant 16 : index
     %c1 = arith.constant 1 : index
     
-    %global_shape = rocir.make_shape %c64, %c128 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c64 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c64, %c128 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c64 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %tile = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.zipped_divide
-    // CHECK: rocir.logical_divide
-    %zipped = rocir.zipped_divide %global, %tile : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.zipped_divide
+    // CHECK: flir.logical_divide
+    %zipped = flir.zipped_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %zipped : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %zipped : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -277,19 +277,19 @@ module {
     %c8 = arith.constant 8 : index
     %c1 = arith.constant 1 : index
     
-    %global_shape = rocir.make_shape %c32, %c64 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c32 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c4, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c4 : (index, index) -> !rocir.stride<(?,?)>
-    %tile = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.tiled_divide
-    // CHECK: rocir.logical_divide
-    %tiled = rocir.tiled_divide %global, %tile : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?,?,?)>
+    // CHECK: flir.tiled_divide
+    // CHECK: flir.logical_divide
+    %tiled = flir.tiled_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
     
-    %size = rocir.size %tiled : !rocir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -301,19 +301,19 @@ module {
     %c8 = arith.constant 8 : index
     %c1 = arith.constant 1 : index
     
-    %global_shape = rocir.make_shape %c16, %c32 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %tile_shape = rocir.make_shape %c4, %c8 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c4 : (index, index) -> !rocir.stride<(?,?)>
-    %tile = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.flat_divide
-    // CHECK: rocir.logical_divide
-    %flat = rocir.flat_divide %global, %tile : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?)>
+    // CHECK: flir.flat_divide
+    // CHECK: flir.logical_divide
+    %flat = flir.flat_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
     
-    %size = rocir.size %flat : !rocir.layout<(?,?)> -> index
+    %size = flir.size %flat : !flir.layout<(?,?)> -> index
     return %size : index
   }
   
@@ -331,20 +331,20 @@ module {
     %c1 = arith.constant 1 : index
     
     // Global tensor: 128x256
-    %global_shape = rocir.make_shape %c128, %c256 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c128 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // Thread tile: 8x16
-    %tile_shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %tile_stride = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %tile = rocir.make_layout %tile_shape, %tile_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.local_partition
-    // CHECK: rocir.logical_divide
-    %thread_data = rocir.local_partition %global, %tile, %c0 : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>, index) -> !rocir.layout<(?,?)>
+    // CHECK: flir.local_partition
+    // CHECK: flir.logical_divide
+    %thread_data = flir.local_partition %global, %tile, %c0 : (!flir.layout<(?,?)>, !flir.layout<(?,?)>, index) -> !flir.layout<(?,?)>
     
-    %size = rocir.size %thread_data : !rocir.layout<(?,?)> -> index
+    %size = flir.size %thread_data : !flir.layout<(?,?)> -> index
     return %size : index
   }
   
@@ -358,21 +358,21 @@ module {
     %c1 = arith.constant 1 : index
     
     // Global tensor: 128x256
-    %global_shape = rocir.make_shape %c128, %c256 : (index, index) -> !rocir.shape<(?,?)>
-    %global_stride = rocir.make_stride %c1, %c128 : (index, index) -> !rocir.stride<(?,?)>
-    %global = rocir.make_layout %global_shape, %global_stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
+    %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
     // CTA tile shape: 32x64
-    %cta_shape = rocir.make_shape %c32, %c64 : (index, index) -> !rocir.shape<(?,?)>
+    %cta_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
     
     // CTA coordinates: (0, 0)
-    %cta_coord = rocir.make_shape %c0, %c0 : (index, index) -> !rocir.shape<(?,?)>
+    %cta_coord = flir.make_shape %c0, %c0 : (index, index) -> !flir.shape<(?,?)>
     
-    // CHECK: rocir.local_tile
-    // CHECK: rocir.logical_divide
-    %cta_tile = rocir.local_tile %global, %cta_shape, %cta_coord : (!rocir.layout<(?,?)>, !rocir.shape<(?,?)>, !rocir.shape<(?,?)>) -> !rocir.layout<(?,?)>
+    // CHECK: flir.local_tile
+    // CHECK: flir.logical_divide
+    %cta_tile = flir.local_tile %global, %cta_shape, %cta_coord : (!flir.layout<(?,?)>, !flir.shape<(?,?)>, !flir.shape<(?,?)>) -> !flir.layout<(?,?)>
     
-    %size = rocir.size %cta_tile : !rocir.layout<(?,?)> -> index
+    %size = flir.size %cta_tile : !flir.layout<(?,?)> -> index
     return %size : index
   }
   
@@ -388,20 +388,20 @@ module {
     %c2 = arith.constant 2 : index
     %c1 = arith.constant 1 : index
     
-    %shape_a = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-    %stride_a = rocir.make_stride %c1, %c8 : (index, index) -> !rocir.stride<(?,?)>
-    %layout_a = rocir.make_layout %shape_a, %stride_a : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %shape_a = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+    %stride_a = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
+    %layout_a = flir.make_layout %shape_a, %stride_a : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    %shape_b = rocir.make_shape %c4, %c2 : (index, index) -> !rocir.shape<(?,?)>
-    %stride_b = rocir.make_stride %c2, %c1 : (index, index) -> !rocir.stride<(?,?)>
-    %layout_b = rocir.make_layout %shape_b, %stride_b : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+    %shape_b = flir.make_shape %c4, %c2 : (index, index) -> !flir.shape<(?,?)>
+    %stride_b = flir.make_stride %c2, %c1 : (index, index) -> !flir.stride<(?,?)>
+    %layout_b = flir.make_layout %shape_b, %stride_b : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
     
-    // CHECK: rocir.composition
+    // CHECK: flir.composition
     // CHECK: arith.muli
     // CHECK: arith.addi
-    %composed = rocir.composition %layout_a, %layout_b : (!rocir.layout<(?,?)>, !rocir.layout<(?,?)>) -> !rocir.layout<(?,?)>
+    %composed = flir.composition %layout_a, %layout_b : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
     
-    %size = rocir.size %composed : !rocir.layout<(?,?)> -> index
+    %size = flir.size %composed : !flir.layout<(?,?)> -> index
     return %size : index
   }
 }

@@ -1,4 +1,4 @@
-// Comprehensive test of all working Rocir operations
+// Comprehensive test of all working Flir operations
 
 // Test 1: size - Product of shape dimensions
 func.func @test_size() -> index {
@@ -6,8 +6,8 @@ func.func @test_size() -> index {
   %c16 = arith.constant 16 : index
   %c32 = arith.constant 32 : index
   
-  %shape = rocir.make_shape %c8, %c16, %c32 : (index, index, index) -> !rocir.shape<(?,?,?)>
-  %size = rocir.size %shape : !rocir.shape<(?,?,?)> -> index
+  %shape = flir.make_shape %c8, %c16, %c32 : (index, index, index) -> !flir.shape<(?,?,?)>
+  %size = flir.size %shape : !flir.shape<(?,?,?)> -> index
   // Expected lowering: %size = 8 * 16 * 32 = 4096
   
   return %size : index
@@ -19,8 +19,8 @@ func.func @test_rank() -> index {
   %c16 = arith.constant 16 : index
   %c32 = arith.constant 32 : index
   
-  %shape = rocir.make_shape %c8, %c16, %c32 : (index, index, index) -> !rocir.shape<(?,?,?)>
-  %rank = rocir.rank %shape : !rocir.shape<(?,?,?)> -> index
+  %shape = flir.make_shape %c8, %c16, %c32 : (index, index, index) -> !flir.shape<(?,?,?)>
+  %rank = flir.rank %shape : !flir.shape<(?,?,?)> -> index
   // Expected lowering: %rank = constant 3
   
   return %rank : index
@@ -33,11 +33,11 @@ func.func @test_cosize() -> index {
   %c1 = arith.constant 1 : index
   %c16 = arith.constant 16 : index
   
-  %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
-  %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+  %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
+  %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
   
-  %cosize = rocir.cosize %layout : !rocir.layout<(?,?)> -> index
+  %cosize = flir.cosize %layout : !flir.layout<(?,?)> -> index
   // Expected lowering: max((8-1)*1, (128-1)*16) + 1 = max(7, 2032) + 1 = 2033
   
   return %cosize : index
@@ -52,12 +52,12 @@ func.func @test_crd2idx() -> index {
   %c8 = arith.constant 8 : index
   %c128 = arith.constant 128 : index
   
-  %coord = rocir.make_coord %c2, %c3 : (index, index) -> !rocir.coord<(?,?)>
-  %shape = rocir.make_shape %c8, %c128 : (index, index) -> !rocir.shape<(?,?)>
-  %stride = rocir.make_stride %c1, %c16 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+  %coord = flir.make_coord %c2, %c3 : (index, index) -> !flir.coord<(?,?)>
+  %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
+  %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
   
-  %idx = rocir.crd2idx %coord, %layout : (!rocir.coord<(?,?)>, !rocir.layout<(?,?)>) -> index
+  %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
   // Expected lowering: idx = 2*1 + 3*16 = 2 + 48 = 50
   
   return %idx : index
@@ -70,11 +70,11 @@ func.func @test_layout_size() -> index {
   %c1 = arith.constant 1 : index
   %c8_1 = arith.constant 8 : index
   
-  %shape = rocir.make_shape %c8, %c16 : (index, index) -> !rocir.shape<(?,?)>
-  %stride = rocir.make_stride %c1, %c8_1 : (index, index) -> !rocir.stride<(?,?)>
-  %layout = rocir.make_layout %shape, %stride : (!rocir.shape<(?,?)>, !rocir.stride<(?,?)>) -> !rocir.layout<(?,?)>
+  %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
+  %stride = flir.make_stride %c1, %c8_1 : (index, index) -> !flir.stride<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
   
-  %size = rocir.size %layout : !rocir.layout<(?,?)> -> index
+  %size = flir.size %layout : !flir.layout<(?,?)> -> index
   // Expected lowering: size = 8 * 16 = 128
   
   return %size : index

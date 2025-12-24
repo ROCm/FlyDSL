@@ -1,116 +1,116 @@
-"""Test basic Rocir operations: make_shape, make_stride, make_layout, size, rank, etc."""
+"""Test basic Flir operations: make_shape, make_stride, make_layout, size, rank, etc."""
 
 import pytest
-from rocdsl.dialects.ext import arith, rocir
+from pyflir.dialects.ext import arith, flir
 
 
-class _BasicOps(rocir.MlirModule):
-    @rocir.jit
-    def shape_rank2(self: rocir.T.i64):
+class _BasicOps(flir.MlirModule):
+    @flir.jit
+    def shape_rank2(self: flir.T.i64):
         c8 = 8
         c16 = 16
-        shape = rocir.make_shape(c8, c16)
-        rank = rocir.rank(shape)
+        shape = flir.make_shape(c8, c16)
+        rank = flir.rank(shape)
         return rank.value
 
-    @rocir.jit
-    def layout_creation(self: rocir.T.i64):
+    @flir.jit
+    def layout_creation(self: flir.T.i64):
         c8 = 8
         c16 = 16
         c1 = 1
-        shape = rocir.make_shape(c8, c16)
-        stride = rocir.make_stride(c1, c8)
-        layout = rocir.make_layout(shape, stride)
+        shape = flir.make_shape(c8, c16)
+        stride = flir.make_stride(c1, c8)
+        layout = flir.make_layout(shape, stride)
         return [layout]
 
-    @rocir.jit
-    def size(self: rocir.T.i64):
+    @flir.jit
+    def size(self: flir.T.i64):
         c4 = 4
         c8 = 8
-        shape = rocir.make_shape(c4, c8)
-        total_size = rocir.size(shape)
+        shape = flir.make_shape(c4, c8)
+        total_size = flir.size(shape)
         return total_size.value
 
-    @rocir.jit
-    def extract(self: rocir.T.i64):
+    @flir.jit
+    def extract(self: flir.T.i64):
         c8 = 8
         c16 = 16
         c1 = 1
-        shape = rocir.make_shape(c8, c16)
-        stride = rocir.make_stride(c1, c8)
-        layout = rocir.make_layout(shape, stride)
-        extracted_shape = rocir.get_shape(layout)
-        extracted_stride = rocir.get_stride(layout)
-        size_val = rocir.size(extracted_shape)
+        shape = flir.make_shape(c8, c16)
+        stride = flir.make_stride(c1, c8)
+        layout = flir.make_layout(shape, stride)
+        extracted_shape = flir.get_shape(layout)
+        extracted_stride = flir.get_stride(layout)
+        size_val = flir.size(extracted_shape)
         return size_val.value
 
-    @rocir.jit
-    def rank(self: rocir.T.i64):
+    @flir.jit
+    def rank(self: flir.T.i64):
         c2 = 2
         c3 = 3
         c4 = 4
-        shape = rocir.make_shape(c2, c3, c4)
-        rank_val = rocir.rank(shape)
+        shape = flir.make_shape(c2, c3, c4)
+        rank_val = flir.rank(shape)
         return rank_val.value
 
-    @rocir.jit
-    def cosize(self: rocir.T.i64):
+    @flir.jit
+    def cosize(self: flir.T.i64):
         c8 = 8
         c16 = 16
         c1 = 1
-        shape = rocir.make_shape(c8, c16)
-        stride = rocir.make_stride(c1, c8)
-        layout = rocir.make_layout(shape, stride)
-        cosize_val = rocir.cosize(layout)
+        shape = flir.make_shape(c8, c16)
+        stride = flir.make_stride(c1, c8)
+        layout = flir.make_layout(shape, stride)
+        cosize_val = flir.cosize(layout)
         return cosize_val.value
 
-    @rocir.jit
-    def compose(self: rocir.T.i64):
+    @flir.jit
+    def compose(self: flir.T.i64):
         c8 = 8
         c16 = 16
         c4 = 4
         c2 = 2
         c1 = 1
-        shape_a = rocir.make_shape(c8, c16)
-        stride_a = rocir.make_stride(c1, c8)
-        layout_a = rocir.make_layout(shape_a, stride_a)
-        shape_b = rocir.make_shape(c4, c2)
-        stride_b = rocir.make_stride(c2, c1)
-        layout_b = rocir.make_layout(shape_b, stride_b)
-        composed = rocir.composition(layout_a, layout_b)
+        shape_a = flir.make_shape(c8, c16)
+        stride_a = flir.make_stride(c1, c8)
+        layout_a = flir.make_layout(shape_a, stride_a)
+        shape_b = flir.make_shape(c4, c2)
+        stride_b = flir.make_stride(c2, c1)
+        layout_b = flir.make_layout(shape_b, stride_b)
+        composed = flir.composition(layout_a, layout_b)
         return [composed]
 
 
 def test_make_shape():
     """Test creating shapes with different ranks."""
     m = _BasicOps()
-    assert "rocir.make_shape" in str(m.module)
+    assert "flir.make_shape" in str(m.module)
 
 
 def test_make_layout():
     """Test creating layouts from shape and stride."""
     m = _BasicOps()
-    assert "rocir.make_layout" in str(m.module)
+    assert "flir.make_layout" in str(m.module)
 
 
 def test_size_operation():
     """Test size computation for shapes and layouts."""
     m = _BasicOps()
-    assert "rocir.size" in str(m.module)
+    assert "flir.size" in str(m.module)
 
 
 def test_get_shape_stride():
     """Test extracting shape and stride from layout."""
     m = _BasicOps()
     s = str(m.module)
-    assert "rocir.get_shape" in s
-    assert "rocir.get_stride" in s
+    assert "flir.get_shape" in s
+    assert "flir.get_stride" in s
 
 
 def test_rank_operation():
     """Test rank operation on shapes and layouts."""
     m = _BasicOps()
-    assert "rocir.rank" in str(m.module)
+    assert "flir.rank" in str(m.module)
 
     
     
@@ -119,7 +119,7 @@ def test_rank_operation():
 def test_cosize_operation():
     """Test cosize (stride extent) computation."""
     m = _BasicOps()
-    assert "rocir.cosize" in str(m.module)
+    assert "flir.cosize" in str(m.module)
 
     
     
@@ -128,7 +128,7 @@ def test_cosize_operation():
 def test_composition():
     """Test layout composition with Pythonic operators."""
     m = _BasicOps()
-    assert "rocir.composition" in str(m.module)
+    assert "flir.composition" in str(m.module)
 
     
     
