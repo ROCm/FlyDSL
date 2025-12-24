@@ -291,7 +291,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 coord_b = rocir.make_coord(n_blk, k0, k1, n_intra, k2_base)
                 idx_bytes = rocir.crd2idx(coord_b, layout_b)
                 idx_i32 = idx_bytes / 4
-                
+
                 return buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=4, dtype=i32_type)
 
             def load_b_tile_flat(k_val):
@@ -422,7 +422,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     curr_bytes = vec_a_parts_lens[i]
                     curr_i32 = curr_bytes // 4
                     col_0 = col_a_local + curr_store_off
-                    
+
                     def swizzle_idx(row_idx, col_idx):
                         k_blocks16 = arith.constant(tile_k // 16, index=True)
                         row_mod = row_idx % k_blocks16
@@ -487,8 +487,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 b_issue_interval = 1
                 b_issue_phase = 0
                 if b_loads_total > 0:
-                    b_issue_interval = total_slots // b_loads_total
-                    b_issue_phase = b_issue_interval // 2
+                    # Heuristic:
+                    # - For very small numbers of loads (tile_k=64 -> b_loads_total=2),
+                    #   favor issuing as early as possible to maximize lead time and
+                    #   reduce `s_waitcnt vmcnt` at the next tile boundary.
+                    # - For larger load counts, shift by half-interval to avoid
+                    #   clustering and better match CK-like cadence.
+                    b_issue_interval = max(1, total_slots // b_loads_total)
+                    if b_loads_total <= 2:
+                        b_issue_phase = 0
+                    else:
+                        b_issue_phase = b_issue_interval // 2
                 
                 current_accs_list = list(accs_in)
                 

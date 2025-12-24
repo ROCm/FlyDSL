@@ -745,7 +745,7 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
 
-    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
+    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=64)
     
     # Work around a known finalization crash
     sys.stdout.flush()
