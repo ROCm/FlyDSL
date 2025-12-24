@@ -1,10 +1,10 @@
-# FLIR (Flexible Layout Intermediate Representation) - MLIR Compiler Infrastructure for high performance ROCm kernels
+# FLIR
 
-FLIR (**F**lexible **L**ayout **I**ntermediate **R**epresentation) is an MLIR-based compiler infrastructure for high performance ROCm kernels.
-It provides a custom layout-algebra IR (Flir dialect), a lowering pipeline to GPU/ROCDL,
-and a Python API (`pyflir`) for constructing and running kernels.
+> **F**lexible **L**ayout **I**ntermediate **R**epresentation — MLIR-based compiler infrastructure for high performance ROCm kernels.
 
-## ✨ Features
+FLIR provides a custom layout-algebra IR (the `flir` dialect), a lowering pipeline to GPU/ROCDL, and a Python API (`pyflir`) for constructing and running kernels.
+
+## Overview
 
 - **Flir Dialect** (layout algebra inspired by CuTe/CUTLASS)
   - Core abstractions: `!flir.shape`, `!flir.stride`, `!flir.layout`, `!flir.coord`
@@ -16,7 +16,7 @@ and a Python API (`pyflir`) for constructing and running kernels.
 - **GPU lowering** to HSACO via MLIR GPU → ROCDL pipeline
 - **Tools**: `flir-opt` for pass testing and IR experimentation
 
-## 🗂️ Repository layout (current)
+### Repository layout
 
 ```
 FLIR/
@@ -31,7 +31,7 @@ FLIR/
 └── tests/                     # mlir + python tests/benchmarks
 ```
 
-## 🧰 Prerequisites
+## Getting started
 
 - **ROCm**: required for GPU execution tests/benchmarks (IR-only tests do not need a GPU).
 - **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
@@ -39,7 +39,7 @@ FLIR/
   - `build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
   - `pyflir/requirements.txt` exists for auxiliary deps (`numpy`, `torch`) for runtime data initialize and result check.
 
-## 🏗️ Build
+### Build
 
 ### A) Build / use an existing llvm-project (MLIR)
 
@@ -70,7 +70,7 @@ After a successful build, you will have:
     - `pyflir/` (your Python API)
     - `_mlir/` (embedded MLIR python bindings)
 
-## 📦 Using the Python bindings
+### Python install
 
 
 ```bash
@@ -84,7 +84,7 @@ python3 setup.py bdist_wheel
 ls dist/
 ```
 
-## ✅ Run tests
+### Run tests
 
 ```bash
 ./run_tests.sh
@@ -100,7 +100,7 @@ What `run_tests.sh` does (high level):
 
 For the Python test folder organization, see `tests/python/README.md`.
 
-## 🛠️ Troubleshooting
+### Troubleshooting
 
 - **`flir-opt not found`**
   - Run `./build.sh`, or build it explicitly:
