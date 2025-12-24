@@ -120,7 +120,15 @@ def range_(
         ...     # Loop with carried value
     """
     if loc is None:
-        loc = Location.unknown()
+        # Prefer a file/line location pointing at user code for better IR dumps.
+        try:
+            from rocdsl.dialects.ext.func import get_user_code_loc
+
+            loc = get_user_code_loc()
+        except Exception:
+            loc = None
+        if loc is None:
+            loc = Location.unknown()
     
     # Implement Python `range` semantics for negative constant steps.
     # - For positive steps, we emit scf.for(start, stop, step) directly.

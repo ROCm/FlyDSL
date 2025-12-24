@@ -33,7 +33,15 @@ from . import gpu as gpu_ext      # noqa: E402
 def _get_location(loc: Optional[Location] = None) -> Location:
     """Get location, using current location if none provided."""
     if loc is None:
-        loc = Location.unknown()
+        # Prefer a file/line location for better IR dump debugging.
+        try:
+            from rocdsl.dialects.ext.func import get_user_code_loc
+
+            loc = get_user_code_loc()
+        except Exception:
+            loc = None
+        if loc is None:
+            loc = Location.unknown()
     return loc
 
 
@@ -453,17 +461,35 @@ def to_index(val, loc: Optional[Location] = None, ip: Optional[InsertionPoint] =
 
 def thread_idx(axis: str = "x"):
     """Return the current thread index along the given axis."""
-    return gpu.thread_id(axis)
+    try:
+        from rocdsl.dialects.ext.func import get_user_code_loc
+
+        loc = get_user_code_loc()
+    except Exception:
+        loc = None
+    return gpu.thread_id(axis, loc=loc)
 
 
 def block_idx(axis: str = "x"):
     """Return the current block index along the given axis."""
-    return gpu.block_id(axis)
+    try:
+        from rocdsl.dialects.ext.func import get_user_code_loc
+
+        loc = get_user_code_loc()
+    except Exception:
+        loc = None
+    return gpu.block_id(axis, loc=loc)
 
 
 def block_dim(axis: str = "x"):
     """Return the block dimension along the given axis."""
-    return gpu.block_dim(axis)
+    try:
+        from rocdsl.dialects.ext.func import get_user_code_loc
+
+        loc = get_user_code_loc()
+    except Exception:
+        loc = None
+    return gpu.block_dim(axis, loc=loc)
 
 
 class ShapeType(Type):

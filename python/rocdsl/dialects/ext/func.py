@@ -128,11 +128,17 @@ def is_relative_to(self, other):
 
 def get_user_code_loc(user_base: Optional[Path] = None):
     from _mlir import extras
+    import sysconfig
 
     if Context.current is None:
         return
 
     mlir_extras_root_path = Path(extras.__path__[0])
+    # Standard library root (e.g. /usr/lib/python3.10). These frames are never "user code".
+    try:
+        stdlib_root = Path(sysconfig.get_paths().get("stdlib", ""))
+    except Exception:
+        stdlib_root = Path("")
 
     prev_frame = inspect.currentframe().f_back
     if user_base is None:
@@ -141,6 +147,7 @@ def get_user_code_loc(user_base: Optional[Path] = None):
     while prev_frame.f_back and (
         is_relative_to(Path(prev_frame.f_code.co_filename), mlir_extras_root_path)
         or is_relative_to(Path(prev_frame.f_code.co_filename), sys.prefix)
+        or (str(stdlib_root) and is_relative_to(Path(prev_frame.f_code.co_filename), stdlib_root))
         or is_relative_to(Path(prev_frame.f_code.co_filename), user_base)
     ):
         prev_frame = prev_frame.f_back

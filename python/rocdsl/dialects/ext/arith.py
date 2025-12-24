@@ -78,7 +78,16 @@ def constant(
     
     if _is_floating_point_type(mlir_type) and not isinstance(value, float):
         value = float(value)
-    
+
+    if loc is None:
+        # Prefer a file/line location pointing at user code for better IR dumps.
+        try:
+            from rocdsl.dialects.ext.func import get_user_code_loc
+
+            loc = get_user_code_loc()
+        except Exception:
+            loc = None
+
     result = _arith.ConstantOp(mlir_type, value, loc=loc, ip=ip).result
     return ArithValue(result)
 

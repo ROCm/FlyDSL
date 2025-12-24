@@ -8,6 +8,7 @@ from _mlir.dialects import func as mlir_func
 
 from rocdsl.compiler.context import ensure_rocir_python_extensions
 from rocdsl.dialects.ext import gpu
+from rocdsl.dialects.ext.func import get_user_code_loc
 from rocdsl.dialects.ext.func import prep_func_types
 from rocdsl.dialects.ext.python_control_flow import lower_range_for_loops
 
@@ -84,7 +85,14 @@ class MlirModule:
             cls, "ALLOW_UNREGISTERED_DIALECTS", False
         )
         ensure_rocir_python_extensions(cls._context)
-        cls._location = ir.Location.unknown(cls._context)
+        # Default location used when builders don't pass an explicit `loc=...`.
+        # Prefer a file/line location pointing at user code (tests/examples) so IR dumps
+        # are actionable. Fall back to `unknown` in dynamic/interactive contexts.
+        with cls._context:
+            try:
+                cls._location = get_user_code_loc() or ir.Location.unknown(cls._context)
+            except Exception:
+                cls._location = ir.Location.unknown(cls._context)
 
         with cls._context, cls._location:
             # Initialize MLIR module for this subclass.

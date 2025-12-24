@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Literal, Optional, Sequence, Union
 
 from _mlir import ir
 from _mlir.passmanager import PassManager
@@ -15,6 +15,9 @@ from rocdsl.compiler.context import ensure_rocir_python_extensions
 from rocdsl.runtime.device import get_rocm_arch
 
 from .executor import default_shared_libs
+
+if TYPE_CHECKING:
+    from .executor import ExecutionEngineExecutor as Executor
 
 
 @dataclass(frozen=True)
@@ -26,59 +29,48 @@ class CompileOptions:
     backend: Literal["execution_engine"] = "execution_engine"
 
 
-def _build_pipeline_str(*, chip: str) -> str:
-    # Keep this as an explicit string so we can pass GPU-to-LLVM options that include dashes.
-    #
-    # Notes:
-    # - We use `format=fatbin` so the ROCm runtime can launch kernels from an embedded binary blob.
-    # - We request bare pointers for host+kernel to keep the executor argument marshaling simple.
-    return (
-        "builtin.module("
-        "rocir-to-standard,"
-        "trivial-dce,"
-        "canonicalize,"
-        "cse,"
-        "gpu-kernel-outlining{data-layout-str=},"
-        "gpu.module(convert-scf-to-cf),"
-        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown use-bare-ptr-memref-call-conv=true}),"
-        "gpu.module(reconcile-unrealized-casts),"
-        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
-        "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true},"
-        "reconcile-unrealized-casts,"
-        "gpu-module-to-binary{format=fatbin opts= section= toolkit=}"
-        ")"
-    )
-
-
 def _pipeline_stages(*, chip: str) -> list[tuple[str, str]]:
-    """Pipeline stages for optional IR dumping.
+    """Single source of truth for the RocDSL compilation pipeline.
 
     Each entry is (dump_stage_name, pipeline_fragment) where pipeline_fragment is the
     content inside `builtin.module(...)` for PassManager.parse.
+
+    Keeping stages and the full pipeline derived from the same list prevents drift
+    (a common source of hard-to-debug issues when editing pass pipelines).
     """
     return [
-        ("02_rocir_to_standard", "rocir-to-standard"),
-        ("03_trivial_dce", "trivial-dce"),
-        ("04_canonicalize", "canonicalize"),
-        ("05_cse", "cse"),
-        ("06_gpu_kernel_outlining", "gpu-kernel-outlining{data-layout-str=}"),
-        ("07_gpu_convert_scf_to_cf", "gpu.module(convert-scf-to-cf)"),
+        ("01_input_cse", "cse"),
+        ("02_input_dce", "trivial-dce"),
+        ("03_rocir_to_standard", "rocir-to-standard"),
+        ("04_trivial_dce", "trivial-dce"),
+        ("05_canonicalize", "canonicalize"),
+        ("06_cse", "cse"),
+        ("07_gpu_kernel_outlining", "gpu-kernel-outlining{data-layout-str=}"),
+        ("08_gpu_convert_scf_to_cf", "gpu.module(convert-scf-to-cf)"),
         (
-            "08_gpu_convert_gpu_to_rocdl",
+            "09_gpu_convert_gpu_to_rocdl",
             "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown use-bare-ptr-memref-call-conv=true})",
         ),
-        ("09_gpu_reconcile_unrealized_casts", "gpu.module(reconcile-unrealized-casts)"),
+        ("10_gpu_reconcile_unrealized_casts", "gpu.module(reconcile-unrealized-casts)"),
         (
-            "10_rocdl_attach_target",
+            "11_rocdl_attach_target",
+            # Note: keep this as a formatted string so the chip is visible in dumps and
+            # matches the non-dump compilation pipeline.
             f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
         ),
         (
-            "11_gpu_to_llvm",
+            "12_gpu_to_llvm",
             "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
         ),
-        ("12_reconcile_unrealized_casts", "reconcile-unrealized-casts"),
-        ("13_gpu_module_to_binary", "gpu-module-to-binary{format=fatbin opts= section= toolkit=}"),
+        ("13_reconcile_unrealized_casts", "reconcile-unrealized-casts"),
+        ("14_gpu_module_to_binary", "gpu-module-to-binary{format=fatbin opts= section= toolkit=}"),
     ]
+
+
+def _build_pipeline_str(*, chip: str) -> str:
+    """Build the full PassManager pipeline string from `_pipeline_stages`."""
+    frags = [frag for _name, frag in _pipeline_stages(chip=chip)]
+    return f"builtin.module({','.join(frags)})"
 
 
 def _override_gpu_module_targets(module: ir.Module, *, chip: str) -> None:
@@ -113,6 +105,31 @@ def _dump_ir(stage: str, *, dump_dir: Path, asm: str) -> Path:
     out = dump_dir / f"{stage}.mlir"
     out.write_text(asm, encoding="utf-8")
     return out
+
+
+def _dump_isa_from_rocdl_module_asm(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool) -> Optional[Path]:
+    """Best-effort dump final ISA/assembly (.s) for the current GPU module.
+
+    This is only used for debug dumps. It intentionally does not affect the main
+    compilation pipeline.
+    """
+    try:
+        from rocdsl.dialects.ext.gpu import get_compile_object_bytes
+    except Exception:
+        return None
+
+    try:
+        # Parse a fresh clone so we don't mutate the main compilation module.
+        mod = ir.Module.parse(asm, context=ctx)
+        pm = PassManager.parse("builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})", context=ctx)
+        pm.enable_verifier(bool(verify))
+        pm.run(mod.operation)
+        isa_bytes = get_compile_object_bytes(mod)
+        out = dump_dir / "15_final_isa.s"
+        out.write_bytes(isa_bytes)
+        return out
+    except Exception:
+        return None
 
 
 def _sanitize_path_component(s: str) -> str:
@@ -189,9 +206,6 @@ def compile(
             kernel_dir = kernel_names[0] if len(kernel_names) == 1 else dump_prefix_base
             dump_dir = dump_root_dir / _sanitize_path_component(kernel_dir)
             print(f"[rocdsl.compile] ROCDSL_DUMP_IR=1 dir={dump_dir}")
-        if dump_enabled:
-            out = _dump_ir("00_input", dump_dir=dump_dir, asm=asm)
-            print(f"[rocdsl.compile] dump 00_input -> {out}")
         module = ir.Module.parse(asm, context=ctx)
 
     chip = get_rocm_arch()
@@ -201,21 +215,37 @@ def compile(
     with ctx:
         _override_gpu_module_targets(module, chip=chip)
         if dump_enabled:
+            # When dumping is enabled, run the pipeline in stages so each intermediate
+            # module state is captured to a file.
             out = _dump_ir(
-                "01_target_overridden",
+                "00_target_overridden",
                 dump_dir=dump_dir,
                 asm=module.operation.get_asm(enable_debug_info=True),
             )
             print(f"[rocdsl.compile] dump 01_target_overridden -> {out}")
-        if dump_enabled:
-            # When dumping is enabled, run the pipeline in stages so each intermediate
-            # module state is captured to a file.
+            asm_for_isa: Optional[str] = None
             for stage_name, frag in _pipeline_stages(chip=chip):
                 pm = PassManager.parse(f"builtin.module({frag})", context=ctx)
                 pm.enable_verifier(bool(verify))
                 pm.run(module.operation)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=module.operation.get_asm(enable_debug_info=True))
+                stage_asm = module.operation.get_asm(enable_debug_info=True)
+                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
                 print(f"[rocdsl.compile] dump {stage_name} -> {out}")
+
+                # Dump ISA from the *post-LLVM* module (right before fatbin emission).
+                # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
+                if stage_name == "13_reconcile_unrealized_casts":
+                    asm_for_isa = stage_asm
+
+            if asm_for_isa is not None:
+                isa_out = _dump_isa_from_rocdl_module_asm(
+                    dump_dir=dump_dir,
+                    ctx=ctx,
+                    asm=asm_for_isa,
+                    verify=verify,
+                )
+                if isa_out is not None:
+                    print(f"[rocdsl.compile] dump 15_final_isa -> {isa_out}")
         else:
             pm = PassManager.parse(pipeline, context=ctx)
             pm.enable_verifier(bool(verify))
