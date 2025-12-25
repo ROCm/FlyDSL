@@ -7,6 +7,30 @@ import sys
 import os
 import importlib
 from pathlib import Path
+from pkgutil import extend_path
+
+# Development convenience:
+# In this repo we often have *two* copies of the `pyflir` package:
+# - source tree:      `pyflir/src/pyflir`
+# - build output:     `.flir/build/python_packages/pyflir/pyflir`
+#
+# Most test runs end up importing the build-output package because
+# `.flir/build/python_packages/pyflir` is on `sys.path`. That makes edits to the
+# source tree appear to "not work".
+#
+# To make `pyflir/src/...` edits take effect immediately (without rebuilding),
+# we treat `pyflir` as a multi-path package and *prefer* the source tree for
+# submodules when it exists.
+__path__ = extend_path(__path__, __name__)  # type: ignore[name-defined]
+
+_this = Path(__file__).resolve()
+for _p in _this.parents:
+    _src_pkg = _p / "pyflir" / "src" / "pyflir"
+    if _src_pkg.is_dir():
+        _src_pkg_str = str(_src_pkg)
+        if _src_pkg_str not in __path__:  # type: ignore[operator]
+            __path__.insert(0, _src_pkg_str)  # type: ignore[operator]
+        break
 
 # IMPORTANT:
 # Do not blindly prepend build/python_packages/pyflir to sys.path.
