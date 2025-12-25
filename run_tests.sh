@@ -40,13 +40,13 @@ echo "Flir Test Suite"
 echo "========================================================================"
 echo ""
 
-# Prefer an installed package if present; otherwise fall back to PYTHONPATH.
+# Prefer an installed package if present and complete; otherwise fall back to PYTHONPATH.
 PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/pyflir"
 if [ ! -d "${PYTHON_PACKAGE_ROOT}" ] && [ -d "${BUILD_DIR}/python_packages/rocdsl" ]; then
   PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/rocdsl"
 fi
-if python3 -c "import pyflir, _mlir; import _mlir.ir" >/dev/null 2>&1; then
-  echo "Using installed Python packages (pyflir/_mlir) - no PYTHONPATH override."
+if python3 -c "import pyflir, pyflir.dialects.ext, _mlir; import _mlir.ir" >/dev/null 2>&1; then
+  echo "Using installed Python packages (pyflir.dialects/_mlir) - no PYTHONPATH override."
 else
   # Prefer in-tree Python sources for `pyflir/`, while still providing the embedded
   # `_mlir` runtime/extensions from the build tree.

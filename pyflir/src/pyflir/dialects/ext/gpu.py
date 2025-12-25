@@ -44,6 +44,40 @@ from _mlir.ir import (
     Value,
 )
 
+from ._loc import maybe_default_loc
+
+# -----------------------------------------------------------------------------
+# Debug location defaults for common GPU builtins
+# -----------------------------------------------------------------------------
+#
+# The ODS-generated helpers (imported via `from _gpu_ops_gen import *`) accept an
+# optional `loc=` but default to inheriting `Location.current`. During kernel
+# emission we often have a single outer `with Location(...)` active, which makes
+# large blocks of IR appear to come from a single source line (`loc(#loc)`).
+#
+# For debug/dump workflows, it is much more useful if these common builtins pick
+# up the user call-site location automatically.
+_ods_block_id = block_id
+_ods_thread_id = thread_id
+_ods_block_dim = block_dim
+_ods_grid_dim = grid_dim
+
+
+def block_id(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
+    return _ods_block_id(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
+
+
+def thread_id(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
+    return _ods_thread_id(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
+
+
+def block_dim(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
+    return _ods_block_dim(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
+
+
+def grid_dim(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
+    return _ods_grid_dim(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
+
 
 def _as_mlir_value(x, *, index: bool = False, loc=None, ip=None):
     """Best-effort normalize common value-like inputs to an MLIR Value.

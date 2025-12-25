@@ -1104,6 +1104,16 @@ def lower_range_for_loops(fn: Callable, *, options: Optional[LoweringOptions] = 
     new_def = transformer.visit(func_def)
     new_mod = ast.Module(body=[new_def], type_ignores=[])
     new_mod = ast.fix_missing_locations(new_mod)
+    # IMPORTANT: `inspect.getsource()` + `textwrap.dedent()` produce a snippet whose AST
+    # line numbers start at 1. When we compile that AST with the original filename,
+    # stack traces (and MLIR `#loc`) will appear "shifted" (relative to the snippet).
+    #
+    # Rebase the AST line numbers to absolute file line numbers using the original
+    # function's first line number.
+    try:
+        ast.increment_lineno(new_mod, fn.__code__.co_firstlineno - 1)
+    except Exception:
+        pass
 
     # Build globals: keep original globals and materialize closure vars as globals.
     g: Dict = dict(fn.__globals__)

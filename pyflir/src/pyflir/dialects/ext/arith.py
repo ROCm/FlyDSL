@@ -12,6 +12,8 @@ from _mlir.ir import (
 from _mlir.dialects import arith as _arith
 from _mlir.dialects._ods_common import get_op_result_or_op_results
 
+from ._loc import maybe_default_loc
+
 def _is_integer_like_type(t: Type) -> bool:
     """Check if type is integer-like (including index)."""
     return IntegerType.isinstance(t) or IndexType.isinstance(t)
@@ -85,6 +87,17 @@ def constant(
             from pyflir.dialects.ext.func import get_user_code_loc
 
             loc = get_user_code_loc()
+        except Exception:
+            loc = None
+    # If we still only have `unknown`, try inheriting the active Location context.
+    try:
+        if loc is not None and str(loc) == "loc(unknown)":
+            loc = None
+    except Exception:
+        pass
+    if loc is None:
+        try:
+            loc = Location.current
         except Exception:
             loc = None
 
@@ -334,6 +347,7 @@ def _binary_op(
     loc: Location = None,
 ) -> "ArithValue":
     """Execute binary operation based on operand types."""
+    loc = maybe_default_loc(loc)
     # Coerce operands to ArithValue with matching types
     # If one is already ArithValue, use its type for the other
     if isinstance(lhs, ArithValue) and not isinstance(rhs, ArithValue):
@@ -393,6 +407,7 @@ def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = 
     - `>>` maps to `arith.shrui` (logical / unsigned right shift)
     - We keep this separate from `_binary_op` because shifts are not implemented there.
     """
+    loc = maybe_default_loc(loc)
     # Coerce operands similar to `_binary_op` so `v << 3` works.
     if isinstance(lhs, ArithValue) and not isinstance(rhs, ArithValue):
         if isinstance(rhs, (int, float)):
@@ -437,6 +452,7 @@ def _comparison_op(
     loc: Location = None,
 ) -> "ArithValue":
     """Execute comparison operation."""
+    loc = maybe_default_loc(loc)
     # Coerce rhs to ArithValue if needed
     if not isinstance(rhs, ArithValue):
         if isinstance(rhs, (int, float)):
@@ -524,6 +540,7 @@ def _minmax_op(
     loc: Location = None,
 ) -> "ArithValue":
     """Execute min/max operation based on operand types."""
+    loc = maybe_default_loc(loc)
     # Coerce rhs to ArithValue if needed
     if not isinstance(rhs, ArithValue):
         if isinstance(rhs, (int, float)):
