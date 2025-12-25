@@ -203,7 +203,7 @@ def get_user_code_loc(user_base: Optional[Path] = None):
             src = (linecache.getline(filename, lineno) or "").strip()
             if not src:
                 continue
-            if any(tok in src for tok in ("rocir.", "arith.", "scf.", "gpu.")):
+            if any(tok in src for tok in ("rocir.", "arith.", "scf.", "gpu.", "memref.", "vector.")):
                 best = f
                 break
         except Exception:

@@ -13,7 +13,7 @@ from rocdsl.dialects.ext import gpu, rocir, arith
 from rocdsl.dialects.ext.python_control_flow import lower_range_for_loops, range_constexpr
 from rocdsl.runtime.device import get_rocm_arch
 from _mlir import ir
-from _mlir.dialects import memref, vector
+from rocdsl.dialects.ext import memref, vector
 from _mlir.ir import F32Type, IntegerType
 import _mlir.extras.types as T
 import numpy as np
@@ -205,6 +205,11 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
     run_pipeline(m.module, Pipeline().canonicalize().cse())
     exe = rocdsl.compile(m)
     print(f"Shared memory: {SMEM_SIZE * 4} bytes per block")
+
+    # Compile-only mode for IR debugging / dump inspection.
+    # Avoids running the full GPU benchmark (allocations, correctness, perf loops).
+    if os.environ.get("ROCDSL_COMPILE_ONLY", "0") == "1":
+        return True, {"compile_only": True}
 
     # Allocate device memory
     np.random.seed(123)

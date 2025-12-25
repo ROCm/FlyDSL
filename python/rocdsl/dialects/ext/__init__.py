@@ -10,8 +10,6 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from _mlir.dialects import memref as memref
-
 _SUBMODULES = {
     "arith",
     "scf",
@@ -19,6 +17,7 @@ _SUBMODULES = {
     "gpu",
     "func",
     "rocdl",
+    "memref",
     "vector",
     "math",
     "llvm",
@@ -33,4 +32,4 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-__all__ = sorted(list(_SUBMODULES) + ["memref"])
+__all__ = sorted(list(_SUBMODULES))

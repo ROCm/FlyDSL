@@ -44,6 +44,7 @@ from _mlir.ir import (
     Value,
 )
 
+from ._loc import maybe_default_loc
 
 # -----------------------------------------------------------------------------
 # Debug location defaults for common GPU builtins
@@ -62,49 +63,20 @@ _ods_block_dim = block_dim
 _ods_grid_dim = grid_dim
 
 
-def _default_loc(loc):
-    try:
-        if loc is not None and str(loc) == "loc(unknown)":
-            loc = None
-    except Exception:
-        pass
-    if loc is None:
-        try:
-            loc = get_user_code_loc()
-        except Exception:
-            loc = None
-    try:
-        if loc is not None and str(loc) == "loc(unknown)":
-            loc = None
-    except Exception:
-        pass
-    if loc is None:
-        try:
-            loc = ir.Location.current
-        except Exception:
-            loc = None
-    if loc is None:
-        try:
-            loc = ir.Location.unknown()
-        except Exception:
-            loc = None
-    return loc
-
-
 def block_id(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
-    return _ods_block_id(dimension, upper_bound=upper_bound, results=results, loc=_default_loc(loc), ip=ip)
+    return _ods_block_id(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
 
 
 def thread_id(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
-    return _ods_thread_id(dimension, upper_bound=upper_bound, results=results, loc=_default_loc(loc), ip=ip)
+    return _ods_thread_id(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
 
 
 def block_dim(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
-    return _ods_block_dim(dimension, upper_bound=upper_bound, results=results, loc=_default_loc(loc), ip=ip)
+    return _ods_block_dim(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
 
 
 def grid_dim(dimension, *, upper_bound=None, results=None, loc=None, ip=None):
-    return _ods_grid_dim(dimension, upper_bound=upper_bound, results=results, loc=_default_loc(loc), ip=ip)
+    return _ods_grid_dim(dimension, upper_bound=upper_bound, results=results, loc=maybe_default_loc(loc), ip=ip)
 
 
 def _as_mlir_value(x, *, index: bool = False, loc=None, ip=None):
