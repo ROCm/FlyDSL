@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MFMA FP8 GEMM Test using Rocir with B preshuffle (variable tiling) - Optimized Torch Version."""
+"""MFMA FP8 GEMM Test using Rocir with B preshuffle (m1024, K32 micro-step variant)."""
 
 import sys
 import os
@@ -14,7 +14,7 @@ import rocdsl.dialects.ext.rocir as rocir
 from rocdsl.dialects.ext.python_control_flow import range_constexpr
 from rocdsl.runtime.hip_util import get_hip_arch
 from rocdsl.utils import SmemAllocator
-from tests.utils import pertoken_quant, shuffle_weight
+from tests.utils import pertoken_quant, shuffle_weight, compile_to_hsaco
 from tests.test_common import verify_output, run_perftest
 import torch
 import torch.nn.functional as F
@@ -33,6 +33,7 @@ if not torch.cuda.is_available():
 try:
     import aiter
     from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
+
     HAS_AITER = True
 except ImportError:
     print("Warning: Aiter not found, skipping comparison")
@@ -70,7 +71,7 @@ def unwrap(v):
 )
 def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     print("=" * 80)
-    print(f"MFMA FP8 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]")
+    print(f"MFMA FP8 GEMM Test ({M}x{N}x{K} Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]")
     print("=" * 80)
     gpu_arch = get_hip_arch()
 
@@ -88,14 +89,10 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     total_threads = 256
     elems_a_per_tile = tile_m * tile_k
     elems_per_thread_a = elems_a_per_tile // total_threads
-    # Force min 16 bytes to avoid small vector load issues?
-    # NO: If tile is small (16x128), 16 bytes load means we load 4096 bytes (2x tile size).
-    # Threads 128-255 would write OOB to LDS (allocated for 2048).
-    # So we must use exact size.
     bytes_per_thread_a = elems_per_thread_a
     vec_width_a_i32 = bytes_per_thread_a // 4
 
-    pad_k = 0  # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
+    pad_k = 8  # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
     lds_stride = tile_k + pad_k
 
     class _MFMA(rocir.MlirModule):
@@ -139,7 +136,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             vec2_i32 = ir.VectorType.get([2], i32_type)
             vec4_i32 = ir.VectorType.get([4], i32_type)
 
-            vec_a_load_len = bytes_per_thread_a
+            vec_a_load_len = bytes_per_thread_a # fp8
 
             zero_attr = ir.DenseElementsAttr.get_splat(
                 vec4_f32, ir.FloatAttr.get(f32, 0.0)
@@ -156,7 +153,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             c16 = arith.constant(16, index=True)
             c256 = arith.constant(256, index=True)
             c1024 = arith.constant(1024, index=True)
-            
+
             c32 = arith.constant(32, index=True)
 
             c_k0 = c_k / 64
@@ -229,8 +226,8 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             idx_a_base_div4 = idx_a_base / 4
 
             m_repeat = tile_m // 16
-            # K64 micro-step: two MFMA(x32) per step
-            k_unroll = tile_k // 64
+            # K32 micro-step: one MFMA(x32) per step.
+            k_unroll = tile_k // 32
 
             lds_a_indices = []
 
@@ -279,15 +276,20 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
             acc_inits = [acc_init] * (num_acc_n * m_repeat)
 
-            # --- B Load Logic ---
+            # --- B Load Logic (K32) ---
             # CK intrawave_v3 interleaves B global loads with MFMA. Here we avoid carrying
             # the whole B tile through the loop state (which inflates VGPR/live ranges),
             # and instead load B packs per ki_step inside the MFMA loop.
-            def load_b_step(base_k, ki_step, ni):
+            def load_b_pack(base_k, ki_step, ni):
+                """
+                Load one 8B (i64) B pack for a single MFMA(x32) step.
+                We select the lower/upper half within the 16B KPack via k2_base = 0 or 8.
+                """
                 k0_base = base_k / 64
-                k0 = k0_base + ki_step
+                k0 = k0_base + (ki_step // 2)
                 k1 = lane_div_16  # 0..3
-                k2_base = c0
+                half = ki_step % 2
+                k2_base = arith.constant(half * 8, index=True)
 
                 n_intra = n_intra_list[ni]
                 n_blk = n_blk_list[ni]
@@ -295,21 +297,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 idx_bytes = rocir.crd2idx(coord_b, layout_b)
                 idx_i32 = idx_bytes / 4
 
-                b16 = buffer_ops.buffer_load(
-                    b_rsrc, idx_i32, vec_width=4, dtype=i32_type
+                # 8B load: vector<2xi32> -> vector<1xi64>
+                b8 = buffer_ops.buffer_load(
+                    b_rsrc, idx_i32, vec_width=2, dtype=i32_type
                 )
-                b_vec128 = vector.BitCastOp(vec2_i64, b16).result
-                b0_pack = unwrap(
+                b_vec64 = vector.BitCastOp(vec1_i64, b8).result
+                b_pack = unwrap(
                     vector.ExtractOp(
-                        b_vec128, static_position=[0], dynamic_position=[]
+                        b_vec64, static_position=[0], dynamic_position=[]
                     ).result
                 )
-                b1_pack = unwrap(
-                    vector.ExtractOp(
-                        b_vec128, static_position=[1], dynamic_position=[]
-                    ).result
-                )
-                return b0_pack, b1_pack
+                return b_pack
 
             # Split A loads logic
             max_bytes_per_load = 16
@@ -351,18 +349,16 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
             # Initial Loads (A). B is loaded on-the-fly inside the MFMA loop.
             vec_a_inits = load_a_split(idx_a_base_div4)
-            
+
             # Loop-carried state
             accs = acc_inits
             vec_a_parts = vec_a_inits
 
-            # Helper to emit tile body
             def emit_tile(k_iv, accs_in, vec_a_in_parts, is_last_tile=False):
                 # Store A to LDS (split) with Swizzle (Bit 3 <-> Bit 5)
                 # To place K=0..7 at 0, K=32..39 at 8
 
                 curr_store_off = 0
-                c8 = arith.constant(8, index=True)
                 c32 = arith.constant(32, index=True)
 
                 for i in range_constexpr(num_a_loads):
@@ -471,17 +467,17 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 # To reuse B
                 for ki_step in range_constexpr(k_unroll):
                     # Load B packs for this ki_step only (short live range)
-                    b0_packs = []
-                    b1_packs = []
+                    b_packs = []
                     for ni in range_constexpr(num_acc_n):
-                        b0, b1 = load_b_step(k_iv, ki_step, ni)
-                        b0_packs.append(b0)
-                        b1_packs.append(b1)
+                        b = load_b_pack(k_iv, ki_step, ni)
+                        b_packs.append(b)
 
-                    ki = ki_step * 64
-                    ki_val = arith.constant(ki, index=True)
-                    col_lds0 = col_offset_base + ki_val
-                    col_lds1 = col_offset_base + ki_val + c32
+                    # For A, we still align swizzle at 16B granularity, then select the half (0 or 8B).
+                    ki64 = (ki_step // 2) * 64
+                    ki64_val = arith.constant(ki64, index=True)
+                    half = ki_step % 2
+                    half_off = arith.constant(half * 8, index=True)
+                    col_base = col_offset_base + ki64_val
 
                     def swizzle_idx(row_idx, col_idx):
                         c16 = arith.constant(16, index=True)
@@ -497,53 +493,40 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         curr_row_a_lds = row_a_lds + mi_val
 
                         # Read A from LDS using the same (row,col)->(row,col') xor swizzle as the store.
-                        col_lds0_swizzled = swizzle_idx(curr_row_a_lds, col_lds0)
-                        coord_a0 = rocir.make_coord(
-                            unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled)
+                        # Select the lower/upper 8B inside the 16B chunk.
+                        col_base_swizzled = swizzle_idx(curr_row_a_lds, col_base)
+                        col_swizzled = col_base_swizzled + half_off
+                        coord_a = rocir.make_coord(
+                            unwrap(curr_row_a_lds), unwrap(col_swizzled)
                         )
-                        idx_a0 = rocir.crd2idx(coord_a0, layout_lds)
-                        idx_a0_idx = unwrap(idx_a0)
+                        idx_a = rocir.crd2idx(coord_a, layout_lds)
+                        idx_a_idx = unwrap(idx_a)
 
-                        loaded_a16 = vector.LoadOp(
-                            vec16_f8, lds_a, [unwrap(idx_a0_idx)]
+                        loaded_a8 = vector.LoadOp(
+                            vec8_f8, lds_a, [unwrap(idx_a_idx)]
                         ).result
-                        a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
-                        a0_pack = vector.ExtractOp(
-                            a_vec128, static_position=[0], dynamic_position=[]
-                        ).result
-                        a1_pack = vector.ExtractOp(
-                            a_vec128, static_position=[1], dynamic_position=[]
+                        a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
+                        a_pack = vector.ExtractOp(
+                            a_vec64, static_position=[0], dynamic_position=[]
                         ).result
 
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             curr_acc = current_accs_list[acc_idx]
-                            b0_pack = b0_packs[ni]
-                            b1_pack = b1_packs[ni]
+                            b_pack = b_packs[ni]
 
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
                                 [
-                                    unwrap(a0_pack),
-                                    unwrap(b0_pack),
+                                    unwrap(a_pack),
+                                    unwrap(b_pack),
                                     unwrap(curr_acc),
                                     unwrap(c0_i32),
                                     unwrap(c0_i32),
                                     unwrap(c0_i32),
                                 ],
                             ).result
-                            acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                                vec4_f32,
-                                [
-                                    unwrap(a1_pack),
-                                    unwrap(b1_pack),
-                                    unwrap(acc0),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
-                                ],
-                            ).result
-                            current_accs_list[acc_idx] = acc1
+                            current_accs_list[acc_idx] = acc0
 
                 gpu.barrier()
                 return current_accs_list, vec_a_next_parts, scales_pf
@@ -614,7 +597,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             bdx = arith.constant(256, index=True).value
             gx = arith.constant(M // tile_m, index=True).value
             gy = arith.constant(N // tile_n, index=True).value
-            
+
             rocir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel_fixed"],
                 grid_size=(gx, gy, c1),
@@ -635,13 +618,18 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     # Use a unique kernel_name so IR/asm dumps don't get overwritten by other tests.
     m = _MFMA()
     try:
-        import _rocirPassesExt
-
-        _rocirPassesExt.register_dialect(m.module.context)
+        from rocdsl.compiler.context import ensure_rocir_python_extensions
+        ensure_rocir_python_extensions(m.module.context)
         print("✓ Registered Rocir dialect")
     except Exception as e:
-        print(f"Warning: Could not register Rocir dialect: {e}")
-        
+        print(f"Warning: Could not ensure Rocir Python extensions: {e}")
+
+    # Optionally dump ASM
+    if os.environ.get("ROCDSL_DUMP_ASM") == "1":
+        print("Dumping assembly via compile_to_hsaco helper...")
+        # Since _MFMA is wrapping the module, pass m.module
+        compile_to_hsaco(m.module, kernel_name="mfma_fp8_preshuffle_m1024_32", waves_per_eu=2)
+
     exe = rocdsl.compile(m)
     print("✓ Compiled")
 
@@ -756,11 +744,10 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
 
-    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=64, tile_k=256)
-    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=256, tile_k=256)
-    # test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=128)
-    # test_mfma_fp8_rocir_preshuffle(32, 7168, 2048, tile_m=32, tile_n=128, tile_k=256)
+    test_mfma_fp8_rocir_preshuffle(1024, 9216, 4096, tile_m=64, tile_n=256, tile_k=128)
+    test_mfma_fp8_rocir_preshuffle(4096, 7168, 256, tile_m=64, tile_n=256, tile_k=128)
+    test_mfma_fp8_rocir_preshuffle(4096, 4608, 7168, tile_m=64, tile_n=256, tile_k=128)
+    test_mfma_fp8_rocir_preshuffle(16384, 8192, 1024, tile_m=64, tile_n=256, tile_k=128)
     
     # Work around a known finalization crash
     sys.stdout.flush()
