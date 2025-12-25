@@ -87,6 +87,17 @@ def constant(
             loc = get_user_code_loc()
         except Exception:
             loc = None
+    # If we still only have `unknown`, try inheriting the active Location context.
+    try:
+        if loc is not None and str(loc) == "loc(unknown)":
+            loc = None
+    except Exception:
+        pass
+    if loc is None:
+        try:
+            loc = Location.current
+        except Exception:
+            loc = None
 
     result = _arith.ConstantOp(mlir_type, value, loc=loc, ip=ip).result
     return ArithValue(result)

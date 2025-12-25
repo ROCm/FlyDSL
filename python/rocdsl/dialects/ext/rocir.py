@@ -32,6 +32,13 @@ from . import gpu as gpu_ext      # noqa: E402
 
 def _get_location(loc: Optional[Location] = None) -> Location:
     """Get location, using current location if none provided."""
+    # Some call sites pass `Location.unknown()` explicitly. Treat it as missing
+    # so we can still attach a useful debug location.
+    try:
+        if loc is not None and str(loc) == "loc(unknown)":
+            loc = None
+    except Exception:
+        pass
     if loc is None:
         # Prefer a file/line location for better IR dump debugging.
         try:
@@ -40,6 +47,21 @@ def _get_location(loc: Optional[Location] = None) -> Location:
             loc = get_user_code_loc()
         except Exception:
             loc = None
+        # `get_user_code_loc()` can legitimately fail in some dynamic/rewritten codepaths
+        # and return `loc(unknown)`. Treat that the same as missing so we still inherit
+        # a meaningful `Location.current` from the surrounding context.
+        try:
+            if loc is not None and str(loc) == "loc(unknown)":
+                loc = None
+        except Exception:
+            pass
+        # If we couldn't infer a file/line location, prefer inheriting the current
+        # location from the surrounding `with Location(...)` context.
+        if loc is None:
+            try:
+                loc = Location.current
+            except Exception:
+                loc = None
         if loc is None:
             loc = Location.unknown()
     return loc
@@ -51,7 +73,10 @@ def _unwrap_value(v):
     if isinstance(v, int):
         from _mlir.dialects import arith
         from _mlir.ir import IndexType, IntegerAttr
-        op = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), v))
+        # Prefer a non-unknown location for implicit constant materialization so IR dumps
+        # remain actionable.
+        loc = _get_location(None)
+        op = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), v), loc=loc)
         return _unwrap_value(op.result)
     try:
         internal = object.__getattribute__(v, "_value")
@@ -379,6 +404,7 @@ class TensorView:
 
 def _to_index_value(val, loc: Optional[Location] = None):
     """Convert python int or MLIR value to an index-typed MLIR value."""
+    loc = _get_location(loc)
     val = _unwrap_value(val)
     if isinstance(val, Value):
         return val

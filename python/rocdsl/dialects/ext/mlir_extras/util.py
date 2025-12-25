@@ -49,29 +49,103 @@ def is_relative_to(self, other):
 
 def get_user_code_loc(user_base: Optional[Path] = None):
     from .. import extras
+    import importlib
+    import linecache
 
     if Context.current is None:
         return
 
     mlir_extras_root_path = Path(extras.__path__[0])
 
-    prev_frame = inspect.currentframe().f_back
-    if user_base is None:
-        user_base = Path(prev_frame.f_code.co_filename)
+    def _pkg_root(pkg_name: str) -> Optional[Path]:
+        try:
+            m = importlib.import_module(pkg_name)
+            p = getattr(m, "__file__", None)
+            if not p:
+                return None
+            return Path(p).resolve().parent
+        except Exception:
+            return None
 
-    while prev_frame.f_back and (
-        is_relative_to(Path(prev_frame.f_code.co_filename), mlir_extras_root_path)
-        or is_relative_to(Path(prev_frame.f_code.co_filename), sys.prefix)
-        or is_relative_to(Path(prev_frame.f_code.co_filename), user_base)
-    ):
+    rocdsl_root = _pkg_root("rocdsl")
+    flyx_root = _pkg_root("flyx")  # optional; present when used via flyx-dsl checkout
+
+    skip_roots = [mlir_extras_root_path, Path(sys.prefix)]
+    if rocdsl_root is not None:
+        skip_roots.append(rocdsl_root)
+    if flyx_root is not None:
+        skip_roots.append(flyx_root)
+
+    prev_frame = inspect.currentframe().f_back
+    # Back-compat: user_base historically was a *file* path used to skip frames in
+    # that exact file. Keep accepting it.
+    user_base_file = Path(user_base).resolve() if user_base is not None else None
+
+    def _should_skip(filename: str) -> bool:
+        try:
+            p = Path(filename).resolve()
+        except Exception:
+            return True
+        if user_base_file is not None and p == user_base_file:
+            return True
+        return any(is_relative_to(p, r) for r in skip_roots)
+
+    # Collect candidate "user" frames and prefer a non-<module> frame when available.
+    candidates = []
+    while prev_frame:
+        if not _should_skip(prev_frame.f_code.co_filename):
+            candidates.append(prev_frame)
         prev_frame = prev_frame.f_back
-    frame_info = inspect.getframeinfo(prev_frame)
+
+    if not candidates:
+        return Location.unknown()
+
+    best = None
+
+    # Prefer a frame that appears to be a direct DSL call site in user code.
+    for f in candidates:
+        try:
+            if f.f_code.co_name == "<module>":
+                continue
+            filename = f.f_code.co_filename
+            lineno = int(getattr(f, "f_lineno", 0) or 0)
+            if not filename or lineno <= 0:
+                continue
+            src = (linecache.getline(filename, lineno) or "").strip()
+            if not src:
+                continue
+            if any(tok in src for tok in ("rocir.", "arith.", "scf.", "gpu.")):
+                best = f
+                break
+        except Exception:
+            continue
+
+    # Fallback: first non-<module> user frame.
+    if best is None:
+        for f in candidates:
+            try:
+                if f.f_code.co_name != "<module>":
+                    best = f
+                    break
+            except Exception:
+                continue
+    if best is None:
+        best = candidates[0]
+
+    frame_info = inspect.getframeinfo(best)
     if sys.version_info.minor >= 11:
-        return Location.file(
-            frame_info.filename, frame_info.lineno, frame_info.positions.col_offset
-        )
+        col = 0
+        line = frame_info.lineno
+        try:
+            pos = getattr(frame_info, "positions", None)
+            if pos is not None:
+                line = int(getattr(pos, "lineno", line) or line)
+                col = int(getattr(pos, "col_offset", 0) or 0)
+        except Exception:
+            pass
+        return Location.file(frame_info.filename, line, col)
     else:
-        return Location.file(frame_info.filename, frame_info.lineno, col=0)
+        return Location.file(frame_info.filename, getattr(best, "f_lineno", frame_info.lineno), col=0)
 
 
 @contextlib.contextmanager
