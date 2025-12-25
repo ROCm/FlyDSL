@@ -29,47 +29,49 @@ class CompileOptions:
     backend: Literal["execution_engine"] = "execution_engine"
 
 
-def _pipeline_stages(*, chip: str) -> list[tuple[str, str]]:
-    """Single source of truth for the FLIR compilation pipeline.
+def _pipeline_fragments(*, chip: str) -> list[str]:
+    """FLIR compilation pipeline fragments as a plain list of strings.
 
-    Each entry is (dump_stage_name, pipeline_fragment) where pipeline_fragment is the
-    content inside `builtin.module(...)` for PassManager.parse.
+    Each entry is the content inside `builtin.module(...)` for PassManager.parse.
 
-    Keeping stages and the full pipeline derived from the same list prevents drift
-    (a common source of hard-to-debug issues when editing pass pipelines).
+    NOTE: We intentionally avoid running CSE/DCE *before* `flir-to-standard`.
+    On some kernels this changes IR structure enough that later codegen/scheduling
+    produces different ISA with measurable perf regressions.
     """
     return [
-        ("01_input_cse", "cse"),
-        ("02_input_dce", "trivial-dce"),
-        ("03_flir_to_standard", "flir-to-standard"),
-        ("04_trivial_dce", "trivial-dce"),
-        ("05_canonicalize", "canonicalize"),
-        ("06_cse", "cse"),
-        ("07_gpu_kernel_outlining", "gpu-kernel-outlining{data-layout-str=}"),
-        ("08_gpu_convert_scf_to_cf", "gpu.module(convert-scf-to-cf)"),
-        (
-            "09_gpu_convert_gpu_to_rocdl",
-            "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown use-bare-ptr-memref-call-conv=true})",
-        ),
-        ("10_gpu_reconcile_unrealized_casts", "gpu.module(reconcile-unrealized-casts)"),
-        (
-            "11_rocdl_attach_target",
-            # Note: keep this as a formatted string so the chip is visible in dumps and
-            # matches the non-dump compilation pipeline.
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
-        ),
-        (
-            "12_gpu_to_llvm",
-            "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-        ),
-        ("13_reconcile_unrealized_casts", "reconcile-unrealized-casts"),
-        ("14_gpu_module_to_binary", "gpu-module-to-binary{format=fatbin opts= section= toolkit=}"),
+        "flir-to-standard",
+        "trivial-dce",
+        "canonicalize",
+        "cse",
+        "gpu-kernel-outlining{data-layout-str=}",
+        "gpu.module(convert-scf-to-cf)",
+        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown use-bare-ptr-memref-call-conv=true})",
+        "gpu.module(reconcile-unrealized-casts)",
+        # Keep this as a formatted string so the chip is visible in dumps and matches
+        # the non-dump compilation pipeline.
+        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+        "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+        "reconcile-unrealized-casts",
+        "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
     ]
 
 
+def _stage_label_from_fragment(fragment: str) -> str:
+    """Make a stable, filename-friendly label from a pipeline fragment."""
+    base = fragment.strip()
+    # Prefer the "inner" pass name for gpu.module(...) wrappers.
+    if base.startswith("gpu.module(") and base.endswith(")"):
+        base = base[len("gpu.module(") : -1].strip()
+    # Strip pass options to keep labels stable.
+    base = base.split("{", 1)[0].strip()
+    # Replace non-alphanumerics with underscores.
+    base = re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower()
+    return base or "stage"
+
+
 def _build_pipeline_str(*, chip: str) -> str:
-    """Build the full PassManager pipeline string from `_pipeline_stages`."""
-    frags = [frag for _name, frag in _pipeline_stages(chip=chip)]
+    """Build the full PassManager pipeline string from `_pipeline_fragments`."""
+    frags = _pipeline_fragments(chip=chip)
     return f"builtin.module({','.join(frags)})"
 
 
@@ -222,9 +224,14 @@ def compile(
                 dump_dir=dump_dir,
                 asm=module.operation.get_asm(enable_debug_info=True),
             )
-            print(f"[flir.compile] dump 01_target_overridden -> {out}")
+            print(f"[flir.compile] dump 00_target_overridden -> {out}")
             asm_for_isa: Optional[str] = None
-            for stage_name, frag in _pipeline_stages(chip=chip):
+            stage_frags = _pipeline_fragments(chip=chip)
+            # Keep dump filenames stable vs the historical numbering scheme:
+            # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
+            stage_num_base = 3
+            for stage_num, frag in enumerate(stage_frags, start=stage_num_base):
+                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                 pm = PassManager.parse(f"builtin.module({frag})", context=ctx)
                 pm.enable_verifier(bool(verify))
                 pm.run(module.operation)
@@ -234,7 +241,7 @@ def compile(
 
                 # Dump ISA from the *post-LLVM* module (right before fatbin emission).
                 # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
-                if stage_name == "13_reconcile_unrealized_casts":
+                if frag.strip() == "reconcile-unrealized-casts":
                     asm_for_isa = stage_asm
 
             if asm_for_isa is not None:
@@ -245,7 +252,8 @@ def compile(
                     verify=verify,
                 )
                 if isa_out is not None:
-                    print(f"[flir.compile] dump 15_final_isa -> {isa_out}")
+                    isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
+                    print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
         else:
             pm = PassManager.parse(pipeline, context=ctx)
             pm.enable_verifier(bool(verify))
