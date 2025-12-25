@@ -92,7 +92,7 @@ def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     bytes_per_thread_a = elems_per_thread_a
     vec_width_a_i32 = bytes_per_thread_a // 4
 
-    pad_k = 0  # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
+    pad_k = 8  # Padding to avoid bank conflicts (stride 136 bytes -> bank inc 2)
     lds_stride = tile_k + pad_k
 
     class _MFMA(rocir.MlirModule):
@@ -745,7 +745,7 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
 
-    test_mfma_fp8_rocir_preshuffle(1024, 7168, 2048, tile_m=128, tile_n=128, tile_k=64)
+    test_mfma_fp8_rocir_preshuffle(5120, 5120, 8192, tile_m=64, tile_n=256, tile_k=128)
     
     # Work around a known finalization crash
     sys.stdout.flush()
