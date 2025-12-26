@@ -3,6 +3,19 @@
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+# Ensure MLIR runtime libs are discoverable for GPU execution/benchmarks.
+# Many Python tests call `pyflir.compile()` which loads MLIR runner/runtime shared libs
+# from `$MLIR_PATH/lib` (or explicit override via FLIR_MLIR_LIB_DIR).
+if [ -z "${MLIR_PATH}" ]; then
+  DEFAULT_MLIR_PATH="$(cd "${SCRIPT_DIR}/.." && pwd)/llvm-project/buildmlir"
+  if [ -d "${DEFAULT_MLIR_PATH}" ]; then
+    export MLIR_PATH="${DEFAULT_MLIR_PATH}"
+  fi
+fi
+if [ -z "${FLIR_MLIR_LIB_DIR}" ] && [ -n "${MLIR_PATH}" ] && [ -d "${MLIR_PATH}/lib" ]; then
+  export FLIR_MLIR_LIB_DIR="${MLIR_PATH}/lib"
+fi
+
 # Locate the build directory (default: .rocdsl/build; fallback: build/).
 BUILD_DIR="${ROCDSL_BUILD_DIR:-${SCRIPT_DIR}/.rocdsl/build}"
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/build" ]; then

@@ -12,11 +12,36 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 @dataclass(frozen=True)
 class SharedLibs:
-    rocm_runtime: str
+    # Historically we loaded a ROCm-specific MLIR runtime wrapper library here.
+    # Some MLIR builds (including common distro builds) do not produce
+    # `libmlir_rocm_runtime.so`. In those environments the ExecutionEngine can
+    # still work as long as the runner utils library is available, and we may
+    # optionally load other runner/runtime helper libs.
+    runtime: str
     runner_utils: str
 
     def as_list(self) -> List[str]:
-        return [self.rocm_runtime, self.runner_utils]
+        return [self.runtime, self.runner_utils]
+
+
+def _find_repo_root(start: Path) -> Optional[Path]:
+    """Best-effort locate the FLIR repo root from a file path."""
+    for p in [start] + list(start.parents):
+        if (p / "CMakeLists.txt").is_file() and (p / "run_tests.sh").is_file() and (p / "pyflir").is_dir():
+            return p
+    return None
+
+
+def _resolve_shared_lib(lib_dir: Path, name: str) -> Optional[Path]:
+    """Resolve a shared library path, allowing version-suffixed filenames."""
+    direct = lib_dir / name
+    if direct.exists():
+        return direct
+    # Common pattern: libfoo.so.XX or libfoo.so.XX.YY
+    matches = sorted(lib_dir.glob(name + ".*"))
+    if matches:
+        return matches[0]
+    return None
 
 
 def _default_mlir_lib_dir() -> Optional[Path]:
@@ -45,10 +70,25 @@ def _default_mlir_lib_dir() -> Optional[Path]:
                 return cand
 
     # Repo-local default from build.sh: <repo>/../llvm-project/buildmlir/lib
-    repo_root = Path(__file__).resolve().parents[3]
-    candidate = repo_root.parent / "llvm-project" / "buildmlir" / "lib"
-    if candidate.exists():
-        return candidate
+    this_file = Path(__file__).resolve()
+    repo_root = _find_repo_root(this_file)
+    if repo_root is None:
+        # Fallback: the package root is typically <repo>/pyflir/src/pyflir/...
+        repo_root = this_file.parents[4]
+
+    candidates: List[Path] = []
+    candidates.append(repo_root.parent / "llvm-project" / "buildmlir" / "lib")
+    # Common workspace layout used by our dev containers.
+    candidates.append(Path("/workspace/llvm-project/buildmlir/lib"))
+    # Common user-local build layout.
+    try:
+        candidates.append(Path.home() / "llvm-project" / "buildmlir" / "lib")
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
 
     return None
 
@@ -62,15 +102,26 @@ def default_shared_libs(lib_dir: Optional[Path] = None) -> SharedLibs:
             "or `MLIR_PATH=/path/to/mlir/build`."
         )
 
-    rocm_rt = lib_dir / "libmlir_rocm_runtime.so"
-    runner = lib_dir / "libmlir_runner_utils.so"
-    if not rocm_rt.exists() or not runner.exists():
+    runner = _resolve_shared_lib(lib_dir, "libmlir_runner_utils.so")
+    if runner is None:
         raise FileNotFoundError(
-            f"Missing MLIR runtime libs in {lib_dir}. Expected "
-            f"`{rocm_rt.name}` and `{runner.name}`."
+            f"Missing MLIR runner utils in {lib_dir}. Expected `libmlir_runner_utils.so`."
         )
 
-    return SharedLibs(str(rocm_rt), str(runner))
+    # Prefer ROCm runtime wrappers when available (required for GPU kernel launch
+    # symbols like `mgpuLaunchKernel`). Fall back to the C runner utils library in
+    # environments that do not build the ROCm runtime wrappers.
+    runtime = _resolve_shared_lib(lib_dir, "libmlir_rocm_runtime.so")
+    if runtime is None:
+        runtime = _resolve_shared_lib(lib_dir, "libmlir_c_runner_utils.so")
+
+    if runtime is None:
+        raise FileNotFoundError(
+            f"Missing MLIR runtime libs in {lib_dir}. Expected one of "
+            f"`libmlir_rocm_runtime.so` or `libmlir_c_runner_utils.so`, plus `libmlir_runner_utils.so`."
+        )
+
+    return SharedLibs(str(runtime), str(runner))
 
 
 class ExecutionEngineExecutor:
