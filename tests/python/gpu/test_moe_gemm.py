@@ -901,7 +901,7 @@ def test_moe_stage1(
             # Perf print: use the same flop model for both
             flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
-            print(f"[aiter CK] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS (doweight_stage1={doweight_stage1})")
+            print(f"[aiter CK] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS")
         except Exception as e:
             pytest.skip(f"aiter CK moe stage1 not runnable in this environment: {e}", allow_module_level=False)
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim

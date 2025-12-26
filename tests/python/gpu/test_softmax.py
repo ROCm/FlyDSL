@@ -8,21 +8,6 @@ Implementation based on high-performance C++ kernel logic:
 - Shared Memory Block Reductions
 """
 
-import sys
-import os
-import math
-
-# Add paths (prefer embedded MLIR to avoid mixing multiple runtimes)
-repo_root = os.path.join(os.path.dirname(__file__), "../../..")
-embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "flir")
-if os.path.isdir(os.path.join(embedded_pkgs, "_mlir")):
-    sys.path.insert(0, embedded_pkgs)
-else:
-    sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../pyflir/src'))
-sys.path.insert(0, repo_root)
-
 import pyflir
 import pytest
 import torch

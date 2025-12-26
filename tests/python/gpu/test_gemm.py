@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """MFMA GEMM Test using Flir with @gpu.func decorator pattern.
-Supports FP8 (mfma_16x16x32) and FP16 (mfma_16x16x16)."""
+Supports FP8 (mfma_16x16x32) and FP16 (mfma_16x16x16).
+Output is unified to FP16 for both paths."""
 
 import sys
 import os
 import logging
 import functools
-from enum import Enum
 
 # Configure logging to show INFO level messages
 logging.basicConfig(level=logging.INFO)
@@ -32,9 +32,9 @@ import _mlir.extras.types as T
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-class DType(Enum):
-    FP8 = "fp8"
-    FP16 = "fp16"
+# Use torch dtypes directly for test parametrization / configuration.
+DTYPE_FP8 = torch.float8_e4m3fnuz
+DTYPE_FP16 = torch.float16
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.float32):
     """
@@ -59,102 +59,176 @@ def unwrap(v):
     return v
 
 
-@pytest.mark.parametrize("dtype_config", [DType.FP8, DType.FP16])
+@pytest.mark.parametrize("dtype_config", [DTYPE_FP8, DTYPE_FP16])
 def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n=128, tile_k=128):
     """Test MFMA GEMM with configurable dtype (FP8 or FP16)."""
-    # FP16 is currently experimental/WIP in this file. Skip unless explicitly enabled.
-    if dtype_config == DType.FP16 and os.environ.get("FLIR_RUN_FP16", "0") != "1":
-        pytest.skip("FP16 path is experimental/WIP (set FLIR_RUN_FP16=1 to enable)")
     
     # Configure based on dtype (non-MLIR parameters)
-    if dtype_config == DType.FP8:
-        print("="*80)
+    if dtype_config == DTYPE_FP8:
         print(f"MFMA FP8 GEMM Test (mfma_16x16x32) - {M}x{N}x{K}")
-        print("="*80)
         mfma_k = 32  # FP8 MFMA processes 32 K elements
-        torch_dtype = torch.float8_e4m3fnuz
+        torch_dtype = DTYPE_FP8
         use_scales = True
         vec_load_size = 16  # Load 16 FP8 elements (16 bytes)
         dtype_name = "fp8"
     else:  # FP16
-        print("="*80)
         print(f"MFMA FP16 GEMM Test (mfma_16x16x16) - {M}x{N}x{K}")
-        print("="*80)
         mfma_k = 16  # FP16 MFMA processes 16 K elements
-        torch_dtype = torch.float16
+        torch_dtype = DTYPE_FP16
         use_scales = False
-        vec_load_size = 16  # Load 16 FP16 elements (32 bytes)
+        # FP16 global->LDS vector load width (in elements).
+        # Prefer 16B loads: 8 * f16 = 16 bytes.
+        vec_load_size = 8
         dtype_name = "fp16"
     
     gpu_arch = get_rocm_arch()
-    print(f"Detected HIP Arch: {gpu_arch}")
-    print(f"MFMA K dimension: {mfma_k}, Tile K: {tile_k}")
-    
     def _mlir_dtype():
-        return ir.Float8E4M3FNType.get() if dtype_config == DType.FP8 else ir.F16Type.get()
+        return ir.Float8E4M3FNType.get() if dtype_config == DTYPE_FP8 else ir.F16Type.get()
+
+    # We currently assume "full tiles" (no tail guards) for both FP8/FP16.
+    # This matches the FP8 path’s grid computation and keeps the kernel simple.
+    if (M % tile_m) != 0 or (N % tile_n) != 0 or (K % tile_k) != 0:
+        raise ValueError(
+            f"Expected M/N/K divisible by tile sizes (no tail support): "
+            f"M={M},N={N},K={K}, tile_m={tile_m},tile_n={tile_n},tile_k={tile_k}"
+        )
+
+    # Common tile decomposition used by both FP8 and FP16 schedules.
+    m_repeat = tile_m // 16
+    n_repeat = tile_n // 64  # 64 columns per (4-wave) super-tile along N
+
+    # Workgroup / schedule:
+    # We keep both FP8/FP16 on a fixed 256-thread block to match the FP8 kernel style.
+    block_size_x = 256
+    fp16_waves_m = fp16_waves_n = None
+    fp16_base_m = fp16_base_n = None
+    fp16_m_reps = fp16_n_reps = None
+    fp16_vecs_per_thread_a = fp16_vecs_per_thread_b = None
+
+    if dtype_config == DTYPE_FP8:
+        # Mirror assumptions inside the FP8 kernel (fixed schedule).
+        if tile_m % 16 != 0:
+            raise ValueError(f"FP8 requires tile_m multiple of 16; got tile_m={tile_m}")
+        if tile_n % (4 * 16) != 0:
+            raise ValueError(f"FP8 fixed num_waves=4 along N requires tile_n multiple of 64; got tile_n={tile_n}")
+        if tile_k % 32 != 0:
+            raise ValueError(f"FP8 MFMA requires tile_k multiple of 32; got tile_k={tile_k}")
+        if (tile_m * tile_k) % block_size_x != 0:
+            raise ValueError(
+                f"FP8 requires tile_m*tile_k divisible by {block_size_x} threads; got tile_m={tile_m}, tile_k={tile_k}"
+            )
+    else:
+        # FP16 fixed schedule: 4 waves along N => 16x64 base tile.
+        fp16_waves_m = 1
+        fp16_waves_n = 4
+        fp16_base_m = 16
+        fp16_base_n = 64
+
+        if tile_m % fp16_base_m != 0:
+            raise ValueError(f"FP16 requires tile_m multiple of {fp16_base_m}; got tile_m={tile_m}")
+        if tile_n % fp16_base_n != 0:
+            raise ValueError(
+                f"FP16 fixed num_waves=4 along N requires tile_n multiple of {fp16_base_n}; got tile_n={tile_n}"
+            )
+        if tile_k % 16 != 0:
+            raise ValueError(f"FP16 MFMA requires tile_k multiple of 16; got tile_k={tile_k}")
+        if tile_k % vec_load_size != 0:
+            raise ValueError(f"FP16 requires tile_k divisible by vec_load_size={vec_load_size}; got tile_k={tile_k}")
+
+        fp16_m_reps = m_repeat
+        fp16_n_reps = n_repeat
+
+        # Vectorized LDS loads: assign whole vectors (vec_load_size elems) to threads.
+        vecs_per_row = tile_k // vec_load_size
+        total_vecs_a = tile_m * vecs_per_row
+        total_vecs_b = tile_n * vecs_per_row
+        if (total_vecs_a % block_size_x) != 0 or (total_vecs_b % block_size_x) != 0:
+            raise ValueError(
+                f"FP16 fixed schedule requires A/B vector loads divisible by {block_size_x} threads. "
+                f"Got total_vecs_a={total_vecs_a}, total_vecs_b={total_vecs_b}"
+            )
+        fp16_vecs_per_thread_a = total_vecs_a // block_size_x
+        fp16_vecs_per_thread_b = total_vecs_b // block_size_x
     
     size_c = M * N
     size_a = M * K
     size_b = N * K  # Transposed B (NxK)
     
-    # FP8: use the same K32 intrawave + swizzled LDS(A) pipeline as
-    # `test_mfma_gemm_fp8_rocir_preshuffle.py`, but load B packs from a *normal*
-    # (N,K) row-major B (no preshuffle/shuffle_weight).
-    if dtype_config == DType.FP8:
-        # 1. Initialize Allocator (emit globals via MlirModule.init_gpu_module)
-        allocator = SmemAllocator(None, arch=gpu_arch)
-        _state = {}
+    # One module + one kernel entrypoint for both FP8/FP16.
+    #
+    # - FP8: uses the existing K32 intrawave + swizzled LDS(A) pipeline.
+    # - FP16: uses a simple LDS(A+B) pipeline + mfma_16x16x16f16, stores FP16 output.
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
 
-        # 2. Allocate LDS for A only
-        pad_k = 8
-        lds_stride = tile_k + pad_k
+    pad_k = 8
+    lds_stride = tile_k + pad_k
+    lds_size_a = tile_m * lds_stride
+    lds_size_b = tile_n * lds_stride
 
-        class _MFMA_FP8_FAST(flir.MlirModule):
-            GPU_MODULE_NAME = "mfma_mod"
-            GPU_MODULE_TARGETS = [
-                f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-            ]
+    class _MFMA(flir.MlirModule):
+        GPU_MODULE_NAME = "mfma_mod"
+        GPU_MODULE_TARGETS = [
+            f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
+        ]
 
-            def init_gpu_module(self):
-                _state["lds_a_decl"] = allocator.allocate_array(ir.Float8E4M3FNType.get(), tile_m * lds_stride)
-                allocator.finalize()
+        def init_gpu_module(self):
+            _state["lds_a_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_a)
+            if dtype_config == DTYPE_FP16:
+                _state["lds_b_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_b)
+            allocator.finalize()
 
-            @flir.kernel
-            def kernel_fp8(
-                self: flir.T.i64,
-                arg_c: lambda: T.memref(size_c, T.f16()),
-                arg_a: lambda: T.memref(size_a, ir.Float8E4M3FNType.get()),
-                arg_b: lambda: T.memref(size_b, ir.Float8E4M3FNType.get()),
-                arg_scale_a: lambda: T.memref(M, T.f32()),
-                arg_scale_b: lambda: T.memref(N, T.f32()),
-                m_in: lambda: T.index(),
-                n_in: lambda: T.index(),
-                k_in: lambda: T.index(),
-            ):
+        # Always include scale parameters for uniform signature.
+        # For FP16, we pass dummy scale arrays but don't use them.
+        @flir.kernel
+        def kernel(
+            self: flir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f16()),
+            arg_a: lambda: T.memref(size_a, _mlir_dtype()),
+            arg_b: lambda: T.memref(size_b, _mlir_dtype()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
+        ):
+            # ---- Shared setup (both FP8/FP16) ----
+            # Keep common SSA values defined once to reduce duplication between branches.
+            f32 = ir.F32Type.get()
+            vec4_f32 = ir.VectorType.get([4], f32)
+            zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
+            acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
+            c0_i32 = arith.i32(0)
+
+            tx = gpu.thread_id("x")
+            bx = gpu.block_id("x")
+            by = gpu.block_id("y")
+
+            # Global layouts (A/B/C) are shared; FP8 ignores layout_b.
+            layout_a = flir.make_layout((m_in, k_in), stride=(k_in, 1))
+            layout_b = flir.make_layout((n_in, k_in), stride=(k_in, 1))
+            layout_c = flir.make_layout((m_in, n_in), stride=(n_in, 1))
+
+            base_ptr = allocator.get_base()
+            lds_a = _state["lds_a_decl"](base_ptr).get()
+
+            # LDS layouts (A always, B only used for FP16).
+            layout_lds_a = flir.make_layout((tile_m, tile_k), stride=(lds_stride, 1))
+
+            # Lane mapping (intrawave)
+            wave_id = tx / 64
+            lane_id = tx % 64
+            lane_mod_16 = lane_id % 16
+            lane_div_16 = lane_id / 16
+
+            if dtype_config == DTYPE_FP8:
+                # --- FP8 pipeline (unchanged structure) ---
                 f8 = ir.Float8E4M3FNType.get()
-                f32 = ir.F32Type.get()
                 i32_type = ir.IntegerType.get_signless(32)
-                vec4_f32 = ir.VectorType.get([4], f32)
                 vec8_f8 = ir.VectorType.get([8], f8)
                 vec16_f8 = ir.VectorType.get([16], f8)
                 vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
                 vec4_i32 = ir.VectorType.get([4], i32_type)
-
-                # Acc init
-                zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
-                acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
-
-                # Layouts (A/C only; B packs use direct row-major indexing)
-                layout_a = flir.make_layout((m_in, k_in), stride=(k_in, 1))
-                layout_c = flir.make_layout((m_in, n_in), stride=(n_in, 1))
-                layout_lds = flir.make_layout((tile_m, tile_k), stride=(lds_stride, 1))
-
-                tx = gpu.thread_id("x")
-                bx = gpu.block_id("x")
-                by = gpu.block_id("y")
-
-                base_ptr = allocator.get_base()
-                lds_a = _state["lds_a_decl"](base_ptr).get()
 
                 a_rsrc = buffer_ops.create_buffer_resource(arg_a)
                 b_rsrc = buffer_ops.create_buffer_resource(arg_b)
@@ -181,23 +255,16 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                 idx_a_base = flir.crd2idx(coord_a_base, layout_a)
                 idx_a_base_div4 = idx_a_base / 4
 
-                # Lane mapping (intrawave)
-                wave_id = tx / 64
-                lane_id = tx % 64
-                lane_mod_16 = lane_id % 16
-                lane_div_16 = lane_id / 16
-
                 row_a_lds = lane_mod_16
                 col_offset_base = lane_div_16 * 16
 
                 # Tile decomposition
-                m_repeat = tile_m // 16
                 k_unroll = tile_k // 32  # K32 micro-steps
 
                 # Dynamic tiling along N (same as preshuffle test)
                 num_waves = 4
-                n_per_wave = tile_n // num_waves
-                num_acc_n = n_per_wave // 16
+                n_per_wave = 16 * n_repeat
+                num_acc_n = n_repeat
                 by_n = by * tile_n
                 c_n_per_wave = arith.constant(n_per_wave, index=True)
                 wave_mod_4 = wave_id % 4
@@ -230,8 +297,6 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                 vec_a_parts = load_a_split(idx_a_base_div4)
                 accs = [acc_init] * (num_acc_n * m_repeat)
-
-                c0_i32 = arith.i32(0)
 
                 def swizzle_xor_16b(row_idx, col_idx):
                     # XOR swizzle on K at 16B granularity (matches preshuffle test)
@@ -267,7 +332,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                         col_0 = col_a_local + curr_store_off
                         col_sw = swizzle_xor_16b(row_a_local, col_0)
-                        idx_0 = flir.crd2idx(flir.make_coord(unwrap(row_a_local), unwrap(col_sw)), layout_lds)
+                        idx_0 = flir.crd2idx(flir.make_coord(unwrap(row_a_local), unwrap(col_sw)), layout_lds_a)
 
                         if curr_i32 == 4:
                             val_16 = vector.BitCastOp(vec16_f8, val_vec).result
@@ -332,7 +397,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                             col_sw = _arith_mlir.AddIOp(unwrap(col_base_sw), unwrap(half_off)).result
 
                             idx_a = flir.crd2idx(
-                                flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_sw)), layout_lds
+                                flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_sw)), layout_lds_a
                             )
                             loaded_a8 = vector.LoadOp(vec8_f8, lds_a, [unwrap(idx_a)]).result
                             a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
@@ -384,229 +449,152 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                             col_g = by_n + n_tile_base + c_offset + lane_mod_16
                             idx = flir.crd2idx(flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
                             buffer_ops.buffer_store(val_f16, c_rsrc, idx)
-
-            @flir.jit
-            def __call__(
-                self: flir.T.i64,
-                arg_c: lambda: T.memref(size_c, T.f16()),
-                arg_a: lambda: T.memref(size_a, ir.Float8E4M3FNType.get()),
-                arg_b: lambda: T.memref(size_b, ir.Float8E4M3FNType.get()),
-                arg_scale_a: lambda: T.memref(M, T.f32()),
-                arg_scale_b: lambda: T.memref(N, T.f32()),
-                m_in: lambda: T.index(),
-                n_in: lambda: T.index(),
-                k_in: lambda: T.index(),
-            ):
-                c1 = arith.constant(1, index=True).value
-                bdx = arith.constant(256, index=True).value
-                gx = arith.constant(M // tile_m, index=True).value
-                gy = arith.constant(N // tile_n, index=True).value
-                flir.gpu_ext.LaunchFuncOp(
-                    ["mfma_mod", "kernel_fp8"],
-                    grid_size=(gx, gy, c1),
-                    block_size=(bdx, c1, c1),
-                    kernel_operands=[arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, m_in, n_in, k_in],
-                )
-
-        m = _MFMA_FP8_FAST()
-    else:
-        # FP16: keep the original simple (LDS A+B) pipeline.
-        # NOTE: With pad_k=8, (tile_m,tile_n)=(128,128) overflows 64KB LDS for FP16
-        # because both A and B tiles are staged in LDS. Clamp to a safe default.
-        if tile_m > 64:
-            tile_m = 64
-        if tile_n > 64:
-            tile_n = 64
-
-        allocator = SmemAllocator(None, arch=gpu_arch)
-        _state = {}
-
-        pad_k = 8
-        lds_stride = tile_k + pad_k
-        lds_size_a = tile_m * lds_stride
-        lds_size_b = tile_n * lds_stride
-
-        class _MFMA(flir.MlirModule):
-            GPU_MODULE_NAME = "mfma_mod"
-            GPU_MODULE_TARGETS = [
-                f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-            ]
-
-            def init_gpu_module(self):
-                _state["lds_a_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_a)
-                _state["lds_b_decl"] = allocator.allocate_array(_mlir_dtype(), lds_size_b)
-                allocator.finalize()
-
-            # Always include scale parameters for uniform signature.
-            # For FP16, we pass dummy scale arrays but don't use them.
-            @flir.kernel
-            def kernel(
-                self: flir.T.i64,
-                arg_c: lambda: T.memref(size_c, T.f32()),
-                arg_a: lambda: T.memref(size_a, _mlir_dtype()),
-                arg_b: lambda: T.memref(size_b, _mlir_dtype()),
-                arg_scale_a: lambda: T.memref(M, T.f32()),
-                arg_scale_b: lambda: T.memref(N, T.f32()),
-                m_in: lambda: T.index(),
-                n_in: lambda: T.index(),
-                k_in: lambda: T.index(),
-            ):
-                # (Original implementation unchanged)
-                f32 = ir.F32Type.get()
+            else:
+                # --- FP16 pipeline ---
                 mlir_dtype = _mlir_dtype()
                 c0, c1 = 0, 1
-                c_m, c_n, c_k = m_in, n_in, k_in
                 c_tile_k = arith.constant(tile_k, index=True)
-                c128, c32, c16, c8, c4, c2, c64 = 128, 32, 16, 8, 4, 2, 64
-                c0_i32 = arith.i32(0)
+                c16, c4, c64 = 16, 4, 64
                 identity_map = ir.AffineMap.get_identity(1)
 
                 c_tile_m = arith.index(tile_m)
                 c_tile_n = arith.index(tile_n)
 
-                shape_a = flir.make_shape(c_m, c_k)
-                stride_a = flir.make_stride(c_k, c1)
-                layout_a = flir.make_layout(shape_a, stride_a)
-
-                shape_b = flir.make_shape(c_n, c_k)
-                stride_b = flir.make_stride(c_k, c1)
-                layout_b = flir.make_layout(shape_b, stride_b)
-
-                shape_c = flir.make_shape(c_m, c_n)
-                stride_c = flir.make_stride(c_n, c1)
-                layout_c = flir.make_layout(shape_c, stride_c)
-
                 c_lds_stride = arith.constant(lds_stride, index=True)
-                shape_lds = flir.make_shape(c_tile_m, c_tile_k)
                 stride_lds = flir.make_stride(c_lds_stride, c1)
-                layout_lds = flir.make_layout(shape_lds, stride_lds)
+                layout_lds_b = flir.make_layout(flir.make_shape(c_tile_n, c_tile_k), stride_lds)
 
-                tx = gpu.thread_id("x")
-                bx = gpu.block_id("x")
-                by = gpu.block_id("y")
-
-                base_ptr = allocator.get_base()
-                lds_a = _state["lds_a_decl"](base_ptr).get()
                 lds_b = _state["lds_b_decl"](base_ptr).get()
-
-                vec4_f32 = ir.VectorType.get([4], f32)
-                zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
-                acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
-
-                c_vec_size = arith.index(vec_load_size)
-                tx_vec = tx * c_vec_size
-                row_a_local = tx_vec // c_tile_k
-                col_a_local = tx_vec % c_tile_k
-                bx_tile = bx * c_tile_m
-                row_a_global = bx_tile + row_a_local
-
-                row_b_local = tx_vec // c_tile_k
-                col_b_local = tx_vec % c_tile_k
-                by_tile = by * c_tile_n
-                row_b_global = by_tile + row_b_local
-
-                lds_write_idx = (row_a_local * c_lds_stride) + col_a_local
 
                 vec_type = ir.VectorType.get([vec_load_size], mlir_dtype)
                 pad_val = _arith_mlir.ConstantOp(mlir_dtype, ir.FloatAttr.get(mlir_dtype, 0.0)).result
 
-                wave_id = tx // c64
-                lane_id = tx % c64
-                wave_row = wave_id // c2
-                wave_col = wave_id % c2
-                lane_mod_16 = lane_id % c16
-                lane_div_16 = lane_id // c16
-                row_a_lds_base = wave_row * c16
-                row_a_lds = row_a_lds_base + lane_mod_16
-                col_offset_base = lane_div_16 * (c4 if dtype_config == DType.FP16 else c8)
-                row_b_lds_base = wave_col * c16
-                row_b_lds = row_b_lds_base + lane_mod_16
+                wave_row = wave_id // fp16_waves_n
+                wave_col = wave_id % fp16_waves_n
+                col_offset_base = lane_div_16 * c4
 
-                def load_global(k_val):
-                    col_a_global_k = k_val + col_a_local
-                    idx_a = flir.crd2idx(flir.make_coord(row_a_global, col_a_global_k), layout_a)
-                    vec_a = vector.TransferReadOp(vec_type, arg_a, [unwrap(idx_a)], identity_map, unwrap(pad_val), [True]).result
+                vec4_f16 = ir.VectorType.get([4], mlir_dtype)
 
-                    col_b_global_k = k_val + col_b_local
-                    idx_b = flir.crd2idx(flir.make_coord(row_b_global, col_b_global_k), layout_b)
-                    vec_b = vector.TransferReadOp(vec_type, arg_b, [unwrap(idx_b)], identity_map, unwrap(pad_val), [True]).result
-                    return vec_a, vec_b
-
-                def compute_tile(acc_in):
+                def compute_16x16(acc_in, row_a_lds, row_b_lds):
                     acc_curr = acc_in
                     for ki in range_constexpr(0, tile_k, mfma_k):
                         col_lds = ki + col_offset_base
-                        idx_a_mfma = flir.crd2idx(flir.make_coord(row_a_lds, col_lds), layout_lds)
-                        idx_b_mfma = flir.crd2idx(flir.make_coord(row_b_lds, col_lds), layout_lds)
-
-                        vec4_f16 = ir.VectorType.get([4], mlir_dtype)
+                        idx_a_mfma = flir.crd2idx(flir.make_coord(row_a_lds, col_lds), layout_lds_a)
+                        idx_b_mfma = flir.crd2idx(flir.make_coord(row_b_lds, col_lds), layout_lds_b)
                         vec_a_load = vector.LoadOp(vec4_f16, lds_a, [unwrap(idx_a_mfma)]).result
                         vec_b_load = vector.LoadOp(vec4_f16, lds_b, [unwrap(idx_b_mfma)]).result
                         acc_curr = rocdl.mfma_f32_16x16x16f16(
-                            vec4_f32, [unwrap(vec_a_load), unwrap(vec_b_load), unwrap(acc_curr), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)]
+                            vec4_f32,
+                            [
+                                unwrap(vec_a_load),
+                                unwrap(vec_b_load),
+                                unwrap(acc_curr),
+                                unwrap(c0_i32),
+                                unwrap(c0_i32),
+                                unwrap(c0_i32),
+                            ],
                         ).result
                     return acc_curr
 
-                c_k_idx = arith.constant(0, index=True)
-                vec_a_init, vec_b_init = load_global(c_k_idx)
-                c_k_main = _arith_mlir.SubIOp(unwrap(c_k), unwrap(c_tile_k)).result
-                acc_iter = acc_init
-                vec_a_curr = vec_a_init
-                vec_b_curr = vec_b_init
-                for k_curr in range(c_k_idx, c_k_main, c_tile_k):
-                    vector.StoreOp(vec_a_curr, lds_a, [unwrap(lds_write_idx)])
-                    vector.StoreOp(vec_b_curr, lds_b, [unwrap(lds_write_idx)])
-                    k_next = _arith_mlir.AddIOp(unwrap(k_curr), unwrap(c_tile_k)).result
-                    vec_a_next, vec_b_next = load_global(k_next)
-                    gpu.barrier()
-                    acc_iter = compute_tile(acc_iter)
-                    gpu.barrier()
-                    vec_a_curr = vec_a_next
-                    vec_b_curr = vec_b_next
+                accs = [acc_init for _ in range(fp16_m_reps * fp16_n_reps)]
 
-                vector.StoreOp(vec_a_curr, lds_a, [unwrap(lds_write_idx)])
-                vector.StoreOp(vec_b_curr, lds_b, [unwrap(lds_write_idx)])
-                gpu.barrier()
-                final_acc = compute_tile(acc_iter)
+                # K loop: compile-time unrolled to avoid dominance issues.
+                for k_step in range_constexpr(0, K, tile_k):
+                    k_curr = arith.constant(k_step, index=True)
+                    c_vecs_per_row = arith.constant(tile_k // vec_load_size, index=True)
+                    c_vec_load_size = arith.constant(vec_load_size, index=True)
+
+                    c_vpt_a = arith.constant(fp16_vecs_per_thread_a, index=True)
+                    vec_id_a_base = tx * c_vpt_a
+                    bx_tile = bx * c_tile_m
+                    for vi in range_constexpr(fp16_vecs_per_thread_a):
+                        vec_id = vec_id_a_base + arith.constant(vi, index=True)
+                        row_l = vec_id // c_vecs_per_row
+                        col_v = vec_id % c_vecs_per_row
+                        col_l = col_v * c_vec_load_size
+                        row_g = bx_tile + row_l
+                        col_g = k_curr + col_l
+                        idx_a = flir.crd2idx(flir.make_coord(row_g, col_g), layout_a)
+                        vec_a = vector.TransferReadOp(
+                            vec_type, arg_a, [unwrap(idx_a)], identity_map, unwrap(pad_val), [True]
+                        ).result
+                        lds_idx = (row_l * c_lds_stride) + col_l
+                        vector.StoreOp(vec_a, lds_a, [unwrap(lds_idx)])
+
+                    c_vpt_b = arith.constant(fp16_vecs_per_thread_b, index=True)
+                    vec_id_b_base = tx * c_vpt_b
+                    by_tile = by * c_tile_n
+                    for vi in range_constexpr(fp16_vecs_per_thread_b):
+                        vec_id = vec_id_b_base + arith.constant(vi, index=True)
+                        row_l = vec_id // c_vecs_per_row
+                        col_v = vec_id % c_vecs_per_row
+                        col_l = col_v * c_vec_load_size
+                        row_g = by_tile + row_l
+                        col_g = k_curr + col_l
+                        idx_b = flir.crd2idx(flir.make_coord(row_g, col_g), layout_b)
+                        vec_b = vector.TransferReadOp(
+                            vec_type, arg_b, [unwrap(idx_b)], identity_map, unwrap(pad_val), [True]
+                        ).result
+                        lds_idx = (row_l * c_lds_stride) + col_l
+                        vector.StoreOp(vec_b, lds_b, [unwrap(lds_idx)])
+
+                    gpu.barrier()
+
+                    for mi in range_constexpr(fp16_m_reps):
+                        c_m_off = arith.constant(mi * fp16_base_m, index=True)
+                        row_a_lds = c_m_off + (wave_row * c16) + lane_mod_16
+                        for ni in range_constexpr(fp16_n_reps):
+                            c_n_off = arith.constant(ni * fp16_base_n, index=True)
+                            row_b_lds = c_n_off + (wave_col * c16) + lane_mod_16
+                            acc_idx = (mi * fp16_n_reps) + ni
+                            accs[acc_idx] = compute_16x16(accs[acc_idx], row_a_lds, row_b_lds)
+
+                    gpu.barrier()
 
                 lane_rem_16 = lane_id % c16
-                row_wave_base = wave_row * c16
-                col_wave_base = wave_col * c16
-                row_base_g = (bx * c_tile_m) + row_wave_base
-                col_base_g = (by * c_tile_n) + col_wave_base
+                for mi in range_constexpr(fp16_m_reps):
+                    c_m_off = arith.constant(mi * fp16_base_m, index=True)
+                    row_wave_base = c_m_off + (wave_row * c16)
+                    row_base_g = (bx * c_tile_m) + row_wave_base
+                    for ni in range_constexpr(fp16_n_reps):
+                        c_n_off = arith.constant(ni * fp16_base_n, index=True)
+                        col_wave_base = c_n_off + (wave_col * c16)
+                        col_base_g = (by * c_tile_n) + col_wave_base
+                        acc_idx = (mi * fp16_n_reps) + ni
+                        final_acc = accs[acc_idx]
+                        for i in range_constexpr(4):
+                            val = vector.ExtractOp(final_acc, [], [i]).result
+                            val_f16 = _arith_mlir.TruncFOp(T.f16(), unwrap(val)).result
+                            row_offset = (lane_div_16 * c4) + arith.index(i)
+                            row_g = row_base_g + row_offset
+                            col_g = col_base_g + lane_rem_16
+                            idx = flir.crd2idx(flir.make_coord(row_g, col_g), layout_c)
+                            memref.StoreOp(unwrap(val_f16), arg_c, [unwrap(idx)])
 
-                for i in range_constexpr(4):
-                    val = vector.ExtractOp(final_acc, [], [i]).result
-                    row_offset = (lane_div_16 * c4) + arith.index(i)
-                    row_g = row_base_g + row_offset
-                    col_g = col_base_g + lane_rem_16
-                    idx = flir.crd2idx(flir.make_coord(row_g, col_g), layout_c)
-                    memref.StoreOp(unwrap(val), arg_c, [unwrap(idx)])
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            arg_c: lambda: T.memref(size_c, T.f16()),
+            arg_a: lambda: T.memref(size_a, _mlir_dtype()),
+            arg_b: lambda: T.memref(size_b, _mlir_dtype()),
+            arg_scale_a: lambda: T.memref(M, T.f32()),
+            arg_scale_b: lambda: T.memref(N, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
+        ):
+            c1 = arith.constant(1, index=True).value
+            bdx = arith.constant(block_size_x, index=True).value
+            gx = arith.constant(M // tile_m, index=True).value
+            gy = arith.constant(N // tile_n, index=True).value
+            flir.gpu_ext.LaunchFuncOp(
+                ["mfma_mod", "kernel"],
+                grid_size=(gx, gy, c1),
+                block_size=(bdx, c1, c1),
+                kernel_operands=[arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, m_in, n_in, k_in],
+            )
 
-            @flir.jit
-            def __call__(
-                self: flir.T.i64,
-                arg_c: lambda: T.memref(size_c, T.f32()),
-                arg_a: lambda: T.memref(size_a, _mlir_dtype()),
-                arg_b: lambda: T.memref(size_b, _mlir_dtype()),
-                arg_scale_a: lambda: T.memref(M, T.f32()),
-                arg_scale_b: lambda: T.memref(N, T.f32()),
-                m_in: lambda: T.index(),
-                n_in: lambda: T.index(),
-                k_in: lambda: T.index(),
-            ):
-                c1 = arith.constant(1, index=True).value
-                bdx = arith.constant(256, index=True).value
-                gx = arith.constant((M + tile_m - 1) // tile_m, index=True).value
-                gy = arith.constant((N + tile_n - 1) // tile_n, index=True).value
-                flir.gpu_ext.LaunchFuncOp(
-                    ["mfma_mod", "kernel"],
-                    grid_size=(gx, gy, c1),
-                    block_size=(bdx, c1, c1),
-                    kernel_operands=[arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, m_in, n_in, k_in],
-                )
-
-        m = _MFMA()
+    m = _MFMA()
 
     # Register Flir dialect for downstream passes (best-effort).
     try:
@@ -631,8 +619,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
     
     if gpu_func_op:
         with m.module.context:
-            gpu_func_op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get("256,256")
-            gpu_func_op.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([256, 1, 1])
+            gpu_func_op.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{block_size_x},{block_size_x}")
+            gpu_func_op.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([block_size_x, 1, 1])
             gpu_func_op.attributes["gpu.kernel"] = ir.UnitAttr.get()
     
     print("Compiling...")
@@ -669,10 +657,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
         scale_b = torch.ones(N, device=device, dtype=torch.float32)
 
     # 5. Run Kernel
-    if dtype_config == DType.FP8:
-        c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
-    else:
-        c_out_raw = torch.zeros((M, N), dtype=torch.float32, device=device)
+    # Unified output: always FP16 for both FP8 and FP16 kernels.
+    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
     
     def launch_kernel():
         exe(c_out_raw, a_q, b_q, scale_a, scale_b, M, N, K)
@@ -681,22 +667,22 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
     torch.cuda.synchronize()
     
     # 7. Verify
-    if dtype_config == DType.FP8:
+    if dtype_config == DTYPE_FP8:
         verify_output(c_out_raw.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
     else:
-        verify_output(c_out_raw, c_ref, rtol=0.1, atol=0.1)
+        verify_output(c_out_raw.to(torch.float32), c_ref, rtol=1e-2, atol=1e-2)
     
     # Benchmark
     warmup = 5
     runs = 20
     
     # Calculate bytes moved based on dtype
-    elem_size = 1 if dtype_config == DType.FP8 else 2  # FP8: 1 byte, FP16: 2 bytes
-    if dtype_config == DType.FP8:
+    if dtype_config == DTYPE_FP8:
         # fp8 inputs, f16 output
         bytes_moved = size_a * 1 + size_b * 1 + size_c * 2
     else:
-        bytes_moved = size_a * elem_size + size_b * elem_size + size_c * 4  # C is FP32 here
+        # fp16 inputs, f16 output
+        bytes_moved = size_a * 2 + size_b * 2 + size_c * 2
     if use_scales:
         bytes_moved += (M + N) * 4  # Add scale arrays if used
     
@@ -723,10 +709,8 @@ if __name__ == "__main__":
     print("Running MFMA GEMM Tests with Multiple Dtypes")
     
     # Default: FP8 only (fast path). Enable FP16 explicitly if you’re working on it.
-    test_mfma_gemm_flir(DType.FP8, M=2560, N=5120, K=4096, tile_m=128, tile_n=128, tile_k=128)
+    test_mfma_gemm_flir(DTYPE_FP8, M=2560, N=5120, K=4096, tile_m=128, tile_n=128, tile_k=128)
     
-    # if os.environ.get("FLIR_RUN_FP16", "0") == "1":
-    #     test_mfma_gemm_flir(DType.FP16)
-    # else:
-    #     print("[Note] Skipping FP16 (experimental). Set FLIR_RUN_FP16=1 to enable.\n")
+    # FP16 fixed schedule uses 4 waves along N and a 64-col base tile.
+    test_mfma_gemm_flir(DTYPE_FP16, M=16, N=5120, K=4096, tile_m=16, tile_n=64, tile_k=256)
     

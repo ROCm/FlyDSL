@@ -8,21 +8,6 @@ Implementation of a Block-wise LayerNorm:
 
 LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 """
-
-import sys
-import os
-
-# Add paths to find flir and mlir packages (prefer embedded MLIR to avoid mixing runtimes)
-repo_root = os.path.join(os.path.dirname(__file__), "../../..")
-embedded_pkgs = os.path.join(repo_root, "build", "python_packages", "flir")
-if os.path.isdir(os.path.join(embedded_pkgs, "_mlir")):
-    sys.path.insert(0, embedded_pkgs)
-else:
-    sys.path.insert(0, os.path.join(os.environ.get('MLIR_PATH', ''), 'tools/mlir/python_packages/mlir_core'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../build/python_bindings'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../pyflir/src'))
-sys.path.insert(0, repo_root)
-
 import pyflir
 import pytest
 import torch
@@ -33,11 +18,7 @@ import numpy as np
 import time
 
 from gpu_common import EPS, bf16_to_fp32_cpu, fp32_to_bf16_rne_cpu
-from samples.layernorm_kernel import (
-    build_layernorm_module,
-    KERNEL_NAME as LAYERNORM_KERNEL_NAME,
-    BLOCK_THREADS,
-)
+from samples.layernorm_kernel import build_layernorm_module
 
 fp32_to_bf16_cpu = fp32_to_bf16_rne_cpu
 

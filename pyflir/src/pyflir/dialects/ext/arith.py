@@ -2,6 +2,7 @@
 
 from functools import partialmethod
 from typing import Optional, Union, Tuple
+import weakref
 import os
 import numpy as np
 
@@ -100,6 +101,27 @@ def constant(
             loc = Location.current
         except Exception:
             loc = None
+
+    # -------------------------------------------------------------------------
+    # Constant emission
+    # -------------------------------------------------------------------------
+    # NOTE: We intentionally do not cache/unique constants here. In some test and
+    # multi-module scenarios, reusing cached MLIR Value handles can lead to
+    # interpreter-level crashes if an underlying IR object becomes invalid.
+    try:
+        ip_eff = ip or InsertionPoint.current
+        blk = getattr(ip_eff, "block", None)
+    except Exception:
+        blk = None
+
+    if blk is not None:
+        # Insert at block begin to dominate all uses in this block.
+        try:
+            with InsertionPoint.at_block_begin(blk):
+                result = _arith.ConstantOp(mlir_type, value, loc=loc).result
+        except Exception:
+            result = _arith.ConstantOp(mlir_type, value, loc=loc, ip=ip).result
+        return ArithValue(result)
 
     result = _arith.ConstantOp(mlir_type, value, loc=loc, ip=ip).result
     return ArithValue(result)

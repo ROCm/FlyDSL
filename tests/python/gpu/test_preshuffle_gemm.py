@@ -716,7 +716,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     tflops = flops / (us / 1e6) / 1e12
     bw = bytes_moved / 1e9 / (us / 1e6)
     tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s ({tbps:.3f} TB/s)")
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
     if HAS_AITER and RUN_AITER_BENCH:
         print("-" * 40)
