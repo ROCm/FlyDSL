@@ -9,6 +9,7 @@ MFMA FP8 GEMM Test using Flir with B preshuffle.
 import os
 import sys
 import logging
+import ctypes
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,7 +18,7 @@ from pyflir.runtime.device import get_rocm_arch
 import pyflir.dialects.ext.flir as flir
 from pyflir.dialects.ext.python_control_flow import range_constexpr
 from pyflir.utils import SmemAllocator
-from tests.utils import pertoken_quant, shuffle_weight
+from tests.utils import compile_to_hsaco, pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 import torch
 import torch.nn.functional as F
@@ -32,7 +33,6 @@ import _mlir.extras.types as T
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-# Aiter imports (optional)
 try:
     import aiter
 
@@ -41,7 +41,6 @@ except ImportError:
     print("Warning: Aiter not found, skipping comparison")
     HAS_AITER = False
 
-# Aiter benchmarking can be expensive (JIT build/tuning). Keep it off by default.
 RUN_AITER_BENCH = os.environ.get("FLIR_RUN_AITER_BENCH", "0") == "1"
 
 
@@ -69,14 +68,34 @@ def unwrap(v):
     return v
 
 
+def _hip_check(result):
+    """Check HIP API call result and raise exception on error (minimal local helper)."""
+    from hip import hip  # type: ignore
+
+    if isinstance(result, tuple):
+        err = result[0]
+        ret_val = result[1] if len(result) == 2 else result[1:]
+    else:
+        err = result
+        ret_val = None
+
+    if err != hip.hipError_t.hipSuccess:
+        try:
+            error_str = hip.hipGetErrorString(err)
+        except Exception:
+            error_str = str(err)
+        raise RuntimeError(f"HIP Error: {error_str}")
+    return ret_val
+
+
 def _pad_fp8_storage(fp8_tensor: torch.Tensor, pad_elems: int = 64) -> torch.Tensor:
-    # When using forced global dwordx4 (16B) loads, some threads over-read beyond the
-    # logical region. Pad underlying storage so the over-read stays in-bounds.
     if fp8_tensor.is_contiguous():
         flat = fp8_tensor.view(-1)
     else:
         flat = fp8_tensor.contiguous().view(-1)
-    storage = torch.empty(flat.numel() + pad_elems, device=fp8_tensor.device, dtype=fp8_tensor.dtype)
+    storage = torch.empty(
+        flat.numel() + pad_elems, device=fp8_tensor.device, dtype=fp8_tensor.dtype
+    )
     storage[: flat.numel()] = flat
     return storage[: flat.numel()].view(fp8_tensor.shape)
 
@@ -93,11 +112,15 @@ def _prepare_inputs(M: int, N: int, K: int, device: torch.device):
     b_q_fp8 = _pad_fp8_storage(b_q_fp8)
 
     b_shuffled = shuffle_weight(b_q_fp8)
-    c_ref = run_torch(a_q_fp8, b_q_fp8, scale_a, scale_b, bias=None, dtype=torch.float32)
+    c_ref = run_torch(
+        a_q_fp8, b_q_fp8, scale_a, scale_b, bias=None, dtype=torch.float32
+    )
     return a_q_fp8, b_q_fp8, b_shuffled, scale_a, scale_b, c_ref
 
 
-def _maybe_run_aiter(a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us_flir):
+def _maybe_run_aiter(
+    a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us_flir
+):
     if not HAS_AITER:
         return
     if not RUN_AITER_BENCH:
@@ -118,8 +141,12 @@ def _maybe_run_aiter(a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_
     tflops_aiter = flops / (us1 / 1e6) / 1e12
     bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
     tflops_flir = flops / (us_flir / 1e6) / 1e12
-    print(f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s")
-    print(f"Speedup vs Aiter: {tflops_flir / tflops_aiter:.2f}x, us {us1:.1f} vs {us_flir:.1f}")
+    print(
+        f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
+    )
+    print(
+        f"Speedup vs Aiter: {tflops_flir / tflops_aiter:.2f}x, us {us1:.1f} vs {us_flir:.1f}"
+    )
     print("-" * 40)
 
 
@@ -141,8 +168,10 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
     size_b = N * K
 
     # Dynamic waves based on tile_n
-    num_waves = max(1, min(4, tile_n // 16))
-    assert tile_n % num_waves == 0, f"tile_n({tile_n}) must be divisible by num_waves({num_waves})"
+    num_waves = 2
+    assert (
+        tile_n % num_waves == 0
+    ), f"tile_n({tile_n}) must be divisible by num_waves({num_waves})"
     assert (tile_n // num_waves) % 16 == 0, "n_per_wave must be a multiple of 16"
     total_threads = num_waves * 64
     elems_a_per_tile = tile_m * tile_k
@@ -162,7 +191,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
         ]
 
         def init_gpu_module(self):
-            _state["lds_a_decl"] = allocator.allocate_array(_f8(), 2 * tile_m * lds_stride)
+            _state["lds_a_decl"] = allocator.allocate_array(
+                _f8(), 2 * tile_m * lds_stride
+            )
             allocator.finalize()
 
         @flir.kernel
@@ -198,9 +229,13 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
 
             # Use low-level ConstantOp for index constants (avoids std::bad_cast in some envs).
             def const_index(i: int):
-                return _arith_mlir.ConstantOp(index_type, ir.IntegerAttr.get(index_type, i)).result
+                return _arith_mlir.ConstantOp(
+                    index_type, ir.IntegerAttr.get(index_type, i)
+                ).result
 
-            zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
+            zero_attr = ir.DenseElementsAttr.get_splat(
+                vec4_f32, ir.FloatAttr.get(f32, 0.0)
+            )
             acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
 
             layout_a = flir.make_layout((c_m, c_k), stride=(c_k, 1))
@@ -216,7 +251,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             def swizzle_idx(row_idx, col_idx):
                 c16 = arith.constant(16, index=True)
                 k_blocks16 = arith.constant(tile_k // 16, index=True)
-                row_mod = _arith_mlir.RemUIOp(unwrap(row_idx), unwrap(k_blocks16)).result
+                row_mod = _arith_mlir.RemUIOp(
+                    unwrap(row_idx), unwrap(k_blocks16)
+                ).result
                 xor_mask = _arith_mlir.MulIOp(unwrap(row_mod), unwrap(c16)).result
                 return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
 
@@ -262,8 +299,12 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             linear_id = _arith_mlir.MulIOp(unwrap(tx_idx), unwrap(vec_len_val)).result
 
             c_tile_k_val = arith.constant(tile_k, index=True)
-            row_a_local = _arith_mlir.DivUIOp(unwrap(linear_id), unwrap(c_tile_k_val)).result
-            col_a_local = _arith_mlir.RemUIOp(unwrap(linear_id), unwrap(c_tile_k_val)).result
+            row_a_local = _arith_mlir.DivUIOp(
+                unwrap(linear_id), unwrap(c_tile_k_val)
+            ).result
+            col_a_local = _arith_mlir.RemUIOp(
+                unwrap(linear_id), unwrap(c_tile_k_val)
+            ).result
 
             bx_m = _arith_mlir.MulIOp(
                 unwrap(bx), unwrap(arith.constant(tile_m, index=True))
@@ -279,7 +320,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             lane_div_16 = lane_id / 16
 
             row_a_lds = lane_mod_16
-            col_offset_base = _arith_mlir.MulIOp(unwrap(lane_div_16), unwrap(c16)).result
+            col_offset_base = _arith_mlir.MulIOp(
+                unwrap(lane_div_16), unwrap(c16)
+            ).result
             row_b_lds = lane_mod_16
 
             coord_a_base = flir.make_coord(unwrap(row_a_global), unwrap(col_a_local))
@@ -295,7 +338,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             c_n_per_wave = arith.constant(n_per_wave, index=True)
             c_num_waves = arith.constant(num_waves, index=True)
             wave_mod = _arith_mlir.RemUIOp(unwrap(wave_id), unwrap(c_num_waves)).result
-            n_tile_base = _arith_mlir.MulIOp(unwrap(wave_mod), unwrap(c_n_per_wave)).result
+            n_tile_base = _arith_mlir.MulIOp(
+                unwrap(wave_mod), unwrap(c_n_per_wave)
+            ).result
 
             n_intra_list = []
             n_blk_list = []
@@ -328,18 +373,32 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                         ).result
                         coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
                         idx_bytes = flir.crd2idx(coord_b, layout_b)
-                        idx_i32 = _arith_mlir.DivUIOp(unwrap(idx_bytes), unwrap(c4)).result
-                        b16 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=4, dtype=i32_type)
+                        idx_i32 = _arith_mlir.DivUIOp(
+                            unwrap(idx_bytes), unwrap(c4)
+                        ).result
+                        b16 = buffer_ops.buffer_load(
+                            b_rsrc, idx_i32, vec_width=4, dtype=i32_type
+                        )
                         b_vec128 = vector.BitCastOp(vec2_i64, b16).result
-                        b0_pack = unwrap(vector.ExtractOp(b_vec128, static_position=[0], dynamic_position=[]).result)
-                        b1_pack = unwrap(vector.ExtractOp(b_vec128, static_position=[1], dynamic_position=[]).result)
+                        b0_pack = unwrap(
+                            vector.ExtractOp(
+                                b_vec128, static_position=[0], dynamic_position=[]
+                            ).result
+                        )
+                        b1_pack = unwrap(
+                            vector.ExtractOp(
+                                b_vec128, static_position=[1], dynamic_position=[]
+                            ).result
+                        )
                         b_packs.append(b0_pack)
                         b_packs.append(b1_pack)
                 return b_packs
 
             # Split A loads logic
             max_bytes_per_load = 16
-            num_a_loads = (bytes_per_thread_a + max_bytes_per_load - 1) // max_bytes_per_load
+            num_a_loads = (
+                bytes_per_thread_a + max_bytes_per_load - 1
+            ) // max_bytes_per_load
             vec_a_parts_lens = []
             remaining_bytes = bytes_per_thread_a
             for _ in range_constexpr(num_a_loads):
@@ -355,16 +414,20 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                     curr_idx = idx_div4
                     if curr_off_i32 > 0:
                         curr_idx = _arith_mlir.AddIOp(
-                            unwrap(idx_div4), unwrap(arith.constant(curr_off_i32, index=True))
+                            unwrap(idx_div4),
+                            unwrap(arith.constant(curr_off_i32, index=True)),
                         ).result
-                    val = buffer_ops.buffer_load(a_rsrc, curr_idx, vec_width=4, dtype=i32_type)
+                    val = buffer_ops.buffer_load(
+                        a_rsrc, curr_idx, vec_width=4, dtype=i32_type
+                    )
                     parts.append(val)
                     curr_off_i32 += curr_bytes // 4
                 return parts
 
             def store_a_to_lds(vec_a_in_parts, buffer_idx):
                 buffer_offset_val = _arith_mlir.MulIOp(
-                    unwrap(buffer_idx), unwrap(arith.constant(tile_m * lds_stride, index=True))
+                    unwrap(buffer_idx),
+                    unwrap(arith.constant(tile_m * lds_stride, index=True)),
                 ).result
                 curr_store_off = 0
                 for i in range_constexpr(num_a_loads):
@@ -373,12 +436,17 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                     curr_i32 = curr_bytes // 4
 
                     col_0 = _arith_mlir.AddIOp(
-                        unwrap(col_a_local), unwrap(arith.constant(curr_store_off, index=True))
+                        unwrap(col_a_local),
+                        unwrap(arith.constant(curr_store_off, index=True)),
                     ).result
                     col_swizzled_0 = swizzle_idx(row_a_local, col_0)
-                    coord_store_0 = flir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_0))
+                    coord_store_0 = flir.make_coord(
+                        unwrap(row_a_local), unwrap(col_swizzled_0)
+                    )
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
-                    idx_0_final = _arith_mlir.AddIOp(unwrap(idx_0), unwrap(buffer_offset_val)).result
+                    idx_0_final = _arith_mlir.AddIOp(
+                        unwrap(idx_0), unwrap(buffer_offset_val)
+                    ).result
 
                     if curr_i32 == 4:
                         val_16 = vector.BitCastOp(vec16_f8, val_vec).result
@@ -393,7 +461,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                             val_1_i32 = vector.ShuffleOp(val_vec, val_vec, [0]).result
                             val_f8 = vector.BitCastOp(vec_f8, val_1_i32).result
                         else:
-                            val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
+                            val_2_i32 = vector.ShuffleOp(
+                                val_vec, val_vec, [0, 1]
+                            ).result
                             val_f8 = vector.BitCastOp(vec_f8, val_2_i32).result
                         vector.StoreOp(val_f8, lds_a, [unwrap(idx_0_final)])
                     curr_store_off += curr_bytes
@@ -411,7 +481,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             if num_tiles > 1:
                 k1 = arith.constant(tile_k, index=True)
                 k1_div4 = _arith_mlir.DivUIOp(unwrap(k1), unwrap(c4)).result
-                idx_a_1_div4 = _arith_mlir.AddIOp(unwrap(idx_a_base_div4), unwrap(k1_div4)).result
+                idx_a_1_div4 = _arith_mlir.AddIOp(
+                    unwrap(idx_a_base_div4), unwrap(k1_div4)
+                ).result
                 vec_a_next = load_a_split(idx_a_1_div4)
                 b_vals_next = load_b_tile(k1)
             else:
@@ -424,7 +496,8 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             def mfma_tile(accs_in, b_vals_in, buffer_read):
                 current_accs_list = list(accs_in)
                 buffer_offset_val = _arith_mlir.MulIOp(
-                    unwrap(buffer_read), unwrap(arith.constant(tile_m * lds_stride, index=True))
+                    unwrap(buffer_read),
+                    unwrap(arith.constant(tile_m * lds_stride, index=True)),
                 ).result
                 for ki_step in range_constexpr(k_unroll):
                     b0_packs = []
@@ -436,19 +509,33 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
 
                     ki = ki_step * 64
                     ki_val = arith.constant(ki, index=True)
-                    col_lds0 = _arith_mlir.AddIOp(unwrap(col_offset_base), unwrap(ki_val)).result
+                    col_lds0 = _arith_mlir.AddIOp(
+                        unwrap(col_offset_base), unwrap(ki_val)
+                    ).result
                     for mi in range_constexpr(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
-                        curr_row_a_lds = _arith_mlir.AddIOp(unwrap(row_a_lds), unwrap(mi_val)).result
+                        curr_row_a_lds = _arith_mlir.AddIOp(
+                            unwrap(row_a_lds), unwrap(mi_val)
+                        ).result
                         col_lds0_swizzled = swizzle_idx(curr_row_a_lds, col_lds0)
-                        coord_a0 = flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled))
+                        coord_a0 = flir.make_coord(
+                            unwrap(curr_row_a_lds), unwrap(col_lds0_swizzled)
+                        )
                         idx_a0 = flir.crd2idx(coord_a0, layout_lds)
-                        idx_a0 = _arith_mlir.AddIOp(unwrap(idx_a0), unwrap(buffer_offset_val)).result
+                        idx_a0 = _arith_mlir.AddIOp(
+                            unwrap(idx_a0), unwrap(buffer_offset_val)
+                        ).result
                         idx_a0_idx = unwrap(idx_a0)
-                        loaded_a16 = vector.LoadOp(vec16_f8, lds_a, [unwrap(idx_a0_idx)]).result
+                        loaded_a16 = vector.LoadOp(
+                            vec16_f8, lds_a, [unwrap(idx_a0_idx)]
+                        ).result
                         a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
-                        a0_pack = vector.ExtractOp(a_vec128, static_position=[0], dynamic_position=[]).result
-                        a1_pack = vector.ExtractOp(a_vec128, static_position=[1], dynamic_position=[]).result
+                        a0_pack = vector.ExtractOp(
+                            a_vec128, static_position=[0], dynamic_position=[]
+                        ).result
+                        a1_pack = vector.ExtractOp(
+                            a_vec128, static_position=[1], dynamic_position=[]
+                        ).result
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             curr_acc = current_accs_list[acc_idx]
@@ -456,11 +543,25 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                             b1_pack = b1_packs[ni]
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
-                                [unwrap(a0_pack), unwrap(b0_pack), unwrap(curr_acc), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)],
+                                [
+                                    unwrap(a0_pack),
+                                    unwrap(b0_pack),
+                                    unwrap(curr_acc),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                ],
                             ).result
                             acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
-                                [unwrap(a1_pack), unwrap(b1_pack), unwrap(acc0), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)],
+                                [
+                                    unwrap(a1_pack),
+                                    unwrap(b1_pack),
+                                    unwrap(acc0),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                ],
                             ).result
                             current_accs_list[acc_idx] = acc1
                 return current_accs_list
@@ -475,7 +576,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                 if (t + 2) < num_tiles:
                     k2 = arith.constant((t + 2) * tile_k, index=True)
                     k2_div4 = _arith_mlir.DivUIOp(unwrap(k2), unwrap(c4)).result
-                    idx_a_2_div4 = _arith_mlir.AddIOp(unwrap(idx_a_base_div4), unwrap(k2_div4)).result
+                    idx_a_2_div4 = _arith_mlir.AddIOp(
+                        unwrap(idx_a_base_div4), unwrap(k2_div4)
+                    ).result
                     vec_a_next = load_a_split(idx_a_2_div4)
                     b_vals_next = load_b_tile(k2)
 
@@ -489,7 +592,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                 tmp1 = _arith_mlir.AddIOp(unwrap(by_n), unwrap(n_tile_base)).result
                 tmp2 = _arith_mlir.AddIOp(unwrap(tmp1), unwrap(c_offset)).result
                 col_g = _arith_mlir.AddIOp(unwrap(tmp2), unwrap(lane_mod_16)).result
-                val = buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=f32)
+                val = buffer_ops.buffer_load(
+                    scale_b_rsrc, col_g, vec_width=1, dtype=f32
+                )
                 s_b_vals.append(val)
 
             s_a_vecs = []
@@ -498,8 +603,12 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                 row_base_m = _arith_mlir.AddIOp(
                     unwrap(bx_m), unwrap(arith.constant(mi * 16, index=True))
                 ).result
-                row_g_base = _arith_mlir.AddIOp(unwrap(row_base_m), unwrap(row_off_base)).result
-                s_a_vec = buffer_ops.buffer_load(scale_a_rsrc, row_g_base, vec_width=4, dtype=f32)
+                row_g_base = _arith_mlir.AddIOp(
+                    unwrap(row_base_m), unwrap(row_off_base)
+                ).result
+                s_a_vec = buffer_ops.buffer_load(
+                    scale_a_rsrc, row_g_base, vec_width=4, dtype=f32
+                )
                 s_a_vec4 = vector.BitCastOp(vec4_f32, s_a_vec).result
                 s_a_vecs.append(s_a_vec4)
 
@@ -510,22 +619,32 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
                 s_a_vec4 = s_a_vecs[mi]
                 for i in range_constexpr(4):
                     row_off = (lane_div_16 * 4) + i
-                    row_g = _arith_mlir.AddIOp(unwrap(row_base_m), unwrap(row_off)).result
-                    s_a = vector.ExtractOp(s_a_vec4, static_position=[i], dynamic_position=[]).result
+                    row_g = _arith_mlir.AddIOp(
+                        unwrap(row_base_m), unwrap(row_off)
+                    ).result
+                    s_a = vector.ExtractOp(
+                        s_a_vec4, static_position=[i], dynamic_position=[]
+                    ).result
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = accs[acc_idx]
                         val = vector.ExtractOp(acc, [], [i]).result
                         offset = ni * 16
                         c_offset = arith.constant(offset, index=True)
-                        tmp1 = _arith_mlir.AddIOp(unwrap(by_n), unwrap(n_tile_base)).result
+                        tmp1 = _arith_mlir.AddIOp(
+                            unwrap(by_n), unwrap(n_tile_base)
+                        ).result
                         tmp2 = _arith_mlir.AddIOp(unwrap(tmp1), unwrap(c_offset)).result
-                        col_g = _arith_mlir.AddIOp(unwrap(tmp2), unwrap(lane_mod_16)).result
+                        col_g = _arith_mlir.AddIOp(
+                            unwrap(tmp2), unwrap(lane_mod_16)
+                        ).result
                         s_b = s_b_vals[ni]
                         val_s = _arith_mlir.MulFOp(unwrap(val), unwrap(s_a)).result
                         val_s = _arith_mlir.MulFOp(unwrap(val_s), unwrap(s_b)).result
                         val_f16 = _arith_mlir.TruncFOp(T.f16(), unwrap(val_s)).result
-                        idx = flir.crd2idx(flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
+                        idx = flir.crd2idx(
+                            flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c
+                        )
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
         @flir.jit
@@ -561,17 +680,76 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             )
 
     m = _MFMA_M16()
-    exe = pyflir.compile(m)
-    print("✓ Compiled (m16 impl)")
+    # Optional: bypass ExecutionEngine host stub and launch via HIP driver API.
+    use_hip_driver = os.environ.get("FLIR_USE_HIP_DRIVER", "0") == "1"
+    exe = None
+    kernel_func = None
+    if use_hip_driver:
+        try:
+            from hip import hip  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "FLIR_USE_HIP_DRIVER=1 requested but `hip` python package is not importable."
+            ) from e
+
+        hsaco = compile_to_hsaco(
+            m.module,
+            kernel_name=f"mfma_m16_t{tile_m}x{tile_n}x{tile_k}_w{num_waves}_driver",
+            waves_per_eu=2,
+        )
+        hip_module = _hip_check(hip.hipModuleLoadData(hsaco))
+        kernel_func = _hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
+        print("✓ Compiled (m16 hsaco + hip driver)")
+    else:
+        exe = pyflir.compile(m)
+        print("✓ Compiled (m16 impl)")
 
     device = torch.device("cuda")
-    a_q_fp8, b_q_fp8, b_shuffled, scale_a, scale_b, c_ref = _prepare_inputs(M, N, K, device)
+    a_q_fp8, b_q_fp8, b_shuffled, scale_a, scale_b, c_ref = _prepare_inputs(
+        M, N, K, device
+    )
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
-        exe(c, a, b, sa, sb, M, N, K)
+        if use_hip_driver:
+            assert kernel_func is not None
+            from hip import hip  # type: ignore
 
-    _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
+            arg_ptrs = [
+                ctypes.c_void_p(int(c.data_ptr())),
+                ctypes.c_void_p(int(a.data_ptr())),
+                ctypes.c_void_p(int(b.data_ptr())),
+                ctypes.c_void_p(int(sa.data_ptr())),
+                ctypes.c_void_p(int(sb.data_ptr())),
+                ctypes.c_long(int(M)),
+                ctypes.c_long(int(N)),
+                ctypes.c_long(int(K)),
+            ]
+            args_array = (ctypes.c_void_p * len(arg_ptrs))(
+                *[ctypes.addressof(p) for p in arg_ptrs]
+            )
+            _hip_check(
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    M // tile_m,
+                    N // tile_n,
+                    1,
+                    total_threads,
+                    1,
+                    1,
+                    0,
+                    0,
+                    args_array,
+                    None,
+                )
+            )
+        else:
+            assert exe is not None
+            exe(c, a, b, sa, sb, M, N, K)
+
+    _, us = run_perftest(
+        launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b
+    )
     c_out_scaled = c_out_raw.to(torch.float32)
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
@@ -583,7 +761,9 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
     tflops = flops / (us / 1e6) / 1e12
     bw = bytes_moved / 1e9 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
-    _maybe_run_aiter(a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us)
+    _maybe_run_aiter(
+        a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us
+    )
 
 
 def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
@@ -618,7 +798,10 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
         ]
 
         def init_gpu_module(self):
-            _state["lds_a_decl"] = allocator.allocate_array(_f8(), tile_m * lds_stride)
+            # Double-buffered LDS A (ping-pong) to support pipelined k-tiles.
+            _state["lds_a_decl"] = allocator.allocate_array(
+                _f8(), 2 * tile_m * lds_stride
+            )
             allocator.finalize()
 
         @flir.kernel
@@ -651,7 +834,9 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
 
             vec_a_load_len = bytes_per_thread_a
 
-            zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
+            zero_attr = ir.DenseElementsAttr.get_splat(
+                vec4_f32, ir.FloatAttr.get(f32, 0.0)
+            )
             acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
 
             layout_a = flir.make_layout((c_m, c_k), stride=(c_k, 1))
@@ -749,14 +934,22 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                 coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
                 idx_bytes = flir.crd2idx(coord_b, layout_b)
                 idx_i32 = idx_bytes / 4
-                b8 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=2, dtype=i32_type)
+                b8 = buffer_ops.buffer_load(
+                    b_rsrc, idx_i32, vec_width=2, dtype=i32_type
+                )
                 b_vec64 = vector.BitCastOp(vec1_i64, b8).result
-                b_pack = unwrap(vector.ExtractOp(b_vec64, static_position=[0], dynamic_position=[]).result)
+                b_pack = unwrap(
+                    vector.ExtractOp(
+                        b_vec64, static_position=[0], dynamic_position=[]
+                    ).result
+                )
                 return b_pack
 
             # Split A loads logic
             max_bytes_per_load = 16
-            num_a_loads = (bytes_per_thread_a + max_bytes_per_load - 1) // max_bytes_per_load
+            num_a_loads = (
+                bytes_per_thread_a + max_bytes_per_load - 1
+            ) // max_bytes_per_load
             vec_a_parts_lens = []
             remaining_bytes = bytes_per_thread_a
             for _ in range_constexpr(num_a_loads):
@@ -772,38 +965,48 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                     curr_idx = idx_div4
                     if curr_off_i32 > 0:
                         curr_idx = idx_div4 + curr_off_i32
-                    val = buffer_ops.buffer_load(a_rsrc, curr_idx, vec_width=4, dtype=i32_type)
+                    val = buffer_ops.buffer_load(
+                        a_rsrc, curr_idx, vec_width=4, dtype=i32_type
+                    )
                     parts.append(val)
                     curr_off_i32 += curr_bytes // 4
                 return parts
 
-            vec_a_parts = load_a_split(idx_a_base_div4)
-            accs = acc_inits
+            # --- Double-buffered LDS A (ping-pong) ---
+            c1 = arith.constant(1, index=True)
 
-            def emit_tile(k_iv, accs_in, vec_a_in_parts, is_last_tile=False):
+            def swizzle_idx(row_idx, col_idx):
+                k_blocks16 = arith.constant(tile_k // 16, index=True)
+                row_mod = row_idx % k_blocks16
+                xor_mask = row_mod * 16
+                return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
+
+            def store_a_to_lds(vec_a_in_parts, buffer_idx):
+                buffer_offset_val = _arith_mlir.MulIOp(
+                    unwrap(buffer_idx),
+                    unwrap(arith.constant(tile_m * lds_stride, index=True)),
+                ).result
                 curr_store_off = 0
-
-                def swizzle_idx(row_idx, col_idx):
-                    k_blocks16 = arith.constant(tile_k // 16, index=True)
-                    row_mod = row_idx % k_blocks16
-                    xor_mask = row_mod * 16
-                    return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
-
                 for i in range_constexpr(num_a_loads):
                     val_vec = vec_a_in_parts[i]
                     curr_bytes = vec_a_parts_lens[i]
                     curr_i32 = curr_bytes // 4
                     col_0 = col_a_local + curr_store_off
                     col_swizzled_0 = swizzle_idx(row_a_local, col_0)
-                    coord_store_0 = flir.make_coord(unwrap(row_a_local), unwrap(col_swizzled_0))
+                    coord_store_0 = flir.make_coord(
+                        unwrap(row_a_local), unwrap(col_swizzled_0)
+                    )
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
+                    idx_0_final = _arith_mlir.AddIOp(
+                        unwrap(idx_0), unwrap(buffer_offset_val)
+                    ).result
                     if curr_i32 == 4:
                         val_16 = vector.BitCastOp(vec16_f8, val_vec).result
-                        vector.StoreOp(val_16, lds_a, [unwrap(idx_0)])
+                        vector.StoreOp(val_16, lds_a, [unwrap(idx_0_final)])
                     elif curr_i32 == 2:
                         val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
                         val_8 = vector.BitCastOp(vec8_f8, val_2_i32).result
-                        vector.StoreOp(val_8, lds_a, [unwrap(idx_0)])
+                        vector.StoreOp(val_8, lds_a, [unwrap(idx_0_final)])
                     else:
                         vec_f8 = ir.VectorType.get([curr_bytes], f8)
                         if curr_bytes <= 4:
@@ -812,36 +1015,14 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                         else:
                             val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
                             val_f8 = vector.BitCastOp(vec_f8, val_2_i32).result
-                        vector.StoreOp(val_f8, lds_a, [unwrap(idx_0)])
+                        vector.StoreOp(val_f8, lds_a, [unwrap(idx_0_final)])
                     curr_store_off += curr_bytes
 
-                gpu.barrier()
-
-                vec_a_next_parts = vec_a_in_parts
-                scales_pf = {}
-                if not is_last_tile:
-                    next_k = k_iv + c_tile_k
-                    next_k_div4 = next_k / 4
-                    next_idx_a_div4 = idx_a_base_div4 + next_k_div4
-                    vec_a_next_parts = load_a_split(next_idx_a_div4)
-                else:
-                    s_b_vals = []
-                    for ni in range_constexpr(num_acc_n):
-                        offset = ni * 16
-                        c_offset = arith.constant(offset, index=True)
-                        col_g = by_n + n_tile_base + c_offset + lane_mod_16
-                        val = buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=f32)
-                        s_b_vals.append(val)
-                    scales_pf["s_b_vals"] = s_b_vals
-                    scales_pf["s_a_vecs"] = []
-                    row_off_base = lane_div_16 * 4
-                    for mi in range_constexpr(m_repeat):
-                        row_base_m = bx_m + (mi * 16)
-                        row_g_base = row_base_m + row_off_base
-                        s_a_vec = buffer_ops.buffer_load(scale_a_rsrc, row_g_base, vec_width=4, dtype=f32)
-                        s_a_vec4 = vector.BitCastOp(vec4_f32, s_a_vec).result
-                        scales_pf["s_a_vecs"].append(s_a_vec4)
-
+            def mfma_tile(accs_in, k_iv, buffer_read):
+                buffer_offset_val = _arith_mlir.MulIOp(
+                    unwrap(buffer_read),
+                    unwrap(arith.constant(tile_m * lds_stride, index=True)),
+                ).result
                 current_accs_list = list(accs_in)
                 for ki_step in range_constexpr(k_unroll):
                     b_packs = []
@@ -855,43 +1036,98 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                     half_off = arith.constant(half * 8, index=True)
                     col_base = col_offset_base + ki64_val
 
-                    def swizzle_idx2(row_idx, col_idx):
-                        k_blocks16 = arith.constant(tile_k // 16, index=True)
-                        row_mod = row_idx % k_blocks16
-                        xor_mask = row_mod * 16
-                        return _arith_mlir.XOrIOp(unwrap(col_idx), unwrap(xor_mask)).result
-
                     for mi in range_constexpr(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
-                        col_base_swizzled = swizzle_idx2(curr_row_a_lds, col_base)
+                        col_base_swizzled = swizzle_idx(curr_row_a_lds, col_base)
                         col_swizzled = col_base_swizzled + half_off
-                        coord_a = flir.make_coord(unwrap(curr_row_a_lds), unwrap(col_swizzled))
+                        coord_a = flir.make_coord(
+                            unwrap(curr_row_a_lds), unwrap(col_swizzled)
+                        )
                         idx_a = flir.crd2idx(coord_a, layout_lds)
-                        idx_a_idx = unwrap(idx_a)
-                        loaded_a8 = vector.LoadOp(vec8_f8, lds_a, [unwrap(idx_a_idx)]).result
+                        idx_a_final = _arith_mlir.AddIOp(
+                            unwrap(idx_a), unwrap(buffer_offset_val)
+                        ).result
+                        loaded_a8 = vector.LoadOp(
+                            vec8_f8, lds_a, [unwrap(idx_a_final)]
+                        ).result
                         a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
-                        a_pack = vector.ExtractOp(a_vec64, static_position=[0], dynamic_position=[]).result
+                        a_pack = vector.ExtractOp(
+                            a_vec64, static_position=[0], dynamic_position=[]
+                        ).result
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             curr_acc = current_accs_list[acc_idx]
                             b_pack = b_packs[ni]
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
-                                [unwrap(a_pack), unwrap(b_pack), unwrap(curr_acc), unwrap(c0_i32), unwrap(c0_i32), unwrap(c0_i32)],
+                                [
+                                    unwrap(a_pack),
+                                    unwrap(b_pack),
+                                    unwrap(curr_acc),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                    unwrap(c0_i32),
+                                ],
                             ).result
                             current_accs_list[acc_idx] = acc0
+                return current_accs_list
 
+            assert K % tile_k == 0, f"K({K}) must be divisible by tile_k({tile_k})"
+            num_tiles = K // tile_k
+            assert num_tiles >= 1
+
+            # Prolog: tile0 into buffer0
+            vec_a_cur_parts = load_a_split(idx_a_base_div4)
+            store_a_to_lds(vec_a_cur_parts, c0)
+            gpu.barrier()
+            accs = list(acc_inits)
+            buf_read = c0
+
+            if num_tiles > 1:
+                k1 = arith.constant(tile_k, index=True)
+                k1_div4 = k1 / 4
+                idx_a_1_div4 = idx_a_base_div4 + k1_div4
+                vec_a_next_parts = load_a_split(idx_a_1_div4)
+            else:
+                vec_a_next_parts = vec_a_cur_parts
+
+            for t in range_constexpr(num_tiles - 1):
+                k_iv = arith.constant(t * tile_k, index=True)
+                accs = mfma_tile(accs, k_iv, buf_read)
+                buf_write = _arith_mlir.XOrIOp(unwrap(buf_read), unwrap(c1)).result
+                store_a_to_lds(vec_a_next_parts, buf_write)
                 gpu.barrier()
-                return current_accs_list, vec_a_next_parts, scales_pf
+                buf_read = buf_write
+                if (t + 2) < num_tiles:
+                    k2 = arith.constant((t + 2) * tile_k, index=True)
+                    k2_div4 = k2 / 4
+                    idx_a_2_div4 = idx_a_base_div4 + k2_div4
+                    vec_a_next_parts = load_a_split(idx_a_2_div4)
 
-            c_k_main = c_k - c_tile_k
-            for k_iv in range(c0, c_k_main, c_tile_k):
-                accs, vec_a_parts, _ = emit_tile(k_iv, accs, vec_a_parts, is_last_tile=False)
+            # Last tile
+            k_last = arith.constant((num_tiles - 1) * tile_k, index=True)
+            final_accs = mfma_tile(accs, k_last, buf_read)
 
-            final_accs, _, scales = emit_tile(c_k_main, accs, vec_a_parts, is_last_tile=True)
-            s_b_vals = scales["s_b_vals"]
-            s_a_vecs = scales["s_a_vecs"]
+            # Load scales (done after MFMA for clarity; correctness-equivalent).
+            s_b_vals = []
+            for ni in range_constexpr(num_acc_n):
+                offset = ni * 16
+                c_offset = arith.constant(offset, index=True)
+                col_g = by_n + n_tile_base + c_offset + lane_mod_16
+                val = buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=f32)
+                s_b_vals.append(val)
+
+            s_a_vecs = []
+            row_off_base = lane_div_16 * 4
+            for mi in range_constexpr(m_repeat):
+                row_base_m = bx_m + (mi * 16)
+                row_g_base = row_base_m + row_off_base
+                s_a_vec = buffer_ops.buffer_load(
+                    scale_a_rsrc, row_g_base, vec_width=4, dtype=f32
+                )
+                s_a_vec4 = vector.BitCastOp(vec4_f32, s_a_vec).result
+                s_a_vecs.append(s_a_vec4)
 
             for mi in range_constexpr(m_repeat):
                 row_base_m = bx_m + (mi * 16)
@@ -899,7 +1135,9 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                 for i in range_constexpr(4):
                     row_off = (lane_div_16 * 4) + i
                     row_g = row_base_m + row_off
-                    s_a = vector.ExtractOp(s_a_vec4, static_position=[i], dynamic_position=[]).result
+                    s_a = vector.ExtractOp(
+                        s_a_vec4, static_position=[i], dynamic_position=[]
+                    ).result
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
@@ -911,7 +1149,9 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                         val_s = val * s_a
                         val_s = val_s * s_b
                         val_f16 = _arith_mlir.TruncFOp(T.f16(), unwrap(val_s)).result
-                        idx = flir.crd2idx(flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c)
+                        idx = flir.crd2idx(
+                            flir.make_coord(unwrap(row_g), unwrap(col_g)), layout_c
+                        )
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
         @flir.jit
@@ -947,17 +1187,76 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
             )
 
     m = _MFMA_M1024()
-    exe = pyflir.compile(m)
-    print("✓ Compiled (m1024 impl)")
+    # Optional: bypass ExecutionEngine host stub and launch via HIP driver API.
+    use_hip_driver = os.environ.get("FLIR_USE_HIP_DRIVER", "0") == "1"
+    exe = None
+    kernel_func = None
+    if use_hip_driver:
+        try:
+            from hip import hip  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "FLIR_USE_HIP_DRIVER=1 requested but `hip` python package is not importable."
+            ) from e
+
+        hsaco = compile_to_hsaco(
+            m.module,
+            kernel_name=f"mfma_m1024_t{tile_m}x{tile_n}x{tile_k}_driver",
+            waves_per_eu=2,
+        )
+        hip_module = _hip_check(hip.hipModuleLoadData(hsaco))
+        kernel_func = _hip_check(hip.hipModuleGetFunction(hip_module, b"kernel_fixed"))
+        print("✓ Compiled (m1024 hsaco + hip driver)")
+    else:
+        exe = pyflir.compile(m)
+        print("✓ Compiled (m1024 impl)")
 
     device = torch.device("cuda")
-    a_q_fp8, b_q_fp8, b_shuffled, scale_a, scale_b, c_ref = _prepare_inputs(M, N, K, device)
+    a_q_fp8, b_q_fp8, b_shuffled, scale_a, scale_b, c_ref = _prepare_inputs(
+        M, N, K, device
+    )
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
-        exe(c, a, b, sa, sb, M, N, K)
+        if use_hip_driver:
+            assert kernel_func is not None
+            from hip import hip  # type: ignore
 
-    _, us = run_perftest(launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b)
+            arg_ptrs = [
+                ctypes.c_void_p(int(c.data_ptr())),
+                ctypes.c_void_p(int(a.data_ptr())),
+                ctypes.c_void_p(int(b.data_ptr())),
+                ctypes.c_void_p(int(sa.data_ptr())),
+                ctypes.c_void_p(int(sb.data_ptr())),
+                ctypes.c_long(int(M)),
+                ctypes.c_long(int(N)),
+                ctypes.c_long(int(K)),
+            ]
+            args_array = (ctypes.c_void_p * len(arg_ptrs))(
+                *[ctypes.addressof(p) for p in arg_ptrs]
+            )
+            _hip_check(
+                hip.hipModuleLaunchKernel(
+                    kernel_func,
+                    M // tile_m,
+                    N // tile_n,
+                    1,
+                    total_threads,
+                    1,
+                    1,
+                    0,
+                    0,
+                    args_array,
+                    None,
+                )
+            )
+        else:
+            assert exe is not None
+            exe(c, a, b, sa, sb, M, N, K)
+
+    _, us = run_perftest(
+        launch_kernel, c_out_raw, a_q_fp8, b_shuffled, scale_a, scale_b
+    )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
@@ -967,7 +1266,9 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
     tflops = flops / (us / 1e6) / 1e12
     bw = bytes_moved / 1e9 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {bw:.2f} GB/s")
-    _maybe_run_aiter(a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us)
+    _maybe_run_aiter(
+        a_q_fp8, b_shuffled, scale_a, scale_b, c_ref, flops, bytes_moved, us
+    )
 
 
 def test_mfma_fp8_rocir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
@@ -995,5 +1296,3 @@ if __name__ == "__main__":
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
-
-
