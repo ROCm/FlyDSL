@@ -1427,6 +1427,63 @@ struct Idx2CrdOpLowering : public RewritePattern {
   }
 };
 
+// Lower swizzle_xor16 to arithmetic:
+//   row_mod = row % kBlocks16
+//   mask    = row_mod * 16
+//   out     = col xor mask
+struct SwizzleXor16OpLowering : public RewritePattern {
+  SwizzleXor16OpLowering(MLIRContext *ctx)
+      : RewritePattern("flir.swizzle_xor16", 1, ctx) {}
+
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    if (op->getNumOperands() != 3)
+      return failure();
+    Value row = op->getOperand(0);
+    Value col = op->getOperand(1);
+    Value kBlocks16 = op->getOperand(2);
+    if (!row.getType().isIndex() || !col.getType().isIndex() ||
+        !kBlocks16.getType().isIndex())
+      return failure();
+
+    // CK-style fast path for power-of-two kBlocks16:
+    //   row_mod = row & (kBlocks16-1)
+    //   mask    = row_mod << 4   // 16 = 2^4
+    //   out     = col xor mask
+    //
+    // Fallback:
+    //   row_mod = row remui kBlocks16
+    //   mask    = row_mod * 16
+    //   out     = col xor mask
+    Value rowMod;
+    if (auto kConstOpt = tryGetConstIndex(kBlocks16)) {
+      int64_t k = *kConstOpt;
+      if (k > 0 && (k & (k - 1)) == 0) {
+        auto km1 = rewriter.create<arith::ConstantIndexOp>(loc, k - 1).getResult();
+        rowMod = rewriter.create<arith::AndIOp>(loc, row, km1).getResult();
+      }
+    }
+    if (!rowMod)
+      rowMod = rewriter.create<arith::RemUIOp>(loc, row, kBlocks16).getResult();
+
+    Value mask;
+    // Prefer shift when kBlocks16 was constant power-of-two (or if we just want bit semantics).
+    // Shift amount is always 4 for the 16B granularity swizzle (fp8 element indexing).
+    if (rowMod.getDefiningOp() && rowMod.getDefiningOp()->getName().getStringRef() == "arith.andi") {
+      auto sh4 = rewriter.create<arith::ConstantIndexOp>(loc, 4).getResult();
+      mask = rewriter.create<arith::ShLIOp>(loc, rowMod, sh4).getResult();
+    } else {
+      auto c16 = rewriter.create<arith::ConstantIndexOp>(loc, 16).getResult();
+      mask = rewriter.create<arith::MulIOp>(loc, rowMod, c16).getResult();
+    }
+
+    auto out = rewriter.create<arith::XOrIOp>(loc, col, mask).getResult();
+    rewriter.replaceOp(op, out);
+    return success();
+  }
+};
+
 // Lower get_shape to extract the shape from a layout.
 struct GetShapeOpLowering : public RewritePattern {
   GetShapeOpLowering(MLIRContext *ctx)
@@ -2348,6 +2405,7 @@ struct FlirToStandardPass
     patterns.add<RankOpLowering>(&getContext());
     patterns.add<Crd2IdxOpLowering>(&getContext());
     patterns.add<Idx2CrdOpLowering>(&getContext());
+    patterns.add<SwizzleXor16OpLowering>(&getContext());
     patterns.add<GetShapeOpLowering>(&getContext());
     patterns.add<GetStrideOpLowering>(&getContext());
     patterns.add<CoalesceOpLowering>(&getContext());
