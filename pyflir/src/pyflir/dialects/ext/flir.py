@@ -5,7 +5,7 @@ making it easier to construct layouts and perform layout transformations
 from Python code.
 """
 
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, Tuple
 
 from _mlir.ir import (
     Type,
@@ -1345,6 +1345,27 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
         return op.results[0]
 
 
+def swizzle_xor16(row: Value, col: Value, k_blocks16: Value,
+                  loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
+    """XOR-with-row swizzle on the K dimension at 16B granularity.
+
+    Computes: col xor ((row % k_blocks16) * 16)
+    Lowered by FlirToStandard to arith ops (matching ROCDSL-style swizzle).
+    """
+    loc = _get_location(loc)
+    with ip or InsertionPoint.current:
+        # ODS-generated builders for dialect ops require passing the result type.
+        # Use the generated helper function for stable argument naming.
+        return flir_ops.swizzle_xor16(
+            IndexType.get(),
+            _unwrap_value(row),
+            _unwrap_value(col),
+            _unwrap_value(k_blocks16),
+            loc=loc,
+            ip=ip,
+        )
+
+
 
 def size(layout_or_tensor, mode: Optional[List[int]] = None, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
     """Get the size of a layout or tensor.
@@ -2473,7 +2494,11 @@ def copy(copy_desc, src, dst,
          src_indices: Optional[List[Value]] = None,
          dst_indices: Optional[List[Value]] = None,
          pred: Optional[Value] = None,
+         dst_swizzle_xor16_kblocks: Optional[Value] = None,
+         dst_swizzle_xor16_dims: Optional[Tuple[int, int]] = (0, 1),
          *,
+         src_buffer_resource: Optional[Value] = None,
+         src_buffer_offset_in_bytes: bool = True,
          nontemporal: Optional[bool] = None,
          alignment: Optional[int] = None,
          return_vector: bool = False,
@@ -2500,6 +2525,30 @@ def copy(copy_desc, src, dst,
     # If return_vector=True, we capture the last vector value loaded by the vectorized path.
     captured_vec = {"val": None}
 
+    def _maybe_swizzle_dst_indices(idx_list: List[Value]) -> List[Value]:
+        """Optionally apply XOR-with-row swizzle to dst indices (2D only).
+
+        This is intended for LDS bank-conflict avoidance where we permute the
+        K dimension at 16B granularity:
+          col' = col xor ((row % kBlocks16) * 16)
+        """
+        if dst_swizzle_xor16_kblocks is None or dst_swizzle_xor16_dims is None:
+            return idx_list
+        if len(idx_list) < 2:
+            return idx_list
+        row_dim, col_dim = dst_swizzle_xor16_dims
+        if row_dim < 0 or col_dim < 0:
+            return idx_list
+        if row_dim >= len(idx_list) or col_dim >= len(idx_list):
+            return idx_list
+        row = _unwrap_value(idx_list[row_dim])
+        col = _unwrap_value(idx_list[col_dim])
+        kblocks = _unwrap_value(dst_swizzle_xor16_kblocks)
+        swz = flir_ops.swizzle_xor16(IndexType.get(), row, col, kblocks, loc=loc, ip=ip)
+        out = list(idx_list)
+        out[col_dim] = _unwrap_value(swz)
+        return out
+
     def emit_tensor_copy(copy_shape, src_view: TensorView, dst_view: TensorView, pred_view: Optional[Union[TensorView, Value]]):
         from _mlir.dialects import vector
         from _mlir.ir import VectorType
@@ -2515,7 +2564,8 @@ def copy(copy_desc, src, dst,
             if dim == len(copy_shape):
                 # Scalar fall-back (should be covered by vectorized path if possible)
                 load_idx = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(i) for i in src_idx], src_view.strides, loc)
-                store_idx = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(i) for i in dst_idx], dst_view.strides, loc)
+                dst_idx2 = _maybe_swizzle_dst_indices([_unwrap_value(i) for i in dst_idx])
+                store_idx = _normalize_indices_to_memref(dst_view.memref, dst_idx2, dst_view.strides, loc)
                 load_op = memref_dialect.load(src_view.memref, load_idx)
                 val = load_op.result if hasattr(load_op, "result") else load_op
                 val = _unwrap_value(val)
@@ -2585,7 +2635,8 @@ def copy(copy_desc, src, dst,
                         vec_type = VectorType.get((vector_size,), elem_type)
                         
                         load_indices = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(idx) for idx in vec_src_idx], src_view.strides, loc)
-                        store_indices = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(idx) for idx in vec_dst_idx], dst_view.strides, loc)
+                        vec_dst_idx2 = _maybe_swizzle_dst_indices([_unwrap_value(idx) for idx in vec_dst_idx])
+                        store_indices = _normalize_indices_to_memref(dst_view.memref, vec_dst_idx2, dst_view.strides, loc)
 
                         # Vector Load
                         vec_val = vector.load(
@@ -2664,10 +2715,105 @@ def copy(copy_desc, src, dst,
         with ip or InsertionPoint.current:
             recurse(0, [], [], [])
 
+    def emit_tensor_load(copy_shape, src_view: TensorView):
+        """Load-only path (no dst), primarily for gmem->register vector loads.
+
+        Currently supported:
+        - 1D TensorView
+        - return_vector=True
+        - extent == vector_size
+        """
+        from _mlir.dialects import vector
+        from _mlir.ir import VectorType
+
+        if not return_vector:
+            raise ValueError("copy(load-only) requires return_vector=True when dst is None")
+        if len(copy_shape) != 1:
+            raise ValueError("copy(load-only) currently supports only 1D shapes")
+
+        extent = int(copy_shape[0])
+
+        vector_size = 1
+        if isinstance(copy_desc, TiledCopy) and copy_desc.copy_atom:
+            vector_size = copy_desc.copy_atom.vector_size
+        elif hasattr(copy_desc, "vector_size"):
+            vector_size = copy_desc.vector_size
+
+        if extent != int(vector_size):
+            raise ValueError(
+                f"copy(load-only) expects extent==vector_size (got {extent} vs {vector_size})"
+            )
+
+        if src_buffer_resource is not None:
+            try:
+                from pyflir.dialects.ext import buffer_ops as _buffer_ops
+            except Exception:
+                from . import buffer_ops as _buffer_ops  # type: ignore
+
+            # Specialize for fp8 where element bytes == 1 and base index is in bytes.
+            elem_ty_str = str(src_view.element_type)
+            is_f8 = ("f8" in elem_ty_str) or ("Float8" in elem_ty_str)
+            if is_f8 and extent in (8, 16) and (extent % 4 == 0):
+                i32_ty = IntegerType.get_signless(32)
+                vec_width = extent // 4  # 8B -> dwordx2, 16B -> dwordx4
+                base0 = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
+                if src_buffer_offset_in_bytes:
+                    # base index is in bytes (fp8 elements). Convert to i32 element offset.
+                    c4 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 4), loc=loc).result
+                    idx_i32 = arith.DivSIOp(_unwrap_value(base0), _unwrap_value(c4), loc=loc).result
+                else:
+                    # base index is already an i32-element offset for dtype=i32 loads.
+                    idx_i32 = _unwrap_value(base0)
+                i32_vec = _buffer_ops.buffer_load(
+                    _unwrap_value(src_buffer_resource),
+                    idx_i32,
+                    vec_width=vec_width,
+                    dtype=i32_ty,
+                )
+                vec_f8_ty = VectorType.get((extent,), src_view.element_type)
+                return vector.BitCastOp(vec_f8_ty, i32_vec).result
+
+        # Generic path: vector.load
+        base = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
+        idxs = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(base)], src_view.strides, loc)
+        vec_type = VectorType.get((extent,), src_view.element_type)
+        with ip or InsertionPoint.current:
+            return vector.load(
+                vec_type,
+                src_view.memref,
+                idxs,
+                nontemporal=nontemporal,
+                alignment=alignment,
+            )
+
     if isinstance(copy_desc, TiledCopy) and isinstance(src, TensorView) and isinstance(dst, TensorView):
         # pred can be TensorView or scalar Value
         emit_tensor_copy(copy_desc.val_shape, src, dst, pred)
         return captured_vec["val"] if return_vector else None
+
+    # Vector store path: src is a vector Value and dst is a TensorView.
+    try:
+        from _mlir.ir import VectorType as _VectorType
+    except Exception:
+        _VectorType = None  # type: ignore
+    if isinstance(dst, TensorView):
+        v = _unwrap_value(src)
+        if _VectorType is not None and isinstance(getattr(v, "type", None), _VectorType):
+            from _mlir.dialects import vector as vector_dialect
+            # Use TensorView base indices as the store address.
+            d_idx = [_unwrap_value(i) for i in dst.base_indices]
+            d_idx2 = _maybe_swizzle_dst_indices(d_idx)
+            store_indices = _normalize_indices_to_memref(dst.memref, d_idx2, dst.strides, loc)
+            with ip or InsertionPoint.current:
+                # IMPORTANT: use the opview `vector.StoreOp` to match existing high-perf
+                # kernels' LDS codegen (some helper paths may lower differently).
+                vector_dialect.StoreOp(v, dst.memref, store_indices)
+            return v if return_vector else None
+
+    # Load-only path: dst=None and src is a TensorView.
+    if isinstance(src, TensorView) and dst is None:
+        vec = emit_tensor_load(src.shape, src)
+        return vec
 
     if isinstance(src, TensorView) and isinstance(dst, TensorView):
         # pred can be TensorView or scalar Value
@@ -2755,6 +2901,7 @@ __all__ = [
     "make_coord",
     "crd2idx",
     "idx2crd",
+    "swizzle_xor16",
     "size",
     "cosize",
     "rank",

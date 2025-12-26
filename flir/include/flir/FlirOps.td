@@ -158,6 +158,27 @@ def Flir_Idx2CrdOp : Flir_Op<"idx2crd", []> {
 }
 
 //===----------------------------------------------------------------------===//
+// Swizzle Operations
+//===----------------------------------------------------------------------===//
+
+def Flir_SwizzleXor16Op : Flir_Op<"swizzle_xor16", [Pure]> {
+  let summary = "XOR-with-row swizzle for LDS bank-conflict avoidance (16B granularity)";
+  let description = [{
+    Computes:
+
+      %row_mod = %row remui %kBlocks16
+      %mask    = %row_mod * 16
+      %out     = %col xor %mask
+
+    This matches the common CK/ROCDSL-style LDS swizzle used for fp8/f16 tiles where
+    the K dimension is permuted at 16B granularity (preserving intra-16B order).
+  }];
+  let arguments = (ins Index:$row, Index:$col, Index:$kBlocks16);
+  let results = (outs Index:$result);
+  let assemblyFormat = "$row `,` $col `,` $kBlocks16 attr-dict `:` functional-type(operands, $result)";
+}
+
+//===----------------------------------------------------------------------===//
 // Layout Manipulation Operations
 //===----------------------------------------------------------------------===//
 
