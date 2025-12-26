@@ -3,13 +3,14 @@
 These helpers build MLIR ops (rocir/gpu/scf/vector/etc). They are extracted from
 softmax/layernorm/rmsnorm kernels to de-duplicate code without changing codegen.
 """
-
-from rocdsl.dialects.ext.python_control_flow import lower_range_for_loops as _lower_range_for_loops
+from __future__ import annotations
 
 
 def unwrap(v):
     if hasattr(v, "value"):
         return v.value
+    if hasattr(v, "_value"):
+        return v._value
     if hasattr(v, "result"):
         return v.result
     return v
@@ -65,10 +66,12 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, rocir, s_red
             unwrap(lane_i32),
             unwrap(arith.constant(0, type=T.i32()).value),
         ).result
-        if is_lane0:
+        if_lane0 = rocir.scf_ext.IfOp(unwrap(is_lane0))
+        with ir.InsertionPoint(if_lane0.then_block):
             wave_idx = rocir.arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
             red_idx = rocir.crd2idx(rocir.make_coord(unwrap(wave_idx)), layout_red)
             s_red_tv[unwrap(red_idx)] = unwrap(w)
+            rocir.scf_ext.yield_([])
         gpu.barrier()
 
         # wave0 reduces NUM_WAVES partials (still using shuffle)
@@ -77,19 +80,24 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, rocir, s_red
             unwrap(wave_i32),
             unwrap(arith.constant(0, type=T.i32()).value),
         ).result
-        if is_wave0:
+        if_wave0 = rocir.scf_ext.IfOp(unwrap(is_wave0), [compute_type], hasElse=True)
+        with ir.InsertionPoint(if_wave0.then_block):
             in_range = rocir.arith.CmpIOp(
                 rocir.arith.CmpIPredicate.ult,
                 unwrap(lane_i32),
                 unwrap(arith.constant(NUM_WAVES, type=T.i32()).value),
             ).result
-            neutral = c_neg_inf if reduce_op_name == "max" else c_zero
-            ww = unwrap(neutral)
-            if in_range:
+            if_in = rocir.scf_ext.IfOp(unwrap(in_range), [compute_type], hasElse=True)
+            with ir.InsertionPoint(if_in.then_block):
                 lane_idx = rocir.arith.IndexCastOp(T.index(), unwrap(lane_i32)).result
                 red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
                 v = s_red_tv[unwrap(red_idx)]
-                ww = unwrap(v)
+                rocir.scf_ext.yield_([unwrap(v)])
+            with ir.InsertionPoint(if_in.else_block):
+                neutral = c_neg_inf if reduce_op_name == "max" else c_zero
+                rocir.scf_ext.yield_([unwrap(neutral)])
+
+            ww = if_in.results[0]
             for sh in [32, 16, 8, 4, 2, 1]:
                 off = arith.constant(sh, type=T.i32()).value
                 peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
@@ -104,9 +112,17 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, rocir, s_red
                 unwrap(lane_i32),
                 unwrap(arith.constant(0, type=T.i32()).value),
             ).result
-            if is_lane0_2:
+            if_lane0_2 = rocir.scf_ext.IfOp(unwrap(is_lane0_2))
+            with ir.InsertionPoint(if_lane0_2.then_block):
                 red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
                 s_red_tv[unwrap(red_idx0)] = unwrap(ww)
+                rocir.scf_ext.yield_([])
+
+            rocir.scf_ext.yield_([unwrap(ww)])
+        with ir.InsertionPoint(if_wave0.else_block):
+            red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
+            keep = s_red_tv[unwrap(red_idx0)]
+            rocir.scf_ext.yield_([unwrap(keep)])
         gpu.barrier()
 
         red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(c_zero_idx)), layout_red)
@@ -122,6 +138,17 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
     _ = stride_unused
 
     def block_reduce_add(val_f32, scratch_memref):
+        # Fast path: single-wave block (RED_SLOTS==1) needs no LDS and no barrier.
+        # After xor-shuffle reduction, all lanes hold the same reduced value.
+        if RED_SLOTS == 1:
+            width_i32 = arith.constant(T.i32(), WARP_SIZE)
+            w = unwrap(val_f32)
+            for sh in [32, 16, 8, 4, 2, 1]:
+                off = arith.constant(T.i32(), sh)
+                peer = gpu.ShuffleOp(unwrap(w), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
+                w = arith_ops.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
+            return w
+
         scratch_tv = rocir.make_tensor(scratch_memref, shape=(RED_SLOTS,), strides=(1,))
         tid_i32 = arith_ops.IndexCastOp(T.i32(), tid.value).result
         c_warp_i32 = arith.constant(T.i32(), WARP_SIZE)
@@ -146,10 +173,12 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
             unwrap(lane_i32),
             unwrap(arith.constant(T.i32(), 0)),
         ).result
-        if is_lane0:
+        if_lane0 = rocir.scf_ext.IfOp(unwrap(is_lane0))
+        with ir.InsertionPoint(if_lane0.then_block):
             wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
             red_idx = rocir.crd2idx(rocir.make_coord(unwrap(wave_idx)), layout_red)
             scratch_tv[unwrap(red_idx)] = unwrap(w)
+            rocir.scf_ext.yield_([])
         gpu.barrier()
 
         NUM_WAVES = RED_SLOTS
@@ -159,18 +188,23 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
             unwrap(arith.constant(T.i32(), 0)),
         ).result
         # Only wave0 does final reduction and writes scratch[0].
-        if is_wave0:
+        if_wave0 = rocir.scf_ext.IfOp(unwrap(is_wave0))
+        with ir.InsertionPoint(if_wave0.then_block):
             in_range = arith_ops.CmpIOp(
                 arith_ops.CmpIPredicate.ult,
                 unwrap(lane_i32),
                 unwrap(arith.constant(T.i32(), NUM_WAVES)),
             ).result
-            ww = unwrap(arith.constant(T.f32(), 0.0).value)
-            if in_range:
+            if_in = rocir.scf_ext.IfOp(unwrap(in_range), [T.f32()], hasElse=True)
+            with ir.InsertionPoint(if_in.then_block):
                 lane_idx = arith_ops.IndexCastOp(T.index(), unwrap(lane_i32)).result
                 red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
                 v = scratch_tv[unwrap(red_idx)]
-                ww = unwrap(v)
+                rocir.scf_ext.yield_([unwrap(v)])
+            with ir.InsertionPoint(if_in.else_block):
+                rocir.scf_ext.yield_([unwrap(arith.constant(T.f32(), 0.0).value)])
+
+            ww = if_in.results[0]
             for sh in [32, 16, 8, 4, 2, 1]:
                 off = arith.constant(T.i32(), sh)
                 peer = gpu.ShuffleOp(unwrap(ww), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
@@ -181,9 +215,12 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
                 unwrap(lane_i32),
                 unwrap(arith.constant(T.i32(), 0)),
             ).result
-            if is_lane0_2:
+            if_lane0_2 = rocir.scf_ext.IfOp(unwrap(is_lane0_2))
+            with ir.InsertionPoint(if_lane0_2.then_block):
                 red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
                 scratch_tv[unwrap(red_idx0)] = unwrap(ww)
+                rocir.scf_ext.yield_([])
+            rocir.scf_ext.yield_([])
 
         gpu.barrier()
         red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
@@ -192,8 +229,104 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
     return block_reduce_add
 
 
-# Apply Python control-flow lowering to these helpers so the examples can use
-# plain Python `if` with MLIR `Value` predicates.
-make_block_reduce = _lower_range_for_loops(make_block_reduce)
-make_block_reduce_add = _lower_range_for_loops(make_block_reduce_add)
+def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, arith_ops, rocir, T, ir, zero_idx):
+    """Return a `block_reduce_add2(a_f32, b_f32, scratch_a, scratch_b)` function.
 
+    This is NOT pair-reduce: it reduces two independent scalars but shares the same
+    cross-wave synchronization so we only pay the barriers once.
+    """
+
+    def _wave_reduce_add(x):
+        width_i32 = arith.constant(T.i32(), WARP_SIZE)
+        w = unwrap(x)
+        for sh in [32, 16, 8, 4, 2, 1]:
+            off = arith.constant(T.i32(), sh)
+            peer = gpu.ShuffleOp(unwrap(w), unwrap(off), unwrap(width_i32), mode="xor").shuffleResult
+            w = arith_ops.AddFOp(unwrap(w), unwrap(peer), fastmath=fm_fast).result
+        return w
+
+    def block_reduce_add2(val0_f32, val1_f32, scratch0_memref, scratch1_memref):
+        # Single-wave block: no LDS/no barrier, just two wave reductions.
+        if RED_SLOTS == 1:
+            return _wave_reduce_add(val0_f32), _wave_reduce_add(val1_f32)
+
+        scratch0_tv = rocir.make_tensor(scratch0_memref, shape=(RED_SLOTS,), strides=(1,))
+        scratch1_tv = rocir.make_tensor(scratch1_memref, shape=(RED_SLOTS,), strides=(1,))
+
+        tid_i32 = arith_ops.IndexCastOp(T.i32(), tid.value).result
+        c_warp_i32 = arith.constant(T.i32(), WARP_SIZE)
+        lane_i32 = arith_ops.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+        wave_i32 = arith_ops.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
+
+        # Layout for LDS scratch.
+        c_num_waves = rocir.const_index(RED_SLOTS)
+        c1 = rocir.const_index(1)
+        shape_red = rocir.make_shape(unwrap(c_num_waves))
+        stride_red = rocir.make_stride(unwrap(c1))
+        layout_red = rocir.make_layout(shape_red, stride_red)
+
+        # Intra-wave reduce both values independently.
+        w0 = _wave_reduce_add(val0_f32)
+        w1 = _wave_reduce_add(val1_f32)
+
+        # lane0 writes per-wave partials into LDS for both sums.
+        is_lane0 = arith_ops.CmpIOp(
+            arith_ops.CmpIPredicate.eq,
+            unwrap(lane_i32),
+            unwrap(arith.constant(T.i32(), 0)),
+        ).result
+        if_lane0 = rocir.scf_ext.IfOp(unwrap(is_lane0))
+        with ir.InsertionPoint(if_lane0.then_block):
+            wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
+            red_idx = rocir.crd2idx(rocir.make_coord(unwrap(wave_idx)), layout_red)
+            scratch0_tv[unwrap(red_idx)] = unwrap(w0)
+            scratch1_tv[unwrap(red_idx)] = unwrap(w1)
+            rocir.scf_ext.yield_([])
+        gpu.barrier()
+
+        # wave0 loads NUM_WAVES partials for both, reduces each with shuffle, writes scratch[0].
+        is_wave0 = arith_ops.CmpIOp(
+            arith_ops.CmpIPredicate.eq,
+            unwrap(wave_i32),
+            unwrap(arith.constant(T.i32(), 0)),
+        ).result
+        if_wave0 = rocir.scf_ext.IfOp(unwrap(is_wave0))
+        with ir.InsertionPoint(if_wave0.then_block):
+            in_range = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.ult,
+                unwrap(lane_i32),
+                unwrap(arith.constant(T.i32(), RED_SLOTS)),
+            ).result
+            if_in = rocir.scf_ext.IfOp(unwrap(in_range), [T.f32(), T.f32()], hasElse=True)
+            with ir.InsertionPoint(if_in.then_block):
+                lane_idx = arith_ops.IndexCastOp(T.index(), unwrap(lane_i32)).result
+                red_idx = rocir.crd2idx(rocir.make_coord(unwrap(lane_idx)), layout_red)
+                v0 = scratch0_tv[unwrap(red_idx)]
+                v1 = scratch1_tv[unwrap(red_idx)]
+                rocir.scf_ext.yield_([unwrap(v0), unwrap(v1)])
+            with ir.InsertionPoint(if_in.else_block):
+                z = arith.constant(T.f32(), 0.0).value
+                rocir.scf_ext.yield_([unwrap(z), unwrap(z)])
+
+            ww0, ww1 = if_in.results[0], if_in.results[1]
+            ww0 = _wave_reduce_add(ww0)
+            ww1 = _wave_reduce_add(ww1)
+
+            is_lane0_2 = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.eq,
+                unwrap(lane_i32),
+                unwrap(arith.constant(T.i32(), 0)),
+            ).result
+            if_lane0_2 = rocir.scf_ext.IfOp(unwrap(is_lane0_2))
+            with ir.InsertionPoint(if_lane0_2.then_block):
+                red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
+                scratch0_tv[unwrap(red_idx0)] = unwrap(ww0)
+                scratch1_tv[unwrap(red_idx0)] = unwrap(ww1)
+                rocir.scf_ext.yield_([])
+            rocir.scf_ext.yield_([])
+
+        gpu.barrier()
+        red_idx0 = rocir.crd2idx(rocir.make_coord(unwrap(zero_idx)), layout_red)
+        return scratch0_tv[unwrap(red_idx0)], scratch1_tv[unwrap(red_idx0)]
+
+    return block_reduce_add2

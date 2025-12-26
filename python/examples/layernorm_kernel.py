@@ -72,12 +72,23 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
     elem_type = dtype_to_elem_type(dtype_str)
     compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
 
+    # Register-row variant: each thread keeps its full slice in registers.
+    # With current tuning, each thread owns exactly 32 elements:
+    #   N == BLOCK_THREADS * VEC_WIDTH * 4  == 256 * 8 * 4 == 8192
+    tile_cols_py = BLOCK_THREADS * VEC_WIDTH
+    if N % tile_cols_py != 0:
+        raise ValueError(f"N must be divisible by BLOCK_THREADS*VEC_WIDTH ({tile_cols_py}), got N={N}")
+    num_tiles_py = N // tile_cols_py
+    if num_tiles_py != 4:
+        raise ValueError(
+            f"Expected per-thread 32 floats (tiles==4). Got N={N}, BLOCK_THREADS={BLOCK_THREADS}, "
+            f"VEC_WIDTH={VEC_WIDTH} => tiles={num_tiles_py}"
+        )
+
     # Allocate Shared Memory for block reductions (one slot per wave)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     smem_red_sum = allocator.allocate_array(T.f32(), RED_SLOTS)
     smem_red_sumsq = allocator.allocate_array(T.f32(), RED_SLOTS)
-    # Cache row in LDS to avoid 2nd global read of Input
-    smem_row = allocator.allocate_array(elem_type, N)
 
     @gpu.module("layernorm_module", [f'#rocdl.target<chip = "{arch}", abi = "500">'])
     def gpu_mod():
@@ -101,7 +112,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             base_ptr = allocator.get_base()
             s_sum = smem_red_sum(base_ptr).get()
             s_sumsq = smem_red_sumsq(base_ptr).get()
-            s_row = smem_row(base_ptr).get()
             # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = rocir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
@@ -109,11 +119,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             tensor_Out = rocir.make_tensor(Output, shape=(M, N), strides=(N, 1))
             tensor_Gamma = rocir.make_tensor(Gamma, shape=(N,), strides=(1,))
             tensor_Beta = rocir.make_tensor(Beta, shape=(N,), strides=(1,))
-            # Represent LDS row cache as a 2D tensor view (1, N) over a 1D memref.
-            tensor_S = rocir.make_tensor(s_row, shape=(1, N), strides=(N, 1))
             gIn = rocir.zipped_divide(tensor_In, (1, tile_cols))
             gOut = rocir.zipped_divide(tensor_Out, (1, tile_cols))
-            gS = rocir.zipped_divide(tensor_S, (1, tile_cols))
 
             thr_layout = rocir.make_ordered_layout((1, BLOCK_THREADS), order=(1, 0))
             val_layout = rocir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
@@ -136,10 +143,24 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 ir=ir,
                 zero_idx=zero_idx,
             )
+            block_reduce_add2 = reduce_utils.make_block_reduce_add2(
+                tid=tid,
+                fm_fast=fm_fast,
+                WARP_SIZE=WARP_SIZE,
+                RED_SLOTS=RED_SLOTS,
+                gpu=gpu,
+                arith=arith,
+                arith_ops=mlir_arith,
+                rocir=rocir,
+                T=T,
+                ir=ir,
+                zero_idx=zero_idx,
+            )
 
-            def bf16_pack_vec8_rne_no_nan(vec_f32):
-                # Manual bf16 pack: RNE rounding, intentionally *no* NaN/range fixups.
-                # This avoids the heavy cmp/cndmask sequences in default lowering on gfx942.
+            def bf16_pack_vec8_rne(vec_f32):
+                # Manual bf16 cast with RNE rounding (NaN-safe, no scaling/clip).
+                # We keep this path for gfx942 to avoid the particularly heavy default lowering,
+                # while preserving NaN/Inf semantics (this is still just an f32->bf16 cast).
                 vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
                 vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
                 vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
@@ -147,17 +168,32 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 c16_i32 = arith.constant(T.i32(), 16).value
                 c7fff_i32 = arith.constant(T.i32(), 0x7FFF).value
                 c1_i32 = arith.constant(T.i32(), 1).value
+                c_abs_mask_i32 = arith.constant(T.i32(), 0x7FFFFFFF).value
+                c_inf_i32 = arith.constant(T.i32(), 0x7F800000).value
+                c_qnan_bf16_i32 = arith.constant(T.i32(), 0x0040).value
 
                 c16_i32_v = vector.splat(vec_i32_ty, unwrap(c16_i32))
                 c7fff_i32_v = vector.splat(vec_i32_ty, unwrap(c7fff_i32))
                 c1_i32_v = vector.splat(vec_i32_ty, unwrap(c1_i32))
+                c_abs_mask_i32_v = vector.splat(vec_i32_ty, unwrap(c_abs_mask_i32))
+                c_inf_i32_v = vector.splat(vec_i32_ty, unwrap(c_inf_i32))
+                c_qnan_bf16_i32_v = vector.splat(vec_i32_ty, unwrap(c_qnan_bf16_i32))
 
                 u = mlir_arith.bitcast(vec_i32_ty, unwrap(vec_f32))
+
+                # Detect NaN: abs(u) > +Inf (works for both qNaN/sNaN, avoids mantissa checks).
+                abs_u = mlir_arith.AndIOp(unwrap(u), unwrap(c_abs_mask_i32_v)).result
+                is_nan = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ugt, unwrap(abs_u), unwrap(c_inf_i32_v)).result
+
                 hi = mlir_arith.ShRUIOp(unwrap(u), unwrap(c16_i32_v)).result
                 lsb = mlir_arith.AndIOp(unwrap(hi), unwrap(c1_i32_v)).result
                 bias = mlir_arith.AddIOp(unwrap(c7fff_i32_v), unwrap(lsb)).result
                 u_round = mlir_arith.AddIOp(unwrap(u), unwrap(bias)).result
-                bf16_bits = mlir_arith.ShRUIOp(unwrap(u_round), unwrap(c16_i32_v)).result
+                bf16_bits_rne = mlir_arith.ShRUIOp(unwrap(u_round), unwrap(c16_i32_v)).result
+
+                # For NaN, ensure we produce a quiet NaN in bf16 (mantissa != 0).
+                bf16_bits_nan = mlir_arith.OrIOp(unwrap(hi), unwrap(c_qnan_bf16_i32_v)).result
+                bf16_bits = rocir.arith.SelectOp(unwrap(is_nan), unwrap(bf16_bits_nan), unwrap(bf16_bits_rne)).result
 
                 even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                 odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
@@ -165,197 +201,126 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 packed = mlir_arith.OrIOp(unwrap(even), unwrap(odd_sh)).result
                 return vector.bitcast(vec_bf16_ty, unwrap(packed))
 
-            # Pass0: global -> LDS row cache (1-pass global read)
+            # Register row cache:
+            # Read Input once into registers (each thread holds 32 fp32 values = 4 vectors),
+            # then reuse those registers for reduction + normalize + writeback.
             c_zero = arith.constant(compute_type, 0.0).value
-            FULL_TILES = (N % (BLOCK_THREADS * VEC_WIDTH) == 0)
-
-            # If N is fully tiled, accumulate sum/sumsq directly from the global-load values
-            # (so bf16/f16 unpack happens only once). Otherwise, fall back to Pass1 LDS read.
             thread_sum = unwrap(c_zero)
             thread_sumsq = unwrap(c_zero)
+            # Direction D: reduce VGPR pressure by caching bf16/f16 payload vectors when possible
+            # (instead of caching already-extended f32 vectors).
+            cache_as_elem = (dtype_str != "f32")
+            in_local = []  # bf16/f16: list[vector<VEC_WIDTH x elem_type>]; f32: list[vector<VEC_WIDTH x f32>]
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
-                c_base = rocir.const_index(base_idx_int)
-                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
-                curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
+            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+            for tile_i in range(num_tiles_py):
+                blkIn = gIn[(unwrap(row), tile_i)]
+                thrIn = thr_copy_e.partition_S(blkIn)
+                frgIn = rocir.make_fragment_like(thrIn, elem_type)
+                vec_e = rocir.copy(
+                    tiled_copy_e,
+                    thrIn,
+                    frgIn,
+                    nontemporal=USE_NONTEMPORAL,
+                    alignment=VEC_ALIGN,
+                    return_vector=True,
+                )
 
-                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
-                if tile_safe:
-                    tile_i = base_idx_int // tile_cols  # python int
-                    blkIn = gIn[(unwrap(row), tile_i)]
-                    blkS = gS[(0, tile_i)]
-                    thrIn = thr_copy_e.partition_S(blkIn)
-                    thrS = thr_copy_e.partition_S(blkS)
-                    vec_e = rocir.copy(
-                        tiled_copy_e,
-                        thrIn,
-                        thrS,
-                        nontemporal=USE_NONTEMPORAL,
-                        alignment=VEC_ALIGN,
-                        return_vector=True,
-                    )
-
-                    if FULL_TILES:
-                        vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        vec = vec_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(vec_e))
-                        vec2 = mlir_arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
-                        red = vector.reduction(compute_type, "add", unwrap(vec), fastmath=fm_fast)
-                        red2 = vector.reduction(compute_type, "add", unwrap(vec2), fastmath=fm_fast)
-                        thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
-                        thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
+                if cache_as_elem:
+                    in_local.append(vec_e)
+                    x = mlir_arith.extf(vec_type_c, unwrap(vec_e))
                 else:
-                    c_N = rocir.const_index(N)
-                    for k in range(VEC_WIDTH):
-                        c_k = rocir.const_index(k)
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        if_store = scf.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
-                            v_e = tensor_In[(unwrap(row), unwrap(idx_k))]
-                            tensor_S[(unwrap(c0_idx), unwrap(idx_k))] = unwrap(v_e)
-                            scf.yield_([])
+                    x = vec_e
+                    in_local.append(x)
 
-            gpu.barrier()
+                x2 = mlir_arith.MulFOp(unwrap(x), unwrap(x), fastmath=fm_fast).result
+                red = vector.reduction(compute_type, "add", unwrap(x), fastmath=fm_fast)
+                red2 = vector.reduction(compute_type, "add", unwrap(x2), fastmath=fm_fast)
+                thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
+                thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
 
-            # Pass1: sum / sumsq (from LDS row cache)
-            # If fully tiled, we've already accumulated from Pass0 global loads.
-            if not FULL_TILES:
-                thread_sum = unwrap(c_zero)
-                thread_sumsq = unwrap(c_zero)
+            sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
-                for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
-                    c_base = rocir.const_index(base_idx_int)
-                    thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
-                    curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
-
-                    tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
-                    if tile_safe:
-                        vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                        vec_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
-                        vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        vec = vec_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(vec_e))
-                        vec2 = mlir_arith.MulFOp(unwrap(vec), unwrap(vec), fastmath=fm_fast).result
-                        red = vector.reduction(compute_type, "add", unwrap(vec), fastmath=fm_fast)
-                        red2 = vector.reduction(compute_type, "add", unwrap(vec2), fastmath=fm_fast)
-                        thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
-                        thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
-                    else:
-                        c_N = rocir.const_index(N)
-                        for k in range(VEC_WIDTH):
-                            c_k = rocir.const_index(k)
-                            idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                            is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                            if_load = scf.IfOp(unwrap(is_valid), [elem_type], hasElse=True)
-                            with ir.InsertionPoint(if_load.then_block):
-                                v_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
-                                scf.yield_([unwrap(v_e)])
-                            with ir.InsertionPoint(if_load.else_block):
-                                # dummy (won't be used)
-                                scf.yield_([unwrap(arith.constant(elem_type, 0.0).value)])
-                            v_e = if_load.results[0]
-                            v = unwrap(v_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(v_e))
-                            v2 = mlir_arith.MulFOp(unwrap(v), unwrap(v), fastmath=fm_fast).result
-                            thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(v), fastmath=fm_fast).result
-                            thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(v2), fastmath=fm_fast).result
-
-            sum_val = block_reduce_add(thread_sum, s_sum)
-            sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
-
-            mean = mlir_arith.DivFOp(unwrap(sum_val), unwrap(n_float.value), fastmath=fm_fast).result
-            mean_sq = mlir_arith.DivFOp(unwrap(sumsq_val), unwrap(n_float.value), fastmath=fm_fast).result
+            inv_n = arith.constant(compute_type, 1.0 / float(N))
+            mean = mlir_arith.MulFOp(unwrap(sum_val), unwrap(inv_n), fastmath=fm_fast).result
+            mean_sq = mlir_arith.MulFOp(unwrap(sumsq_val), unwrap(inv_n), fastmath=fm_fast).result
             mean2 = mlir_arith.MulFOp(unwrap(mean), unwrap(mean), fastmath=fm_fast).result
             var = mlir_arith.SubFOp(unwrap(mean_sq), unwrap(mean2), fastmath=fm_fast).result
 
             var_eps = mlir_arith.AddFOp(unwrap(var), unwrap(eps.value), fastmath=fm_fast).result
-            rstd = math.rsqrt(unwrap(var_eps))
+            # Keep fast-math behavior consistent across the full LN pipeline (incl. rsqrt).
+            rstd = math.rsqrt(unwrap(var_eps), fastmath=fm_fast)
 
-            # Pass2: normalize + affine + store (vectorized)
+            # Normalize + affine + store (vectorized), reusing in_local registers.
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
             mean_splat = vector.splat(vec_type_c, unwrap(mean))
             rstd_splat = vector.splat(vec_type_c, unwrap(rstd))
 
-            for base_idx_int in range(0, N, BLOCK_THREADS * VEC_WIDTH):
+            # Direction C: software-pipeline Gamma/Beta loads to hide memory latency.
+            # Load tile0 gamma/beta first, then in each iteration prefetch tile_{i+1}
+            # before computing tile_i.
+            thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
+            c_base0 = rocir.const_index(0)
+            curr_idx0 = mlir_arith.AddIOp(unwrap(c_base0), unwrap(thread_offset_base)).result
+            g_e_cur = vector.load(vec_type_e, Gamma, [unwrap(curr_idx0)], alignment=VEC_ALIGN)
+            b_e_cur = vector.load(vec_type_e, Beta, [unwrap(curr_idx0)], alignment=VEC_ALIGN)
+            g_cur = g_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e_cur))
+            b_cur = b_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e_cur))
+
+            for tile_i in range(num_tiles_py):
+                base_idx_int = tile_i * tile_cols
                 c_base = rocir.const_index(base_idx_int)
-                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), rocir.const_index(VEC_WIDTH)).result
                 curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
-                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
-                if tile_safe:
-                    x_e = vector.load(vec_type_e, s_row, [unwrap(curr_idx)], alignment=VEC_ALIGN)
-                    # Gamma/Beta are reused across many blocks: do NOT use nontemporal here.
-                    # Let caches work for them.
-                    g_e = vector.load(vec_type_e, Gamma, [unwrap(curr_idx)], alignment=VEC_ALIGN)
-                    b_e = vector.load(vec_type_e, Beta, [unwrap(curr_idx)], alignment=VEC_ALIGN)
-
-                    x = x_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(x_e))
-                    g = g_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e))
-                    b = b_e if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e))
-
-                    diff = mlir_arith.SubFOp(unwrap(x), unwrap(mean_splat), fastmath=fm_fast).result
-                    norm = mlir_arith.MulFOp(unwrap(diff), unwrap(rstd_splat), fastmath=fm_fast).result
-                    scaled = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
-                    y = mlir_arith.AddFOp(unwrap(scaled), unwrap(b), fastmath=fm_fast).result
-
-                    if dtype_str == "bf16":
-                        # Arch-dependent BF16 pack:
-                        # - gfx942: use manual RNE pack to avoid heavy lowering.
-                        # - gfx950+: rely on hardware v_cvt_pk_bf16_f32 via truncf lowering.
-                        if USE_HW_CVT_PK_BF16_F32:
-                            out_bf16 = mlir_arith.truncf(vec_type_e, unwrap(y))
-                        else:
-                            out_bf16 = bf16_pack_vec8_rne_no_nan(y)
-                        tile_i = base_idx_int // tile_cols  # python int
-                        blkOut = gOut[(unwrap(row), tile_i)]
-                        thrOut = thr_copy_e.partition_S(blkOut)
-                        frgOut = rocir.make_fragment_like(thrOut, elem_type)
-                        vector.store(out_bf16, frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
-                        rocir.copy(
-                            tiled_copy_e,
-                            frgOut,
-                            thrOut,
-                            nontemporal=USE_NONTEMPORAL,
-                            alignment=VEC_ALIGN,
-                        )
-                    else:
-                        y_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, unwrap(y))
-                        tile_i = base_idx_int // tile_cols  # python int
-                        blkOut = gOut[(unwrap(row), tile_i)]
-                        thrOut = thr_copy_e.partition_S(blkOut)
-                        frgOut = rocir.make_fragment_like(thrOut, elem_type)
-                        vector.store(unwrap(y_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
-                        rocir.copy(
-                            tiled_copy_e,
-                            frgOut,
-                            thrOut,
-                            nontemporal=USE_NONTEMPORAL,
-                            alignment=VEC_ALIGN,
-                        )
+                x = in_local[tile_i]
+                if cache_as_elem:
+                    x = mlir_arith.extf(vec_type_c, unwrap(x))
+                # Prefetch next tile's Gamma/Beta early (loads are cache-friendly).
+                if tile_i + 1 < num_tiles_py:
+                    next_base_idx_int = (tile_i + 1) * tile_cols
+                    c_base_next = rocir.const_index(next_base_idx_int)
+                    next_idx = mlir_arith.AddIOp(unwrap(c_base_next), unwrap(thread_offset_base)).result
+                    g_e_next = vector.load(vec_type_e, Gamma, [unwrap(next_idx)], alignment=VEC_ALIGN)
+                    b_e_next = vector.load(vec_type_e, Beta, [unwrap(next_idx)], alignment=VEC_ALIGN)
+                    g_next = g_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e_next))
+                    b_next = b_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e_next))
                 else:
-                    c_N = rocir.const_index(N)
-                    # scalar tail
-                    for k in range(VEC_WIDTH):
-                        c_k = rocir.const_index(k)
-                        idx_k = mlir_arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
-                        is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
-                        if_store = scf.IfOp(unwrap(is_valid))
-                        with ir.InsertionPoint(if_store.then_block):
-                            x_e = tensor_S[(unwrap(c0_idx), unwrap(idx_k))]
-                            g_e = tensor_Gamma[unwrap(idx_k)]
-                            b_e = tensor_Beta[unwrap(idx_k)]
-                            x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
-                            g = unwrap(g_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(g_e))
-                            b = unwrap(b_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(b_e))
-                            diff = mlir_arith.SubFOp(unwrap(x), unwrap(mean), fastmath=fm_fast).result
-                            norm = mlir_arith.MulFOp(unwrap(diff), unwrap(rstd), fastmath=fm_fast).result
-                            y = mlir_arith.AddFOp(
-                                unwrap(mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result),
-                                unwrap(b),
-                                fastmath=fm_fast,
-                            ).result
-                            y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
-                            tensor_Out[(unwrap(row), unwrap(idx_k))] = unwrap(y_e)
-                            scf.yield_([])
+                    g_next = g_cur
+                    b_next = b_cur
+
+                diff = mlir_arith.SubFOp(unwrap(x), unwrap(mean_splat), fastmath=fm_fast).result
+                norm = mlir_arith.MulFOp(unwrap(diff), unwrap(rstd_splat), fastmath=fm_fast).result
+                scaled = mlir_arith.MulFOp(unwrap(norm), unwrap(g_cur), fastmath=fm_fast).result
+                y = mlir_arith.AddFOp(unwrap(scaled), unwrap(b_cur), fastmath=fm_fast).result
+
+                if dtype_str == "bf16":
+                    # Arch-dependent BF16 pack:
+                    # - gfx942: use manual RNE pack to avoid heavy lowering.
+                    # - gfx950+: rely on hardware v_cvt_pk_bf16_f32 via truncf lowering.
+                    if USE_HW_CVT_PK_BF16_F32:
+                        out_e = mlir_arith.truncf(vec_type_e, unwrap(y))
+                    else:
+                        out_e = bf16_pack_vec8_rne(y)
+                else:
+                    out_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, unwrap(y))
+
+                blkOut = gOut[(unwrap(row), tile_i)]
+                thrOut = thr_copy_e.partition_S(blkOut)
+                frgOut = rocir.make_fragment_like(thrOut, elem_type)
+                vector.store(unwrap(out_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                rocir.copy(
+                    tiled_copy_e,
+                    frgOut,
+                    thrOut,
+                    nontemporal=USE_NONTEMPORAL,
+                    alignment=VEC_ALIGN,
+                )
+
+                # Advance the pipelined gamma/beta.
+                g_cur = g_next
+                b_cur = b_next
 
     return ctx
 
