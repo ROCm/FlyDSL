@@ -22,31 +22,33 @@ def Flir_CoordType : Type<CPred<"llvm::isa<::mlir::flir::CoordType>($_self)">, "
 //===----------------------------------------------------------------------===//
 
 def Flir_MakeShapeOp : Flir_Op<"make_shape", [Pure]> {
-  let summary = "Create a flir shape from index values or nested shapes";
+  let summary = "Create a flir shape (type-mode: structure/spec in type, dynamic leaves in operands)";
   let description = [{
-    Creates a shape value from runtime index values or nested shapes.
-    Supports both flat and nested (tuple) layouts.
-    Examples: 
-      - Flat: flir.make_shape %i, %j : (index, index) -> !flir.shape<2>
-      - Nested: flir.make_shape %s1, %s2 : (!flir.shape<2>, !flir.shape<3>) -> !flir.shape<2>
+    Creates a shape value.
+    This op is **type-mode only**:
+      - The tuple structure and any compile-time constants are encoded in the result type
+        (`!flir.shape<...>` / structure+dims).
+      - The operands contain **only the dynamic leaf index values** (in left-to-right leaf order).
   }];
-  let arguments = (ins Variadic<AnyTypeOf<[Index, Flir_ShapeType]>>:$values);
+  let arguments = (ins Variadic<Index>:$values);
   let results = (outs Flir_ShapeType:$result);
   let assemblyFormat = "$values attr-dict `:` functional-type($values, $result)";
+  let hasVerifier = 1;
 }
 
 def Flir_MakeStrideOp : Flir_Op<"make_stride", [Pure]> {
-  let summary = "Create a flir stride from index values or nested strides";
+  let summary = "Create a flir stride (type-mode: structure/spec in type, dynamic leaves in operands)";
   let description = [{
-    Creates a stride value from runtime index values or nested strides.
-    Supports both flat and nested (tuple) layouts.
-    Examples:
-      - Flat: flir.make_stride %i, %j : (index, index) -> !flir.stride<2>
-      - Nested: flir.make_stride %s1, %s2 : (!flir.stride<2>, !flir.stride<3>) -> !flir.stride<2>
+    Creates a stride value.
+    This op is **type-mode only**:
+      - The tuple structure and any compile-time constants are encoded in the result type
+        (`!flir.stride<...>` / structure+dims).
+      - The operands contain **only the dynamic leaf index values** (in left-to-right leaf order).
   }];
-  let arguments = (ins Variadic<AnyTypeOf<[Index, Flir_StrideType]>>:$values);
+  let arguments = (ins Variadic<Index>:$values);
   let results = (outs Flir_StrideType:$result);
   let assemblyFormat = "$values attr-dict `:` functional-type($values, $result)";
+  let hasVerifier = 1;
 }
 
 def Flir_MakeLayoutOp : Flir_Op<"make_layout", [Pure]> {
@@ -66,10 +68,12 @@ def Flir_MakeCoordOp : Flir_Op<"make_coord", [Pure]> {
     Creates a coordinate value from runtime index values.
     Example: flir.make_coord %i, %j : (index, index) -> !flir.coord<2>
   }];
-  // Support nested coord trees by allowing !flir.coord operands (like make_shape/make_stride).
-  let arguments = (ins Variadic<AnyTypeOf<[Index, Flir_CoordType]>>:$values);
+  // Coordinates are represented as a flat list of index operands.
+  // Nested coord SSA trees are not supported.
+  let arguments = (ins Variadic<Index>:$values);
   let results = (outs Flir_CoordType:$result);
   let assemblyFormat = "$values attr-dict `:` functional-type($values, $result)";
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -151,6 +155,27 @@ def Flir_Idx2CrdOp : Flir_Op<"idx2crd", []> {
   let arguments = (ins Index:$idx, Flir_LayoutType:$layout);
   let results = (outs Flir_CoordType:$result);
   let assemblyFormat = "$idx `,` $layout attr-dict `:` functional-type(operands, $result)";
+}
+
+//===----------------------------------------------------------------------===//
+// Swizzle Operations
+//===----------------------------------------------------------------------===//
+
+def Flir_SwizzleXor16Op : Flir_Op<"swizzle_xor16", [Pure]> {
+  let summary = "XOR-with-row swizzle for LDS bank-conflict avoidance (16B granularity)";
+  let description = [{
+    Computes:
+
+      %row_mod = %row remui %kBlocks16
+      %mask    = %row_mod * 16
+      %out     = %col xor %mask
+
+    This matches the common CK/ROCDSL-style LDS swizzle used for fp8/f16 tiles where
+    the K dimension is permuted at 16B granularity (preserving intra-16B order).
+  }];
+  let arguments = (ins Index:$row, Index:$col, Index:$kBlocks16);
+  let results = (outs Index:$result);
+  let assemblyFormat = "$row `,` $col `,` $kBlocks16 attr-dict `:` functional-type(operands, $result)";
 }
 
 //===----------------------------------------------------------------------===//

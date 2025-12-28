@@ -23,7 +23,7 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
-from tests.test_common import run_perftest
+from tests.test_common import checkAllclose, run_perftest
 
 
 def create_vec_add_kernel(
@@ -251,10 +251,8 @@ def benchmark_vector_add(tile_size: int = 4):
     print(f"    - Blocks: {num_blocks:,} x Threads/Block: {threads_per_block}")
     
     # Allocate device memory
-    a_host = np.random.randn(SIZE).astype(np.float32)
-    b_host = np.random.randn(SIZE).astype(np.float32)
-    a_dev = torch.tensor(a_host, device="cuda", dtype=torch.float32)
-    b_dev = torch.tensor(b_host, device="cuda", dtype=torch.float32)
+    a_dev = torch.randn(SIZE, device="cuda", dtype=torch.float32)
+    b_dev = torch.randn(SIZE, device="cuda", dtype=torch.float32)
     c_dev = torch.empty_like(a_dev)
 
     def kernel_launch():
@@ -277,18 +275,7 @@ def benchmark_vector_add(tile_size: int = 4):
     }
     
     # Verify correctness
-    c_host = c_dev.cpu().numpy()
-    expected = a_host + b_host
-    error = np.max(np.abs(c_host - expected))
-    
-    print(f"\n  Correctness Check:")
-    print(f"  Max error: {error:.2e}")
-    
-    # Print a standardized bandwidth line so run_tests.sh can pick it up (like matrixTranspose).
-    print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
-
-    # Print benchmark results
-    print(f"\n{results}")
+    error = checkAllclose(c_dev, a_dev + b_dev)
 
     torch_results = benchmark_pytorch_add(SIZE)
     if torch_results:

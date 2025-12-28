@@ -67,14 +67,7 @@ def get_user_code_loc(user_base: Optional[Path] = None):
         except Exception:
             return None
 
-    rocdsl_root = _pkg_root("rocdsl")
-    flyx_root = _pkg_root("flyx")  # optional; present when used via flyx-dsl checkout
-
     skip_roots = [mlir_extras_root_path, Path(sys.prefix)]
-    if rocdsl_root is not None:
-        skip_roots.append(rocdsl_root)
-    if flyx_root is not None:
-        skip_roots.append(flyx_root)
 
     prev_frame = inspect.currentframe().f_back
     # Back-compat: user_base historically was a *file* path used to skip frames in

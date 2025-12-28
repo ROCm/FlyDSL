@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Default to downloading llvm-project in the parent directory of rocDSL
+# Default to downloading llvm-project in the parent directory of flir
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
 LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
@@ -75,6 +75,6 @@ cmake --build . -j$(nproc)
 echo "=============================================="
 echo "LLVM/MLIR build completed successfully!"
 echo ""
-echo "To configure rocDSL, use:"
+echo "To configure flir, use:"
 echo "cmake .. -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir"
 echo "=============================================="

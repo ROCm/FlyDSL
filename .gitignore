@@ -2,7 +2,6 @@
 build/
 .flir/
 ## Legacy build outputs (pre-rename)
-.rocdsl/
 *.log
 
 # MLIR/nanobind generated type stubs (generated during build)

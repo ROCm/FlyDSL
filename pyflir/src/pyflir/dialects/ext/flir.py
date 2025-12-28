@@ -5,7 +5,7 @@ making it easier to construct layouts and perform layout transformations
 from Python code.
 """
 
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, Tuple
 
 from _mlir.ir import (
     Type,
@@ -252,58 +252,14 @@ def _extract_tuple_spec_from_flir_type(type_str: str) -> Optional[str]:
     return None
 
 
-def _is_flir_type(v: Value, prefix: str) -> bool:
-    try:
-        return str(v.type).startswith(prefix)
-    except Exception:
-        return False
-
-
-def _flatten_nested_shape_or_stride_value(v: Value, kind: str) -> Optional[tuple]:
-    """If v is produced by flir.make_shape/make_stride, flatten it into (spec, leaf_values)."""
-    try:
-        op = v.owner
-    except Exception:
-        return None
-    op_name = ""
-    try:
-        op_name = op.operation.name
-    except Exception:
-        try:
-            op_name = op.name
-        except Exception:
-            op_name = ""
-    expected = "flir.make_shape" if kind == "shape" else "flir.make_stride"
-    if op_name != expected:
-        return None
-
-    try:
-        operands = list(op.values)
-    except Exception:
-        # Generated opviews may use accessors like getValues().
-        try:
-            operands = list(op.getValues())
-        except Exception:
-            return None
-
-    child_specs = []
-    leaf_vals: List[Value] = []
-    for ov in operands:
-        ov = _unwrap_value(ov)
-        if isinstance(ov, Value) and _is_flir_type(ov, f"!flir.{kind}<"):
-            rec = _flatten_nested_shape_or_stride_value(ov, kind)
-            if rec is None:
-                return None
-            sub_spec, sub_leaves = rec
-            child_specs.append(sub_spec)
-            leaf_vals.extend(sub_leaves)
-        else:
-            # Leaf index value
-            const = _try_get_constant_index(ov) if isinstance(ov, Value) else None
-            child_specs.append(str(const) if const is not None else "?")
-            leaf_vals.append(ov)
-    spec = "(" + ",".join(child_specs) + ")"
-    return spec, leaf_vals
+def _require_index_value(v: Value, what: str) -> Value:
+    """Ensure v is an index-typed Value. Raise a clear error otherwise."""
+    from _mlir.ir import IndexType
+    if not isinstance(v, Value):
+        raise TypeError(f"{what} must be an MLIR Value (got {type(v)})")
+    if v.type != IndexType.get():
+        raise ValueError(f"{what} must have type 'index' (got {v.type})")
+    return v
 
 
 class TensorView:
@@ -620,12 +576,23 @@ class _PatternNode:
         return self
 
     def to_spec(self) -> str:
+        # Normalize away redundant 1-tuples that can arise from intermediate algebra steps
+        # (e.g. returning `_PatternNode.tup([leaf])`). For our type specs, `(x)` and `x`
+        # are equivalent except at the root where layout<...> requires a tuple-root.
+        def normalize(n: "_PatternNode") -> "_PatternNode":
+            if n.is_leaf:
+                return n
+            kids = [normalize(c) for c in n.children]
+            if len(kids) == 1:
+                return kids[0]
+            return _PatternNode.tup(kids)
+
         def emit(n: "_PatternNode") -> str:
             if n.is_leaf:
                 return "?" if n.value is None else str(n.value)
             return "(" + ",".join(emit(c) for c in n.children) + ")"
 
-        return emit(self.to_tuple_root())
+        return emit(normalize(self).to_tuple_root())
 
 
 def _parse_tuple_spec(spec: str) -> _PatternNode:
@@ -966,103 +933,94 @@ def make_shape(*dims, loc: Optional[Location] = None, ip: Optional[InsertionPoin
     if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
         dims = dims[0]
     
-    # Nested form: allow tuple/list and nested flir.make_shape results.
-    # If we can fully flatten to leaf index values, emit a tuple-spec type: !flir.shape<(...)>.
     nested_spec = None
-    nested_leaf_vals = None
+    nested_dyn_vals: Optional[List[Value]] = None
 
     # Normalize to a list for processing
     dims_list = list(dims)
     if len(dims_list) == 1 and isinstance(dims_list[0], (tuple, list)):
         dims_list = list(dims_list[0])
 
-    # Detect nested structure (tuple/list or shape values)
-    has_nested = any(isinstance(d, (tuple, list)) for d in dims_list) or any(
-        isinstance(_unwrap_value(d), Value) and _is_flir_type(_unwrap_value(d), "!flir.shape<") for d in dims_list
-    )
+    # Detect nested structure (tuple/list).
+    #
+    # NOTE: We intentionally avoid probing MLIR Value types here (e.g. via `str(v.type)`),
+    # because doing so has been observed to trigger interpreter-level crashes when a value
+    # becomes invalid/dangling in some edge cases. The common/idiomatic way to build nested
+    # shapes is via tuples/lists, which we continue to support.
+    has_nested = any(isinstance(d, (tuple, list)) for d in dims_list)
 
     if has_nested:
-        # Build a spec and leaf list by recursively expanding nested make_shape ops and tuples.
-        child_specs = []
-        leaf_vals: List[Value] = []
+        # Build a spec and leaf list from tuples/lists only (type-mode).
+        child_specs: List[str] = []
+        dyn_leaf_vals: List[Value] = []
 
         def consume_node(node):
-            nonlocal child_specs, leaf_vals
+            nonlocal child_specs, dyn_leaf_vals
             if isinstance(node, (tuple, list)):
                 sub_child_specs = []
                 for x in node:
                     consume_node(x)
                     # move last spec into sub list
                     sub_child_specs.append(child_specs.pop())
-                    # leaf_vals already appended
                 child_specs.append("(" + ",".join(sub_child_specs) + ")")
                 return
 
-            v = _unwrap_value(node)
-            if isinstance(v, Value) and _is_flir_type(v, "!flir.shape<"):
-                rec = _flatten_nested_shape_or_stride_value(v, "shape")
-                if rec is None:
-                    raise ValueError("Cannot flatten nested flir.shape value without defining flir.make_shape")
-                sub_spec, sub_leaves = rec
-                child_specs.append(sub_spec)
-                leaf_vals.extend(sub_leaves)
+            # IMPORTANT: do not call `_unwrap_value` on python ints here, otherwise
+            # it will materialize `arith.constant` ops (exactly what we're avoiding).
+            if isinstance(node, int):
+                child_specs.append(str(int(node)))
                 return
 
+            v = _unwrap_value(node)
+            # Disallow passing `!flir.shape` values as operands.
+            if isinstance(v, Value) and str(v.type).startswith("!flir.shape<"):
+                raise ValueError("Passing flir.shape values into make_shape is not supported; use tuple/list nesting instead.")
+
             # Leaf index
-            const = _try_get_constant_index(v) if isinstance(v, Value) else None
+            const = None
+            if isinstance(v, Value):
+                const = _try_get_constant_index(v)
             child_specs.append(str(const) if const is not None else "?")
-            leaf_vals.append(v)
+            if const is None:
+                # Only dynamic leaves become operands.
+                dyn_leaf_vals.append(_require_index_value(v, "shape leaf"))
 
         try:
             for d in dims_list:
                 consume_node(d)
             nested_spec = "(" + ",".join(child_specs) + ")"
-            nested_leaf_vals = leaf_vals
+            nested_dyn_vals = dyn_leaf_vals
         except Exception:
             nested_spec = None
-            nested_leaf_vals = None
+            nested_dyn_vals = None
 
-    if nested_spec is not None and nested_leaf_vals is not None:
+    if nested_spec is not None and nested_dyn_vals is not None:
         result_type = Type.parse(f'!flir.shape<{nested_spec}>')
-
-        def pack_operands(node):
-            if isinstance(node, (tuple, list)):
-                return make_shape(*node, loc=loc, ip=ip)
-            v = _unwrap_value(node)
-            if isinstance(v, Value) and _is_flir_type(v, "!flir.shape<"):
-                return v
-            return v
-
-        operands = [_unwrap_value(pack_operands(d)) for d in dims_list]
+        # Type-mode: operands are the dynamic leaves only.
+        operands = [_unwrap_value(v) for v in nested_dyn_vals]
     else:
         # Fallback: flat shape only
         flat_dims = _flatten_nested(dims)
         rank = len(flat_dims)
-        # If any dimension is a compile-time constant, encode it in the type spec
-        # so downstream passes can "see" static information early:
-        #   !flir.shape<(4,32)> or partial !flir.shape<(4,?)>
-        spec_elems = []
-        has_any_const = False
+        spec_elems: List[str] = []
+        dyn_leaf_vals: List[Value] = []
         for d in flat_dims:
+            if isinstance(d, int):
+                spec_elems.append(str(int(d)))
+                continue
             v = _unwrap_value(d)
             const = None
-            if isinstance(v, int):
-                const = v
-            elif isinstance(v, Value):
+            if isinstance(v, Value):
                 const = _try_get_constant_index(v)
-            if const is not None:
-                has_any_const = True
-                spec_elems.append(str(const))
-            else:
-                spec_elems.append("?")
-        if has_any_const:
-            flat_spec = "(" + ",".join(spec_elems) + ")"
-            result_type = Type.parse(f"!flir.shape<{flat_spec}>")
-        else:
-            result_type = ShapeType.get(rank)
+            spec_elems.append(str(const) if const is not None else "?")
+            if const is None:
+                dyn_leaf_vals.append(_require_index_value(v, "shape leaf"))
+        flat_spec = "(" + ",".join(spec_elems) + ")"
+        result_type = Type.parse(f"!flir.shape<{flat_spec}>")
     
-    if nested_spec is None or nested_leaf_vals is None:
-        operands = [_unwrap_value(d) for d in flat_dims]
+    if nested_spec is None or nested_dyn_vals is None:
+        # Type-mode: operands are the dynamic leaves only.
+        operands = [_unwrap_value(v) for v in dyn_leaf_vals]
 
     with ip or InsertionPoint.current:
         return flir_ops.MakeShapeOp(result_type, operands, loc=loc).result
@@ -1098,22 +1056,21 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
         strides = strides[0]
     
     nested_spec = None
-    nested_leaf_vals = None
+    nested_dyn_vals: Optional[List[Value]] = None
 
     strides_list = list(strides)
     if len(strides_list) == 1 and isinstance(strides_list[0], (tuple, list)):
         strides_list = list(strides_list[0])
 
-    has_nested = any(isinstance(s, (tuple, list)) for s in strides_list) or any(
-        isinstance(_unwrap_value(s), Value) and _is_flir_type(_unwrap_value(s), "!flir.stride<") for s in strides_list
-    )
+    # Detect nested structure (tuple/list). See make_shape() for rationale.
+    has_nested = any(isinstance(s, (tuple, list)) for s in strides_list)
 
     if has_nested:
-        child_specs = []
-        leaf_vals: List[Value] = []
+        child_specs: List[str] = []
+        dyn_leaf_vals: List[Value] = []
 
         def consume_node(node):
-            nonlocal child_specs, leaf_vals
+            nonlocal child_specs, dyn_leaf_vals
             if isinstance(node, (tuple, list)):
                 sub_child_specs = []
                 for x in node:
@@ -1122,71 +1079,55 @@ def make_stride(*strides, loc: Optional[Location] = None, ip: Optional[Insertion
                 child_specs.append("(" + ",".join(sub_child_specs) + ")")
                 return
 
-            v = _unwrap_value(node)
-            if isinstance(v, Value) and _is_flir_type(v, "!flir.stride<"):
-                rec = _flatten_nested_shape_or_stride_value(v, "stride")
-                if rec is None:
-                    raise ValueError("Cannot flatten nested flir.stride value without defining flir.make_stride")
-                sub_spec, sub_leaves = rec
-                child_specs.append(sub_spec)
-                leaf_vals.extend(sub_leaves)
+            if isinstance(node, int):
+                child_specs.append(str(int(node)))
                 return
 
-            const = _try_get_constant_index(v) if isinstance(v, Value) else None
+            v = _unwrap_value(node)
+            # Disallow passing `!flir.stride` values as operands.
+            if isinstance(v, Value) and str(v.type).startswith("!flir.stride<"):
+                raise ValueError("Passing flir.stride values into make_stride is not supported; use tuple/list nesting instead.")
+
+            const = None
+            if isinstance(v, Value):
+                const = _try_get_constant_index(v)
             child_specs.append(str(const) if const is not None else "?")
-            leaf_vals.append(v)
+            if const is None:
+                dyn_leaf_vals.append(_require_index_value(v, "stride leaf"))
 
         try:
             for s in strides_list:
                 consume_node(s)
             nested_spec = "(" + ",".join(child_specs) + ")"
-            nested_leaf_vals = leaf_vals
+            nested_dyn_vals = dyn_leaf_vals
         except Exception:
             nested_spec = None
-            nested_leaf_vals = None
+            nested_dyn_vals = None
 
-    if nested_spec is not None and nested_leaf_vals is not None:
-        # Type carries structure. Prefer representing structure in operands too by
-        # passing nested !flir.stride operands for tuple nodes.
+    if nested_spec is not None and nested_dyn_vals is not None:
         result_type = Type.parse(f'!flir.stride<{nested_spec}>')
-
-        def pack_operands(node):
-            if isinstance(node, (tuple, list)):
-                return make_stride(*node, loc=loc, ip=ip)
-            v = _unwrap_value(node)
-            if isinstance(v, Value) and _is_flir_type(v, "!flir.stride<"):
-                return v
-            return v
-
-        operands = [_unwrap_value(pack_operands(s)) for s in strides_list]
+        operands = [_unwrap_value(v) for v in nested_dyn_vals]
     else:
         flat_strides = _flatten_nested(strides)
         rank = len(flat_strides)
-        # Same idea as make_shape: encode constant strides into the type spec
-        # e.g. !flir.stride<(32,1)> or partial !flir.stride<(?,1)>
-        spec_elems = []
-        has_any_const = False
+        spec_elems: List[str] = []
+        dyn_leaf_vals: List[Value] = []
         for s in flat_strides:
+            if isinstance(s, int):
+                spec_elems.append(str(int(s)))
+                continue
             v = _unwrap_value(s)
             const = None
-            if isinstance(v, int):
-                const = v
-            elif isinstance(v, Value):
+            if isinstance(v, Value):
                 const = _try_get_constant_index(v)
-            if const is not None:
-                has_any_const = True
-                spec_elems.append(str(const))
-            else:
-                spec_elems.append("?")
-        if has_any_const:
-            flat_spec = "(" + ",".join(spec_elems) + ")"
-            result_type = Type.parse(f"!flir.stride<{flat_spec}>")
-        else:
-            result_type = StrideType.get(rank)
+            spec_elems.append(str(const) if const is not None else "?")
+            if const is None:
+                dyn_leaf_vals.append(_require_index_value(v, "stride leaf"))
+        flat_spec = "(" + ",".join(spec_elems) + ")"
+        result_type = Type.parse(f"!flir.stride<{flat_spec}>")
     
-    if nested_spec is None or nested_leaf_vals is None:
-        # Flat: keep dense leaf operands.
-        operands = [_unwrap_value(s) for s in flat_strides]
+    if nested_spec is None or nested_dyn_vals is None:
+        operands = [_unwrap_value(v) for v in dyn_leaf_vals]
 
     with ip or InsertionPoint.current:
         return flir_ops.MakeStrideOp(result_type, operands, loc=loc).result
@@ -1293,46 +1234,22 @@ def make_coord(*coords: Value, loc: Optional[Location] = None, ip: Optional[Inse
     if len(coords) == 1 and isinstance(coords[0], (tuple, list)):
         coords = tuple(coords[0])
 
-    with ip or InsertionPoint.current:
-        # Build a nested coord type spec (domain unknown => '?' leaves). Prefer encoding
-        # structure in operands by nesting flir.make_coord ops for tuple nodes.
-        has_nested = any(isinstance(c, (tuple, list)) for c in coords)
-        if has_nested:
-            child_specs: List[str] = []
-
-            def build_operand(node):
-                nonlocal child_specs
-                if isinstance(node, (tuple, list)):
-                    sub_specs = []
-                    sub_operands = []
-                    for x in node:
-                        sub_operands.append(build_operand(x))
-                        sub_specs.append(child_specs.pop())
-                    sub_spec = "(" + ",".join(sub_specs) + ")"
-                    child_specs.append(sub_spec)
-                    # For sub-coords, preserve the subtree shape in the type as well.
-                    sub_type = Type.parse(f"!flir.coord<{sub_spec}>")
-                    return flir_ops.MakeCoordOp(sub_type, sub_operands, loc=loc, ip=ip).result
-
-                v = _unwrap_value(node)
-                if isinstance(v, Value) and _is_flir_type(v, "!flir.coord<"):
-                    # Allow passing a pre-built coord subtree.
-                    child_specs.append("?")
-                    return v
-                child_specs.append("?")
-                return v
-
-            operands = []
-            for c in coords:
-                operands.append(build_operand(c))
-
-            nested_spec = "(" + ",".join(child_specs) + ")"
-            result_type = Type.parse(f"!flir.coord<{nested_spec}>")
+    # Coordinates are represented as a flat list of index operands.
+    # Legacy nested coord SSA trees are not supported.
+    flat = _flatten_nested(coords)
+    operands: List[Value] = []
+    for c in flat:
+        if isinstance(c, int):
+            operands.append(_require_index_value(_unwrap_value(c), "coord leaf"))
         else:
-            rank = len(coords)
-            result_type = CoordType.get(rank)
-            operands = [_unwrap_value(c) for c in coords]
+            operands.append(_require_index_value(_unwrap_value(c), "coord leaf"))
 
+    with ip or InsertionPoint.current:
+        # Use a structured coord type by default with unknown domain shape "(?,?,...)".
+        # (`idx2crd` may use a more structured type derived from the layout domain.)
+        rank = len(operands)
+        spec = "(" + ",".join(["?"] * rank) + ")"
+        result_type = Type.parse(f"!flir.coord<{spec}>")
         return flir_ops.MakeCoordOp(result_type, operands, loc=loc).result
 
 
@@ -1389,7 +1306,8 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
     layout_type_str = str(layout.type)
     if "<" not in layout_type_str or ">" not in layout_type_str:
         rank = _extract_rank_from_flir_type_str(layout_type_str)
-        result_type = CoordType.get(rank)
+        spec = "(" + ",".join(["?"] * rank) + ")"
+        result_type = Type.parse(f"!flir.coord<{spec}>")
     else:
         inner = layout_type_str.split("<", 1)[1].rsplit(">", 1)[0].strip()
 
@@ -1419,11 +1337,33 @@ def idx2crd(idx: Value, layout: Value, loc: Optional[Location] = None, ip: Optio
             result_type = Type.parse(f"!flir.coord<{shape_spec}>")
         else:
             rank = _extract_rank_from_flir_type_str(layout_type_str)
-            result_type = CoordType.get(rank)
+            spec = "(" + ",".join(["?"] * rank) + ")"
+            result_type = Type.parse(f"!flir.coord<{spec}>")
     
     with ip or InsertionPoint.current:
         op = flir_ops.Idx2CrdOp(result_type, _unwrap_value(idx), _unwrap_value(layout), loc=loc, ip=ip)
         return op.results[0]
+
+
+def swizzle_xor16(row: Value, col: Value, k_blocks16: Value,
+                  loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None) -> Value:
+    """XOR-with-row swizzle on the K dimension at 16B granularity.
+
+    Computes: col xor ((row % k_blocks16) * 16)
+    Lowered by FlirToStandard to arith ops (matching ROCDSL-style swizzle).
+    """
+    loc = _get_location(loc)
+    with ip or InsertionPoint.current:
+        # ODS-generated builders for dialect ops require passing the result type.
+        # Use the generated helper function for stable argument naming.
+        return flir_ops.swizzle_xor16(
+            IndexType.get(),
+            _unwrap_value(row),
+            _unwrap_value(col),
+            _unwrap_value(k_blocks16),
+            loc=loc,
+            ip=ip,
+        )
 
 
 
@@ -2554,7 +2494,11 @@ def copy(copy_desc, src, dst,
          src_indices: Optional[List[Value]] = None,
          dst_indices: Optional[List[Value]] = None,
          pred: Optional[Value] = None,
+         dst_swizzle_xor16_kblocks: Optional[Value] = None,
+         dst_swizzle_xor16_dims: Optional[Tuple[int, int]] = (0, 1),
          *,
+         src_buffer_resource: Optional[Value] = None,
+         src_buffer_offset_in_bytes: bool = True,
          nontemporal: Optional[bool] = None,
          alignment: Optional[int] = None,
          return_vector: bool = False,
@@ -2581,6 +2525,30 @@ def copy(copy_desc, src, dst,
     # If return_vector=True, we capture the last vector value loaded by the vectorized path.
     captured_vec = {"val": None}
 
+    def _maybe_swizzle_dst_indices(idx_list: List[Value]) -> List[Value]:
+        """Optionally apply XOR-with-row swizzle to dst indices (2D only).
+
+        This is intended for LDS bank-conflict avoidance where we permute the
+        K dimension at 16B granularity:
+          col' = col xor ((row % kBlocks16) * 16)
+        """
+        if dst_swizzle_xor16_kblocks is None or dst_swizzle_xor16_dims is None:
+            return idx_list
+        if len(idx_list) < 2:
+            return idx_list
+        row_dim, col_dim = dst_swizzle_xor16_dims
+        if row_dim < 0 or col_dim < 0:
+            return idx_list
+        if row_dim >= len(idx_list) or col_dim >= len(idx_list):
+            return idx_list
+        row = _unwrap_value(idx_list[row_dim])
+        col = _unwrap_value(idx_list[col_dim])
+        kblocks = _unwrap_value(dst_swizzle_xor16_kblocks)
+        swz = flir_ops.swizzle_xor16(IndexType.get(), row, col, kblocks, loc=loc, ip=ip)
+        out = list(idx_list)
+        out[col_dim] = _unwrap_value(swz)
+        return out
+
     def emit_tensor_copy(copy_shape, src_view: TensorView, dst_view: TensorView, pred_view: Optional[Union[TensorView, Value]]):
         from _mlir.dialects import vector
         from _mlir.ir import VectorType
@@ -2596,7 +2564,8 @@ def copy(copy_desc, src, dst,
             if dim == len(copy_shape):
                 # Scalar fall-back (should be covered by vectorized path if possible)
                 load_idx = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(i) for i in src_idx], src_view.strides, loc)
-                store_idx = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(i) for i in dst_idx], dst_view.strides, loc)
+                dst_idx2 = _maybe_swizzle_dst_indices([_unwrap_value(i) for i in dst_idx])
+                store_idx = _normalize_indices_to_memref(dst_view.memref, dst_idx2, dst_view.strides, loc)
                 load_op = memref_dialect.load(src_view.memref, load_idx)
                 val = load_op.result if hasattr(load_op, "result") else load_op
                 val = _unwrap_value(val)
@@ -2666,7 +2635,8 @@ def copy(copy_desc, src, dst,
                         vec_type = VectorType.get((vector_size,), elem_type)
                         
                         load_indices = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(idx) for idx in vec_src_idx], src_view.strides, loc)
-                        store_indices = _normalize_indices_to_memref(dst_view.memref, [_unwrap_value(idx) for idx in vec_dst_idx], dst_view.strides, loc)
+                        vec_dst_idx2 = _maybe_swizzle_dst_indices([_unwrap_value(idx) for idx in vec_dst_idx])
+                        store_indices = _normalize_indices_to_memref(dst_view.memref, vec_dst_idx2, dst_view.strides, loc)
 
                         # Vector Load
                         vec_val = vector.load(
@@ -2745,10 +2715,105 @@ def copy(copy_desc, src, dst,
         with ip or InsertionPoint.current:
             recurse(0, [], [], [])
 
+    def emit_tensor_load(copy_shape, src_view: TensorView):
+        """Load-only path (no dst), primarily for gmem->register vector loads.
+
+        Currently supported:
+        - 1D TensorView
+        - return_vector=True
+        - extent == vector_size
+        """
+        from _mlir.dialects import vector
+        from _mlir.ir import VectorType
+
+        if not return_vector:
+            raise ValueError("copy(load-only) requires return_vector=True when dst is None")
+        if len(copy_shape) != 1:
+            raise ValueError("copy(load-only) currently supports only 1D shapes")
+
+        extent = int(copy_shape[0])
+
+        vector_size = 1
+        if isinstance(copy_desc, TiledCopy) and copy_desc.copy_atom:
+            vector_size = copy_desc.copy_atom.vector_size
+        elif hasattr(copy_desc, "vector_size"):
+            vector_size = copy_desc.vector_size
+
+        if extent != int(vector_size):
+            raise ValueError(
+                f"copy(load-only) expects extent==vector_size (got {extent} vs {vector_size})"
+            )
+
+        if src_buffer_resource is not None:
+            try:
+                from pyflir.dialects.ext import buffer_ops as _buffer_ops
+            except Exception:
+                from . import buffer_ops as _buffer_ops  # type: ignore
+
+            # Specialize for fp8 where element bytes == 1 and base index is in bytes.
+            elem_ty_str = str(src_view.element_type)
+            is_f8 = ("f8" in elem_ty_str) or ("Float8" in elem_ty_str)
+            if is_f8 and extent in (8, 16) and (extent % 4 == 0):
+                i32_ty = IntegerType.get_signless(32)
+                vec_width = extent // 4  # 8B -> dwordx2, 16B -> dwordx4
+                base0 = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
+                if src_buffer_offset_in_bytes:
+                    # base index is in bytes (fp8 elements). Convert to i32 element offset.
+                    c4 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 4), loc=loc).result
+                    idx_i32 = arith.DivSIOp(_unwrap_value(base0), _unwrap_value(c4), loc=loc).result
+                else:
+                    # base index is already an i32-element offset for dtype=i32 loads.
+                    idx_i32 = _unwrap_value(base0)
+                i32_vec = _buffer_ops.buffer_load(
+                    _unwrap_value(src_buffer_resource),
+                    idx_i32,
+                    vec_width=vec_width,
+                    dtype=i32_ty,
+                )
+                vec_f8_ty = VectorType.get((extent,), src_view.element_type)
+                return vector.BitCastOp(vec_f8_ty, i32_vec).result
+
+        # Generic path: vector.load
+        base = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
+        idxs = _normalize_indices_to_memref(src_view.memref, [_unwrap_value(base)], src_view.strides, loc)
+        vec_type = VectorType.get((extent,), src_view.element_type)
+        with ip or InsertionPoint.current:
+            return vector.load(
+                vec_type,
+                src_view.memref,
+                idxs,
+                nontemporal=nontemporal,
+                alignment=alignment,
+            )
+
     if isinstance(copy_desc, TiledCopy) and isinstance(src, TensorView) and isinstance(dst, TensorView):
         # pred can be TensorView or scalar Value
         emit_tensor_copy(copy_desc.val_shape, src, dst, pred)
         return captured_vec["val"] if return_vector else None
+
+    # Vector store path: src is a vector Value and dst is a TensorView.
+    try:
+        from _mlir.ir import VectorType as _VectorType
+    except Exception:
+        _VectorType = None  # type: ignore
+    if isinstance(dst, TensorView):
+        v = _unwrap_value(src)
+        if _VectorType is not None and isinstance(getattr(v, "type", None), _VectorType):
+            from _mlir.dialects import vector as vector_dialect
+            # Use TensorView base indices as the store address.
+            d_idx = [_unwrap_value(i) for i in dst.base_indices]
+            d_idx2 = _maybe_swizzle_dst_indices(d_idx)
+            store_indices = _normalize_indices_to_memref(dst.memref, d_idx2, dst.strides, loc)
+            with ip or InsertionPoint.current:
+                # IMPORTANT: use the opview `vector.StoreOp` to match existing high-perf
+                # kernels' LDS codegen (some helper paths may lower differently).
+                vector_dialect.StoreOp(v, dst.memref, store_indices)
+            return v if return_vector else None
+
+    # Load-only path: dst=None and src is a TensorView.
+    if isinstance(src, TensorView) and dst is None:
+        vec = emit_tensor_load(src.shape, src)
+        return vec
 
     if isinstance(src, TensorView) and isinstance(dst, TensorView):
         # pred can be TensorView or scalar Value
@@ -2836,6 +2901,7 @@ __all__ = [
     "make_coord",
     "crd2idx",
     "idx2crd",
+    "swizzle_xor16",
     "size",
     "cosize",
     "rank",

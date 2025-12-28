@@ -19,10 +19,19 @@ KERNEL_NAME = "layernorm"
 
 
 def unwrap(v):
-    if hasattr(v, "value"):
-        return v.value
+    # Be defensive: some wrapper objects expose `.value` but it can be None until emitted.
+    if v is None:
+        return None
+    if hasattr(v, "_value"):
+        v = v._value
     if hasattr(v, "result"):
-        return v.result
+        r = v.result
+        if r is not None:
+            return r
+    if hasattr(v, "value"):
+        r = v.value
+        if r is not None:
+            return r
     return v
 
 

@@ -209,7 +209,17 @@ def compile(
             kernel_dir = kernel_names[0] if len(kernel_names) == 1 else dump_prefix_base
             dump_dir = dump_root_dir / _sanitize_path_component(kernel_dir)
             print(f"[flir.compile] FLIR_DUMP_IR=1 dir={dump_dir}")
-        module = ir.Module.parse(asm, context=ctx)
+        try:
+            module = ir.Module.parse(asm, context=ctx)
+        except Exception:
+            # Some environments/bindings have rare MLIR assembly parse failures when
+            # round-tripping with rich debug info. Fall back to a simpler print; and
+            # if that still fails, compile in-place (mutating the caller module).
+            try:
+                asm_no_debug = mlir_module.operation.get_asm(enable_debug_info=False)
+                module = ir.Module.parse(asm_no_debug, context=ctx)
+            except Exception:
+                module = mlir_module
 
     chip = get_rocm_arch()
 

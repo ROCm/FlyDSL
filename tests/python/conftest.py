@@ -29,7 +29,6 @@ if _src_py_dir.exists():
     sys.path.insert(0, _p2)
 
 if _embedded_pkg_dir.exists():
-    os.environ.setdefault("FLIR_USE_EMBEDDED_MLIR", "1")
     # Help flir locate the embedded python_packages root correctly.
     os.environ.setdefault("FLIR_BUILD_DIR", str(_embedded_pkg_dir.parents[2]))
     _p = str(_embedded_pkg_dir)

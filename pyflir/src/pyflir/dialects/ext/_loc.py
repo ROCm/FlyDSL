@@ -34,8 +34,8 @@ def maybe_default_loc(loc: Optional[Location]) -> Optional[Location]:
         return loc
 
     # Only do stack inspection when debugging/dumping.
-    dump_enabled = os.environ.get("FLIR_DUMP_IR", "0") == "1" or os.environ.get("ROCDSL_DUMP_IR", "0") == "1"
-    auto_loc = os.environ.get("FLIR_AUTO_LOC", "0") == "1" or os.environ.get("ROCDSL_AUTO_LOC", "0") == "1"
+    dump_enabled = os.environ.get("FLIR_DUMP_IR", "0") == "1" or os.environ.get("FLIR_DUMP_IR", "0") == "1"
+    auto_loc = os.environ.get("FLIR_AUTO_LOC", "0") == "1" or os.environ.get("FLIR_AUTO_LOC", "0") == "1"
     if not dump_enabled and not auto_loc:
         return None
 

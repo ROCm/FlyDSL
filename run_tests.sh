@@ -2,14 +2,11 @@
 # Flir Test Suite - Organized by test type
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-
+COMPARE_AITER_CK=0
 # Locate the build directory (default: .flir/build; fallback: build/).
 BUILD_DIR="${FLIR_BUILD_DIR:-${FLIR_BUILD_DIR:-${SCRIPT_DIR}/.flir/build}}"
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/build" ]; then
   BUILD_DIR="${SCRIPT_DIR}/build"
-fi
-if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/.rocdsl/build" ]; then
-  BUILD_DIR="${SCRIPT_DIR}/.rocdsl/build"
 fi
 
 # Prefer the new tool location (LLVM_RUNTIME_OUTPUT_INTDIR = build/bin),
@@ -40,18 +37,9 @@ echo "Flir Test Suite"
 echo "========================================================================"
 echo ""
 
-# Prefer an installed package if present and complete; otherwise fall back to PYTHONPATH.
 PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/pyflir"
-if [ ! -d "${PYTHON_PACKAGE_ROOT}" ] && [ -d "${BUILD_DIR}/python_packages/rocdsl" ]; then
-  PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/rocdsl"
-fi
-if python3 -c "import pyflir, pyflir.dialects.ext, _mlir; import _mlir.ir" >/dev/null 2>&1; then
-  echo "Using installed Python packages (pyflir.dialects/_mlir) - no PYTHONPATH override."
-else
-  # Prefer in-tree Python sources for `pyflir/`, while still providing the embedded
-  # `_mlir` runtime/extensions from the build tree.
-  export PYTHONPATH="${SCRIPT_DIR}/pyflir/src:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
-fi
+export PYTHONPATH="${SCRIPT_DIR}/pyflir/src:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
+echo "Using in-tree Python sources + embedded build packages via PYTHONPATH."
 
 
 #=============================================================================
