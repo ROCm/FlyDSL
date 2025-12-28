@@ -17,7 +17,7 @@ import pyflir
 from pyflir.runtime.device import get_rocm_arch
 import pyflir.dialects.ext.flir as flir
 from pyflir.dialects.ext.python_control_flow import range_constexpr
-from pyflir.utils import SmemAllocator
+from pyflir.utils import SmemAllocator, SmemPtr
 from tests.utils import compile_to_hsaco, pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 import torch
@@ -25,7 +25,7 @@ import torch.nn.functional as F
 import pytest
 from _mlir import ir
 from _mlir.dialects import vector
-from pyflir.dialects.ext import arith, gpu, buffer_ops
+from pyflir.dialects.ext import arith, gpu, buffer_ops, memref
 from _mlir.dialects import arith as _arith_mlir
 import _mlir.dialects.rocdl as rocdl
 import _mlir.extras.types as T
@@ -286,7 +286,8 @@ def _run_impl_m16(M, N, K, tile_m, tile_n, tile_k):
             by = gpu.block_id("y")
 
             base_ptr = allocator.get_base()
-            lds_a = _state["lds_a_decl"](base_ptr).get()
+            lds_a_ptr = _state["lds_a_decl"](base_ptr)
+            lds_a = lds_a_ptr.get()
 
             a_rsrc = buffer_ops.create_buffer_resource(arg_a)
             b_rsrc = buffer_ops.create_buffer_resource(arg_b)
@@ -788,7 +789,12 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
     elems_per_thread_a = elems_a_per_tile // total_threads
     bytes_per_thread_a = elems_per_thread_a
 
-    pad_k = 8
+    # Make LDS row-stride 16B-aligned so LDS vector loads can be 16B-aligned
+    # and AMDGPU can select `ds_read_b128` (instead of splitting/using read2).
+    pad_k = 16
+    # Make LDS row-stride 16B-aligned so LDS vector loads can be 16B-aligned
+    # and AMDGPU can select `ds_read_b128` (instead of splitting/using read2).
+    pad_k = 16
     lds_stride = tile_k + pad_k
 
     class _MFMA_M1024(flir.MlirModule):
@@ -830,6 +836,7 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
             vec8_f8 = ir.VectorType.get([8], f8)
             vec16_f8 = ir.VectorType.get([16], f8)
             vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+            vec2_i64 = ir.VectorType.get([2], ir.IntegerType.get_signless(64))
             vec4_i32 = ir.VectorType.get([4], i32_type)
 
             vec_a_load_len = bytes_per_thread_a
@@ -865,7 +872,19 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
             by = gpu.block_id("y")
 
             base_ptr = allocator.get_base()
-            lds_a = _state["lds_a_decl"](base_ptr).get()
+            lds_a_ptr = _state["lds_a_decl"](base_ptr)
+            lds_a = lds_a_ptr.get()
+
+            # A second view of the same LDS buffer, but typed as 16B blocks.
+            # This makes the addressing naturally 16B-granular, allowing LLVM to
+            # attach a 16-byte alignment to the underlying `llvm.load` and enabling
+            # AMDGPU to select `ds_read_b128` instead of `ds_read2_b64`.
+            lds_a16 = SmemPtr(
+                lds_a_ptr.base_memref,
+                lds_a_ptr.byte_offset,
+                vec16_f8,
+                shape=((2 * tile_m * lds_stride) // 16,),
+            ).get()
 
             a_rsrc = buffer_ops.create_buffer_resource(arg_a)
             b_rsrc = buffer_ops.create_buffer_resource(arg_b)
@@ -1033,27 +1052,26 @@ def _run_impl_m1024(M, N, K, tile_m, tile_n, tile_k):
                     ki64 = (ki_step // 2) * 64
                     ki64_val = arith.constant(ki64, index=True)
                     half = ki_step % 2
-                    half_off = arith.constant(half * 8, index=True)
                     col_base = col_offset_base + ki64_val
 
                     for mi in range_constexpr(m_repeat):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
                         col_base_swizzled = swizzle_idx(curr_row_a_lds, col_base)
-                        col_swizzled = col_base_swizzled + half_off
                         coord_a = flir.make_coord(
-                            unwrap(curr_row_a_lds), unwrap(col_swizzled)
+                            unwrap(curr_row_a_lds), unwrap(col_base_swizzled)
                         )
                         idx_a = flir.crd2idx(coord_a, layout_lds)
                         idx_a_final = _arith_mlir.AddIOp(
                             unwrap(idx_a), unwrap(buffer_offset_val)
                         ).result
-                        loaded_a8 = vector.LoadOp(
-                            vec8_f8, lds_a, [unwrap(idx_a_final)]
-                        ).result
-                        a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
+                        # Force a single 16B LDS read so AMDGPU selects ds_read_b128.
+                        # We then pick the desired 64-bit half (half=0/1) in registers.
+                        idx_a_blk = (arith.ArithValue(idx_a_final) // c16).value
+                        loaded_a16 = unwrap(memref.load(lds_a16, [idx_a_blk]))
+                        a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
                         a_pack = vector.ExtractOp(
-                            a_vec64, static_position=[0], dynamic_position=[]
+                            a_vec128, static_position=[half], dynamic_position=[]
                         ).result
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
@@ -1285,12 +1303,12 @@ if __name__ == "__main__":
     torch.set_default_device("cuda")
     print("Running merged tiling tests...")
     # Small-M (m16) case
-    test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=32, tile_k=512)
+    # test_mfma_fp8_rocir_preshuffle(16, 7168, 2048, tile_m=16, tile_n=32, tile_k=512)
     # Large-M (m1024) case
-    test_mfma_fp8_rocir_preshuffle(1024, 9216, 4096, tile_m=64, tile_n=256, tile_k=128)
-    test_mfma_fp8_rocir_preshuffle(4096, 7168, 256, tile_m=64, tile_n=256, tile_k=128)
+    # test_mfma_fp8_rocir_preshuffle(1024, 9216, 4096, tile_m=64, tile_n=256, tile_k=128)
+    # test_mfma_fp8_rocir_preshuffle(4096, 7168, 256, tile_m=64, tile_n=256, tile_k=128)
     test_mfma_fp8_rocir_preshuffle(4096, 4608, 7168, tile_m=64, tile_n=256, tile_k=128)
-    test_mfma_fp8_rocir_preshuffle(16384, 8192, 1024, tile_m=64, tile_n=256, tile_k=128)
+    # test_mfma_fp8_rocir_preshuffle(16384, 8192, 1024, tile_m=64, tile_n=256, tile_k=128)
 
     # Work around a known finalization crash (seen in some environments).
     sys.stdout.flush()

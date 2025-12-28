@@ -15,6 +15,7 @@ from pyflir.compiler.context import ensure_flir_python_extensions
 from pyflir.runtime.device import get_rocm_arch
 
 from .executor import default_shared_libs
+from .lds_b128 import force_lds_b128_alignment, reassociate_lds_gep_adds
 
 if TYPE_CHECKING:
     from .executor import ExecutionEngineExecutor as Executor
@@ -213,18 +214,21 @@ def compile(
     chip = get_rocm_arch()
 
     pipeline = _build_pipeline_str(chip=chip)
+    # Default ON: set FLIR_FORCE_LDS_B128=0 to disable.
+    force_lds_b128 = _env_truthy("FLIR_FORCE_LDS_B128", "1")
 
     with ctx:
         _override_gpu_module_targets(module, chip=chip)
-        if dump_enabled:
+        if dump_enabled or force_lds_b128:
             # When dumping is enabled, run the pipeline in stages so each intermediate
             # module state is captured to a file.
-            out = _dump_ir(
-                "00_target_overridden",
-                dump_dir=dump_dir,
-                asm=module.operation.get_asm(enable_debug_info=True),
-            )
-            print(f"[flir.compile] dump 00_target_overridden -> {out}")
+            if dump_enabled:
+                out = _dump_ir(
+                    "00_target_overridden",
+                    dump_dir=dump_dir,
+                    asm=module.operation.get_asm(enable_debug_info=True),
+                )
+                print(f"[flir.compile] dump 00_target_overridden -> {out}")
             asm_for_isa: Optional[str] = None
             stage_frags = _pipeline_fragments(chip=chip)
             # Keep dump filenames stable vs the historical numbering scheme:
@@ -235,16 +239,22 @@ def compile(
                 pm = PassManager.parse(f"builtin.module({frag})", context=ctx)
                 pm.enable_verifier(bool(verify))
                 pm.run(module.operation)
+                # After gpu-to-llvm, we can safely annotate LLVM loads/stores.
+                if force_lds_b128 and frag.strip().startswith("gpu-to-llvm"):
+                    if _env_truthy("FLIR_REASSOC_LDS_OFFSETS", "1"):
+                        reassociate_lds_gep_adds(module)
+                    force_lds_b128_alignment(module, nbytes=16, alignment=16)
                 stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flir.compile] dump {stage_name} -> {out}")
+                if dump_enabled:
+                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                    print(f"[flir.compile] dump {stage_name} -> {out}")
 
                 # Dump ISA from the *post-LLVM* module (right before fatbin emission).
                 # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
                 if frag.strip() == "reconcile-unrealized-casts":
                     asm_for_isa = stage_asm
 
-            if asm_for_isa is not None:
+            if dump_enabled and asm_for_isa is not None:
                 isa_out = _dump_isa_from_rocdl_module_asm(
                     dump_dir=dump_dir,
                     ctx=ctx,

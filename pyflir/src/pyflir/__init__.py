@@ -42,10 +42,41 @@ for _p in _this.parents:
 #   FLIR_USE_EMBEDDED_MLIR=1
 # For backward compatibility (pre-rename), we also honor:
 #   FLIR_USE_EMBEDDED_MLIR=1
-_flir_root = Path(__file__).resolve().parents[2]
+_this_file = Path(__file__).resolve()
+# Determine FLIR repo root robustly for both:
+# - source tree import:    <root>/pyflir/src/pyflir/__init__.py
+# - build output import:   <root>/.flir/build/python_packages/pyflir/pyflir/__init__.py
+_flir_root = None
+for _p in _this_file.parents:
+    if (_p / "tests").is_dir() and (_p / "pyflir").is_dir():
+        _flir_root = _p
+        break
+if _flir_root is None:
+    # Fallback to previous heuristic.
+    _flir_root = _this_file.parents[2]
 _use_embedded = os.environ.get("FLIR_USE_EMBEDDED_MLIR")
 if _use_embedded is None:
     _use_embedded = os.environ.get("FLIR_USE_EMBEDDED_MLIR", "0")
+
+# Convenience for direct `python tests/...` runs inside the FLIR source tree:
+# If an embedded build exists, default to using it to avoid importing the legacy
+# in-tree `_mlir` shim under `<repo>/python/_mlir` (which does not ship `_flirPasses`).
+if _use_embedded != "1" and os.environ.get("FLIR_AUTO_EMBEDDED", "1") != "0":
+    try:
+        _argv0 = Path(sys.argv[0]).resolve()
+    except Exception:
+        _argv0 = None
+    _embedded_default = _flir_root / ".flir" / "build" / "python_packages" / "pyflir"
+    if not _embedded_default.exists():
+        _embedded_default = _flir_root / "build" / "python_packages" / "pyflir"
+    if _embedded_default.exists() and _argv0 is not None:
+        try:
+            # Only auto-enable for scripts executed from within this repo (usually tests/).
+            if _flir_root in _argv0.parents and "tests" in _argv0.parts:
+                _use_embedded = "1"
+        except Exception:
+            pass
+
 if _use_embedded == "1":
     # Default build layout: `.flir/build` (see build.sh/setup.py), with fallback
     # to legacy `build/`.
@@ -68,6 +99,21 @@ if _use_embedded == "1":
         _python_packages_str = str(_python_packages_dir)
         if _python_packages_str not in sys.path:
             sys.path.insert(0, _python_packages_str)
+        # If we're using embedded MLIR, ensure the legacy in-tree `python/` path
+        # can't shadow the embedded `_mlir` runtime.
+        _legacy_python = str((_flir_root / "python").resolve())
+        if _legacy_python in sys.path:
+            sys.path.remove(_legacy_python)
+        # Also drop any other `_mlir` providers that may have been injected earlier.
+        _cleaned = []
+        for _p in sys.path:
+            try:
+                if (Path(_p) / "_mlir").exists() and _p != _python_packages_str:
+                    continue
+            except Exception:
+                pass
+            _cleaned.append(_p)
+        sys.path[:] = _cleaned
 
 # Lazy import dialects and passes to avoid requiring MLIR when only using runtime
 def __getattr__(name):

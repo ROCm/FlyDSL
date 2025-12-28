@@ -2,6 +2,7 @@
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
 from pyflir.runtime.device import get_rocm_arch
+from pyflir.compiler.lds_b128 import force_lds_b128_alignment, reassociate_lds_gep_adds
 from _mlir import ir
 import os
 import torch
@@ -191,6 +192,19 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
         "08_lower_to_llvm",
         lambda: run_pipeline(llvm_converted, Pipeline().lower_to_llvm().reconcile_unrealized_casts()),
     )
+    # Optional: force 16B LDS loads/stores to be 16B-aligned so AMDGPU can pick ds_*_b128.
+    # Default ON: force 16B LDS loads/stores to be 16B-aligned so AMDGPU can pick ds_*_b128.
+    # Set FLIR_FORCE_LDS_B128=0 to disable.
+    if os.environ.get("FLIR_FORCE_LDS_B128", "1") != "0":
+        # Optional: reassociate LDS address arithmetic so constant deltas become foldable DS offsets.
+        # Default ON when forcing b128; set FLIR_REASSOC_LDS_OFFSETS=0 to disable.
+        if os.environ.get("FLIR_REASSOC_LDS_OFFSETS", "1") != "0":
+            reassoc = reassociate_lds_gep_adds(llvm_lowered)
+            if enable_ir_printing:
+                print(f"[FLIR_REASSOC_LDS_OFFSETS] reassociated {reassoc} LDS GEP indices")
+        updated = force_lds_b128_alignment(llvm_lowered, nbytes=16, alignment=16)
+        if enable_ir_printing:
+            print(f"[FLIR_FORCE_LDS_B128] updated {updated} llvm.load/llvm.store ops (LDS, 16B)")
     _apply_waves_per_eu_on_llvm_funcs(llvm_lowered)
     dump_stage(llvm_lowered, "08_llvm_final")
     
