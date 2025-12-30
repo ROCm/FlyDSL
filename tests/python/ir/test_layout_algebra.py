@@ -1014,6 +1014,46 @@ def test_complement_simple_rank_2():
     run_lowering_test(ctx, "complement_rank_2_ok")
 
 
+def test_complement_rank_2_dynamic_stride_error():
+    """Rank-2 complement with dynamic stride MUST fail during lowering.
+
+    CUTLASS requires static stride for rank>1 complements:
+      "Dynamic-stride complement only for rank-1 layouts"
+    """
+    print("\n=== Test: Complement Rank-2 Dynamic Stride (must error) ===")
+
+    ctx = RAIIMLIRContextModule()
+    index_type = IndexType.get()
+
+    @func.FuncOp.from_py_func(index_type)
+    def run_complement_rank_2_dynamic_stride_error(runtime_stride0):
+        c3 = Index(3)
+        c2 = Index(2)
+        c1 = Index(1)
+        c12 = Index(12)
+
+        tiler_shape = flir.make_shape(c3, c2)
+        # Make stride dynamic in rank-2.
+        tiler_stride = flir.make_stride(runtime_stride0, c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
+
+        _ = flir.complement(tiler_layout, c12)
+        return
+
+    try:
+        run_lowering_test(ctx, "complement_rank_2_dynamic_stride_error")
+    except Exception as e:
+        msg = str(e)
+        assert "Dynamic-stride complement only for rank-1 layouts" in msg, (
+            "Expected dynamic-stride complement error message, got:\n" + msg
+        )
+        return
+
+    raise AssertionError(
+        "Expected complement_rank_2_dynamic_stride_error to fail during lowering, but it succeeded."
+    )
+
+
 def test_complement_simple_rank_1():
     """Test complement operation: complement(3:1, 12) should give 4:3
     
@@ -1167,6 +1207,7 @@ if __name__ == "__main__":
         ("Complement Rank-2 Non-injective (must error)", test_complement_rank_2_error),
         ("Complement Rank-1 Non-injective (must error)", test_complement_rank_1_error),
         ("Complement Rank-2 Injective (must succeed)", test_complement_simple_rank_2),
+        ("Complement Rank-2 Dynamic Stride (must error)", test_complement_rank_2_dynamic_stride_error),
         ("Complement Simple Rank-1", test_complement_simple_rank_1),
         ("Complement with Divide", test_complement_with_divide),
         ("Logical Divide 1D", test_logical_divide_1d),
