@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Complete tests for Flir layout algebra operations.
-Exactly following the layout algebra notebook examples from the CUTLASS tree.
+These tests follow a reference notebook for layout-algebra behavior.
 
 Each test corresponds to a specific cell in the notebook.
 """
@@ -1006,7 +1006,7 @@ def test_complement_simple_rank_2():
 def test_complement_rank_2_dynamic_stride_error():
     """Rank-2 complement with dynamic stride MUST fail during lowering.
 
-    CUTLASS requires static stride for rank>1 complements:
+    For rank>1 complements, stride must be compile-time static:
       "Dynamic-stride complement only for rank-1 layouts"
     """
     print("\n=== Test: Complement Rank-2 Dynamic Stride (must error) ===")
