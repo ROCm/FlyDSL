@@ -7,6 +7,7 @@ requires = [
   "pybind11>=2.10",
   "nanobind>=2.0",
   "numpy",
+  "cmake",
 ]
 build-backend = "setuptools.build_meta"
 
