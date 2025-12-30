@@ -2,10 +2,12 @@
 #include "flir/FlirOps.h"
 #include "flir/FlirPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
@@ -355,6 +357,24 @@ static std::pair<Value, Value> computeComplementInline(
               return r.create<arith::DivUIOp>(l, a, b).getResult();
           },
           rewriter);
+
+      // Non-injective check for rank-1:
+      // If stride==0 and shape>1, the layout overlaps (all indices map to 0).
+      // In our algorithm, this manifests as gap(new_shape) == 0.
+      if (auto c = tryGetConstIndex(newShape)) {
+        if (*c == 0) {
+          emitError(loc, "Non-injective Layout detected in complement.");
+          return {Value(), Value()};
+        }
+      } else {
+        // Runtime check for dynamic stride: gap must be non-zero.
+        Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+        Value ok = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+        rewriter.create<cf::AssertOp>(
+            loc, ok,
+            rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+      }
       
       // new_stride = min_stride * modeShape
       auto newStride = foldBinaryOp(loc, minStride, modeShape,
@@ -449,11 +469,37 @@ static std::pair<Value, Value> computeComplementInline(
         
         // new_shape = min_stride / last_result_stride
         auto newShape = foldBinaryOp(loc, minStride, currStride,
-            [](int64_t a, int64_t b) { return b != 0 ? std::max(int64_t(1), a / b) : a; },
+            [](int64_t a, int64_t b) { return b != 0 ? a / b : a; },
             [](Location l, Value a, Value b, PatternRewriter& r) {
                 return r.create<arith::DivUIOp>(l, a, b).getResult();
             },
             rewriter);
+            
+        // Check for Non-injective Layout (gap size == 0)
+        if (auto constNewShape = tryGetConstIndex(newShape)) {
+             if (constNewShape.value() == 0) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {Value(), Value()};
+             }
+        } else {
+             auto minStrideC = tryGetConstIndex(minStride);
+             auto currStrideC = tryGetConstIndex(currStride);
+             if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {Value(), Value()};
+             }
+             // Runtime check for dynamic cases: gap must be non-zero.
+             // This makes the failure deterministic at runtime instead of silent UB.
+             if (!(minStrideC && currStrideC)) {
+                 Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+                 Value ok = rewriter.create<arith::CmpIOp>(
+                     loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+                 rewriter.create<cf::AssertOp>(
+                     loc, ok,
+                     rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+             }
+        }
+
         
         // Skip size-1 gap modes.
         bool isOne = false;
@@ -483,11 +529,35 @@ static std::pair<Value, Value> computeComplementInline(
     Value lastMinStride = modes.back().stride;
     Value lastModeShape = modes.back().shape;
     auto lastNewShape = foldBinaryOp(loc, lastMinStride, currStride,
-        [](int64_t a, int64_t b) { return b != 0 ? std::max(int64_t(1), a / b) : a; },
+        [](int64_t a, int64_t b) { return b != 0 ? a / b : a; },
         [](Location l, Value a, Value b, PatternRewriter& r) {
             return r.create<arith::DivUIOp>(l, a, b).getResult();
         },
         rewriter);
+
+    // Check for Non-injective Layout (gap size == 0)
+    if (auto constNewShape = tryGetConstIndex(lastNewShape)) {
+            if (constNewShape.value() == 0) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {Value(), Value()};
+            }
+    } else {
+            auto minStrideC = tryGetConstIndex(lastMinStride);
+            auto currStrideC = tryGetConstIndex(currStride);
+            if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {Value(), Value()};
+            }
+            // Runtime check for dynamic cases: last gap must be non-zero.
+            if (!(minStrideC && currStrideC)) {
+                Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+                Value ok = rewriter.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ne, lastNewShape, zero).getResult();
+                rewriter.create<cf::AssertOp>(
+                    loc, ok,
+                    rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+            }
+    }
     
     // Filter last size-1 mode
     bool lastIsOne = false;
@@ -931,21 +1001,69 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
     std::vector<Value> resShape;
     std::vector<Value> resStride;
     Value currStride = rewriter.create<arith::ConstantIndexOp>(loc, 1); // starts at 1
+    std::optional<int64_t> currStrideC = 1; // Compile-time tracking
+
     resStride.push_back(currStride);
     
     // Iterate through sorted modes
     for (const auto& mode : modes) {
         Value minStride = mode.stride;
         Value modeShape = mode.shape;
+        auto minStrideC = tryGetConstIndex(minStride);
+        auto modeShapeC = tryGetConstIndex(modeShape);
         
         // Gap before the current mode.
-        Value newShape = rewriter.create<arith::DivUIOp>(loc, minStride, currStride);
+        Value newShape = foldBinaryOp(loc, minStride, currStride,
+            [](int64_t a, int64_t b) { return b != 0 ? a / b : a; },
+            [](Location l, Value a, Value b, PatternRewriter& r) {
+                return r.create<arith::DivUIOp>(l, a, b).getResult();
+            },
+            rewriter);
+
+        // Check for Non-injective Layout (similar to CUTLASS static_assert)
+        // If the gap size is 0, it means minStride < currStride, implying overlap.
+        // We use our explicit compile-time tracking (currStrideC) for robust checking.
+
+        // Compile-time check (best effort).
+        if (auto constNewShape = tryGetConstIndex(newShape); constNewShape.has_value()) {
+            if (constNewShape.value() == 0) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {LayoutNode(Value()), LayoutNode(Value())};
+            }
+        }
+
+        if (minStrideC.has_value() && currStrideC.has_value()) {
+            if (*minStrideC < *currStrideC) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {LayoutNode(Value()), LayoutNode(Value())};
+            }
+        } else {
+            // Runtime check for dynamic cases: gap must be non-zero.
+            Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+            Value ok = rewriter.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+            rewriter.create<cf::AssertOp>(
+                loc, ok,
+                rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+        }
         
         resShape.push_back(newShape);
-        Value nextStride = rewriter.create<arith::MulIOp>(loc, minStride, modeShape);
+        Value nextStride = foldBinaryOp(loc, minStride, modeShape,
+            [](int64_t a, int64_t b) { return a * b; },
+            [](Location l, Value a, Value b, PatternRewriter& r) {
+                return r.create<arith::MulIOp>(l, a, b).getResult();
+            },
+            rewriter);
         
         // Advance coverage to include this mode.
         currStride = nextStride;
+        
+        // Update compile-time tracking
+        if (minStrideC.has_value() && modeShapeC.has_value()) {
+            currStrideC = (*minStrideC) * (*modeShapeC);
+        } else {
+            currStrideC = std::nullopt;
+        }
     }
     
     // 4. Append the final mode that stretches coverage to cosizeHi.
@@ -2395,7 +2513,6 @@ struct FlirToStandardPass
   using impl::FlirToStandardPassBase<FlirToStandardPass>::FlirToStandardPassBase;
   
   void runOnOperation() override {
-    
     RewritePatternSet patterns(&getContext());
     
     // Add all lowering patterns
@@ -2436,10 +2553,27 @@ struct FlirToStandardPass
     config.setMaxIterations(256);
 
     FrozenRewritePatternSet frozen(std::move(patterns));
-    // This pass is best-effort: patterns may not cover all IR combinations yet.
-    // Do not hard-fail the whole pipeline if greedy rewriting does not converge.
-    // (The test runner expects flir-opt to succeed even if some flir ops remain.)
-    (void)applyPatternsGreedily(getOperation(), frozen, config);
+    // If we emitted any error diagnostics (e.g. non-injective layout checks),
+    // we must fail the pass so the Python bindings convert it into an exception
+    // instead of aborting on "unhandled captured errors".
+    bool hadError = false;
+    int errorCount = 0;
+    ScopedDiagnosticHandler diagHandler(&getContext(), [&](Diagnostic &d) {
+      if (d.getSeverity() == DiagnosticSeverity::Error) {
+        hadError = true;
+        ++errorCount;
+        // Greedy rewriting may retry and re-emit the same error many times.
+        // Keep the first error, suppress subsequent ones to avoid log spam.
+        if (errorCount > 1)
+          return success();
+      }
+      // Do not suppress non-error diagnostics.
+      return failure();
+    });
+
+    auto res = applyPatternsGreedily(getOperation(), frozen, config);
+    if (hadError || failed(res))
+      signalPassFailure();
   }
 };
 
