@@ -16,6 +16,20 @@ Example:
 
 from _mlir.dialects.rocdl import *
 
+mask_mfma = 0x008
+mask_vmem_rd = 0x020
+mask_dsrd = 0x100
+mask_dswr = 0x200
+
+def sched_mfma(cnt):
+    sched_group_barrier(mask_mfma, cnt, 0)
+def sched_vmem(cnt):
+    sched_group_barrier(mask_vmem_rd, cnt, 0)
+def sched_dsrd(cnt):
+    sched_group_barrier(mask_dsrd, cnt, 0)
+def sched_dswr(cnt):
+    sched_group_barrier(mask_dswr, cnt, 0)
+
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
     'workitem_id_x', 'workitem_id_y', 'workitem_id_z',

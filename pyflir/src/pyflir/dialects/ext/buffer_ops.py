@@ -138,13 +138,16 @@ class BufferResourceDescriptor:
     def from_memref(memref_val: ir.Value, 
                     stride: int = 0, 
                     max_size: bool = True,
-                    data_format: str = 'f32') -> 'BufferResourceDescriptor':
+                    data_format: str = 'f32',
+                    num_records_bytes: Optional[Union[int, ir.Value]] = None) -> 'BufferResourceDescriptor':
         """Create buffer resource descriptor from memref.
         
         Args:
             memref_val: Memref value to create descriptor for
             stride: Stride in elements (0 for contiguous)
             max_size: If True, use max buffer size for flexibility
+            num_records_bytes: Override buffer size (in BYTES) used by hardware OOB checking.
+                              If provided, this takes precedence over `max_size`.
             data_format: Data format ('f32', 'f16', 'i32', etc.)
             
         Returns:
@@ -165,13 +168,59 @@ class BufferResourceDescriptor:
         flags = _create_i32_constant(flags_val)
         stride_val = _create_i16_constant(stride)
         
-        if max_size:
+        def _num_records_from_memref_type() -> Optional[int]:
+            """Best-effort: derive logical buffer size (in bytes) from static memref type."""
+            try:
+                mt = ir.MemRefType(_unwrap_value(memref_val).type)
+                shape = list(mt.shape)
+                if any(int(d) < 0 for d in shape):
+                    return None
+                # Compute element size in bytes (scalar element type).
+                elem_t = mt.element_type
+                elem_bits = getattr(elem_t, "width", None)
+                if elem_bits is None:
+                    return None
+                elem_bytes = int(elem_bits) // 8
+                if elem_bytes <= 0:
+                    return None
+                num_elems = 1
+                for d in shape:
+                    num_elems *= int(d)
+                return int(num_elems) * int(elem_bytes)
+            except Exception:
+                return None
+
+        if num_records_bytes is not None:
+            # Caller-provided size in BYTES (preferred for exact hardware OOB behavior).
+            if isinstance(num_records_bytes, int):
+                nbytes = int(num_records_bytes)
+                if nbytes <= 0:
+                    nbytes = 0
+                # Descriptor uses i32 bytes; clamp to the max representable.
+                if nbytes > 0x7FFFFFFE:
+                    nbytes = 0x7FFFFFFE
+                num_records = _create_i32_constant(nbytes)
+            else:
+                # Value path: cast to i32 if needed.
+                v = _unwrap_value(num_records_bytes)
+                if not isinstance(v.type, ir.IntegerType) or v.type.width != 32:
+                    op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), v)
+                    v = _unwrap_value(op.result)
+                num_records = v
+        elif max_size:
             # Use max for flexibility (hardware will check actual bounds)
             # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
-            num_records = _create_i32_constant(0x7FFFFFFE)
+            num_records = _create_i32_constant(0x7FFFFFFE)  # FALLBACK_MAX_SIZE
         else:
-            # TODO: Extract actual size from memref type
-            num_records = _create_i32_constant(0x7FFFFFFE)
+            # Use the logical memref size (in bytes) for hardware OOB checking.
+            nbytes = _num_records_from_memref_type()
+            if nbytes is None:
+                # Fall back to max-size if we can't infer statically.
+                num_records = _create_i32_constant(0x7FFFFFFE)
+            else:
+                if nbytes > 0x7FFFFFFE:
+                    nbytes = 0x7FFFFFFE
+                num_records = _create_i32_constant(int(nbytes))
         
         # Create resource descriptor (returns !llvm.ptr<8>)
         rsrc_type = ir.Type.parse('!llvm.ptr<8>')
@@ -182,7 +231,9 @@ class BufferResourceDescriptor:
 
 def create_buffer_resource(memref_val: ir.Value, 
                            stride: int = 0,
-                           max_size: bool = True) -> ir.Value:
+                           max_size: bool = True,
+                           *,
+                           num_records_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
     """Create AMD buffer resource descriptor from memref.
     
     This is a simplified wrapper around BufferResourceDescriptor.from_memref()
@@ -200,7 +251,9 @@ def create_buffer_resource(memref_val: ir.Value,
         >>> rsrc = create_buffer_resource(A)
         >>> data = buffer_load(rsrc, offset)
     """
-    desc = BufferResourceDescriptor.from_memref(memref_val, stride, max_size)
+    desc = BufferResourceDescriptor.from_memref(
+        memref_val, stride, max_size, num_records_bytes=num_records_bytes
+    )
     return desc.rsrc
 
 

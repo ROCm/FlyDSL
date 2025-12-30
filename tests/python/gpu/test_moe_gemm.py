@@ -33,10 +33,10 @@ from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 
 from _mlir import ir
-from _mlir.dialects import vector
+from _mlir.dialects import vector, llvm
 from pyflir.dialects.ext import arith, gpu, buffer_ops, math as mlir_math
 from _mlir.dialects import arith as _arith_mlir
-import _mlir.dialects.rocdl as rocdl
+from pyflir.dialects.ext import rocdl
 import _mlir.extras.types as T
 from pyflir.lang.ir.types import T as I
 
@@ -420,7 +420,8 @@ def test_moe_stage1(
         ]
 
         def init_gpu_module(self):
-            _state["lds_x_decl"] = allocator.allocate_array(I.f8, tile_m * lds_stride)
+            # Ping-pong LDS for X (2-stage pipeline), matching the tuned GEMM kernel structure.
+            _state["lds_x_decl"] = allocator.allocate_array(I.f8, 2 * tile_m * lds_stride)
             allocator.finalize()
 
         @flir.kernel
@@ -459,17 +460,25 @@ def test_moe_stage1(
 
             c0f = arith.constant(0.0, type=f32).value
             c1f = arith.constant(1.0, type=f32).value
-            # (kept for historical/context; not needed if we use `math.exp` directly)
-            # c_log2e = log2(e)
+            # CK-style silu uses exp2(log2e * x) + rcp, which maps to v_exp_f32 + v_rcp_f32
+            # and avoids the full-precision div fixup sequence (and its cndmask-heavy guards).
             c_log2e = arith.constant(1.4426950408889634, type=f32).value  # log2(e)
+            c_log2e_neg = arith.constant(-1.4426950408889634, type=f32).value
             c3f = arith.constant(3.0, type=f32).value
             c1_div_6 = arith.constant(0.1666666716337204, type=f32).value  # 1/6 as f32
 
             def silu(x):
-                neg = flir.arith.SubFOp(unwrap(c0f), unwrap(x)).result
-                exp_neg = mlir_math.exp(unwrap(neg))
-                den = flir.arith.AddFOp(unwrap(c1f), unwrap(exp_neg)).result
-                sig = flir.arith.DivFOp(unwrap(c1f), unwrap(den)).result
+                # Align with CK's device fast path:
+                #   emu = exp(-x)  ~= exp2(log2e * (-x))  -> v_exp_f32
+                #   sig = rcp(1 + emu)                   -> v_rcp_f32
+                #   y = x * sig
+                #
+                # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
+                # sequences that introduce extra compares/cndmasks.
+                t = flir.arith.MulFOp(unwrap(x), unwrap(c_log2e_neg)).result
+                emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [unwrap(t)], [], [])
+                den = flir.arith.AddFOp(unwrap(c1f), unwrap(emu)).result
+                sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [unwrap(den)], [], [])
                 return flir.arith.MulFOp(unwrap(x), unwrap(sig)).result
 
             zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
@@ -506,14 +515,17 @@ def test_moe_stage1(
             base_ptr = allocator.get_base()
             lds_x = _state["lds_x_decl"](base_ptr).get()
 
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x)
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out)
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x)
-            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights)
+            # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
+            # used directly (CK-style). This allows us to avoid `select`-based masking for
+            # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
+            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
+            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
+            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
+            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
+            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
+            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
 
             # Expert id for this M tile (keep address math in `index`)
             expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
@@ -537,10 +549,10 @@ def test_moe_stage1(
             t_i32 = _arith_mlir.AndIOp(unwrap(fused), unwrap(mask24)).result
             s_i32 = _arith_mlir.ShRUIOp(unwrap(fused), unwrap(arith.i32(24)._value)).result
 
-            # valid token?
+            # token id (may be sentinel == tokens); we rely on buffer descriptor OOB checks
+            # (num_records set to the logical memref size) instead of predication/select.
             tokens_i32 = arith.i32(tokens)._value
             topk_i32 = arith.i32(topk)._value
-            valid_t = _arith_mlir.CmpIOp(_arith_mlir.CmpIPredicate.ult, unwrap(t_i32), unwrap(tokens_i32)).result
             t_idx = _arith_mlir.IndexCastOp(ir.IndexType.get(), unwrap(t_i32)).result
 
             # X base index (token-major)
@@ -549,58 +561,51 @@ def test_moe_stage1(
             idx_x_div4 = _arith_mlir.DivUIOp(unwrap(idx_x), unwrap(c4)).result
 
             # ---- X gmem->reg prefetch (GEMM-style) ----
-            max_bytes_per_load = 16
-            num_x_loads = (bytes_per_thread_x + max_bytes_per_load - 1) // max_bytes_per_load
-            vec_x_parts_lens = []
-            remaining_bytes = bytes_per_thread_x
-            for _ in range_constexpr(num_x_loads):
-                curr_bytes = min(remaining_bytes, max_bytes_per_load)
-                vec_x_parts_lens.append(curr_bytes)
-                remaining_bytes -= curr_bytes
+            # The tuned GEMM kernel uses fixed 16B global loads; for our MoE tile shapes we
+            # expect bytes_per_thread_x to be a multiple of 16. This keeps IR small and
+            # matches the scheduling assumptions.
+            x_load_bytes = 16
+            if bytes_per_thread_x % x_load_bytes != 0:
+                raise ValueError(
+                    f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by {x_load_bytes}"
+                )
+            num_x_loads = bytes_per_thread_x // x_load_bytes
 
             vec2_i32 = I.vec(2, i32)
             vec4_i32 = I.vec(4, i32)
 
-            def load_x_part(idx_i32, extent: int):
-                """Load `extent` fp8 bytes from X (gmem) into a vector via buffer_load backend.
+            def load_x_16(idx_i32):
+                """Load 16 fp8 bytes from X (gmem) into a vector via buffer_load backend.
 
-                `idx_i32` is an i32-element (dword) offset (not bytes).
+                `idx_i32` is an i32-element (dword) offset (not bytes), matching GEMM.
                 """
                 x_view = flir.TensorView(
                     arg_x,
-                    (extent,),
+                    (16,),
                     strides=(1,),
                     base_indices=(unwrap(idx_i32),),
                     element_type=f8,
                 )
-                atom = atom_x_g2r16 if extent == 16 else atom_x_g2r8
                 return flir.copy(
-                    atom,
+                    atom_x_g2r16,
                     x_view,
                     None,
-                    pred=valid_t,
-                    alignment=extent,
+                    alignment=16,
                     return_vector=True,
                     src_buffer_resource=x_rsrc,
                     src_buffer_offset_in_bytes=False,
                 )
 
-            vec_x_inits = []
-            curr_load_off = 0
-            for i in range_constexpr(num_x_loads):
-                curr_bytes = vec_x_parts_lens[i]
-                off_i32 = arith.constant(curr_load_off // 4, index=True)
-                idx_i32 = idx_x_div4 + off_i32
-                x_f8 = load_x_part(idx_i32, curr_bytes)
-                if curr_bytes == 16:
-                    vec_x_inits.append(vector.BitCastOp(vec4_i32, x_f8).result)
-                elif curr_bytes == 8:
-                    vec_x_inits.append(vector.BitCastOp(vec2_i32, x_f8).result)
-                else:
-                    vec_x_inits.append(x_f8)
-                curr_load_off += curr_bytes
-
-            vec_x_parts = vec_x_inits
+            def load_x_tile(base_k):
+                """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
+                base_k_div4 = _arith_mlir.DivUIOp(unwrap(base_k), unwrap(c4)).result
+                parts = []
+                for i in range_constexpr(num_x_loads):
+                    off_i32 = arith.constant(i * 4, index=True)  # 16B == 4 dwords
+                    idx_i32 = idx_x_div4 + base_k_div4 + off_i32
+                    x_f8 = load_x_16(idx_i32)
+                    parts.append(vector.BitCastOp(vec4_i32, x_f8).result)
+                return parts
 
             # tx -> wave/lane (GEMM-style decomposition).
             coord_wl = flir.idx2crd(unwrap(tx), layout_tx_wave_lane)
@@ -698,75 +703,72 @@ def test_moe_stage1(
                 b_vec64 = vector.BitCastOp(vec1_i64, b8_f8).result
                 return vector.ExtractOp(b_vec64, static_position=[0], dynamic_position=[]).result
 
+            def load_b_tile(base_k, blk_list, intra_list):
+                """Prefetch the entire per-thread B tile (gmem -> regs) for a given K base."""
+                b_tile = []
+                for ki_step in range_constexpr(k_unroll):
+                    packs = []
+                    for ni in range_constexpr(num_acc_n):
+                        packs.append(load_b_pack(base_k, ki_step, ni, blk_list, intra_list))
+                    b_tile.append(packs)
+                return b_tile
+
             acc_gate = [acc_init] * (num_acc_n * m_repeat)
             acc_up = [acc_init] * (num_acc_n * m_repeat)
 
-            def emit_tile(k_iv, acc_gate_in, acc_up_in, vec_x_in_parts, is_last=False):
-                # Store X to LDS
-                store_off = 0
-                for pi in range_constexpr(num_x_loads):
-                    val_vec = vec_x_in_parts[pi]
-                    curr_bytes = vec_x_parts_lens[pi]
+            # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
+            def store_x_tile_to_lds(vec_x_in_parts, lds_base):
+                for i in range_constexpr(num_x_loads):
                     # Match GEMM address pattern exactly.
+                    store_off = arith.constant(i * 16, index=True)
                     col_0 = col_a_local + store_off
                     col_swz = flir.swizzle_xor16(row_a_local, col_0, k_blocks16)
                     coord_store_0 = flir.make_coord(row_a_local, col_swz)
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
+                    idx_0 = (arith.ArithValue(idx_0) + lds_base).value
 
-                    if curr_bytes == 16:
-                        v16 = vector.BitCastOp(vec16_f8, val_vec).result
-                        s_view = flir.TensorView(
-                            lds_x, (16,), strides=(1,), base_indices=(idx_0,), element_type=f8
-                        )
-                        flir.copy(atom_x_s16, v16, s_view, alignment=16 if _ck_lds128 else None)
-                    elif curr_bytes == 8:
-                        v8 = vector.BitCastOp(vec8_f8, val_vec).result
-                        s_view = flir.TensorView(
-                            lds_x, (8,), strides=(1,), base_indices=(idx_0,), element_type=f8
-                        )
-                        flir.copy(atom_x_s8, v8, s_view, alignment=8 if _ck_lds128 else None)
-                    else:
-                        # Rare fallback: keep as fp8 vector and rely on scalar stores.
-                        s_view = flir.TensorView(
-                            lds_x, (curr_bytes,), strides=(1,), base_indices=(idx_0,), element_type=f8
-                        )
-                        flir.copy(atom_x_s8, val_vec, s_view)
-                    store_off += curr_bytes
+                    v16 = vector.BitCastOp(vec16_f8, vec_x_in_parts[i]).result
+                    s_view = flir.TensorView(
+                        lds_x, (16,), strides=(1,), base_indices=(idx_0,), element_type=f8
+                    )
+                    flir.copy(atom_x_s16, v16, s_view, alignment=16 if _ck_lds128 else None)
 
-                gpu.barrier()
-
-                vec_x_next = vec_x_in_parts
-                if not is_last:
-                    next_k = _arith_mlir.AddIOp(unwrap(k_iv), unwrap(c_tile_k)).result
-                    next_k_div4 = _arith_mlir.DivUIOp(unwrap(next_k), unwrap(c4)).result
-                    vec_x_next = []
-                    curr_load_off2 = 0
-                    for i in range_constexpr(num_x_loads):
-                        curr_bytes = vec_x_parts_lens[i]
-                        off_i32 = arith.constant(curr_load_off2 // 4, index=True)
-                        idx_i32 = idx_x_div4 + next_k_div4 + off_i32
-                        x_f8 = load_x_part(idx_i32, curr_bytes)
-                        if curr_bytes == 16:
-                            vec_x_next.append(vector.BitCastOp(vec4_i32, x_f8).result)
-                        elif curr_bytes == 8:
-                            vec_x_next.append(vector.BitCastOp(vec2_i32, x_f8).result)
-                        else:
-                            vec_x_next.append(x_f8)
-                        curr_load_off2 += curr_bytes
-
+            def compute_tile(
+                acc_gate_in,
+                acc_up_in,
+                b_gate_tile_in,
+                b_up_tile_in,
+                lds_base,
+                *,
+                prefetch_epilogue: bool = False,
+            ):
                 gate_list = list(acc_gate_in)
                 up_list = list(acc_up_in)
-
-                # Inline MFMA hot loop (match fast GEMM K32 pattern: ki_step outer -> mi inner).
                 c0_i32 = arith.i32(0)._value
 
-                for ki_step in range_constexpr(k_unroll):
-                    # Load B packs (gate+up) once per ki_step, reuse across MI.
-                    b_gate_packs = []
-                    b_up_packs = []
+                # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
+                # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
+                epilogue_pf = None
+                if prefetch_epilogue:
+                    expert_off_pf = arith.ArithValue(expert_off_idx)
+                    sw_gate_pf = []
+                    sw_up_pf = []
                     for ni in range_constexpr(num_acc_n):
-                        b_gate_packs.append(load_b_pack(k_iv, ki_step, ni, n_blk_gate, n_intra_gate))
-                        b_up_packs.append(load_b_pack(k_iv, ki_step, ni, n_blk_up, n_intra_up))
+                        col_g = col_g_list[ni]
+                        valid_col = valid_col_list[ni]
+                        row_gate_idx = expert_off_pf + col_g
+                        row_up_idx = row_gate_idx + inter_idx
+                        sw_gate_pf.append(
+                            buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
+                        )
+                        sw_up_pf.append(
+                            buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
+                        )
+                    epilogue_pf = (sw_gate_pf, sw_up_pf)
+
+                for ki_step in range_constexpr(k_unroll):
+                    b_gate_packs = b_gate_tile_in[ki_step]
+                    b_up_packs = b_up_tile_in[ki_step]
 
                     half = ki_step % 2
                     ki64 = (ki_step // 2) * 64
@@ -779,23 +781,23 @@ def test_moe_stage1(
                         # Read X from LDS using the same (row,col)->(row,col') xor swizzle as the store.
                         col_base_swizzled = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                         if _ck_lds128:
-                            # Base is 16B-aligned; read 16B then pick low/high 8B for this MFMA step.
                             coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
                             idx_a16 = flir.crd2idx(coord_a16, layout_lds)
+                            idx_a16 = (arith.ArithValue(idx_a16) + lds_base).value
                             loaded_a16 = vector.LoadOp(
-                                vec16_f8, lds_x, [arith.ArithValue(idx_a16).value]
+                                vec16_f8, lds_x, [idx_a16]
                             ).result
                             a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
                             a_pack = vector.ExtractOp(
                                 a_vec128, static_position=[half], dynamic_position=[]
                             ).result
                         else:
-                            # Legacy: read only the needed 8B half.
                             col_swizzled = col_base_swizzled + half * 8
                             coord_a = flir.make_coord(curr_row_a_lds, col_swizzled)
                             idx_a = flir.crd2idx(coord_a, layout_lds)
+                            idx_a = (arith.ArithValue(idx_a) + lds_base).value
                             loaded_a8 = vector.LoadOp(
-                                vec8_f8, lds_x, [arith.ArithValue(idx_a).value]
+                                vec8_f8, lds_x, [idx_a]
                             ).result
                             a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
                             a_pack = vector.ExtractOp(
@@ -826,33 +828,145 @@ def test_moe_stage1(
                                     unwrap(c0_i32),
                                 ],
                             ).result
+                return gate_list, up_list, epilogue_pf
 
+            # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
+            lds_tile_elems = arith.constant(tile_m * lds_stride, index=True)
+            lds_base_cur = arith.constant(0, index=True)
+            lds_base_nxt = lds_tile_elems
+
+            # Optional scheduler hints (copied from tuned GEMM); can be disabled via env.
+            use_sched = os.environ.get("FLIR_MOE_SCHED", "1") in ("1", "true", "True", "YES", "yes")
+            if use_sched:
+                rocdl.sched_barrier(0)
+
+
+                def hot_loop_scheduler():
+                    mfma_group = num_acc_n
+                    mfma_total = k_unroll * m_repeat * mfma_group
+                    mfma_per_iter = 2 * mfma_group
+                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+
+                    # DS-read preload (CK default is 2); clamp to non-negative.
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+
+                    # DS-write hints near the end: match total X LDS-store micro-ops per thread.
+                    dswr_tail = num_x_loads
+                    if dswr_tail > sche_iters:
+                        dswr_tail = sche_iters
+                    dswr_start = sche_iters - dswr_tail
+
+                    for sche_i in range_constexpr(sche_iters):
+                        rocdl.sched_vmem(1)
+                        rocdl.sched_mfma(mfma_group)
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(mfma_group)
+                        if sche_i >= dswr_start:
+                            rocdl.sched_dswr(1)
+                    rocdl.sched_barrier(0)
+
+            # Prologue: prefetch tile0, store to LDS(cur), sync.
+            k0 = arith.constant(0, index=True)
+            x_regs0 = load_x_tile(k0)
+            b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
+            b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
+            store_x_tile_to_lds(x_regs0, lds_base_cur)
+            gpu.barrier()
+
+            # Loop-carried ping/pong state.
+            # Match the tuned GEMM structure: we keep two physical LDS buffers and alternate
+            # compute/store roles (pong=compute, ping=next-store).
+            lds_base_pong = lds_base_cur  # current/compute
+            lds_base_ping = lds_base_nxt  # next/load+store
+
+            # Unrolled ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
+            # This matches the GEMM kernel's "load ping, compute pong, store ping" cadence.
+            c2_tile_k = arith.constant(tile_k * 2, index=True)
+            c_k_main2 = k_in - c2_tile_k
+
+            for k_iv in range(c0, c_k_main2, c2_tile_k):
+                # ---- stage 0: prefetch+store ping, compute pong ----
+                next_k1 = k_iv + c_tile_k
+                x_regs_ping = load_x_tile(next_k1)
+                b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)    
+                b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
+
+                acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
+                store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+                if use_sched:
+                    hot_loop_scheduler()
                 gpu.barrier()
-                return gate_list, up_list, vec_x_next
 
-            c_k_main = _arith_mlir.SubIOp(unwrap(k_in), unwrap(c_tile_k)).result
-            for k_iv in range(c0, c_k_main, c_tile_k):
-                acc_gate, acc_up, vec_x_parts = emit_tile(k_iv, acc_gate, acc_up, vec_x_parts, is_last=False)
-            acc_gate, acc_up, _ = emit_tile(c_k_main, acc_gate, acc_up, vec_x_parts, is_last=True)
+                # ---- stage 1: prefetch+store pong, compute ping ----
+                next_k2 = k_iv + c2_tile_k
+                x_regs_pong = load_x_tile(next_k2)
+                b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
+                b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
+
+                acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping)
+                store_x_tile_to_lds(x_regs_pong, lds_base_pong)
+                if use_sched:
+                    hot_loop_scheduler()
+                gpu.barrier()
+
+                # Advance pong state to next_k2 for next iteration.
+                b_gate_cur = b_gate_next
+                b_up_cur = b_up_next
+
+            # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
+            k_tail1 = k_in - c_tile_k
+            x_regs_ping = load_x_tile(k_tail1)
+            b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
+            b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
+
+            acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
+            store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+            if use_sched:
+                hot_loop_scheduler()
+            gpu.barrier()
+
+            # Epilogue: compute last tile with epilogue scale prefetch to overlap loads with MFMA.
+            acc_gate, acc_up, epilogue_pf = compute_tile(
+                acc_gate,
+                acc_up,
+                b_gate_ping,
+                b_up_ping,
+                lds_base_ping,
+                prefetch_epilogue=True,
+            )
 
             # Store epilogue to out[t, slot, inter]
             # Recompute token/slot for each output row this lane writes.
             #
             # GEMM-style prefetch: scale_w depends only on (expert,row) and `col_g` (ni),
             # not on token/slot. Hoist it out of the MI/II loops.
-            sw_gate_vals = []
-            sw_up_vals = []
-            for ni in range_constexpr(num_acc_n):
-                col_g = col_g_list[ni]
-                valid_col = valid_col_list[ni]
-                row_gate_idx = _arith_mlir.AddIOp(unwrap(expert_off_idx), unwrap(col_g)).result
-                row_up_idx = _arith_mlir.AddIOp(unwrap(row_gate_idx), unwrap(inter_idx)).result
-                sw_gate_vals.append(
-                    buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32, mask=valid_col)
-                )
-                sw_up_vals.append(
-                    buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32, mask=valid_col)
-                )
+            # Prefer `pyflir.dialects.ext.arith.ArithValue` operator overloading here to keep the
+            # kernel code readable (avoid raw `_mlir.dialects.arith.*Op` plumbing).
+            expert_off = arith.ArithValue(expert_off_idx)
+            bx_m0 = arith.ArithValue(bx_m)
+            tokens_i32_v = arith.ArithValue(tokens_i32)
+            topk_i32_v = arith.ArithValue(topk_i32)
+            inter_i32_v = arith.ArithValue(arith.i32(inter_dim)._value)
+            mask24_i32 = arith.i32(0xFFFFFF)
+
+            if epilogue_pf is not None:
+                sw_gate_vals, sw_up_vals = epilogue_pf
+            else:
+                sw_gate_vals = []
+                sw_up_vals = []
+                for ni in range_constexpr(num_acc_n):
+                    col_g = col_g_list[ni]
+                    row_gate_idx = expert_off + col_g
+                    row_up_idx = row_gate_idx + inter_idx
+                    sw_gate_vals.append(
+                        buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
+                    )
+                    sw_up_vals.append(
+                        buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
+                    )
 
             # Epilogue hoists to keep IR + Python build time small:
             # - `col_g` -> i32 cast is invariant across MI/II
@@ -860,43 +974,37 @@ def test_moe_stage1(
             # - inter_dim i32 constant is invariant
             col_i32_list = []
             for ni in range_constexpr(num_acc_n):
-                col_i32_list.append(_arith_mlir.IndexCastOp(i32, unwrap(col_g_list[ni])).result)
+                col_i32_list.append(arith.ArithValue(arith.IndexCastOp(i32, unwrap(col_g_list[ni])).result))
 
-            lane_div_16_mul4 = _arith_mlir.MulIOp(unwrap(lane_div_16), unwrap(c4)).result
+            lane_div_16_mul4 = arith.ArithValue(lane_div_16) * 4
             ii_idx_list = [arith.constant(ii, index=True) for ii in range(4)]
-            inter_i32_local = arith.i32(inter_dim)._value
+            inter_i32_local = inter_i32_v
 
             for mi in range_constexpr(m_repeat):
                 mi_base = arith.constant(mi * 16, index=True)
                 for ii in range_constexpr(4):
-                    row_off = _arith_mlir.AddIOp(unwrap(lane_div_16_mul4), unwrap(ii_idx_list[ii])).result
-                    row_in_tile = _arith_mlir.AddIOp(unwrap(mi_base), unwrap(row_off)).result
-                    sorted_row2 = _arith_mlir.AddIOp(unwrap(bx_m), unwrap(row_in_tile)).result
+                    row_off = lane_div_16_mul4 + ii_idx_list[ii]
+                    row_in_tile = mi_base + row_off
+                    sorted_row2 = bx_m0 + row_in_tile
 
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, sorted_row2, vec_width=1, dtype=i32)
-                    t2 = _arith_mlir.AndIOp(unwrap(fused2), unwrap(mask24)).result
-                    s2 = _arith_mlir.ShRUIOp(unwrap(fused2), unwrap(arith.i32(24)._value)).result
-                    valid2 = _arith_mlir.CmpIOp(_arith_mlir.CmpIPredicate.ult, unwrap(t2), unwrap(tokens_i32)).result
-
-                    t2_idx = _arith_mlir.IndexCastOp(ir.IndexType.get(), unwrap(t2)).result
-                    sx = buffer_ops.buffer_load(sx_rsrc, t2_idx, vec_width=1, dtype=f32, mask=valid2)
+                    t2 = fused2 & mask24_i32
+                    s2 = fused2 >> 24
+                    # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
+                    # sentinel (t2 == tokens) or otherwise out-of-range.
+                    sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                     # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
-                    idx0 = _arith_mlir.MulIOp(unwrap(t2), unwrap(topk_i32)).result
-                    idx0 = _arith_mlir.AddIOp(unwrap(idx0), unwrap(s2)).result
-                    idx0 = _arith_mlir.MulIOp(unwrap(idx0), unwrap(inter_i32_local)).result
+                    idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
 
                     # Sorted weight aligned with `sorted_row2` (matches aiter moe_sorting output).
                     # Only load when used to reduce both IR and runtime memory traffic.
                     if doweight_stage1:
                         tw = buffer_ops.buffer_load(
-                            sorted_w_rsrc, sorted_row2, vec_width=1, dtype=f32, mask=valid2
+                            sorted_w_rsrc, sorted_row2, vec_width=1, dtype=f32
                         )
 
                     for ni in range_constexpr(num_acc_n):
-                        valid_col = valid_col_list[ni]
-                        valid_store = _arith_mlir.AndIOp(unwrap(valid2), unwrap(valid_col)).result
-
                         col_i32 = col_i32_list[ni]
                         sw_gate = sw_gate_vals[ni]
                         sw_up = sw_up_vals[ni]
@@ -905,21 +1013,16 @@ def test_moe_stage1(
                         vg = vector.ExtractOp(acc_gate[acc_idx], [], [ii]).result
                         vu = vector.ExtractOp(acc_up[acc_idx], [], [ii]).result
 
-                        vg = flir.arith.MulFOp(unwrap(vg), unwrap(sx)).result
-                        vg = flir.arith.MulFOp(unwrap(vg), unwrap(sw_gate)).result
-                        vu = flir.arith.MulFOp(unwrap(vu), unwrap(sx)).result
-                        vu = flir.arith.MulFOp(unwrap(vu), unwrap(sw_up)).result
+                        vg = vg * sx * sw_gate
+                        vu = vu * sx * sw_up
 
-                        y = flir.arith.MulFOp(unwrap(silu(vg)), unwrap(vu)).result
+                        y = silu(vg) * vu 
                         if doweight_stage1:
-                            y = flir.arith.MulFOp(unwrap(y), unwrap(tw)).result
-
-                        y_f16 = _arith_mlir.TruncFOp(T.f16(), unwrap(y)).result
-
-                        idx_out = _arith_mlir.AddIOp(unwrap(idx0), unwrap(col_i32)).result
-
-                        buffer_ops.buffer_store(y_f16, out_rsrc, idx_out, mask=valid_store)
-
+                            y = y * tw
+                        # y = y.to(T.f16)
+                        y = arith.TruncFOp(T.f16(), unwrap(y)).result
+                        idx_out = idx0 + col_i32
+                        buffer_ops.buffer_store(y, out_rsrc, idx_out)
         @flir.jit
         def __call__(
             self: flir.T.i64,

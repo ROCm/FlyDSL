@@ -23,9 +23,9 @@ from _mlir import ir
 from _mlir.dialects import vector, memref, builtin, llvm
 from pyflir.dialects.ext import arith, scf, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
-import _mlir.dialects.rocdl as rocdl
-import _mlir.extras.types as T
-from pyflir.lang.ir.types import T as I
+import pyflir.dialects.ext.rocdl as rocdl
+import pyflir.lang.ir.types as mlir_types
+from pyflir.lang.ir.types import T
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -95,44 +95,28 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         ]
 
         def init_gpu_module(self):
-            _state["lds_a_decl"] = allocator.allocate_array(I.f8, tile_m * lds_stride)
+            # Ping-pong LDS for A (2-stage pipeline).
+            _state["lds_a_decl"] = allocator.allocate_array(T.f8, 2 * tile_m * lds_stride)
             allocator.finalize()
 
         @flir.kernel
-        def kernel_fixed(
+        def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: T.memref(size_c, T.f16()),
-            arg_a: lambda: T.memref(size_a, I.f8),
-            arg_b: lambda: T.memref(size_b, I.f8),
-            arg_scale_a: lambda: T.memref(M, T.f32()),
-            arg_scale_b: lambda: T.memref(N, T.f32()),
-            c_m: lambda: T.index(),
-            c_n: lambda: T.index(),
-            c_k: lambda: T.index(),
+            arg_c: lambda: mlir_types.memref(size_c, T.f16),
+            arg_a: lambda: mlir_types.memref(size_a, T.f8),
+            arg_b: lambda: mlir_types.memref(size_b, T.f8),
+            arg_scale_a: lambda: mlir_types.memref(M, T.f32),
+            arg_scale_b: lambda: mlir_types.memref(N, T.f32),
+            c_m: lambda: T.index,
+            c_n: lambda: T.index,
+            c_k: lambda: T.index,
         ):
             # ---- Types (centralized) ----
-            f8 = I.f8
-            f16 = I.f16
-            f32 = I.f32
-            i8 = I.i8
-            i32 = I.i32
-            i64 = I.i64
-            index = I.index
-
-            vec4_f32 = I.vec(4, f32)
-            vec8_f8 = I.vec(8, f8)
-            vec16_f8 = I.vec(16, f8)
-            vec1_i64 = I.vec(1, i64)
-            vec2_i64 = I.vec(2, i64)
-            vec2_i32 = I.vec(2, i32)
-            vec4_i32 = I.vec(4, i32)
-
-            vec_a_load_len = bytes_per_thread_a # fp8
 
             zero_attr = ir.DenseElementsAttr.get_splat(
-                vec4_f32, ir.FloatAttr.get(f32, 0.0)
+                T.f32x4, ir.FloatAttr.get(T.f32, 0.0)
             )
-            acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
+            acc_init = _arith_mlir.ConstantOp(T.f32x4, zero_attr).result
 
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
@@ -268,7 +252,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             #
             # Keep the original 8B-per-step behavior: each MFMA(x32) step consumes one 8B pack
             # (half of the 16B KPack). This maps naturally to buffer_load_dwordx2.
-            atom_b_g2r = flir.make_copy_atom(f8, vector_size=8)
+            atom_b_g2r = flir.make_copy_atom(T.f8, vector_size=8)
 
             def load_b_pack(base_k, ki_step, ni):
                 """
@@ -295,7 +279,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     (8,),
                     strides=(1,),
                     base_indices=(idx_bytes,),
-                    element_type=f8,
+                    element_type=T.f8,
                 )
                 b8_f8 = flir.copy(
                     atom_b_g2r,
@@ -305,10 +289,25 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     return_vector=True,
                     src_buffer_resource=b_rsrc,
                 )
-                b_vec64 = vector.BitCastOp(vec1_i64, b8_f8).result
+                b_vec64 = vector.BitCastOp(T.vec(1, T.i64), b8_f8).result
                 return vector.ExtractOp(
                     b_vec64, static_position=[0], dynamic_position=[]
                 ).result
+
+            def load_b_tile(base_k):
+                """Prefetch the entire per-thread B tile (gmem -> regs).
+
+                Returns a python list-of-lists: b_tile[ki_step][ni] -> i64 pack.
+                This is K-tile double-buffered (like A): compute uses current b_tile_in,
+                while we prefetch the next tile into b_tile_next.
+                """
+                b_tile = []
+                for ki_step in range_constexpr(k_unroll):
+                    packs = []
+                    for ni in range_constexpr(num_acc_n):
+                        packs.append(load_b_pack(base_k, ki_step, ni))
+                    b_tile.append(packs)
+                return b_tile
 
             # A gmem->reg prefetch via flir.copy (buffer-load backend), keeping the original
             # pipelining structure: load next tile into regs (loop-carried), then store to LDS.
@@ -322,7 +321,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             c4 = arith.constant(4, index=True)
             tx_i32_base = tx * c4
 
-            atom_a_g2r16 = flir.make_copy_atom(f8, vector_size=16)
+            atom_a_g2r16 = flir.make_copy_atom(T.f8, vector_size=16)
 
             def load_a_16(idx_i32):
                 """Load 16 fp8 bytes from A (gmem) into a vector via buffer_load backend.
@@ -334,7 +333,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     (16,),
                     strides=(1,),
                     base_indices=(idx_i32,),
-                    element_type=f8,
+                    element_type=T.f8,
                 )
                 return flir.copy(
                     atom_a_g2r16,
@@ -346,122 +345,107 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     src_buffer_offset_in_bytes=False,
                 )
 
-            vec_a_inits = []
-            for i in range_constexpr(num_a_loads):
-                # Inter-thread contiguous 16B: lanes touch consecutive chunks, then stride by
-                # (total_threads * 16B) per subsequent load.
+            def a_tile_chunk_coord_i32(i: int):
+                """Map per-thread chunk `i` -> (row_a_local, col_a_local_i32) within the A tile.
+
+                We want inter-thread contiguous 16B chunks:
+                  chunk_linear = tx + i*total_threads
+                  chunk_i32_base = chunk_linear * 4  (because 16B == 4 dwords)
+                Then decompose into (row, col_i32) using a tile-local layout.
+                """
                 chunk_off_i32 = arith.constant(i * total_threads * 4, index=True)
                 tile_idx_i32 = tx_i32_base + chunk_off_i32
                 coord_a_local_i32 = flir.idx2crd(tile_idx_i32, layout_a_tile_div4)
                 row_a_local = flir.get(coord_a_local_i32, 0)
                 col_a_local_i32 = flir.get(coord_a_local_i32, 1)
+                return row_a_local, col_a_local_i32
 
-                row_a_global = bx_m + row_a_local
-                coord_a_g = flir.make_coord(row_a_global, col_a_local_i32)
-                idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-                a_f8 = load_a_16(idx_i32)
-                vec_a_inits.append(vector.BitCastOp(vec4_i32, a_f8).result)
-
-            # Loop-carried state
-            accs = acc_inits
-            vec_a_parts = vec_a_inits
-
-            def emit_tile(k_iv, accs_in, vec_a_in_parts, is_last_tile=False):
-                # Store A to LDS with CK-style XOR16 swizzle (16B granularity), preserving the
-                # original LDS address pattern (same row/col swizzle as before).
+            def load_a_tile(k_base_div4):
+                """Load the per-thread A tile portion (gmem -> regs) for a given K base (in /4 units)."""
+                parts = []
                 for i in range_constexpr(num_a_loads):
-                    a_val = vec_a_in_parts[i]
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    row_a_global = bx_m + row_a_local
+                    coord_a_g = flir.make_coord(
+                        row_a_global, k_base_div4 + col_a_local_i32
+                    )
+                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
+                    a_f8 = load_a_16(idx_i32)
+                    parts.append(vector.BitCastOp(T.i32x4, a_f8).result)
+                return parts
 
-                    chunk_off_i32 = arith.constant(i * total_threads * 4, index=True)
-                    tile_idx_i32 = tx_i32_base + chunk_off_i32
-                    coord_a_local_i32 = flir.idx2crd(tile_idx_i32, layout_a_tile_div4)
-                    row_a_local = flir.get(coord_a_local_i32, 0)
-                    col_a_local_i32 = flir.get(coord_a_local_i32, 1)
-
+            def store_a_tile_to_lds(vec_a_in_parts, lds_base):
+                """Store the per-thread A tile portion (regs -> LDS), applying CK-style XOR16 swizzle."""
+                for i in range_constexpr(num_a_loads):
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     col_a_local_bytes = col_a_local_i32 * c4
-                    col_swz = flir.swizzle_xor16(row_a_local, col_a_local_bytes, k_blocks16)
+                    col_swz = flir.swizzle_xor16(
+                        row_a_local, col_a_local_bytes, k_blocks16
+                    )
                     coord_store_0 = flir.make_coord(row_a_local, col_swz)
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
+                    idx_0 = (arith.ArithValue(idx_0) + lds_base).value
 
                     # Convert back to fp8 vector for LDS store.
-                    a_vec = vector.BitCastOp(vec16_f8, a_val).result
-
+                    a_vec = vector.BitCastOp(T.f8x16, vec_a_in_parts[i]).result
                     s_view = flir.TensorView(
                         lds_a,
                         (16,),
                         strides=(1,),
                         base_indices=(idx_0,),
-                        element_type=f8,
+                        element_type=T.f8,
                     )
                     flir.copy(atom_a_g2r16, a_vec, s_view, alignment=16)
 
-                gpu.barrier()
+            # Ping-pong LDS bases (index-typed).
+            lds_tile_elems = arith.constant(tile_m * lds_stride, index=True)
+            lds_base_cur = arith.constant(0, index=True)
+            lds_base_nxt = lds_tile_elems
 
-                vec_a_next_parts = vec_a_in_parts  # Default placeholder
+            def prefetch_ab_tile(base_k):
+                """Prefetch full per-thread A+B tiles (gmem -> regs)."""
+                base_k_div4 = base_k / 4
+                a_regs = load_a_tile(base_k_div4)
+                b_regs = load_b_tile(base_k)
+                return a_regs, b_regs
+
+            def compute_tile(accs_in, b_tile_in, lds_base, *, is_last_tile=False):
+                """Compute one K-tile using A from ping-pong LDS and B from regs.
+
+                For the last tile, we also prefetch scale vectors before MFMA so loads can
+                overlap with MFMA.
+                """
                 scales_pf = {}
-
-                if not is_last_tile:
-                    # Next K calculations
-                    next_k = k_iv + tile_k
-                    next_k_div4 = next_k / 4
-
-                    # Prefetch A (next tile) into regs via flir.copy(load-only, buffer backend).
-                    vec_a_next_parts = []
-                    for i in range_constexpr(num_a_loads):
-                        chunk_off_i32 = arith.constant(i * total_threads * 4, index=True)
-                        tile_idx_i32 = tx_i32_base + chunk_off_i32
-                        coord_a_local_i32 = flir.idx2crd(tile_idx_i32, layout_a_tile_div4)
-                        row_a_local = flir.get(coord_a_local_i32, 0)
-                        col_a_local_i32 = flir.get(coord_a_local_i32, 1)
-
-                        row_a_global = bx_m + row_a_local
-                        coord_a_g = flir.make_coord(row_a_global, next_k_div4 + col_a_local_i32)
-                        idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-                        a_f8 = load_a_16(idx_i32)
-                        vec_a_next_parts.append(vector.BitCastOp(vec4_i32, a_f8).result)
-                    # b_vals_next_raw = load_b_tile(next_k)
-                    # b_vals_next = []
-                    # for b_list in b_vals_next_raw:
-                    #     b_vals_next.extend(b_list)
-                else:
+                if is_last_tile:
                     # --- PREFETCH SCALES (Last Iteration) ---
-                    # Prefetch Scale B (invariant for thread)
                     s_b_vals = []
                     for ni in range_constexpr(num_acc_n):
                         offset = ni * 16
                         c_offset = arith.constant(offset, index=True)
                         col_g = by_n + n_tile_base + c_offset + lane_mod_16
-
                         val = buffer_ops.buffer_load(
-                            scale_b_rsrc, col_g, vec_width=1, dtype=f32
+                            scale_b_rsrc, col_g, vec_width=1, dtype=T.f32
                         )
                         s_b_vals.append(val)
-
                     scales_pf["s_b_vals"] = s_b_vals
                     scales_pf["s_a_vecs"] = []
 
-                    # Pre-load Scale A vectors
                     row_off_base = lane_div_16 * 4
                     for mi in range_constexpr(m_repeat):
                         row_base_m = bx_m + (mi * 16)
                         row_g_base = row_base_m + row_off_base
                         s_a_vec = buffer_ops.buffer_load(
-                            scale_a_rsrc, row_g_base, vec_width=4, dtype=f32
+                            scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
                         )
-                        s_a_vec4 = vector.BitCastOp(vec4_f32, s_a_vec).result
+                        s_a_vec4 = vector.BitCastOp(T.f32x4, s_a_vec).result
                         scales_pf["s_a_vecs"].append(s_a_vec4)
 
                 current_accs_list = list(accs_in)
 
-                # Loop Swap: Iterate K_step (outer) -> MI (inner) to keep B pack live ranges short.
+                # MFMA: use current B tile resident in regs; use A from LDS (ping-pong base).
                 for ki_step in range_constexpr(k_unroll):
-                    # Load B packs for this ki_step only (short live range)
-                    b_packs = []
-                    for ni in range_constexpr(num_acc_n):
-                        b = load_b_pack(k_iv, ki_step, ni)
-                        b_packs.append(b)
+                    b_packs = b_tile_in[ki_step]
 
-                    # For A, align swizzle at 16B granularity.
                     ki64 = (ki_step // 2) * 64
                     half = ki_step % 2
                     col_base = col_offset_base + ki64
@@ -470,14 +454,16 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         mi_val = arith.constant(mi * 16, index=True)
                         curr_row_a_lds = row_a_lds + mi_val
 
-                        # Read A from LDS using the same (row,col)->(row,col') xor swizzle as the store.
-                        col_base_swizzled = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
+                        col_base_swizzled = flir.swizzle_xor16(
+                            curr_row_a_lds, col_base, k_blocks16
+                        )
                         coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
                         idx_a16 = flir.crd2idx(coord_a16, layout_lds)
+                        idx_a16 = (arith.ArithValue(idx_a16) + lds_base).value
                         loaded_a16 = vector.LoadOp(
-                            vec16_f8, lds_a, [arith.ArithValue(idx_a16).value]
+                            T.f8x16, lds_a, [idx_a16]
                         ).result
-                        a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
+                        a_vec128 = vector.BitCastOp(T.i64x2, loaded_a16).result
                         a_pack = vector.ExtractOp(
                             a_vec128, static_position=[half], dynamic_position=[]
                         ).result
@@ -488,7 +474,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             b_pack = b_packs[ni]
 
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                                vec4_f32,
+                                T.f32x4,
                                 [
                                     arith.ArithValue(a_pack).value,
                                     arith.ArithValue(b_pack).value,
@@ -500,21 +486,83 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             ).result
                             current_accs_list[acc_idx] = acc0
 
-                gpu.barrier()
-                return current_accs_list, vec_a_next_parts, scales_pf
+                return current_accs_list, scales_pf
 
-            # Main Loop (runs 0 to K-tile_k)
-            # Peel off the last iteration
+            # ---------------- Pipeline Prologue ----------------
+            # Prefetch tile-0 into regs, then commit A to LDS(cur) and sync.
+            k0 = arith.constant(0, index=True)
+            a_regs0, b_tile_cur = prefetch_ab_tile(k0)
+            store_a_tile_to_lds(a_regs0, lds_base_cur)
+            gpu.barrier()
+
+            # Loop-carried state
+            accs = acc_inits
+
+            # ---------------- Main Pipelined Loop ----------------
+            # We execute tiles [0 .. K-tile_k) here. Each iteration:
+            # - load ping buffer, compute pong, store ping
+            # - barrier
+            # - swap ping/pong roles
+            #
+            # Note: ping/pong *roles* are swapped each iteration (so compute always uses "pong",
+            # while the physical buffer alternates). This matches the classic 2-stage pipeline.
             c_k_main = c_k - tile_k
+            # Ping/pong LDS bases.
+            lds_base_pong = lds_base_cur  # current/compute
+            lds_base_ping = lds_base_nxt  # next/load+store
+            # Ping/pong B reg tiles (pong is primed by the prologue).
+            b_tile_pong = b_tile_cur  # current/compute
+            rocdl.sched_barrier(0)
+            def hot_loop_scheduler():
+                # Derive CK-like schedule parameters from this tile:
+                # - MFMA group size per "slot": num_acc_n
+                # - Total MFMA per tile: k_unroll * m_repeat * num_acc_n
+                # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
+                mfma_group = num_acc_n
+                mfma_total = k_unroll * m_repeat * mfma_group
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                mfma_tail = mfma_total - sche_iters * mfma_per_iter
 
-            for k_iv in range(0, c_k_main, tile_k):
-                accs, vec_a_parts, _ = emit_tile(
-                    k_iv, accs, vec_a_parts, is_last_tile=False
-                )
+                # DS-read preload (CK default is 2); clamp to non-negative.
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(1)
 
-            # Epilogue: Run last tile and prefetch scales
-            final_accs, _, scales = emit_tile(
-                c_k_main, accs, vec_a_parts, is_last_tile=True
+                # DS-write hints near the end: match total A LDS-store micro-ops per thread.
+                dswr_tail = num_a_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start:
+                        rocdl.sched_dswr(1)
+
+                rocdl.sched_barrier(0)
+            for k_iv in range(0, c_k_main, tile_k * 2):
+                next_k1 = k_iv + tile_k
+                # load ping, compute pong, store ping
+                a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
+                accs, _ = compute_tile(accs, b_tile_pong, lds_base_pong)
+                store_a_tile_to_lds(a_regs_ping, lds_base_ping)
+                hot_loop_scheduler()
+                gpu.barrier()
+                next_k2 = k_iv + tile_k * 2
+                # load ping, compute pong, store ping
+                a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
+                accs, _ = compute_tile(accs, b_tile_ping, lds_base_ping)
+                store_a_tile_to_lds(a_regs_pong, lds_base_pong)
+                hot_loop_scheduler()
+                gpu.barrier()
+
+            # ---------------- Epilogue (last tile) ----------------
+            final_accs, scales = compute_tile(
+                accs, b_tile_pong, lds_base_pong, is_last_tile=True
             )
 
             s_b_vals = scales["s_b_vals"]
@@ -547,7 +595,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         val_s = val * s_a
                         val_s = val_s * s_b
                         val_f16 = _arith_mlir.TruncFOp(
-                            f16, arith.ArithValue(val_s).value
+                            T.f16, arith.ArithValue(val_s).value
                         ).result
 
                         idx = flir.crd2idx(
@@ -558,14 +606,14 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: T.memref(size_c, T.f16()),
-            arg_a: lambda: T.memref(size_a, I.f8),
-            arg_b: lambda: T.memref(size_b, I.f8),
-            arg_scale_a: lambda: T.memref(M, T.f32()),
-            arg_scale_b: lambda: T.memref(N, T.f32()),
-            c_m: lambda: T.index(),
-            c_n: lambda: T.index(),
-            c_k: lambda: T.index(),
+            arg_c: lambda: mlir_types.memref(size_c, T.f16),
+            arg_a: lambda: mlir_types.memref(size_a, T.f8),
+            arg_b: lambda: mlir_types.memref(size_b, T.f8),
+            arg_scale_a: lambda: mlir_types.memref(M, T.f32),
+            arg_scale_b: lambda: mlir_types.memref(N, T.f32),
+            c_m: lambda: T.index,
+            c_n: lambda: T.index,
+            c_k: lambda: T.index,
         ):
             c1 = arith.constant(1, index=True).value
             bdx = arith.constant(256, index=True).value
@@ -573,7 +621,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             gy = arith.constant(N // tile_n, index=True).value
 
             flir.gpu_ext.LaunchFuncOp(
-                ["mfma_mod", "kernel_fixed"],
+                ["mfma_mod", "kernel_gemm"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, c1, c1),
                 kernel_operands=[
@@ -703,7 +751,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         )
 
         print(
-            f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, us {us1:.1f} vs {us:.1f}"
+            f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
         )
         print("-" * 40)
     elif HAS_AITER and not RUN_AITER_BENCH:
@@ -717,5 +765,5 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
 
-    test_mfma_fp8_flir_preshuffle(5120, 5120, 8192, tile_m=64, tile_n=256, tile_k=128)
+    test_mfma_fp8_flir_preshuffle(5120, 5120, 8192+128, tile_m=64, tile_n=256, tile_k=128)
     
