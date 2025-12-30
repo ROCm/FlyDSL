@@ -414,8 +414,7 @@ static std::pair<Value, Value> computeComplementInline(
           rewriter);
 
       // Denominator safety for ceil_div: newStride must be non-zero.
-      // (The CUTLASS pipeline filters stride-0 modes; we assert here so we never
-      // constant-fold a division-by-zero.)
+      // We assert here so we never constant-fold a division-by-zero.
       if (auto ns = tryGetConstIndex(newStride); ns.has_value() && *ns == 0) {
         emitError(loc, "Zero stride encountered in complement.");
         return {Value(), Value()};
@@ -496,9 +495,8 @@ static std::pair<Value, Value> computeComplementInline(
         }
     }
 
-    // CUTLASS behavior:
-    //   static_assert(R == 1 || is_static<Stride>::value,
-    //                 "Dynamic-stride complement only for rank-1 layouts");
+    // Complement requires a deterministic stride order for rank > 1.
+    // If any stride leaf is dynamic, sorting/folding by stride becomes unsound.
     // In FLIR lowering, if rank > 1 and any stride is not a compile-time constant,
     // we cannot soundly sort/fold by stride, so we reject early.
     if (!allStatic && shapes.size() > 1) {
@@ -1078,9 +1076,8 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
         }
     }
 
-    // CUTLASS behavior:
-    //   static_assert(R == 1 || is_static<Stride>::value,
-    //                 "Dynamic-stride complement only for rank-1 layouts");
+    // Complement requires a deterministic stride order for rank > 1.
+    // If any stride leaf is dynamic, sorting/folding by stride becomes unsound.
     // Reject rank>1 dynamic-stride complements in FLIR lowering.
     if (!allStatic && leavesShape.size() > 1) {
       emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
@@ -1121,7 +1118,7 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
             },
             rewriter);
 
-        // Check for Non-injective Layout (similar to CUTLASS static_assert)
+        // Check for non-injective layouts.
         // If the gap size is 0, it means minStride < currStride, implying overlap.
         // We use our explicit compile-time tracking (currStrideC) for robust checking.
 
