@@ -2,10 +2,9 @@
 
 import pytest
 from _mlir.ir import Context, Location, Module, InsertionPoint
-from _mlir.dialects import func
 
 try:
-    from pyflir.dialects.ext import arith
+    from pyflir.dialects.ext import arith, flir
 except ImportError:
     pytest.skip("FLIR dialect not available", allow_module_level=True)
 
@@ -13,8 +12,8 @@ except ImportError:
 def test_arithmetic_operators(ctx):
     """Test +, -, *, / operators."""
     with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_arithmetic")
-        def test_ops():
+        @flir.jit
+        def test_arithmetic():
             # Create constants
             a = arith.index(10)
             b = arith.index(3)
@@ -25,7 +24,7 @@ def test_arithmetic_operators(ctx):
             e = a * b      # MulIOp
             f = a // b     # DivSIOp
             
-            return arith.as_value(c)
+            return c
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -36,7 +35,7 @@ def test_arithmetic_operators(ctx):
 def test_mixed_operators(ctx):
     """Test operators with Python literals."""
     with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_mixed")
+        @flir.jit
         def test_mixed():
             a = arith.index(100)
             
@@ -45,7 +44,7 @@ def test_mixed_operators(ctx):
             c = a * 2      # Should create constant 2 and multiply
             d = 10 + a     # Reverse operator
             
-            return arith.as_value(b)
+            return b
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -56,8 +55,8 @@ def test_mixed_operators(ctx):
 def test_comparison_operators(ctx):
     """Test <, >, <=, >=, ==, != operators."""
     with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_comparison")
-        def test_cmp():
+        @flir.jit
+        def test_comparison():
             a = arith.index(10)
             b = arith.index(5)
             
@@ -69,7 +68,7 @@ def test_comparison_operators(ctx):
             eq = a == b    # CmpIOp(eq)
             ne = a != b    # CmpIOp(ne)
             
-            return arith.as_value(lt)
+            return lt
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -80,8 +79,8 @@ def test_comparison_operators(ctx):
 def test_float_operators(ctx):
     """Test operators with floating point values."""
     with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_float_ops")
-        def test_float():
+        @flir.jit
+        def test_float_ops():
             a = arith.f32(3.14)
             b = arith.f32(2.0)
             
@@ -93,7 +92,7 @@ def test_float_operators(ctx):
             # Float comparison
             gt = a > b     # CmpFOp(ogt)
             
-            return arith.as_value(c)
+            return c
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -104,8 +103,8 @@ def test_float_operators(ctx):
 def test_chained_operations(ctx):
     """Test chaining multiple operators."""
     with InsertionPoint(ctx.module.body):
-        @func.FuncOp.from_py_func(name="test_chained")
-        def test_chain():
+        @flir.jit
+        def test_chained():
             a = arith.index(10)
             b = arith.index(5)
             c = arith.index(2)
@@ -113,7 +112,7 @@ def test_chained_operations(ctx):
             # Complex expression: (a + b) * c - 3
             result = (a + b) * c - 3
             
-            return arith.as_value(result)
+            return result
     
     ctx.module.operation.verify()
     # Apply lowering

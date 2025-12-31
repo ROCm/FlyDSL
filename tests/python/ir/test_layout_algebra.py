@@ -13,7 +13,6 @@ from pyflir.compiler.context import RAIIMLIRContextModule
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
 from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
-from _mlir.dialects import func
 from _mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
 
 def flatten_nested_list(nested):
@@ -189,7 +188,7 @@ def test_coalesce_basic():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def test_coalesce():
         layout = flir.make_layout(
             (Index(2), (Index(1), Index(6))),
@@ -200,7 +199,7 @@ def test_coalesce_basic():
         
         # Verify size is preserved
         sz = flir.size(coalesced)
-        return [arith.as_value(sz)]
+        return [sz]
     
     # Verify size is preserved: 2 * 1 * 6 = 12
     run_lowering_test(ctx, "coalesce_basic", expected_val=12)
@@ -217,7 +216,7 @@ def test_coalesce_dynamic_stride():
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     index_type = IndexType.get()
     
-    @func.FuncOp.from_py_func(index_type)
+    @flir.jit(index_type)
     def coalesce_dynamic(runtime_stride):
         layout = flir.make_layout(
             (Index(2), (Index(1), Index(6))),
@@ -225,7 +224,7 @@ def test_coalesce_dynamic_stride():
         )
         coalesced = flir.coalesce(layout)
         stride = flir.get_stride(coalesced)
-        return [arith.as_value(v) for v in [
+        return [v for v in [
             flir.get(stride, Index(0)),
             flir.get(stride, Index(1)),
             flir.get(stride, Index(2)),
@@ -256,7 +255,7 @@ def test_composition_basic():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_composition():
         A = flir.make_layout(
             (Index(6), Index(2)),
@@ -279,7 +278,7 @@ def test_composition_basic():
         for i in range(3):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [2, 2, 3] + stride [24, 2, 8]
     # Structure: ((2,2),3):((24,2),8)
@@ -323,7 +322,7 @@ def test_composition_static_vs_dynamic():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_composition_static():
         # Create layouts with STATIC dimensions using Index()
         # These will become arith.constant operations
@@ -350,7 +349,7 @@ def test_composition_static_vs_dynamic():
         for i in range(3):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [5, 2, 2] + stride [16, 80, 4]
     # All values should be constants after lowering
@@ -371,8 +370,8 @@ def test_composition_static_vs_dynamic():
     ctx_dynamic = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     index_type = IndexType.get()
     
-    @func.FuncOp.from_py_func(index_type, index_type, index_type, index_type,
-                                index_type, index_type, index_type, index_type)
+    @flir.jit(index_type, index_type, index_type, index_type,
+              index_type, index_type, index_type, index_type)
     def run_composition_dynamic(a_dim0, a_dim1, a_stride0, a_stride1,
                                 b_dim0, b_dim1, b_stride0, b_stride1):
         """
@@ -412,7 +411,7 @@ def test_composition_static_vs_dynamic():
         flir.printf("  R shape[0]: {}\n", vals[0])
         flir.printf("  R stride[0]: {}\n", vals[1])
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     print("  Creating dynamic layout: A_dynamic from function arguments (arg0-arg3)")
     print("  Creating dynamic layout: B_dynamic from function arguments (arg4-arg7)")
@@ -470,7 +469,7 @@ def test_logical_divide_1d():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_logical_divide_1d():
         layout = flir.make_layout(
             (Index(4), Index(2), Index(3)),
@@ -498,10 +497,10 @@ def test_logical_divide_1d():
         stride_d3 = flir.get(stride, Index(3))
         
         # Return all values: shape dims, stride dims
-        return [arith.as_value(v) for v in [
+        return [
             shape_d0, shape_d1, shape_d2, shape_d3,
             stride_d0, stride_d1, stride_d2, stride_d3,
-        ]]
+        ]
 
     # Expected: shape [2,2,2,3] + stride [4,1,2,8]
     # Structure: ((2,2),(2,3)):((4,1),(2,8))
@@ -522,7 +521,7 @@ def test_logical_divide_2d():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_logical_divide_2d():
         # Input: (9, (4, 8)):(59, (13, 1))
         layout = flir.make_layout(
@@ -549,7 +548,7 @@ def test_logical_divide_2d():
         for i in range(6):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [3,3,2,4,2,2] + stride [177,59,13,2,26,1]
     # Actual: [3, 2, 2, 4, 2, 2] - index 1 is 2 (complement size mismatch due to non-contiguous composition)
@@ -567,7 +566,7 @@ def test_shape_stride_type_nested_spec_printing():
     """Ensure nested shape/stride types print in tuple form."""
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
 
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def _build():
         s = flir.make_shape(Index(9), (Index(4), Index(8)))
         st = flir.make_stride(Index(59), (Index(13), Index(1)))
@@ -589,7 +588,7 @@ def test_zipped_divide():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_zipped_divide():
         layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
@@ -614,7 +613,7 @@ def test_zipped_divide():
         for i in range(6):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     # Structure: ((3,(2,4)),(3,(2,2))):((177,(13,2)),(59,(26,1)))
@@ -635,7 +634,7 @@ def test_tiled_divide():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_tiled_divide():
         layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
@@ -660,7 +659,7 @@ def test_tiled_divide():
         for i in range(6):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     # Structure: ((3,(2,4)),3,(2,2)):((177,(13,2)),59,(26,1))
@@ -680,7 +679,7 @@ def test_flat_divide():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_flat_divide():
         layout = flir.make_layout(
             (Index(9), (Index(4), Index(8))),
@@ -694,7 +693,7 @@ def test_flat_divide():
 
         res_flat = flir.flat_divide(layout, tiler)
         sz = flir.size(res_flat)
-        return [arith.as_value(sz)]
+        return [sz]
 
     # Expected size: 9 * 4 * 8 = 288 (divide preserves total size)
     # TODO: Add full shape/stride verification once divide lowering is implemented
@@ -718,7 +717,7 @@ def test_logical_product_1d():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_logical_product():
         layout = flir.make_layout(
             (Index(2), Index(2)),
@@ -742,7 +741,7 @@ def test_logical_product_1d():
         for i in range(3):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: block shape (2,2) concatenated with tiler shape (6)
     # Stride: block stride (4,1) concatenated with scaled tiler stride (1 * block_size)
@@ -765,7 +764,7 @@ def test_blocked_raked_product():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_blocked_raked_product():
         layout = flir.make_layout(
             (Index(2), Index(5)),
@@ -789,7 +788,7 @@ def test_blocked_raked_product():
         for i in range(4):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [2,5,3,4] + stride [5,1,10,30] (block_size=10)
     # Structure: ((2,3),(5,4)):((5,10),(1,30))
@@ -818,7 +817,7 @@ def test_zipped_tiled_flat_product():
     
     ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_zipped_tiled_flat_product():
         layout = flir.make_layout(
             (Index(2), Index(5)),
@@ -842,7 +841,7 @@ def test_zipped_tiled_flat_product():
         for i in range(4):
             vals.append(flir.get(stride, Index(i)))
         
-        return [arith.as_value(v) for v in vals]
+        return vals
 
     # Expected: shape [2,5,3,4] + stride [5,1,10,30] (block_size=10)
     # Structure: (2,5,3,4):(5,1,10,30)
@@ -863,7 +862,7 @@ def test_complement_simple():
     
     ctx = RAIIMLIRContextModule()
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def run_complement_simple():
         # Create tiler layout: 3:1
         c3 = Index(3)
@@ -894,7 +893,7 @@ def test_complement_simple():
         vals.append(val_stride)
         vals.append(comp_size)
         
-        return [arith.as_value(v) for v in vals]
+        return vals
     
     run_lowering_test(ctx, "complement_simple", expected_vals=[4, 3, 4])
 
@@ -916,7 +915,7 @@ def test_complement_with_divide():
     
     ctx = RAIIMLIRContextModule()
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def test_func():
         # Create input layout: 12:1
         c12 = Index(12)
@@ -955,7 +954,7 @@ def test_composition_with_tuple():
     
     ctx = RAIIMLIRContextModule()
     
-    @func.FuncOp.from_py_func()
+    @flir.jit
     def test_func():
         # Create simple layouts for composition test
         c4 = Index(4)

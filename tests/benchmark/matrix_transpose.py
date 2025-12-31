@@ -108,7 +108,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
                 for t in range_constexpr(VEC_SIZE):
                     t_c = arith.index(t)
                     g_idx = global_row * n_c + global_col + t_c
-                    vals.append(arith.as_value(memref.load(A, [g_idx])))
+                    vals.append(memref.load(A, [g_idx]))
 
                 vec_val = vector.from_elements(vec_type, vals)
                 s_idx = row_off * smem_stride_c + col_off
@@ -136,7 +136,7 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
                 for t in range_constexpr(VEC_SIZE):
                     t_c = arith.index(t)
                     s_idx = (col_off + t_c) * smem_stride_c + row_off
-                    vals.append(arith.as_value(memref.load(smem, [s_idx])))
+                    vals.append(memref.load(smem, [s_idx]))
 
                 vec_val = vector.from_elements(vec_type, vals)
                 g_idx_b = base_row_b * m_c + base_col_b
@@ -345,7 +345,7 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
                 s_idx = (col_off + t_c) * smem_stride_c + row_off
                 vals.append(memref.load(smem, [s_idx]))
 
-            vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
+            vec_val = vector.from_elements(vec_type, vals)
 
             row_valid = base_row_b < n_c
             col_valid = base_col_b < m_c
@@ -557,7 +557,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                     val = tensor_A[g_idx]
                     vals.append(val)
 
-                vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
+                vec_val = vector.from_elements(vec_type, vals)
                 s_coord = flir.make_coord(row_off, col_off)
                 s_idx = flir.crd2idx(s_coord, smem_layout)
                 vector.store(vec_val, smem, [v(s_idx)])
@@ -588,7 +588,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                     val = tensor_smem[s_idx]
                     vals.append(val)
 
-                vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
+                vec_val = vector.from_elements(vec_type, vals)
                 b_coord = flir.make_coord(base_row_b, base_col_b)
                 g_idx_b = flir.crd2idx(b_coord, b_layout)
                 vector.store(vec_val, B, [v(g_idx_b)])

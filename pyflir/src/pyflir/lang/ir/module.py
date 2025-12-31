@@ -64,6 +64,97 @@ def _bind_method_builder(fn, instance_self, *, lower_range_loops: bool):
     return body_builder
 
 
+def _unwrap_return_value(v):
+    """Best-effort unwrap of return values for `flir.jit` builders.
+
+    `mlir_func.FuncOp.from_py_func` requires returned operands to be `ir.Value`
+    (or a sequence of `ir.Value`). In our Python front-end, many builders return
+    lightweight wrappers (e.g. `arith.ArithValue`). This helper peels those
+    wrappers so tests/examples don't need to sprinkle `arith.as_value(...)`.
+    """
+    if v is None:
+        return None
+
+    # Already an MLIR Value.
+    if isinstance(v, ir.Value):
+        return v
+
+    # Common wrapper pattern: `._value` holds the underlying `ir.Value`.
+    try:
+        internal = object.__getattribute__(v, "_value")
+        return _unwrap_return_value(internal)
+    except Exception:
+        pass
+
+    # MLIR OpView results often expose `.value` as a property.
+    try:
+        if hasattr(v, "value") and callable(getattr(type(v).value, "fget", None)):
+            return _unwrap_return_value(v.value)
+    except Exception:
+        pass
+
+    # Fallback for wrappers that store `_value` as a normal attribute.
+    try:
+        if hasattr(v, "_value"):
+            return _unwrap_return_value(v._value)
+    except Exception:
+        pass
+
+    # If a plain Python int is returned, materialize it as an index constant.
+    # (This matches existing behavior in `pyflir.dialects.ext.flir._unwrap_value`.)
+    if isinstance(v, int):
+        from _mlir.dialects import arith as mlir_arith
+        from _mlir.ir import IndexType, IntegerAttr
+
+        try:
+            loc = get_user_code_loc()
+        except Exception:
+            loc = None
+        if loc is None:
+            loc = ir.Location.unknown()
+        op = mlir_arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), v), loc=loc)
+        return op.result
+
+    return v
+
+
+def _unwrap_returns(results):
+    if results is None:
+        return None
+    if isinstance(results, (tuple, list)):
+        return [_unwrap_return_value(v) for v in results]
+    return _unwrap_return_value(results)
+
+
+def _wrap_body_builder_unwrap_returns(body_builder):
+    """Wrap a body builder to ensure all returned values are `ir.Value`."""
+
+    def _wrapped(*args, **kwargs):
+        return _unwrap_returns(body_builder(*args, **kwargs))
+
+    # Preserve metadata for better debug locations / type materialization.
+    try:
+        _wrapped.__name__ = getattr(body_builder, "__name__", _wrapped.__name__)
+        _wrapped.__qualname__ = getattr(body_builder, "__qualname__", _wrapped.__qualname__)
+        _wrapped.__doc__ = getattr(body_builder, "__doc__", _wrapped.__doc__)
+        _wrapped.__module__ = getattr(body_builder, "__module__", _wrapped.__module__)
+    except Exception:
+        pass
+    try:
+        _wrapped.__signature__ = inspect.signature(body_builder)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        _wrapped.__annotations__ = dict(getattr(body_builder, "__annotations__", {}))
+    except Exception:
+        pass
+    try:
+        _wrapped.__flir_orig_globals__ = getattr(body_builder, "__flir_orig_globals__", getattr(body_builder, "__globals__", {}))
+    except Exception:
+        pass
+    return _wrapped
+
+
 class MlirModule:
     GPU_MODULE_NAME = "kernels"
     GPU_MODULE_TARGETS = None
@@ -185,6 +276,7 @@ class MlirModule:
             with self._context, self._location:
                 with ir.InsertionPoint.at_block_begin(self.module.body):
                     body_builder = _bind_method_builder(fn, self, lower_range_loops=False)
+                    body_builder = _wrap_body_builder_unwrap_returns(body_builder)
                     sig = inspect.signature(body_builder)
                     input_types, _, _ = prep_func_types(sig, [])
                     # `prep_func_types` may return lambdas/strings. Materialize them
@@ -256,6 +348,7 @@ class _JitDescriptor:
                     with instance_self._context, instance_self._location:
                         with ir.InsertionPoint.at_block_begin(instance_self.module.body):
                             body_builder = _bind_method_builder(fn, instance_self, lower_range_loops=False)
+                            body_builder = _wrap_body_builder_unwrap_returns(body_builder)
                             sig = inspect.signature(body_builder)
                             input_types, _, _ = prep_func_types(sig, [])
                             # `prep_func_types` may return lambdas/strings. Materialize them
@@ -287,9 +380,15 @@ class _JitDescriptor:
 
 
 def _looks_like_method(fn) -> bool:
-    qn = getattr(fn, "__qualname__", "")
-    # Heuristic: "Cls.method" or "<locals>.Cls.method"
-    return "." in qn
+    # Prefer a semantic check over `__qualname__` heuristics: nested free
+    # functions (e.g. tests defining helpers inside test bodies) also contain
+    # dots in `__qualname__` ("...<locals>...") but are NOT methods.
+    try:
+        sig = inspect.signature(fn)
+        params = list(sig.parameters.values())
+        return bool(params) and params[0].name == "self"
+    except Exception:
+        return False
 
 
 def kernel(fn=None, *, emit: bool = True):
@@ -348,7 +447,7 @@ def jit(*arg_types, emit: bool = True):
         sig = inspect.signature(fn)
         input_types, _, _ = prep_func_types(sig, [])
         materialized_inputs = _materialize_types(fn, input_types)
-        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(_wrap_body_builder_unwrap_returns(fn))
 
     # Called as `@flir.jit(type0, type1, ...)`
     def _decorator(fn):
@@ -358,7 +457,7 @@ def jit(*arg_types, emit: bool = True):
         if not emit:
             raise ValueError("flir.jit(emit=False) is only supported on MlirModule methods")
         materialized_inputs = _materialize_types(fn, list(arg_types))
-        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(fn)
+        return mlir_func.FuncOp.from_py_func(*materialized_inputs)(_wrap_body_builder_unwrap_returns(fn))
 
     return _decorator
 

@@ -15,6 +15,18 @@ from _mlir.dialects.vector import *  # noqa: F401,F403,E402
 
 
 def from_elements(*args, loc=None, ip=None, **kwargs):
+    # The upstream `vector.from_elements` expects each element to be an `ir.Value`.
+    # In our codebase, scalar values may be auto-wrapped as `arith.ArithValue`.
+    # Unwrap them here so call sites don't need to sprinkle `arith.as_value(...)`.
+    from . import arith as _arith_ext
+
+    if len(args) >= 2:
+        args = list(args)
+        elems = args[1]
+        if isinstance(elems, (list, tuple)):
+            args[1] = [_arith_ext.unwrap(v) for v in elems]
+        return _vector.from_elements(*args, loc=maybe_default_loc(loc), ip=ip, **kwargs)
+
     return _vector.from_elements(*args, loc=maybe_default_loc(loc), ip=ip, **kwargs)
 
 

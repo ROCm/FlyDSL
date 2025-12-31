@@ -41,10 +41,10 @@ def test_lane_operations():
             i32 = flir.T.i32()
             src = arith_ext.constant(42, type=i32)
             lane = arith_ext.constant(0, type=i32)
-            rocdl.readlane(i32, arith_ext.as_value(src), arith_ext.as_value(lane))
-            rocdl.readfirstlane(i32, arith_ext.as_value(src))
+            rocdl.readlane(i32, src, lane)
+            rocdl.readfirstlane(i32, src)
             offset = arith_ext.constant(0x1F, type=i32)
-            rocdl.ds_swizzle(i32, arith_ext.as_value(src), arith_ext.as_value(offset))
+            rocdl.ds_swizzle(i32, src, offset)
             return []
         
     mlir_str = str(_M().module)

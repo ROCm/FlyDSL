@@ -19,6 +19,9 @@ from _mlir.dialects.rocdl import *  # noqa: F401,F403
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
+_ods_readlane = readlane
+_ods_readfirstlane = readfirstlane
+_ods_ds_swizzle = ds_swizzle
 
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
@@ -68,6 +71,27 @@ def mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, *, loc=None, ip=None):
 def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
     """Return the op result directly (no `.result` needed at call sites)."""
     return mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, loc=loc, ip=ip).result
+
+
+def readlane(result_type, src, lane_id, *, loc=None, ip=None):
+    """Lane read that accepts ArithValue / wrappers."""
+    from . import arith as _arith_ext
+
+    return _ods_readlane(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(lane_id), loc=loc, ip=ip)
+
+
+def readfirstlane(result_type, src, *, loc=None, ip=None):
+    """Read-firstlane that accepts ArithValue / wrappers."""
+    from . import arith as _arith_ext
+
+    return _ods_readfirstlane(result_type, _arith_ext.unwrap(src), loc=loc, ip=ip)
+
+
+def ds_swizzle(result_type, src, offset, *, loc=None, ip=None):
+    """DS swizzle that accepts ArithValue / wrappers."""
+    from . import arith as _arith_ext
+
+    return _ods_ds_swizzle(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(offset), loc=loc, ip=ip)
 
 
 # Keep raw ODS builders available (rare: for tests that want the op object).

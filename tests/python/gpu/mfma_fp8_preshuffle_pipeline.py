@@ -46,9 +46,6 @@ def make_preshuffle_b_layout(flir, _arith_mlir, *, c_n: ir.Value, c_k: ir.Value)
 
     Shape: (N0, K0, KLane, NLane, KPack) = (N/16, K/64, 4, 16, 16)
     """
-    c_n = arith.as_value(c_n, index=True)
-    c_k = arith.as_value(c_k, index=True)
-
     c16 = arith.constant(16, index=True)
     c64 = arith.constant(64, index=True)
     c1024 = arith.constant(1024, index=True)
@@ -93,9 +90,7 @@ def load_fp8_tile_split_dwordx4(buffer_ops, flir, _arith_mlir, *, rsrc, idx_div4
     NOTE: We intentionally load 16 fp8 bytes per split (dwordx4). Callers pad
     the underlying storage so this is safe even when the last split is < 16B.
     """
-    rsrc = arith.as_value(rsrc)
-    idx_div4 = arith.as_value(idx_div4, index=True)
-    mask = arith.as_value(mask) if mask is not None else None
+    # Callers may pass ArithValue/int; ext wrappers handle unwrapping.
 
     # 16 fp8 bytes -> vector<16xf8> -> bitcast to vector<4xi32>
     f8 = ir.Float8E4M3FNType.get()
@@ -134,12 +129,7 @@ def load_b_pack_k32(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: 
     Uses `flir.copy(load-only)` + `src_buffer_resource` to generate buffer loads,
     matching the preshuffle GEMM path.
     """
-    b_rsrc = arith.as_value(b_rsrc)
-    layout_b = arith.as_value(layout_b)
-    base_k = arith.as_value(base_k, index=True)
-    n_blk = arith.as_value(n_blk, index=True)
-    n_intra = arith.as_value(n_intra, index=True)
-    lane_div_16 = arith.as_value(lane_div_16, index=True)
+    # Accept ArithValue/Value/int and rely on ext wrappers to unwrap where needed.
     c64 = arith.constant(64, index=True)
     k0_base = arith.ArithValue(base_k) / c64
     k0 = k0_base + arith.constant(ki_step // 2, index=True)
@@ -174,12 +164,7 @@ def load_b_pack_k32(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: 
 
 def load_b_packs_k64(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: ir.Value, ki_step: int, n_blk: ir.Value, n_intra: ir.Value, lane_div_16: ir.Value, i32_type) -> Tuple[ir.Value, ir.Value]:
     """Load 16B (two i64 packs) for one K64 micro-step."""
-    b_rsrc = arith.as_value(b_rsrc)
-    layout_b = arith.as_value(layout_b)
-    base_k = arith.as_value(base_k, index=True)
-    n_blk = arith.as_value(n_blk, index=True)
-    n_intra = arith.as_value(n_intra, index=True)
-    lane_div_16 = arith.as_value(lane_div_16, index=True)
+    # Accept ArithValue/Value/int and rely on ext wrappers to unwrap where needed.
     c4 = arith.constant(4, index=True)
     c64 = arith.constant(64, index=True)
     k0_base = arith.ArithValue(base_k) / c64
