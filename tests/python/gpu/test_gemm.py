@@ -24,10 +24,11 @@ import torch
 import torch.nn.functional as F
 import pytest
 from _mlir import ir
-from _mlir.dialects import vector, memref, builtin
 from pyflir.dialects.ext import arith, scf, gpu, buffer_ops
+from pyflir.dialects.ext import vector
+from pyflir.dialects.ext import memref
 from _mlir.dialects import arith as _arith_mlir
-import _mlir.dialects.rocdl as rocdl
+from pyflir.dialects.ext import rocdl
 import _mlir.extras.types as T
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -187,7 +188,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
             vec4_f32 = ir.VectorType.get([4], f32)
             zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
             acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
-            c0_i32 = arith.i32(0).value
+            c0_i32 = 0
+            i32_type = ir.IntegerType.get_signless(32)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -293,8 +295,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     row_mod = row_idx % k_blocks16
                     xor_mask = row_mod * 16
                     return _arith_mlir.XOrIOp(
-                        arith.ArithValue(col_idx).value,
-                        arith.ArithValue(xor_mask).value,
+                        arith.unwrap(col_idx),
+                        arith.unwrap(xor_mask),
                     ).result
 
                 def load_b_pack_rowmajor(base_k, ki_step, ni):
@@ -332,17 +334,17 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                         if curr_i32 == 4:
                             val_16 = vector.BitCastOp(vec16_f8, val_vec).result
-                            vector.StoreOp(val_16, lds_a, [arith.ArithValue(idx_0).value])
+                            vector.StoreOp(val_16, lds_a, [arith.unwrap(idx_0)])
                         elif curr_i32 == 2:
                             val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
                             val_8 = vector.BitCastOp(vec8_f8, val_2_i32).result
-                            vector.StoreOp(val_8, lds_a, [arith.ArithValue(idx_0).value])
+                            vector.StoreOp(val_8, lds_a, [arith.unwrap(idx_0)])
                         else:
                             # Conservative fallback (rare for our default tiles)
                             vec_f8 = ir.VectorType.get([curr_bytes], f8)
                             val_1_i32 = vector.ShuffleOp(val_vec, val_vec, [0]).result
                             val_f8 = vector.BitCastOp(vec_f8, val_1_i32).result
-                            vector.StoreOp(val_f8, lds_a, [arith.ArithValue(idx_0).value])
+                            vector.StoreOp(val_f8, lds_a, [arith.unwrap(idx_0)])
 
                         curr_store_off += curr_bytes
 
@@ -391,15 +393,15 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                             curr_row_a_lds = row_a_lds + arith.constant(mi * 16, index=True)
                             col_base_sw = swizzle_xor_16b(curr_row_a_lds, col_base)
                             col_sw = _arith_mlir.AddIOp(
-                                arith.ArithValue(col_base_sw).value,
-                                arith.ArithValue(half_off).value,
+                                arith.unwrap(col_base_sw),
+                                arith.unwrap(half_off),
                             ).result
 
                             idx_a = flir.crd2idx(
                                 flir.make_coord(curr_row_a_lds, col_sw), layout_lds_a
                             )
                             loaded_a8 = vector.LoadOp(
-                                vec8_f8, lds_a, [arith.ArithValue(idx_a).value]
+                                vec8_f8, lds_a, [arith.unwrap(idx_a)]
                             ).result
                             a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
                             a_pack = vector.ExtractOp(a_vec64, static_position=[0], dynamic_position=[]).result
@@ -408,15 +410,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                                 acc_idx = mi * num_acc_n + ni
                                 current_accs_list[acc_idx] = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                     vec4_f32,
-                                    [
-                                        arith.ArithValue(a_pack).value,
-                                        arith.ArithValue(b_packs[ni]).value,
-                                        arith.ArithValue(current_accs_list[acc_idx]).value,
-                                        c0_i32,
-                                        c0_i32,
-                                        c0_i32,
-                                    ],
-                                ).result
+                                    [a_pack, b_packs[ni], current_accs_list[acc_idx], c0_i32, c0_i32, c0_i32],
+                                )
 
                     gpu.barrier()
                     return current_accs_list, vec_a_next_parts, scales_pf
@@ -439,15 +434,13 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     for i in range_constexpr(4):
                         row_off = (lane_div_16 * 4) + i
                         row_g = row_base_m + row_off
-                        s_a = vector.ExtractOp(s_a_vec4, static_position=[i], dynamic_position=[]).result
+                        s_a = vector.extract(s_a_vec4, static_position=[i], dynamic_position=[])
                         for ni in range_constexpr(num_acc_n):
                             acc = final_accs[mi * num_acc_n + ni]
-                            val = vector.ExtractOp(acc, [], [i]).result
+                            val = vector.extract(acc, static_position=[i], dynamic_position=[])
                             s_b = s_b_vals[ni]
                             val_s = (val * s_a) * s_b
-                            val_f16 = _arith_mlir.TruncFOp(
-                                T.f16(), arith.ArithValue(val_s).value
-                            ).result
+                            val_f16 = arith.trunc_f(T.f16(), val_s)
                             c_offset = arith.constant(ni * 16, index=True)
                             col_g = by_n + n_tile_base + c_offset + lane_mod_16
                             idx = flir.crd2idx(flir.make_coord(row_g, col_g), layout_c)
@@ -484,23 +477,12 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         col_lds = ki + col_offset_base
                         idx_a_mfma = flir.crd2idx(flir.make_coord(row_a_lds, col_lds), layout_lds_a)
                         idx_b_mfma = flir.crd2idx(flir.make_coord(row_b_lds, col_lds), layout_lds_b)
-                        vec_a_load = vector.LoadOp(
-                            vec4_f16, lds_a, [arith.ArithValue(idx_a_mfma).value]
-                        ).result
-                        vec_b_load = vector.LoadOp(
-                            vec4_f16, lds_b, [arith.ArithValue(idx_b_mfma).value]
-                        ).result
+                        vec_a_load = vector.load_op(vec4_f16, lds_a, [idx_a_mfma])
+                        vec_b_load = vector.load_op(vec4_f16, lds_b, [idx_b_mfma])
                         acc_curr = rocdl.mfma_f32_16x16x16f16(
                             vec4_f32,
-                            [
-                                arith.ArithValue(vec_a_load).value,
-                                arith.ArithValue(vec_b_load).value,
-                                arith.ArithValue(acc_curr).value,
-                                c0_i32,
-                                c0_i32,
-                                c0_i32,
-                            ],
-                        ).result
+                            [vec_a_load, vec_b_load, acc_curr, c0_i32, c0_i32, c0_i32],
+                        )
                     return acc_curr
 
                 accs = [acc_init for _ in range(fp16_m_reps * fp16_n_reps)]
@@ -522,16 +504,11 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         row_g = bx_tile + row_l
                         col_g = k_curr + col_l
                         idx_a = flir.crd2idx(flir.make_coord(row_g, col_g), layout_a)
-                        vec_a = vector.TransferReadOp(
-                            vec_type,
-                            arg_a,
-                            [arith.ArithValue(idx_a).value],
-                            identity_map,
-                            arith.ArithValue(pad_val).value,
-                            [True],
-                        ).result
+                        vec_a = vector.transfer_read(
+                            vec_type, arg_a, [idx_a], identity_map, pad_val, [True]
+                        )
                         lds_idx = (row_l * c_lds_stride) + col_l
-                        vector.StoreOp(vec_a, lds_a, [arith.ArithValue(lds_idx).value])
+                        vector.store(vec_a, lds_a, [lds_idx])
 
                     c_vpt_b = arith.constant(fp16_vecs_per_thread_b, index=True)
                     vec_id_b_base = tx * c_vpt_b
@@ -544,16 +521,11 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         row_g = by_tile + row_l
                         col_g = k_curr + col_l
                         idx_b = flir.crd2idx(flir.make_coord(row_g, col_g), layout_b)
-                        vec_b = vector.TransferReadOp(
-                            vec_type,
-                            arg_b,
-                            [arith.ArithValue(idx_b).value],
-                            identity_map,
-                            arith.ArithValue(pad_val).value,
-                            [True],
-                        ).result
+                        vec_b = vector.transfer_read(
+                            vec_type, arg_b, [idx_b], identity_map, pad_val, [True]
+                        )
                         lds_idx = (row_l * c_lds_stride) + col_l
-                        vector.StoreOp(vec_b, lds_b, [arith.ArithValue(lds_idx).value])
+                        vector.store(vec_b, lds_b, [lds_idx])
 
                     gpu.barrier()
 
@@ -580,19 +552,13 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         acc_idx = (mi * fp16_n_reps) + ni
                         final_acc = accs[acc_idx]
                         for i in range_constexpr(4):
-                            val = vector.ExtractOp(final_acc, [], [i]).result
-                            val_f16 = _arith_mlir.TruncFOp(
-                                T.f16(), arith.ArithValue(val).value
-                            ).result
+                            val = vector.extract(final_acc, static_position=[i], dynamic_position=[])
+                            val_f16 = arith.trunc_f(T.f16(), val)
                             row_offset = (lane_div_16 * c4) + arith.index(i)
                             row_g = row_base_g + row_offset
                             col_g = col_base_g + lane_rem_16
                             idx = flir.crd2idx(flir.make_coord(row_g, col_g), layout_c)
-                            memref.StoreOp(
-                                arith.ArithValue(val_f16).value,
-                                arg_c,
-                                [arith.ArithValue(idx).value],
-                            )
+                            memref.store(val_f16, arg_c, [idx])
 
         @flir.jit
         def __call__(
@@ -606,10 +572,10 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
         ):
-            c1 = arith.constant(1, index=True).value
-            bdx = arith.constant(block_size_x, index=True).value
-            gx = arith.constant(M // tile_m, index=True).value
-            gy = arith.constant(N // tile_n, index=True).value
+            c1 = arith.constant(1, index=True)
+            bdx = arith.constant(block_size_x, index=True)
+            gx = arith.constant(M // tile_m, index=True)
+            gy = arith.constant(N // tile_n, index=True)
             flir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel"],
                 grid_size=(gx, gy, c1),

@@ -5,7 +5,7 @@ import pytest
 from _mlir.ir import IntegerAttr
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
 
 
@@ -26,13 +26,12 @@ def _lower_and_get_single_return_int(module) -> int:
     assert len(ret.operands) == 1
 
     v = ret.operands[0]
-    if hasattr(v, "value"):
-        v = v.value
+    v = arith.unwrap(v)
     def_op = v.owner
     assert def_op.name == "arith.constant"
     val_attr = def_op.attributes["value"]
     assert isinstance(val_attr, IntegerAttr)
-    return val_attr.value
+    return int(val_attr)
 
 
 def test_nested_layout_direct():
@@ -46,7 +45,7 @@ def test_nested_layout_direct():
             c13 = Index(13)
             c1 = Index(1)
             layout = flir.make_layout((c9, (c4, c8)), stride=(c59, (c13, c1)))
-            return [flir.size(layout).value]
+            return [arith.unwrap(flir.size(layout))]
 
     m = _M()
     assert "flir.make_layout" in str(m.module)
@@ -67,7 +66,7 @@ def test_multi_level_nested_shape_and_stride_spec():
             shape = flir.make_shape(c9, (c4, (c8, c2)))
             stride = flir.make_stride(c59, (c13, (c2, c1)))
             layout = flir.make_layout(shape, stride)
-            return [flir.size(layout).value]
+            return [arith.unwrap(flir.size(layout))]
 
     ir_text = str(_M().module)
     assert "!flir.shape<(9,(4,(8,2)))>" in ir_text
@@ -87,7 +86,7 @@ def test_flat_divide_with_nested_layout():
                 stride=(Index(3), (Index(1), Index(8))),
             )
             res = flir.flat_divide(layout, tiler)
-            return [flir.size(res).value]
+            return [arith.unwrap(flir.size(res))]
 
     assert _lower_and_get_single_return_int(_M().module) == 9 * 4 * 8
 
@@ -105,7 +104,7 @@ def test_logical_divide_2d_nested():
                 stride=(Index(3), (Index(1), Index(8))),
             )
             res = flir.logical_divide(layout, tiler)
-            return [flir.size(res).value]
+            return [arith.unwrap(flir.size(res))]
 
     assert _lower_and_get_single_return_int(_M().module) == 9 * 4 * 8
 
@@ -119,9 +118,9 @@ def test_idx2crd_crd2idx_with_nested_layout_rank():
                 stride=(Index(59), (Index(13), Index(1))),
             )
             idx = Index(50)
-            c = flir.idx2crd(idx.value, layout)
+            c = flir.idx2crd(arith.unwrap(idx), layout)
             back = flir.crd2idx(c, layout)
-            return [back.value]
+            return [arith.unwrap(back)]
 
     # Make sure idx2crd uses the shape-rank (3 leaves), not shape+stride (6 leaves).
     ir_text = str(_M().module)
@@ -137,7 +136,7 @@ def test_composition_infers_structured_layout_type():
             A = flir.make_layout((Index(6), Index(2)), stride=(Index(8), Index(2)))
             B = flir.make_layout((Index(4), Index(3)), stride=(Index(3), Index(1)))
             R = flir.composition(A, B)
-            return [flir.size(R).value]
+            return [arith.unwrap(flir.size(R))]
 
     ir_text = str(_M().module)
     # Wrapper should infer a structured result type, not layout<-1>.
@@ -156,9 +155,9 @@ def test_crd2idx_on_composed_layout_pipeline_does_not_crash():
             B = flir.make_layout((Index(4), Index(3)), stride=(Index(3), Index(1)))
             R = flir.composition(A, B)
             # Composition above yields rank-3 (flattened leaf count), so use a rank-3 coord.
-            c = flir.make_coord(Index(1).value, Index(2).value, Index(0).value)
+            c = flir.make_coord(arith.unwrap(Index(1)), arith.unwrap(Index(2)), arith.unwrap(Index(0)))
             out = flir.crd2idx(c, R)
-            return [out.value]
+            return [arith.unwrap(out)]
 
     m = _M()
     pipeline = Pipeline().flir_to_standard().canonicalize().cse()

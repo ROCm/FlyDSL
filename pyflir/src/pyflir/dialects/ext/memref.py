@@ -7,7 +7,7 @@ to carry the user call-site location instead of inheriting a single outer
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from _mlir.dialects import memref as _memref
 
@@ -19,11 +19,28 @@ from _mlir.dialects.memref import *  # noqa: F401,F403,E402
 
 
 def load(memref: Any, indices: Sequence[Any], *, loc=None, ip=None):
-    return _memref.load(memref, indices, loc=maybe_default_loc(loc), ip=ip)
+    # Accept ArithValue / wrappers / python ints for indices.
+    from . import arith as _arith_ext
+
+    return _memref.load(
+        _arith_ext.unwrap(memref),
+        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
+        loc=maybe_default_loc(loc),
+        ip=ip,
+    )
 
 
 def store(value: Any, memref: Any, indices: Sequence[Any], *, loc=None, ip=None):
-    return _memref.store(value, memref, indices, loc=maybe_default_loc(loc), ip=ip)
+    # Accept ArithValue / wrappers / python ints for value and indices.
+    from . import arith as _arith_ext
+
+    return _memref.store(
+        _arith_ext.unwrap(value),
+        _arith_ext.unwrap(memref),
+        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
+        loc=maybe_default_loc(loc),
+        ip=ip,
+    )
 
 
 def view(source: Any, byte_shift: Any, sizes: Sequence[Any], *, loc=None, ip=None):

@@ -20,11 +20,12 @@ import torch
 import torch.nn.functional as F
 import pytest
 from _mlir import ir
-from _mlir.dialects import vector, memref, builtin, llvm
+from pyflir.dialects.ext import vector, memref
+from _mlir.dialects import builtin, llvm
 from pyflir.dialects.ext import arith, scf, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
 import pyflir.dialects.ext.rocdl as rocdl
-import pyflir.lang.ir.types as mlir_types
+from pyflir.lang.ir.types import memref
 from pyflir.lang.ir.types import T
 
 if not torch.cuda.is_available():
@@ -102,11 +103,11 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         @flir.kernel
         def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: mlir_types.memref(size_c, T.f16),
-            arg_a: lambda: mlir_types.memref(size_a, T.f8),
-            arg_b: lambda: mlir_types.memref(size_b, T.f8),
-            arg_scale_a: lambda: mlir_types.memref(M, T.f32),
-            arg_scale_b: lambda: mlir_types.memref(N, T.f32),
+            arg_c: lambda: memref(size_c, T.f16),
+            arg_a: lambda: memref(size_a, T.f8),
+            arg_b: lambda: memref(size_b, T.f8),
+            arg_scale_a: lambda: memref(M, T.f32),
+            arg_scale_b: lambda: memref(N, T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
@@ -120,7 +121,8 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
-            c0_i32 = arith.i32(0).value
+            c0_i32 = 0
+            i32_type = T.i32
 
             # A is FP8 (1B/elem) but we use dwordx4 (16B) buffer loads, so build a /4 layout.
             c_k_div4 = c_k / 4
@@ -384,7 +386,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     )
                     coord_store_0 = flir.make_coord(row_a_local, col_swz)
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
-                    idx_0 = (arith.ArithValue(idx_0) + lds_base).value
+                    idx_0 = arith.unwrap(arith.ArithValue(idx_0) + lds_base)
 
                     # Convert back to fp8 vector for LDS store.
                     a_vec = vector.BitCastOp(T.f8x16, vec_a_in_parts[i]).result
@@ -459,7 +461,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         )
                         coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
                         idx_a16 = flir.crd2idx(coord_a16, layout_lds)
-                        idx_a16 = (arith.ArithValue(idx_a16) + lds_base).value
+                        idx_a16 = arith.unwrap(arith.ArithValue(idx_a16) + lds_base)
                         loaded_a16 = vector.LoadOp(
                             T.f8x16, lds_a, [idx_a16]
                         ).result
@@ -476,14 +478,14 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 T.f32x4,
                                 [
-                                    arith.ArithValue(a_pack).value,
-                                    arith.ArithValue(b_pack).value,
-                                    arith.ArithValue(curr_acc).value,
-                                    c0_i32,
-                                    c0_i32,
-                                    c0_i32,
+                                    arith.unwrap(a_pack),
+                                    arith.unwrap(b_pack),
+                                    arith.unwrap(curr_acc),
+                                    arith.unwrap(c0_i32, type=i32_type),
+                                    arith.unwrap(c0_i32, type=i32_type),
+                                    arith.unwrap(c0_i32, type=i32_type),
                                 ],
-                            ).result
+                            )
                             current_accs_list[acc_idx] = acc0
 
                 return current_accs_list, scales_pf
@@ -594,9 +596,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
 
                         val_s = val * s_a
                         val_s = val_s * s_b
-                        val_f16 = _arith_mlir.TruncFOp(
-                            T.f16, arith.ArithValue(val_s).value
-                        ).result
+                        val_f16 = arith.trunc_f(T.f16, val_s)
 
                         idx = flir.crd2idx(
                             flir.make_coord(row_g, col_g), layout_c
@@ -606,33 +606,33 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: mlir_types.memref(size_c, T.f16),
-            arg_a: lambda: mlir_types.memref(size_a, T.f8),
-            arg_b: lambda: mlir_types.memref(size_b, T.f8),
-            arg_scale_a: lambda: mlir_types.memref(M, T.f32),
-            arg_scale_b: lambda: mlir_types.memref(N, T.f32),
+            arg_c: lambda: memref(size_c, T.f16),
+            arg_a: lambda: memref(size_a, T.f8),
+            arg_b: lambda: memref(size_b, T.f8),
+            arg_scale_a: lambda: memref(M, T.f32),
+            arg_scale_b: lambda: memref(N, T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
         ):
-            c1 = arith.constant(1, index=True).value
-            bdx = arith.constant(256, index=True).value
-            gx = arith.constant(M // tile_m, index=True).value
-            gy = arith.constant(N // tile_n, index=True).value
+            c1 = arith.constant(1, index=True)
+            bdx = arith.constant(256, index=True)
+            gx = arith.constant(M // tile_m, index=True)
+            gy = arith.constant(N // tile_n, index=True)
 
             flir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel_gemm"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, c1, c1),
                 kernel_operands=[
-                    arith.ArithValue(arg_c).value,
-                    arith.ArithValue(arg_a).value,
-                    arith.ArithValue(arg_b).value,
-                    arith.ArithValue(arg_scale_a).value,
-                    arith.ArithValue(arg_scale_b).value,
-                    arith.ArithValue(c_m).value,
-                    arith.ArithValue(c_n).value,
-                    arith.ArithValue(c_k).value,
+                    arg_c,
+                    arg_a,
+                    arg_b,
+                    arg_scale_a,
+                    arg_scale_b,
+                    c_m,
+                    c_n,
+                    c_k,
                 ],
             )
 
@@ -734,26 +734,30 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
     if HAS_AITER and RUN_AITER_BENCH:
         print("-" * 40)
         print("Running Aiter Benchmark...")
+        try:
+            def launch_aiter(a, b, sa, sb):
+                return aiter.gemm_a8w8_bpreshuffle(
+                    a, b, sa, sb, None, torch.float16  # bias
+                )
 
-        def launch_aiter(a, b, sa, sb):
-            return aiter.gemm_a8w8_bpreshuffle(
-                a, b, sa, sb, None, torch.float16  # bias
+            # Verify Aiter output first
+            c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
+            verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+            tflops_aiter = flops / (us1 / 1e6) / 1e12
+            bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
+            print(
+                f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
             )
 
-        # Verify Aiter output first
-        c_aiter, us1 = run_perftest(launch_aiter, a_q_fp8, b_shuffled, scale_a, scale_b)
-        verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
-
-        tflops_aiter = flops / (us1 / 1e6) / 1e12
-        bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
-        print(
-            f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
-        )
-
-        print(
-            f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
-        )
-        print("-" * 40)
+            print(
+                f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
+            )
+            print("-" * 40)
+        except Exception as e:
+            # Best-effort only: aiter can be importable but fail to load its JIT .so deps.
+            print(f"Skipping Aiter benchmark (not runnable here): {e}")
+            print("-" * 40)
     elif HAS_AITER and not RUN_AITER_BENCH:
         print("-" * 40)
         print("Skipping Aiter benchmark (set pyflir_RUN_AITER_BENCH=1 to enable)")

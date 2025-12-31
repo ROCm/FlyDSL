@@ -6,14 +6,13 @@ from _mlir.dialects import arith
 
 # Import Flir wrappers
 import pyflir.dialects.ext.flir as flir
+from pyflir.dialects.ext import arith as arith_ext
 from pyflir.dialects.ext.arith import Index
 
 
 def _unwrap(val):
     """Unwrap ArithValue to get underlying MLIR Value."""
-    if hasattr(val, "value"):
-        return val.value
-    return val
+    return arith_ext.unwrap(val)
 
 
 def test_make_shape(ctx, insert_point):

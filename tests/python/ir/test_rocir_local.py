@@ -1,4 +1,4 @@
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
 
 
@@ -15,7 +15,7 @@ def test_local_partition():
                 flir.make_stride(Index(1), Index(8)),
             )
             thread_data = flir.local_partition(global_layout, tile, Index(0))
-            return [flir.size(thread_data).value]
+            return [arith.unwrap(flir.size(thread_data))]
 
     s = str(_M().module)
     assert "flir.local_partition" in s
@@ -32,7 +32,7 @@ def test_local_tile():
             cta_shape = flir.make_shape(Index(32), Index(64))
             cta_coord = flir.make_shape(Index(0), Index(0))
             cta_tile = flir.local_tile(global_layout, cta_shape, cta_coord)
-            return [flir.size(cta_tile).value]
+            return [arith.unwrap(flir.size(cta_tile))]
 
     s = str(_M().module)
     assert "flir.local_tile" in s
@@ -51,7 +51,7 @@ def test_composition():
                 flir.make_stride(Index(2), Index(1)),
             )
             composed = flir.composition(layout_a, layout_b)
-            return [flir.size(composed).value]
+            return [arith.unwrap(flir.size(composed))]
 
     s = str(_M().module)
     assert "flir.composition" in s
@@ -75,7 +75,7 @@ def test_thread_block_hierarchy():
                 flir.make_stride(Index(1), Index(4)),
             )
             tiled = flir.local_tile(partitioned, tile_layout, Index(0))
-            return [flir.size(tiled).value]
+            return [arith.unwrap(flir.size(tiled))]
 
     s = str(_M().module)
     assert "flir.local_partition" in s

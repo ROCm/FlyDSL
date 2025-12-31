@@ -7,7 +7,7 @@ indexing and run a light canonicalize/cse pipeline.
 import sys
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
 import _mlir.extras.types as T
 
@@ -45,8 +45,8 @@ def test_layout_based_transpose():
 
             valid = (row < M_c) & (col < N_c)
             if valid:
-                val = flir.memref.load(Input, [row.value, col.value])
-                flir.memref.store(val.value, Output, [col.value, row.value])
+                val = flir.memref.load(Input, [arith.unwrap(row), arith.unwrap(col)])
+                flir.memref.store(arith.unwrap(val), Output, [arith.unwrap(col), arith.unwrap(row)])
 
         @flir.jit
         def __call__(
@@ -54,10 +54,10 @@ def test_layout_based_transpose():
             Input: lambda: T.memref(M, N, T.f32()),
             Output: lambda: T.memref(N, M, T.f32()),
         ):
-            c1 = Index(1).value
-            blk = Index(16).value
-            gx = Index((N + 15) // 16).value
-            gy = Index((M + 15) // 16).value
+            c1 = Index(1)
+            blk = Index(16)
+            gx = Index((N + 15) // 16)
+            gy = Index((M + 15) // 16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "transpose_layout"],
                 grid_size=(gx, gy, c1),
@@ -108,10 +108,10 @@ def test_strided_layout_access():
 
             valid = (row < M_c) & (col < N_c)
             if valid:
-                in_idx = (row * in_stride + col).value
-                out_idx = (row * out_stride + col).value
+                in_idx = arith.unwrap(row * in_stride + col)
+                out_idx = arith.unwrap(row * out_stride + col)
                 v = flir.memref.load(Input, [in_idx])
-                flir.memref.store(v.value, Output, [out_idx])
+                flir.memref.store(arith.unwrap(v), Output, [out_idx])
 
         @flir.jit
         def __call__(
@@ -119,10 +119,10 @@ def test_strided_layout_access():
             Input: lambda: T.memref(M * in_stride_val, T.f32()),
             Output: lambda: T.memref(M * out_stride_val, T.f32()),
         ):
-            c1 = Index(1).value
-            blk = Index(16).value
-            gx = Index((N + 15) // 16).value
-            gy = Index((M + 15) // 16).value
+            c1 = Index(1)
+            blk = Index(16)
+            gx = Index((N + 15) // 16)
+            gy = Index((M + 15) // 16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "copy_with_layout"],
                 grid_size=(gx, gy, c1),

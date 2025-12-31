@@ -4,7 +4,7 @@ Vector addition test with clean, readable syntax
 """
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 import _mlir.extras.types as T
 
 
@@ -30,10 +30,10 @@ def test_vector_add():
             col = (bx * bdx + tx)
 
             # Vector addition: C[row,col] = A[row,col] + B[row,col]
-            a = flir.memref.load(A, [row.value, col.value])
-            b = flir.memref.load(B, [row.value, col.value])
+            a = flir.memref.load(A, [arith.unwrap(row), arith.unwrap(col)])
+            b = flir.memref.load(B, [arith.unwrap(row), arith.unwrap(col)])
             c = a + b
-            flir.memref.store(c.value, C, [row.value, col.value])
+            flir.memref.store(arith.unwrap(c), C, [arith.unwrap(row), arith.unwrap(col)])
 
         @flir.jit
         def __call__(
@@ -42,10 +42,10 @@ def test_vector_add():
             B: lambda: T.memref(M, N, T.f32()),
             C: lambda: T.memref(M, N, T.f32()),
         ):
-            c1 = flir.arith_ext.index(1).value
-            bx = flir.arith_ext.index(N // 16).value
-            by = flir.arith_ext.index(M // 16).value
-            b16 = flir.arith_ext.index(16).value
+            c1 = flir.arith_ext.index(1)
+            bx = flir.arith_ext.index(N // 16)
+            by = flir.arith_ext.index(M // 16)
+            b16 = flir.arith_ext.index(16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "vecAdd"],
                 grid_size=(bx, by, c1),

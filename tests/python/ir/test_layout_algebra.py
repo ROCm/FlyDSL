@@ -11,16 +11,14 @@ import traceback
 
 from pyflir.compiler.context import RAIIMLIRContextModule
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
 from _mlir.dialects import func
 from _mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
 
 def unwrap(val):
     """Unwrap ArithValue or other wrappers."""
-    if hasattr(val, 'value'):
-        return val.value
-    return val
+    return arith.unwrap(val)
 
 
 def flatten_nested_list(nested):
@@ -120,12 +118,11 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
                 val_attr = def_op.attributes["value"]
                 actual = None
                 
-                if isinstance(val_attr, IntegerAttr):
-                    actual = val_attr.value
-                elif hasattr(val_attr, "value"):
-                    actual = val_attr.value
-                else:
+                # Avoid direct attribute access in tests: normalize all attrs via `int(...)` where possible.
+                try:
                     actual = int(val_attr)
+                except Exception:
+                    actual = val_attr
                 
                 if actual != expected:
                     all_actual = []
@@ -134,16 +131,14 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
                             all_actual.append("arg")
                             continue
                         defining_op = ret_op.owner
-                        if hasattr(defining_op, 'value'):
-                            val_attr = defining_op.value
-                            if isinstance(val_attr, IntegerAttr):
-                                all_actual.append(val_attr.value)
-                            elif hasattr(val_attr, "value"):
-                                all_actual.append(val_attr.value)
-                            else:
-                                all_actual.append(int(val_attr))
+                        if "value" in defining_op.attributes:
+                            val_attr2 = defining_op.attributes["value"]
+                            try:
+                                all_actual.append(int(val_attr2))
+                            except Exception:
+                                all_actual.append(val_attr2)
                         else:
-                            all_actual.append('?')
+                            all_actual.append("?")
                     raise AssertionError(
                         f"{test_name}: Value [{i}] mismatch. Expected {expected}, got {actual}. "
                         f"All values: {all_actual}")
@@ -170,12 +165,10 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
             val_attr = def_op.attributes["value"]
             actual = None
             
-            if isinstance(val_attr, IntegerAttr):
-                actual = val_attr.value
-            elif hasattr(val_attr, "value"):
-                actual = val_attr.value
-            else:
+            try:
                 actual = int(val_attr)
+            except Exception:
+                actual = val_attr
             
             assert actual == expected_val, \
                 f"{test_name}: Size mismatch. Expected {expected_val}, got {actual}"

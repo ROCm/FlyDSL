@@ -19,11 +19,9 @@ def unwrap_values(*values):
     """
     unwrapped = []
     for val in values:
-        if hasattr(val, "value"):
-            # It's an ArithValue or similar wrapper
-            unwrapped.append(val.value)
-        else:
-            # Already an MLIR Value
-            unwrapped.append(val)
+        # Prefer the unified helper in arith ext (handles ints/bools too).
+        from pyflir.dialects.ext import arith
+
+        unwrapped.append(arith.unwrap(val))
     return tuple(unwrapped)
 

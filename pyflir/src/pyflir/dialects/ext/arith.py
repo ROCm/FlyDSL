@@ -303,6 +303,145 @@ def absf(value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithVa
     result = _math.AbsFOp(val, loc=loc).result
     return ArithValue(result)
 
+def andi(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Bitwise AND operation on integers.
+    
+    Args:
+        lhs: Left operand
+        rhs: Right operand
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the AND result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(lhs, int):
+        lhs = constant(lhs, loc=loc)
+    if isinstance(rhs, int):
+        rhs = constant(rhs, loc=loc)
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+    result = _arith.AndIOp(lhs_val, rhs_val, loc=loc).result
+    return ArithValue(result)
+
+def ori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Bitwise OR operation on integers.
+    
+    Args:
+        lhs: Left operand
+        rhs: Right operand
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the OR result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(lhs, int):
+        lhs = constant(lhs, loc=loc)
+    if isinstance(rhs, int):
+        rhs = constant(rhs, loc=loc)
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+    result = _arith.OrIOp(lhs_val, rhs_val, loc=loc).result
+    return ArithValue(result)
+
+def xori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Bitwise XOR operation on integers.
+    
+    Args:
+        lhs: Left operand
+        rhs: Right operand
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the XOR result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(lhs, int):
+        lhs = constant(lhs, loc=loc)
+    if isinstance(rhs, int):
+        rhs = constant(rhs, loc=loc)
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+    result = _arith.XOrIOp(lhs_val, rhs_val, loc=loc).result
+    return ArithValue(result)
+
+def shrui(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Logical (unsigned) right shift operation on integers.
+    
+    Args:
+        lhs: Value to shift
+        rhs: Number of bits to shift
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the shift result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(lhs, int):
+        lhs = constant(lhs, loc=loc)
+    if isinstance(rhs, int):
+        rhs = constant(rhs, loc=loc)
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+    result = _arith.ShRUIOp(lhs_val, rhs_val, loc=loc).result
+    return ArithValue(result)
+
+def shli(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Left shift operation on integers.
+    
+    Args:
+        lhs: Value to shift
+        rhs: Number of bits to shift
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the shift result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(lhs, int):
+        lhs = constant(lhs, loc=loc)
+    if isinstance(rhs, int):
+        rhs = constant(rhs, loc=loc)
+    lhs_val = _unwrap_value(lhs)
+    rhs_val = _unwrap_value(rhs)
+    result = _arith.ShLIOp(lhs_val, rhs_val, loc=loc).result
+    return ArithValue(result)
+
+def index_cast(target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Cast between index and integer types.
+    
+    Args:
+        target_type: Target type (index or integer type)
+        value: Value to cast
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the cast result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(value, int):
+        value = constant(value, loc=loc)
+    val = _unwrap_value(value)
+    result = _arith.IndexCastOp(target_type, val, loc=loc).result
+    return ArithValue(result)
+
+def trunc_f(target_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Truncate floating point value to narrower type (e.g., f32 -> f16).
+    
+    Args:
+        target_type: Target floating point type
+        value: Value to truncate
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the truncated result
+    """
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.TruncFOp(target_type, val, loc=loc).result
+    return ArithValue(result)
+
 def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optional[Value] = None, loc: Location = None) -> "ArithValue":
     """Perform vector reduction.
     
@@ -360,6 +499,22 @@ def _unwrap_value(val):
     while isinstance(val, ArithValue):
         val = val._value
     return val
+
+
+def unwrap(
+    val: Union["ArithValue", Value, int, float, bool],
+    *,
+    type: Optional[Type] = None,
+    index: bool = False,
+    loc: Location = None,
+) -> Value:
+    """Public helper to unwrap `ArithValue` (and related wrappers) to the underlying `ir.Value`.
+
+    This is the preferred replacement for direct `.value` / `._value` access in tests.
+    """
+    if isinstance(val, (int, float, bool)):
+        return _unwrap_value(constant(val, type=type, index=index, loc=loc))
+    return _unwrap_value(val)
 
 def _binary_op(
     lhs: "ArithValue",
@@ -674,8 +829,9 @@ from _mlir.dialects.arith import (
 )
 
 __all__ = [
-    "constant", "index", "i32", "i64", "f16", "f32", "f64", "Index",
+    "constant", "unwrap", "index", "i32", "i64", "f16", "f32", "f64", "Index",
     "maximum", "minimum", "select", "extf", "fptosi", "absf", "reduce", "constant_vector",
+    "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
     "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",

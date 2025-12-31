@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
 from _mlir import ir
-from _mlir.dialects import vector
+from pyflir.dialects.ext import vector
 
 
 @dataclass(frozen=True)
