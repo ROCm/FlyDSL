@@ -7,7 +7,7 @@ indexing and run a light canonicalize/cse pipeline.
 import sys
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir, arith
+from pyflir.dialects.ext import flir, memref
 from pyflir.dialects.ext.arith import Index
 import _mlir.extras.types as T
 
@@ -45,8 +45,8 @@ def test_layout_based_transpose():
 
             valid = (row < M_c) & (col < N_c)
             if valid:
-                val = flir.memref.load(Input, [arith.unwrap(row), arith.unwrap(col)])
-                flir.memref.store(arith.unwrap(val), Output, [arith.unwrap(col), arith.unwrap(row)])
+                val = memref.load(Input, [row, col])
+                memref.store(val, Output, [col, row])
 
         @flir.jit
         def __call__(
@@ -108,10 +108,10 @@ def test_strided_layout_access():
 
             valid = (row < M_c) & (col < N_c)
             if valid:
-                in_idx = arith.unwrap(row * in_stride + col)
-                out_idx = arith.unwrap(row * out_stride + col)
-                v = flir.memref.load(Input, [in_idx])
-                flir.memref.store(arith.unwrap(v), Output, [out_idx])
+                in_idx = row * in_stride + col
+                out_idx = row * out_stride + col
+                v = memref.load(Input, [in_idx])
+                memref.store(v, Output, [out_idx])
 
         @flir.jit
         def __call__(

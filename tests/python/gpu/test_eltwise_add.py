@@ -69,7 +69,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
 
             # Calculate linear thread index
             bdim_x = flir.block_dim("x")
-            tidx = arith_ext.unwrap(tid_y * bdim_x + tid_x)
+            tidx = tid_y * bdim_x + tid_x
 
             # Block coordinates
             blk_coord_y = bid_y

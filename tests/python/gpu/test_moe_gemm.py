@@ -34,7 +34,7 @@ from tests.test_common import verify_output, run_perftest
 
 from _mlir import ir
 from pyflir.dialects.ext import vector
-from _mlir.dialects import llvm
+from pyflir.dialects.ext import llvm
 from pyflir.dialects.ext import arith, gpu, buffer_ops
 from _mlir.dialects import arith as _arith_mlir
 from pyflir.dialects.ext import rocdl
@@ -59,14 +59,6 @@ logging.basicConfig(level=logging.INFO)
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
-
-
-def unwrap(v):
-    if isinstance(v, int):
-        return arith.unwrap(arith.constant(v, index=True))
-    while hasattr(v, "value") or hasattr(v, "_value"):
-        v = getattr(v, "_value", getattr(v, "value", v))
-    return v
 
 
 def build_sorted_routing(
@@ -485,20 +477,19 @@ def test_moe_stage1(
                 # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
                 # sequences that introduce extra compares/cndmasks.
                 t = x * c_log2e_neg
-                emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [unwrap(t)], [], [])
+                emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [t], [], [])
                 den = c1f + emu
-                sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [unwrap(den)], [], [])
+                sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den], [], [])
                 return x * sig
 
-            zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
-            acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
+            acc_init = arith.constant_vector(0.0, vec4_f32)
 
             # Layouts
             layout_x = flir.make_layout((tokens_in, k_in), stride=(k_in, 1))
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
-            b_layout = make_preshuffle_b_layout(flir, _arith_mlir, c_n=unwrap(c_n_total), c_k=unwrap(k_in))
+            b_layout = make_preshuffle_b_layout(flir, _arith_mlir, c_n=c_n_total, c_k=k_in)
             layout_b = b_layout.layout_b
             c_k0 = k_in / c64
 
@@ -545,7 +536,7 @@ def test_moe_stage1(
             # Thread -> (row_a_local, col_a_local) via layout algebra (GEMM-style).
             vec_len_val = arith.constant(bytes_per_thread_x, index=True)
             linear_id = tx * vec_len_val
-            coord_rc = flir.idx2crd(unwrap(linear_id), layout_lin_rowcol)
+            coord_rc = flir.idx2crd(linear_id, layout_lin_rowcol)
             row_a_local = flir.get(coord_rc, 0)
             col_a_local = flir.get(coord_rc, 1)
 
@@ -565,7 +556,7 @@ def test_moe_stage1(
             t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
 
             # X base index (token-major)
-            coord_x = flir.make_coord(unwrap(t_idx), unwrap(col_a_local))
+            coord_x = flir.make_coord(t_idx, col_a_local)
             idx_x = flir.crd2idx(coord_x, layout_x)
             idx_x_div4 = idx_x / c4
 
@@ -592,7 +583,7 @@ def test_moe_stage1(
                     arg_x,
                     (16,),
                     strides=(1,),
-                    base_indices=(unwrap(idx_i32),),
+                        base_indices=(idx_i32,),
                     element_type=f8,
                 )
                 return flir.copy(
@@ -613,11 +604,11 @@ def test_moe_stage1(
                     off_i32 = arith.constant(i * 4, index=True)  # 16B == 4 dwords
                     idx_i32 = idx_x_div4 + base_k_div4 + off_i32
                     x_f8 = load_x_16(idx_i32)
-                    parts.append(vector.BitCastOp(vec4_i32, x_f8).result)
+                    parts.append(vector.bitcast(vec4_i32, x_f8))
                 return parts
 
             # tx -> wave/lane (GEMM-style decomposition).
-            coord_wl = flir.idx2crd(unwrap(tx), layout_tx_wave_lane)
+            coord_wl = flir.idx2crd(tx, layout_tx_wave_lane)
             wave_id = flir.get(coord_wl, 0)
             lane_id = flir.get(coord_wl, 1)
             coord_l16 = flir.idx2crd(lane_id, layout_lane16)
@@ -658,19 +649,15 @@ def test_moe_stage1(
                 row_gate = expert_off_idx + col_g
                 row_up = row_gate + inter_idx
 
-                coord_gate = flir.idx2crd(unwrap(row_gate), layout_n_blk_intra)
+                coord_gate = flir.idx2crd(row_gate, layout_n_blk_intra)
                 n_blk_gate.append(flir.get(coord_gate, 0))
                 n_intra_gate.append(flir.get(coord_gate, 1))
 
-                coord_up = flir.idx2crd(unwrap(row_up), layout_n_blk_intra)
+                coord_up = flir.idx2crd(row_up, layout_n_blk_intra)
                 n_blk_up.append(flir.get(coord_up, 0))
                 n_intra_up.append(flir.get(coord_up, 1))
 
-                valid_col_list.append(
-                    _arith_mlir.CmpIOp(
-                        _arith_mlir.CmpIPredicate.ult, unwrap(col_g), unwrap(inter_idx)
-                    ).result
-                )
+                valid_col_list.append(arith.ult(col_g, inter_idx))
 
             m_repeat = tile_m // 16
             k_unroll = tile_k // 32
@@ -681,13 +668,13 @@ def test_moe_stage1(
             atom_b_g2r = flir.make_copy_atom(f8, vector_size=8)
 
             def load_b_pack(base_k, ki_step, ni, blk_list, intra_list):
-                coord_k = flir.idx2crd(unwrap(base_k), layout_k0_kpack64)
+                coord_k = flir.idx2crd(base_k, layout_k0_kpack64)
                 k0_base = flir.get(coord_k, 0)
                 k0 = k0_base + (ki_step // 2)
                 k1 = lane_div_16  # 0..3
                 half = ki_step % 2
                 half_val = arith.constant(half, index=True)
-                k2_base = flir.crd2idx(flir.make_coord(unwrap(half_val), 0), layout_half8)
+                k2_base = flir.crd2idx(flir.make_coord(half_val, 0), layout_half8)
 
                 n_intra = intra_list[ni]
                 n_blk = blk_list[ni]
@@ -698,7 +685,7 @@ def test_moe_stage1(
                     arg_w,
                     (8,),
                     strides=(1,),
-                    base_indices=(unwrap(idx_bytes),),
+                    base_indices=(idx_bytes,),
                     element_type=f8,
                 )
                 b8_f8 = flir.copy(
@@ -709,8 +696,8 @@ def test_moe_stage1(
                     return_vector=True,
                     src_buffer_resource=w_rsrc,
                 )
-                b_vec64 = vector.BitCastOp(vec1_i64, b8_f8).result
-                return vector.ExtractOp(b_vec64, static_position=[0], dynamic_position=[]).result
+                b_vec64 = vector.bitcast(vec1_i64, b8_f8)
+                return vector.extract(b_vec64, static_position=[0], dynamic_position=[])
 
             def load_b_tile(base_k, blk_list, intra_list):
                 """Prefetch the entire per-thread B tile (gmem -> regs) for a given K base."""
@@ -734,9 +721,9 @@ def test_moe_stage1(
                     col_swz = flir.swizzle_xor16(row_a_local, col_0, k_blocks16)
                     coord_store_0 = flir.make_coord(row_a_local, col_swz)
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
-                    idx_0 = arith.unwrap(arith.ArithValue(idx_0) + lds_base)
+                    idx_0 = arith.ArithValue(idx_0) + lds_base
 
-                    v16 = vector.BitCastOp(vec16_f8, vec_x_in_parts[i]).result
+                    v16 = vector.bitcast(vec16_f8, vec_x_in_parts[i])
                     s_view = flir.TensorView(
                         lds_x, (16,), strides=(1,), base_indices=(idx_0,), element_type=f8
                     )
@@ -753,7 +740,7 @@ def test_moe_stage1(
             ):
                 gate_list = list(acc_gate_in)
                 up_list = list(acc_up_in)
-                c0_i32 = arith.i32(0)
+                c0_i32 = 0
 
                 # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
                 # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
@@ -792,49 +779,41 @@ def test_moe_stage1(
                         if _ck_lds128:
                             coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
                             idx_a16 = flir.crd2idx(coord_a16, layout_lds)
-                            idx_a16 = arith.unwrap(arith.ArithValue(idx_a16) + lds_base)
-                            loaded_a16 = vector.LoadOp(
-                                vec16_f8, lds_x, [idx_a16]
-                            ).result
-                            a_vec128 = vector.BitCastOp(vec2_i64, loaded_a16).result
-                            a_pack = vector.ExtractOp(
-                                a_vec128, static_position=[half], dynamic_position=[]
-                            ).result
+                            idx_a16 = arith.ArithValue(idx_a16) + lds_base
+                            loaded_a16 = vector.load_op(vec16_f8, lds_x, [idx_a16])
+                            a_vec128 = vector.bitcast(vec2_i64, loaded_a16)
+                            a_pack = vector.extract(a_vec128, static_position=[half], dynamic_position=[])
                         else:
                             col_swizzled = col_base_swizzled + half * 8
                             coord_a = flir.make_coord(curr_row_a_lds, col_swizzled)
                             idx_a = flir.crd2idx(coord_a, layout_lds)
-                            idx_a = arith.unwrap(arith.ArithValue(idx_a) + lds_base)
-                            loaded_a8 = vector.LoadOp(
-                                vec8_f8, lds_x, [idx_a]
-                            ).result
-                            a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
-                            a_pack = vector.ExtractOp(
-                                a_vec64, static_position=[0], dynamic_position=[]
-                            ).result
+                            idx_a = arith.ArithValue(idx_a) + lds_base
+                            loaded_a8 = vector.load_op(vec8_f8, lds_x, [idx_a])
+                            a_vec64 = vector.bitcast(vec1_i64, loaded_a8)
+                            a_pack = vector.extract(a_vec64, static_position=[0], dynamic_position=[])
 
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             gate_list[acc_idx] = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
                                 [
-                                    unwrap(a_pack),
-                                    unwrap(b_gate_packs[ni]),
-                                    unwrap(gate_list[acc_idx]),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
+                                    a_pack,
+                                    b_gate_packs[ni],
+                                    gate_list[acc_idx],
+                                    c0_i32,
+                                    c0_i32,
+                                    c0_i32,
                                 ],
                             )
                             up_list[acc_idx] = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 vec4_f32,
                                 [
-                                    unwrap(a_pack),
-                                    unwrap(b_up_packs[ni]),
-                                    unwrap(up_list[acc_idx]),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
-                                    unwrap(c0_i32),
+                                    a_pack,
+                                    b_up_packs[ni],
+                                    up_list[acc_idx],
+                                    c0_i32,
+                                    c0_i32,
+                                    c0_i32,
                                 ],
                             )
                 return gate_list, up_list, epilogue_pf
@@ -1019,8 +998,8 @@ def test_moe_stage1(
                         sw_up = sw_up_vals[ni]
 
                         acc_idx = mi * num_acc_n + ni
-                        vg = vector.ExtractOp(acc_gate[acc_idx], [], [ii]).result
-                        vu = vector.ExtractOp(acc_up[acc_idx], [], [ii]).result
+                        vg = vector.extract(acc_gate[acc_idx], static_position=[ii], dynamic_position=[])
+                        vu = vector.extract(acc_up[acc_idx], static_position=[ii], dynamic_position=[])
 
                         vg = vg * sx * sw_gate
                         vu = vu * sx * sw_up
@@ -1055,17 +1034,17 @@ def test_moe_stage1(
                 grid_size=(gx, gy, 1),
                 block_size=(bdx, 1, 1),
                 kernel_operands=[
-                    unwrap(arg_out),
-                    unwrap(arg_x),
-                    unwrap(arg_w),
-                    unwrap(arg_scale_x),
-                    unwrap(arg_scale_w),
-                    unwrap(arg_sorted_token_ids),
-                    unwrap(arg_expert_ids),
-                    unwrap(arg_sorted_weights),
-                    unwrap(tokens_in),
-                    unwrap(inter_in),
-                    unwrap(k_in),
+                    arg_out,
+                    arg_x,
+                    arg_w,
+                    arg_scale_x,
+                    arg_scale_w,
+                    arg_sorted_token_ids,
+                    arg_expert_ids,
+                    arg_sorted_weights,
+                    tokens_in,
+                    inter_in,
+                    k_in,
                 ],
             )
 

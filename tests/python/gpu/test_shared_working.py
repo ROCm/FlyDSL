@@ -15,6 +15,7 @@ import pyflir
 import torch
 
 from pyflir.dialects.ext import arith, flir
+from pyflir.dialects.ext import memref
 from pyflir.runtime.device import get_rocm_arch
 from pyflir.utils import SmemAllocator
 
@@ -77,30 +78,29 @@ def test_matmul_shared_working():
             def get_tile_idx(y, x):
                 coord = flir.make_coord(y, x)
                 idx_val = flir.crd2idx(coord, tile_layout)
-                return arith.unwrap(idx_val)
+                return idx_val
 
             for t in range(num_tiles):
                 k_base = (t * tile_c)
 
                 a_col = (k_base + tx)
-                a_val = flir.memref.load(A, [arith.unwrap(row), arith.unwrap(a_col)])
-                As.store(arith.unwrap(a_val), [get_tile_idx(arith.unwrap(ty), arith.unwrap(tx))])
+                a_val = memref.load(A, [row, a_col])
+                As.store(a_val, [get_tile_idx(ty, tx)])
 
                 b_row = (k_base + ty)
-                b_val = flir.memref.load(B, [arith.unwrap(b_row), arith.unwrap(col)])
-                Bs.store(arith.unwrap(b_val), [get_tile_idx(arith.unwrap(ty), arith.unwrap(tx))])
+                b_val = memref.load(B, [b_row, col])
+                Bs.store(b_val, [get_tile_idx(ty, tx)])
 
                 gpu.barrier()
 
                 for k_local in range(tile_c):
-                    a_smem = As.load([get_tile_idx(arith.unwrap(ty), k_local)])
-                    b_smem = Bs.load([get_tile_idx(k_local, arith.unwrap(tx))])
+                    a_smem = As.load([get_tile_idx(ty, k_local)])
+                    b_smem = Bs.load([get_tile_idx(k_local, tx)])
                     acc = (acc + a_smem * b_smem)
 
                 gpu.barrier()
 
-            out_v = arith.unwrap(acc)
-            flir.memref.store(out_v, C, [arith.unwrap(row), arith.unwrap(col)])
+            memref.store(acc, C, [row, col])
 
         @flir.jit
         def __call__(

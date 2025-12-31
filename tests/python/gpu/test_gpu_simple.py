@@ -4,7 +4,7 @@ Vector addition test with clean, readable syntax
 """
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir, arith
+from pyflir.dialects.ext import flir, memref
 import _mlir.extras.types as T
 
 
@@ -30,10 +30,10 @@ def test_vector_add():
             col = (bx * bdx + tx)
 
             # Vector addition: C[row,col] = A[row,col] + B[row,col]
-            a = flir.memref.load(A, [arith.unwrap(row), arith.unwrap(col)])
-            b = flir.memref.load(B, [arith.unwrap(row), arith.unwrap(col)])
+            a = memref.load(A, [row, col])
+            b = memref.load(B, [row, col])
             c = a + b
-            flir.memref.store(arith.unwrap(c), C, [arith.unwrap(row), arith.unwrap(col)])
+            memref.store(c, C, [row, col])
 
         @flir.jit
         def __call__(

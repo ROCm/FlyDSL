@@ -9,34 +9,34 @@ class _CoordOps(flir.MlirModule):
     def coord_ops(self: flir.T.i64):
         i = arith.index(4)
         j = arith.index(7)
-        coord_2d = flir.make_coord(arith.unwrap(i), arith.unwrap(j))
+        coord_2d = flir.make_coord(i, j)
 
         m = arith.index(32)
         n = arith.index(64)
         one = arith.index(1)
-        shape = flir.make_shape(arith.unwrap(m), arith.unwrap(n))
-        stride = flir.make_stride(arith.unwrap(n), arith.unwrap(one))  # row-major: stride=(64,1)
+        shape = flir.make_shape(m, n)
+        stride = flir.make_stride(n, one)  # row-major: stride=(64,1)
         layout = flir.make_layout(shape, stride)
 
         linear_idx = flir.crd2idx(coord_2d, layout)
         idx_test = arith.index(263)
-        coord_back = flir.idx2crd(arith.unwrap(idx_test), layout)
+        coord_back = flir.idx2crd(idx_test, layout)
 
         k = arith.index(42)
-        coord_1d = flir.make_coord(arith.unwrap(k))
+        coord_1d = flir.make_coord(k)
         size_1d = arith.index(1024)
         stride_1d = arith.index(1)
         layout_1d = flir.make_layout(
-            flir.make_shape(arith.unwrap(size_1d)),
-            flir.make_stride(arith.unwrap(stride_1d)),
+            flir.make_shape(size_1d),
+            flir.make_stride(stride_1d),
         )
         idx_1d = flir.crd2idx(coord_1d, layout_1d)
 
         # Keep values alive in IR.
         return [
-            arith.unwrap(linear_idx),
-            arith.unwrap(flir.crd2idx(coord_back, layout)),
-            arith.unwrap(idx_1d),
+            linear_idx,
+            flir.crd2idx(coord_back, layout),
+            idx_1d,
         ]
 
 

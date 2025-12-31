@@ -11,7 +11,7 @@ class _BasicOps(flir.MlirModule):
         c16 = 16
         shape = flir.make_shape(c8, c16)
         rank = flir.rank(shape)
-        return arith.unwrap(rank)
+        return rank
 
     @flir.jit
     def layout_creation(self: flir.T.i64):
@@ -29,7 +29,7 @@ class _BasicOps(flir.MlirModule):
         c8 = 8
         shape = flir.make_shape(c4, c8)
         total_size = flir.size(shape)
-        return arith.unwrap(total_size)
+        return total_size
 
     @flir.jit
     def extract(self: flir.T.i64):
@@ -42,7 +42,7 @@ class _BasicOps(flir.MlirModule):
         extracted_shape = flir.get_shape(layout)
         extracted_stride = flir.get_stride(layout)
         size_val = flir.size(extracted_shape)
-        return arith.unwrap(size_val)
+        return size_val
 
     @flir.jit
     def rank(self: flir.T.i64):
@@ -51,7 +51,7 @@ class _BasicOps(flir.MlirModule):
         c4 = 4
         shape = flir.make_shape(c2, c3, c4)
         rank_val = flir.rank(shape)
-        return arith.unwrap(rank_val)
+        return rank_val
 
     @flir.jit
     def cosize(self: flir.T.i64):
@@ -62,7 +62,7 @@ class _BasicOps(flir.MlirModule):
         stride = flir.make_stride(c1, c8)
         layout = flir.make_layout(shape, stride)
         cosize_val = flir.cosize(layout)
-        return arith.unwrap(cosize_val)
+        return cosize_val
 
     @flir.jit
     def compose(self: flir.T.i64):

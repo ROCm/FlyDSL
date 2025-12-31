@@ -516,6 +516,17 @@ def unwrap(
         return _unwrap_value(constant(val, type=type, index=index, loc=loc))
     return _unwrap_value(val)
 
+
+def as_value(
+    val: Union["ArithValue", Value, int, float, bool],
+    *,
+    type: Optional[Type] = None,
+    index: bool = False,
+    loc: Location = None,
+) -> Value:
+    """Alias for `unwrap`, intended for readability at MLIR builder boundaries."""
+    return unwrap(val, type=type, index=index, loc=loc)
+
 def _binary_op(
     lhs: "ArithValue",
     rhs: "ArithValue",
@@ -571,7 +582,25 @@ def _binary_op(
     
     # Get the operation class
     op_class = getattr(_arith, f"{op_name}Op")
-    result = op_class(_unwrap_value(lhs) if isinstance(lhs, ArithValue) else lhs, _unwrap_value(rhs) if isinstance(rhs, ArithValue) else rhs, loc=loc).result
+
+    lhs_val = _unwrap_value(lhs) if isinstance(lhs, ArithValue) else lhs
+    rhs_val = _unwrap_value(rhs) if isinstance(rhs, ArithValue) else rhs
+
+    # Vector-scalar promotion (broadcast): MLIR arith ops require identical types.
+    # Some bindings don't reliably expose `VectorType` for isinstance checks, so
+    # detect vectors structurally.
+    try:
+        lhs_et = getattr(lhs_val.type, "element_type", None)
+        rhs_et = getattr(rhs_val.type, "element_type", None)
+
+        if lhs_et is not None and lhs_et == rhs_val.type:
+            rhs_val = _vector.BroadcastOp(lhs_val.type, rhs_val, loc=loc).result
+        elif rhs_et is not None and rhs_et == lhs_val.type:
+            lhs_val = _vector.BroadcastOp(rhs_val.type, lhs_val, loc=loc).result
+    except Exception:
+        pass
+
+    result = op_class(lhs_val, rhs_val, loc=loc).result
     
     return ArithValue(result)
 
@@ -829,7 +858,7 @@ from _mlir.dialects.arith import (
 )
 
 __all__ = [
-    "constant", "unwrap", "index", "i32", "i64", "f16", "f32", "f64", "Index",
+    "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
     "maximum", "minimum", "select", "extf", "fptosi", "absf", "reduce", "constant_vector",
     "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f",
     "ArithValue",

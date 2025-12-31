@@ -12,7 +12,7 @@ import os
 import pyflir
 from pyflir.dialects.ext import flir
 from pyflir.runtime.device import get_rocm_arch
-from pyflir.dialects.ext import arith
+from pyflir.dialects.ext import arith, memref
 import _mlir.extras.types as T
 import pytest
 import torch
@@ -56,13 +56,12 @@ def test_matmul_with_flir():
             c_layout = flir.make_layout(c_shape, c_stride)
 
             # Create coordinate for current thread's position
-            thread_coord = flir.make_coord(arith.unwrap(row), arith.unwrap(col))
+            thread_coord = flir.make_coord(row, col)
 
             # Use crd2idx to compute linear index (will be lowered to arith ops)
             idx = flir.crd2idx(thread_coord, c_layout)
-            idx_v = arith.unwrap(idx)
-            idx_i32 = arith.index_cast(T.i32(), idx_v)
-            flir.memref.store(arith.unwrap(idx_i32), C, [arith.unwrap(row), arith.unwrap(col)])
+            idx_i32 = arith.index_cast(T.i32(), idx)
+            memref.store(idx_i32, C, [row, col])
 
         @flir.jit
         def __call__(

@@ -114,10 +114,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
         ):
             # ---- Types (centralized) ----
 
-            zero_attr = ir.DenseElementsAttr.get_splat(
-                T.f32x4, ir.FloatAttr.get(T.f32, 0.0)
-            )
-            acc_init = _arith_mlir.ConstantOp(T.f32x4, zero_attr).result
+            acc_init = arith.constant_vector(0.0, T.f32x4)
 
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
@@ -291,10 +288,8 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     return_vector=True,
                     src_buffer_resource=b_rsrc,
                 )
-                b_vec64 = vector.BitCastOp(T.vec(1, T.i64), b8_f8).result
-                return vector.ExtractOp(
-                    b_vec64, static_position=[0], dynamic_position=[]
-                ).result
+                b_vec64 = vector.bitcast(T.vec(1, T.i64), b8_f8)
+                return vector.extract(b_vec64, static_position=[0], dynamic_position=[])
 
             def load_b_tile(base_k):
                 """Prefetch the entire per-thread B tile (gmem -> regs).
@@ -373,7 +368,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     )
                     idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
                     a_f8 = load_a_16(idx_i32)
-                    parts.append(vector.BitCastOp(T.i32x4, a_f8).result)
+                    parts.append(vector.bitcast(T.i32x4, a_f8))
                 return parts
 
             def store_a_tile_to_lds(vec_a_in_parts, lds_base):
@@ -386,10 +381,10 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     )
                     coord_store_0 = flir.make_coord(row_a_local, col_swz)
                     idx_0 = flir.crd2idx(coord_store_0, layout_lds)
-                    idx_0 = arith.unwrap(arith.ArithValue(idx_0) + lds_base)
+                    idx_0 = arith.ArithValue(idx_0) + lds_base
 
                     # Convert back to fp8 vector for LDS store.
-                    a_vec = vector.BitCastOp(T.f8x16, vec_a_in_parts[i]).result
+                    a_vec = vector.bitcast(T.f8x16, vec_a_in_parts[i])
                     s_view = flir.TensorView(
                         lds_a,
                         (16,),
@@ -439,7 +434,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         s_a_vec = buffer_ops.buffer_load(
                             scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
                         )
-                        s_a_vec4 = vector.BitCastOp(T.f32x4, s_a_vec).result
+                        s_a_vec4 = vector.bitcast(T.f32x4, s_a_vec)
                         scales_pf["s_a_vecs"].append(s_a_vec4)
 
                 current_accs_list = list(accs_in)
@@ -461,14 +456,10 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         )
                         coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
                         idx_a16 = flir.crd2idx(coord_a16, layout_lds)
-                        idx_a16 = arith.unwrap(arith.ArithValue(idx_a16) + lds_base)
-                        loaded_a16 = vector.LoadOp(
-                            T.f8x16, lds_a, [idx_a16]
-                        ).result
-                        a_vec128 = vector.BitCastOp(T.i64x2, loaded_a16).result
-                        a_pack = vector.ExtractOp(
-                            a_vec128, static_position=[half], dynamic_position=[]
-                        ).result
+                        idx_a16 = arith.ArithValue(idx_a16) + lds_base
+                        loaded_a16 = vector.load_op(T.f8x16, lds_a, [idx_a16])
+                        a_vec128 = vector.bitcast(T.i64x2, loaded_a16)
+                        a_pack = vector.extract(a_vec128, static_position=[half], dynamic_position=[])
 
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
@@ -478,12 +469,12 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(
                                 T.f32x4,
                                 [
-                                    arith.unwrap(a_pack),
-                                    arith.unwrap(b_pack),
-                                    arith.unwrap(curr_acc),
-                                    arith.unwrap(c0_i32, type=i32_type),
-                                    arith.unwrap(c0_i32, type=i32_type),
-                                    arith.unwrap(c0_i32, type=i32_type),
+                                    a_pack,
+                                    b_pack,
+                                    curr_acc,
+                                    c0_i32,
+                                    c0_i32,
+                                    c0_i32,
                                 ],
                             )
                             current_accs_list[acc_idx] = acc0
@@ -578,9 +569,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                     row_off = (lane_div_16 * 4) + i
                     row_g = row_base_m + row_off
 
-                    s_a = vector.ExtractOp(
-                        s_a_vec4, static_position=[i], dynamic_position=[]
-                    ).result
+                    s_a = vector.extract(s_a_vec4, static_position=[i], dynamic_position=[])
 
                     # Base column for this thread within the N tile.
                     # For row-major C (stride=(c_n, 1)), stepping by 16 columns
@@ -595,7 +584,7 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
 
-                        val = vector.ExtractOp(acc, [], [i]).result
+                        val = vector.extract(acc, static_position=[i], dynamic_position=[])
 
                         s_b = s_b_vals[ni]
 

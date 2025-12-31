@@ -15,7 +15,7 @@ def test_logical_product():
                 flir.make_stride(Index(1), Index(4)),
             )
             tiled = flir.logical_product(base, tiler)
-            return [arith.unwrap(flir.size(tiled))]
+            return [flir.size(tiled)]
 
     s = str(_M().module)
     assert "flir.logical_product" in s
@@ -34,7 +34,7 @@ def test_zipped_product():
                 flir.make_stride(Index(1), Index(2)),
             )
             zipped = flir.zipped_product(base, tiler)
-            return [arith.unwrap(flir.size(zipped))]
+            return [flir.size(zipped)]
 
     s = str(_M().module)
     assert "flir.zipped_product" in s
@@ -53,7 +53,7 @@ def test_tiled_product():
                 flir.make_stride(Index(1), Index(8)),
             )
             tiled = flir.tiled_product(base, tiler)
-            return [arith.unwrap(flir.size(tiled))]
+            return [flir.size(tiled)]
 
     s = str(_M().module)
     assert "flir.tiled_product" in s
@@ -72,7 +72,7 @@ def test_flat_product():
                 flir.make_stride(Index(1), Index(4)),
             )
             flat = flir.flat_product(base, tiler)
-            return [arith.unwrap(flir.size(flat))]
+            return [flir.size(flat)]
 
     s = str(_M().module)
     assert "flir.flat_product" in s
@@ -91,7 +91,7 @@ def test_raked_product():
                 flir.make_stride(Index(1), Index(4)),
             )
             raked = flir.raked_product(base, raker)
-            return [arith.unwrap(flir.size(raked))]
+            return [flir.size(raked)]
 
     s = str(_M().module)
     assert "flir.raked_product" in s
@@ -110,7 +110,7 @@ def test_blocked_product():
                 flir.make_stride(Index(1), Index(16)),
             )
             blocked = flir.blocked_product(base, blocker)
-            return [arith.unwrap(flir.size(blocked))]
+            return [flir.size(blocked)]
 
     s = str(_M().module)
     assert "flir.blocked_product" in s

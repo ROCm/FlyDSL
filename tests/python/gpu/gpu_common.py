@@ -11,11 +11,6 @@ import _mlir.extras.types as T
 from pyflir.dialects.ext import arith
 
 
-# Small helper: unwrap MLIR wrapper values into ir.Value
-def unwrap(v):
-    return arith.unwrap(v)
-
-
 # Default epsilon used by norm operators.
 EPS: float = 1e-5
 

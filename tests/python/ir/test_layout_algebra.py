@@ -16,11 +16,6 @@ from pyflir.dialects.ext.arith import Index
 from _mlir.dialects import func
 from _mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
 
-def unwrap(val):
-    """Unwrap ArithValue or other wrappers."""
-    return arith.unwrap(val)
-
-
 def flatten_nested_list(nested):
     """Flatten a nested list/tuple structure into a flat list."""
     if not isinstance(nested, (list, tuple)):
@@ -205,7 +200,7 @@ def test_coalesce_basic():
         
         # Verify size is preserved
         sz = flir.size(coalesced)
-        return [unwrap(sz)]
+        return [arith.as_value(sz)]
     
     # Verify size is preserved: 2 * 1 * 6 = 12
     run_lowering_test(ctx, "coalesce_basic", expected_val=12)
@@ -230,11 +225,11 @@ def test_coalesce_dynamic_stride():
         )
         coalesced = flir.coalesce(layout)
         stride = flir.get_stride(coalesced)
-        return [
-            unwrap(flir.get(stride, Index(0))),
-            unwrap(flir.get(stride, Index(1))),
-            unwrap(flir.get(stride, Index(2))),
-        ]
+        return [arith.as_value(v) for v in [
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
+            flir.get(stride, Index(2)),
+        ]]
     
     run_lowering_test(
         ctx,
@@ -280,11 +275,11 @@ def test_composition_basic():
         # Get dimensions (rank 3: (2,2,3))
         vals = []
         for i in range(3):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [2, 2, 3] + stride [24, 2, 8]
     # Structure: ((2,2),3):((24,2),8)
@@ -351,11 +346,11 @@ def test_composition_static_vs_dynamic():
         # Get dimensions (rank 3: (5,2,2))
         vals = []
         for i in range(3):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [5, 2, 2] + stride [16, 80, 4]
     # All values should be constants after lowering
@@ -417,7 +412,7 @@ def test_composition_static_vs_dynamic():
         flir.printf("  R shape[0]: {}\n", vals[0])
         flir.printf("  R stride[0]: {}\n", vals[1])
         
-        return [unwrap(v) for v in vals]
+        return [arith.as_value(v) for v in vals]
 
     print("  Creating dynamic layout: A_dynamic from function arguments (arg0-arg3)")
     print("  Creating dynamic layout: B_dynamic from function arguments (arg4-arg7)")
@@ -503,8 +498,10 @@ def test_logical_divide_1d():
         stride_d3 = flir.get(stride, Index(3))
         
         # Return all values: shape dims, stride dims
-        return [unwrap(shape_d0), unwrap(shape_d1), unwrap(shape_d2), unwrap(shape_d3),
-                unwrap(stride_d0), unwrap(stride_d1), unwrap(stride_d2), unwrap(stride_d3)]
+        return [arith.as_value(v) for v in [
+            shape_d0, shape_d1, shape_d2, shape_d3,
+            stride_d0, stride_d1, stride_d2, stride_d3,
+        ]]
 
     # Expected: shape [2,2,2,3] + stride [4,1,2,8]
     # Structure: ((2,2),(2,3)):((4,1),(2,8))
@@ -548,11 +545,11 @@ def test_logical_divide_2d():
         # Get dimensions (rank 6 after flattening)
         vals = []
         for i in range(6):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(6):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [3,3,2,4,2,2] + stride [177,59,13,2,26,1]
     # Actual: [3, 2, 2, 4, 2, 2] - index 1 is 2 (complement size mismatch due to non-contiguous composition)
@@ -613,11 +610,11 @@ def test_zipped_divide():
         # Get dimensions (rank 6)
         vals = []
         for i in range(6):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(6):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     # Structure: ((3,(2,4)),(3,(2,2))):((177,(13,2)),(59,(26,1)))
@@ -659,11 +656,11 @@ def test_tiled_divide():
         # Get dimensions (rank 6)
         vals = []
         for i in range(6):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(6):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [3,2,4,3,2,2] + stride [177,13,2,59,26,1]
     # Structure: ((3,(2,4)),3,(2,2)):((177,(13,2)),59,(26,1))
@@ -697,7 +694,7 @@ def test_flat_divide():
 
         res_flat = flir.flat_divide(layout, tiler)
         sz = flir.size(res_flat)
-        return [unwrap(sz)]
+        return [arith.as_value(sz)]
 
     # Expected size: 9 * 4 * 8 = 288 (divide preserves total size)
     # TODO: Add full shape/stride verification once divide lowering is implemented
@@ -741,11 +738,11 @@ def test_logical_product_1d():
         # Product of (2,2) with 6 gives rank 3: (2, 2, 6)
         vals = []
         for i in range(3):  # Layout (2,2) + tiler 6 = rank 3
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: block shape (2,2) concatenated with tiler shape (6)
     # Stride: block stride (4,1) concatenated with scaled tiler stride (1 * block_size)
@@ -788,11 +785,11 @@ def test_blocked_raked_product():
         # Get dimensions (rank 4: block + tiler)
         vals = []
         for i in range(4):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(4):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [2,5,3,4] + stride [5,1,10,30] (block_size=10)
     # Structure: ((2,3),(5,4)):((5,10),(1,30))
@@ -841,11 +838,11 @@ def test_zipped_tiled_flat_product():
         # Get dimensions (rank 4: block + tiler)
         vals = []
         for i in range(4):
-            vals.append(unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(4):
-            vals.append(unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         
-        return vals
+        return [arith.as_value(v) for v in vals]
 
     # Expected: shape [2,5,3,4] + stride [5,1,10,30] (block_size=10)
     # Structure: (2,5,3,4):(5,1,10,30)
@@ -893,11 +890,11 @@ def test_complement_simple():
         comp_size = flir.size(comp_layout)
         
         vals = []
-        vals.append(unwrap(val_shape))
-        vals.append(unwrap(val_stride))
-        vals.append(unwrap(comp_size))
+        vals.append(val_shape)
+        vals.append(val_stride)
+        vals.append(comp_size)
         
-        return vals
+        return [arith.as_value(v) for v in vals]
     
     run_lowering_test(ctx, "complement_simple", expected_vals=[4, 3, 4])
 

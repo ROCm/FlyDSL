@@ -1355,20 +1355,7 @@ def swizzle_xor16(row: Value, col: Value, k_blocks16: Value,
     loc = _get_location(loc)
     with ip or InsertionPoint.current:
         # ODS-generated builders for dialect ops require passing the result type.
-        #
-        # NOTE: We intentionally do not provide an arith-op fallback here. Other
-        # sites in this file unconditionally rely on this op being present (e.g.
-        # layout swizzle construction), so silently falling back would only mask
-        # a broken/partial flir binding and can lead to IR differences.
-        try:
-            swz = flir_ops.swizzle_xor16
-        except AttributeError as e:
-            raise RuntimeError(
-                "Missing flir op builder `swizzle_xor16` in `_mlir.dialects.flir`. "
-                "Please rebuild/upgrade the flir python bindings."
-            ) from e
-
-        return swz(
+        return flir_ops.swizzle_xor16(
             IndexType.get(),
             _unwrap_value(row),
             _unwrap_value(col),

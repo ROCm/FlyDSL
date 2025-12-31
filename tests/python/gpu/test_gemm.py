@@ -186,8 +186,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
             # Keep common SSA values defined once to reduce duplication between branches.
             f32 = ir.F32Type.get()
             vec4_f32 = ir.VectorType.get([4], f32)
-            zero_attr = ir.DenseElementsAttr.get_splat(vec4_f32, ir.FloatAttr.get(f32, 0.0))
-            acc_init = _arith_mlir.ConstantOp(vec4_f32, zero_attr).result
+            acc_init = arith.constant_vector(0.0, vec4_f32)
             c0_i32 = 0
             i32_type = ir.IntegerType.get_signless(32)
 
@@ -294,10 +293,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     k_blocks16 = arith.constant(tile_k // 16, index=True)
                     row_mod = row_idx % k_blocks16
                     xor_mask = row_mod * 16
-                    return _arith_mlir.XOrIOp(
-                        arith.unwrap(col_idx),
-                        arith.unwrap(xor_mask),
-                    ).result
+                    return arith.xori(col_idx, xor_mask)
 
                 def load_b_pack_rowmajor(base_k, ki_step, ni):
                     # Match the preshuffle kernel’s (ki64, half, lane_div_16*16) addressing,
@@ -313,10 +309,8 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     idx_i32 = idx_bytes / 4
 
                     b8 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=2, dtype=i32_type)
-                    b_vec64 = vector.BitCastOp(vec1_i64, b8).result
-                    return vector.ExtractOp(
-                        b_vec64, static_position=[0], dynamic_position=[]
-                    ).result
+                    b_vec64 = vector.bitcast(vec1_i64, b8)
+                    return vector.extract(b_vec64, static_position=[0], dynamic_position=[])
 
                 def emit_tile(k_iv, accs_in, vec_a_in_parts, is_last_tile=False):
                     # Store A parts into LDS with XOR swizzle (same as preshuffle test)
@@ -333,18 +327,18 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         )
 
                         if curr_i32 == 4:
-                            val_16 = vector.BitCastOp(vec16_f8, val_vec).result
-                            vector.StoreOp(val_16, lds_a, [arith.unwrap(idx_0)])
+                            val_16 = vector.bitcast(vec16_f8, val_vec)
+                            vector.store(val_16, lds_a, [idx_0])
                         elif curr_i32 == 2:
-                            val_2_i32 = vector.ShuffleOp(val_vec, val_vec, [0, 1]).result
-                            val_8 = vector.BitCastOp(vec8_f8, val_2_i32).result
-                            vector.StoreOp(val_8, lds_a, [arith.unwrap(idx_0)])
+                            val_2_i32 = vector.shuffle(val_vec, val_vec, [0, 1])
+                            val_8 = vector.bitcast(vec8_f8, val_2_i32)
+                            vector.store(val_8, lds_a, [idx_0])
                         else:
                             # Conservative fallback (rare for our default tiles)
                             vec_f8 = ir.VectorType.get([curr_bytes], f8)
-                            val_1_i32 = vector.ShuffleOp(val_vec, val_vec, [0]).result
-                            val_f8 = vector.BitCastOp(vec_f8, val_1_i32).result
-                            vector.StoreOp(val_f8, lds_a, [arith.unwrap(idx_0)])
+                            val_1_i32 = vector.shuffle(val_vec, val_vec, [0])
+                            val_f8 = vector.bitcast(vec_f8, val_1_i32)
+                            vector.store(val_f8, lds_a, [idx_0])
 
                         curr_store_off += curr_bytes
 
@@ -372,7 +366,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         for mi in range_constexpr(m_repeat):
                             row_g_base = (bx_m + (mi * 16)) + row_off_base
                             s_a_vec = buffer_ops.buffer_load(scale_a_rsrc, row_g_base, vec_width=4, dtype=f32)
-                            s_a_vecs.append(vector.BitCastOp(vec4_f32, s_a_vec).result)
+                            s_a_vecs.append(vector.bitcast(vec4_f32, s_a_vec))
                         scales_pf["s_a_vecs"] = s_a_vecs
 
                     current_accs_list = list(accs_in)
@@ -392,19 +386,14 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         for mi in range_constexpr(m_repeat):
                             curr_row_a_lds = row_a_lds + arith.constant(mi * 16, index=True)
                             col_base_sw = swizzle_xor_16b(curr_row_a_lds, col_base)
-                            col_sw = _arith_mlir.AddIOp(
-                                arith.unwrap(col_base_sw),
-                                arith.unwrap(half_off),
-                            ).result
+                            col_sw = col_base_sw + half_off
 
                             idx_a = flir.crd2idx(
                                 flir.make_coord(curr_row_a_lds, col_sw), layout_lds_a
                             )
-                            loaded_a8 = vector.LoadOp(
-                                vec8_f8, lds_a, [arith.unwrap(idx_a)]
-                            ).result
-                            a_vec64 = vector.BitCastOp(vec1_i64, loaded_a8).result
-                            a_pack = vector.ExtractOp(a_vec64, static_position=[0], dynamic_position=[]).result
+                            loaded_a8 = vector.load_op(vec8_f8, lds_a, [idx_a])
+                            a_vec64 = vector.bitcast(vec1_i64, loaded_a8)
+                            a_pack = vector.extract(a_vec64, static_position=[0], dynamic_position=[])
 
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -463,7 +452,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                 lds_b = _state["lds_b_decl"](base_ptr).get()
 
                 vec_type = ir.VectorType.get([vec_load_size], mlir_dtype)
-                pad_val = _arith_mlir.ConstantOp(mlir_dtype, ir.FloatAttr.get(mlir_dtype, 0.0)).result
+                pad_val = arith.constant(0.0, type=mlir_dtype)
 
                 wave_row = wave_id // fp16_waves_n
                 wave_col = wave_id % fp16_waves_n

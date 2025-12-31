@@ -97,3 +97,40 @@ def transfer_read(result_type, source, indices, permutation_map, padding, in_bou
     ).result
 
 
+def bitcast(result_type, source, *, loc=None, ip=None):
+    """Wrapper around `vector.BitCastOp(...).result`."""
+    from . import arith as _arith_ext
+
+    return _vector.BitCastOp(
+        result_type,
+        _arith_ext.unwrap(source, loc=loc),
+        loc=maybe_default_loc(loc),
+        ip=ip,
+    ).result
+
+
+def shuffle(v1, v2, mask, *, loc=None, ip=None):
+    """Wrapper around `vector.ShuffleOp(...).result`."""
+    from . import arith as _arith_ext
+
+    return _vector.ShuffleOp(
+        _arith_ext.unwrap(v1, loc=loc),
+        _arith_ext.unwrap(v2, loc=loc),
+        mask,
+        loc=maybe_default_loc(loc),
+        ip=ip,
+    ).result
+
+
+def broadcast(result_type, source, *, loc=None, ip=None):
+    """Wrapper around `vector.BroadcastOp(...).result`."""
+    from . import arith as _arith_ext
+
+    return _vector.BroadcastOp(
+        result_type,
+        _arith_ext.unwrap(source, loc=loc),
+        loc=maybe_default_loc(loc),
+        ip=ip,
+    ).result
+
+

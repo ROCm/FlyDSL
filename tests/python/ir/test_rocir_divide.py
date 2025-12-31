@@ -1,17 +1,8 @@
 """Tests for Flir divide operations (partitioning)."""
 
-import pytest
-from _mlir.ir import IndexType
-from _mlir.dialects import arith
-
 import pyflir.dialects.ext.flir as flir
-from pyflir.dialects.ext import arith as arith_ext
 from pyflir.dialects.ext.arith import Index
-
-def _unwrap(val):
-    """Unwrap ArithValue to get underlying MLIR Value."""
-    return arith_ext.unwrap(val)
-from test_utils import unwrap_values
+from pyflir.dialects.ext import arith as arith_ext
 
 
 def test_logical_divide(ctx, insert_point):
@@ -39,7 +30,7 @@ def test_logical_divide(ctx, insert_point):
         partitioned = flir.logical_divide(global_layout, tile)
         
         size = flir.size(partitioned)
-        return unwrap_values(size)
+        return [size]
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -69,7 +60,7 @@ def test_zipped_divide(ctx, insert_point):
         zipped = flir.zipped_divide(global_layout, tile)
         
         size = flir.size(zipped)
-        return unwrap_values(size)
+        return [size]
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -99,7 +90,7 @@ def test_tiled_divide(ctx, insert_point):
         tiled = flir.tiled_divide(global_layout, tile)
         
         size = flir.size(tiled)
-        return unwrap_values(size)
+        return [size]
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -129,7 +120,7 @@ def test_flat_divide(ctx, insert_point):
         flat = flir.flat_divide(global_layout, tile)
         
         size = flir.size(flat)
-        return unwrap_values(size)
+        return [size]
     
     ctx.module.operation.verify()
     # Apply lowering

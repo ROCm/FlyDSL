@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 
 from _mlir import ir
-from pyflir.dialects.ext import vector
+from pyflir.dialects.ext import arith, vector
 
 
 @dataclass(frozen=True)
@@ -30,23 +30,15 @@ class PreshuffleBLayout:
     c1024: ir.Value
 
 
-def _unwrap(v):
-    """Best-effort unwrap for ArithValue-like wrappers used in tests."""
-    while hasattr(v, "_value") or hasattr(v, "value"):
-        v = getattr(v, "_value", getattr(v, "value", v))
-    return v
-
-
 def swizzle_xor_16b(flir, _arith_mlir, row_idx: ir.Value, col_idx: ir.Value, *, tile_k: int) -> ir.Value:
     """CK-style XOR16 swizzle on K at 16B granularity (index-typed).
 
     This now routes through the dedicated `flir.swizzle_xor16` op so lowering can
     optimize to bitwise ops when `kBlocks16` is a const power-of-two.
     """
-    row_idx = _unwrap(row_idx)
-    col_idx = _unwrap(col_idx)
-    k_blocks16 = flir.const_index(tile_k // 16)
-    return _unwrap(flir.swizzle_xor16(row_idx, col_idx, k_blocks16))
+    # Accept ArithValue / Value / int and rely on ext unwrapping.
+    k_blocks16 = arith.constant(tile_k // 16, index=True)
+    return flir.swizzle_xor16(row_idx, col_idx, k_blocks16)
 
 
 def make_preshuffle_b_layout(flir, _arith_mlir, *, c_n: ir.Value, c_k: ir.Value) -> PreshuffleBLayout:
@@ -54,25 +46,26 @@ def make_preshuffle_b_layout(flir, _arith_mlir, *, c_n: ir.Value, c_k: ir.Value)
 
     Shape: (N0, K0, KLane, NLane, KPack) = (N/16, K/64, 4, 16, 16)
     """
-    c_n = _unwrap(c_n)
-    c_k = _unwrap(c_k)
+    c_n = arith.as_value(c_n, index=True)
+    c_k = arith.as_value(c_k, index=True)
 
-    c16 = flir.const_index(16)
-    c64 = flir.const_index(64)
-    c1024 = flir.const_index(1024)
+    c16 = arith.constant(16, index=True)
+    c64 = arith.constant(64, index=True)
+    c1024 = arith.constant(1024, index=True)
 
-    c_k0 = _unwrap(_arith_mlir.DivUIOp(c_k, c64).result)
-    stride_n0 = _unwrap(_arith_mlir.MulIOp(c_k0, c1024).result)
+    # Index math: use operator overloading to avoid low-level op result access.
+    c_k0 = arith.ArithValue(c_k) / c64
+    stride_n0 = c_k0 * c1024
     stride_b = (
         stride_n0,  # n0
         c1024,      # k0
-        flir.const_index(256),  # k1 (KLane)
+        arith.constant(256, index=True),  # k1 (KLane)
         c16,        # n1
-        flir.const_index(1),    # k2
+        arith.constant(1, index=True),    # k2
     )
-    n0 = _unwrap(_arith_mlir.DivUIOp(c_n, c16).result)
+    n0 = arith.ArithValue(c_n) / c16
     layout_b = flir.make_layout(
-        (n0, c_k0, flir.const_index(4), c16, c16),
+        (n0, c_k0, arith.constant(4, index=True), c16, c16),
         stride=stride_b,
     )
     return PreshuffleBLayout(layout_b=layout_b, c16=c16, c64=c64, c1024=c1024)
@@ -100,9 +93,9 @@ def load_fp8_tile_split_dwordx4(buffer_ops, flir, _arith_mlir, *, rsrc, idx_div4
     NOTE: We intentionally load 16 fp8 bytes per split (dwordx4). Callers pad
     the underlying storage so this is safe even when the last split is < 16B.
     """
-    rsrc = _unwrap(rsrc)
-    idx_div4 = _unwrap(idx_div4)
-    mask = _unwrap(mask) if mask is not None else None
+    rsrc = arith.as_value(rsrc)
+    idx_div4 = arith.as_value(idx_div4, index=True)
+    mask = arith.as_value(mask) if mask is not None else None
 
     # 16 fp8 bytes -> vector<16xf8> -> bitcast to vector<4xi32>
     f8 = ir.Float8E4M3FNType.get()
@@ -112,7 +105,7 @@ def load_fp8_tile_split_dwordx4(buffer_ops, flir, _arith_mlir, *, rsrc, idx_div4
     parts = []
     off_i32 = 0
     for curr_bytes in lens:
-        curr_idx = idx_div4 if off_i32 == 0 else _unwrap(_arith_mlir.AddIOp(idx_div4, flir.const_index(off_i32)).result)
+        curr_idx = idx_div4 if off_i32 == 0 else (arith.ArithValue(idx_div4) + arith.constant(off_i32, index=True))
         src_view = flir.TensorView(
             None,
             (16,),
@@ -130,7 +123,7 @@ def load_fp8_tile_split_dwordx4(buffer_ops, flir, _arith_mlir, *, rsrc, idx_div4
             src_buffer_offset_in_bytes=False,  # idx_div4 is in dword units
             alignment=16,
         )
-        parts.append(_unwrap(vector.BitCastOp(vec4_i32, _unwrap(v16)).result))
+        parts.append(vector.bitcast(vec4_i32, v16))
         off_i32 += (curr_bytes // 4)
     return parts
 
@@ -141,19 +134,18 @@ def load_b_pack_k32(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: 
     Uses `flir.copy(load-only)` + `src_buffer_resource` to generate buffer loads,
     matching the preshuffle GEMM path.
     """
-    b_rsrc = _unwrap(b_rsrc)
-    layout_b = _unwrap(layout_b)
-    base_k = _unwrap(base_k)
-    n_blk = _unwrap(n_blk)
-    n_intra = _unwrap(n_intra)
-    lane_div_16 = _unwrap(lane_div_16)
-    c4 = flir.const_index(4)
-    c64 = flir.const_index(64)
-    k0_base = _unwrap(_arith_mlir.DivUIOp(base_k, c64).result)
-    k0 = _unwrap(_arith_mlir.AddIOp(k0_base, flir.const_index(ki_step // 2)).result)
+    b_rsrc = arith.as_value(b_rsrc)
+    layout_b = arith.as_value(layout_b)
+    base_k = arith.as_value(base_k, index=True)
+    n_blk = arith.as_value(n_blk, index=True)
+    n_intra = arith.as_value(n_intra, index=True)
+    lane_div_16 = arith.as_value(lane_div_16, index=True)
+    c64 = arith.constant(64, index=True)
+    k0_base = arith.ArithValue(base_k) / c64
+    k0 = k0_base + arith.constant(ki_step // 2, index=True)
     k1 = lane_div_16
     half = ki_step % 2
-    k2_base = flir.const_index(half * 8)
+    k2_base = arith.constant(half * 8, index=True)
 
     coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
     idx_bytes = flir.crd2idx(coord_b, layout_b)
@@ -163,7 +155,7 @@ def load_b_pack_k32(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: 
         None,
         (8,),
         strides=(1,),
-        base_indices=(_unwrap(idx_bytes),),
+        base_indices=(idx_bytes,),
         element_type=f8,
     )
     b8_f8 = flir.copy(
@@ -176,32 +168,32 @@ def load_b_pack_k32(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: 
         src_buffer_offset_in_bytes=True,
     )
     vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-    b_vec64 = _unwrap(vector.BitCastOp(vec1_i64, _unwrap(b8_f8)).result)
-    return _unwrap(vector.ExtractOp(b_vec64, static_position=[0], dynamic_position=[]).result)
+    b_vec64 = vector.bitcast(vec1_i64, b8_f8)
+    return vector.extract(b_vec64, static_position=[0], dynamic_position=[])
 
 
 def load_b_packs_k64(buffer_ops, flir, _arith_mlir, *, b_rsrc, layout_b, base_k: ir.Value, ki_step: int, n_blk: ir.Value, n_intra: ir.Value, lane_div_16: ir.Value, i32_type) -> Tuple[ir.Value, ir.Value]:
     """Load 16B (two i64 packs) for one K64 micro-step."""
-    b_rsrc = _unwrap(b_rsrc)
-    layout_b = _unwrap(layout_b)
-    base_k = _unwrap(base_k)
-    n_blk = _unwrap(n_blk)
-    n_intra = _unwrap(n_intra)
-    lane_div_16 = _unwrap(lane_div_16)
-    c4 = flir.const_index(4)
-    c64 = flir.const_index(64)
-    k0_base = _unwrap(_arith_mlir.DivUIOp(base_k, c64).result)
-    k0 = _unwrap(_arith_mlir.AddIOp(k0_base, flir.const_index(ki_step)).result)
+    b_rsrc = arith.as_value(b_rsrc)
+    layout_b = arith.as_value(layout_b)
+    base_k = arith.as_value(base_k, index=True)
+    n_blk = arith.as_value(n_blk, index=True)
+    n_intra = arith.as_value(n_intra, index=True)
+    lane_div_16 = arith.as_value(lane_div_16, index=True)
+    c4 = arith.constant(4, index=True)
+    c64 = arith.constant(64, index=True)
+    k0_base = arith.ArithValue(base_k) / c64
+    k0 = k0_base + arith.constant(ki_step, index=True)
     k1 = lane_div_16
-    k2_base = flir.const_index(0)
+    k2_base = arith.constant(0, index=True)
     coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
     idx_bytes = flir.crd2idx(coord_b, layout_b)
-    idx_i32 = _unwrap(_arith_mlir.DivUIOp(_unwrap(idx_bytes), c4).result)
+    idx_i32 = arith.ArithValue(idx_bytes) / c4
     b16 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=4, dtype=i32_type)
     vec2_i64 = ir.VectorType.get([2], ir.IntegerType.get_signless(64))
-    b_vec128 = _unwrap(vector.BitCastOp(vec2_i64, _unwrap(b16)).result)
-    b0 = _unwrap(vector.ExtractOp(b_vec128, static_position=[0], dynamic_position=[]).result)
-    b1 = _unwrap(vector.ExtractOp(b_vec128, static_position=[1], dynamic_position=[]).result)
+    b_vec128 = vector.bitcast(vec2_i64, b16)
+    b0 = vector.extract(b_vec128, static_position=[0], dynamic_position=[])
+    b1 = vector.extract(b_vec128, static_position=[1], dynamic_position=[])
     return b0, b1
 
 

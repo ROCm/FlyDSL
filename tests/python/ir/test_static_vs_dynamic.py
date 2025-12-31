@@ -16,11 +16,11 @@ class _StaticDynamic(flir.MlirModule):
         shape = flir.get_shape(layout)
         stride = flir.get_stride(layout)
         return [
-            arith.unwrap(flir.get(shape, Index(0))),
-            arith.unwrap(flir.get(shape, Index(1))),
-            arith.unwrap(flir.get(stride, Index(0))),
-            arith.unwrap(flir.get(stride, Index(1))),
-            arith.unwrap(flir.size(layout)),
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
+            flir.size(layout),
         ]
     
     @flir.jit
@@ -36,11 +36,11 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(layout)
         flir.printf("Dynamic layout: ({},{}):({}{})\n", dim0, dim1, stride0, stride1)
         return [
-            arith.unwrap(flir.get(shape, Index(0))),
-            arith.unwrap(flir.get(shape, Index(1))),
-            arith.unwrap(flir.get(stride, Index(0))),
-            arith.unwrap(flir.get(stride, Index(1))),
-            arith.unwrap(flir.size(layout)),
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
+            flir.size(layout),
         ]
     
     @flir.jit
@@ -52,9 +52,9 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(arith.unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(arith.unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         return vals
     
     @flir.jit
@@ -77,9 +77,9 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(arith.unwrap(flir.get(shape, Index(i))))
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(arith.unwrap(flir.get(stride, Index(i))))
+            vals.append(flir.get(stride, Index(i)))
         return vals
 
     @flir.jit
@@ -93,10 +93,10 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(layout)
         flir.printf("Mixed: ({},8):(16,{})\n", runtime_extent, runtime_stride)
         return [
-            arith.unwrap(flir.get(shape, Index(0))),
-            arith.unwrap(flir.get(shape, Index(1))),
-            arith.unwrap(flir.get(stride, Index(0))),
-            arith.unwrap(flir.get(stride, Index(1))),
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
         ]
     
 
