@@ -507,7 +507,6 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
             b_tile_pong = b_tile_cur  # current/compute
             rocdl.sched_barrier(0)
             def hot_loop_scheduler():
-                # Derive CK-like schedule parameters from this tile:
                 # - MFMA group size per "slot": num_acc_n
                 # - Total MFMA per tile: k_unroll * m_repeat * num_acc_n
                 # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
@@ -515,25 +514,31 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                 mfma_total = k_unroll * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                mfma_tail = mfma_total - sche_iters * mfma_per_iter
-
                 # DS-read preload (CK default is 2); clamp to non-negative.
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 rocdl.sched_mfma(1)
+                if num_acc_n < 4:
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+
 
                 # DS-write hints near the end: match total A LDS-store micro-ops per thread.
                 dswr_tail = num_a_loads
                 if dswr_tail > sche_iters:
                     dswr_tail = sche_iters
                 dswr_start = sche_iters - dswr_tail
+                # print(f"mfma_total: {mfma_total}, mfma_group: {mfma_group}, sche_iters: {sche_iters}")
+                # print(f"dswr_tail: {dswr_tail}, dswr_start: {dswr_start}", f"num_acc_n: {num_acc_n}")
 
                 for sche_i in range_constexpr(sche_iters):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(mfma_group)
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start:
+                    if sche_i >= dswr_start - 1:
                         rocdl.sched_dswr(1)
 
                 rocdl.sched_barrier(0)
@@ -763,5 +768,6 @@ if __name__ == "__main__":
     # Test cases
     print("Running Tiling Tests...")
 
+    test_mfma_fp8_flir_preshuffle(5120, 5120, 8192+128, tile_m=128, tile_n=128, tile_k=128)
     test_mfma_fp8_flir_preshuffle(5120, 5120, 8192+128, tile_m=64, tile_n=256, tile_k=128)
     

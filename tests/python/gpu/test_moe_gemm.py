@@ -824,37 +824,34 @@ def test_moe_stage1(
             lds_base_nxt = lds_tile_elems
 
             # Optional scheduler hints (copied from tuned GEMM); can be disabled via env.
-            use_sched = os.environ.get("FLIR_MOE_SCHED", "1") in ("1", "true", "True", "YES", "yes")
-            if use_sched:
+            rocdl.sched_barrier(0)
+
+            def hot_loop_scheduler():
+                mfma_group = num_acc_n * 2
+                mfma_total = k_unroll * m_repeat * mfma_group
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+
+                # DS-read preload (CK default is 2); clamp to non-negative.
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(1)
+
+                # DS-write hints near the end: match total X LDS-store micro-ops per thread.
+                dswr_tail = num_x_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+                print(f"sche_iters: {sche_iters}, dswr_tail: {dswr_tail}, dswr_start: {dswr_start}")
+                print(f"mfma_group: {mfma_group}, mfma_total: {mfma_total}, mfma_per_iter: {mfma_per_iter}")
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
-
-
-                def hot_loop_scheduler():
-                    mfma_group = num_acc_n
-                    mfma_total = k_unroll * m_repeat * mfma_group
-                    mfma_per_iter = 2 * mfma_group
-                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-
-                    # DS-read preload (CK default is 2); clamp to non-negative.
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-
-                    # DS-write hints near the end: match total X LDS-store micro-ops per thread.
-                    dswr_tail = num_x_loads
-                    if dswr_tail > sche_iters:
-                        dswr_tail = sche_iters
-                    dswr_start = sche_iters - dswr_tail
-
-                    for sche_i in range_constexpr(sche_iters):
-                        rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(mfma_group)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(mfma_group)
-                        if sche_i >= dswr_start:
-                            rocdl.sched_dswr(1)
-                    rocdl.sched_barrier(0)
 
             # Prologue: prefetch tile0, store to LDS(cur), sync.
             k0 = arith.constant(0, index=True)
@@ -884,8 +881,7 @@ def test_moe_stage1(
 
                 acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
                 store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                if use_sched:
-                    hot_loop_scheduler()
+                hot_loop_scheduler()
                 gpu.barrier()
 
                 # ---- stage 1: prefetch+store pong, compute ping ----
@@ -896,8 +892,7 @@ def test_moe_stage1(
 
                 acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping)
                 store_x_tile_to_lds(x_regs_pong, lds_base_pong)
-                if use_sched:
-                    hot_loop_scheduler()
+                hot_loop_scheduler()
                 gpu.barrier()
 
                 # Advance pong state to next_k2 for next iteration.
@@ -912,8 +907,7 @@ def test_moe_stage1(
 
             acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
             store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-            if use_sched:
-                hot_loop_scheduler()
+            hot_loop_scheduler()
             gpu.barrier()
 
             # Epilogue: compute last tile with epilogue scale prefetch to overlap loads with MFMA.
