@@ -12,7 +12,7 @@ import os
 import pyflir
 from pyflir.dialects.ext import flir
 from pyflir.runtime.device import get_rocm_arch
-from pyflir.dialects.ext import arith
+from pyflir.dialects.ext import arith, memref
 import _mlir.extras.types as T
 import pytest
 import torch
@@ -56,14 +56,12 @@ def test_matmul_with_flir():
             c_layout = flir.make_layout(c_shape, c_stride)
 
             # Create coordinate for current thread's position
-            thread_coord = flir.make_coord(row.value, col.value)
+            thread_coord = flir.make_coord(row, col)
 
             # Use crd2idx to compute linear index (will be lowered to arith ops)
             idx = flir.crd2idx(thread_coord, c_layout)
-            idx_v = idx.value if hasattr(idx, "value") else idx
-            idx_i32 = arith.IndexCastOp(T.i32(), idx_v).result
-            idx_i32_v = idx_i32.value if hasattr(idx_i32, "value") else idx_i32
-            flir.memref.store(idx_i32_v, C, [row.value, col.value])
+            idx_i32 = arith.index_cast(T.i32(), idx)
+            memref.store(idx_i32, C, [row, col])
 
         @flir.jit
         def __call__(
@@ -71,10 +69,10 @@ def test_matmul_with_flir():
             C: lambda: T.memref(M, N, T.i32()),
         ):
             # Wrap the kernel launch inside a host-side function.
-            c1 = arith.index(1).value
-            blk = arith.index(16).value
-            gx = arith.index((N + 15) // 16).value
-            gy = arith.index((M + 15) // 16).value
+            c1 = arith.index(1)
+            blk = arith.index(16)
+            gx = arith.index((N + 15) // 16)
+            gy = arith.index((M + 15) // 16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "coords_to_linear"],
                 grid_size=(gx, gy, c1),

@@ -1,6 +1,6 @@
 """Sanity test: MlirModule + @kernel/@jit re-exported under `flir.*`."""
 
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, memref
 
 
 def test_mlirmodule_kernel_jit_emits_ops(ctx, insert_point):
@@ -15,8 +15,8 @@ def test_mlirmodule_kernel_jit_emits_ops(ctx, insert_point):
             C: flir.T.memref(N, element_type=flir.T.f32()),
         ):
             tid = flir.thread_idx("x")
-            a = flir.memref.load(A, [tid.value])
-            flir.memref.store(a.value if hasattr(a, "value") else a, C, [tid.value])
+            a = memref.load(A, [tid])
+            memref.store(a, C, [tid])
 
         @flir.jit
         def __call__(

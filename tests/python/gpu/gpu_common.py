@@ -8,16 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import _mlir.extras.types as T
-
-
-# Small helper: unwrap MLIR wrapper values into ir.Value
-def unwrap(v):
-    # Prefer the public `.value` interface used by FLIR wrapper types.
-    if hasattr(v, "value"):
-        return v.value
-    if hasattr(v, "result"):
-        return v.result
-    return v
+from pyflir.dialects.ext import arith
 
 
 # Default epsilon used by norm operators.

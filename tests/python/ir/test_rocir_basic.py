@@ -6,14 +6,8 @@ from _mlir.dialects import arith
 
 # Import Flir wrappers
 import pyflir.dialects.ext.flir as flir
+from pyflir.dialects.ext import arith as arith_ext
 from pyflir.dialects.ext.arith import Index
-
-
-def _unwrap(val):
-    """Unwrap ArithValue to get underlying MLIR Value."""
-    if hasattr(val, "value"):
-        return val.value
-    return val
 
 
 def test_make_shape(ctx, insert_point):
@@ -23,7 +17,7 @@ def test_make_shape(ctx, insert_point):
     def create_shape(dim0, dim1):
         shape = flir.make_shape(dim0, dim1)
         size = flir.size(shape)
-        return (_unwrap(size),)  # Unwrap and return tuple
+        return (size,)  # return tuple
     
     # Verify the module
     ctx.module.operation.verify()
@@ -41,7 +35,7 @@ def test_make_layout(ctx, insert_point):
         stride = flir.make_stride(stride_val, dim0)
         layout = flir.make_layout(shape, stride)
         size = flir.size(layout)
-        return (_unwrap(size),)
+        return (size,)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -60,7 +54,7 @@ def test_constant_shape(ctx, insert_point):
         shape = flir.make_shape(c8, c16)
         size = flir.size(shape)
         
-        return (_unwrap(size),)
+        return (size,)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -75,7 +69,7 @@ def test_rank_operation(ctx, insert_point):
     def get_rank(dim0, dim1, dim2):
         shape = flir.make_shape(dim0, dim1, dim2)
         rank_val = flir.rank(shape)
-        return (_unwrap(rank_val),)
+        return (rank_val,)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -99,9 +93,7 @@ def test_get_shape_stride(ctx, insert_point):
         
         size1 = flir.size(extracted_shape)
         size2 = flir.cosize(layout)
-        
-        result = arith.addi(_unwrap(size1), _unwrap(size2))
-        return (_unwrap(result),)
+        return (size1 + size2,)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -124,7 +116,7 @@ def test_2d_layout(ctx, insert_point):
         layout = flir.make_layout(shape, stride)
         
         size = flir.size(layout)  # Should be 128
-        return (_unwrap(size),)
+        return (size,)
     
     ctx.module.operation.verify()
     # Apply lowering

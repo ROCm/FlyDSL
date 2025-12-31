@@ -21,10 +21,12 @@ import pyflir
 
 from pyflir.dialects.ext import flir
 from pyflir.dialects.ext.python_control_flow import range_constexpr
+from pyflir.dialects.ext import arith
 from pyflir.dialects.ext.arith import Index
 from pyflir.runtime.device import get_rocm_arch
 from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
+from pyflir.dialects.ext import arith as arith_ext
 import _mlir.extras.types as T
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -67,7 +69,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
 
             # Calculate linear thread index
             bdim_x = flir.block_dim("x")
-            tidx = (tid_y * bdim_x + tid_x).value
+            tidx = tid_y * bdim_x + tid_x
 
             # Block coordinates
             blk_coord_y = bid_y
@@ -169,13 +171,13 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             B: lambda: T.memref(M, N, dtype.get()),
             C: lambda: T.memref(M, N, dtype.get()),
         ):
-            c1 = Index(1).value
+            c1 = Index(1)
             tile_m = THR_M * VAL_M
             tile_n = THR_N * VAL_N
-            gx = Index((N + tile_n - 1) // tile_n).value
-            gy = Index((M + tile_m - 1) // tile_m).value
-            bdx = Index(THR_N).value
-            bdy = Index(THR_M).value
+            gx = Index((N + tile_n - 1) // tile_n)
+            gy = Index((M + tile_m - 1) // tile_m)
+            bdx = Index(THR_N)
+            bdy = Index(THR_M)
             flir.gpu_ext.LaunchFuncOp(
                 ["elementwise_kernels", "elementwise_add_kernel"],
                 grid_size=(gx, gy, c1),

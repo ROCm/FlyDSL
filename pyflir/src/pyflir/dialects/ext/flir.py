@@ -1355,7 +1355,6 @@ def swizzle_xor16(row: Value, col: Value, k_blocks16: Value,
     loc = _get_location(loc)
     with ip or InsertionPoint.current:
         # ODS-generated builders for dialect ops require passing the result type.
-        # Use the generated helper function for stable argument naming.
         return flir_ops.swizzle_xor16(
             IndexType.get(),
             _unwrap_value(row),

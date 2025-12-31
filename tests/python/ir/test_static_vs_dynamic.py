@@ -2,7 +2,7 @@
 """Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
+from pyflir.dialects.ext import flir, arith
 from pyflir.dialects.ext.arith import Index
 
 
@@ -16,11 +16,11 @@ class _StaticDynamic(flir.MlirModule):
         shape = flir.get_shape(layout)
         stride = flir.get_stride(layout)
         return [
-            flir.get(shape, Index(0)).value,
-            flir.get(shape, Index(1)).value,
-            flir.get(stride, Index(0)).value,
-            flir.get(stride, Index(1)).value,
-            flir.size(layout).value,
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
+            flir.size(layout),
         ]
     
     @flir.jit
@@ -36,11 +36,11 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(layout)
         flir.printf("Dynamic layout: ({},{}):({}{})\n", dim0, dim1, stride0, stride1)
         return [
-            flir.get(shape, Index(0)).value,
-            flir.get(shape, Index(1)).value,
-            flir.get(stride, Index(0)).value,
-            flir.get(stride, Index(1)).value,
-            flir.size(layout).value,
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
+            flir.size(layout),
         ]
     
     @flir.jit
@@ -52,9 +52,9 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(flir.get(shape, Index(i)).value)
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(flir.get(stride, Index(i)).value)
+            vals.append(flir.get(stride, Index(i)))
         return vals
     
     @flir.jit
@@ -77,9 +77,9 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(R)
         vals = []
         for i in range(3):
-            vals.append(flir.get(shape, Index(i)).value)
+            vals.append(flir.get(shape, Index(i)))
         for i in range(3):
-            vals.append(flir.get(stride, Index(i)).value)
+            vals.append(flir.get(stride, Index(i)))
         return vals
 
     @flir.jit
@@ -93,10 +93,10 @@ class _StaticDynamic(flir.MlirModule):
         stride = flir.get_stride(layout)
         flir.printf("Mixed: ({},8):(16,{})\n", runtime_extent, runtime_stride)
         return [
-            flir.get(shape, Index(0)).value,
-            flir.get(shape, Index(1)).value,
-            flir.get(stride, Index(0)).value,
-            flir.get(stride, Index(1)).value,
+            flir.get(shape, Index(0)),
+            flir.get(shape, Index(1)),
+            flir.get(stride, Index(0)),
+            flir.get(stride, Index(1)),
         ]
     
 

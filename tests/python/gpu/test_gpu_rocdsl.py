@@ -11,7 +11,7 @@ from _mlir import ir
 import _mlir.extras.types as T
 
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import arith, flir
+from pyflir.dialects.ext import arith, flir, memref
 
 
 def test_vector_add_flir_crd2idx_emits():
@@ -29,13 +29,12 @@ def test_vector_add_flir_crd2idx_emits():
             vec_shape = flir.make_shape(SIZE)
             vec_stride = flir.make_stride(1)
             vec_layout = flir.make_layout(vec_shape, vec_stride)
-            thread_coord = flir.make_coord(tid.value)
+            thread_coord = flir.make_coord(tid)
             linear_idx = flir.crd2idx(thread_coord, vec_layout)
-            idx = linear_idx.value if hasattr(linear_idx, "value") else linear_idx
-            a = flir.memref.load(A, [idx])
-            b = flir.memref.load(B, [idx])
+            a = memref.load(A, [linear_idx])
+            b = memref.load(B, [linear_idx])
             c = a + b
-            flir.memref.store(c.value, C, [idx])
+            memref.store(c, C, [linear_idx])
 
         @flir.jit
         def __call__(
@@ -44,9 +43,9 @@ def test_vector_add_flir_crd2idx_emits():
             B: lambda: T.memref(SIZE, T.f32()),
             C: lambda: T.memref(SIZE, T.f32()),
         ):
-            c1 = arith.index(1).value
-            blk = arith.index(256).value
-            gx = arith.index((SIZE + 255) // 256).value
+            c1 = arith.index(1)
+            blk = arith.index(256)
+            gx = arith.index((SIZE + 255) // 256)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "vecAdd"],
                 grid_size=(gx, c1, c1),
@@ -86,17 +85,17 @@ def test_matrix_transpose_flir_layout_emits():
             _ = a_layout
             _ = b_layout
 
-            thread_coord = flir.make_coord(row.value, col.value)
+            thread_coord = flir.make_coord(row, col)
             a_idx = flir.crd2idx(thread_coord, a_layout)
-            transposed_coord = flir.make_coord(col.value, row.value)
+            transposed_coord = flir.make_coord(col, row)
             b_idx = flir.crd2idx(transposed_coord, b_layout)
 
             # Note: A/B are 2D memrefs, so use 2D indices for load/store.
             # We still emit flir.crd2idx above to exercise layout lowering.
             _ = a_idx
             _ = b_idx
-            a_val = flir.memref.load(A, [row.value, col.value])
-            flir.memref.store(a_val.value, B, [col.value, row.value])
+            a_val = memref.load(A, [row, col])
+            memref.store(a_val, B, [col, row])
 
         @flir.jit
         def __call__(
@@ -104,10 +103,10 @@ def test_matrix_transpose_flir_layout_emits():
             A: lambda: T.memref(M, N, T.f32()),
             B: lambda: T.memref(N, M, T.f32()),
         ):
-            c1 = arith.index(1).value
-            blk = arith.index(16).value
-            gx = arith.index((N + 15) // 16).value
-            gy = arith.index((M + 15) // 16).value
+            c1 = arith.index(1)
+            blk = arith.index(16)
+            gx = arith.index((N + 15) // 16)
+            gy = arith.index((M + 15) // 16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "matrixTranspose"],
                 grid_size=(gx, gy, c1),
@@ -148,7 +147,7 @@ def test_matmul_uses_scf_for_and_flir_layout():
             one = arith.index(1)
 
             c_layout = flir.make_layout(flir.make_shape(m_c, n_c), flir.make_stride(n_c, one))
-            thread_coord = flir.make_coord(row.value, col.value)
+            thread_coord = flir.make_coord(row, col)
             _ = flir.crd2idx(thread_coord, c_layout)
 
             valid = (row < m_c) & (col < n_c)
@@ -156,13 +155,11 @@ def test_matmul_uses_scf_for_and_flir_layout():
                 sum_val = arith.f32(0.0)
                 # Python `for` + reassignment is auto-lowered into scf.for with iter_args/yield/results.
                 for k in range(k_c):
-                    k_v = k.value if hasattr(k, "value") else k
-                    a_val = flir.memref.load(A, [row.value, k_v])
-                    b_val = flir.memref.load(B, [k_v, col.value])
+                    a_val = memref.load(A, [row, k])
+                    b_val = memref.load(B, [k, col])
                     sum_val = sum_val + (a_val * b_val)
 
-                out_v = sum_val.value if hasattr(sum_val, "value") else sum_val
-                flir.memref.store(out_v, C, [row.value, col.value])
+                memref.store(sum_val, C, [row, col])
 
         @flir.jit
         def __call__(
@@ -171,10 +168,10 @@ def test_matmul_uses_scf_for_and_flir_layout():
             B: lambda: T.memref(K, N, T.f32()),
             C: lambda: T.memref(M, N, T.f32()),
         ):
-            c1 = arith.index(1).value
-            blk = arith.index(16).value
-            gx = arith.index((N + 15) // 16).value
-            gy = arith.index((M + 15) // 16).value
+            c1 = arith.index(1)
+            blk = arith.index(16)
+            gx = arith.index((N + 15) // 16)
+            gy = arith.index((M + 15) // 16)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "matmul"],
                 grid_size=(gx, gy, c1),

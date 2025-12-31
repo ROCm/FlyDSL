@@ -14,7 +14,11 @@ Example:
     >>> rocdl.barrier()
 """
 
-from _mlir.dialects.rocdl import *
+from _mlir.dialects.rocdl import *  # noqa: F401,F403
+
+# Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
+_ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
@@ -29,6 +33,46 @@ def sched_dsrd(cnt):
     sched_group_barrier(mask_dsrd, cnt, 0)
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
+
+
+def _unwrap_mfma_operand(v, *, loc=None):
+    """MFMA operands are MLIR Values; some trailing operands are i32 flags.
+
+    Accept Python ints and materialize them as i32 signless constants.
+    """
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+
+    if isinstance(v, int):
+        return _arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc)._value
+    return _arith_ext.unwrap(v, loc=loc)
+
+
+def mfma_f32_16x16x16f16_op(result_type, operands, *, loc=None, ip=None):
+    """Return the op view (original behavior)."""
+    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_mfma_f32_16x16x16f16(result_type, ops, loc=loc, ip=ip)
+
+
+def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
+    """Return the op result directly (no `.result` needed at call sites)."""
+    return mfma_f32_16x16x16f16_op(result_type, operands, loc=loc, ip=ip).result
+
+
+def mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, *, loc=None, ip=None):
+    """Return the op view (original behavior)."""
+    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_mfma_f32_16x16x32_fp8_fp8(result_type, ops, loc=loc, ip=ip)
+
+
+def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
+    """Return the op result directly (no `.result` needed at call sites)."""
+    return mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, loc=loc, ip=ip).result
+
+
+# Keep raw ODS builders available (rare: for tests that want the op object).
+_mfma_f32_16x16x16f16_ods = _ods_mfma_f32_16x16x16f16
+_mfma_f32_16x16x32_fp8_fp8_ods = _ods_mfma_f32_16x16x32_fp8_fp8
 
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
@@ -47,6 +91,8 @@ __all__ = [
     'mfma_f32_32x32x8f16', 'mfma_f32_16x16x16f16',
     'mfma_f32_32x32x4bf16', 'mfma_f32_16x16x8bf16',
     'mfma_i32_32x32x8i8', 'mfma_i32_16x16x16i8',
+    # Raw-op constructors (return op view) for the above
+    'mfma_f32_16x16x16f16_op', 'mfma_f32_16x16x32_fp8_fp8_op',
     
     # Matrix operations - WMMA (Wave Matrix Multiply-Accumulate)
     'wmma_f32_16x16x16_f16', 'wmma_f32_16x16x16_bf16',

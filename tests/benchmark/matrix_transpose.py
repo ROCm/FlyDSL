@@ -108,21 +108,11 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
                 for t in range_constexpr(VEC_SIZE):
                     t_c = arith.index(t)
                     g_idx = global_row * n_c + global_col + t_c
-                    val_op = memref.load(
-                        A, [g_idx.value if hasattr(g_idx, "value") else g_idx]
-                    )
-                    val = (
-                        val_op.value
-                        if hasattr(val_op, "value")
-                        else (val_op.result if hasattr(val_op, "result") else val_op)
-                    )
-                    vals.append(val)
+                    vals.append(arith.as_value(memref.load(A, [g_idx])))
 
                 vec_val = vector.from_elements(vec_type, vals)
                 s_idx = row_off * smem_stride_c + col_off
-                vector.store(
-                    vec_val, smem, [s_idx.value if hasattr(s_idx, "value") else s_idx]
-                )
+                vector.store(vec_val, smem, [s_idx])
 
         gpu.barrier()
 
@@ -146,23 +136,11 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
                 for t in range_constexpr(VEC_SIZE):
                     t_c = arith.index(t)
                     s_idx = (col_off + t_c) * smem_stride_c + row_off
-                    val_op = memref.load(
-                        smem, [s_idx.value if hasattr(s_idx, "value") else s_idx]
-                    )
-                    val = (
-                        val_op.value
-                        if hasattr(val_op, "value")
-                        else (val_op.result if hasattr(val_op, "result") else val_op)
-                    )
-                    vals.append(val)
+                    vals.append(arith.as_value(memref.load(smem, [s_idx])))
 
                 vec_val = vector.from_elements(vec_type, vals)
                 g_idx_b = base_row_b * m_c + base_col_b
-                vector.store(
-                    vec_val,
-                    B,
-                    [g_idx_b.value if hasattr(g_idx_b, "value") else g_idx_b],
-                )
+                vector.store(vec_val, B, [g_idx_b])
 
     _matrix_transpose_arith_impl = lower_range_for_loops(_matrix_transpose_arith_impl)
 
@@ -189,11 +167,11 @@ def benchmark_matrix_transpose_arith(TILE_SIZE=4, BLOCK_TILE=32):
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
-            c1 = arith.index(1).value
-            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE).value
-            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
-            bx = arith.index(BLOCK_X).value
-            by = arith.index(BLOCK_Y).value
+            c1 = arith.index(1)
+            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE)
+            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE)
+            bx = arith.index(BLOCK_X)
+            by = arith.index(BLOCK_Y)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "matrix_transpose"],
                 grid_size=(gx, gy, c1),
@@ -338,15 +316,14 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
             col_valid = global_col < n_c
             col_end_valid = (global_col + vec_width_c) <= n_c
             valid_load = row_valid & col_valid & col_end_valid
-            mask_val = valid_load.value if hasattr(valid_load, "value") else valid_load
+            mask_val = valid_load
 
             vec_val = buffer_ops.buffer_load_2d(
                 a_rsrc, global_row, global_col, n_c, vec_width=VEC_WIDTH, mask=mask_val
             )
 
             s_idx = row_off * smem_stride_c + col_off
-            s_idx_val = s_idx.value if hasattr(s_idx, "value") else s_idx
-            vector.store(vec_val, smem, [s_idx_val])
+            vector.store(vec_val, smem, [s_idx])
 
         gpu.barrier()
 
@@ -366,22 +343,15 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
             for t in range(VEC_WIDTH):
                 t_c = arith.index(t)
                 s_idx = (col_off + t_c) * smem_stride_c + row_off
-                s_idx_val = s_idx.value if hasattr(s_idx, "value") else s_idx
-                val_op = memref.load(smem, [s_idx_val])
-                val = (
-                    val_op.value
-                    if hasattr(val_op, "value")
-                    else (val_op.result if hasattr(val_op, "result") else val_op)
-                )
-                vals.append(val)
+                vals.append(memref.load(smem, [s_idx]))
 
-            vec_val = vector.from_elements(vec_type, vals)
+            vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
 
             row_valid = base_row_b < n_c
             col_valid = base_col_b < m_c
             col_end_valid = (base_col_b + vec_width_c) <= m_c
             valid_store = row_valid & col_valid & col_end_valid
-            mask_val = valid_store.value if hasattr(valid_store, "value") else valid_store
+            mask_val = valid_store
 
             buffer_ops.buffer_store_2d(
                 vec_val, b_rsrc, base_row_b, base_col_b, m_c, mask=mask_val
@@ -410,11 +380,11 @@ def benchmark_matrix_transpose_buffer_load(TILE_SIZE=4, BLOCK_TILE=32):
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
-            c1 = arith.index(1).value
-            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE).value
-            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
-            bx = arith.index(THREADS_PER_BLOCK_X).value
-            by = arith.index(THREADS_PER_BLOCK_Y).value
+            c1 = arith.index(1)
+            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE)
+            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE)
+            bx = arith.index(THREADS_PER_BLOCK_X)
+            by = arith.index(THREADS_PER_BLOCK_Y)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "matrix_transpose_buffer_load"],
                 grid_size=(gx, gy, c1),
@@ -526,11 +496,6 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
     _state = {}
 
     def _matrix_transpose_flir_impl(A, B):
-        # Helpers to keep the kernel code readable.
-        def v(x):
-            """Unwrap ArithValue (or similar wrappers) to an MLIR Value."""
-            return x.value if hasattr(x, "value") else x
-
         smem = memref.get_global(_state["smem_type"], "tile_smem_flir")
 
         tensor_A = flir.TensorView(A, shape=(M * N,))
@@ -592,7 +557,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                     val = tensor_A[g_idx]
                     vals.append(val)
 
-                vec_val = vector.from_elements(vec_type, vals)
+                vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
                 s_coord = flir.make_coord(row_off, col_off)
                 s_idx = flir.crd2idx(s_coord, smem_layout)
                 vector.store(vec_val, smem, [v(s_idx)])
@@ -623,7 +588,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                     val = tensor_smem[s_idx]
                     vals.append(val)
 
-                vec_val = vector.from_elements(vec_type, vals)
+                vec_val = vector.from_elements(vec_type, [arith.as_value(v) for v in vals])
                 b_coord = flir.make_coord(base_row_b, base_col_b)
                 g_idx_b = flir.crd2idx(b_coord, b_layout)
                 vector.store(vec_val, B, [v(g_idx_b)])
@@ -653,11 +618,11 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
             A: lambda: T.memref(M * N, T.f32()),
             B: lambda: T.memref(N * M, T.f32()),
         ):
-            c1 = arith.index(1).value
-            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE).value
-            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE).value
-            bx = arith.index(THREADS_PER_BLOCK_X).value
-            by = arith.index(THREADS_PER_BLOCK_Y).value
+            c1 = arith.index(1)
+            gx = arith.index((N + BLOCK_TILE - 1) // BLOCK_TILE)
+            gy = arith.index((M + BLOCK_TILE - 1) // BLOCK_TILE)
+            bx = arith.index(THREADS_PER_BLOCK_X)
+            by = arith.index(THREADS_PER_BLOCK_Y)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "matrix_transpose_flir"],
                 grid_size=(gx, gy, c1),

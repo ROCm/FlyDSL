@@ -15,6 +15,7 @@ import pyflir
 import torch
 
 from pyflir.dialects.ext import arith, flir
+from pyflir.dialects.ext import memref
 from pyflir.runtime.device import get_rocm_arch
 from pyflir.utils import SmemAllocator
 
@@ -77,30 +78,29 @@ def test_matmul_shared_working():
             def get_tile_idx(y, x):
                 coord = flir.make_coord(y, x)
                 idx_val = flir.crd2idx(coord, tile_layout)
-                return idx_val.value if hasattr(idx_val, "value") else idx_val
+                return idx_val
 
             for t in range(num_tiles):
                 k_base = (t * tile_c)
 
                 a_col = (k_base + tx)
-                a_val = flir.memref.load(A, [row.value, a_col.value])
-                As.store(a_val.value, [get_tile_idx(ty.value, tx.value)])
+                a_val = memref.load(A, [row, a_col])
+                As.store(a_val, [get_tile_idx(ty, tx)])
 
                 b_row = (k_base + ty)
-                b_val = flir.memref.load(B, [b_row.value, col.value])
-                Bs.store(b_val.value, [get_tile_idx(ty.value, tx.value)])
+                b_val = memref.load(B, [b_row, col])
+                Bs.store(b_val, [get_tile_idx(ty, tx)])
 
                 gpu.barrier()
 
                 for k_local in range(tile_c):
-                    a_smem = As.load([get_tile_idx(ty.value, k_local)])
-                    b_smem = Bs.load([get_tile_idx(k_local, tx.value)])
+                    a_smem = As.load([get_tile_idx(ty, k_local)])
+                    b_smem = Bs.load([get_tile_idx(k_local, tx)])
                     acc = (acc + a_smem * b_smem)
 
                 gpu.barrier()
 
-            out_v = acc.value if hasattr(acc, "value") else acc
-            flir.memref.store(out_v, C, [row.value, col.value])
+            memref.store(acc, C, [row, col])
 
         @flir.jit
         def __call__(
@@ -109,9 +109,9 @@ def test_matmul_shared_working():
             B: lambda: T.memref(K, N, T.f32()),
             C: lambda: T.memref(M, N, T.f32()),
         ):
-            c1 = arith.index(1).value
-            tile = arith.index(TILE_SIZE).value
-            grid = arith.index((M + TILE_SIZE - 1) // TILE_SIZE).value
+            c1 = arith.index(1)
+            tile = arith.index(TILE_SIZE)
+            grid = arith.index((M + TILE_SIZE - 1) // TILE_SIZE)
             flir.gpu_ext.LaunchFuncOp(
                 ["matmul_shared", "matmul_shared"],
                 grid_size=(grid, grid, c1),

@@ -351,7 +351,10 @@ def buffer_store(data: ir.Value,
                  rsrc: ir.Value,
                  offset: ir.Value,
                  mask: Optional[ir.Value] = None,
-                 cache_modifier: int = 0):
+                 cache_modifier: int = 0,
+                 *,
+                 soffset_bytes: Optional[Union[int, ir.Value]] = None,
+                 offset_is_bytes: bool = False):
     """AMD buffer store operation.
     
     Store data to global memory using buffer descriptor and offset.
@@ -379,17 +382,20 @@ def buffer_store(data: ir.Value,
         op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), offset)
         offset = _unwrap_value(op.result)
     
-    # IMPORTANT: Buffer store offset is in BYTES, not elements!
-    # Get element size from data type
-    data_type = data.type
-    if hasattr(data_type, 'element_type'):  # Vector type
-        element_type = data_type.element_type
-    else:  # Scalar type
-        element_type = data_type
-    element_bytes = element_type.width // 8
-    bytes_const = _create_i32_constant(element_bytes)
-    op = std_arith.MulIOp(offset, bytes_const)
-    offset = _unwrap_value(op.result)
+    # IMPORTANT: RawPtrBufferStoreOp offset is in BYTES.
+    # For backward compat, `buffer_store()` accepts element offsets by default
+    # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
+    if not offset_is_bytes:
+        # Get element size from data type
+        data_type = data.type
+        if hasattr(data_type, 'element_type'):  # Vector type
+            element_type = data_type.element_type
+        else:  # Scalar type
+            element_type = data_type
+        element_bytes = element_type.width // 8
+        bytes_const = _create_i32_constant(element_bytes)
+        op = std_arith.MulIOp(offset, bytes_const)
+        offset = _unwrap_value(op.result)
     
     # Apply mask by setting invalid offsets to max
     if mask is not None:
@@ -398,8 +404,17 @@ def buffer_store(data: ir.Value,
         op = std_arith.SelectOp(mask, offset, max_offset)
         offset = _unwrap_value(op.result)
     
-    # Create instruction offset and aux flags
-    zero_i32 = _create_i32_constant(0)
+    # Create instruction offset (soffset) and aux flags
+    if soffset_bytes is None:
+        soffset = _create_i32_constant(0)
+    else:
+        if isinstance(soffset_bytes, int):
+            soffset = _create_i32_constant(int(soffset_bytes))
+        else:
+            soffset = _unwrap_value(soffset_bytes)
+            if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
+                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     
     # Emit buffer store
@@ -407,7 +422,7 @@ def buffer_store(data: ir.Value,
         data,
         rsrc,
         offset,
-        zero_i32,  # soffset (instruction offset)
+        soffset,   # soffset (scalar byte offset)
         aux_flags  # aux (cache modifiers)
     )
 

@@ -25,7 +25,7 @@ def test_arithmetic_operators(ctx):
             e = a * b      # MulIOp
             f = a // b     # DivSIOp
             
-            return c.value
+            return arith.as_value(c)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -45,7 +45,7 @@ def test_mixed_operators(ctx):
             c = a * 2      # Should create constant 2 and multiply
             d = 10 + a     # Reverse operator
             
-            return b.value
+            return arith.as_value(b)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -69,7 +69,7 @@ def test_comparison_operators(ctx):
             eq = a == b    # CmpIOp(eq)
             ne = a != b    # CmpIOp(ne)
             
-            return lt.value
+            return arith.as_value(lt)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -93,7 +93,7 @@ def test_float_operators(ctx):
             # Float comparison
             gt = a > b     # CmpFOp(ogt)
             
-            return c.value
+            return arith.as_value(c)
     
     ctx.module.operation.verify()
     # Apply lowering
@@ -113,7 +113,7 @@ def test_chained_operations(ctx):
             # Complex expression: (a + b) * c - 3
             result = (a + b) * c - 3
             
-            return result.value
+            return arith.as_value(result)
     
     ctx.module.operation.verify()
     # Apply lowering

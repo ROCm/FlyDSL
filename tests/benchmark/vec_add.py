@@ -8,8 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pyflir
 from pyflir.compiler.pipeline import Pipeline, run_pipeline
-from pyflir.dialects.ext import flir
-from pyflir.dialects.ext import arith
+from pyflir.dialects.ext import flir, arith
 from pyflir.runtime.device import get_rocm_arch
 from _mlir.ir import F32Type, IntegerType
 import _mlir.extras.types as T
@@ -61,7 +60,7 @@ def create_vec_add_kernel(
             tid_y = flir.thread_idx("y")
             bid_x = flir.block_idx("x")
             bdim_x = flir.block_dim("x")
-            tid_linear = (tid_y * bdim_x + tid_x).value
+            tid_linear = (tid_y * bdim_x + tid_x)
 
             thr_layout = flir.make_ordered_layout((THREADS_PER_BLOCK,), order=(0,))
             val_layout = flir.make_ordered_layout((TILE_SIZE,), order=(0,))
@@ -158,9 +157,9 @@ def create_vec_add_kernel(
             B: lambda: T.memref(size, dtype.get()),
             C: lambda: T.memref(size, dtype.get()),
         ):
-            c1 = arith.index(1).value
-            gx = arith.index(num_blocks).value
-            bx = arith.index(THREADS_PER_BLOCK).value
+            c1 = arith.index(1)
+            gx = arith.index(num_blocks)
+            bx = arith.index(THREADS_PER_BLOCK)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "vec_add"],
                 grid_size=(gx, c1, c1),

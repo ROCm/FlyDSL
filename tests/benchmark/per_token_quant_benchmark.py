@@ -51,10 +51,7 @@ from pyflir.dialects.ext import arith, flir, block_reduce_ops, scf as scf_ext
 from pyflir.dialects.ext.gpu import lds_space
 from pyflir.runtime.device import get_rocm_arch
 from pyflir.utils import SmemAllocator
-from _mlir.dialects import (
-    vector,
-    memref,
-)
+from pyflir.dialects.ext import vector, memref
 import _mlir.extras.types as T
 from test_common import run_perftest
 
@@ -159,13 +156,13 @@ def compile_kernel_for_n(N, gpu_arch=None):
 
             frgInput = flir.make_fragment_like(thrInput, T.f16())
 
-            zero_vec = arith.constant_vector(0.0, vec_type_f16).value
+            zero_vec = arith.constant_vector(0.0, vec_type_f16)
             frg_memref = frgInput.memref if hasattr(frgInput, "memref") else frgInput
-            vector.store(zero_vec, frg_memref, [c_0.value, c_0.value])
+            vector.store(zero_vec, frg_memref, [c_0, c_0])
 
             flir.copy(tiled_copy_input, thrInput, frgInput, pred=is_valid)
 
-            vec_val_f16 = vector.load(vec_type_f16, frg_memref, [c_0.value, c_0.value])
+            vec_val_f16 = vector.load_op(vec_type_f16, frg_memref, [c_0, c_0])
             vec_val_f32 = arith.extf(vec_type_f32, vec_val_f16)
 
             vec_abs_f32 = arith.absf(vec_val_f32)
@@ -188,8 +185,8 @@ def compile_kernel_for_n(N, gpu_arch=None):
         if is_thread_0:
             tensor_scales[bid_x] = final_scale
 
-        vec_scale = vector.BroadcastOp(vec_type_f32, final_scale.value).result
-        vec_f1 = vector.BroadcastOp(vec_type_f32, f_1.value).result
+        vec_scale = vector.broadcast(vec_type_f32, final_scale)
+        vec_f1 = vector.broadcast(vec_type_f32, f_1)
         vec_f1_arith = arith.ArithValue(vec_f1)
         vec_scale_arith = arith.ArithValue(vec_scale)
         vec_inv_scale = (vec_f1_arith / vec_scale_arith)
@@ -216,8 +213,8 @@ def compile_kernel_for_n(N, gpu_arch=None):
                 frgOutput.memref if hasattr(frgOutput, "memref") else frgOutput
             )
 
-            vector.store(vec_quant.value, frg_out_memref, [c_0.value, c_0.value])
-            flir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid.value)
+            vector.store(vec_quant, frg_out_memref, [c_0, c_0])
+            flir.copy(tiled_copy_output, frgOutput, thrOutput, pred=is_valid)
 
     class _Quant(flir.MlirModule):
         GPU_MODULE_NAME = "quant_mod"
@@ -246,8 +243,8 @@ def compile_kernel_for_n(N, gpu_arch=None):
             scales: lambda: T.memref(M_compile, T.f32()),
             m_in: lambda: T.index(),
         ):
-            c1 = arith.index(1).value
-            bx = arith.index(BLOCK_SIZE).value
+            c1 = arith.index(1)
+            bx = arith.index(BLOCK_SIZE)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "quant_kernel"],
                 grid_size=(m_in, c1, c1),
