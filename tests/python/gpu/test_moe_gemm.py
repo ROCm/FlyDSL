@@ -834,7 +834,10 @@ def test_moe_stage1(
 
                 # DS-read preload (CK default is 2); clamp to non-negative.
                 rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(2)
+                rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(1)
+                rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(1)
 
                 # DS-write hints near the end: match total X LDS-store micro-ops per thread.
@@ -842,8 +845,8 @@ def test_moe_stage1(
                 if dswr_tail > sche_iters:
                     dswr_tail = sche_iters
                 dswr_start = sche_iters - dswr_tail
-                print(f"sche_iters: {sche_iters}, dswr_tail: {dswr_tail}, dswr_start: {dswr_start}")
-                print(f"mfma_group: {mfma_group}, mfma_total: {mfma_total}, mfma_per_iter: {mfma_per_iter}")
+                # print(f"sche_iters: {sche_iters}, dswr_tail: {dswr_tail}, dswr_start: {dswr_start}")
+                # print(f"mfma_group: {mfma_group}, mfma_total: {mfma_total}, mfma_per_iter: {mfma_per_iter}")
                 for sche_i in range_constexpr(sche_iters):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(mfma_group)
