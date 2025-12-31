@@ -580,15 +580,20 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                         s_a_vec4, static_position=[i], dynamic_position=[]
                     ).result
 
+                    # Base column for this thread within the N tile.
+                    # For row-major C (stride=(c_n, 1)), stepping by 16 columns
+                    # corresponds to +32 bytes for f16 stores.
+                    col_base = by_n + n_tile_base + lane_mod_16
+                    idx_base = flir.crd2idx(
+                        flir.make_coord(row_g, col_base), layout_c
+                    )
+                    byte_offset_base = idx_base * 2
+
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
 
                         val = vector.ExtractOp(acc, [], [i]).result
-
-                        offset = ni * 16
-                        c_offset = arith.constant(offset, index=True)
-                        col_g = by_n + n_tile_base + c_offset + lane_mod_16
 
                         s_b = s_b_vals[ni]
 
@@ -598,10 +603,10 @@ def test_mfma_fp8_flir_preshuffle(M, N, K, tile_m, tile_n, tile_k):
                             T.f16, arith.ArithValue(val_s).value
                         ).result
 
-                        idx = flir.crd2idx(
-                            flir.make_coord(row_g, col_g), layout_c
+                        byte_off = byte_offset_base + 32 * ni
+                        buffer_ops.buffer_store(
+                            val_f16, c_rsrc, byte_off, offset_is_bytes=True
                         )
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx)
 
         @flir.jit
         def __call__(
