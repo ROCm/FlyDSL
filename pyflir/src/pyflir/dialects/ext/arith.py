@@ -254,6 +254,26 @@ def fptosi(result_type: Type, value: Union["ArithValue", Value], *, loc: Locatio
     result = _arith.FPToSIOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
+
+def sitofp(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Convert signed integer value to floating point.
+
+    Args:
+        result_type: Target floating point type (e.g., f32)
+        value: Signed integer value to convert
+        loc: Optional source location
+
+    Returns:
+        ArithValue wrapping the floating point result
+
+    Example:
+        >>> i32_val = ...
+        >>> f32_val = arith.sitofp(T.f32(), i32_val)
+    """
+    val = _unwrap_value(value) if isinstance(value, ArithValue) else value
+    result = _arith.SIToFPOp(result_type, val, loc=loc).result
+    return ArithValue(result)
+
 def constant_vector(element_value: Union[int, float], vector_type: Type, *, loc: Location = None) -> "ArithValue":
     """Create a constant vector with all elements set to the same value.
     
@@ -859,7 +879,7 @@ from _mlir.dialects.arith import (
 
 __all__ = [
     "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
-    "maximum", "minimum", "select", "extf", "fptosi", "absf", "reduce", "constant_vector",
+    "maximum", "minimum", "select", "extf", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
     "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",

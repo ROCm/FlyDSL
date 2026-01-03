@@ -1,45 +1,16 @@
 #!/usr/bin/env python3
-"""
-MoE GEMM stage1 unit test (flir, MFMA FP8, B preshuffle).
-
-Reference: `../aiter/op_tests/test_moe_2stage.py` (stage1 semantics)
-- Per-token topk routing: `topk_ids` and `topk_weights`
-- Stage1: y2 = x @ W1[expert]^T -> split into gate/up (2*inter_dim)
-         out1 = activation(gate) * up
-         (optional) apply topk_weights (doweight_stage1)
-
-This test constructs CK-style routing buffers:
-- `sorted_token_ids`: packed (token_id | (topk_slot << 24)), padded to tile_m
-- `expert_ids`: expert id per M tile (tile_m rows)
-
-Kernel writes output as E[t, topk_slot, inter_dim] (fp16).
-"""
-
 import logging
 import os
+from dataclasses import dataclass
 from typing import Tuple, Optional
 
 import pytest
 import torch
-import torch.nn.functional as F
 import argparse
 
-import pyflir
-from pyflir.dialects.ext import flir
-from pyflir.dialects.ext.python_control_flow import range_constexpr
-from pyflir.runtime.device import get_rocm_arch as get_hip_arch
-from pyflir.utils import SmemAllocator
+from test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
-
-from _mlir import ir
-from pyflir.dialects.ext import vector
-from pyflir.dialects.ext import llvm
-from pyflir.dialects.ext import arith, gpu, buffer_ops
-from _mlir.dialects import arith as _arith_mlir
-from pyflir.dialects.ext import rocdl
-import _mlir.extras.types as T
-from pyflir.lang.ir.types import T as I
 
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
@@ -55,7 +26,19 @@ from tests.python.gpu.mfma_fp8_preshuffle_pipeline import (
     make_preshuffle_b_layout,
 )
 
+# Kernel implementations live under `samples/`; this test file is the harness.
+from samples.moe_gemm_2stage import compile_moe_gemm1, compile_moe_gemm2
+
 logging.basicConfig(level=logging.INFO)
+
+# Reduce noisy aiter log spam (e.g. "type hints mismatch, override to --> ...") so test output
+# stays readable. You can override via env: FLIR_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
+_aiter_level = os.environ.get("FLIR_AITER_LOG_LEVEL", "ERROR").upper().strip()
+try:
+    logging.getLogger("aiter").setLevel(getattr(logging, _aiter_level, logging.ERROR))
+except Exception:
+    # Best-effort only; never break tests due to logging configuration.
+    pass
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -168,44 +151,6 @@ def build_sorted_routing(
     return sorted_token_ids, sorted_weights, sorted_expert_ids
 
 
-def torch_stage1_ref(
-    x_fp8: torch.Tensor,
-    w1_fp8_flat: torch.Tensor,
-    scale_x: torch.Tensor,
-    scale_w1_flat: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    inter_dim: int,
-    doweight_stage1: bool,
-) -> torch.Tensor:
-    """Return [tokens, topk, inter_dim] fp32."""
-    tokens, model_dim = x_fp8.shape
-    topk = topk_ids.shape[1]
-    experts = int(topk_ids.max().item()) + 1
-
-    x = x_fp8.to(torch.float32) * scale_x  # [tokens, model_dim] (scale_x [tokens,1])
-    w1 = w1_fp8_flat.to(torch.float32) * scale_w1_flat  # [experts*2*inter_dim, model_dim] (scale [rows,1])
-    w1 = w1.view(experts, 2 * inter_dim, model_dim)
-
-    out = torch.zeros((tokens, topk, inter_dim), device="cuda", dtype=torch.float32)
-    for e in range(experts):
-        # routes assigned to expert e
-        mask = topk_ids == e
-        idx = mask.nonzero(as_tuple=False)  # [num, 2] (t, slot)
-        if idx.numel() == 0:
-            continue
-        t_idx = idx[:, 0]
-        s_idx = idx[:, 1]
-        y2 = F.linear(x[t_idx, :], w1[e, :, :])  # [num, 2*inter_dim]
-        gate = y2[:, :inter_dim]
-        up = y2[:, inter_dim:]
-        y = F.silu(gate) * up
-        if doweight_stage1:
-            y = y * topk_weights[t_idx, s_idx].unsqueeze(-1)
-        out[t_idx, s_idx, :] = y
-    return out
-
-
 @pytest.mark.parametrize(
     "tokens,model_dim,inter_dim,experts,topk,doweight_stage1",
     [
@@ -268,10 +213,79 @@ def _pad_sorted_buffers_to_full_blocks(
     return pad_ids, pad_w
 
 
-@pytest.mark.parametrize("tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k, doweight_stage1", [
-    (256, 4096, 2048, 17, 9, 64, 128, 128, False),
-])
-def test_moe_stage1(
+@dataclass(frozen=True)
+class RoutingBuffers:
+    sorted_token_ids: torch.Tensor
+    sorted_weights: torch.Tensor
+    sorted_expert_ids: torch.Tensor
+    num_valid_ids: torch.Tensor
+    sorted_size: int
+
+
+def build_routing_buffers(
+    *,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    experts: int,
+    model_dim: int,
+    tile_m: int,
+    moe_sort_mode: Optional[str] = None,
+) -> RoutingBuffers:
+    """Build/pad routing buffers once (CK format), reusable across stage1 + stage2."""
+    device = topk_ids.device
+    sort_mode = (
+        (moe_sort_mode or os.environ.get("pyflir_MOE_SORT_MODE", "aiter" if HAS_AITER else "torch"))
+        .lower()
+        .strip()
+    )
+
+    sorted_token_ids = sorted_weights = sorted_expert_ids = num_valid_ids = None
+    if sort_mode == "aiter":
+        res = _maybe_aiter_moe_sorting(
+            topk_ids,
+            topk_weights,
+            num_experts=experts,
+            model_dim=model_dim,
+            block_m=tile_m,
+        )
+        if res is not None:
+            sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
+        else:
+            logging.warning(
+                "aiter moe_sorting unavailable; falling back to torch routing buffers. "
+                "Set pyflir_MOE_SORT_MODE=torch to silence this, or ensure aiter JIT deps are available."
+            )
+            sort_mode = "torch"
+
+    if sort_mode != "aiter":
+        sorted_token_ids, sorted_weights, sorted_expert_ids = build_sorted_routing(
+            topk_ids,
+            topk_weights,
+            num_experts=experts,
+            model_dim=model_dim,
+            tile_m=tile_m,
+        )
+        num_valid_ids = torch.tensor([int(sorted_token_ids.numel())], device=device, dtype=torch.int32)
+
+    sorted_token_ids, sorted_weights = _pad_sorted_buffers_to_full_blocks(
+        sorted_ids=sorted_token_ids,
+        sorted_weights=sorted_weights,
+        sorted_expert_ids=sorted_expert_ids,
+        tokens=int(topk_ids.shape[0]),
+        block_m=tile_m,
+    )
+    sorted_size = int(sorted_token_ids.numel())
+    return RoutingBuffers(
+        sorted_token_ids=sorted_token_ids,
+        sorted_weights=sorted_weights,
+        sorted_expert_ids=sorted_expert_ids,
+        num_valid_ids=num_valid_ids,
+        sorted_size=sorted_size,
+    )
+
+
+# ---- Stage1/Stage2 runners (helpers; NOT pytest tests) ----
+def run_moe_stage1(
     tokens: int,
     model_dim: int,
     inter_dim: int,
@@ -287,6 +301,14 @@ def test_moe_stage1(
     num_warmup: int = 2,
     compare_aiter_ck: Optional[bool] = None,
     moe_sort_mode: Optional[str] = None,
+    # Optional overrides (used by the 2-stage runner to avoid duplicated setup/sorting).
+    x_fp32_in: Optional[torch.Tensor] = None,
+    w1_fp32_in: Optional[torch.Tensor] = None,
+    w2_fp32_in: Optional[torch.Tensor] = None,
+    topk_ids_in: Optional[torch.Tensor] = None,
+    topk_weights_in: Optional[torch.Tensor] = None,
+    routing_in: Optional[RoutingBuffers] = None,
+    return_outputs: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -296,63 +318,50 @@ def test_moe_stage1(
     torch.manual_seed(int(seed))
 
     # Data: input and weights (aiter shapes)
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    x_fp32 = (
+        x_fp32_in
+        if x_fp32_in is not None
+        else torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    )
+    w1_fp32 = (
+        w1_fp32_in
+        if w1_fp32_in is not None
+        else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    )
     # w2 is required by aiter CK API even for stage1; keep it allocated to avoid null ptr.
     # Stage1 kernels should not touch it, but we allocate a correct-shape tensor for safety.
-    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+    w2_fp32 = (
+        w2_fp32_in
+        if w2_fp32_in is not None
+        else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+    )
 
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
-    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
-    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    if topk_ids_in is None or topk_weights_in is None:
+        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    else:
+        topk_ids = topk_ids_in
+        topk_weights = topk_weights_in
 
-    # Prefer aiter moe_sorting buffers (exact CK routing format), fall back to torch sorting.
-    sort_mode = (
-        (moe_sort_mode or os.environ.get("pyflir_MOE_SORT_MODE", "aiter" if HAS_AITER else "torch"))
-        .lower()
-        .strip()
-    )
-    sorted_token_ids = sorted_weights = sorted_expert_ids = num_valid_ids = None
-    if sort_mode == "aiter":
-        res = _maybe_aiter_moe_sorting(
-            topk_ids,
-            topk_weights,
-            num_experts=experts,
-            model_dim=model_dim,
-            block_m=tile_m,
-        )
-        if res is not None:
-            sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
-        else:
-            # Some environments can import `aiter` but cannot run its JIT deps.
-            # Fall back to the pure-torch builder instead of hard-skipping the whole GPU test suite.
-            logging.warning(
-                "aiter moe_sorting unavailable; falling back to torch routing buffers. "
-                "Set pyflir_MOE_SORT_MODE=torch to silence this, or ensure aiter JIT deps are available."
-            )
-            sort_mode = "torch"
-
-    if sort_mode != "aiter":
-        sorted_token_ids, sorted_weights, sorted_expert_ids = build_sorted_routing(
-            topk_ids,
-            topk_weights,
-            num_experts=experts,
+    routing = (
+        routing_in
+        if routing_in is not None
+        else build_routing_buffers(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            experts=experts,
             model_dim=model_dim,
             tile_m=tile_m,
+            moe_sort_mode=moe_sort_mode,
         )
-        # num_valid_ids is total_tokens_post_pad; for our builder that's the full buffer length.
-        num_valid_ids = torch.tensor([int(sorted_token_ids.numel())], device=device, dtype=torch.int32)
-
-    # Pad to full blocks for safe indexing in our flir kernel (which uses grid_x = num_blocks).
-    sorted_token_ids, sorted_weights = _pad_sorted_buffers_to_full_blocks(
-        sorted_ids=sorted_token_ids,
-        sorted_weights=sorted_weights,
-        sorted_expert_ids=sorted_expert_ids,
-        tokens=tokens,
-        block_m=tile_m,
     )
-    sorted_size = int(sorted_token_ids.numel())
+    sorted_token_ids = routing.sorted_token_ids
+    sorted_weights = routing.sorted_weights
+    sorted_expert_ids = routing.sorted_expert_ids
+    num_valid_ids = routing.num_valid_ids
+    sorted_size = routing.sorted_size
 
     # FP8 per-token quantize (aiter config)
     x_fp8, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [tokens, K], [tokens,1]
@@ -389,664 +398,19 @@ def test_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    gpu_arch = get_hip_arch()
-    allocator = SmemAllocator(None, arch=gpu_arch)
-    _state = {}
-
-    size_out = tokens * topk * inter_dim
-    size_x = tokens * model_dim
-    size_w = experts * (2 * inter_dim) * model_dim
-    size_sorted = sorted_size
-    size_expert_ids = int(sorted_expert_ids.numel())
-
-    total_threads = 256
-    elems_x_per_tile = tile_m * tile_k
-    elems_per_thread_x = elems_x_per_tile // total_threads
-    bytes_per_thread_x = elems_per_thread_x  # fp8
-    # Keep MoE stage1 X gmem->LDS pipeline consistent with the optimized GEMM kernel:
-    # split into <=16B pieces and use `flir.copy(load-only)` for buffer_load_dwordx4.
-    # (Compute the split lens inside the kernel so the code matches GEMM structure.)
-
-    # CK-style LDS128 mode (same idea as test_preshuffle_gemm.py):
-    # - LDS stride == tile_k (no extra padding) + XOR16 swizzle
-    # - Use ds_{read,write}_b128 (16B) and extract 8B halves for MFMA steps
-    _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
-    pad_k = 0 if _ck_lds128 else 8
-    lds_stride = tile_k + pad_k
-
-    class _MOE1(flir.MlirModule):
-        GPU_MODULE_NAME = "mfma_moe1"
-        GPU_MODULE_TARGETS = [
-            f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-        ]
-
-        def init_gpu_module(self):
-            # Ping-pong LDS for X (2-stage pipeline), matching the tuned GEMM kernel structure.
-            _state["lds_x_decl"] = allocator.allocate_array(I.f8, 2 * tile_m * lds_stride)
-            allocator.finalize()
-
-        @flir.kernel
-        def kernel(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
-            arg_x: lambda: T.memref(size_x, I.f8),
-            arg_w: lambda: T.memref(size_w, I.f8),
-            arg_scale_x: lambda: T.memref(tokens, T.f32()),
-            arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
-            tokens_in: lambda: T.index(),
-            inter_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-        ):
-            f8 = I.f8
-            f32 = I.f32
-            i32 = I.i32
-            i64 = I.i64
-            vec4_f32 = I.vec(4, f32)
-            vec8_f8 = I.vec(8, f8)
-            vec16_f8 = I.vec(16, f8)
-            vec1_i64 = I.vec(1, i64)
-            vec2_i64 = I.vec(2, i64)
-
-            c0 = arith.constant(0, index=True)
-            c4 = arith.constant(4, index=True)
-            c1 = arith.constant(1, index=True)
-            c16 = arith.constant(16, index=True)
-            c64 = arith.constant(64, index=True)
-            c256 = arith.constant(256, index=True)
-            c1024 = arith.constant(1024, index=True)
-            c_tile_k = arith.constant(tile_k, index=True)
-
-            c0f = arith.constant(0.0, type=f32)
-            c1f = arith.constant(1.0, type=f32)
-            # CK-style silu uses exp2(log2e * x) + rcp, which maps to v_exp_f32 + v_rcp_f32
-            # and avoids the full-precision div fixup sequence (and its cndmask-heavy guards).
-            c_log2e = arith.constant(1.4426950408889634, type=f32)  # log2(e)
-            c_log2e_neg = arith.constant(-1.4426950408889634, type=f32)
-            c3f = arith.constant(3.0, type=f32)
-            c1_div_6 = arith.constant(0.1666666716337204, type=f32)  # 1/6 as f32
-
-            def silu(x):
-                # Align with CK's device fast path:
-                #   emu = exp(-x)  ~= exp2(log2e * (-x))  -> v_exp_f32
-                #   sig = rcp(1 + emu)                   -> v_rcp_f32
-                #   y = x * sig
-                #
-                # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
-                # sequences that introduce extra compares/cndmasks.
-                t = x * c_log2e_neg
-                emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [t], [], [])
-                den = c1f + emu
-                sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den], [], [])
-                return x * sig
-
-            acc_init = arith.constant_vector(0.0, vec4_f32)
-
-            # Layouts
-            layout_x = flir.make_layout((tokens_in, k_in), stride=(k_in, 1))
-
-            # B preshuffle layout: match GEMM test helper exactly.
-            c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
-            b_layout = make_preshuffle_b_layout(flir, _arith_mlir, c_n=c_n_total, c_k=k_in)
-            layout_b = b_layout.layout_b
-            c_k0 = k_in / c64
-
-            shape_lds = flir.make_shape(tile_m, tile_k)
-            stride_lds = flir.make_stride(lds_stride, 1)
-            layout_lds = flir.make_layout(shape_lds, stride_lds)
-
-            tx = gpu.thread_id("x")
-            bx = gpu.block_id("x")  # tile along sorted M
-            by = gpu.block_id("y")  # tile along inter_dim
-
-            # Common constants/atoms (hoisted): keep IR small like GEMM.
-            # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
-            k_blocks16 = arith.constant(tile_k // 16, index=True)
-            atom_x_s16 = flir.make_copy_atom(f8, vector_size=16)
-            atom_x_s8 = flir.make_copy_atom(f8, vector_size=8)
-            atom_x_g2r16 = flir.make_copy_atom(f8, vector_size=16)
-            atom_x_g2r8 = flir.make_copy_atom(f8, vector_size=8)
-            layout_tx_wave_lane = flir.make_layout((4, 64), stride=(64, 1))
-            layout_lane16 = flir.make_layout((4, 16), stride=(16, 1))
-            layout_lin_rowcol = flir.make_layout((tile_m, tile_k), stride=(tile_k, 1))
-
-            base_ptr = allocator.get_base()
-            lds_x = _state["lds_x_decl"](base_ptr).get()
-
-            # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
-            # used directly (CK-style). This allows us to avoid `select`-based masking for
-            # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
-
-            # Expert id for this M tile (keep address math in `index`)
-            expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
-            expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
-            inter2_idx = arith.constant(2 * inter_dim, index=True)
-            expert_off_idx = expert_idx * inter2_idx  # index
-
-            # Thread -> (row_a_local, col_a_local) via layout algebra (GEMM-style).
-            vec_len_val = arith.constant(bytes_per_thread_x, index=True)
-            linear_id = tx * vec_len_val
-            coord_rc = flir.idx2crd(linear_id, layout_lin_rowcol)
-            row_a_local = flir.get(coord_rc, 0)
-            col_a_local = flir.get(coord_rc, 1)
-
-            bx_m = bx * arith.constant(tile_m, index=True)
-            sorted_row = bx_m + row_a_local
-
-            # Load fused token id and decode token (t) and topk slot (s)
-            fused = buffer_ops.buffer_load(sorted_rsrc, sorted_row, vec_width=1, dtype=i32)
-            mask24 = arith.i32(0xFFFFFF)
-            t_i32 = arith.andi(fused, mask24)
-            s_i32 = arith.shrui(fused, arith.i32(24))
-
-            # token id (may be sentinel == tokens); we rely on buffer descriptor OOB checks
-            # (num_records set to the logical memref size) instead of predication/select.
-            tokens_i32 = arith.i32(tokens)
-            topk_i32 = arith.i32(topk)
-            t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
-
-            # X base index (token-major)
-            coord_x = flir.make_coord(t_idx, col_a_local)
-            idx_x = flir.crd2idx(coord_x, layout_x)
-            idx_x_div4 = idx_x / c4
-
-            # ---- X gmem->reg prefetch (GEMM-style) ----
-            # The tuned GEMM kernel uses fixed 16B global loads; for our MoE tile shapes we
-            # expect bytes_per_thread_x to be a multiple of 16. This keeps IR small and
-            # matches the scheduling assumptions.
-            x_load_bytes = 16
-            if bytes_per_thread_x % x_load_bytes != 0:
-                raise ValueError(
-                    f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by {x_load_bytes}"
-                )
-            num_x_loads = bytes_per_thread_x // x_load_bytes
-
-            vec2_i32 = I.vec(2, i32)
-            vec4_i32 = I.vec(4, i32)
-
-            def load_x_16(idx_i32):
-                """Load 16 fp8 bytes from X (gmem) into a vector via buffer_load backend.
-
-                `idx_i32` is an i32-element (dword) offset (not bytes), matching GEMM.
-                """
-                x_view = flir.TensorView(
-                    arg_x,
-                    (16,),
-                    strides=(1,),
-                        base_indices=(idx_i32,),
-                    element_type=f8,
-                )
-                return flir.copy(
-                    atom_x_g2r16,
-                    x_view,
-                    None,
-                    alignment=16,
-                    return_vector=True,
-                    src_buffer_resource=x_rsrc,
-                    src_buffer_offset_in_bytes=False,
-                )
-
-            def load_x_tile(base_k):
-                """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
-                base_k_div4 = base_k / c4
-                parts = []
-                for i in range_constexpr(num_x_loads):
-                    off_i32 = arith.constant(i * 4, index=True)  # 16B == 4 dwords
-                    idx_i32 = idx_x_div4 + base_k_div4 + off_i32
-                    x_f8 = load_x_16(idx_i32)
-                    parts.append(vector.bitcast(vec4_i32, x_f8))
-                return parts
-
-            # tx -> wave/lane (GEMM-style decomposition).
-            coord_wl = flir.idx2crd(tx, layout_tx_wave_lane)
-            wave_id = flir.get(coord_wl, 0)
-            lane_id = flir.get(coord_wl, 1)
-            coord_l16 = flir.idx2crd(lane_id, layout_lane16)
-            lane_div_16 = flir.get(coord_l16, 0)
-            lane_mod_16 = flir.get(coord_l16, 1)
-
-            # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16*16.
-            row_a_lds = lane_mod_16
-            col_offset_base = flir.crd2idx(flir.make_coord(lane_div_16, 0), layout_lane16)
-
-            # Dynamic N tiling within block (same as existing kernels)
-            by_n = by * arith.constant(tile_n, index=True)
-            num_waves = 4
-            n_per_wave = tile_n // num_waves
-            num_acc_n = n_per_wave // 16
-            c_n_per_wave = arith.constant(n_per_wave, index=True)
-            wave_mod_4 = wave_id % c4
-            n_tile_base = wave_mod_4 * c_n_per_wave
-
-            # Precompute n_blk/n_intra for gate and up rows (GEMM-style: idx2crd/get)
-            n_intra_gate = []
-            n_blk_gate = []
-            n_intra_up = []
-            n_blk_up = []
-            col_g_list = []
-            valid_col_list = []
-            inter_idx = arith.constant(inter_dim, index=True)
-            # layout for (row -> (blk,intra)) where intra is 0..15
-            c_n0 = c_n_total / c16
-            layout_n_blk_intra = flir.make_layout((c_n0, 16), stride=(16, 1))
-            for ni in range_constexpr(num_acc_n):
-                offset = arith.constant(ni * 16, index=True)
-                col_g = by_n + n_tile_base
-                col_g = col_g + offset
-                col_g = col_g + lane_mod_16
-                col_g_list.append(col_g)
-
-                row_gate = expert_off_idx + col_g
-                row_up = row_gate + inter_idx
-
-                coord_gate = flir.idx2crd(row_gate, layout_n_blk_intra)
-                n_blk_gate.append(flir.get(coord_gate, 0))
-                n_intra_gate.append(flir.get(coord_gate, 1))
-
-                coord_up = flir.idx2crd(row_up, layout_n_blk_intra)
-                n_blk_up.append(flir.get(coord_up, 0))
-                n_intra_up.append(flir.get(coord_up, 1))
-
-                valid_col_list.append(arith.ult(col_g, inter_idx))
-
-            m_repeat = tile_m // 16
-            k_unroll = tile_k // 32
-
-            # --- B Load Logic (K32) - match GEMM style exactly ---
-            layout_k0_kpack64 = flir.make_layout((c_k0, 64), stride=(64, 1))
-            layout_half8 = flir.make_layout((2, 8), stride=(8, 1))
-            atom_b_g2r = flir.make_copy_atom(f8, vector_size=8)
-
-            def load_b_pack(base_k, ki_step, ni, blk_list, intra_list):
-                coord_k = flir.idx2crd(base_k, layout_k0_kpack64)
-                k0_base = flir.get(coord_k, 0)
-                k0 = k0_base + (ki_step // 2)
-                k1 = lane_div_16  # 0..3
-                half = ki_step % 2
-                half_val = arith.constant(half, index=True)
-                k2_base = flir.crd2idx(flir.make_coord(half_val, 0), layout_half8)
-
-                n_intra = intra_list[ni]
-                n_blk = blk_list[ni]
-                coord_b = flir.make_coord(n_blk, k0, k1, n_intra, k2_base)
-                idx_bytes = flir.crd2idx(coord_b, layout_b)
-
-                b_view = flir.TensorView(
-                    arg_w,
-                    (8,),
-                    strides=(1,),
-                    base_indices=(idx_bytes,),
-                    element_type=f8,
-                )
-                b8_f8 = flir.copy(
-                    atom_b_g2r,
-                    b_view,
-                    None,
-                    alignment=8,
-                    return_vector=True,
-                    src_buffer_resource=w_rsrc,
-                )
-                b_vec64 = vector.bitcast(vec1_i64, b8_f8)
-                return vector.extract(b_vec64, static_position=[0], dynamic_position=[])
-
-            def load_b_tile(base_k, blk_list, intra_list):
-                """Prefetch the entire per-thread B tile (gmem -> regs) for a given K base."""
-                b_tile = []
-                for ki_step in range_constexpr(k_unroll):
-                    packs = []
-                    for ni in range_constexpr(num_acc_n):
-                        packs.append(load_b_pack(base_k, ki_step, ni, blk_list, intra_list))
-                    b_tile.append(packs)
-                return b_tile
-
-            acc_gate = [acc_init] * (num_acc_n * m_repeat)
-            acc_up = [acc_init] * (num_acc_n * m_repeat)
-
-            # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-            def store_x_tile_to_lds(vec_x_in_parts, lds_base):
-                for i in range_constexpr(num_x_loads):
-                    # Match GEMM address pattern exactly.
-                    store_off = arith.constant(i * 16, index=True)
-                    col_0 = col_a_local + store_off
-                    col_swz = flir.swizzle_xor16(row_a_local, col_0, k_blocks16)
-                    coord_store_0 = flir.make_coord(row_a_local, col_swz)
-                    idx_0 = flir.crd2idx(coord_store_0, layout_lds)
-                    idx_0 = arith.ArithValue(idx_0) + lds_base
-
-                    v16 = vector.bitcast(vec16_f8, vec_x_in_parts[i])
-                    s_view = flir.TensorView(
-                        lds_x, (16,), strides=(1,), base_indices=(idx_0,), element_type=f8
-                    )
-                    flir.copy(atom_x_s16, v16, s_view, alignment=16 if _ck_lds128 else None)
-
-            def compute_tile(
-                acc_gate_in,
-                acc_up_in,
-                b_gate_tile_in,
-                b_up_tile_in,
-                lds_base,
-                *,
-                prefetch_epilogue: bool = False,
-            ):
-                gate_list = list(acc_gate_in)
-                up_list = list(acc_up_in)
-                c0_i32 = 0
-
-                # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
-                # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
-                epilogue_pf = None
-                if prefetch_epilogue:
-                    expert_off_pf = arith.ArithValue(expert_off_idx)
-                    sw_gate_pf = []
-                    sw_up_pf = []
-                    for ni in range_constexpr(num_acc_n):
-                        col_g = col_g_list[ni]
-                        valid_col = valid_col_list[ni]
-                        row_gate_idx = expert_off_pf + col_g
-                        row_up_idx = row_gate_idx + inter_idx
-                        sw_gate_pf.append(
-                            buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
-                        )
-                        sw_up_pf.append(
-                            buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
-                        )
-                    epilogue_pf = (sw_gate_pf, sw_up_pf)
-
-                for ki_step in range_constexpr(k_unroll):
-                    b_gate_packs = b_gate_tile_in[ki_step]
-                    b_up_packs = b_up_tile_in[ki_step]
-
-                    half = ki_step % 2
-                    ki64 = (ki_step // 2) * 64
-                    col_base = col_offset_base + ki64
-
-                    for mi in range_constexpr(m_repeat):
-                        mi_val = arith.constant(mi * 16, index=True)
-                        curr_row_a_lds = row_a_lds + mi_val
-
-                        # Read X from LDS using the same (row,col)->(row,col') xor swizzle as the store.
-                        col_base_swizzled = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-                        if _ck_lds128:
-                            coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swizzled)
-                            idx_a16 = flir.crd2idx(coord_a16, layout_lds)
-                            idx_a16 = arith.ArithValue(idx_a16) + lds_base
-                            loaded_a16 = vector.load_op(vec16_f8, lds_x, [idx_a16])
-                            a_vec128 = vector.bitcast(vec2_i64, loaded_a16)
-                            a_pack = vector.extract(a_vec128, static_position=[half], dynamic_position=[])
-                        else:
-                            col_swizzled = col_base_swizzled + half * 8
-                            coord_a = flir.make_coord(curr_row_a_lds, col_swizzled)
-                            idx_a = flir.crd2idx(coord_a, layout_lds)
-                            idx_a = arith.ArithValue(idx_a) + lds_base
-                            loaded_a8 = vector.load_op(vec8_f8, lds_x, [idx_a])
-                            a_vec64 = vector.bitcast(vec1_i64, loaded_a8)
-                            a_pack = vector.extract(a_vec64, static_position=[0], dynamic_position=[])
-
-                        for ni in range_constexpr(num_acc_n):
-                            acc_idx = mi * num_acc_n + ni
-                            gate_list[acc_idx] = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                                vec4_f32,
-                                [
-                                    a_pack,
-                                    b_gate_packs[ni],
-                                    gate_list[acc_idx],
-                                    c0_i32,
-                                    c0_i32,
-                                    c0_i32,
-                                ],
-                            )
-                            up_list[acc_idx] = rocdl.mfma_f32_16x16x32_fp8_fp8(
-                                vec4_f32,
-                                [
-                                    a_pack,
-                                    b_up_packs[ni],
-                                    up_list[acc_idx],
-                                    c0_i32,
-                                    c0_i32,
-                                    c0_i32,
-                                ],
-                            )
-                return gate_list, up_list, epilogue_pf
-
-            # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
-            lds_tile_elems = arith.constant(tile_m * lds_stride, index=True)
-            lds_base_cur = arith.constant(0, index=True)
-            lds_base_nxt = lds_tile_elems
-
-            # Optional scheduler hints (copied from tuned GEMM); can be disabled via env.
-            rocdl.sched_barrier(0)
-
-            def hot_loop_scheduler():
-                mfma_group = num_acc_n * 2
-                mfma_total = k_unroll * m_repeat * mfma_group
-                mfma_per_iter = 2 * mfma_group
-                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-
-                # DS-read preload (CK default is 2); clamp to non-negative.
-                rocdl.sched_dsrd(2)
-                rocdl.sched_mfma(2)
-                rocdl.sched_dsrd(1)
-                rocdl.sched_mfma(1)
-                rocdl.sched_dsrd(1)
-                rocdl.sched_mfma(1)
-
-                # DS-write hints near the end: match total X LDS-store micro-ops per thread.
-                dswr_tail = num_x_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
-                # print(f"sche_iters: {sche_iters}, dswr_tail: {dswr_tail}, dswr_start: {dswr_start}")
-                # print(f"mfma_group: {mfma_group}, mfma_total: {mfma_total}, mfma_per_iter: {mfma_per_iter}")
-                for sche_i in range_constexpr(sche_iters):
-                    rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
-                        rocdl.sched_dswr(1)
-                rocdl.sched_barrier(0)
-
-            # Prologue: prefetch tile0, store to LDS(cur), sync.
-            k0 = arith.constant(0, index=True)
-            x_regs0 = load_x_tile(k0)
-            b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
-            b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
-            store_x_tile_to_lds(x_regs0, lds_base_cur)
-            gpu.barrier()
-
-            # Loop-carried ping/pong state.
-            # Match the tuned GEMM structure: we keep two physical LDS buffers and alternate
-            # compute/store roles (pong=compute, ping=next-store).
-            lds_base_pong = lds_base_cur  # current/compute
-            lds_base_ping = lds_base_nxt  # next/load+store
-
-            # Unrolled ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
-            # This matches the GEMM kernel's "load ping, compute pong, store ping" cadence.
-            c2_tile_k = arith.constant(tile_k * 2, index=True)
-            c_k_main2 = k_in - c2_tile_k
-
-            for k_iv in range(c0, c_k_main2, c2_tile_k):
-                # ---- stage 0: prefetch+store ping, compute pong ----
-                next_k1 = k_iv + c_tile_k
-                x_regs_ping = load_x_tile(next_k1)
-                b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)    
-                b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
-
-                acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
-                store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                hot_loop_scheduler()
-                gpu.barrier()
-
-                # ---- stage 1: prefetch+store pong, compute ping ----
-                next_k2 = k_iv + c2_tile_k
-                x_regs_pong = load_x_tile(next_k2)
-                b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
-                b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
-
-                acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping)
-                store_x_tile_to_lds(x_regs_pong, lds_base_pong)
-                hot_loop_scheduler()
-                gpu.barrier()
-
-                # Advance pong state to next_k2 for next iteration.
-                b_gate_cur = b_gate_next
-                b_up_cur = b_up_next
-
-            # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
-            k_tail1 = k_in - c_tile_k
-            x_regs_ping = load_x_tile(k_tail1)
-            b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
-            b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
-
-            acc_gate, acc_up, _ = compute_tile(acc_gate, acc_up, b_gate_cur, b_up_cur, lds_base_pong)
-            store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-            hot_loop_scheduler()
-            gpu.barrier()
-
-            # Epilogue: compute last tile with epilogue scale prefetch to overlap loads with MFMA.
-            acc_gate, acc_up, epilogue_pf = compute_tile(
-                acc_gate,
-                acc_up,
-                b_gate_ping,
-                b_up_ping,
-                lds_base_ping,
-                prefetch_epilogue=True,
-            )
-
-            # Store epilogue to out[t, slot, inter]
-            # Recompute token/slot for each output row this lane writes.
-            #
-            # GEMM-style prefetch: scale_w depends only on (expert,row) and `col_g` (ni),
-            # not on token/slot. Hoist it out of the MI/II loops.
-            # Prefer `pyflir.dialects.ext.arith.ArithValue` operator overloading here to keep the
-            # kernel code readable (avoid raw `_mlir.dialects.arith.*Op` plumbing).
-            expert_off = arith.ArithValue(expert_off_idx)
-            bx_m0 = arith.ArithValue(bx_m)
-            tokens_i32_v = arith.ArithValue(tokens_i32)
-            topk_i32_v = arith.ArithValue(topk_i32)
-            inter_i32_v = arith.ArithValue(arith.i32(inter_dim))
-            mask24_i32 = arith.i32(0xFFFFFF)
-
-            if epilogue_pf is not None:
-                sw_gate_vals, sw_up_vals = epilogue_pf
-            else:
-                sw_gate_vals = []
-                sw_up_vals = []
-                for ni in range_constexpr(num_acc_n):
-                    col_g = col_g_list[ni]
-                    row_gate_idx = expert_off + col_g
-                    row_up_idx = row_gate_idx + inter_idx
-                    sw_gate_vals.append(
-                        buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
-                    )
-                    sw_up_vals.append(
-                        buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
-                    )
-
-            # Epilogue hoists to keep IR + Python build time small:
-            # - `col_g` -> i32 cast is invariant across MI/II
-            # - lane_div_16*4 is invariant across MI/II
-            # - inter_dim i32 constant is invariant
-            col_i32_list = []
-            for ni in range_constexpr(num_acc_n):
-                col_i32_list.append(arith.ArithValue(arith.index_cast(i32, col_g_list[ni])))
-
-            lane_div_16_mul4 = arith.ArithValue(lane_div_16) * 4
-            ii_idx_list = [arith.constant(ii, index=True) for ii in range(4)]
-            inter_i32_local = inter_i32_v
-
-            for mi in range_constexpr(m_repeat):
-                mi_base = arith.constant(mi * 16, index=True)
-                for ii in range_constexpr(4):
-                    row_off = lane_div_16_mul4 + ii_idx_list[ii]
-                    row_in_tile = mi_base + row_off
-                    sorted_row2 = bx_m0 + row_in_tile
-
-                    fused2 = buffer_ops.buffer_load(sorted_rsrc, sorted_row2, vec_width=1, dtype=i32)
-                    t2 = fused2 & mask24_i32
-                    s2 = fused2 >> 24
-                    # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
-                    # sentinel (t2 == tokens) or otherwise out-of-range.
-                    sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
-
-                    # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
-                    idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
-
-                    # Sorted weight aligned with `sorted_row2` (matches aiter moe_sorting output).
-                    # Only load when used to reduce both IR and runtime memory traffic.
-                    if doweight_stage1:
-                        tw = buffer_ops.buffer_load(
-                            sorted_w_rsrc, sorted_row2, vec_width=1, dtype=f32
-                        )
-
-                    for ni in range_constexpr(num_acc_n):
-                        col_i32 = col_i32_list[ni]
-                        sw_gate = sw_gate_vals[ni]
-                        sw_up = sw_up_vals[ni]
-
-                        acc_idx = mi * num_acc_n + ni
-                        vg = vector.extract(acc_gate[acc_idx], static_position=[ii], dynamic_position=[])
-                        vu = vector.extract(acc_up[acc_idx], static_position=[ii], dynamic_position=[])
-
-                        vg = vg * sx * sw_gate
-                        vu = vu * sx * sw_up
-
-                        y = silu(vg) * vu 
-                        if doweight_stage1:
-                            y = y * tw
-                        # y = y.to(T.f16)
-                        y = arith.trunc_f(T.f16(), y)
-                        idx_out = idx0 + col_i32
-                        buffer_ops.buffer_store(y, out_rsrc, idx_out)
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
-            arg_x: lambda: T.memref(size_x, I.f8),
-            arg_w: lambda: T.memref(size_w, I.f8),
-            arg_scale_x: lambda: T.memref(tokens, T.f32()),
-            arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
-            tokens_in: lambda: T.index(),
-            inter_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-        ):
-            bdx = 256
-            gx = size_expert_ids
-            gy = inter_dim // tile_n
-            flir.gpu_ext.LaunchFuncOp(
-                ["mfma_moe1", "kernel"],
-                grid_size=(gx, gy, 1),
-                block_size=(bdx, 1, 1),
-                kernel_operands=[
-                    arg_out,
-                    arg_x,
-                    arg_w,
-                    arg_scale_x,
-                    arg_scale_w,
-                    arg_sorted_token_ids,
-                    arg_expert_ids,
-                    arg_sorted_weights,
-                    tokens_in,
-                    inter_in,
-                    k_in,
-                ],
-            )
-
-    m = _MOE1()
-    exe = pyflir.compile(m)
+    exe = compile_moe_gemm1(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        sorted_size=sorted_size,
+        size_expert_ids=int(sorted_expert_ids.numel()),
+        doweight_stage1=bool(doweight_stage1),
+    )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         exe(o, x, w, sx, sw, st, eids, sw_sorted, tokens, inter_dim, model_dim)
@@ -1066,7 +430,7 @@ def test_moe_stage1(
     )
     torch.cuda.synchronize()
 
-    ref = torch_stage1_ref(
+    ref = torch_moe_gemm1(
         x_fp8,
         w1_fp8_flat,
         scale_x,
@@ -1137,7 +501,7 @@ def test_moe_stage1(
             )
 
             # Correctness: flir vs CK
-            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25)
+            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="flir vs aiter:")
 
             # Perf print: use the same flop model for both
             flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -1147,14 +511,19 @@ def test_moe_stage1(
             # Treat CK compare as best-effort: many environments can import `aiter` but can't load
             # the full JIT .so dependency chain. Don't fail the FLIR test suite for that.
             logging.warning(f"Skipping aiter CK moe stage1 compare (not runnable here): {e}")
-    flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
-    tflops = flops / (us / 1e6) / 1e12
+    # Note: kernel executes `sorted_size` rows (padded to full tile_m blocks per-expert),
+    # which can be > tokens*topk. Report both:
+    # - logical TFLOPS: based on tokens*topk (algorithmic work)
+    # - executed TFLOPS: based on sorted_size (actual kernel work including padding)
+    flops_logical = 2 * tokens * topk * (2 * inter_dim) * model_dim
+    tflops_logical = flops_logical / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
     bytes_moved += tokens * model_dim * 1  # x fp8
     bytes_moved += experts * (2 * inter_dim) * model_dim * 1  # w fp8
-    bytes_moved += tokens * topk * inter_dim * 2  # out fp16
+    # Output rows are logically tokens*topk, but kernel may touch padded rows due to routing blocks.
+    bytes_moved += int(sorted_size) * inter_dim * 2  # out fp16 (upper bound for writes)
     bytes_moved += tokens * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
@@ -1163,8 +532,424 @@ def test_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"MoE stage1: {us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
+        "MoE stage1: "
+        f"{us:.1f} us, "
+        f"{tflops_logical:.2f} TFLOPS(logical, M={tokens*topk}), "
+        f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
+    if return_outputs:
+        return out, us
+    return None
+
+
+def run_moe_stage2(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    doweight_stage1: bool,
+    *,
+    seed: int = 0,
+    num_iters: int = 5,
+    num_warmup: int = 2,
+    compare_aiter_ck: Optional[bool] = None,
+    moe_sort_mode: Optional[str] = None,
+    # Optional overrides (used by the 2-stage runner to avoid duplicated setup/sorting).
+    x_fp32_in: Optional[torch.Tensor] = None,
+    w1_fp32_in: Optional[torch.Tensor] = None,
+    w2_fp32_in: Optional[torch.Tensor] = None,
+    topk_ids_in: Optional[torch.Tensor] = None,
+    topk_weights_in: Optional[torch.Tensor] = None,
+    routing_in: Optional[RoutingBuffers] = None,
+    a2_fp8_in: Optional[torch.Tensor] = None,
+    a2_scale_in: Optional[torch.Tensor] = None,
+    return_outputs: bool = False,
+):
+    """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
+    assert model_dim % tile_n == 0
+    assert inter_dim % tile_k == 0
+
+    device = torch.device("cuda")
+    torch.manual_seed(int(seed))
+
+    # Data: input and weights (aiter shapes)
+    x_fp32 = (
+        x_fp32_in
+        if x_fp32_in is not None
+        else torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+    )
+    w1_fp32 = (
+        w1_fp32_in
+        if w1_fp32_in is not None
+        else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    )
+    w2_fp32 = (
+        w2_fp32_in
+        if w2_fp32_in is not None
+        else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+    )
+
+    # Routing: deterministic torch topk + softmax.
+    if topk_ids_in is None or topk_weights_in is None:
+        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+        topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+        topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    else:
+        topk_ids = topk_ids_in
+        topk_weights = topk_weights_in
+
+    routing = (
+        routing_in
+        if routing_in is not None
+        else build_routing_buffers(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            experts=experts,
+            model_dim=model_dim,
+            tile_m=tile_m,
+            moe_sort_mode=moe_sort_mode,
+        )
+    )
+    sorted_token_ids = routing.sorted_token_ids
+    sorted_weights = routing.sorted_weights
+    sorted_expert_ids = routing.sorted_expert_ids
+    num_valid_ids = routing.num_valid_ids
+    sorted_size = routing.sorted_size
+
+    # Quantize + preshuffle weights.
+    x_fp8, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [tokens,K], [tokens,1]
+    w1_fp8, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [E,2*inter,K], [E,2*inter,1]
+    w2_fp8, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [E,N,inter], [E,N,1]
+
+    # Preshuffle weights (aiter/CK layout).
+    w2_shuffled = shuffle_weight(w2_fp8)
+
+    # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
+    if a2_fp8_in is not None and a2_scale_in is not None:
+        a2_fp8 = a2_fp8_in
+        a2_scale = a2_scale_in
+    else:
+        w1_fp8_flat = w1_fp8.view(experts * (2 * inter_dim), model_dim)
+        scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+        out1_ref = torch_moe_gemm1(
+            x_fp8,
+            w1_fp8_flat,
+            scale_x,
+            scale_w1_flat,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=bool(doweight_stage1),
+        )  # [tokens, topk, inter] fp32
+        a2_fp8, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.float8_e4m3fnuz)  # [tokens,topk,inter], [tokens,topk,1]
+
+    # Flatten weights/scales for the kernel.
+    w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
+    scale_w2_flat = scale_w2.view(experts * model_dim, 1)
+
+    # Pad storage for forced global dwordx4 loads (same trick as existing GEMM tests).
+    PAD_ELEMS = 256
+    a2_flat = a2_fp8.contiguous().view(-1)
+    a2_storage = torch.empty(a2_flat.numel() + PAD_ELEMS, device=device, dtype=a2_fp8.dtype)
+    a2_storage[: a2_flat.numel()] = a2_flat
+    a2_fp8 = a2_storage[: a2_flat.numel()].view(tokens, topk, inter_dim)
+
+    w2_flat = w2_shuffled_flat.contiguous().view(-1)
+    w2_storage = torch.empty(w2_flat.numel() + PAD_ELEMS, device=device, dtype=w2_shuffled_flat.dtype)
+    w2_storage[: w2_flat.numel()] = w2_flat
+    w2_shuffled_flat = w2_storage[: w2_flat.numel()].view(experts * model_dim, inter_dim)
+
+    # Flatten scales to 1D memrefs.
+    a2_scale_1d = a2_scale.view(-1).contiguous()  # [tokens*topk]
+    w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
+    sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
+
+    # Output: [tokens, model_dim] fp32 (atomic add).
+    out = torch.zeros((tokens, model_dim), device=device, dtype=torch.float32)
+    out_perf = torch.zeros_like(out)
+
+    doweight_stage2 = not bool(doweight_stage1)
+    exe = compile_moe_gemm2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        sorted_size=sorted_size,
+        size_expert_ids=int(sorted_expert_ids.numel()),
+        doweight_stage2=bool(doweight_stage2),
+    )
+
+    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        exe(o, x, w, sx, sw, st, eids, sw_sorted, tokens, model_dim, inter_dim)
+
+    # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
+    # across perf iterations for correctness. Time into a dedicated buffer, then run
+    # a single clean launch for correctness verification below.
+    _, us = run_perftest(
+        launch,
+        out_perf,
+        a2_fp8.view(-1),
+        w2_shuffled_flat.view(-1),
+        a2_scale_1d,
+        w2_scale_1d,
+        sorted_token_ids,
+        sorted_expert_ids,
+        sorted_weights_1d,
+        num_iters=int(num_iters),
+        num_warmup=int(num_warmup),
+    )
+    torch.cuda.synchronize()
+
+    # Correctness run (single launch into a clean zeroed output).
+    out.zero_()
+    launch(
+        out,
+        a2_fp8.view(-1),
+        w2_shuffled_flat.view(-1),
+        a2_scale_1d,
+        w2_scale_1d,
+        sorted_token_ids,
+        sorted_expert_ids,
+        sorted_weights_1d,
+    )
+    torch.cuda.synchronize()
+
+    ref2 = torch_moe_gemm2(
+        a2_fp8,
+        w2_fp8,
+        a2_scale,
+        scale_w2,
+        topk_ids.to(torch.int64),
+        topk_weights,
+        model_dim=model_dim,
+        doweight_stage2=doweight_stage2,
+    )
+    assert verify_output(out, ref2, rtol=0.5, atol=0.5)
+
+    # Optional compare vs aiter CK stage2.
+    if compare_aiter_ck is None:
+        compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
+    else:
+        compare_ck = bool(compare_aiter_ck)
+    if compare_ck:
+        if not HAS_AITER:
+            pytest.skip("aiter not available; cannot compare to CK moe stage2.", allow_module_level=False)
+        try:
+            from aiter.ops.moe_op import ck_moe_stage2_fwd
+            from aiter.ops.enum import QuantType, ActivationType
+
+            # CK stage2 output type is fp16 in many builds; keep fp16 for compatibility.
+            # (Some environments don't accept fp32 output tensors here.)
+            out_ck = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
+            out_ck_perf = torch.zeros_like(out_ck)
+
+            def launch_ck(o, a2_, w1_, w2_, sorted_ids_, sorted_eids_, num_valid_, w2_scale_, a2_scale_, sorted_w_):
+                ck_moe_stage2_fwd(
+                    inter_states=a2_,
+                    w1=w1_,
+                    w2=w2_,
+                    sorted_token_ids=sorted_ids_,
+                    sorted_expert_ids=sorted_eids_,
+                    num_valid_ids=num_valid_,
+                    out=o,
+                    topk=topk,
+                    kernelName="",
+                    w2_scale=w2_scale_,
+                    a2_scale=a2_scale_,
+                    block_m=tile_m,
+                    sorted_weights=sorted_w_ if doweight_stage2 else None,
+                    quant_type=QuantType.per_Token,
+                    activation=ActivationType.Silu,
+                )
+
+            _, us_ck = run_perftest(
+                launch_ck,
+                out_ck_perf,
+                a2_fp8,
+                shuffle_weight(w1_fp8),  # stage2 signature includes w1; provide preshuffled tensor
+                w2_shuffled,
+                sorted_token_ids,
+                sorted_expert_ids,
+                num_valid_ids,
+                scale_w2.contiguous(),
+                a2_scale.contiguous(),
+                sorted_weights,
+                num_iters=int(num_iters),
+                num_warmup=int(num_warmup),
+            )
+
+            # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
+            flops_logical = 2 * tokens * topk * model_dim * inter_dim
+            tflops_ck_logical = flops_logical / (us_ck / 1e6) / 1e12
+            print(
+                f"[aiter CK] stage2: {us_ck:.1f} us, "
+                f"{tflops_ck_logical:.2f} TFLOPS(logical, M={tokens*topk})"
+            )
+
+            # Correctness run (best-effort; do not fail perf comparison if CK diverges).
+            out_ck.zero_()
+            launch_ck(
+                out_ck,
+                a2_fp8,
+                shuffle_weight(w1_fp8),
+                w2_shuffled,
+                sorted_token_ids,
+                sorted_expert_ids,
+                num_valid_ids,
+                scale_w2.contiguous(),
+                a2_scale.contiguous(),
+                sorted_weights,
+            )
+            torch.cuda.synchronize()
+            if not verify_output(out, out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter CK] stage2:"):
+                logging.warning("[aiter CK] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
+        except Exception as e:
+            logging.warning(f"Skipping aiter CK moe stage2 compare (not runnable here): {e}")
+
+    # Same note as stage1: executed rows = sorted_size (padded), logical rows = tokens*topk.
+    flops_logical = 2 * tokens * topk * model_dim * inter_dim
+    tflops_logical = flops_logical / (us / 1e6) / 1e12
+
+    bytes_moved = 0
+    bytes_moved += int(sorted_size) * inter_dim * 1  # a2 fp8 (upper bound: padded rows)
+    bytes_moved += experts * model_dim * inter_dim * 1  # w2 fp8
+    bytes_moved += tokens * model_dim * 4  # out fp32
+    bytes_moved += int(sorted_size) * 4  # a2_scale f32 (1D, padded upper bound)
+    bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
+    bytes_moved += int(sorted_weights.numel()) * 4
+    bytes_moved += int(sorted_token_ids.numel()) * 4
+    bytes_moved += int(sorted_expert_ids.numel()) * 4
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(
+        "MoE stage2: "
+        f"{us:.1f} us, "
+        f"{tflops_logical:.2f} TFLOPS(logical, M={tokens*topk}), "
+        f"{tbps:.3f} TB/s (doweight_stage2={doweight_stage2})"
+    )
+    if return_outputs:
+        return out, us
+    return None
+
+
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
+    [
+        (256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False),
+    ],
+)
+def test_moe_gemm_2stage(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n1: int,
+    tile_k1: int,
+    tile_n2: int,
+    tile_k2: int,
+    doweight_stage1: bool,
+    *,
+    seed: int = 0,
+    num_iters: int = 5,
+    num_warmup: int = 2,
+    moe_sort_mode: Optional[str] = None,
+    compare_aiter_ck: Optional[bool] = None,
+    init_scale: float = 1.0,
+):
+    """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    device = torch.device("cuda")
+    torch.manual_seed(int(seed))
+
+    # NOTE: With naive N(0,1) weights, stage1 output variance grows with K and can easily overflow fp16
+    # outputs in CK paths for large (model_dim, inter_dim). Use a fan-in style init by default to keep
+    # activations O(1) and avoid inf/nan (similar motivation to typical Transformer init).
+    #
+    # `init_scale` is an extra global multiplier (keep at 1.0 unless you intentionally want larger/smaller
+    # activations).
+    import math
+
+    s = float(init_scale)
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    # fan_in = model_dim for W1: [E, 2*inter, model]
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
+    # fan_in = inter_dim for W2: [E, model, inter]
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+
+    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode=moe_sort_mode,
+    )
+
+    out1_fp16, _us1 = run_moe_stage1(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n1,
+        tile_k=tile_k1,
+        doweight_stage1=bool(doweight_stage1),
+        seed=seed,
+        num_iters=num_iters,
+        num_warmup=num_warmup,
+        compare_aiter_ck=compare_aiter_ck,
+        moe_sort_mode=moe_sort_mode,
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        return_outputs=True,
+    )
+
+    out1_fp32 = out1_fp16.to(torch.float32)
+    a2_fp8, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.float8_e4m3fnuz)
+
+    _out2_fp32, _us2 = run_moe_stage2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n2,
+        tile_k=tile_k2,
+        doweight_stage1=bool(doweight_stage1),
+        seed=seed,
+        num_iters=num_iters,
+        num_warmup=num_warmup,
+        compare_aiter_ck=compare_aiter_ck,
+        moe_sort_mode=moe_sort_mode,
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        a2_fp8_in=a2_fp8,
+        a2_scale_in=a2_scale,
+        return_outputs=True,
+    )
+
 
 
 if __name__ == "__main__":
@@ -1192,7 +977,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
-        description="MoE stage1 (FLIR MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
+        description="MoE 2-stage (FLIR MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(8192, 5120), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1205,6 +990,8 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=64, help="Tile M / block_m (routing block size).")
     parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
     parser.add_argument("--tile_k", type=int, default=128, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
+    parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
     # Sorting / comparison knobs
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
@@ -1214,27 +1001,34 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
     parser.add_argument("--num_iters", type=int, default=5, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=2, help="Benchmark warmup iters")
+    parser.add_argument("--init_scale", type=float, default=1.0, help="Extra scale applied on top of fan-in init for random x/w (use >1.0 only if you want to stress overflow).")
 
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
 
-    # Run the aiter-aligned FP8 per-token stage1 test.
-    test_moe_stage1(
+    tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
+    tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else int(args.tile_k)
+
+    # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
+    test_moe_gemm_2stage(
         tokens=int(args.tokenNum),
         model_dim=int(model_dim),
         inter_dim=int(inter_dim),
         experts=int(args.expert),
         topk=int(args.topk),
         tile_m=int(args.tile_m),
-        tile_n=int(args.tile_n),
-        tile_k=int(args.tile_k),
+        tile_n1=int(args.tile_n),
+        tile_k1=int(args.tile_k),
+        tile_n2=tile_n2,
+        tile_k2=tile_k2,
         doweight_stage1=bool(args.doweight_stage1),
         seed=int(args.seed),
         num_iters=int(args.num_iters),
         num_warmup=int(args.num_warmup),
-        compare_aiter_ck=args.compare_aiter_ck,
         moe_sort_mode=args.moe_sort_mode,
+        compare_aiter_ck=args.compare_aiter_ck,
+        init_scale=float(args.init_scale),
     )
 
 
