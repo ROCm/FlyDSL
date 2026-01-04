@@ -28,7 +28,7 @@ DEFAULT_OUT_DIR_REL = Path(".flir")
 DEFAULT_BUILD_DIR_REL = DEFAULT_OUT_DIR_REL / "build"
 
 # Keep build artifacts under a single output directory.
-# - build.sh defaults to: .flir/build
+# - flir/build.sh defaults to: .flir/build
 # - You can override with:
 #   FLIR_OUT_DIR=.flir          (relative to repo root)
 #   FLIR_BUILD_DIR=.flir/build  (relative to repo root)
@@ -84,10 +84,10 @@ def _assert_embedded_mlir_exists() -> None:
     # Default to ALWAYS rebuilding unless the user opts out.
     rebuild_mode = (os.environ.get("FLIR_REBUILD") or os.environ.get("FLIR_REBUILD") or "1").strip().lower()
     # Semantics:
-    # - 1 (default):    always run ./build.sh before installing
-    # - auto:           run ./build.sh iff embedded runtime is missing
-    # - 1/true/yes:     always run ./build.sh before installing
-    # - 0/false/no:     never run ./build.sh (error if missing)
+    # - 1 (default):    always run ./flir/build.sh before installing
+    # - auto:           run ./flir/build.sh iff embedded runtime is missing
+    # - 1/true/yes:     always run ./flir/build.sh before installing
+    # - 0/false/no:     never run ./flir/build.sh (error if missing)
     force_rebuild = rebuild_mode in {"1", "true", "yes"}
     never_rebuild = rebuild_mode in {"0", "false", "no"}
 
@@ -97,10 +97,10 @@ def _assert_embedded_mlir_exists() -> None:
             env = dict(os.environ)
             # Ensure build.sh writes artifacts where setup.py expects them.
             env.setdefault("FLIR_BUILD_DIR", str(BUILD_DIR_REL))
-            subprocess.run(["bash", "./build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
+            subprocess.run(["bash", "flir/build.sh"], cwd=str(REPO_ROOT), check=True, env=env)
         except Exception as e:
             raise RuntimeError(
-                "Failed to build embedded MLIR runtime via `./build.sh`.\n"
+                "Failed to build embedded MLIR runtime via `./flir/build.sh`.\n"
                 f"Original error: {e}\n"
             ) from e
 
@@ -108,7 +108,7 @@ def _assert_embedded_mlir_exists() -> None:
         raise RuntimeError(
             "Embedded MLIR python runtime not found at "
             f"{EMBEDDED__MLIR}.\n\n"
-            "Build it first (e.g. `./build.sh`), or run the CMake build that "
+            "Build it first (e.g. `./flir/build.sh`), or run the CMake build that "
             "produces `build/python_packages/flydsl/_mlir`.\n\n"
             "Controls:\n"
             "  - FLIR_REBUILD=auto (default): build iff missing\n"

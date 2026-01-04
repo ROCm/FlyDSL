@@ -13,7 +13,7 @@ from pathlib import Path
 # This must run before importing `flydsl` (which imports `_mlir` at module import time).
 _repo_root = Path(__file__).resolve().parents[1]
 
-# Preferred build layout (new): `.flir/build` (see build.sh)
+# Preferred build layout (new): `.flir/build` (see flir/build.sh)
 _embedded_pkg_dir = _repo_root / ".flir" / "build" / "python_packages" / "flydsl"
 # Legacy fallback: `build/python_packages/flydsl`
 if not _embedded_pkg_dir.exists():

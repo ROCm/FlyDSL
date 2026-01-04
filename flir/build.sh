@@ -2,32 +2,33 @@
 set -ex
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Keep all generated artifacts under one directory by default.
 # - You can override with:
-#   FLIR_OUT_DIR=.flir   (relative to repo root) or an absolute path
-#   FLIR_BUILD_DIR=...     (absolute path to CMake build dir)
-DEFAULT_OUT_DIR="${SCRIPT_DIR}/.flir"
+#   FLIR_OUT_DIR=.flir          (relative to repo root) or an absolute path
+#   FLIR_BUILD_DIR=...          (absolute path to CMake build dir)
+DEFAULT_OUT_DIR="${REPO_ROOT}/.flir"
 # Backward compatible: honor legacy FLIR_OUT_DIR/FLIR_BUILD_DIR if FLIR_* not set.
 OUT_DIR="${FLIR_OUT_DIR:-${FLIR_OUT_DIR:-${DEFAULT_OUT_DIR}}}"
 if [[ "${OUT_DIR}" != /* ]]; then
-  OUT_DIR="${SCRIPT_DIR}/${OUT_DIR}"
+  OUT_DIR="${REPO_ROOT}/${OUT_DIR}"
 fi
 BUILD_DIR="${FLIR_BUILD_DIR:-${FLIR_BUILD_DIR:-${OUT_DIR}/build}}"
 if [[ "${BUILD_DIR}" != /* ]]; then
-  BUILD_DIR="${SCRIPT_DIR}/${BUILD_DIR}"
+  BUILD_DIR="${REPO_ROOT}/${BUILD_DIR}"
 fi
 
 # Set up environment
 if [ -z "$MLIR_PATH" ]; then
     # Default path based on build_llvm.sh
-    DEFAULT_MLIR_PATH="$(cd "${SCRIPT_DIR}/.." && pwd)/llvm-project/buildmlir"
+    DEFAULT_MLIR_PATH="${REPO_ROOT}/llvm-project/buildmlir"
     if [ -d "$DEFAULT_MLIR_PATH" ]; then
         echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH"
         export MLIR_PATH="$DEFAULT_MLIR_PATH"
     else
         echo "Error: MLIR_PATH not set and default location ($DEFAULT_MLIR_PATH) not found."
-        echo "Please run ./build_llvm.sh first or set MLIR_PATH."
+        echo "Please run ./build_llvm.sh from the repo root first, or set MLIR_PATH."
         exit 1
     fi
 fi
@@ -37,7 +38,6 @@ fi
 
 # Build C++ components
 mkdir -p "${BUILD_DIR}" && cd "${BUILD_DIR}"
-# NOTE: build dir may be nested (e.g. .flir/build), so `..` may not be repo root.
 cmake "${SCRIPT_DIR}" \
     -DMLIR_DIR="$MLIR_PATH/lib/cmake/mlir" \
     -DBUILD_PYTHON_BINDINGS=ON \
@@ -112,9 +112,9 @@ find "${PYTHON_PACKAGE_DIR}" -mindepth 1 -maxdepth 1 \
     -exec rm -rf {} +
 
 # Copy flydsl python package into the package root as flydsl/
-cp -r "${SCRIPT_DIR}/flydsl/src/flydsl" "${PYTHON_PACKAGE_DIR}/" || { echo "Failed to copy flydsl/src/flydsl"; exit 1; }
+cp -r "${REPO_ROOT}/flydsl/src/flydsl" "${PYTHON_PACKAGE_DIR}/" || { echo "Failed to copy flydsl/src/flydsl"; exit 1; }
 
-cd "${SCRIPT_DIR}"
+cd "${REPO_ROOT}"
 
 echo ""
 echo "✓ Build complete!"
@@ -124,11 +124,12 @@ echo ""
 echo "Embedded MLIR runtime location: ${PYTHON_PACKAGE_DIR}/_mlir"
 echo ""
 echo "Recommended (no manual PYTHONPATH):"
-echo "  cd ${SCRIPT_DIR} && python3 -m pip install -e ."
+echo "  cd ${REPO_ROOT} && python3 -m pip install -e ."
 echo ""
 echo "Build a wheel:"
-echo "  cd ${SCRIPT_DIR} && python3 setup.py bdist_wheel"
-echo "  # wheel will be under: ${SCRIPT_DIR}/dist/"
+echo "  cd ${REPO_ROOT} && python3 setup.py bdist_wheel"
+echo "  # wheel will be under: ${REPO_ROOT}/dist/"
 echo ""
 echo "Fallback (no install):"
-echo "  export PYTHONPATH=${PYTHON_PACKAGE_DIR}:${SCRIPT_DIR}/flydsl/src:${SCRIPT_DIR}:\$PYTHONPATH"
+echo "  export PYTHONPATH=${PYTHON_PACKAGE_DIR}:${REPO_ROOT}/flydsl/src:${REPO_ROOT}:\$PYTHONPATH"
+

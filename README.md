@@ -1,5 +1,4 @@
-# # FlyDSL (**F**lexible **L**ayout P**Y**thon DSL) & FLIR （**F**lexible **L**ayout **I**ntermediate **R**epresentation）
-
+# FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL) & FLIR
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
@@ -26,13 +25,15 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 
 ```
 FlyDSL/
-├── CMakeLists.txt
 ├── build_llvm.sh              # build/prepare llvm-project (optional helper)
-├── build.sh                   # build FLIR + python bindings (recommended)
 ├── run_tests.sh               # run MLIR + Python tests
-├── flir/                      # C++ sources (include/, lib/, tools/)
+├── flir/                      # C++ sources + build scripts (CMake, embedded python bindings)
+│   ├── CMakeLists.txt
+│   ├── build.sh               # build FLIR + python bindings (recommended)
+│   ├── include/
+│   ├── lib/
+│   └── tools/
 ├── flydsl/                    # Python sources (src/flydsl) + python-only docs/reqs
-├── flir/python_bindings/      # CMake targets for python extensions/bindings
 ├── tests/                     # mlir + python tests/benchmarks
 └── kernels/                   # Python kernels (importable as `kernels.*`)
 ```
@@ -43,7 +44,7 @@ FlyDSL/
 - **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
 - **Python**: Python 3 + `pip`.
   - `build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
-  - `flydsl/requirements.txt` exists for auxiliary deps (`numpy`, `torch`) for runtime data initialize and result check.
+  - `flydsl/requirements.txt` exists for auxiliary deps (`numpy`, ) for runtime data initialize and result check.
 
 ### Build
 
@@ -64,7 +65,7 @@ Or use the helper script (clones ROCm llvm-project and builds MLIR):
 ### B) Build FLIR (C++ + embedded python package)
 
 ```bash
-./build.sh
+./flir/build.sh
 ```
 
 After a successful build, you will have:
@@ -109,7 +110,7 @@ For the test folder organization, see `tests/` (`mlir/`, `pyir/`, `kernels/`).
 ### Troubleshooting
 
 - **`flir-opt not found`**
-  - Run `./build.sh`, or build it explicitly:
+  - Run `./flir/build.sh`, or build it explicitly:
     - `cmake --build build --target flir-opt -j$(nproc)`
 
 - **Python import issues (`No module named flydsl` / `No module named mlir`)**

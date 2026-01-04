@@ -47,7 +47,7 @@ _flir_root = _repo_root
 
 def _resolve_embedded_python_packages_dir() -> Path | None:
     """Return the repo build's python_packages/<project> directory, if it exists."""
-    # Default build layout: `.flir/build` (see build.sh/setup.py), with fallback to legacy `build/`.
+    # Default build layout: `.flir/build` (see flir/build.sh/setup.py), with fallback to legacy `build/`.
     _build_dir = os.environ.get("FLIR_BUILD_DIR") or os.environ.get("FLIR_BUILD_DIR")
     if _build_dir is None:
         _build_dir_path = _flir_root / ".flir" / "build"

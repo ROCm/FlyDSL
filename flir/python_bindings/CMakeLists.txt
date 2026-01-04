@@ -107,7 +107,7 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
       LIBRARY_OUTPUT_DIRECTORY "${_flir_embedded_mlir_runtime_dir}"
     )
 
-    # Ensure the thin runtime is staged when building FlirPythonCAPI (build.sh).
+    # Ensure the thin runtime is staged when building FlirPythonCAPI (flir/build.sh).
     add_dependencies(FlirPythonCAPI FlirJitRuntime)
   else()
     message(WARNING
@@ -154,7 +154,7 @@ endif()
 # Copy the pure Python sources (flydsl package) to the build directory
 add_custom_target(CopyFlirPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${PROJECT_SOURCE_DIR}/flydsl/src/flydsl"
+    "${FLIR_REPO_ROOT}/flydsl/src/flydsl"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/flydsl"
   COMMENT "Copying flydsl/src/flydsl sources to build/python_packages/flydsl/flydsl"
   DEPENDS FlirPythonModules

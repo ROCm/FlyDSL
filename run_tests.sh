@@ -25,7 +25,7 @@ if [ ! -x "${FLIR_OPT}" ]; then
   fi
   if [ ! -x "${FLIR_OPT}" ]; then
     echo "Error: flir-opt not found."
-    echo "  Try: ./build.sh"
+    echo "  Try: ./flir/build.sh"
     echo "  Or:  cmake --build build --target flir-opt -j\$(nproc)"
     exit 1
   fi

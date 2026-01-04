@@ -58,7 +58,7 @@ def default_shared_libs(lib_dir: Optional[Path] = None) -> SharedLibs:
             "Could not locate FLIR JIT runtime library (expected `libflir_jit_runtime.so` "
             "under the embedded `_mlir/_mlir_libs/`).\n\n"
             "Fix:\n"
-            "  - Build with `./build.sh` and use the embedded package root on PYTHONPATH, or\n"
+            "  - Build with `./flir/build.sh` and use the embedded package root on PYTHONPATH, or\n"
             "  - Install the built wheel so `_mlir/_mlir_libs/libflir_jit_runtime.so` is present."
         )
 

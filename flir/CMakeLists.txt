@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Repo root (parent of this `flir/` directory). Used to locate python sources, docs, etc.
+get_filename_component(FLIR_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+
 # Options
 option(BUILD_RUNTIME "Build C++ runtime library" ON)
 option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
@@ -16,32 +19,31 @@ option(ENABLE_ROCM "Enable AMD ROCm support (GFX942/GFX950)" OFF)  # Disabled by
 find_package(MLIR CONFIG)
 if(MLIR_FOUND)
     message(STATUS "Found MLIR: ${MLIR_DIR}")
-    
+
     # Include MLIR CMake modules
     list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
     list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
-    
+
     include(TableGen)
     include(AddLLVM)
     include(AddMLIR)
     include(HandleLLVMOptions)
     include(MLIRDetectPythonEnv)
     mlir_configure_python_dev_packages()
-    
+
     include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
     include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
-    include_directories(${PROJECT_SOURCE_DIR}/flir/include)
+    include_directories(${PROJECT_SOURCE_DIR}/include)
     # Generated TableGen headers land under the subdir build tree:
-    #   ${PROJECT_BINARY_DIR}/flir/include/flir/*.inc
+    #   ${PROJECT_BINARY_DIR}/include/flir/*.inc
     # and are included as "flir/*.inc".
-    include_directories(${PROJECT_BINARY_DIR}/flir/include)
     include_directories(${PROJECT_BINARY_DIR}/include)
-    
+
     add_definitions(${LLVM_DEFINITIONS})
-    
+
     # TableGen targets
-    add_subdirectory(flir/include/flir)
-    
+    add_subdirectory(include/flir)
+
     message(STATUS "TableGen targets configured")
 else()
     message(WARNING "MLIR not found. TableGen targets will not be built.")
@@ -77,22 +79,23 @@ set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 set(MLIR_PYTHON_PACKAGE_PREFIX "_mlir" CACHE STRING "" FORCE)
 set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PACKAGE_PREFIX}" CACHE STRING "" FORCE)
 
-add_subdirectory(flir/lib)
-add_subdirectory(flir/tools)
+add_subdirectory(lib)
+add_subdirectory(tools)
 if(BUILD_PYTHON_BINDINGS AND MLIR_FOUND)
-    add_subdirectory(flir/python_bindings)
+    add_subdirectory(python_bindings)
 endif()
 
-
 # Installation
-install(DIRECTORY flir/include/flir
+install(DIRECTORY include/flir
     DESTINATION include
     FILES_MATCHING PATTERN "*.td"
 )
 
-install(DIRECTORY docs
-    DESTINATION share/flir
-)
+if(EXISTS "${FLIR_REPO_ROOT}/docs")
+  install(DIRECTORY "${FLIR_REPO_ROOT}/docs"
+      DESTINATION share/flir
+  )
+endif()
 
 # Summary
 message(STATUS "")
@@ -108,3 +111,4 @@ if(ENABLE_ROCM AND hip_FOUND)
 message(STATUS "  HIP Version:       ${HIP_VERSION}")
 endif()
 message(STATUS "")
+
