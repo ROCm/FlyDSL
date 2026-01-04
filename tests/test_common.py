@@ -416,7 +416,7 @@ def checkAllclose(
         return percent
 
 
-def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
+def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg=''):
     if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
         return True
     
@@ -442,7 +442,7 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2):
         print(f"✗ Check failed: logits_diff {logits_diff} > 1e-3")
         logging.error(f"logits_diff: {logits_diff} is too large, please check the implementation")
         return False
-    print("✓ Check passed")
+    print(f"{msg} ✓ Check passed")
     return True
 
 

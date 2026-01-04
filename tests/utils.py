@@ -273,6 +273,16 @@ def pertoken_quant(
     if dtypeMax is None:
         dtypeMax = get_dtype_max(quant_dtype)
 
+    # Be robust to rare non-finite values (can appear from FP8 pipelines at extreme shapes):
+    # - Avoid producing inf scales (which would later lead to 0*inf -> NaN in dequant).
+    # - Avoid propagating NaN/Inf into the quantized tensor.
+    hidden_states = torch.nan_to_num(
+        hidden_states,
+        nan=0.0,
+        posinf=float(dtypeMax),
+        neginf=-float(dtypeMax),
+    )
+
     per_token_scale = scale
     if scale is None:
         # [m, 1]
@@ -281,6 +291,8 @@ def pertoken_quant(
         )
         per_token_scale = per_token_amax / dtypeMax
         per_token_scale[per_token_scale == 0] = 1
+
+    per_token_scale = torch.nan_to_num(per_token_scale, nan=1.0, posinf=1.0, neginf=1.0)
 
     # quant hidden_states
     y = (hidden_states / per_token_scale).to(dtype=quant_dtype)

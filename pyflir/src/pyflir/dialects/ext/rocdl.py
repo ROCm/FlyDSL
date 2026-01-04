@@ -19,9 +19,11 @@ from _mlir.dialects.rocdl import *  # noqa: F401,F403
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
+_ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
 _ods_readlane = readlane
 _ods_readfirstlane = readfirstlane
 _ods_ds_swizzle = ds_swizzle
+_ods_raw_ptr_buffer_atomic_fadd = raw_ptr_buffer_atomic_fadd
 
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
@@ -73,6 +75,17 @@ def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
     return mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, loc=loc, ip=ip).result
 
 
+def mfma_i32_16x16x32_i8_op(result_type, operands, *, loc=None, ip=None):
+    """Return the op view (original behavior)."""
+    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_mfma_i32_16x16x32_i8(result_type, ops, loc=loc, ip=ip)
+
+
+def mfma_i32_16x16x32_i8(result_type, operands, *, loc=None, ip=None):
+    """Return the op result directly (no `.result` needed at call sites)."""
+    return mfma_i32_16x16x32_i8_op(result_type, operands, loc=loc, ip=ip).result
+
+
 def readlane(result_type, src, lane_id, *, loc=None, ip=None):
     """Lane read that accepts ArithValue / wrappers."""
     from . import arith as _arith_ext
@@ -92,6 +105,25 @@ def ds_swizzle(result_type, src, offset, *, loc=None, ip=None):
     from . import arith as _arith_ext
 
     return _ods_ds_swizzle(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(offset), loc=loc, ip=ip)
+
+
+def raw_ptr_buffer_atomic_fadd(val, rsrc, voffset, soffset, cache, *, loc=None, ip=None):
+    """Atomic fadd that accepts `ArithValue` / wrappers (no explicit `arith.unwrap(...)` needed).
+
+    Signature intentionally matches the underlying ODS builder:
+      (val, rsrc, voffset, soffset, cache)
+    """
+    from . import arith as _arith_ext
+
+    return _ods_raw_ptr_buffer_atomic_fadd(
+        _arith_ext.unwrap(val),
+        _arith_ext.unwrap(rsrc),
+        _arith_ext.unwrap(voffset),
+        _arith_ext.unwrap(soffset),
+        _arith_ext.unwrap(cache),
+        loc=loc,
+        ip=ip,
+    )
 
 
 # Keep raw ODS builders available (rare: for tests that want the op object).
@@ -115,8 +147,10 @@ __all__ = [
     'mfma_f32_32x32x8f16', 'mfma_f32_16x16x16f16',
     'mfma_f32_32x32x4bf16', 'mfma_f32_16x16x8bf16',
     'mfma_i32_32x32x8i8', 'mfma_i32_16x16x16i8',
+    'mfma_i32_16x16x32_i8',
     # Raw-op constructors (return op view) for the above
     'mfma_f32_16x16x16f16_op', 'mfma_f32_16x16x32_fp8_fp8_op',
+    'mfma_i32_16x16x32_i8_op',
     
     # Matrix operations - WMMA (Wave Matrix Multiply-Accumulate)
     'wmma_f32_16x16x16_f16', 'wmma_f32_16x16x16_bf16',

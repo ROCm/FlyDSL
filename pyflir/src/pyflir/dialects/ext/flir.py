@@ -2749,15 +2749,24 @@ def copy(copy_desc, src, dst,
             except Exception:
                 from . import buffer_ops as _buffer_ops  # type: ignore
 
-            # Specialize for fp8 where element bytes == 1 and base index is in bytes.
-            elem_ty_str = str(src_view.element_type)
+            # Specialize for 1-byte element types (fp8/int8) so we can lower to
+            # `buffer_load_dwordx{2,4}` and avoid per-load scalarization.
+            elem_ty = src_view.element_type
+            elem_ty_str = str(elem_ty)
             is_f8 = ("f8" in elem_ty_str) or ("Float8" in elem_ty_str)
-            if is_f8 and extent in (8, 16) and (extent % 4 == 0):
+            is_i8 = False
+            try:
+                is_i8 = IntegerType.isinstance(elem_ty) and (IntegerType(elem_ty).width == 8)
+            except Exception:
+                # Best-effort fallback for older bindings.
+                is_i8 = (elem_ty_str == "i8")
+
+            if (is_f8 or is_i8) and extent in (8, 16) and (extent % 4 == 0):
                 i32_ty = IntegerType.get_signless(32)
                 vec_width = extent // 4  # 8B -> dwordx2, 16B -> dwordx4
                 base0 = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
                 if src_buffer_offset_in_bytes:
-                    # base index is in bytes (fp8 elements). Convert to i32 element offset.
+                    # base index is in bytes (1-byte elements). Convert to i32 element offset.
                     c4 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 4), loc=loc).result
                     idx_i32 = arith.DivSIOp(_unwrap_value(base0), _unwrap_value(c4), loc=loc).result
                 else:
@@ -2771,8 +2780,8 @@ def copy(copy_desc, src, dst,
                     dtype=i32_ty,
                     mask=mask,
                 )
-                vec_f8_ty = VectorType.get((extent,), src_view.element_type)
-                return vector.BitCastOp(vec_f8_ty, i32_vec).result
+                vec_elem_ty = VectorType.get((extent,), elem_ty)
+                return vector.BitCastOp(vec_elem_ty, i32_vec).result
 
         # Generic path: vector.load
         base = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
