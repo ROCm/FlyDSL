@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
 import re
 from dataclasses import dataclass
@@ -16,39 +17,35 @@ class SharedLibs:
     runner_utils: str
 
     def as_list(self) -> List[str]:
-        return [self.rocm_runtime, self.runner_utils]
+        # De-duplicate while preserving order (ExecutionEngine just needs the
+        # symbols to be available once).
+        out: List[str] = []
+        for p in (self.rocm_runtime, self.runner_utils):
+            if p and p not in out:
+                out.append(p)
+        return out
 
 
 def _default_mlir_lib_dir() -> Optional[Path]:
-    # Highest priority: explicit override.
-    env_dir = os.environ.get("FLIR_MLIR_LIB_DIR")
-    if env_dir:
-        p = Path(env_dir)
-        if p.exists():
-            return p
-
-    # Next: MLIR_PATH from build.sh convention.
-    mlir_path = os.environ.get("MLIR_PATH")
-    if mlir_path:
-        p = Path(mlir_path) / "lib"
-        if p.exists():
-            return p
-
-    # Next: try to locate a sibling llvm-project next to FLIR_BUILD_DIR (or its parents).
-    # This matches common build layouts where dsl2/ and llvm-project/ live side-by-side.
-    build_dir = os.environ.get("FLIR_BUILD_DIR")
-    if build_dir:
-        b = Path(build_dir).resolve()
-        for base in [b] + list(b.parents)[:3]:
-            cand = base / "llvm-project" / "buildmlir" / "lib"
-            if cand.exists():
-                return cand
-
-    # Repo-local default from build.sh: <repo>/../llvm-project/buildmlir/lib
-    repo_root = Path(__file__).resolve().parents[3]
-    candidate = repo_root.parent / "llvm-project" / "buildmlir" / "lib"
-    if candidate.exists():
-        return candidate
+    try:
+        spec = importlib.util.find_spec("_mlir._mlir_libs")
+        if spec:
+            if spec.submodule_search_locations:
+                embedded_lib_dir = Path(next(iter(spec.submodule_search_locations)))
+            elif spec.origin:
+                embedded_lib_dir = Path(spec.origin).parent
+            else:
+                embedded_lib_dir = None
+        else:
+            embedded_lib_dir = None
+        if embedded_lib_dir:
+            for cand in (embedded_lib_dir, embedded_lib_dir / "lib"):
+                if not cand.exists():
+                    continue
+                if (cand / "libflir_jit_runtime.so").exists() or any(cand.glob("libflir_jit_runtime.so.*")):
+                    return cand
+    except Exception:
+        pass
 
     return None
 
@@ -58,19 +55,26 @@ def default_shared_libs(lib_dir: Optional[Path] = None) -> SharedLibs:
         lib_dir = _default_mlir_lib_dir()
     if lib_dir is None:
         raise FileNotFoundError(
-            "Could not locate MLIR runtime libraries. Set `FLIR_MLIR_LIB_DIR=/path/to/mlir/lib` "
-            "or `MLIR_PATH=/path/to/mlir/build`."
+            "Could not locate FLIR JIT runtime library (expected `libflir_jit_runtime.so` "
+            "under the embedded `_mlir/_mlir_libs/`).\n\n"
+            "Fix:\n"
+            "  - Build with `./build.sh` and use the embedded package root on PYTHONPATH, or\n"
+            "  - Install the built wheel so `_mlir/_mlir_libs/libflir_jit_runtime.so` is present."
         )
 
-    rocm_rt = lib_dir / "libmlir_rocm_runtime.so"
-    runner = lib_dir / "libmlir_runner_utils.so"
-    if not rocm_rt.exists() or not runner.exists():
-        raise FileNotFoundError(
-            f"Missing MLIR runtime libs in {lib_dir}. Expected "
-            f"`{rocm_rt.name}` and `{runner.name}`."
-        )
+    flir_rt = lib_dir / "libflir_jit_runtime.so"
+    if not flir_rt.exists():
+        cands = sorted(lib_dir.glob("libflir_jit_runtime.so.*"))
+        if cands:
+            flir_rt = cands[-1]
+    if flir_rt.exists():
+        # Thin ROCm runtime (mgpu* wrappers).
+        return SharedLibs(str(flir_rt), str(flir_rt))
 
-    return SharedLibs(str(rocm_rt), str(runner))
+    raise FileNotFoundError(
+        f"Missing FLIR JIT runtime lib in {lib_dir}. Expected "
+        "`libflir_jit_runtime.so` (or `libflir_jit_runtime.so.*`)."
+    )
 
 
 class ExecutionEngineExecutor:
@@ -141,10 +145,6 @@ class ExecutionEngineExecutor:
     def __getattr__(self, name: str):
         # `ExecutionEngine.raw_lookup(name)` returns the packed-call interface,
         # i.e. a function pointer with signature `void(void**)`.
-        #
-        # Therefore we must always call it with a single pointer to an array of
-        # pointers-to-arguments (each entry points to host memory containing the
-        # value to be passed).
         sym = f"_mlir_ciface_{name}"
         func_ptr = 0
         sig_name = name

@@ -198,7 +198,23 @@ setup(
     include_package_data=True,
     # Ensure embedded shared libs are packaged in wheels.
     package_data={
-        "": ["*.so", "*.so.*", "*.dylib", "*.dll", "*.pyi"],
+        # Note: we also stage MLIR ExecutionEngine runtime libs under
+        # `_mlir/_mlir_libs/lib/`. We intentionally only package the FLIR-owned
+        # thin runtime (`libflir_jit_runtime.so*`) to avoid shipping upstream
+        # `libmlir_*` runtime shared libraries (which can export large LLVM/MLIR
+        # symbol surfaces and increase collision risk when multiple LLVM/MLIR
+        # copies are present in one process).
+        "": [
+            "*.so",
+            "*.so.*",
+            "*.dylib",
+            "*.dll",
+            "*.pyi",
+            "lib/libflir_jit_runtime.so",
+            "lib/libflir_jit_runtime.so.*",
+            "lib/libflir_jit_runtime.dylib",
+            "lib/libflir_jit_runtime.dll",
+        ],
     },
     install_requires=_load_requirements(),
     cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),

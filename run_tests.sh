@@ -136,7 +136,7 @@ echo "========================================================================"
 echo ""
 
 if command -v rocm-smi &> /dev/null; then
-    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU'| head -1)
+    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
     if [ -n "$GPU_NAME" ]; then
         echo "GPU detected: $GPU_NAME"
     else
@@ -188,7 +188,7 @@ echo "Part 5: Benchmark Tests (Performance Benchmarks)"
 echo "========================================================================"
 echo ""
 
-if command -v rocm-smi &> /dev/null; then
+if command -v rocm-smi >/dev/null 2>&1; then
     BENCHMARK_TEST_COUNT=0
     BENCHMARK_PASS_COUNT=0
     
@@ -237,7 +237,7 @@ echo "MLIR IR Tests (Lowering):        $MLIR_PASS_COUNT/$MLIR_TEST_COUNT passed"
 echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 echo "Example Tests (ROCDL):           $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
 
-if command -v rocm-smi &> /dev/null; then
+if command -v rocm-smi >/dev/null 2>&1; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
     echo "Benchmark Tests:                 $BENCHMARK_PASS_COUNT/$BENCHMARK_TEST_COUNT passed"
 else
@@ -260,7 +260,7 @@ if [ $ALL_GPU_PASSED -eq 1 ] && [ $ALL_BENCHMARK_PASSED -eq 1 ]; then
     echo ""
     exit 0
 else
-    if command -v rocm-smi &> /dev/null; then
+    if command -v rocm-smi >/dev/null 2>&1; then
         echo ""
         if [ $ALL_GPU_PASSED -ne 1 ]; then
             echo "Some GPU tests failed"

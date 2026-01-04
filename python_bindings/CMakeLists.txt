@@ -79,6 +79,44 @@ add_mlir_python_modules(FlirPythonModules
     FlirPythonCAPI
 )
 
+# -----------------------------------------------------------------------------
+set(_flir_embedded_mlir_libs_root "${FlirPythonModules_ROOT_PREFIX}/_mlir_libs")
+set(_flir_embedded_mlir_runtime_dir "${_flir_embedded_mlir_libs_root}/lib")
+
+option(FLIR_BUILD_THIN_JIT_RUNTIME
+  "Build and embed a thin ROCm JIT runtime shared library (recommended)."
+  ON
+)
+
+if(FLIR_BUILD_THIN_JIT_RUNTIME)
+  # Only build the ROCm runtime if HIP is available.
+  find_package(hip QUIET CONFIG PATHS /opt/rocm)
+  if(hip_FOUND)
+    add_library(FlirJitRuntime SHARED
+      runtime/FlirRocmRuntimeWrappers.cpp
+    )
+    target_include_directories(FlirJitRuntime PRIVATE
+      ${LLVM_INCLUDE_DIRS}
+      ${MLIR_INCLUDE_DIRS}
+    )
+    target_compile_features(FlirJitRuntime PRIVATE cxx_std_17)
+    target_link_libraries(FlirJitRuntime PRIVATE hip::host hip::amdhip64)
+
+    set_target_properties(FlirJitRuntime PROPERTIES
+      OUTPUT_NAME "flir_jit_runtime"
+      LIBRARY_OUTPUT_DIRECTORY "${_flir_embedded_mlir_runtime_dir}"
+    )
+
+    # Ensure the thin runtime is staged when building FlirPythonCAPI (build.sh).
+    add_dependencies(FlirPythonCAPI FlirJitRuntime)
+  else()
+    message(WARNING
+      "hip not found; cannot build thin ROCm JIT runtime. "
+      "GPU execution via ExecutionEngine may require external MLIR runtime libs."
+    )
+  endif()
+endif()
+
 option(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS
   "Suppress warnings coming from third-party sources used to build the embedded Python bindings (MLIR python binding sources, nanobind)."
   ON

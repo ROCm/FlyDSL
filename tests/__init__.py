@@ -1,0 +1,2 @@
+"""FLIR tests package"""
+
