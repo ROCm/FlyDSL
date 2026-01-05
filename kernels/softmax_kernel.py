@@ -1,20 +1,18 @@
 """Softmax kernel builder used by tests.
 
 This file intentionally keeps the kernel builder logic identical to the version
-previously embedded in `tests/kernels/test_softmax.py` to preserve codegen and
+previously embedded in `tests/python/gpu/test_softmax.py` to preserve codegen and
 performance. Only test-only helpers/imports are removed.
 """
 
 import os
 
+from flydsl.compiler.context import RAIIMLIRContextModule
 from flydsl.dialects.ext import flir
-from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
-from flydsl.runtime.device import get_rocm_arch
+from flydsl.runtime.hip_util import get_hip_arch
 from flydsl.utils import SmemAllocator
 from _mlir import ir
-from _mlir.ir import InsertionPoint
-from _mlir.dialects import scf as scf_mlir
 import _mlir.extras.types as T
 
 
@@ -24,6 +22,8 @@ KERNEL_NAME = "softmax_kernel"
 def unwrap(v):
     if hasattr(v, "value"):
         return v.value
+    if hasattr(v, "_value"):
+        return v._value
     if hasattr(v, "result"):
         return v.result
     return v
@@ -33,7 +33,7 @@ def next_power_of_2(x):
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
 
-# Expose modules through Flir interface (keep behavior/perf, avoid mlir.* imports).
+# Expose modules through Rocir interface (keep behavior/perf, avoid mlir.* imports).
 gpu = flir.gpu_ext          # extended wrapper (has set_container_module, etc.)
 scf = flir.scf_ext          # extended wrapper (yield_ helper, etc.)
 arith = flir.arith_ext      # extended wrapper (arith.constant(...), ArithValue, etc.)
@@ -44,7 +44,26 @@ llvm = flir.llvm            # raw dialect module
 
 
 def build_softmax_module(M, N, dtype_str="f32"):
-    gpu_arch = get_rocm_arch()
+    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+    gpu.set_container_module(ctx.module)
+    gpu_arch = get_hip_arch()
+
+    # Types
+    if dtype_str == "f32":
+        elem_type = T.f32()
+    elif dtype_str == "f16":
+        elem_type = T.f16()
+    elif dtype_str == "bf16":
+        elem_type = ir.BF16Type.get()
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+    # For bf16, avoid repeated bf16<->f32 "unpack/align" sequences in ISA by doing all
+    # math in f32 and only converting at load/store boundaries.
+    compute_type = T.f32() if dtype_str == "bf16" else elem_type
+
+    f32 = T.f32()  # still used for comparisons in tests
+    idx = T.index()
 
     # Kernel Config
     # Adaptive Block Size
@@ -63,57 +82,34 @@ def build_softmax_module(M, N, dtype_str="f32"):
     # For f16/bf16 and VEC_WIDTH=8 -> 16B; for f32 -> 32B. Use 16B universally.
     VEC_ALIGN = 16
 
-    # Optional: use LLVM AMDGPU bf16 pack intrinsic (requires LLVM support).
-    # - 0 (default): use manual bf16 pack (works on current toolchain)
-    # - 1: use llvm.amdgcn.cvt.pk.bf16.f32 (after you add the intrinsic to your LLVM build)
-    # - NOTE: gfx942 does not support `v_cvt_pk_bf16_f32` (llvm-mc will report instruction not supported).
-    USE_BF16_PACK_INTR = (os.environ.get("FLIR_BF16_PACK_INTR", "0") == "1") and (gpu_arch != "gfx942")
+    # Arch-dependent BF16 pack:
+    # - gfx950 (and gfx95x): hardware supports v_cvt_pk_bf16_f32, so no manual pack needed.
+    # - gfx942: does not support v_cvt_pk_bf16_f32; keep manual pack.
+    USE_HW_CVT_PK_BF16_F32 = (gpu_arch == "gfx950") or gpu_arch.startswith("gfx95")
 
     # NOTE: Remaining bf16 "unpack/align" ops (e.g. 0xffff0000) mainly come from
     # unpacking packed bf16 values in 16B global vector loads. In this pipeline, scalarizing the loads tends to be re-vectorized back to the same pattern.
     BF16_SCALARIZE_VEC_LOAD = False
 
     # Allocator for Shared Memory (Warp Reductions)
-    allocator = SmemAllocator(None, arch=gpu_arch)
+    allocator = SmemAllocator(ctx, arch=gpu_arch)
     # Reduction scratch: one slot per wave (lane0 writes partials) + reuse slot 0 for broadcast.
     WARP_SIZE = 64
     RED_SLOTS = max(1, (BLOCK_SIZE + WARP_SIZE - 1) // WARP_SIZE)
-    _state = {}
+    smem_red = allocator.allocate_array(compute_type, RED_SLOTS)
 
-    class _Softmax(flir.MlirModule):
-        GPU_MODULE_NAME = f"softmax_{dtype_str}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+    @gpu.module(f"softmax_{dtype_str}", [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">'])
+    def gpu_mod():
+        allocator.finalize()
 
-        def init_gpu_module(self):
-            # Materialize types under the active MLIR Context.
-            if dtype_str == "f32":
-                elem_type = T.f32()
-            elif dtype_str == "f16":
-                elem_type = T.f16()
-            elif dtype_str == "bf16":
-                elem_type = ir.BF16Type.get()
-            else:
-                raise ValueError(f"Unsupported dtype: {dtype_str}")
-
-            compute_type = T.f32() if dtype_str == "bf16" else elem_type
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
-            _state["smem_red"] = allocator.allocate_array(compute_type, RED_SLOTS)
-            allocator.finalize()
-
-        @flir.kernel
-        def softmax_kernel(
-            self,
-            A: lambda: T.memref(M, N, _state["elem_type"]),
-            C: lambda: T.memref(M, N, _state["elem_type"]),
-        ):
+        @gpu.func(emit=True)
+        def softmax_kernel(A: T.memref(M, N, elem_type), C: T.memref(M, N, elem_type)):
             row = flir.block_idx("x")
             tid = flir.thread_idx("x")
-            elem_type = _state["elem_type"]
-            compute_type = _state["compute_type"]
 
             base_ptr = allocator.get_base()
-            s_red = _state["smem_red"](base_ptr).get()
+            s_red = smem_red(base_ptr).get()
+            # Rocir-style: tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_SIZE * VEC_WIDTH  # python int
             tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
@@ -179,7 +175,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             thread_offset_base = flir.arith.MulIOp(unwrap(tid), flir.const_index(VEC_WIDTH)).result
 
             # Loop range(0, N, step)
-            for base_idx_int in range_constexpr(0, N, step):
+            for base_idx_int in range(0, N, step):
                 # Current global index base for this thread
                 # global_idx = base_idx_int + thread_offset_base
                 c_base = flir.const_index(base_idx_int)
@@ -191,7 +187,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                 is_safe_vector = (base_idx_int + (BLOCK_SIZE - 1) * VEC_WIDTH + VEC_WIDTH) <= N
 
                 if is_safe_vector:
-                    # Flir tiled copy: global -> rmem fragment, then load vector from fragment.
+                    # Rocir tiled copy: global -> rmem fragment, then load vector from fragment.
                     tile_i = base_idx_int // tile_cols  # python int
                     blkA = gA[(unwrap(row), tile_i)]
                     thrA = thr_copy_A.partition_S(blkA)
@@ -214,26 +210,25 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                 else:
                     # Scalar tail handling with validity mask
-                    for k in range_constexpr(VEC_WIDTH):
+                    for k in range(VEC_WIDTH):
                         c_k = flir.const_index(k)
                         idx_k = flir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
 
                         c_N = flir.const_index(N)
-                        is_valid = flir.arith.CmpIOp(
-                            flir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)
-                        ).result
+                        is_valid = flir.arith.CmpIOp(flir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
 
-                        # Use Python `if` and rely on control-flow lowering to emit scf.if
-                        # (with results) so `val` dominates later uses.
-                        if is_valid:
+                        if_load = flir.scf_ext.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
+                        with ir.InsertionPoint(if_load.then_block):
                             val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
                             if dtype_str == "bf16":
-                                val = flir.arith.extf(compute_type, unwrap(val_e)).result
+                                val_c = flir.arith.extf(compute_type, unwrap(val_e))
+                                flir.scf_ext.yield_([unwrap(val_c)])
                             else:
-                                val = unwrap(val_e)
-                        else:
-                            val = unwrap(c_neg_inf)
-                        row_buffer.append((val, is_valid))
+                                flir.scf_ext.yield_([unwrap(val_e)])
+                        with ir.InsertionPoint(if_load.else_block):
+                            flir.scf_ext.yield_([unwrap(c_neg_inf)])
+
+                        row_buffer.append((if_load.results[0], is_valid))
 
             # 2. Local Max
             thread_max = unwrap(c_neg_inf)
@@ -248,8 +243,9 @@ def build_softmax_module(M, N, dtype_str="f32"):
             for item in row_buffer:
                 if isinstance(item, tuple):  # Scalar with validity mask
                     val, valid = item
-                    # `val` is already -inf when invalid (see the scalar tail load above).
-                    thread_max = flir.arith.MaximumFOp(unwrap(thread_max), unwrap(val)).result
+                    # Select: if valid, val, else -inf
+                    safe_val = flir.arith.SelectOp(unwrap(valid), unwrap(val), unwrap(c_neg_inf)).result
+                    thread_max = flir.arith.MaximumFOp(unwrap(thread_max), unwrap(safe_val)).result
                 else:  # Vector
                     vec_val = item
                     red = reduce_vec_max(vec_val)
@@ -310,7 +306,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             buf_idx = 0
             thread_offset_base = flir.arith.MulIOp(unwrap(tid), flir.const_index(VEC_WIDTH)).result
 
-            for base_idx_int in range_constexpr(0, N, step):
+            for base_idx_int in range(0, N, step):
                 c_base = flir.const_index(base_idx_int)
                 curr_idx = flir.arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
@@ -328,40 +324,11 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     norm_vec = flir.arith.MulFOp(vec_exp, inv_sum_splat_vec, fastmath=fm_fast).result
 
                     if dtype_str == "bf16":
-                        if USE_BF16_PACK_INTR:
-                            # === BF16 fast-pack store path (LLVM AMDGPU intrinsic) ===
-                            # After patching/rebuilding LLVM, this should exist and lower to native pack on gfx9+: llvm.amdgcn.cvt.pk.bf16.f32(float lo, float hi) -> <2 x bf16>
+                        if USE_HW_CVT_PK_BF16_F32:
+                            # gfx95x: rely on f32->bf16 vector truncation lowering, which should
+                            # map to hardware v_cvt_pk_bf16_f32 on these targets.
                             vec_type_bf16 = ir.VectorType.get([VEC_WIDTH], elem_type)
-                            bf16_zero = arith.constant(0.0, type=elem_type).value
-                            out_bf16 = vector.splat(vec_type_bf16, unwrap(bf16_zero))
-
-                            pair_ty = ir.VectorType.get([2], elem_type)
-                            intr = "llvm.amdgcn.cvt.pk.bf16.f32"
-
-                            for pj in range_constexpr(VEC_WIDTH // 2):
-                                f0 = vector.extract(norm_vec, static_position=[2 * pj], dynamic_position=[])
-                                f1 = vector.extract(norm_vec, static_position=[2 * pj + 1], dynamic_position=[])
-                                pair = llvm.call_intrinsic(
-                                    pair_ty,
-                                    intr,
-                                    [unwrap(f0), unwrap(f1)],
-                                    [],
-                                    [],
-                                )
-                                b0 = vector.extract(pair, static_position=[0], dynamic_position=[])
-                                b1 = vector.extract(pair, static_position=[1], dynamic_position=[])
-                                out_bf16 = vector.insert(
-                                    unwrap(b0),
-                                    unwrap(out_bf16),
-                                    dynamic_position=[],
-                                    static_position=[2 * pj],
-                                )
-                                out_bf16 = vector.insert(
-                                    unwrap(b1),
-                                    unwrap(out_bf16),
-                                    dynamic_position=[],
-                                    static_position=[2 * pj + 1],
-                                )
+                            out_bf16 = flir.arith.truncf(vec_type_bf16, unwrap(norm_vec))
                         else:
                             # === BF16 fast-pack store path (manual pack, toolchain-safe) ===
                             vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
@@ -422,13 +389,14 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         )
 
                 else:
-                    for k in range_constexpr(VEC_WIDTH):
+                    for k in range(VEC_WIDTH):
                         item = row_buffer[buf_idx]
                         buf_idx += 1
                         val_exp, valid = item
 
                         # If valid, store
-                        if valid:
+                        if_store = flir.scf_ext.IfOp(unwrap(valid))
+                        with ir.InsertionPoint(if_store.then_block):
                             norm_val = flir.arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
                             if dtype_str == "bf16":
                                 norm_val = flir.arith.truncf(elem_type, unwrap(norm_val))
@@ -436,23 +404,8 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             c_k = flir.const_index(k)
                             idx_k = flir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                             tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
+                            flir.scf_ext.yield_([])
 
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            A: lambda: T.memref(M, N, _state["elem_type"]),
-            C: lambda: T.memref(M, N, _state["elem_type"]),
-        ):
-            c1 = arith.index(1).value
-            gx = arith.index(M).value
-            bx = arith.index(BLOCK_SIZE).value
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, "softmax_kernel"],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[A, C],
-            )
-
-    return _Softmax()
+    return ctx
 
 

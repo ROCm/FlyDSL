@@ -1,12 +1,35 @@
 #!/bin/bash
 set -e
 
-# Default to downloading llvm-project in the parent directory of flir
-BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LLVM_SRC_DIR="$BASE_DIR/llvm-project"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
+# Build LLVM/MLIR for FlyDSL.
+#
+# This repo historically supported two layouts:
+# - llvm-project under the repo root:        FlyDSL/llvm-project
+# - llvm-project under the repo parent:      FlyDSL/../llvm-project   (common on shared machines)
+#
+# We auto-detect existing checkouts and default to the parent layout for
+# backwards-compatibility (flir/build.sh supports both).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LLVM_SRC_DIR_IN_REPO="${REPO_ROOT}/llvm-project"
+LLVM_SRC_DIR_IN_PARENT="${REPO_ROOT}/../llvm-project"
 
-echo "Base directory: $BASE_DIR"
+# Allow explicit override.
+if [ -n "${LLVM_SRC_DIR:-}" ]; then
+    LLVM_SRC_DIR="${LLVM_SRC_DIR}"
+elif [ -d "${LLVM_SRC_DIR_IN_REPO}" ]; then
+    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_REPO}"
+elif [ -d "${LLVM_SRC_DIR_IN_PARENT}" ]; then
+    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_PARENT}"
+else
+    # Backward compatible default: create under the repo parent directory.
+    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_PARENT}"
+fi
+
+# Build directory (override-able).
+LLVM_BUILD_DIR_DEFAULT="${LLVM_SRC_DIR}/buildmlir"
+LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-${LLVM_BUILD_DIR_DEFAULT}}"
+
+echo "Repo root:      $REPO_ROOT"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 

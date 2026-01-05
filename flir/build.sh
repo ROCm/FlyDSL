@@ -4,6 +4,10 @@ set -ex
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Default MLIR build locations (compatible with build_llvm.sh layouts).
+DEFAULT_MLIR_PATH_IN_REPO="${REPO_ROOT}/llvm-project/buildmlir"
+DEFAULT_MLIR_PATH_IN_PARENT="${REPO_ROOT}/../llvm-project/buildmlir"
+
 # Keep all generated artifacts under one directory by default.
 # - You can override with:
 #   FLIR_OUT_DIR=.flir          (relative to repo root) or an absolute path
@@ -21,14 +25,60 @@ fi
 
 # Set up environment
 if [ -z "$MLIR_PATH" ]; then
-    # Default path based on build_llvm.sh
-    DEFAULT_MLIR_PATH="${REPO_ROOT}/llvm-project/buildmlir"
-    if [ -d "$DEFAULT_MLIR_PATH" ]; then
-        echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH"
-        export MLIR_PATH="$DEFAULT_MLIR_PATH"
+    # Default path based on build_llvm.sh (which may build llvm-project either under
+    # the repo root or under the repo parent directory).
+    if [ -d "$DEFAULT_MLIR_PATH_IN_REPO" ]; then
+        echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH_IN_REPO"
+        export MLIR_PATH="$DEFAULT_MLIR_PATH_IN_REPO"
+    elif [ -d "$DEFAULT_MLIR_PATH_IN_PARENT" ]; then
+        echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH_IN_PARENT"
+        export MLIR_PATH="$DEFAULT_MLIR_PATH_IN_PARENT"
     else
-        echo "Error: MLIR_PATH not set and default location ($DEFAULT_MLIR_PATH) not found."
+        echo "Error: MLIR_PATH not set and default locations not found:"
+        echo "  - ${DEFAULT_MLIR_PATH_IN_REPO}"
+        echo "  - ${DEFAULT_MLIR_PATH_IN_PARENT}"
         echo "Please run ./build_llvm.sh from the repo root first, or set MLIR_PATH."
+        exit 1
+    fi
+fi
+
+# -----------------------------------------------------------------------------
+# Sanity checks for MLIR CMake package consistency.
+# -----------------------------------------------------------------------------
+MLIR_CMAKE_DIR="${MLIR_PATH}/lib/cmake/mlir"
+if [ ! -d "${MLIR_CMAKE_DIR}" ]; then
+    echo "Error: MLIR CMake package dir not found: ${MLIR_CMAKE_DIR}"
+    echo "  MLIR_PATH='${MLIR_PATH}'"
+    echo "Please set MLIR_PATH to a valid MLIR build/install prefix."
+    exit 1
+fi
+
+MLIR_TARGETS_CMAKE="${MLIR_CMAKE_DIR}/MLIRTargets.cmake"
+if [ -f "${MLIR_TARGETS_CMAKE}" ]; then
+    # If MLIRTargets.cmake references PybindUtils.h but the file is missing, the MLIR
+    # build directory and source checkout are out-of-sync. Flir embeds upstream MLIR
+    # Python sources which (in current versions) use nanobind, so we need a consistent
+    # MLIR build.
+    if grep -q "PybindUtils.h" "${MLIR_TARGETS_CMAKE}" && [ ! -f "${MLIR_PATH}/../mlir/lib/Bindings/Python/PybindUtils.h" ] && [ ! -f "${MLIR_PATH}/../../mlir/lib/Bindings/Python/PybindUtils.h" ]; then
+        # Suggest a known-good MLIR build location if one exists.
+        _suggest_mlir_path="${DEFAULT_MLIR_PATH_IN_REPO}"
+        if [ -d "${DEFAULT_MLIR_PATH_IN_REPO}" ]; then
+          _suggest_mlir_path="${DEFAULT_MLIR_PATH_IN_REPO}"
+        elif [ -d "${DEFAULT_MLIR_PATH_IN_PARENT}" ]; then
+          _suggest_mlir_path="${DEFAULT_MLIR_PATH_IN_PARENT}"
+        else
+          _suggest_mlir_path="${DEFAULT_MLIR_PATH_IN_REPO}"
+        fi
+
+        echo "Error: Detected an inconsistent MLIR build:"
+        echo "  - ${MLIR_TARGETS_CMAKE} references 'PybindUtils.h'"
+        echo "  - but 'PybindUtils.h' is missing in the corresponding llvm-project checkout"
+        echo ""
+        echo "This typically happens if llvm-project source was updated without a clean rebuild."
+        echo "Recommended fix for this repo:"
+        echo "  cd '${REPO_ROOT}' && ./build_llvm.sh"
+        echo "Then rebuild flir with:"
+        echo "  MLIR_PATH='${_suggest_mlir_path}' ./flir/build.sh"
         exit 1
     fi
 fi
@@ -39,7 +89,7 @@ fi
 # Build C++ components
 mkdir -p "${BUILD_DIR}" && cd "${BUILD_DIR}"
 cmake "${SCRIPT_DIR}" \
-    -DMLIR_DIR="$MLIR_PATH/lib/cmake/mlir" \
+    -DMLIR_DIR="${MLIR_CMAKE_DIR}" \
     -DBUILD_PYTHON_BINDINGS=ON \
     -DBUILD_RUNTIME=OFF
 
