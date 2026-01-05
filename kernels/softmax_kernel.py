@@ -1,7 +1,7 @@
 """Softmax kernel builder used by tests.
 
 This file intentionally keeps the kernel builder logic identical to the version
-previously embedded in `tests/python/gpu/test_softmax.py` to preserve codegen and
+previously embedded in `tests/kernels/test_softmax.py` to preserve codegen and
 performance. Only test-only helpers/imports are removed.
 """
 

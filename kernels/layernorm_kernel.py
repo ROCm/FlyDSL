@@ -1,7 +1,7 @@
 """LayerNorm kernel builder used by tests.
 
 This file intentionally keeps the kernel builder logic identical to the version
-embedded in `tests/python/gpu/test_layernorm.py` (before factoring) to preserve
+embedded in `tests/kernels/test_layernorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 

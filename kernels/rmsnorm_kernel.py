@@ -1,11 +1,10 @@
 """RMSNorm kernel builder used by tests.
 
 This file intentionally keeps the kernel builder logic identical to the version
-embedded in `tests/python/gpu/test_rmsnorm.py` (before factoring) to preserve
+embedded in `tests/kernels/test_rmsnorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
-from flydsl.compiler.context import RAIIMLIRContextModule
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
@@ -108,7 +107,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             base_ptr = allocator.get_base()
             s_red = _state["smem_red"](base_ptr).get()
             s_row = _state["smem_row"](base_ptr).get()
-            # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
+            # FLir-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
             tensor_In = flir.make_tensor(Input, shape=(M, N), strides=(N, 1))

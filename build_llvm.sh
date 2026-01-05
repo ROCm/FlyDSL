@@ -2,13 +2,6 @@
 set -e
 
 # Build LLVM/MLIR for FlyDSL.
-#
-# This repo historically supported two layouts:
-# - llvm-project under the repo root:        FlyDSL/llvm-project
-# - llvm-project under the repo parent:      FlyDSL/../llvm-project   (common on shared machines)
-#
-# We auto-detect existing checkouts and default to the parent layout for
-# backwards-compatibility (flir/build.sh supports both).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLVM_SRC_DIR_IN_REPO="${REPO_ROOT}/llvm-project"
 LLVM_SRC_DIR_IN_PARENT="${REPO_ROOT}/../llvm-project"
