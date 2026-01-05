@@ -28,3 +28,6 @@ flydsl/src/*.egg-info/
 
 # Wheels / packaging outputs
 dist/
+
+# Local analysis artifacts (not part of source)
+layernorm_09_assembly.s
