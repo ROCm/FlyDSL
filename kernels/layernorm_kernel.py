@@ -41,7 +41,7 @@ def dtype_to_elem_type(dtype_str: str):
     raise ValueError(f"unsupported dtype: {dtype_str}")
 
 
-# Expose modules through Rocir interface (keep behavior/perf, avoid mlir.* imports).
+# Expose modules through Flir interface (keep behavior/perf, avoid mlir.* imports).
 gpu = flir.gpu_ext
 scf = flir.scf_ext
 # Keep arith as the raw dialect module here (this file uses arith.constant(Type, value) form).

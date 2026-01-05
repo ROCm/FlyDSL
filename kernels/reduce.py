@@ -36,7 +36,7 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, flir, s_red_
         # AMD wavefront size is 64 on gfx9+/gfx10+/gfx11.
         WARP_SIZE = 64
         NUM_WAVES = (BLOCK_SIZE + WARP_SIZE - 1) // WARP_SIZE  # python int
-        # Use Rocir layout algebra to compute LDS indices for the reduction scratch.
+        # Use Flir layout algebra to compute LDS indices for the reduction scratch.
         c_num_waves = flir.const_index(NUM_WAVES)
         c1 = flir.const_index(1)
         shape_red = flir.make_shape(unwrap(c_num_waves))
@@ -156,7 +156,7 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
         lane_i32 = arith_ops.RemUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
         wave_i32 = arith_ops.DivUIOp(unwrap(tid_i32), unwrap(c_warp_i32)).result
         width_i32 = arith.constant(T.i32(), WARP_SIZE)
-        # Use Rocir layout algebra to compute LDS indices for the reduction scratch.
+        # Use Flir layout algebra to compute LDS indices for the reduction scratch.
         c_num_waves = flir.const_index(RED_SLOTS)
         c1 = flir.const_index(1)
         shape_red = flir.make_shape(unwrap(c_num_waves))

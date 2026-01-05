@@ -33,7 +33,7 @@ def next_power_of_2(x):
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
 
-# Expose modules through Rocir interface (keep behavior/perf, avoid mlir.* imports).
+# Expose modules through Flir interface (keep behavior/perf, avoid mlir.* imports).
 gpu = flir.gpu_ext          # extended wrapper (has set_container_module, etc.)
 scf = flir.scf_ext          # extended wrapper (yield_ helper, etc.)
 arith = flir.arith_ext      # extended wrapper (arith.constant(...), ArithValue, etc.)
@@ -187,7 +187,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                 is_safe_vector = (base_idx_int + (BLOCK_SIZE - 1) * VEC_WIDTH + VEC_WIDTH) <= N
 
                 if is_safe_vector:
-                    # Rocir tiled copy: global -> rmem fragment, then load vector from fragment.
+                    # Flir tiled copy: global -> rmem fragment, then load vector from fragment.
                     tile_i = base_idx_int // tile_cols  # python int
                     blkA = gA[(unwrap(row), tile_i)]
                     thrA = thr_copy_A.partition_S(blkA)
