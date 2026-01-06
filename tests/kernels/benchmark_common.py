@@ -80,7 +80,7 @@ def maybe_enable_aiter() -> bool:
     """Best-effort make `import aiter` work.
 
     - If already importable: returns True.
-    - Else: try inserting AITER_REPO (default: /home/xzhu/aiter) into sys.path.
+    - Else: try inserting AITER_REPO into sys.path.
     """
     try:
         import aiter  # noqa: F401
@@ -88,7 +88,8 @@ def maybe_enable_aiter() -> bool:
     except Exception:
         pass
 
-    aiter_repo = os.environ.get("AITER_REPO", "/home/xzhu/aiter")
+    # Do not assume any absolute default path; only enable via explicit env var.
+    aiter_repo = os.environ.get("AITER_REPO", "").strip()
     if aiter_repo and os.path.isdir(aiter_repo):
         sys.path.insert(0, aiter_repo)
         try:
