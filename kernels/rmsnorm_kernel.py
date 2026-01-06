@@ -208,7 +208,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # Pass2: normalize + gamma + store
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-            rrms_splat = vector.splat(vec_type_c, unwrap(rrms))
+            rrms_splat = vector.broadcast(vec_type_c, unwrap(rrms))
 
             # Software pipeline for aligned tiles: prefetch Gamma
             g_pref_e = None

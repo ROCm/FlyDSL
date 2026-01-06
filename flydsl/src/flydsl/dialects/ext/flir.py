@@ -2902,7 +2902,7 @@ def printf(format_str: str, *args, loc: Optional[Location] = None, ip: Optional[
     unwrapped_args = [_unwrap_value(arg) for arg in args]
     
     with ip or InsertionPoint.current:
-        return _gpu.printf(format=format_str, args=unwrapped_args, loc=loc, ip=ip)
+        return _gpu.printf(format_str, *unwrapped_args, loc=loc, ip=ip)
 
 
 __all__ = [

@@ -155,9 +155,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 c7fff_i32 = arith.constant(T.i32(), 0x7FFF).value
                 c1_i32 = arith.constant(T.i32(), 1).value
 
-                c16_i32_v = vector.splat(vec_i32_ty, unwrap(c16_i32))
-                c7fff_i32_v = vector.splat(vec_i32_ty, unwrap(c7fff_i32))
-                c1_i32_v = vector.splat(vec_i32_ty, unwrap(c1_i32))
+                c16_i32_v = vector.broadcast(vec_i32_ty, unwrap(c16_i32))
+                c7fff_i32_v = vector.broadcast(vec_i32_ty, unwrap(c7fff_i32))
+                c1_i32_v = vector.broadcast(vec_i32_ty, unwrap(c1_i32))
 
                 u = mlir_arith.bitcast(vec_i32_ty, unwrap(vec_f32))
                 hi = mlir_arith.ShRUIOp(unwrap(u), unwrap(c16_i32_v)).result
@@ -168,7 +168,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                 odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                odd_sh = mlir_arith.ShLIOp(unwrap(odd), unwrap(vector.splat(vec4_i32_ty, unwrap(c16_i32)))).result
+                odd_sh = mlir_arith.ShLIOp(unwrap(odd), unwrap(vector.broadcast(vec4_i32_ty, unwrap(c16_i32)))).result
                 packed = mlir_arith.OrIOp(unwrap(even), unwrap(odd_sh)).result
                 return vector.bitcast(vec_bf16_ty, unwrap(packed))
 
@@ -279,8 +279,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             # Pass2: normalize + affine + store (vectorized)
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-            mean_splat = vector.splat(vec_type_c, unwrap(mean))
-            rstd_splat = vector.splat(vec_type_c, unwrap(rstd))
+            mean_splat = vector.broadcast(vec_type_c, unwrap(mean))
+            rstd_splat = vector.broadcast(vec_type_c, unwrap(rstd))
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
