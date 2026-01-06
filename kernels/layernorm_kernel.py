@@ -97,7 +97,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             base_ptr = allocator.get_base()
             s_sum = _state["smem_red_sum"](base_ptr).get()
             s_sumsq = _state["smem_red_sumsq"](base_ptr).get()
-            # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
+            # FLIR-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
             tensor_In = flir.make_tensor(Input, shape=(M, N), strides=(N, 1))
