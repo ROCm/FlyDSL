@@ -388,16 +388,14 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         val_exp, valid = item
 
                         # If valid, store
-                        with scf.if_(valid) as then_blk:
-                            with ir.InsertionPoint(then_blk):
-                                norm_val = flir.arith.MulFOp(val_exp, inv_sum, fastmath=fm_fast).result
-                                if dtype_str == "bf16":
-                                    norm_val = flir.arith.truncf(elem_type, norm_val)
+                        if valid:
+                            norm_val = flir.arith.MulFOp(val_exp, inv_sum, fastmath=fm_fast).result
+                            if dtype_str == "bf16":
+                                norm_val = flir.arith.truncf(elem_type, norm_val)
 
-                                c_k = flir.const_index(k)
-                                idx_k = flir.arith.AddIOp(curr_idx, c_k).result
-                                tensor_C[(row, idx_k)] = norm_val
-                                scf.yield_([])
+                            c_k = flir.const_index(k)
+                            idx_k = flir.arith.AddIOp(curr_idx, c_k).result
+                            tensor_C[(row, idx_k)] = norm_val
 
         @flir.jit
         def __call__(
