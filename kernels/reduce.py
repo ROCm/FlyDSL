@@ -5,6 +5,8 @@ softmax/layernorm/rmsnorm kernels to de-duplicate code without changing codegen.
 """
 from __future__ import annotations
 
+from flydsl.dialects.ext.python_control_flow import lower_range_for_loops
+
 
 def unwrap(v):
     if hasattr(v, "value"):
@@ -66,11 +68,10 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, flir, s_red_
             unwrap(lane_i32),
             unwrap(arith.constant(0, type=T.i32()).value),
         ).result
-        with flir.scf_ext.if_(is_lane0) as then_blk:
-            with ir.InsertionPoint(then_blk):
-                wave_idx = flir.arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
-                red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
-                s_red_tv[unwrap(red_idx)] = unwrap(w)
+        if is_lane0:
+            wave_idx = flir.arith.IndexCastOp(T.index(), unwrap(wave_i32)).result
+            red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
+            s_red_tv[unwrap(red_idx)] = unwrap(w)
         gpu.barrier()
 
         # wave0 reduces NUM_WAVES partials (still using shuffle)
@@ -79,7 +80,7 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, flir, s_red_
             unwrap(wave_i32),
             unwrap(arith.constant(0, type=T.i32()).value),
         ).result
-        with flir.scf_ext.if_(is_wave0) as then_blk:
+        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
             with ir.InsertionPoint(then_blk):
                 in_range = flir.arith.CmpIOp(
                     flir.arith.CmpIPredicate.ult,
@@ -110,16 +111,21 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, flir, s_red_
                     unwrap(lane_i32),
                     unwrap(arith.constant(0, type=T.i32()).value),
                 ).result
-                with flir.scf_ext.if_(is_lane0_2) as then2:
-                    with ir.InsertionPoint(then2):
-                        red_idx0 = flir.crd2idx(flir.make_coord(unwrap(c_zero_idx)), layout_red)
-                        s_red_tv[unwrap(red_idx0)] = unwrap(ww)
+                if is_lane0_2:
+                    red_idx0 = flir.crd2idx(flir.make_coord(unwrap(c_zero_idx)), layout_red)
+                    s_red_tv[unwrap(red_idx0)] = unwrap(ww)
+                flir.scf_ext.yield_([])
+            with ir.InsertionPoint(else_blk):
+                flir.scf_ext.yield_([])
         gpu.barrier()
 
         red_idx0 = flir.crd2idx(flir.make_coord(unwrap(c_zero_idx)), layout_red)
         return s_red_tv[unwrap(red_idx0)]
 
-    return block_reduce
+    try:
+        return lower_range_for_loops(block_reduce)
+    except Exception:
+        return block_reduce
 
 
 def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, arith_ops, flir, T, ir, zero_idx, scratch_tv_shape_stride=(None, None)):
@@ -165,11 +171,10 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
             unwrap(lane_i32),
             unwrap(arith.constant(T.i32(), 0)),
         ).result
-        with flir.scf_ext.if_(is_lane0) as then_blk:
-            with ir.InsertionPoint(then_blk):
-                wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
-                red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
-                scratch_tv[unwrap(red_idx)] = unwrap(w)
+        if is_lane0:
+            wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
+            red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
+            scratch_tv[unwrap(red_idx)] = unwrap(w)
         gpu.barrier()
 
         NUM_WAVES = RED_SLOTS
@@ -179,7 +184,7 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
             unwrap(arith.constant(T.i32(), 0)),
         ).result
         # Only wave0 does final reduction and writes scratch[0].
-        with flir.scf_ext.if_(is_wave0) as then_blk:
+        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
             with ir.InsertionPoint(then_blk):
                 in_range = arith_ops.CmpIOp(
                     arith_ops.CmpIPredicate.ult,
@@ -205,16 +210,21 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
                     unwrap(lane_i32),
                     unwrap(arith.constant(T.i32(), 0)),
                 ).result
-                with flir.scf_ext.if_(is_lane0_2) as then2:
-                    with ir.InsertionPoint(then2):
-                        red_idx0 = flir.crd2idx(flir.make_coord(unwrap(zero_idx)), layout_red)
-                        scratch_tv[unwrap(red_idx0)] = unwrap(ww)
+                if is_lane0_2:
+                    red_idx0 = flir.crd2idx(flir.make_coord(unwrap(zero_idx)), layout_red)
+                    scratch_tv[unwrap(red_idx0)] = unwrap(ww)
+                flir.scf_ext.yield_([])
+            with ir.InsertionPoint(else_blk):
+                flir.scf_ext.yield_([])
 
         gpu.barrier()
         red_idx0 = flir.crd2idx(flir.make_coord(unwrap(zero_idx)), layout_red)
         return scratch_tv[unwrap(red_idx0)]
 
-    return block_reduce_add
+    try:
+        return lower_range_for_loops(block_reduce_add)
+    except Exception:
+        return block_reduce_add
 
 
 def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, arith_ops, flir, T, ir, zero_idx):
@@ -264,12 +274,11 @@ def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ar
             unwrap(lane_i32),
             unwrap(arith.constant(T.i32(), 0)),
         ).result
-        with flir.scf_ext.if_(is_lane0) as then_blk:
-            with ir.InsertionPoint(then_blk):
-                wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
-                red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
-                scratch0_tv[unwrap(red_idx)] = unwrap(w0)
-                scratch1_tv[unwrap(red_idx)] = unwrap(w1)
+        if is_lane0:
+            wave_idx = arith_ops.IndexCastOp(T.index(), unwrap(wave_i32)).result
+            red_idx = flir.crd2idx(flir.make_coord(unwrap(wave_idx)), layout_red)
+            scratch0_tv[unwrap(red_idx)] = unwrap(w0)
+            scratch1_tv[unwrap(red_idx)] = unwrap(w1)
         gpu.barrier()
 
         # wave0 loads NUM_WAVES partials for both, reduces each with shuffle, writes scratch[0].
@@ -278,7 +287,7 @@ def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ar
             unwrap(wave_i32),
             unwrap(arith.constant(T.i32(), 0)),
         ).result
-        with flir.scf_ext.if_(is_wave0) as then_blk:
+        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
             with ir.InsertionPoint(then_blk):
                 in_range = arith_ops.CmpIOp(
                     arith_ops.CmpIPredicate.ult,
@@ -296,22 +305,27 @@ def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ar
                 ww0 = flir.arith.SelectOp(unwrap(in_range), unwrap(v0), unwrap(z)).result
                 ww1 = flir.arith.SelectOp(unwrap(in_range), unwrap(v1), unwrap(z)).result
 
-            ww0 = _wave_reduce_add(ww0)
-            ww1 = _wave_reduce_add(ww1)
+                ww0 = _wave_reduce_add(ww0)
+                ww1 = _wave_reduce_add(ww1)
 
-            is_lane0_2 = arith_ops.CmpIOp(
-                arith_ops.CmpIPredicate.eq,
-                unwrap(lane_i32),
-                unwrap(arith.constant(T.i32(), 0)),
-            ).result
-            with flir.scf_ext.if_(is_lane0_2) as then2:
-                with ir.InsertionPoint(then2):
+                is_lane0_2 = arith_ops.CmpIOp(
+                    arith_ops.CmpIPredicate.eq,
+                    unwrap(lane_i32),
+                    unwrap(arith.constant(T.i32(), 0)),
+                ).result
+                if is_lane0_2:
                     red_idx0 = flir.crd2idx(flir.make_coord(unwrap(zero_idx)), layout_red)
                     scratch0_tv[unwrap(red_idx0)] = unwrap(ww0)
                     scratch1_tv[unwrap(red_idx0)] = unwrap(ww1)
+                flir.scf_ext.yield_([])
+            with ir.InsertionPoint(else_blk):
+                flir.scf_ext.yield_([])
 
         gpu.barrier()
         red_idx0 = flir.crd2idx(flir.make_coord(unwrap(zero_idx)), layout_red)
         return scratch0_tv[unwrap(red_idx0)], scratch1_tv[unwrap(red_idx0)]
 
-    return block_reduce_add2
+    try:
+        return lower_range_for_loops(block_reduce_add2)
+    except Exception:
+        return block_reduce_add2
