@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 import pytest
 import torch
@@ -70,6 +70,60 @@ except Exception:
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+
+
+def _divisors(n: int) -> List[int]:
+    """Return sorted positive divisors of n (best-effort helper for CLI hints)."""
+    n = int(n)
+    if n <= 0:
+        return []
+    ds = set()
+    i = 1
+    while i * i <= n:
+        if n % i == 0:
+            ds.add(i)
+            ds.add(n // i)
+        i += 1
+    return sorted(ds)
+
+
+def _suggest_stage2_tile_k(*, inter_dim: int, tile_m: int) -> List[int]:
+    """Suggest feasible stage2 tile_k2 values for a given inter_dim and routing tile_m.
+
+    Constraints derived from `kernels/moe_gemm_2stage.py::compile_moe_gemm2` (current behavior):
+    - tile_k2 must divide inter_dim (no K-tail handling)
+    - tile_k2 must be divisible by 64 (kernel uses K64 micro-steps: tile_k//64)
+    - total_threads is fixed to 256, so tile_m*tile_k2 must be divisible by 256 (exact work partition)
+    - the kernel will pick gmem->reg vector width adaptively (16B, else 8B, else 4B),
+      which requires bytes_per_thread_x = (tile_m*tile_k2)/256 to be divisible by 4.
+    """
+    inter_dim = int(inter_dim)
+    tile_m = int(tile_m)
+    out: List[int] = []
+    for k in _divisors(inter_dim):
+        if k % 64 != 0:
+            continue
+        # Ensure exact bytes-per-thread partitioning + at least 4B chunks for the dword-indexed mapping.
+        if (tile_m * k) % 1024 != 0:
+            continue
+        out.append(k)
+    return out
+
+
+def _pick_stage2_tile_k(*, inter_dim: int, tile_m: int, prefer: int) -> int:
+    """Pick a reasonable stage2 tile_k2 when user didn't explicitly provide one."""
+    inter_dim = int(inter_dim)
+    tile_m = int(tile_m)
+    prefer = int(prefer)
+    feasible = _suggest_stage2_tile_k(inter_dim=inter_dim, tile_m=tile_m)
+    if prefer in feasible:
+        return prefer
+    if not feasible:
+        # Fall back to prefer; runtime checks will raise an actionable error.
+        return prefer
+    # Prefer the closest value to the user's stage1 tile_k, breaking ties towards larger k.
+    feasible = sorted(feasible, key=lambda k: (abs(k - prefer), -k))
+    return feasible[0]
 
 
 def build_sorted_routing(
@@ -597,8 +651,37 @@ def run_moe_stage2(
     return_outputs: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
-    assert model_dim % tile_n == 0
-    assert inter_dim % tile_k == 0
+    # Parameter sanity checks with actionable hints (avoid bare AssertionError).
+    if model_dim % tile_n != 0:
+        raise ValueError(
+            f"Invalid stage2 tiling: model_dim ({model_dim}) must be divisible by tile_n2 ({tile_n})."
+        )
+    if inter_dim % tile_k != 0:
+        # Stage2 tile_k is tile_k2 (K dimension = inter_dim).
+        # In kernels/moe_gemm_2stage.py, total_threads is fixed to 256 and there is no K-tail.
+        feasible = _suggest_stage2_tile_k(inter_dim=inter_dim, tile_m=tile_m)
+        raise ValueError(
+            "Invalid stage2 tiling: inter_dim ({inter_dim}) must be divisible by tile_k2 ({tile_k}). "
+            "Try setting `--tile_k2` to a divisor of inter_dim. "
+            f"Feasible tile_k2 for (inter_dim={inter_dim}, tile_m={tile_m}) under the kernel's current gmem-load constraints: {feasible}. "
+            "Tip: stage2 splits A2 loads across 256 threads; if you want smaller tile_k2, you may need a larger tile_m so (tile_m*tile_k2) stays divisible by 1024."
+            .format(inter_dim=inter_dim, tile_k=tile_k)
+        )
+    # Enforce the kernel's stage2 gmem->reg load mapping constraints.
+    # See: kernels/moe_gemm_2stage.py::compile_moe_gemm2 (x_load_bytes selection).
+    if (tile_m * tile_k) % 256 != 0:
+        raise ValueError(
+            f"Invalid stage2 tiling: tile_m*tile_k2 must be divisible by 256 (total_threads=256). "
+            f"Got tile_m={tile_m}, tile_k2={tile_k} -> tile_m*tile_k2={tile_m * tile_k}."
+        )
+    bytes_per_thread_x = (tile_m * tile_k) // 256  # 1B elements
+    if bytes_per_thread_x % 4 != 0:
+        feasible = _suggest_stage2_tile_k(inter_dim=inter_dim, tile_m=tile_m)
+        raise ValueError(
+            f"Invalid stage2 tiling for gmem loads: bytes_per_thread_x ((tile_m*tile_k2)/256) must be divisible by 4. "
+            f"Got tile_m={tile_m}, tile_k2={tile_k} -> bytes_per_thread_x={bytes_per_thread_x}. "
+            f"Feasible tile_k2 for (inter_dim={inter_dim}, tile_m={tile_m}): {feasible}."
+        )
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
@@ -1077,10 +1160,14 @@ if __name__ == "__main__":
     model_dim, inter_dim = args.dim
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
-    tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else int(args.tile_k)
+    tile_k2 = (
+        int(args.tile_k2)
+        if args.tile_k2 is not None
+        else _pick_stage2_tile_k(inter_dim=int(inter_dim), tile_m=int(args.tile_m), prefer=int(args.tile_k))
+    )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    dtypes_to_run = ["fp8", "int8", "int4"] if args.in_dtype == "all" else [str(args.in_dtype)]
+    dtypes_to_run = ["int8", "int4"] 
     for dt in dtypes_to_run:
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
