@@ -8,7 +8,7 @@ codegen and performance. Only test-only helpers/imports are removed.
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
-from flydsl.runtime.hip_util import get_hip_arch
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator
 from _mlir import ir
 import _mlir.extras.types as T

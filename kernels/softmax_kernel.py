@@ -10,7 +10,7 @@ import os
 from flydsl.compiler.context import RAIIMLIRContextModule
 from flydsl.dialects.ext import flir
 from . import reduce as reduce_utils
-from flydsl.runtime.hip_util import get_hip_arch
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator
 from _mlir import ir
 import _mlir.extras.types as T

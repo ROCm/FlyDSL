@@ -24,13 +24,13 @@ if _src_py.exists():
     sys.path.insert(0, str(_src_py))
 sys.path.insert(0, str(_repo))
 
-from flydsl.runtime.hip_util import hip_check
 from tests.utils import compile_to_hsaco
 from tests.test_common import run_perftest
 from tests.kernels.perf_compare_common import (
     PerfRow,
     bench_gpu_us_hip,
     bench_gpu_us_torch,
+    hip_check,
     maybe_enable_aiter,
     print_perf_table,
 )

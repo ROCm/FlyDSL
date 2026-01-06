@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 # Make repo-root / src-layout packages importable when running as a module:
 #   python -m tests.kernels.perf_compare_common
@@ -59,11 +59,52 @@ def print_perf_table(rows: List[PerfRow]) -> None:
     print("=" * 100 + "\n")
 
 
+def hip_check(ret: Any, msg: str | None = None) -> Any:
+    """Check a HIP API return value.
+
+    Accepts either:
+    - an int error code (0 means success), or
+    - a (err, value) tuple as commonly returned by hip-python.
+
+    Returns the underlying value for tuple returns, or the original `ret` for
+    non-tuple returns.
+    """
+
+    err = ret
+    value = None
+    if isinstance(ret, tuple) and ret:
+        err = ret[0]
+        value = ret[1] if len(ret) > 1 else None
+
+    # hipSuccess is 0.
+    if int(err) != 0:
+        details = f"HIP call failed with error code {int(err)}"
+        # Best-effort: translate error code to string if hip-python is available.
+        try:
+            from hip import hip as _hip  # type: ignore
+
+            try:
+                s = _hip.hipGetErrorString(int(err))
+                if isinstance(s, tuple):
+                    s = s[1]
+                if s:
+                    details += f" ({s})"
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        if msg:
+            details = f"{msg}: {details}"
+        raise RuntimeError(details)
+
+    return value if isinstance(ret, tuple) else ret
+
+
 def bench_gpu_us_hip(launch: Callable[[], None], *, warmup: int = 20, iters: int = 200) -> float:
     """Measure device time using HIP events (works for hipModuleLaunchKernel launches)."""
     try:
         from hip import hip
-        from flydsl.runtime.hip_util import hip_check
     except Exception as e:
         raise RuntimeError("HIP python bindings are required for bench_gpu_us_hip") from e
 
@@ -174,7 +215,6 @@ def _bench_flydsl_hip(*, op: str, M: int, N: int, dtype: str, warmup: int, iters
         import ctypes
         import torch
         from hip import hip
-        from flydsl.runtime.hip_util import hip_check
         from tests.utils import compile_to_hsaco
     except Exception as e:
         raise RuntimeError("FlyDSL HIP benchmark requires torch+hip") from e
