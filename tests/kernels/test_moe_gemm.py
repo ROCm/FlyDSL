@@ -15,12 +15,9 @@ import argparse
 # Some environments have another `flydsl` (e.g. from a sibling checkout) earlier
 # on `sys.path`, which can miss newer ROCDL wrappers (notably atomic fadd / MFMA).
 # -----------------------------------------------------------------------------
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-_PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if _PYFLIR_SRC not in sys.path:
-    sys.path.insert(0, _PYFLIR_SRC)
 
 from test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
@@ -803,8 +800,12 @@ def run_moe_stage2(
     w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, model_dim] fp32 (atomic add).
-    out = torch.zeros((tokens, model_dim), device=device, dtype=torch.float32)
+    # Output: stage2 supports two epilogues via env:
+    # - FLIR_MOE_STAGE2_CSHUFFLE=1 (default): fp16 output + atomic pk_add_f16 (f16x2)
+    # - FLIR_MOE_STAGE2_CSHUFFLE=0: fp32 output + atomic fadd f32 (baseline/compare)
+    use_cshuffle = os.environ.get("FLIR_MOE_STAGE2_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
+    out_dtype = torch.float16 if use_cshuffle else torch.float32
+    out = torch.zeros((tokens, model_dim), device=device, dtype=out_dtype)
     out_perf = torch.zeros_like(out)
 
     doweight_stage2 = not bool(doweight_stage1)
@@ -868,7 +869,7 @@ def run_moe_stage2(
         model_dim=model_dim,
         doweight_stage2=doweight_stage2,
     )
-    assert verify_output(out, ref2, rtol=0.5, atol=0.5)
+    assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
     # Same note as stage1: executed rows = sorted_size (padded), logical rows = tokens*topk.
     flops = 2 * tokens * topk * model_dim * inter_dim
@@ -877,7 +878,7 @@ def run_moe_stage2(
     bytes_moved = 0
     bytes_moved += int(sorted_size) * inter_dim * 1  # a2 fp8 (upper bound: padded rows)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * 4  # out fp32
+    bytes_moved += tokens * model_dim * (2 if out_dtype == torch.float16 else 4)  # out
     bytes_moved += int(sorted_size) * 4  # a2_scale f32 (1D, padded upper bound)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
@@ -967,7 +968,7 @@ def run_moe_stage2(
                 sorted_weights,
             )
             torch.cuda.synchronize()
-            if not verify_output(out, out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter CK] stage2:"):
+            if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter CK] stage2:"):
                     logging.warning("[aiter CK] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
         except Exception as e:
             logging.warning(f"Skipping aiter CK moe stage2 compare (not runnable here): {e}")
