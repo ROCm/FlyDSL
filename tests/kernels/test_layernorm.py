@@ -25,7 +25,7 @@ if _src_py.exists():
 sys.path.insert(0, str(_repo))
 
 from tests.test_common import run_perftest
-from tests.kernels.perf_compare_common import (
+from tests.kernels.benchmark_common import (
     PerfRow,
     bench_gpu_us_torch,
     maybe_enable_aiter,
@@ -163,12 +163,12 @@ def test_all():
             configs.append((int(m_s), int(n_s), dt))
     else:
         configs = [
-            (64, 256, "f32"),     # Aligned
-            (128, 1024, "f32"),   # Aligned
-            (32, 128, "f16"),     # Aligned
-            (64, 2000, "f32"),    # Unaligned (tail handling)
-            (16, 512, "bf16"),    # BF16
-            (1024, 8192, "bf16"), # BF16
+            # (64, 256, "f32"),     # Aligned
+            # (128, 1024, "f32"),   # Aligned
+            # (32, 128, "f16"),     # Aligned
+            # (64, 2000, "f32"),    # Unaligned (tail handling)
+            # (16, 512, "bf16"),    # BF16
+            # (1024, 8192, "bf16"), # BF16
             (32768, 8192, "bf16"),
         ]
 

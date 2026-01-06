@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
 # Make repo-root / src-layout packages importable when running as a module:
-#   python -m tests.kernels.perf_compare_common
+#   python -m tests.kernels.benchmark_common
 _THIS = os.path.abspath(__file__)
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_THIS)))  # FlyDSL/
 if _REPO_ROOT not in sys.path:
@@ -250,7 +250,7 @@ def run_compare_sweep(
 
 def main() -> None:
     # CLI entrypoint:
-    #   BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.perf_compare_common
+    #   BENCH_CONFIGS="M,N,dtype;..." AITER_IMPL=triton BENCH_WARMUP=10 BENCH_ITERS=50 python -m tests.kernels.benchmark_common
     configs = _parse_configs(os.environ.get("BENCH_CONFIGS", "")) or _default_configs()
     aiter_impl = os.environ.get("AITER_IMPL", "triton")
     warmup = int(os.environ.get("BENCH_WARMUP", "10"))
