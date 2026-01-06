@@ -100,15 +100,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             gOut = flir.zipped_divide(tensor_Out, (1, tile_cols))
             gS = flir.zipped_divide(tensor_S, (1, tile_cols))
 
-            # `examples.reduce.make_block_reduce_add` historically expects a `tid` wrapper with `.value`.
-            # When running under different rocdsl/MLIR bindings, `tid` may be an OpResult (no `.value`).
-            # Wrap it once here so both the small-N and tiled paths share the same reducer.
-            class _TidWrap:
-                def __init__(self, v):
-                    self.value = v
-
             block_reduce_add = reduce_utils.make_block_reduce_add(
-                tid=_TidWrap((tid)),
+                tid=tid,
                 fm_fast=fm_fast,
                 WARP_SIZE=WARP_SIZE,
                 RED_SLOTS=RED_SLOTS,
