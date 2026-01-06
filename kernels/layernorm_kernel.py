@@ -321,17 +321,15 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     c_base = flir.const_index(base_idx_int)
                     idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(tid)).result
                     is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
-                    if_v = flir.scf_ext.IfOp(unwrap(is_valid), [T.f32(), T.f32()], hasElse=True)
-                    with ir.InsertionPoint(if_v.then_block):
+                    thread_sum_next = thread_sum
+                    thread_sumsq_next = thread_sumsq
+                    if is_valid:
                         x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
                         x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
                         x2 = mlir_arith.MulFOp(unwrap(x), unwrap(x), fastmath=fm_fast).result
-                        ns = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(x), fastmath=fm_fast).result
-                        nss = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(x2), fastmath=fm_fast).result
-                        flir.scf_ext.yield_([unwrap(ns), unwrap(nss)])
-                    with ir.InsertionPoint(if_v.else_block):
-                        flir.scf_ext.yield_([unwrap(thread_sum), unwrap(thread_sumsq)])
-                    thread_sum, thread_sumsq = if_v.results[0], if_v.results[1]
+                        thread_sum_next = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(x), fastmath=fm_fast).result
+                        thread_sumsq_next = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(x2), fastmath=fm_fast).result
+                    thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
                 sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
@@ -352,8 +350,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     c_base = flir.const_index(base_idx_int)
                     idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(tid)).result
                     is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
-                    if_v = flir.scf_ext.IfOp(unwrap(is_valid))
-                    with ir.InsertionPoint(if_v.then_block):
+                    if is_valid:
                         x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
                         g_e = memref.load(Gamma, [unwrap(idx)])
                         b_e = memref.load(Beta, [unwrap(idx)])
@@ -369,7 +366,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         else:
                             y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
                         memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx)])
-                        flir.scf_ext.yield_([])
 
     return ctx
 

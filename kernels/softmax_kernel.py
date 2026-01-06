@@ -217,18 +217,17 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         c_N = flir.const_index(N)
                         is_valid = flir.arith.CmpIOp(flir.arith.CmpIPredicate.ult, unwrap(idx_k), unwrap(c_N)).result
 
-                        if_load = flir.scf_ext.IfOp(unwrap(is_valid), [compute_type], hasElse=True)
-                        with ir.InsertionPoint(if_load.then_block):
+                        if is_valid:
                             val_e = tensor_A[(unwrap(row), unwrap(idx_k))]
                             if dtype_str == "bf16":
                                 val_c = flir.arith.extf(compute_type, unwrap(val_e))
-                                flir.scf_ext.yield_([unwrap(val_c)])
+                                val = val_c
                             else:
-                                flir.scf_ext.yield_([unwrap(val_e)])
-                        with ir.InsertionPoint(if_load.else_block):
-                            flir.scf_ext.yield_([unwrap(c_neg_inf)])
+                                val = val_e
+                        else:
+                            val = c_neg_inf
 
-                        row_buffer.append((if_load.results[0], is_valid))
+                        row_buffer.append((val, is_valid))
 
             # 2. Local Max
             thread_max = unwrap(c_neg_inf)
@@ -395,8 +394,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         val_exp, valid = item
 
                         # If valid, store
-                        if_store = flir.scf_ext.IfOp(unwrap(valid))
-                        with ir.InsertionPoint(if_store.then_block):
+                        if valid:
                             norm_val = flir.arith.MulFOp(unwrap(val_exp), unwrap(inv_sum), fastmath=fm_fast).result
                             if dtype_str == "bf16":
                                 norm_val = flir.arith.truncf(elem_type, unwrap(norm_val))
@@ -404,7 +402,6 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             c_k = flir.const_index(k)
                             idx_k = flir.arith.AddIOp(unwrap(curr_idx), unwrap(c_k)).result
                             tensor_C[(unwrap(row), unwrap(idx_k))] = unwrap(norm_val)
-                            flir.scf_ext.yield_([])
 
     return ctx
 

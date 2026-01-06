@@ -151,16 +151,13 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     c_base = flir.const_index(base_idx_int)
                     idx = flir.arith.AddIOp(unwrap(c_base), unwrap(tid)).result
                     is_valid = flir.arith.CmpIOp(flir.arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
-                    if_v = flir.scf_ext.IfOp(unwrap(is_valid), [T.f32()], hasElse=True)
-                    with ir.InsertionPoint(if_v.then_block):
+                    thread_sumsq_next = thread_sumsq
+                    if is_valid:
                         x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
                         x = unwrap(x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, unwrap(x_e))
                         x2 = flir.arith.MulFOp(unwrap(x), unwrap(x), fastmath=fm_fast).result
-                        nss = flir.arith.AddFOp(unwrap(thread_sumsq), unwrap(x2), fastmath=fm_fast).result
-                        flir.scf_ext.yield_([unwrap(nss)])
-                    with ir.InsertionPoint(if_v.else_block):
-                        flir.scf_ext.yield_([unwrap(thread_sumsq)])
-                    thread_sumsq = if_v.results[0]
+                        thread_sumsq_next = flir.arith.AddFOp(unwrap(thread_sumsq), unwrap(x2), fastmath=fm_fast).result
+                    thread_sumsq = thread_sumsq_next
 
                 sum_sq = block_reduce_add(thread_sumsq, s_red)
                 mean_sq = flir.arith.DivFOp(unwrap(sum_sq), unwrap(n_float), fastmath=fm_fast).result
@@ -172,8 +169,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     c_base = flir.const_index(base_idx_int)
                     idx = flir.arith.AddIOp(unwrap(c_base), unwrap(tid)).result
                     is_valid = flir.arith.CmpIOp(flir.arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
-                    if_v = flir.scf_ext.IfOp(unwrap(is_valid))
-                    with ir.InsertionPoint(if_v.then_block):
+                    if is_valid:
                         x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
                         g_e = memref.load(Gamma, [unwrap(idx)])
                         x = unwrap(x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, unwrap(x_e))
@@ -182,7 +178,6 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         y = flir.arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
                         y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, unwrap(y))
                         memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx)])
-                        flir.scf_ext.yield_([])
                 return
 
             thr_layout = flir.make_ordered_layout((1, BLOCK_THREADS), order=(1, 0))
