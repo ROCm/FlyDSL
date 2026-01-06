@@ -98,7 +98,6 @@ def build_softmax_module(M, N, dtype_str="f32"):
             A: lambda: T.memref(M, N, _state["elem_type"]),
             C: lambda: T.memref(M, N, _state["elem_type"]),
         ):
-            # Normalize to MLIR index Values (handles different wrapper shapes without a local `unwrap()`).
             row = flir.const_index(flir.block_idx("x"))
             tid = flir.const_index(flir.thread_idx("x"))
 

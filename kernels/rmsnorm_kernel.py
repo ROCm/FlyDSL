@@ -20,10 +20,6 @@ KERNEL_NAME = "rmsnorm"
 EPS = 1e-5
 
 
-# NOTE: This file is being refactored to avoid wrapper "unwrapping" helpers.
-# The previous `unwrap/val` compatibility shim has been intentionally removed.
-
-
 def dtype_to_elem_type(dtype_str: str):
     if dtype_str == "f32":
         return T.f32()
