@@ -17,7 +17,7 @@ import _mlir.extras.types as T
 KERNEL_NAME = "layernorm"
 
 
-def val(v):
+def unwrap(v):
     if hasattr(v, "value"):
         return v.value
     if hasattr(v, "_value"):
@@ -93,8 +93,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Beta: lambda: T.memref(N, _state["elem_type"]),
             Output: lambda: T.memref(M, N, _state["elem_type"]),
         ):
-            row = flir.block_idx("x")
-            tid = flir.thread_idx("x")
+            # Normalize to MLIR index Values early so downstream ops always see `Value`.
+            row = flir.const_index(flir.block_idx("x"))
+            tid = flir.const_index(flir.thread_idx("x"))
 
             elem_type = _state["elem_type"]
             compute_type = _state["compute_type"]
@@ -124,7 +125,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 copy_atom_e, thr_layout, val_layout,
                 thr_shape=(1, BLOCK_THREADS), val_shape=(1, VEC_WIDTH)
             )
-            thr_copy_e = tiled_copy_e.get_slice(val(tid))
+            thr_copy_e = tiled_copy_e.get_slice(unwrap(tid))
             block_reduce_add = reduce_utils.make_block_reduce_add(
                 tid=tid,
                 fm_fast=fm_fast,
@@ -167,34 +168,34 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 c_inf_i32 = arith.constant(T.i32(), 0x7F800000).value
                 c_qnan_bf16_i32 = arith.constant(T.i32(), 0x0040).value
 
-                c16_i32_v = vector.splat(vec_i32_ty, val(c16_i32))
-                c7fff_i32_v = vector.splat(vec_i32_ty, val(c7fff_i32))
-                c1_i32_v = vector.splat(vec_i32_ty, val(c1_i32))
-                c_abs_mask_i32_v = vector.splat(vec_i32_ty, val(c_abs_mask_i32))
-                c_inf_i32_v = vector.splat(vec_i32_ty, val(c_inf_i32))
-                c_qnan_bf16_i32_v = vector.splat(vec_i32_ty, val(c_qnan_bf16_i32))
+                c16_i32_v = vector.splat(vec_i32_ty, unwrap(c16_i32))
+                c7fff_i32_v = vector.splat(vec_i32_ty, unwrap(c7fff_i32))
+                c1_i32_v = vector.splat(vec_i32_ty, unwrap(c1_i32))
+                c_abs_mask_i32_v = vector.splat(vec_i32_ty, unwrap(c_abs_mask_i32))
+                c_inf_i32_v = vector.splat(vec_i32_ty, unwrap(c_inf_i32))
+                c_qnan_bf16_i32_v = vector.splat(vec_i32_ty, unwrap(c_qnan_bf16_i32))
 
-                u = mlir_arith.bitcast(vec_i32_ty, val(vec_f32))
+                u = mlir_arith.bitcast(vec_i32_ty, unwrap(vec_f32))
 
                 # Detect NaN: abs(u) > +Inf (works for both qNaN/sNaN, avoids mantissa checks).
-                abs_u = mlir_arith.AndIOp(val(u), val(c_abs_mask_i32_v)).result
-                is_nan = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ugt, val(abs_u), val(c_inf_i32_v)).result
+                abs_u = mlir_arith.AndIOp(unwrap(u), unwrap(c_abs_mask_i32_v)).result
+                is_nan = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ugt, unwrap(abs_u), unwrap(c_inf_i32_v)).result
 
-                hi = mlir_arith.ShRUIOp(val(u), val(c16_i32_v)).result
-                lsb = mlir_arith.AndIOp(val(hi), val(c1_i32_v)).result
-                bias = mlir_arith.AddIOp(val(c7fff_i32_v), val(lsb)).result
-                u_round = mlir_arith.AddIOp(val(u), val(bias)).result
-                bf16_bits_rne = mlir_arith.ShRUIOp(val(u_round), val(c16_i32_v)).result
+                hi = mlir_arith.ShRUIOp(unwrap(u), unwrap(c16_i32_v)).result
+                lsb = mlir_arith.AndIOp(unwrap(hi), unwrap(c1_i32_v)).result
+                bias = mlir_arith.AddIOp(unwrap(c7fff_i32_v), unwrap(lsb)).result
+                u_round = mlir_arith.AddIOp(unwrap(u), unwrap(bias)).result
+                bf16_bits_rne = mlir_arith.ShRUIOp(unwrap(u_round), unwrap(c16_i32_v)).result
 
                 # For NaN, ensure we produce a quiet NaN in bf16 (mantissa != 0).
-                bf16_bits_nan = mlir_arith.OrIOp(val(hi), val(c_qnan_bf16_i32_v)).result
-                bf16_bits = flir.arith.SelectOp(val(is_nan), val(bf16_bits_nan), val(bf16_bits_rne)).result
+                bf16_bits_nan = mlir_arith.OrIOp(unwrap(hi), unwrap(c_qnan_bf16_i32_v)).result
+                bf16_bits = flir.arith.SelectOp(unwrap(is_nan), unwrap(bf16_bits_nan), unwrap(bf16_bits_rne)).result
 
                 even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                 odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                odd_sh = mlir_arith.ShLIOp(val(odd), val(vector.splat(vec4_i32_ty, val(c16_i32)))).result
-                packed = mlir_arith.OrIOp(val(even), val(odd_sh)).result
-                return vector.bitcast(vec_bf16_ty, val(packed))
+                odd_sh = mlir_arith.ShLIOp(unwrap(odd), unwrap(vector.splat(vec4_i32_ty, unwrap(c16_i32)))).result
+                packed = mlir_arith.OrIOp(unwrap(even), unwrap(odd_sh)).result
+                return vector.bitcast(vec_bf16_ty, unwrap(packed))
 
             # Fast-path: keep the original register-row variant for the tuned (N==8192) case.
             if N == (BLOCK_THREADS * VEC_WIDTH * 4):
@@ -202,8 +203,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Read Input once into registers (each thread holds 32 fp32 values = 4 vectors),
                 # then reuse those registers for reduction + normalize + writeback.
                 c_zero = arith.constant(compute_type, 0.0).value
-                thread_sum = val(c_zero)
-                thread_sumsq = val(c_zero)
+                thread_sum = unwrap(c_zero)
+                thread_sumsq = unwrap(c_zero)
                 # Reduce VGPR pressure by caching bf16/f16 payload vectors when possible.
                 cache_as_elem = (dtype_str != "f32")
                 in_local = []  # bf16/f16: list[vector<VEC_WIDTH x elem_type>]; f32: list[vector<VEC_WIDTH x f32>]
@@ -211,7 +212,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                 for tile_i in range_constexpr(num_tiles_py):
-                    blkIn = gIn[(val(row), tile_i)]
+                    blkIn = gIn[(unwrap(row), tile_i)]
                     thrIn = thr_copy_e.partition_S(blkIn)
                     frgIn = flir.make_fragment_like(thrIn, elem_type)
                     vec_e = flir.copy(
@@ -225,84 +226,84 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                     if cache_as_elem:
                         in_local.append(vec_e)
-                        x = mlir_arith.extf(vec_type_c, val(vec_e))
+                        x = mlir_arith.extf(vec_type_c, unwrap(vec_e))
                     else:
                         x = vec_e
                         in_local.append(x)
 
-                    x2 = mlir_arith.MulFOp(val(x), val(x), fastmath=fm_fast).result
-                    red = vector.reduction(compute_type, "add", val(x), fastmath=fm_fast)
-                    red2 = vector.reduction(compute_type, "add", val(x2), fastmath=fm_fast)
-                    thread_sum = mlir_arith.AddFOp(val(thread_sum), val(red), fastmath=fm_fast).result
-                    thread_sumsq = mlir_arith.AddFOp(val(thread_sumsq), val(red2), fastmath=fm_fast).result
+                    x2 = mlir_arith.MulFOp(unwrap(x), unwrap(x), fastmath=fm_fast).result
+                    red = vector.reduction(compute_type, "add", unwrap(x), fastmath=fm_fast)
+                    red2 = vector.reduction(compute_type, "add", unwrap(x2), fastmath=fm_fast)
+                    thread_sum = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(red), fastmath=fm_fast).result
+                    thread_sumsq = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(red2), fastmath=fm_fast).result
 
                 sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
                 inv_n = arith.constant(compute_type, 1.0 / float(N))
-                mean = mlir_arith.MulFOp(val(sum_val), val(inv_n), fastmath=fm_fast).result
-                mean_sq = mlir_arith.MulFOp(val(sumsq_val), val(inv_n), fastmath=fm_fast).result
-                mean2 = mlir_arith.MulFOp(val(mean), val(mean), fastmath=fm_fast).result
-                var = mlir_arith.SubFOp(val(mean_sq), val(mean2), fastmath=fm_fast).result
+                mean = mlir_arith.MulFOp(unwrap(sum_val), unwrap(inv_n), fastmath=fm_fast).result
+                mean_sq = mlir_arith.MulFOp(unwrap(sumsq_val), unwrap(inv_n), fastmath=fm_fast).result
+                mean2 = mlir_arith.MulFOp(unwrap(mean), unwrap(mean), fastmath=fm_fast).result
+                var = mlir_arith.SubFOp(unwrap(mean_sq), unwrap(mean2), fastmath=fm_fast).result
                 # Numerical safety: with fast-math and cancellation, `var` can become slightly negative
                 # and lead to NaNs in rsqrt for small-N cases. Clamp to >= 0 before adding eps.
                 c0_f = arith.constant(compute_type, 0.0)
-                is_neg = mlir_arith.CmpFOp(mlir_arith.CmpFPredicate.OLT, val(var), val(c0_f.value)).result
-                var = flir.arith.SelectOp(val(is_neg), val(c0_f.value), val(var)).result
+                is_neg = mlir_arith.CmpFOp(mlir_arith.CmpFPredicate.OLT, unwrap(var), unwrap(c0_f.value)).result
+                var = flir.arith.SelectOp(unwrap(is_neg), unwrap(c0_f.value), unwrap(var)).result
 
-                var_eps = mlir_arith.AddFOp(val(var), val(eps.value), fastmath=fm_fast).result
-                rstd = math.rsqrt(val(var_eps), fastmath=fm_fast)
+                var_eps = mlir_arith.AddFOp(unwrap(var), unwrap(eps.value), fastmath=fm_fast).result
+                rstd = math.rsqrt(unwrap(var_eps), fastmath=fm_fast)
 
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                 vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                mean_splat = vector.splat(vec_type_c, val(mean))
-                rstd_splat = vector.splat(vec_type_c, val(rstd))
+                mean_splat = vector.splat(vec_type_c, unwrap(mean))
+                rstd_splat = vector.splat(vec_type_c, unwrap(rstd))
 
                 # Pipeline Gamma/Beta loads.
-                thread_offset_base = mlir_arith.MulIOp(val(tid), flir.const_index(VEC_WIDTH)).result
+                thread_offset_base = mlir_arith.MulIOp(unwrap(tid), flir.const_index(VEC_WIDTH)).result
                 c_base0 = flir.const_index(0)
-                curr_idx0 = mlir_arith.AddIOp(val(c_base0), val(thread_offset_base)).result
-                g_e_cur = vector.load(vec_type_e, Gamma, [val(curr_idx0)], alignment=VEC_ALIGN)
-                b_e_cur = vector.load(vec_type_e, Beta, [val(curr_idx0)], alignment=VEC_ALIGN)
-                g_cur = g_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, val(g_e_cur))
-                b_cur = b_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, val(b_e_cur))
+                curr_idx0 = mlir_arith.AddIOp(unwrap(c_base0), unwrap(thread_offset_base)).result
+                g_e_cur = vector.load(vec_type_e, Gamma, [unwrap(curr_idx0)], alignment=VEC_ALIGN)
+                b_e_cur = vector.load(vec_type_e, Beta, [unwrap(curr_idx0)], alignment=VEC_ALIGN)
+                g_cur = g_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e_cur))
+                b_cur = b_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e_cur))
 
                 for tile_i in range_constexpr(num_tiles_py):
                     base_idx_int = tile_i * tile_cols
                     c_base = flir.const_index(base_idx_int)
-                    curr_idx = mlir_arith.AddIOp(val(c_base), val(thread_offset_base)).result
+                    curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
 
                     x = in_local[tile_i]
                     if cache_as_elem:
-                        x = mlir_arith.extf(vec_type_c, val(x))
+                        x = mlir_arith.extf(vec_type_c, unwrap(x))
                     if tile_i + 1 < num_tiles_py:
                         next_base_idx_int = (tile_i + 1) * tile_cols
                         c_base_next = flir.const_index(next_base_idx_int)
-                        next_idx = mlir_arith.AddIOp(val(c_base_next), val(thread_offset_base)).result
-                        g_e_next = vector.load(vec_type_e, Gamma, [val(next_idx)], alignment=VEC_ALIGN)
-                        b_e_next = vector.load(vec_type_e, Beta, [val(next_idx)], alignment=VEC_ALIGN)
-                        g_next = g_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, val(g_e_next))
-                        b_next = b_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, val(b_e_next))
+                        next_idx = mlir_arith.AddIOp(unwrap(c_base_next), unwrap(thread_offset_base)).result
+                        g_e_next = vector.load(vec_type_e, Gamma, [unwrap(next_idx)], alignment=VEC_ALIGN)
+                        b_e_next = vector.load(vec_type_e, Beta, [unwrap(next_idx)], alignment=VEC_ALIGN)
+                        g_next = g_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e_next))
+                        b_next = b_e_next if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e_next))
                     else:
                         g_next = g_cur
                         b_next = b_cur
 
-                    diff = mlir_arith.SubFOp(val(x), val(mean_splat), fastmath=fm_fast).result
-                    norm = mlir_arith.MulFOp(val(diff), val(rstd_splat), fastmath=fm_fast).result
-                    scaled = mlir_arith.MulFOp(val(norm), val(g_cur), fastmath=fm_fast).result
-                    y = mlir_arith.AddFOp(val(scaled), val(b_cur), fastmath=fm_fast).result
+                    diff = mlir_arith.SubFOp(unwrap(x), unwrap(mean_splat), fastmath=fm_fast).result
+                    norm = mlir_arith.MulFOp(unwrap(diff), unwrap(rstd_splat), fastmath=fm_fast).result
+                    scaled = mlir_arith.MulFOp(unwrap(norm), unwrap(g_cur), fastmath=fm_fast).result
+                    y = mlir_arith.AddFOp(unwrap(scaled), unwrap(b_cur), fastmath=fm_fast).result
 
                     if dtype_str == "bf16":
                         if USE_HW_CVT_PK_BF16_F32:
-                            out_e = mlir_arith.truncf(vec_type_e, val(y))
+                            out_e = mlir_arith.truncf(vec_type_e, unwrap(y))
                         else:
                             out_e = bf16_pack_vec8_rne(y)
                     else:
-                        out_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, val(y))
+                        out_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, unwrap(y))
 
-                    blkOut = gOut[(val(row), tile_i)]
+                    blkOut = gOut[(unwrap(row), tile_i)]
                     thrOut = thr_copy_e.partition_S(blkOut)
                     frgOut = flir.make_fragment_like(thrOut, elem_type)
-                    vector.store(val(out_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                    vector.store(unwrap(out_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                     flir.copy(
                         tiled_copy_e,
                         frgOut,
@@ -317,60 +318,60 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Generic path: 2-pass global implementation supporting arbitrary N (incl. tail).
                 # For these small/unaligned-N test cases, correctness & robustness matter more than peak perf.
                 c_N = flir.const_index(N)
-                c_zero = val(arith.constant(compute_type, 0.0))
-                thread_sum = val(c_zero)
-                thread_sumsq = val(c_zero)
+                c_zero = unwrap(arith.constant(compute_type, 0.0))
+                thread_sum = unwrap(c_zero)
+                thread_sumsq = unwrap(c_zero)
 
                 # Pass1: sum + sumsq
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = mlir_arith.AddIOp(val(c_base), val(tid)).result
-                    is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, val(idx), val(c_N)).result
+                    idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(tid)).result
+                    is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
                     thread_sum_next = thread_sum
                     thread_sumsq_next = thread_sumsq
                     if is_valid:
-                        x_e = memref.load(Input, [val(row), val(idx)])
-                        x = val(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, val(x_e))
-                        x2 = mlir_arith.MulFOp(val(x), val(x), fastmath=fm_fast).result
-                        thread_sum_next = mlir_arith.AddFOp(val(thread_sum), val(x), fastmath=fm_fast).result
-                        thread_sumsq_next = mlir_arith.AddFOp(val(thread_sumsq), val(x2), fastmath=fm_fast).result
+                        x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
+                        x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
+                        x2 = mlir_arith.MulFOp(unwrap(x), unwrap(x), fastmath=fm_fast).result
+                        thread_sum_next = mlir_arith.AddFOp(unwrap(thread_sum), unwrap(x), fastmath=fm_fast).result
+                        thread_sumsq_next = mlir_arith.AddFOp(unwrap(thread_sumsq), unwrap(x2), fastmath=fm_fast).result
                     thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
                 sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
                 inv_n = arith.constant(compute_type, 1.0 / float(N))
-                mean = mlir_arith.MulFOp(val(sum_val), val(inv_n), fastmath=fm_fast).result
-                mean_sq = mlir_arith.MulFOp(val(sumsq_val), val(inv_n), fastmath=fm_fast).result
-                mean2 = mlir_arith.MulFOp(val(mean), val(mean), fastmath=fm_fast).result
-                var = mlir_arith.SubFOp(val(mean_sq), val(mean2), fastmath=fm_fast).result
+                mean = mlir_arith.MulFOp(unwrap(sum_val), unwrap(inv_n), fastmath=fm_fast).result
+                mean_sq = mlir_arith.MulFOp(unwrap(sumsq_val), unwrap(inv_n), fastmath=fm_fast).result
+                mean2 = mlir_arith.MulFOp(unwrap(mean), unwrap(mean), fastmath=fm_fast).result
+                var = mlir_arith.SubFOp(unwrap(mean_sq), unwrap(mean2), fastmath=fm_fast).result
                 # Numerical safety: clamp variance to >=0 to avoid NaNs in rsqrt on small-N cases.
                 c0_f = arith.constant(compute_type, 0.0)
-                is_neg = mlir_arith.CmpFOp(mlir_arith.CmpFPredicate.OLT, val(var), val(c0_f.value)).result
-                var = flir.arith.SelectOp(val(is_neg), val(c0_f.value), val(var)).result
-                var_eps = mlir_arith.AddFOp(val(var), val(eps.value), fastmath=fm_fast).result
-                rstd = math.rsqrt(val(var_eps), fastmath=fm_fast)
+                is_neg = mlir_arith.CmpFOp(mlir_arith.CmpFPredicate.OLT, unwrap(var), unwrap(c0_f.value)).result
+                var = flir.arith.SelectOp(unwrap(is_neg), unwrap(c0_f.value), unwrap(var)).result
+                var_eps = mlir_arith.AddFOp(unwrap(var), unwrap(eps.value), fastmath=fm_fast).result
+                rstd = math.rsqrt(unwrap(var_eps), fastmath=fm_fast)
 
                 # Pass2: normalize + affine + store
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = mlir_arith.AddIOp(val(c_base), val(tid)).result
-                    is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, val(idx), val(c_N)).result
+                    idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(tid)).result
+                    is_valid = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ult, unwrap(idx), unwrap(c_N)).result
                     if is_valid:
-                        x_e = memref.load(Input, [val(row), val(idx)])
-                        g_e = memref.load(Gamma, [val(idx)])
-                        b_e = memref.load(Beta, [val(idx)])
-                        x = val(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, val(x_e))
-                        g = val(g_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, val(g_e))
-                        b = val(b_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, val(b_e))
-                        diff = mlir_arith.SubFOp(val(x), val(mean), fastmath=fm_fast).result
-                        norm = mlir_arith.MulFOp(val(diff), val(rstd), fastmath=fm_fast).result
-                        scaled = mlir_arith.MulFOp(val(norm), val(g), fastmath=fm_fast).result
-                        y = mlir_arith.AddFOp(val(scaled), val(b), fastmath=fm_fast).result
+                        x_e = memref.load(Input, [unwrap(row), unwrap(idx)])
+                        g_e = memref.load(Gamma, [unwrap(idx)])
+                        b_e = memref.load(Beta, [unwrap(idx)])
+                        x = unwrap(x_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(x_e))
+                        g = unwrap(g_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(g_e))
+                        b = unwrap(b_e) if dtype_str == "f32" else mlir_arith.extf(compute_type, unwrap(b_e))
+                        diff = mlir_arith.SubFOp(unwrap(x), unwrap(mean), fastmath=fm_fast).result
+                        norm = mlir_arith.MulFOp(unwrap(diff), unwrap(rstd), fastmath=fm_fast).result
+                        scaled = mlir_arith.MulFOp(unwrap(norm), unwrap(g), fastmath=fm_fast).result
+                        y = mlir_arith.AddFOp(unwrap(scaled), unwrap(b), fastmath=fm_fast).result
                         if dtype_str == "bf16":
-                            y_e = mlir_arith.truncf(elem_type, val(y))
+                            y_e = mlir_arith.truncf(elem_type, unwrap(y))
                         else:
-                            y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, val(y))
-                        memref.store(val(y_e), Output, [val(row), val(idx)])
+                            y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
+                        memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx)])
 
         @flir.jit
         def __call__(
@@ -380,9 +381,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Beta: lambda: T.memref(N, _state["elem_type"]),
             Output: lambda: T.memref(M, N, _state["elem_type"]),
         ):
-            c1 = val(flir.arith_ext.index(1))
-            gx = val(flir.arith_ext.index(M))
-            bx = val(flir.arith_ext.index(BLOCK_THREADS))
+            c1 = unwrap(flir.arith_ext.index(1))
+            gx = unwrap(flir.arith_ext.index(M))
+            bx = unwrap(flir.arith_ext.index(BLOCK_THREADS))
             flir.gpu_ext.LaunchFuncOp(
                 ["layernorm_module", "layernorm_kernel"],
                 grid_size=(gx, c1, c1),
