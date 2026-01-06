@@ -226,7 +226,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
             if dtype_config == DTYPE_FP8:
                 # --- FP8 pipeline (unchanged structure) ---
-                f8 = ir.Float8E4M3FNType.get()
+                f8 = _mlir_dtype()  # Use arch-appropriate FP8 type
                 i32_type = ir.IntegerType.get_signless(32)
                 vec8_f8 = ir.VectorType.get([8], f8)
                 vec16_f8 = ir.VectorType.get([16], f8)
