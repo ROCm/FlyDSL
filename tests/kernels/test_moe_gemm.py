@@ -25,6 +25,15 @@ if _PYFLIR_SRC not in sys.path:
 from test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
+from flydsl.runtime.device import get_rocm_arch
+
+ARCH = get_rocm_arch()
+# GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
+# GFX940/941/942 (MI300) use float8_e4m3fnuz
+if "gfx95" in ARCH:
+    DTYPE_FP8 = torch.float8_e4m3fn
+else:
+    DTYPE_FP8 = torch.float8_e4m3fnuz
 
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
     """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
@@ -372,10 +381,10 @@ def run_moe_stage1(
 
     # Quantize inputs / weights.
     if in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [tokens,K], [tokens,1]
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.float8_e4m3fnuz)  # [E,2*inter,K], [E,2*inter,1]
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
     # w2 is not used by our kernel, but required by CK stage1 API
-        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.float8_e4m3fnuz)
+        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -654,9 +663,9 @@ def run_moe_stage2(
 
     # Quantize inputs / weights.
     if in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.float8_e4m3fnuz)
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.float8_e4m3fnuz)
-        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.float8_e4m3fnuz)
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -688,7 +697,7 @@ def run_moe_stage2(
             doweight_stage1=bool(doweight_stage1),
         )  # [tokens, topk, inter] fp32
         if in_dtype == "fp8":
-            a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.float8_e4m3fnuz)
+            a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
         else:
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
@@ -980,7 +989,7 @@ def test_moe_gemm_2stage(
 
     out1_fp32 = out1_fp16.to(torch.float32)
     if in_dtype == "fp8":
-        a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.float8_e4m3fnuz)
+        a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
     else:
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
 

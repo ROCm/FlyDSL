@@ -31,6 +31,7 @@ if _PYFLIR_SRC not in sys.path:
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
+from flydsl.runtime.device import get_rocm_arch
 
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +52,11 @@ except ImportError:
 
 
 RUN_AITER_BENCH = os.environ.get("COMPARE_AITER_CK", "1") == "1"
+
+ARCH = get_rocm_arch()
+# GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
+# GFX940/941/942 (MI300) use float8_e4m3fnuz
+DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
@@ -113,7 +119,7 @@ def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
 
-    quant_dtype = torch.int8 if is_int8 else torch.float8_e4m3fnuz
+    quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
     a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
     if is_int4:
         # Signed int4 range is [-8, 7]. Use dtypeMax=7 for symmetric per-row scaling.

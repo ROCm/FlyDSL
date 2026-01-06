@@ -5,6 +5,24 @@ from __future__ import annotations
 from _mlir import ir
 from _mlir.extras.types import *
 
+from flydsl.runtime.device import get_rocm_arch
+
+
+
+def _flir_default_f8_type() -> ir.Type:
+    """Select E4M3 f8 type compatible with the current GPU arch.
+
+    - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx94* (MI300): FP8 E4M3FNUZ
+    """
+    arch = ""
+    try:
+        arch = str(get_rocm_arch())
+    except Exception:
+        arch = ""
+    if "gfx95" in arch:
+        return ir.Float8E4M3FNType.get()
+    return ir.Float8E4M3FNUZType.get()
 
 
 class Types:
@@ -107,19 +125,19 @@ class Types:
     # ROCm kernels in this repo typically use E4M3FN.
     @property
     def f8(self) -> ir.Type:
-        return ir.Float8E4M3FNType.get()
+        return _flir_default_f8_type()
     @property
     def f8x2(self) -> ir.Type:
-        return ir.VectorType.get([2], ir.Float8E4M3FNType.get())
+        return ir.VectorType.get([2], _flir_default_f8_type())
     @property
     def f8x4(self) -> ir.Type:
-        return ir.VectorType.get([4], ir.Float8E4M3FNType.get())
+        return ir.VectorType.get([4], _flir_default_f8_type())
     @property
     def f8x8(self) -> ir.Type:
-        return ir.VectorType.get([8], ir.Float8E4M3FNType.get())
+        return ir.VectorType.get([8], _flir_default_f8_type())
     @property
     def f8x16(self) -> ir.Type:
-        return ir.VectorType.get([16], ir.Float8E4M3FNType.get())
+        return ir.VectorType.get([16], _flir_default_f8_type())
 
     # ---- Vectors ----
     def vec(self, n: int, elem: ir.Type) -> ir.Type:

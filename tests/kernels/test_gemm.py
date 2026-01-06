@@ -34,7 +34,14 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 # Use torch dtypes directly for test parametrization / configuration.
-DTYPE_FP8 = torch.float8_e4m3fnuz
+ARCH = get_rocm_arch()
+# GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
+# GFX940/941/942 (MI300) use float8_e4m3fnuz
+if "gfx95" in ARCH:
+    DTYPE_FP8 = torch.float8_e4m3fn
+else:
+    DTYPE_FP8 = torch.float8_e4m3fnuz
+
 DTYPE_FP16 = torch.float16
 
 def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.float32):
@@ -73,7 +80,13 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
     
     gpu_arch = get_rocm_arch()
     def _mlir_dtype():
-        return ir.Float8E4M3FNType.get() if dtype_config == DTYPE_FP8 else ir.F16Type.get()
+        if dtype_config == DTYPE_FP8:
+            if DTYPE_FP8 == torch.float8_e4m3fn:
+                 return ir.Float8E4M3FNType.get()
+            else:
+                 return ir.Float8E4M3FNUZType.get()
+        else:
+            return ir.F16Type.get()
 
     # We currently assume "full tiles" (no tail guards) for both FP8/FP16.
     # This matches the FP8 path’s grid computation and keeps the kernel simple.
