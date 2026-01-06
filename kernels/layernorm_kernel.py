@@ -5,7 +5,6 @@ embedded in `tests/kernels/test_layernorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
-from flydsl.compiler.context import RAIIMLIRContextModule
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
@@ -60,39 +59,45 @@ VEC_ALIGN = 16
 
 
 def build_layernorm_module(M: int, N: int, dtype_str: str):
-    ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-    gpu.set_container_module(ctx.module)
-
     arch = get_hip_arch()
     # gfx950 supports efficient BF16 pack via v_cvt_pk_bf16_f32.
     # gfx942 does *not* support it and tends to lower f32->bf16 to heavier sequences,
     # so we keep the manual pack there for performance.
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or arch.startswith("gfx95")
-    allocator = SmemAllocator(ctx, arch=arch)
-
-    elem_type = dtype_to_elem_type(dtype_str)
-    compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
+    allocator = SmemAllocator(None, arch=arch)
 
     tile_cols_py = BLOCK_THREADS * VEC_WIDTH
 
     # Allocate Shared Memory for block reductions (one slot per wave).
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    smem_red_sum = allocator.allocate_array(T.f32(), RED_SLOTS)
-    smem_red_sumsq = allocator.allocate_array(T.f32(), RED_SLOTS)
+    _state = {}
 
-    @gpu.module("layernorm_module", [f'#rocdl.target<chip = "{arch}", abi = "500">'])
-    def gpu_mod():
-        allocator.finalize()
+    class _LayerNorm(flir.MlirModule):
+        GPU_MODULE_NAME = "layernorm_module"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{arch}", abi = "500">']
 
-        @gpu.func(emit=True)
+        def init_gpu_module(self):
+            elem_type = dtype_to_elem_type(dtype_str)
+            compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+            _state["smem_red_sum"] = allocator.allocate_array(T.f32(), RED_SLOTS)
+            _state["smem_red_sumsq"] = allocator.allocate_array(T.f32(), RED_SLOTS)
+            allocator.finalize()
+
+        @flir.kernel
         def layernorm_kernel(
-            Input: T.memref(M, N, elem_type),
-            Gamma: T.memref(N, elem_type),
-            Beta: T.memref(N, elem_type),
-            Output: T.memref(M, N, elem_type)
+            self: flir.T.i64,
+            Input: lambda: T.memref(M, N, _state["elem_type"]),
+            Gamma: lambda: T.memref(N, _state["elem_type"]),
+            Beta: lambda: T.memref(N, _state["elem_type"]),
+            Output: lambda: T.memref(M, N, _state["elem_type"]),
         ):
             row = flir.block_idx("x")
             tid = flir.thread_idx("x")
+
+            elem_type = _state["elem_type"]
+            compute_type = _state["compute_type"]
 
             zero_idx = flir.const_index(0)
             n_float = arith.constant(compute_type, float(N))
@@ -100,8 +105,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             fm_fast = mlir_arith.FastMathFlags.fast
 
             base_ptr = allocator.get_base()
-            s_sum = smem_red_sum(base_ptr).get()
-            s_sumsq = smem_red_sumsq(base_ptr).get()
+            s_sum = _state["smem_red_sum"](base_ptr).get()
+            s_sumsq = _state["smem_red_sumsq"](base_ptr).get()
             # Rocir-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
@@ -205,7 +210,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                for tile_i in range(num_tiles_py):
+                for tile_i in range_constexpr(num_tiles_py):
                     blkIn = gIn[(unwrap(row), tile_i)]
                     thrIn = thr_copy_e.partition_S(blkIn)
                     frgIn = flir.make_fragment_like(thrIn, elem_type)
@@ -261,7 +266,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 g_cur = g_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(g_e_cur))
                 b_cur = b_e_cur if dtype_str == "f32" else mlir_arith.extf(vec_type_c, unwrap(b_e_cur))
 
-                for tile_i in range(num_tiles_py):
+                for tile_i in range_constexpr(num_tiles_py):
                     base_idx_int = tile_i * tile_cols
                     c_base = flir.const_index(base_idx_int)
                     curr_idx = mlir_arith.AddIOp(unwrap(c_base), unwrap(thread_offset_base)).result
@@ -367,6 +372,24 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                             y_e = y if dtype_str == "f32" else mlir_arith.truncf(elem_type, unwrap(y))
                         memref.store(unwrap(y_e), Output, [unwrap(row), unwrap(idx)])
 
-    return ctx
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            Input: lambda: T.memref(M, N, _state["elem_type"]),
+            Gamma: lambda: T.memref(N, _state["elem_type"]),
+            Beta: lambda: T.memref(N, _state["elem_type"]),
+            Output: lambda: T.memref(M, N, _state["elem_type"]),
+        ):
+            c1 = unwrap(flir.arith_ext.index(1))
+            gx = unwrap(flir.arith_ext.index(M))
+            bx = unwrap(flir.arith_ext.index(BLOCK_THREADS))
+            flir.gpu_ext.LaunchFuncOp(
+                ["layernorm_module", "layernorm_kernel"],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[Input, Gamma, Beta, Output],
+            )
+
+    return _LayerNorm()
 
 
