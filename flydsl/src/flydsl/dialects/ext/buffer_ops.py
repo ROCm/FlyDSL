@@ -26,27 +26,6 @@ from _mlir.dialects import llvm, rocdl, arith as std_arith, memref
 import _mlir.extras.types as T
 from typing import Optional, Union
 
-from flydsl.runtime.device import get_rocm_arch
-
-# Determine buffer descriptor size based on GPU architecture
-def _buffer_use_i64() -> bool:
-    """
-    Return True if buffer descriptor should use i64 for num_records.
-    GFX950 (MI355) requires i64, GFX940/941/942 (MI308) requires i32.
-    """
-    arch = ""
-    try:
-        arch = str(get_rocm_arch())
-    except Exception:
-        arch = ""
-    # GFX950 and newer use i64
-    if "gfx95" in arch:
-        return True
-    # GFX940/941/942 (MI300 series) use i32
-    return False
-
-_USE_I64_BUFFER = _buffer_use_i64()
-
 __all__ = [
     'create_llvm_ptr',
     'create_buffer_resource',
@@ -139,20 +118,6 @@ def _create_i64_constant(value: int) -> ir.Value:
     return _unwrap_value(op.result)
 
 
-def _create_buffer_size_constant(value: int) -> ir.Value:
-    """
-    Create buffer size constant with architecture-appropriate width.
-    GFX950 (MI355) uses i64, GFX940/941/942 (MI308) uses i32.
-    """
-    if _USE_I64_BUFFER:
-        return _create_i64_constant(value)
-    else:
-        # Clamp to i32 max value
-        if value > 0x7FFFFFFF:
-            value = 0x7FFFFFFF
-        return _create_i32_constant(value)
-
-
 class BufferResourceDescriptor:
     """AMD Buffer Resource Descriptor
     
@@ -225,34 +190,37 @@ class BufferResourceDescriptor:
             except Exception:
                 return None
 
-        # Determine the target integer width based on architecture
-        target_width = 64 if _USE_I64_BUFFER else 32
-        
         if num_records_bytes is not None:
             # Caller-provided size in BYTES (preferred for exact hardware OOB behavior).
             if isinstance(num_records_bytes, int):
                 nbytes = int(num_records_bytes)
                 if nbytes <= 0:
                     nbytes = 0
-                num_records = _create_buffer_size_constant(nbytes)
+                # Descriptor uses i32 bytes; clamp to the max representable.
+                if nbytes > 0x7FFFFFFE:
+                    nbytes = 0x7FFFFFFE
+                num_records = _create_i32_constant(nbytes)
             else:
-                # Value path: cast to target width if needed.
+                # Value path: cast to i32 if needed.
                 v = _unwrap_value(num_records_bytes)
-                if not isinstance(v.type, ir.IntegerType) or v.type.width != target_width:
-                    op = std_arith.IndexCastOp(ir.IntegerType.get_signless(target_width), v)
+                if not isinstance(v.type, ir.IntegerType) or v.type.width != 32:
+                    op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), v)
                     v = _unwrap_value(op.result)
                 num_records = v
         elif max_size:
             # Use max for flexibility (hardware will check actual bounds)
-            num_records = _create_buffer_size_constant(0x7FFFFFFE)  # FALLBACK_MAX_SIZE
+            # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
+            num_records = _create_i32_constant(0x7FFFFFFE)  # FALLBACK_MAX_SIZE
         else:
             # Use the logical memref size (in bytes) for hardware OOB checking.
             nbytes = _num_records_from_memref_type()
             if nbytes is None:
                 # Fall back to max-size if we can't infer statically.
-                num_records = _create_buffer_size_constant(0x7FFFFFFE)
+                num_records = _create_i32_constant(0x7FFFFFFE)
             else:
-                num_records = _create_buffer_size_constant(int(nbytes))
+                if nbytes > 0x7FFFFFFE:
+                    nbytes = 0x7FFFFFFE
+                num_records = _create_i32_constant(int(nbytes))
         
         # Create resource descriptor (returns !llvm.ptr<8>)
         rsrc_type = ir.Type.parse('!llvm.ptr<8>')
