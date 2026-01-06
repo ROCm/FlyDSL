@@ -28,7 +28,7 @@ if [ -z "$MLIR_PATH" ]; then
         export MLIR_PATH="$DEFAULT_MLIR_PATH"
     else
         echo "Error: MLIR_PATH not set and default location ($DEFAULT_MLIR_PATH) not found."
-        echo "Please run ./build_llvm.sh from the repo root first, or set MLIR_PATH."
+        echo "Please run bash scripts/build_llvm.sh from the repo root first, or set MLIR_PATH."
         exit 1
     fi
 fi

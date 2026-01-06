@@ -1,10 +1,10 @@
-# FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL) & FLIR
+# FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
 tiling, partitioning, data movement, and kernel structure at a high level.
 
-**FlyDSL** & **FLIR**: FlyDSL is powered by FLIR (**F**lexible **L**ayout **I**ntermediate **R**epresentation):
+**FlyDSL**: FlyDSL is powered by FLIR (**F**lexible **L**ayout **I**ntermediate **R**epresentation):
 an end‑to‑end, MLIR‑native compiler stack for GPU kernels. Its core is the `flir` dialect—a first‑class
 layout IR with explicit algebra and coordinate mapping, plus a composable lowering pipeline to GPU/ROCDL.
 
@@ -25,8 +25,7 @@ layout IR with explicit algebra and coordinate mapping, plus a composable loweri
 
 ```
 FlyDSL/
-├── build_llvm.sh              # build/prepare llvm-project (optional helper)
-├── run_tests.sh               # run MLIR + Python tests
+├── scripts/                   # helper scripts (build llvm, tests, packaging)
 ├── flir/                      # C++ sources + build scripts (CMake, embedded python bindings)
 │   ├── CMakeLists.txt
 │   ├── build.sh               # build FLIR + python bindings (recommended)
@@ -43,7 +42,7 @@ FlyDSL/
 - **ROCm**: required for GPU execution tests/benchmarks (IR-only tests do not need a GPU).
 - **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
 - **Python**: Python 3 + `pip`.
-  - `build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
+  - `scripts/build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
   - `flydsl/requirements.txt` exists for auxiliary deps (`numpy`, ) for runtime data initialize and result check.
 
 ### Build
@@ -59,7 +58,7 @@ export MLIR_PATH=/path/to/llvm-project/build
 Or use the helper script (clones ROCm llvm-project and builds MLIR):
 
 ```bash
-./build_llvm.sh
+bash scripts/build_llvm.sh
 ```
 
 ### B) Build FLIR (C++ + embedded python package)
@@ -93,21 +92,11 @@ python3 setup.py bdist_wheel
 ls dist/
 ```
 
-### Build a wheel compatible with older glibc (manylinux_2_28)
-
-If you need the wheel to install on machines with older glibc (e.g. `ldd --version` shows 2.35),
-build it in a manylinux container so it gets a `manylinux_2_28` tag:
-
-```bash
-cd /mnt/raid0/felix/flir
-bash tools/build_manylinux_2_28.sh
-ls dist/
-```
 
 ### Run tests
 
 ```bash
-./run_tests.sh
+bash scripts/run_tests.sh
 ```
 
 What `run_tests.sh` does (high level):

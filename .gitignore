@@ -1,6 +1,7 @@
 # Build outputs
 build/
 .flydsl/
+.flir
 ## Legacy build outputs (pre-rename)
 *.log
 

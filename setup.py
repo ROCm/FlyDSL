@@ -218,8 +218,8 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     Note:
       - This does NOT guarantee a `manylinux_2_28` tag; the best achievable policy
         depends on your binary's ELF deps and glibc symbol versions.
-      - For a guaranteed manylinux_2_28 wheel, build inside a manylinux_2_28 image
-        (see tools/build_manylinux_2_28.sh).
+    - For a guaranteed manylinux_2_28 wheel, build inside a manylinux_2_28 image
+        (see scripts/build_manylinux_2_28.sh).
     """
     if sys.platform != "linux":
         return
