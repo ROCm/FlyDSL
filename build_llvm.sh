@@ -1,28 +1,12 @@
 #!/bin/bash
 set -e
 
-# Build LLVM/MLIR for FlyDSL.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LLVM_SRC_DIR_IN_REPO="${REPO_ROOT}/llvm-project"
-LLVM_SRC_DIR_IN_PARENT="${REPO_ROOT}/../llvm-project"
+# Default to downloading llvm-project in the parent directory of flir
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LLVM_SRC_DIR="$BASE_DIR/llvm-project"
+LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
 
-# Allow explicit override.
-if [ -n "${LLVM_SRC_DIR:-}" ]; then
-    LLVM_SRC_DIR="${LLVM_SRC_DIR}"
-elif [ -d "${LLVM_SRC_DIR_IN_REPO}" ]; then
-    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_REPO}"
-elif [ -d "${LLVM_SRC_DIR_IN_PARENT}" ]; then
-    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_PARENT}"
-else
-    # Backward compatible default: create under the repo parent directory.
-    LLVM_SRC_DIR="${LLVM_SRC_DIR_IN_PARENT}"
-fi
-
-# Build directory (override-able).
-LLVM_BUILD_DIR_DEFAULT="${LLVM_SRC_DIR}/buildmlir"
-LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-${LLVM_BUILD_DIR_DEFAULT}}"
-
-echo "Repo root:      $REPO_ROOT"
+echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 
