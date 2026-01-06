@@ -39,6 +39,10 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
+DTYPE_FP32 = torch.float32
+DTYPE_FP16 = torch.float16
+DTYPE_BF16 = torch.bfloat16
+
 import flydsl
 
 EPS: float = 1e-5
@@ -63,29 +67,29 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print(f"[Skip] build_rmsnorm_module failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return True, None
     torch.manual_seed(42)
-    input_t = torch.randn((M, N), device="cuda", dtype=torch.float32)
-    gamma_t = torch.rand((N,), device="cuda", dtype=torch.float32)
+    input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
     if dtype == "f32":
         input_dev = input_t.contiguous()
         gamma_dev = gamma_t.contiguous()
-        output_dev = torch.empty((M, N), device="cuda", dtype=torch.float32)
-        input_ref = input_dev.to(torch.float32)
-        gamma_ref = gamma_dev.to(torch.float32)
+        output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
+        input_ref = input_dev.to(DTYPE_FP32)
+        gamma_ref = gamma_dev.to(DTYPE_FP32)
         atol = 1e-4
     elif dtype == "f16":
-        input_dev = input_t.to(torch.float16).contiguous()
-        gamma_dev = gamma_t.to(torch.float16).contiguous()
-        output_dev = torch.empty((M, N), device="cuda", dtype=torch.float16)
-        input_ref = input_dev.to(torch.float32)
-        gamma_ref = gamma_dev.to(torch.float32)
+        input_dev = input_t.to(DTYPE_FP16).contiguous()
+        gamma_dev = gamma_t.to(DTYPE_FP16).contiguous()
+        output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
+        input_ref = input_dev.to(DTYPE_FP32)
+        gamma_ref = gamma_dev.to(DTYPE_FP32)
         atol = 1e-2
     elif dtype == "bf16":
-        input_dev = input_t.to(torch.bfloat16).contiguous()
-        gamma_dev = gamma_t.to(torch.bfloat16).contiguous()
-        output_dev = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
-        input_ref = input_dev.to(torch.float32)
-        gamma_ref = gamma_dev.to(torch.float32)
+        input_dev = input_t.to(DTYPE_BF16).contiguous()
+        gamma_dev = gamma_t.to(DTYPE_BF16).contiguous()
+        output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
+        input_ref = input_dev.to(DTYPE_FP32)
+        gamma_ref = gamma_dev.to(DTYPE_FP32)
         atol = 2e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
@@ -97,7 +101,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     sq_mean = (x * x).mean(dim=1, keepdim=True)
     rms = torch.sqrt(sq_mean + EPS)
     expected = (x / rms) * gamma
-    expected = expected.to(torch.float32)
+    expected = expected.to(DTYPE_FP32)
 
     print("Launching kernel...")
 
@@ -123,7 +127,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print(f"[Perf] FLIR rmsnorm gpu: {flir_gpu_us:.1f} us")
 
     # Verification (pure torch style; compute max error in torch)
-    output_ref = output_dev.to(torch.float32)
+    output_ref = output_dev.to(DTYPE_FP32)
 
     error = (output_ref - expected).abs().max().item()
     print(f"Max absolute error: {error:.2e} (atol={atol})")
@@ -181,7 +185,7 @@ def test_all():
             if maybe_enable_aiter():
                 try:
                     from aiter.ops.triton.rmsnorm import rms_norm as aiter_rms_norm
-                    x = torch.randn((M, N), device="cuda", dtype=torch.bfloat16 if dtype == "bf16" else (torch.float16 if dtype == "f16" else torch.float32))
+                    x = torch.randn((M, N), device="cuda", dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32))
                     w = torch.rand((N,), device="cuda", dtype=x.dtype)
 
                     def run_aiter():

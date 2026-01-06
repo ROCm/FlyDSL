@@ -31,6 +31,10 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
+DTYPE_FP32 = torch.float32
+DTYPE_FP16 = torch.float16
+DTYPE_BF16 = torch.bfloat16
+
 import flydsl
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
@@ -61,20 +65,20 @@ def run_test(M, N, dtype_str):
         return False, None
         
     torch.manual_seed(42)
-    a_t = (torch.rand((M, N), device="cuda", dtype=torch.float32) * 4.0) - 2.0
+    a_t = (torch.rand((M, N), device="cuda", dtype=DTYPE_FP32) * 4.0) - 2.0
 
     # PyTorch CPU reference (stable softmax)
-    expected = torch.softmax(a_t, dim=1).to(torch.float32)
+    expected = torch.softmax(a_t, dim=1).to(DTYPE_FP32)
     
     if dtype_str == "f32":
         a_dev = a_t.contiguous()
-        c_dev = torch.empty((M, N), device="cuda", dtype=torch.float32)
+        c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP32)
     elif dtype_str == "f16":
-        a_dev = a_t.to(torch.float16).contiguous()
-        c_dev = torch.empty((M, N), device="cuda", dtype=torch.float16)
+        a_dev = a_t.to(DTYPE_FP16).contiguous()
+        c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_FP16)
     elif dtype_str == "bf16":
-        a_dev = a_t.to(torch.bfloat16).contiguous()
-        c_dev = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+        a_dev = a_t.to(DTYPE_BF16).contiguous()
+        c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
     
     def kernel_launch():
         exe(a_dev, c_dev)
@@ -99,13 +103,13 @@ def run_test(M, N, dtype_str):
 
     # Verify in pure torch style (keep tensors, compute max error in torch), similar to test_mfma_gemm_fp8_rocir.py
     if dtype_str == "f32":
-        res = c_dev.to(torch.float32)
+        res = c_dev.to(DTYPE_FP32)
         atol = 1e-5
     elif dtype_str == "f16":
-        res = c_dev.to(torch.float32)
+        res = c_dev.to(DTYPE_FP32)
         atol = 1e-2
     elif dtype_str == "bf16":
-        res = c_dev.to(torch.float32)
+        res = c_dev.to(DTYPE_FP32)
         atol = 2e-2
 
     max_err = (res - expected).abs().max().item()
@@ -165,11 +169,11 @@ def test_all():
             if maybe_enable_aiter():
                 try:
                     from aiter.ops.triton.softmax import softmax as aiter_softmax
-                    x = (torch.rand((M, N), device="cuda", dtype=torch.float16) * 4.0) - 2.0
+                    x = (torch.rand((M, N), device="cuda", dtype=DTYPE_FP16) * 4.0) - 2.0
                     if dtype == "f32":
-                        x = x.to(torch.float32)
+                        x = x.to(DTYPE_FP32)
                     elif dtype == "bf16":
-                        x = x.to(torch.bfloat16)
+                        x = x.to(DTYPE_BF16)
 
                     def run_aiter():
                         aiter_softmax(x)
