@@ -142,50 +142,6 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 zero_idx=zero_idx,
             )
 
-            def bf16_pack_vec8_rne(vec_f32):
-                # Manual bf16 cast with RNE rounding (NaN-safe, no scaling/clip).
-                # We keep this path for gfx942 to avoid the particularly heavy default lowering,
-                # while preserving NaN/Inf semantics (this is still just an f32->bf16 cast).
-                vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
-                vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
-                vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
-
-                c16_i32 = arith.constant(T.i32(), 16).value
-                c7fff_i32 = arith.constant(T.i32(), 0x7FFF).value
-                c1_i32 = arith.constant(T.i32(), 1).value
-                c_abs_mask_i32 = arith.constant(T.i32(), 0x7FFFFFFF).value
-                c_inf_i32 = arith.constant(T.i32(), 0x7F800000).value
-                c_qnan_bf16_i32 = arith.constant(T.i32(), 0x0040).value
-
-                c16_i32_v = vector.splat(vec_i32_ty, (c16_i32))
-                c7fff_i32_v = vector.splat(vec_i32_ty, (c7fff_i32))
-                c1_i32_v = vector.splat(vec_i32_ty, (c1_i32))
-                c_abs_mask_i32_v = vector.splat(vec_i32_ty, (c_abs_mask_i32))
-                c_inf_i32_v = vector.splat(vec_i32_ty, (c_inf_i32))
-                c_qnan_bf16_i32_v = vector.splat(vec_i32_ty, (c_qnan_bf16_i32))
-
-                u = mlir_arith.bitcast(vec_i32_ty, (vec_f32))
-
-                # Detect NaN: abs(u) > +Inf (works for both qNaN/sNaN, avoids mantissa checks).
-                abs_u = mlir_arith.AndIOp((u), (c_abs_mask_i32_v)).result
-                is_nan = mlir_arith.CmpIOp(mlir_arith.CmpIPredicate.ugt, (abs_u), (c_inf_i32_v)).result
-
-                hi = mlir_arith.ShRUIOp((u), (c16_i32_v)).result
-                lsb = mlir_arith.AndIOp((hi), (c1_i32_v)).result
-                bias = mlir_arith.AddIOp((c7fff_i32_v), (lsb)).result
-                u_round = mlir_arith.AddIOp((u), (bias)).result
-                bf16_bits_rne = mlir_arith.ShRUIOp((u_round), (c16_i32_v)).result
-
-                # For NaN, ensure we produce a quiet NaN in bf16 (mantissa != 0).
-                bf16_bits_nan = mlir_arith.OrIOp((hi), (c_qnan_bf16_i32_v)).result
-                bf16_bits = flir.arith.SelectOp((is_nan), (bf16_bits_nan), (bf16_bits_rne)).result
-
-                even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
-                odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                odd_sh = mlir_arith.ShLIOp((odd), (vector.splat(vec4_i32_ty, (c16_i32)))).result
-                packed = mlir_arith.OrIOp((even), (odd_sh)).result
-                return vector.bitcast(vec_bf16_ty, (packed))
-
             # Fast-path: keep the original register-row variant for the tuned (N==8192) case.
             if N == (BLOCK_THREADS * VEC_WIDTH * 4):
                 num_tiles_py = 4
@@ -285,7 +241,23 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         if USE_HW_CVT_PK_BF16_F32:
                             out_e = mlir_arith.truncf(vec_type_e, (y))
                         else:
-                            out_e = bf16_pack_vec8_rne(y)
+                            # Round-to-zero bf16 pack: truncate high 16 bits of f32 (no rounding).
+                            # This intentionally trades numerical accuracy for simplicity/speed and
+                            # avoids heavyweight bf16 lowering on some toolchains.
+                            vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
+                            vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
+                            vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
+                            c16_i32 = arith.constant(T.i32(), 16).value
+                            c16_i32_v = vector.splat(vec_i32_ty, (c16_i32))
+
+                            u = mlir_arith.bitcast(vec_i32_ty, (y))
+                            bf16_bits = mlir_arith.ShRUIOp((u), (c16_i32_v)).result
+
+                            even = vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
+                            odd = vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
+                            odd_sh = mlir_arith.ShLIOp((odd), (vector.splat(vec4_i32_ty, (c16_i32)))).result
+                            packed = mlir_arith.OrIOp((even), (odd_sh)).result
+                            out_e = vector.bitcast(vec_bf16_ty, (packed))
                     else:
                         out_e = y if dtype_str == "f32" else mlir_arith.truncf(vec_type_e, (y))
 
