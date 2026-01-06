@@ -70,43 +70,39 @@ def make_block_reduce(*, tid, BLOCK_SIZE, compute_type, arith, gpu, flir, s_red_
             wave_i32,
             arith.constant(0, type=T.i32()).value,
         ).result
-        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
-            with ir.InsertionPoint(then_blk):
-                in_range = flir.arith.CmpIOp(
-                    flir.arith.CmpIPredicate.ult,
-                    lane_i32,
-                    arith.constant(NUM_WAVES, type=T.i32()).value,
-                ).result
+        if is_wave0:
+            in_range = flir.arith.CmpIOp(
+                flir.arith.CmpIPredicate.ult,
+                lane_i32,
+                arith.constant(NUM_WAVES, type=T.i32()).value,
+            ).result
 
-                # Predicated load: clamp lane index to 0 when out-of-range, then select.
-                c0_i32 = arith.constant(0, type=T.i32()).value
-                lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
-                lane_safe_idx = flir.arith.IndexCastOp(T.index(), lane_safe_i32).result
-                red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
-                v = s_red_tv[red_idx]
-                neutral = c_neg_inf if reduce_op_name == "max" else c_zero
-                ww = flir.arith.SelectOp(in_range, v, neutral).result
+            # Predicated load: clamp lane index to 0 when out-of-range, then select.
+            c0_i32 = arith.constant(0, type=T.i32()).value
+            lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
+            lane_safe_idx = flir.arith.IndexCastOp(T.index(), lane_safe_i32).result
+            red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
+            v = s_red_tv[red_idx]
+            neutral = c_neg_inf if reduce_op_name == "max" else c_zero
+            ww = flir.arith.SelectOp(in_range, v, neutral).result
 
-                for sh in [32, 16, 8, 4, 2, 1]:
-                    off = arith.constant(sh, type=T.i32()).value
-                    peer = gpu.ShuffleOp(ww, off, width_i32, mode="xor").shuffleResult
-                    if reduce_op_name == "max":
-                        ww = flir.arith.MaximumFOp(ww, peer).result
-                    else:
-                        ww = flir.arith.AddFOp(ww, peer, fastmath=fm_fast).result
+            for sh in [32, 16, 8, 4, 2, 1]:
+                off = arith.constant(sh, type=T.i32()).value
+                peer = gpu.ShuffleOp(ww, off, width_i32, mode="xor").shuffleResult
+                if reduce_op_name == "max":
+                    ww = flir.arith.MaximumFOp(ww, peer).result
+                else:
+                    ww = flir.arith.AddFOp(ww, peer, fastmath=fm_fast).result
 
-                # lane0 writes final to s_red[0]
-                is_lane0_2 = flir.arith.CmpIOp(
-                    flir.arith.CmpIPredicate.eq,
-                    lane_i32,
-                    arith.constant(0, type=T.i32()).value,
-                ).result
-                if is_lane0_2:
-                    red_idx0 = flir.crd2idx(flir.make_coord(c_zero_idx), layout_red)
-                    s_red_tv[red_idx0] = ww
-                flir.scf_ext.yield_([])
-            with ir.InsertionPoint(else_blk):
-                flir.scf_ext.yield_([])
+            # lane0 writes final to s_red[0]
+            is_lane0_2 = flir.arith.CmpIOp(
+                flir.arith.CmpIPredicate.eq,
+                lane_i32,
+                arith.constant(0, type=T.i32()).value,
+            ).result
+            if is_lane0_2:
+                red_idx0 = flir.crd2idx(flir.make_coord(c_zero_idx), layout_red)
+                s_red_tv[red_idx0] = ww
         gpu.barrier()
 
         red_idx0 = flir.crd2idx(flir.make_coord(c_zero_idx), layout_red)
@@ -174,38 +170,34 @@ def make_block_reduce_add(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ari
             arith.constant(T.i32(), 0).value,
         ).result
         # Only wave0 does final reduction and writes scratch[0].
-        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
-            with ir.InsertionPoint(then_blk):
-                in_range = arith_ops.CmpIOp(
-                    arith_ops.CmpIPredicate.ult,
-                    lane_i32,
-                    arith.constant(T.i32(), NUM_WAVES).value,
-                ).result
+        if is_wave0:
+            in_range = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.ult,
+                lane_i32,
+                arith.constant(T.i32(), NUM_WAVES).value,
+            ).result
 
-                c0_i32 = arith.constant(T.i32(), 0).value
-                lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
-                lane_safe_idx = arith_ops.IndexCastOp(T.index(), lane_safe_i32).result
-                red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
-                v = scratch_tv[red_idx]
-                z = arith.constant(T.f32(), 0.0).value
-                ww = flir.arith.SelectOp(in_range, v, z).result
+            c0_i32 = arith.constant(T.i32(), 0).value
+            lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
+            lane_safe_idx = arith_ops.IndexCastOp(T.index(), lane_safe_i32).result
+            red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
+            v = scratch_tv[red_idx]
+            z = arith.constant(T.f32(), 0.0).value
+            ww = flir.arith.SelectOp(in_range, v, z).result
 
-                for sh in [32, 16, 8, 4, 2, 1]:
-                    off = arith.constant(T.i32(), sh).value
-                    peer = gpu.ShuffleOp(ww, off, width_i32, mode="xor").shuffleResult
-                    ww = arith_ops.AddFOp(ww, peer, fastmath=fm_fast).result
+            for sh in [32, 16, 8, 4, 2, 1]:
+                off = arith.constant(T.i32(), sh).value
+                peer = gpu.ShuffleOp(ww, off, width_i32, mode="xor").shuffleResult
+                ww = arith_ops.AddFOp(ww, peer, fastmath=fm_fast).result
 
-                is_lane0_2 = arith_ops.CmpIOp(
-                    arith_ops.CmpIPredicate.eq,
-                    lane_i32,
-                    arith.constant(T.i32(), 0).value,
-                ).result
-                if is_lane0_2:
-                    red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
-                    scratch_tv[red_idx0] = ww
-                flir.scf_ext.yield_([])
-            with ir.InsertionPoint(else_blk):
-                flir.scf_ext.yield_([])
+            is_lane0_2 = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.eq,
+                lane_i32,
+                arith.constant(T.i32(), 0).value,
+            ).result
+            if is_lane0_2:
+                red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
+                scratch_tv[red_idx0] = ww
 
         gpu.barrier()
         red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
@@ -277,39 +269,35 @@ def make_block_reduce_add2(*, tid, fm_fast, WARP_SIZE, RED_SLOTS, gpu, arith, ar
             wave_i32,
             arith.constant(T.i32(), 0).value,
         ).result
-        with flir.scf_ext.if_(is_wave0, hasElse=True) as (then_blk, else_blk):
-            with ir.InsertionPoint(then_blk):
-                in_range = arith_ops.CmpIOp(
-                    arith_ops.CmpIPredicate.ult,
-                    lane_i32,
-                    arith.constant(T.i32(), RED_SLOTS).value,
-                ).result
+        if is_wave0:
+            in_range = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.ult,
+                lane_i32,
+                arith.constant(T.i32(), RED_SLOTS).value,
+            ).result
 
-                c0_i32 = arith.constant(T.i32(), 0).value
-                lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
-                lane_safe_idx = arith_ops.IndexCastOp(T.index(), lane_safe_i32).result
-                red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
-                v0 = scratch0_tv[red_idx]
-                v1 = scratch1_tv[red_idx]
-                z = arith.constant(T.f32(), 0.0).value
-                ww0 = flir.arith.SelectOp(in_range, v0, z).result
-                ww1 = flir.arith.SelectOp(in_range, v1, z).result
+            c0_i32 = arith.constant(T.i32(), 0).value
+            lane_safe_i32 = flir.arith.SelectOp(in_range, lane_i32, c0_i32).result
+            lane_safe_idx = arith_ops.IndexCastOp(T.index(), lane_safe_i32).result
+            red_idx = flir.crd2idx(flir.make_coord(lane_safe_idx), layout_red)
+            v0 = scratch0_tv[red_idx]
+            v1 = scratch1_tv[red_idx]
+            z = arith.constant(T.f32(), 0.0).value
+            ww0 = flir.arith.SelectOp(in_range, v0, z).result
+            ww1 = flir.arith.SelectOp(in_range, v1, z).result
 
-                ww0 = _wave_reduce_add(ww0)
-                ww1 = _wave_reduce_add(ww1)
+            ww0 = _wave_reduce_add(ww0)
+            ww1 = _wave_reduce_add(ww1)
 
-                is_lane0_2 = arith_ops.CmpIOp(
-                    arith_ops.CmpIPredicate.eq,
-                    lane_i32,
-                    arith.constant(T.i32(), 0).value,
-                ).result
-                if is_lane0_2:
-                    red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
-                    scratch0_tv[red_idx0] = ww0
-                    scratch1_tv[red_idx0] = ww1
-                flir.scf_ext.yield_([])
-            with ir.InsertionPoint(else_blk):
-                flir.scf_ext.yield_([])
+            is_lane0_2 = arith_ops.CmpIOp(
+                arith_ops.CmpIPredicate.eq,
+                lane_i32,
+                arith.constant(T.i32(), 0).value,
+            ).result
+            if is_lane0_2:
+                red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
+                scratch0_tv[red_idx0] = ww0
+                scratch1_tv[red_idx0] = ww1
 
         gpu.barrier()
         red_idx0 = flir.crd2idx(flir.make_coord(zero_idx), layout_red)
