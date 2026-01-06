@@ -2862,6 +2862,12 @@ def copy(copy_desc, src, dst,
 # This mirrors the behavior where print shows compile-time information
 print = print  # Re-export Python's built-in print
 
+# Backwards compatibility: allow `flir.flir` (historical API / older tests) to
+# refer to this module object. This keeps `flir.flir.print` equivalent to
+# `flir.print` without changing the public surface area of operations.
+import sys as _sys
+flir = _sys.modules[__name__]
+
 
 def printf(format_str: str, *args, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
     """Print formatted output at runtime (dynamic values).

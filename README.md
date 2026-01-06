@@ -93,6 +93,17 @@ python3 setup.py bdist_wheel
 ls dist/
 ```
 
+### Build a wheel compatible with older glibc (manylinux_2_28)
+
+If you need the wheel to install on machines with older glibc (e.g. `ldd --version` shows 2.35),
+build it in a manylinux container so it gets a `manylinux_2_28` tag:
+
+```bash
+cd /mnt/raid0/felix/flir
+bash tools/build_manylinux_2_28.sh
+ls dist/
+```
+
 ### Run tests
 
 ```bash

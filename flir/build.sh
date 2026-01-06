@@ -38,10 +38,19 @@ fi
 
 # Build C++ components
 mkdir -p "${BUILD_DIR}" && cd "${BUILD_DIR}"
+
+# Enable ROCm by default when ROCm is present on the system.
+# This is required for GPU execution tests (HIP runtime) to work.
+ENABLE_ROCM_FLAG=OFF
+if [[ -d "/opt/rocm" ]] || command -v hipcc &> /dev/null; then
+  ENABLE_ROCM_FLAG=ON
+fi
+
 cmake "${SCRIPT_DIR}" \
     -DMLIR_DIR="$MLIR_PATH/lib/cmake/mlir" \
     -DBUILD_PYTHON_BINDINGS=ON \
-    -DBUILD_RUNTIME=OFF
+    -DBUILD_RUNTIME=OFF \
+    -DENABLE_ROCM="${ENABLE_ROCM_FLAG}"
 
 # Build core targets (skip type stub generation which may fail)
 echo "Building core libraries..."
@@ -121,6 +130,65 @@ echo "✓ Build complete!"
 echo "✓ flir-opt: ${BUILD_DIR}/bin/flir-opt"
 echo "✓ Python bindings built with embedded MLIR dependencies"
 echo ""
+
+# Build a compliant manylinux wheel if possible
+# DEFAULT: 0 (Fast build, no wheel). Set FLIR_BUILD_WHEEL=1 for PyPI release.
+if [[ "${FLIR_BUILD_WHEEL:-0}" == "1" ]]; then
+    echo "Building and repairing wheel and sdist for release..."
+    # Clean up old dist artifacts to avoid confusion
+    rm -rf "${REPO_ROOT}/dist"
+    cd "${REPO_ROOT}"
+    # Set FLIR_IN_BUILD_SH=1 to prevent setup.py from recursively calling build.sh
+    export FLIR_IN_BUILD_SH=1
+
+    # Reduce wheel size (wheel build only; does not affect local editable installs):
+    # - Drop the non-versioned CAPI .so which is typically a symlink/copy of the
+    #   versioned library (packaging both can double wheel size).
+    # - Strip debug symbols from shared libraries (huge savings).
+    echo "Stripping shared libraries..."
+    if command -v strip &> /dev/null; then
+        rm -f "${PYTHON_PACKAGE_DIR}/_mlir/_mlir_libs/libFlirPythonCAPI.so" || true
+        find "${PYTHON_PACKAGE_DIR}" -name "*.so*" -exec strip --strip-unneeded {} + || true
+    else
+        echo "Warning: strip not found; skipping binary stripping."
+    fi
+
+    # Generate both Wheel and Source distribution
+    python3 setup.py bdist_wheel sdist
+
+    if command -v auditwheel &> /dev/null; then
+        echo "Repairing wheel with auditwheel..."
+        WHEELHOUSE="${REPO_ROOT}/dist/wheelhouse"
+        mkdir -p "${WHEELHOUSE}"
+        
+        # Repair the specific wheel generated (avoiding glob issues)
+        WHEEL_FILE=$(ls dist/*.whl | head -n 1)
+        # IMPORTANT:
+        # We intentionally do NOT bundle ROCm user-space runtime libraries into the wheel.
+        # If bundled, they can conflict with an existing ROCm runtime (e.g. PyTorch),
+        # leading to runtime failures like hipErrorNoDevice. Instead, rely on the
+        # system ROCm installation in ROCm-enabled environments.
+        #
+        # Excluding these libs also avoids auditwheel failing manylinux checks due
+        # to too-recent symbol versions inside ROCm-provided shared libraries.
+        auditwheel repair "$WHEEL_FILE" -w "${WHEELHOUSE}" \
+            --exclude "libamdhip64.so.*" \
+            --exclude "libhsa-runtime64.so.*" \
+            --exclude "libdrm_amdgpu.so.*" \
+            || { echo "Warning: auditwheel repair failed; leaving the original wheel in dist/"; rm -rf "${WHEELHOUSE}"; }
+        
+        # Replace the original wheel with the repaired ones
+        if ls "${WHEELHOUSE}"/*.whl &> /dev/null; then
+            rm -f dist/*linux_x86_64.whl
+            mv "${WHEELHOUSE}"/*.whl dist/
+            rm -rf "${WHEELHOUSE}"
+            echo "✓ Compliant manylinux wheel and sdist are ready in dist/"
+        fi
+    else
+        echo "Warning: auditwheel not found. Original dist files remain in dist/."
+    fi
+fi
+
 echo "Embedded MLIR runtime location: ${PYTHON_PACKAGE_DIR}/_mlir"
 echo ""
 echo "Recommended (no manual PYTHONPATH):"

@@ -1,26 +1,21 @@
 # Build outputs
 build/
-.flir/
+.flydsl/
 ## Legacy build outputs (pre-rename)
 *.log
 
-# MLIR/nanobind generated type stubs (generated during build)
-python_bindings/mlir/
-
 # Backups
 *.old
-
-# Generated helper scripts
-setup_env.sh
 
 # Python caches
 __pycache__/
 *.pyc
 .cache/
 
-# Editable-install helper symlink (created by setup.py)
-python/_mlir
-flydsl/src/_mlir
+# Virtualenvs
+.venv/
+.venv*/
+.venvs/
 
 # setuptools metadata from editable installs
 *.egg-info/
