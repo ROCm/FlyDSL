@@ -59,73 +59,6 @@ def print_perf_table(rows: List[PerfRow]) -> None:
     print("=" * 100 + "\n")
 
 
-def hip_check(ret: Any, msg: str | None = None) -> Any:
-    """Check a HIP API return value.
-
-    Accepts either:
-    - an int error code (0 means success), or
-    - a (err, value) tuple as commonly returned by hip-python.
-
-    Returns the underlying value for tuple returns, or the original `ret` for
-    non-tuple returns.
-    """
-
-    err = ret
-    value = None
-    if isinstance(ret, tuple) and ret:
-        err = ret[0]
-        value = ret[1] if len(ret) > 1 else None
-
-    # hipSuccess is 0.
-    if int(err) != 0:
-        details = f"HIP call failed with error code {int(err)}"
-        # Best-effort: translate error code to string if hip-python is available.
-        try:
-            from hip import hip as _hip  # type: ignore
-
-            try:
-                s = _hip.hipGetErrorString(int(err))
-                if isinstance(s, tuple):
-                    s = s[1]
-                if s:
-                    details += f" ({s})"
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        if msg:
-            details = f"{msg}: {details}"
-        raise RuntimeError(details)
-
-    return value if isinstance(ret, tuple) else ret
-
-
-def bench_gpu_us_hip(launch: Callable[[], None], *, warmup: int = 20, iters: int = 200) -> float:
-    """Measure device time using HIP events (works for hipModuleLaunchKernel launches)."""
-    try:
-        from hip import hip
-    except Exception as e:
-        raise RuntimeError("HIP python bindings are required for bench_gpu_us_hip") from e
-
-    start = hip_check(hip.hipEventCreate())
-    end = hip_check(hip.hipEventCreate())
-    try:
-        for _ in range(warmup):
-            launch()
-        hip_check(hip.hipDeviceSynchronize())
-        hip_check(hip.hipEventRecord(start, 0))
-        for _ in range(iters):
-            launch()
-        hip_check(hip.hipEventRecord(end, 0))
-        hip_check(hip.hipEventSynchronize(end))
-        ms = hip_check(hip.hipEventElapsedTime(start, end))
-        return float(ms) * 1e3 / iters
-    finally:
-        hip_check(hip.hipEventDestroy(start))
-        hip_check(hip.hipEventDestroy(end))
-
-
 def bench_gpu_us_torch(fn: Callable[[], None], *, warmup: int = 20, iters: int = 200) -> float:
     """Measure device time using torch CUDA events (works for torch-launched kernels, incl. Triton)."""
     import torch
@@ -206,102 +139,47 @@ def _dtype_torch(dt: str):
     raise ValueError(f"unsupported dtype: {dt}")
 
 
-def _bench_flydsl_hip(*, op: str, M: int, N: int, dtype: str, warmup: int, iters: int) -> Optional[float]:
-    """Build + compile FlyDSL kernel, then benchmark launch via HIP events.
+def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, iters: int) -> Optional[float]:
+    """Build + compile FlyDSL kernel, then benchmark via torch CUDA events.
 
-    Note: compile time is not included in timing.
+    This intentionally avoids hip-python / HIP driver calls, aligning with the
+    style used by other tests (flydsl.compile + torch timing).
     """
-    try:
-        import ctypes
-        import torch
-        from hip import hip
-        from tests.utils import compile_to_hsaco
-    except Exception as e:
-        raise RuntimeError("FlyDSL HIP benchmark requires torch+hip") from e
+    import torch
+    import flydsl
+
+    if not torch.cuda.is_available():
+        return None
 
     torch_dtype, dt_norm = _dtype_torch(dtype)
     dtype = dt_norm
 
     if op == "softmax":
-        from kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as KNAME
-        ctx = build_softmax_module(M, N, dtype)
-        hsaco = compile_to_hsaco(ctx.module, kernel_name=KNAME)
-        mod = hip_check(hip.hipModuleLoadData(hsaco))
-        fn = hip_check(hip.hipModuleGetFunction(mod, KNAME.encode("utf-8")))
-
+        from kernels.softmax_kernel import build_softmax_module
+        m = build_softmax_module(M, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-
-        blk = min(256, 1 if N == 0 else 2 ** ((N - 1).bit_length()))
-        if blk < 32:
-            blk = 32
-
-        def launch():
-            arg_ptrs = [ctypes.c_void_p(int(x.data_ptr())), ctypes.c_void_p(int(y.data_ptr()))]
-            args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-            hip_check(
-                hip.hipModuleLaunchKernel(
-                    fn, M, 1, 1, blk, 1, 1, 0, 0, args, None
-                )
-            )
-
-        return bench_gpu_us_hip(launch, warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, y), warmup=warmup, iters=iters)
 
     if op == "layernorm":
-        from kernels.layernorm_kernel import build_layernorm_module, BLOCK_THREADS
-        ctx = build_layernorm_module(M, N, dtype)
-        from tests.utils import compile_to_hsaco
-        hsaco = compile_to_hsaco(ctx.module, kernel_name="layernorm")
-        mod = hip_check(hip.hipModuleLoadData(hsaco))
-        fn = hip_check(hip.hipModuleGetFunction(mod, b"layernorm_kernel"))
-
+        from kernels.layernorm_kernel import build_layernorm_module
+        m = build_layernorm_module(M, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-
-        def launch():
-            arg_ptrs = [
-                ctypes.c_void_p(int(x.data_ptr())),
-                ctypes.c_void_p(int(gamma.data_ptr())),
-                ctypes.c_void_p(int(beta.data_ptr())),
-                ctypes.c_void_p(int(y.data_ptr())),
-            ]
-            args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-            hip_check(
-                hip.hipModuleLaunchKernel(
-                    fn, M, 1, 1, BLOCK_THREADS, 1, 1, 0, 0, args, None
-                )
-            )
-
-        return bench_gpu_us_hip(launch, warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y), warmup=warmup, iters=iters)
 
     if op == "rmsnorm":
-        from kernels.rmsnorm_kernel import build_rmsnorm_module, BLOCK_THREADS
-        ctx = build_rmsnorm_module(M, N, dtype)
-        from tests.utils import compile_to_hsaco
-        hsaco = compile_to_hsaco(ctx.module, kernel_name="rmsnorm")
-        mod = hip_check(hip.hipModuleLoadData(hsaco))
-        fn = hip_check(hip.hipModuleGetFunction(mod, b"rmsnorm_kernel"))
-
+        from kernels.rmsnorm_kernel import build_rmsnorm_module
+        m = build_rmsnorm_module(M, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-
-        def launch():
-            arg_ptrs = [
-                ctypes.c_void_p(int(x.data_ptr())),
-                ctypes.c_void_p(int(gamma.data_ptr())),
-                ctypes.c_void_p(int(y.data_ptr())),
-            ]
-            args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-            hip_check(
-                hip.hipModuleLaunchKernel(
-                    fn, M, 1, 1, BLOCK_THREADS, 1, 1, 0, 0, args, None
-                )
-            )
-
-        return bench_gpu_us_hip(launch, warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, gamma, y), warmup=warmup, iters=iters)
 
     raise ValueError(f"unknown op: {op}")
 
@@ -310,7 +188,6 @@ def _bench_aiter(*, op: str, impl: str, M: int, N: int, dtype: str, warmup: int,
     """Benchmark AIter implementation.
 
     - impl=triton: uses aiter.ops.triton.*
-    - impl=hip: uses aiter.*2d_hip (may have limited shape support; best-effort)
     """
     if not maybe_enable_aiter():
         return None
@@ -343,23 +220,7 @@ def _bench_aiter(*, op: str, impl: str, M: int, N: int, dtype: str, warmup: int,
             return bench_gpu_us_torch(lambda: fn(x, w, 1e-5), warmup=warmup, iters=iters)
         return None
 
-    if impl == "hip":
-        # Best-effort: these kernels are not guaranteed to support large M/N.
-        if op == "softmax" and hasattr(aiter, "softmax2d_hip"):
-            x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
-            return bench_gpu_us_torch(lambda: aiter.softmax2d_hip(x), warmup=warmup, iters=iters)
-        if op == "layernorm" and hasattr(aiter, "layernorm2d_hip"):
-            x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
-            w = torch.randn((N,), device="cuda", dtype=torch_dtype)
-            b = torch.randn((N,), device="cuda", dtype=torch_dtype)
-            return bench_gpu_us_torch(lambda: aiter.layernorm2d_hip(x, w, b, 1e-5, None), warmup=warmup, iters=iters)
-        if op == "rmsnorm" and hasattr(aiter, "rmsnorm2d_hip"):
-            x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
-            w = torch.randn((N,), device="cuda", dtype=torch_dtype)
-            return bench_gpu_us_torch(lambda: aiter.rmsnorm2d_hip(x, w, 1e-5, 0), warmup=warmup, iters=iters)
-        return None
-
-    raise ValueError(f"unsupported AITER_IMPL={impl!r} (expected triton|hip)")
+    raise ValueError(f"unsupported AITER_IMPL={impl!r} (expected triton)")
 
 
 def run_compare_sweep(
@@ -376,7 +237,7 @@ def run_compare_sweep(
             flir_us = None
             aiter_us = None
             try:
-                flir_us = _bench_flydsl_hip(op=op, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
+                flir_us = _bench_flydsl_torch(op=op, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
             except Exception:
                 flir_us = None
             try:

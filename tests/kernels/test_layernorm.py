@@ -24,23 +24,22 @@ if _src_py.exists():
     sys.path.insert(0, str(_src_py))
 sys.path.insert(0, str(_repo))
 
-from tests.utils import compile_to_hsaco
 from tests.test_common import run_perftest
 from tests.kernels.perf_compare_common import (
     PerfRow,
-    bench_gpu_us_hip,
     bench_gpu_us_torch,
-    hip_check,
     maybe_enable_aiter,
     print_perf_table,
 )
+import pytest
 try:
-    from hip import hip
+    import torch
 except ImportError:
-    print("HIP module not found. Skipping GPU tests.")
-    sys.exit(0)
+    torch = None
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-import ctypes
+import flydsl
 
 EPS: float = 1e-5
 from kernels.layernorm_kernel import (
@@ -55,67 +54,44 @@ BENCH_ITERS = 100
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm (M={M}, N={N}, dtype={dtype})")
 
-    if hip is None:
-        print("HIP not available, skipping...")
-        return True, None
-
-    # CPU reference + run_perftest both rely on torch.
     try:
-        import torch
-    except Exception as e:
-        raise RuntimeError(
-            "test_layernorm requires torch (ROCm build recommended). "
-            "It is used for the PyTorch CPU reference and for run_perftest."
-        ) from e
-
-    try:
-        ctx = build_layernorm_module(M, N, dtype)
+        m = build_layernorm_module(M, N, dtype)
+        exe = flydsl.compile(m)
     except ValueError as e:
         print(f"[Skip] {e}")
         return True, None
-    try:
-        hsaco = compile_to_hsaco(ctx.module, kernel_name=LAYERNORM_KERNEL_NAME)
-    except Exception as e:
-        print(f"Compilation failed: {e}")
-        print(ctx.module)
-        raise e
-
-    print(f" HSACO size: {len(hsaco)} bytes")
 
     torch.manual_seed(42)
-    input_t = torch.randn((M, N), dtype=torch.float32)
-    gamma_t = torch.rand((N,), dtype=torch.float32)
-    beta_t = torch.rand((N,), dtype=torch.float32)
+    input_t = torch.randn((M, N), device="cuda", dtype=torch.float32)
+    gamma_t = torch.rand((N,), device="cuda", dtype=torch.float32)
+    beta_t = torch.rand((N,), device="cuda", dtype=torch.float32)
 
     if dtype == "f32":
-        input_host = input_t.contiguous()
-        gamma_host = gamma_t.contiguous()
-        beta_host = beta_t.contiguous()
-        output_host = torch.empty((M, N), dtype=torch.float32)
-        elem_bytes = 4
-        input_ref = input_host.to(torch.float32)
-        gamma_ref = gamma_host.to(torch.float32)
-        beta_ref = beta_host.to(torch.float32)
+        input_dev = input_t.contiguous()
+        gamma_dev = gamma_t.contiguous()
+        beta_dev = beta_t.contiguous()
+        output_dev = torch.empty((M, N), device="cuda", dtype=torch.float32)
+        input_ref = input_dev.to(torch.float32)
+        gamma_ref = gamma_dev.to(torch.float32)
+        beta_ref = beta_dev.to(torch.float32)
         atol = 1e-4
     elif dtype == "f16":
-        input_host = input_t.to(torch.float16).contiguous()
-        gamma_host = gamma_t.to(torch.float16).contiguous()
-        beta_host = beta_t.to(torch.float16).contiguous()
-        output_host = torch.empty((M, N), dtype=torch.float16)
-        elem_bytes = 2
-        input_ref = input_host.to(torch.float32)
-        gamma_ref = gamma_host.to(torch.float32)
-        beta_ref = beta_host.to(torch.float32)
+        input_dev = input_t.to(torch.float16).contiguous()
+        gamma_dev = gamma_t.to(torch.float16).contiguous()
+        beta_dev = beta_t.to(torch.float16).contiguous()
+        output_dev = torch.empty((M, N), device="cuda", dtype=torch.float16)
+        input_ref = input_dev.to(torch.float32)
+        gamma_ref = gamma_dev.to(torch.float32)
+        beta_ref = beta_dev.to(torch.float32)
         atol = 1e-2
     elif dtype == "bf16":
-        input_host = input_t.to(torch.bfloat16).view(torch.uint16).contiguous()
-        gamma_host = gamma_t.to(torch.bfloat16).view(torch.uint16).contiguous()
-        beta_host = beta_t.to(torch.bfloat16).view(torch.uint16).contiguous()
-        output_host = torch.empty((M, N), dtype=torch.uint16)
-        elem_bytes = 2
-        input_ref = input_host.view(torch.bfloat16).to(torch.float32)
-        gamma_ref = gamma_host.view(torch.bfloat16).to(torch.float32)
-        beta_ref = beta_host.view(torch.bfloat16).to(torch.float32)
+        input_dev = input_t.to(torch.bfloat16).contiguous()
+        gamma_dev = gamma_t.to(torch.bfloat16).contiguous()
+        beta_dev = beta_t.to(torch.bfloat16).contiguous()
+        output_dev = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
+        input_ref = input_dev.to(torch.float32)
+        gamma_ref = gamma_dev.to(torch.float32)
+        beta_ref = beta_dev.to(torch.float32)
         atol = 2e-2
     else:
         raise ValueError(f"unsupported dtype: {dtype}")
@@ -129,55 +105,22 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     expected = (x - mean) / torch.sqrt(var + EPS) * gamma + beta
     expected = expected.to(torch.float32)
 
-    # Allocate GPU Memory
-    d_input = hip_check(hip.hipMalloc(M * N * elem_bytes))
-    d_gamma = hip_check(hip.hipMalloc(N * elem_bytes))
-    d_beta = hip_check(hip.hipMalloc(N * elem_bytes))
-    d_output = hip_check(hip.hipMalloc(M * N * elem_bytes))
-
-    hip_check(hip.hipMemcpy(d_input, int(input_host.data_ptr()), M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_gamma, int(gamma_host.data_ptr()), N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    hip_check(hip.hipMemcpy(d_beta, int(beta_host.data_ptr()), N * elem_bytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-
-    # Load Kernel
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, b"layernorm_kernel"))
-
-    # Launch Config
-    grid_x, grid_y, grid_z = M, 1, 1
-    block_x, block_y, block_z = BLOCK_THREADS, 1, 1
-    smem_size = 0
-
-    arg_ptrs = [
-        ctypes.c_void_p(int(d_input)),
-        ctypes.c_void_p(int(d_gamma)),
-        ctypes.c_void_p(int(d_beta)),
-        ctypes.c_void_p(int(d_output))
-    ]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-
     print("Launching kernel...")
 
-    def hip_kernel_launch():
-        hip_check(
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                grid_x, grid_y, grid_z,
-                block_x, block_y, block_z,
-                smem_size, 0, args, None
-            )
-        )
+    def kernel_launch():
+        exe(input_dev, gamma_dev, beta_dev, output_dev)
 
     # One run for correctness visibility, then benchmark via shared harness.
-    hip_kernel_launch()
-    hip_check(hip.hipDeviceSynchronize())
+    kernel_launch()
+    torch.cuda.synchronize()
 
-    _, avg_us = run_perftest(hip_kernel_launch, num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
-    hip_check(hip.hipDeviceSynchronize())
+    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    torch.cuda.synchronize()
     flir_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_hip(hip_kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
+    elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (2 * M * N + 2 * N) * elem_bytes  # read input + write output + (gamma+beta)
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
@@ -185,16 +128,8 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     if flir_gpu_us is not None:
         print(f"[Perf] FLIR layernorm gpu: {flir_gpu_us:.1f} us")
 
-    # Copy back
-    hip_check(hip.hipMemcpy(int(output_host.data_ptr()), d_output, M * N * elem_bytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
-
     # Verification (pure torch style; compute max error in torch)
-    if dtype == "f32":
-        output_ref = output_host.to(torch.float32)
-    elif dtype == "f16":
-        output_ref = output_host.to(torch.float32)
-    else:  # bf16 payload
-        output_ref = output_host.view(torch.bfloat16).to(torch.float32)
+    output_ref = output_dev.to(torch.float32)
 
     error = (output_ref - expected).abs().max().item()
     print(f"Max absolute error: {error:.2e} (atol={atol})")
@@ -207,16 +142,9 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print("First row Expected:")
         print(expected[0, :5])
         print("First row Actual:")
-        # Print raw host values (uint16 for bf16) to help debugging.
-        print(output_host[0, :5])
+        print(output_ref[0, :5])
         ok = False
 
-    # Cleanup
-    hip_check(hip.hipFree(d_input))
-    hip_check(hip.hipFree(d_gamma))
-    hip_check(hip.hipFree(d_beta))
-    hip_check(hip.hipFree(d_output))
-    hip_check(hip.hipModuleUnload(hip_module))
     return ok, flir_gpu_us
 
 def test_all():

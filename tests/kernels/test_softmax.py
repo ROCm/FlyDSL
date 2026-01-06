@@ -23,24 +23,22 @@ if _src_py.exists():
     sys.path.insert(0, str(_src_py))
 sys.path.insert(0, str(_repo))
 
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from tests.utils import compile_to_hsaco
+import pytest
+try:
+    import torch
+except ImportError:
+    torch = None
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+
+import flydsl
 from tests.test_common import run_perftest
 from tests.kernels.perf_compare_common import (
     PerfRow,
-    bench_gpu_us_hip,
     bench_gpu_us_torch,
-    hip_check,
     maybe_enable_aiter,
     print_perf_table,
 )
-try:
-    from hip import hip
-except ImportError:
-    print("HIP module not found. Skipping GPU tests.")
-    sys.exit(0)
-
-import ctypes
 
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
@@ -53,18 +51,9 @@ BENCH_ITERS = 100
 def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
 
-    # CPU reference + run_perftest both rely on torch.
     try:
-        import torch
-    except Exception as e:
-        raise RuntimeError(
-            "test_softmax requires torch (ROCm build recommended). "
-            "It is used for the PyTorch CPU reference and for run_perftest."
-        ) from e
-    
-    try:
-        ctx = build_softmax_module(M, N, dtype_str)
-        hsaco = compile_to_hsaco(ctx.module, kernel_name=SOFTMAX_KERNEL_NAME)
+        m = build_softmax_module(M, N, dtype_str)
+        exe = flydsl.compile(m)
     except Exception as e:
         print(f"❌ Compilation Failed: {e}")
         import traceback
@@ -72,60 +61,34 @@ def run_test(M, N, dtype_str):
         return False, None
         
     torch.manual_seed(42)
-    a_t = (torch.rand((M, N), dtype=torch.float32) * 4.0) - 2.0
+    a_t = (torch.rand((M, N), device="cuda", dtype=torch.float32) * 4.0) - 2.0
 
     # PyTorch CPU reference (stable softmax)
     expected = torch.softmax(a_t, dim=1).to(torch.float32)
     
     if dtype_str == "f32":
-        a_host = a_t.contiguous()
-        c_host = torch.empty((M, N), dtype=torch.float32)
-        nbytes = M * N * 4
+        a_dev = a_t.contiguous()
+        c_dev = torch.empty((M, N), device="cuda", dtype=torch.float32)
     elif dtype_str == "f16":
-        a_host = a_t.to(torch.float16).contiguous()
-        c_host = torch.empty((M, N), dtype=torch.float16)
-        nbytes = M * N * 2
+        a_dev = a_t.to(torch.float16).contiguous()
+        c_dev = torch.empty((M, N), device="cuda", dtype=torch.float16)
     elif dtype_str == "bf16":
-        # BF16 host buffer uses uint16 payload holding raw bf16 bits.
-        a_host = a_t.to(torch.bfloat16).view(torch.uint16).contiguous()
-        c_host = torch.empty((M, N), dtype=torch.uint16)
-        nbytes = M * N * 2
+        a_dev = a_t.to(torch.bfloat16).contiguous()
+        c_dev = torch.empty((M, N), device="cuda", dtype=torch.bfloat16)
     
-    d_a = hip_check(hip.hipMalloc(nbytes))
-    d_c = hip_check(hip.hipMalloc(nbytes))
-    
-    hip_check(hip.hipMemcpy(d_a, int(a_host.data_ptr()), nbytes, hip.hipMemcpyKind.hipMemcpyHostToDevice))
-    
-    hip_module = hip_check(hip.hipModuleLoadData(hsaco))
-    kernel_func = hip_check(hip.hipModuleGetFunction(hip_module, SOFTMAX_KERNEL_NAME.encode("utf-8")))
-    
-    arg_ptrs = [ctypes.c_void_p(int(d_a)), ctypes.c_void_p(int(d_c))]
-    args = (ctypes.c_void_p * len(arg_ptrs))(*[ctypes.addressof(p) for p in arg_ptrs])
-    
-    # Dynamic block size based on N
-    blk = min(256, next_power_of_2(N))
-    if blk < 32: blk = 32
-
-    def hip_kernel_launch():
-        hip_check(
-            hip.hipModuleLaunchKernel(
-                kernel_func,
-                M, 1, 1,
-                blk, 1, 1,
-                0, 0, args, None
-            )
-        )
+    def kernel_launch():
+        exe(a_dev, c_dev)
 
     # One run for correctness visibility, then benchmark via shared harness.
-    hip_kernel_launch()
-    hip_check(hip.hipDeviceSynchronize())
+    kernel_launch()
+    torch.cuda.synchronize()
 
-    _, avg_us = run_perftest(hip_kernel_launch, num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
-    hip_check(hip.hipDeviceSynchronize())
+    _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
+    torch.cuda.synchronize()
     # Optional: more stable device timing via HIP events (for FLIR kernel).
     flir_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_hip(hip_kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
     total_bytes = 2 * M * N * (4 if dtype_str == "f32" else 2)  # read input + write output
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
@@ -133,27 +96,20 @@ def run_test(M, N, dtype_str):
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
     if flir_gpu_us is not None:
         print(f"[Perf] FLIR softmax gpu: {flir_gpu_us:.1f} us")
-    
-    hip_check(hip.hipMemcpy(int(c_host.data_ptr()), d_c, nbytes, hip.hipMemcpyKind.hipMemcpyDeviceToHost))
 
     # Verify in pure torch style (keep tensors, compute max error in torch), similar to test_mfma_gemm_fp8_rocir.py
     if dtype_str == "f32":
-        res = c_host.to(torch.float32)
+        res = c_dev.to(torch.float32)
         atol = 1e-5
     elif dtype_str == "f16":
-        res = c_host.to(torch.float32)
+        res = c_dev.to(torch.float32)
         atol = 1e-2
     elif dtype_str == "bf16":
-        # BF16 payload stored as uint16; reinterpret then convert to fp32
-        res = c_host.view(torch.bfloat16).to(torch.float32)
+        res = c_dev.to(torch.float32)
         atol = 2e-2
 
     max_err = (res - expected).abs().max().item()
     print(f"  Max Absolute Error: {max_err:.2e} (atol={atol})")
-    
-    hip_check(hip.hipFree(d_a))
-    hip_check(hip.hipFree(d_c))
-    hip_check(hip.hipModuleUnload(hip_module))
     
     if max_err < atol:
         print("  ✅ Passed")
