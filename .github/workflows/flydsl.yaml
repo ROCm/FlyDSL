@@ -58,15 +58,16 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
           docker exec flydsl_test bash -c "pip install ninja>=1.11.1"
+          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+    
+      - name: Build LLVM
+        run: |
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh && ./flir/build.sh"
+        
+      - name: Install Python package
+        run: |
+          docker exec flydsl_test bash -c "cd /flydsl-test && pip install -e ."
 
       - name: Run tests
         run: |
-          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          echo "=============================================="
-          echo "Building LLVM..."
-          echo "=============================================="
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh && pip install -e ."
-          echo "=============================================="
-          echo "Running tests..."
-          echo "=============================================="
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
