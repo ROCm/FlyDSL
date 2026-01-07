@@ -62,7 +62,9 @@ jobs:
     
       - name: Build LLVM
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh && ./flir/build.sh"
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
+          docker exec flydsl_test bash -c "ls -la /flydsl-test/llvm-project/buildmlir"
+          docker exec flydsl_test bash -c "export MLIR_PATH=/flydsl-test/llvm-project/buildmlir && cd /flydsl-test && ./flir/build.sh"
         
       - name: Install Python package
         run: |
