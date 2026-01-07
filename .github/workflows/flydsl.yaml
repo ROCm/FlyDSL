@@ -9,6 +9,10 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DOCKER_IMAGE: "rocm/pytorch:latest"
   GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || 'ROCm/FlyDSL' }}
