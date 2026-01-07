@@ -2645,6 +2645,10 @@ def copy(copy_desc, src, dst,
                             nontemporal=nontemporal,
                             alignment=alignment,
                         )
+                        # `flydsl.dialects.ext.arith` registers a global value caster that may wrap
+                        # op results (including vector results) as `ArithValue`. Raw MLIR dialect ops
+                        # like `vector.store` only accept `ir.Value`, so unwrap here.
+                        vec_val = _unwrap_value(vec_val)
                         if return_vector and captured_vec["val"] is None:
                             captured_vec["val"] = vec_val
 
@@ -2669,7 +2673,7 @@ def copy(copy_desc, src, dst,
                             if_op = scf.IfOp(cond, [], loc=loc)
                             with InsertionPoint(if_op.then_block):
                                 vector.store(
-                                    vec_val,
+                                    _unwrap_value(vec_val),
                                     dst_view.memref,
                                     store_indices,
                                     nontemporal=nontemporal,
@@ -2679,7 +2683,7 @@ def copy(copy_desc, src, dst,
                         else:
                             # No predicate or handled by hoisted check
                             vector.store(
-                                vec_val,
+                                _unwrap_value(vec_val),
                                 dst_view.memref,
                                 store_indices,
                                 nontemporal=nontemporal,
