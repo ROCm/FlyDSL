@@ -165,26 +165,26 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         x = vec_e
                         in_local.append(x)
 
-                    x2 = (arith.ArithValue(x) * x)
+                    x2 = x * x
                     red = flir.vector.reduction(compute_type, "add", (x), fastmath=fm_fast)
                     red2 = flir.vector.reduction(compute_type, "add", (x2), fastmath=fm_fast)
-                    thread_sum = (arith.ArithValue(thread_sum) + red)
-                    thread_sumsq = (arith.ArithValue(thread_sumsq) + red2)
+                    thread_sum = thread_sum + red
+                    thread_sumsq = thread_sumsq + red2
 
                 sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
-                mean = (arith.ArithValue(sum_val) * inv_n)
-                mean_sq = (arith.ArithValue(sumsq_val) * inv_n)
-                mean2 = (arith.ArithValue(mean) * mean)
-                var = (arith.ArithValue(mean_sq) - mean2)
+                mean = sum_val * inv_n
+                mean_sq = sumsq_val * inv_n
+                mean2 = mean * mean
+                var = mean_sq - mean2
                 # Numerical safety: with fast-math and cancellation, `var` can become slightly negative
                 # and lead to NaNs in rsqrt for small-N cases. Clamp to >= 0 before adding eps.
                 c0_f = arith.constant(0.0, type=compute_type)
-                is_neg = (arith.ArithValue(var) < c0_f)
+                is_neg = var < c0_f
                 var = arith.select(is_neg, c0_f, var)
 
-                var_eps = (arith.ArithValue(var) + eps)
+                var_eps = var + eps
                 rstd = flir.math.rsqrt(arith.as_value(var_eps), fastmath=fm_fast)
 
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
@@ -193,9 +193,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 rstd_splat = flir.vector.splat(vec_type_c, (rstd))
 
                 # Pipeline Gamma/Beta loads.
-                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH)
+                thread_offset_base = tid * VEC_WIDTH
                 c_base0 = flir.const_index(0)
-                curr_idx0 = (arith.ArithValue(c_base0) + thread_offset_base)
+                curr_idx0 = c_base0 + thread_offset_base
                 g_e_cur = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
                 b_e_cur = flir.vector.load(vec_type_e, Beta, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
                 g_cur = g_e_cur if dtype_str == "f32" else flir.arith.extf(vec_type_c, (g_e_cur))
@@ -204,7 +204,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 for tile_i in range_constexpr(num_tiles_py):
                     base_idx_int = tile_i * tile_cols
                     c_base = flir.const_index(base_idx_int)
-                    curr_idx = (arith.ArithValue(c_base) + thread_offset_base)
+                    curr_idx = c_base + thread_offset_base
 
                     x = in_local[tile_i]
                     if cache_as_elem:
@@ -212,7 +212,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     if tile_i + 1 < num_tiles_py:
                         next_base_idx_int = (tile_i + 1) * tile_cols
                         c_base_next = flir.const_index(next_base_idx_int)
-                        next_idx = (arith.ArithValue(c_base_next) + thread_offset_base)
+                        next_idx = c_base_next + thread_offset_base
                         g_e_next = flir.vector.load(vec_type_e, Gamma, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
                         b_e_next = flir.vector.load(vec_type_e, Beta, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
                         g_next = g_e_next if dtype_str == "f32" else flir.arith.extf(vec_type_c, (g_e_next))
@@ -221,10 +221,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         g_next = g_cur
                         b_next = b_cur
 
-                    diff = (arith.ArithValue(x) - mean_splat)
-                    norm = (arith.ArithValue(diff) * rstd_splat)
-                    scaled = (arith.ArithValue(norm) * g_cur)
-                    y = (arith.ArithValue(scaled) + b_cur)
+                    diff = x - mean_splat
+                    norm = diff * rstd_splat
+                    scaled = norm * g_cur
+                    y = scaled + b_cur
 
                     if dtype_str == "bf16":
                         if USE_HW_CVT_PK_BF16_F32:
@@ -275,36 +275,36 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Pass1: sum + sumsq
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = (arith.ArithValue(c_base) + tid)
+                    idx = c_base + tid
                     is_valid = arith.ult(idx, c_N)
                     thread_sum_next = thread_sum
                     thread_sumsq_next = thread_sumsq
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
                         x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
-                        x2 = (arith.ArithValue(x) * x)
-                        thread_sum_next = (arith.ArithValue(thread_sum) + x)
-                        thread_sumsq_next = (arith.ArithValue(thread_sumsq) + x2)
+                        x2 = x * x
+                        thread_sum_next = thread_sum + x
+                        thread_sumsq_next = thread_sumsq + x2
                     thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
                 sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
-                mean = (arith.ArithValue(sum_val) * inv_n)
-                mean_sq = (arith.ArithValue(sumsq_val) * inv_n)
-                mean2 = (arith.ArithValue(mean) * mean)
-                var = (arith.ArithValue(mean_sq) - mean2)
+                mean = sum_val * inv_n
+                mean_sq = sumsq_val * inv_n
+                mean2 = mean * mean
+                var = mean_sq - mean2
                 # Numerical safety: clamp variance to >=0 to avoid NaNs in rsqrt on small-N cases.
                 c0_f = arith.constant(0.0, type=compute_type)
-                is_neg = (arith.ArithValue(var) < c0_f)
+                is_neg = var < c0_f
                 var = arith.select(is_neg, c0_f, var)
-                var_eps = (arith.ArithValue(var) + eps)
+                var_eps = var + eps
                 rstd = flir.math.rsqrt(arith.as_value(var_eps), fastmath=fm_fast)
 
                 # Pass2: normalize + affine + store
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = (arith.ArithValue(c_base) + tid)
+                    idx = c_base + tid
                     is_valid = arith.ult(idx, c_N)
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
@@ -313,10 +313,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
                         g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (g_e))
                         b = (b_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (b_e))
-                        diff = (arith.ArithValue(x) - mean)
-                        norm = (arith.ArithValue(diff) * rstd)
-                        scaled = (arith.ArithValue(norm) * g)
-                        y = (arith.ArithValue(scaled) + b)
+                        diff = x - mean
+                        norm = diff * rstd
+                        scaled = norm * g
+                        y = scaled + b
                         if dtype_str == "bf16":
                             y_e = flir.arith.truncf(elem_type, (y))
                         else:
