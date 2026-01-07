@@ -1350,7 +1350,7 @@ def swizzle_xor16(row: Value, col: Value, k_blocks16: Value,
     """XOR-with-row swizzle on the K dimension at 16B granularity.
 
     Computes: col xor ((row % k_blocks16) * 16)
-    Lowered by FlirToStandard to arith ops (matching ROCDSL-style swizzle).
+    Lowered by FlirToStandard to arith ops (matching FLYDSL-style swizzle).
     """
     loc = _get_location(loc)
     with ip or InsertionPoint.current:

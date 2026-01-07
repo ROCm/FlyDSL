@@ -12,11 +12,11 @@ import sys
 import os
 from pathlib import Path
 
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
+# Prefer embedded MLIR/flydsl to avoid mixing multiple runtimes.
 _repo = Path(__file__).resolve().parents[3]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
+_embedded = _repo / "build" / "python_packages" / "flydsl"
 if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
+    os.environ.setdefault("FLYDSL_USE_EMBEDDED_MLIR", "1")
     sys.path.insert(0, str(_embedded))
 _src_py = _repo / "python"
 if _src_py.exists():
@@ -91,7 +91,7 @@ def run_test(M, N, dtype_str):
     torch.cuda.synchronize()
     # Optional: more stable device timing via HIP events (for FLIR kernel).
     flir_gpu_us = None
-    if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
+    if os.environ.get("FLYDSL_COMPARE_AITER", "0") == "1":
         flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
     total_bytes = 2 * M * N * (4 if dtype_str == "f32" else 2)  # read input + write output
@@ -127,8 +127,8 @@ def test_all():
     print("Running Softmax Vectorized Tests")
     print("="*80)
     
-    # Default shape sweep (override with ROCDSL_SOFTMAX_SHAPES="M,N,dtype;M,N,dtype;...")
-    shapes_env = os.environ.get("ROCDSL_SOFTMAX_SHAPES", "").strip()
+    # Default shape sweep (override with FLYDSL_SOFTMAX_SHAPES="M,N,dtype;M,N,dtype;...")
+    shapes_env = os.environ.get("FLYDSL_SOFTMAX_SHAPES", "").strip()
     if shapes_env:
         configs = []
         for part in shapes_env.split(";"):
@@ -148,7 +148,7 @@ def test_all():
             (32768, 8192, "bf16"),
         ]
 
-    do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
+    do_compare = os.environ.get("FLYDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
     
     failures = 0

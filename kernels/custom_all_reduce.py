@@ -1,4 +1,4 @@
-"""Custom all-reduce kernel + Python-facing shim (AIter-like API shape).
+"""Custom all-reduce kernel + Python-facing shim.
 
 This kernel is intentionally written in the same "ext arith" style as
 `moe_gemm_2stage.py` / `preshuffle_gemm.py`:
@@ -503,7 +503,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     return CustomAllReduce(world_size=world_size, rank=rank, full_nvlink=full_nvlink)
 
 
-# ---- Optional free-function wrappers (closer to the C++ extension API shape) ----
+# ---- Optional free-function wrappers ----
 def all_reduce_reg(fa: CustomAllReduce, inp, out, open_fp8_quant: bool = False):
     return fa.all_reduce_reg(inp, out, open_fp8_quant=open_fp8_quant)
 
