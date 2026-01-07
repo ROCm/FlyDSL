@@ -54,9 +54,14 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
+      - name: Install dependencies
+        run: |
+          docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
+          docker exec flydsl_test bash -c "pip install ninja>=1.11.1"
+
       - name: Run tests
         run: |
           # docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake ninja-build build-essential"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
-          docker exec flydsl_test bash -c "cd /flydsl-test && pip install ninja>=1.11.1 && bash scripts/build_llvm.sh && pip install -e ."
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh && pip install -e ."
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
