@@ -65,7 +65,7 @@ jobs:
           set -ex
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
           docker exec flydsl_test bash -c "ls -la /llvm-project/buildmlir/lib/cmake/mlir"
-          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/buildmlir/lib/cmake/mlir && cd /flydsl-test && ./flir/build.sh"
+          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/buildmlir && cd /flydsl-test && ./flir/build.sh"
         
       - name: Install Python package
         run: |
