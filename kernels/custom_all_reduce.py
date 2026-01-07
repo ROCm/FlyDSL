@@ -16,6 +16,7 @@ Notes vs the C++ AIter implementation you pasted:
 """
 
 from flydsl.dialects.ext import flir, arith
+from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from _mlir import ir
 import _mlir.extras.types as T
@@ -32,6 +33,21 @@ def _dtype_to_mlir(dtype_str: str):
         return T.f16(), T.f32()
     if dtype_str == "bf16":
         return ir.BF16Type.get(), T.f32()
+    raise ValueError(f"unsupported dtype: {dtype_str}")
+
+def _pack_elems(dtype_str: str) -> int:
+    """Match C++ packed_t<T>::P where P is 16 bytes."""
+    if dtype_str == "f32":
+        return 4
+    if dtype_str in {"f16", "bf16"}:
+        return 8
+    raise ValueError(f"unsupported dtype: {dtype_str}")
+
+def _elem_size_bytes(dtype_str: str) -> int:
+    if dtype_str == "f32":
+        return 4
+    if dtype_str in {"f16", "bf16"}:
+        return 2
     raise ValueError(f"unsupported dtype: {dtype_str}")
 
 
@@ -59,9 +75,20 @@ def build_custom_all_reduce_module(
     if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
         raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
 
+    # C++ custom allreduce requires size to be multiple of 16B pack.
+    PACK_ELEMS = _pack_elems(dtype_str)
+    if N % PACK_ELEMS != 0:
+        raise ValueError(f"custom allreduce requires input length to be multiple of {PACK_ELEMS}")
+
     gpu_arch = get_hip_arch()
-    num_blocks = (N + BLOCK_SIZE - 1) // BLOCK_SIZE
+    # One thread handles one 16B pack.
+    num_packs = N // PACK_ELEMS
+    num_blocks = (num_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
     _state = {}
+    VEC_ALIGN = 16
+    total_bytes = N * _elem_size_bytes(dtype_str)
+    # Mirror the C++ dispatch: bytes%128==0 => fast path, else naive path.
+    USE_FAST_VEC = (total_bytes % 128) == 0
 
     class _CustomAllReduce(flir.MlirModule):
         GPU_MODULE_NAME = f"custom_all_reduce_{dtype_str}"
@@ -81,39 +108,64 @@ def build_custom_all_reduce_module(
             tid = flir.const_index(flir.thread_idx("x"))
             bid = flir.const_index(flir.block_idx("x"))
 
-            c_N = flir.const_index(N)
+            c_num_packs = flir.const_index(num_packs)
             c0_idx = flir.const_index(0)
 
             elem_type = _state["elem_type"]
             compute_type = _state["compute_type"]
 
-            # global index for this thread
-            idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
-            is_valid = arith.ult(idx, c_N)
+            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
+            vec_c_ty = ir.VectorType.get([PACK_ELEMS], compute_type)
 
-            if is_valid:
-                # Predicated index to avoid OOB loads.
-                idx_safe = arith.select(is_valid, idx, c0_idx)
+            pack_idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+            is_valid_pack = arith.ult(pack_idx, c_num_packs)
+            pack_idx_safe = arith.select(is_valid_pack, pack_idx, c0_idx)
+            base = arith.ArithValue(pack_idx_safe) * PACK_ELEMS  # element index
 
+            # ---- Fast vector path: vector.load/store of a 16B pack ----
+            if USE_FAST_VEC:
                 if world_size == 1:
-                    x_e = flir.memref.load(In, [arith.as_value(idx_safe)])
-                    if dtype_str == "f32":
-                        y_c = arith.ArithValue(x_e)
-                    else:
-                        y_c = arith.extf(compute_type, x_e)
+                    v_e = flir.vector.load(vec_e_ty, In, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    v_c = v_e if dtype_str == "f32" else flir.arith.extf(vec_c_ty, (v_e))
                 else:
-                    acc = arith.constant(0.0, type=compute_type)
-                    for r in range(world_size):
-                        x_e = flir.memref.load(In, [flir.const_index(r), arith.as_value(idx_safe)])
-                        x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
-                        acc = arith.ArithValue(acc) + x_c
-                    y_c = acc
+                    zero = arith.constant(0.0, type=compute_type)
+                    acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
+                    for r in range_constexpr(world_size):
+                        v_e = flir.vector.load(
+                            vec_e_ty,
+                            In,
+                            [flir.const_index(r), arith.as_value(base)],
+                            alignment=VEC_ALIGN,
+                        )
+                        v_c = v_e if dtype_str == "f32" else flir.arith.extf(vec_c_ty, (v_e))
+                        acc = arith.as_value(arith.ArithValue(acc) + v_c)
+                    v_c = acc
 
-                if dtype_str == "f32":
-                    y_e = arith.as_value(y_c)
-                else:
-                    y_e = arith.as_value(arith.trunc_f(elem_type, y_c))
-                flir.memref.store(y_e, Out, [arith.as_value(idx)])
+                if is_valid_pack:
+                    if dtype_str == "f32":
+                        out_v = v_c
+                    else:
+                        out_v = flir.arith.truncf(vec_e_ty, (v_c))
+                    flir.vector.store(out_v, Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            # ---- Naive path: keep the same 16B "pack" contract but do scalar element ops ----
+            if is_valid_pack:
+                for lane in range_constexpr(PACK_ELEMS):
+                    idx = arith.ArithValue(base) + lane
+                    if world_size == 1:
+                        x_e = flir.memref.load(In, [arith.as_value(idx)])
+                        y_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                    else:
+                        acc = arith.constant(0.0, type=compute_type)
+                        for r in range_constexpr(world_size):
+                            x_e = flir.memref.load(In, [flir.const_index(r), arith.as_value(idx)])
+                            x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                            acc = arith.ArithValue(acc) + x_c
+                        y_c = acc
+
+                    y_e = arith.as_value(y_c) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, y_c))
+                    flir.memref.store(y_e, Out, [arith.as_value(idx)])
 
         @flir.jit
         def __call__(
@@ -157,9 +209,17 @@ def build_custom_all_gather_module(
         raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
 
     gpu_arch = get_hip_arch()
-    # For world_size>1, we flatten r-major indexing with the same 1D launch.
-    total = N if world_size == 1 else (world_size * N)
-    num_blocks = (total + BLOCK_SIZE - 1) // BLOCK_SIZE
+    PACK_ELEMS = _pack_elems(dtype_str)
+    VEC_ALIGN = 16
+    total_bytes = N * _elem_size_bytes(dtype_str)
+    USE_FAST_VEC = (total_bytes % 128) == 0 and (N % PACK_ELEMS == 0)
+
+    # For world_size>1 we flatten (r, pack) space into 1D launch.
+    packs_per_rank = (N // PACK_ELEMS) if (N % PACK_ELEMS == 0) else None
+    total_work = N if world_size == 1 else (world_size * N)
+    if USE_FAST_VEC:
+        total_work = (N // PACK_ELEMS) if world_size == 1 else (world_size * (N // PACK_ELEMS))
+    num_blocks = (total_work + BLOCK_SIZE - 1) // BLOCK_SIZE
     _state = {}
 
     class _CustomAllGather(flir.MlirModule):
@@ -179,15 +239,38 @@ def build_custom_all_gather_module(
             tid = flir.const_index(flir.thread_idx("x"))
             bid = flir.const_index(flir.block_idx("x"))
 
-            c_total = flir.const_index(total)
             idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+
+            if USE_FAST_VEC:
+                vec_e_ty = ir.VectorType.get([PACK_ELEMS], _state["elem_type"])
+                c_total = flir.const_index(total_work)
+                is_valid = arith.ult(idx, c_total)
+                if is_valid:
+                    if world_size == 1:
+                        base = arith.ArithValue(idx) * PACK_ELEMS
+                        v = flir.vector.load(vec_e_ty, In, [arith.as_value(base)], alignment=VEC_ALIGN)
+                        flir.vector.store(v, Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    else:
+                        # Flattened pack index -> (r, pack_in_rank)
+                        idx_i32 = arith.index_cast(T.i32(), idx)
+                        cP_i32 = arith.i32(packs_per_rank)
+                        r_i32 = flir.arith.DivUIOp(arith.as_value(idx_i32), arith.as_value(cP_i32)).result
+                        p_i32 = flir.arith.RemUIOp(arith.as_value(idx_i32), arith.as_value(cP_i32)).result
+                        r = arith.index_cast(ir.IndexType.get(), r_i32)
+                        p = arith.index_cast(ir.IndexType.get(), p_i32)
+                        base = arith.ArithValue(p) * PACK_ELEMS
+                        v = flir.vector.load(vec_e_ty, In, [arith.as_value(r), arith.as_value(base)], alignment=VEC_ALIGN)
+                        flir.vector.store(v, Out, [arith.as_value(r), arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            # naive scalar copy (supports any N)
+            c_total = flir.const_index(total_work)
             is_valid = arith.ult(idx, c_total)
             if is_valid:
                 if world_size == 1:
                     v = flir.memref.load(In, [arith.as_value(idx)])
                     flir.memref.store(v, Out, [arith.as_value(idx)])
                 else:
-                    # Flattened index -> (r, i)
                     idx_i32 = arith.index_cast(T.i32(), idx)
                     cN_i32 = arith.i32(N)
                     r_i32 = flir.arith.DivUIOp(arith.as_value(idx_i32), arith.as_value(cN_i32)).result
@@ -272,6 +355,9 @@ class CustomAllReduce:
             return "bf16"
         raise ValueError(f"unsupported dtype: {dt!r}")
 
+    def _pack_elems_for_tensor(self, t) -> int:
+        return _pack_elems(self._dtype_str(t))
+
     def _compile(self, *, op: str, N: int, dtype_str: str, world_size: int):
         import flydsl
 
@@ -310,6 +396,10 @@ class CustomAllReduce:
                 raise ValueError("inp.scalar_type must equal out.scalar_type")
             if int(out.numel()) != int(x0.numel()):
                 raise ValueError("inp.numel must equal out.numel")
+            # Match C++ allreduce hard requirement: size must be multiple of pack elems.
+            pack_elems = self._pack_elems_for_tensor(x0)
+            if int(x0.numel()) % pack_elems != 0:
+                raise ValueError(f"custom allreduce currently requires input length to be multiple of {pack_elems}")
 
             N = int(x0.numel())
             dtype_str = self._dtype_str(x0)
@@ -323,6 +413,9 @@ class CustomAllReduce:
             raise ValueError("inp.scalar_type must equal out.scalar_type")
         if int(inp.numel()) != int(out.numel()):
             raise ValueError("inp.numel must equal out.numel")
+        pack_elems = self._pack_elems_for_tensor(inp)
+        if int(inp.numel()) % pack_elems != 0:
+            raise ValueError(f"custom allreduce currently requires input length to be multiple of {pack_elems}")
         N = int(inp.numel())
         dtype_str = self._dtype_str(inp)
         exe = self._compile(op="all_reduce", N=N, dtype_str=dtype_str, world_size=1)
