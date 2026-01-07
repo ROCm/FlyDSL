@@ -164,7 +164,6 @@ def compile_preshuffle_gemm_a8(
                 if is_int8
                 else arith.constant_vector(0.0, T.f32x4)
             )
-            c0_i32 = arith.unwrap(0, type=T.i32)
 
             # Layouts
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
@@ -433,11 +432,11 @@ def compile_preshuffle_gemm_a8(
                 def mfma_k64(acc_in, a0, a1, b0, b1):
                     acc_mid = mfma_fn(
                         mfma_res_ty,
-                        [a0, b0, acc_in, c0_i32, c0_i32, c0_i32],
+                        [a0, b0, acc_in, 0, 0, 0],
                     )
                     return mfma_fn(
                         mfma_res_ty,
-                        [a1, b1, acc_mid, c0_i32, c0_i32, c0_i32],
+                        [a1, b1, acc_mid, 0, 0, 0],
                     )
 
                 for ku in range_constexpr(k_unroll):

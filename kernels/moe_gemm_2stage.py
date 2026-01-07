@@ -158,7 +158,6 @@ def compile_moe_gemm1(
             vec16_x = I.vec(16, x_elem)
             vec1_i64 = I.vec(1, i64)
             vec2_i64 = I.vec(2, i64)
-            c0_i32 = arith.unwrap(0, type=i32)
 
             def silu(x):
                 # Align with CK's device fast path:
@@ -584,10 +583,10 @@ def compile_moe_gemm1(
 
                 def mfma_k64(acc_in, a0, a1, b0, b1):
                     acc_mid = mfma_fn(
-                        mfma_res_ty, [a0, b0, acc_in, c0_i32, c0_i32, c0_i32]
+                        mfma_res_ty, [a0, b0, acc_in, 0, 0, 0]
                     )
                     return mfma_fn(
-                        mfma_res_ty, [a1, b1, acc_mid, c0_i32, c0_i32, c0_i32]
+                        mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0]
                     )
 
                 for ku in range_constexpr(k_unroll):
@@ -1121,7 +1120,6 @@ def compile_moe_gemm2(
             vec16_x = I.vec(16, x_elem)
             vec1_i64 = I.vec(1, i64)
             vec2_i64 = I.vec(2, i64)
-            c0_i32 = arith.unwrap(0, type=i32)
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
@@ -1510,8 +1508,8 @@ def compile_moe_gemm2(
                     epilogue_pf = (sw_pf, tw_pf)
 
                 def mfma_k64(acc0, a0, a1, b0, b1):
-                    acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, c0_i32, c0_i32, c0_i32])
-                    return mfma_fn(mfma_res_ty, [a1, b1, acc1, c0_i32, c0_i32, c0_i32])
+                    acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
+                    return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
 
                 for ku in range_constexpr(k_unroll):
                     b_packs0, b_packs1 = b_tile_in[ku]
