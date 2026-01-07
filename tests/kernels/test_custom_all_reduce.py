@@ -105,7 +105,8 @@ def test_all():
     else:
         # Default: run one case (can override via ROCDSL_CUSTOM_ALL_REDUCE_SHAPES)
         configs = [
-            (256 * 8 + 13, "f16", 1),
+            # allreduce requires N to be multiple of 16B pack: f16/bf16 -> 8 elems, f32 -> 4 elems
+            (256 * 8 + 16, "f16", 1),
         ]
 
     for N, dtype, ws in configs:
