@@ -2,11 +2,13 @@
 # Flir Test Suite - Organized by test type
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${REPO_ROOT}"
 COMPARE_AITER_CK=0
 # Locate the build directory (default: .flir/build; fallback: build/).
-BUILD_DIR="${FLIR_BUILD_DIR:-${FLIR_BUILD_DIR:-${SCRIPT_DIR}/.flir/build}}"
-if [ ! -d "${BUILD_DIR}" ] && [ -d "${SCRIPT_DIR}/build" ]; then
-  BUILD_DIR="${SCRIPT_DIR}/build"
+BUILD_DIR="${FLIR_BUILD_DIR:-${FLIR_BUILD_DIR:-${REPO_ROOT}/.flir/build}}"
+if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
+  BUILD_DIR="${REPO_ROOT}/build"
 fi
 
 # Prefer the new tool location (LLVM_RUNTIME_OUTPUT_INTDIR = build/bin),
@@ -38,7 +40,7 @@ echo "========================================================================"
 echo ""
 
 PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/flydsl"
-export PYTHONPATH="${SCRIPT_DIR}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${SCRIPT_DIR}:${PYTHONPATH}"
+export PYTHONPATH="${REPO_ROOT}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH}"
 echo "Using in-tree Python sources + embedded build packages via PYTHONPATH."
 
 

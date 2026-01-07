@@ -106,15 +106,25 @@ class SmemPtr:
         view = self.get()
         if idxs is None: 
             # If scalar (shape is None or (1,)), access index 0
-            idxs = [arith.constant(T.index(), 0) for _ in range(len(self.shape) if self.shape else 1)]
-        return memref.load(view, idxs)
+            idxs = [
+                get_op_result_or_value(arith.constant(T.index(), 0))
+                for _ in range(len(self.shape) if self.shape else 1)
+            ]
+        else:
+            idxs = [get_op_result_or_value(i) for i in idxs]
+        return memref.load(get_op_result_or_value(view), idxs)
     
     def store(self, val, idxs=None):
         """Helper to store value. If scalar, idxs defaults to [0]."""
         view = self.get()
         if idxs is None: 
-            idxs = [arith.constant(T.index(), 0) for _ in range(len(self.shape) if self.shape else 1)]
-        memref.store(val, view, idxs)
+            idxs = [
+                get_op_result_or_value(arith.constant(T.index(), 0))
+                for _ in range(len(self.shape) if self.shape else 1)
+            ]
+        else:
+            idxs = [get_op_result_or_value(i) for i in idxs]
+        memref.store(get_op_result_or_value(val), get_op_result_or_value(view), idxs)
 
 # ==============================================================================
 # Struct Support

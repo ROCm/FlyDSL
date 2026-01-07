@@ -151,7 +151,10 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    pad_k = 8
+    # FP8 uses XOR swizzle and benefits from a small padding along K to reduce bank conflicts.
+    # FP16 path does not swizzle and the default tile (128x128x128) must fit within 64KB LDS
+    # on gfx942; keep pad_k=0 for FP16 to avoid allocating >64KB.
+    pad_k = 8 if dtype_config == DTYPE_FP8 else 0
     lds_stride = tile_k + pad_k
     lds_size_a = tile_m * lds_stride
     lds_size_b = tile_n * lds_stride
