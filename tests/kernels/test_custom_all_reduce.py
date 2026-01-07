@@ -29,72 +29,87 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-import flydsl
-
-from kernels.custom_all_reduce import build_custom_all_reduce_module
+from kernels.custom_all_reduce import init_custom_ar, meta_size
 
 
-def _reference_block_sum_broadcast(x_fp32: "torch.Tensor", *, block_size: int) -> "torch.Tensor":
-    assert x_fp32.dtype == torch.float32
-    n = x_fp32.numel()
-    y = torch.empty((n,), device=x_fp32.device, dtype=torch.float32)
-    for start in range(0, n, block_size):
-        end = min(start + block_size, n)
-        s = x_fp32[start:end].sum()
-        y[start:end] = s
-    return y
-
-
-def run_test(N: int, dtype_str: str, *, block_size: int = 256):
-    m = build_custom_all_reduce_module(N, dtype_str=dtype_str, BLOCK_SIZE=block_size)
-    exe = flydsl.compile(m)
-
+def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     torch.manual_seed(0)
-    x0 = torch.randn((N,), device="cuda", dtype=DTYPE_FP32)
+
+    # Create a shim handle (API-shape compatibility with the C++ extension).
+    meta = torch.empty((meta_size(),), device="cuda", dtype=torch.int8)
+    rank_data = torch.empty((1,), device="cuda", dtype=torch.int8)
+    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
+    offsets = [0 for _ in range(world_size)]
+    fa = init_custom_ar(meta, rank_data, handles, offsets, rank=0, full_nvlink=False)
 
     if dtype_str == "f32":
-        x = x0.contiguous()
-        y = torch.empty((N,), device="cuda", dtype=DTYPE_FP32)
+        dtype = DTYPE_FP32
         atol = 1e-4
     elif dtype_str == "f16":
-        x = x0.to(DTYPE_FP16).contiguous()
-        y = torch.empty((N,), device="cuda", dtype=DTYPE_FP16)
-        atol = 5e-2
+        dtype = DTYPE_FP16
+        atol = 1e-3  # allreduce is elementwise sum/copy; should be tight
     elif dtype_str == "bf16":
-        x = x0.to(DTYPE_BF16).contiguous()
-        y = torch.empty((N,), device="cuda", dtype=DTYPE_BF16)
-        atol = 1e-1
+        dtype = DTYPE_BF16
+        atol = 1e-2
     else:
         raise ValueError(f"unsupported dtype_str: {dtype_str}")
 
-    exe(x, y)
-    torch.cuda.synchronize()
+    if world_size == 1:
+        x = torch.randn((N,), device="cuda", dtype=dtype).contiguous()
+        y = torch.empty((N,), device="cuda", dtype=dtype)
+        fa.all_reduce_reg(x, y, open_fp8_quant=False)
+        torch.cuda.synchronize()
+        max_err = (y.to(torch.float32) - x.to(torch.float32)).abs().max().item()
+        assert max_err < atol, f"max_err={max_err:.3e} >= atol={atol}"
 
-    expected = _reference_block_sum_broadcast(x.to(torch.float32), block_size=block_size)
-    res = y.to(torch.float32)
+        # all_gather (world_size==1) is identity
+        yg = torch.empty((N,), device="cuda", dtype=dtype)
+        fa.all_gather_reg(x, yg)
+        torch.cuda.synchronize()
+        max_err = (yg.to(torch.float32) - x.to(torch.float32)).abs().max().item()
+        assert max_err < atol, f"[gather] max_err={max_err:.3e} >= atol={atol}"
+    else:
+        xs = [torch.randn((N,), device="cuda", dtype=dtype).contiguous() for _ in range(world_size)]
+        y = torch.empty((N,), device="cuda", dtype=dtype)
+        fa.all_reduce_reg(xs, y, open_fp8_quant=False)
+        torch.cuda.synchronize()
+        expected = torch.stack(xs, dim=0).to(torch.float32).sum(dim=0)
+        max_err = (y.to(torch.float32) - expected).abs().max().item()
+        assert max_err < atol, f"max_err={max_err:.3e} >= atol={atol}"
 
-    max_err = (res - expected).abs().max().item()
-    assert max_err < atol, f"max_err={max_err:.3e} >= atol={atol} (N={N}, dtype={dtype_str})"
+        yg = torch.empty((world_size, N), device="cuda", dtype=dtype)
+        fa.all_gather_reg(xs, yg)
+        torch.cuda.synchronize()
+        expected_g = torch.stack(xs, dim=0).to(dtype)
+        max_err = (yg.to(torch.float32) - expected_g.to(torch.float32)).abs().max().item()
+        assert max_err < atol, f"[gather] max_err={max_err:.3e} >= atol={atol}"
 
 
 def test_all():
     shapes_env = os.environ.get("ROCDSL_CUSTOM_ALL_REDUCE_SHAPES", "").strip()
+    
     if shapes_env:
         configs = []
         for part in shapes_env.split(";"):
             p = part.strip()
             if not p:
                 continue
-            n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(n_s), dt))
+            parts = [x.strip() for x in p.split(",")]
+            if len(parts) == 2:
+                n_s, dt = parts
+                ws = 1
+            else:
+                n_s, dt, ws_s = parts
+                ws = int(ws_s)
+            configs.append((int(n_s), dt, ws))
     else:
         # Default: run one case (can override via ROCDSL_CUSTOM_ALL_REDUCE_SHAPES)
         configs = [
-            (256 * 8 + 13, "f16"),
+            (256 * 8 + 13, "f16", 1),
         ]
 
-    for N, dtype in configs:
-        run_test(N, dtype_str=dtype, block_size=256)
+    for N, dtype, ws in configs:
+        run_test(N, dtype_str=dtype, world_size=ws)
 
 
 if __name__ == "__main__":
