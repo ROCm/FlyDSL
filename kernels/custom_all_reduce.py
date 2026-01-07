@@ -380,30 +380,39 @@ class CustomAllReduce:
         if not _is_weak_contiguous(out):
             raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
 
-        # Accept either a single tensor (world_size==1) or a list/tuple of tensors (packed mode).
-        if isinstance(inp, (list, tuple)):
+        # Packed mode:
+        # - list/tuple of rank tensors, or
+        # - a single stacked tensor shaped [world_size, N] (preferred for CUDA graph capture: no per-call stack alloc).
+        if isinstance(inp, (list, tuple)) or (getattr(inp, "ndim", None) == 2 and int(getattr(inp, "shape", [0])[0]) == self.world_size and self.world_size > 1):
             import torch
 
-            xs = list(inp)
-            if len(xs) != self.world_size:
-                raise ValueError("len(inp) must equal world_size in packed mode")
-            x0 = xs[0]
-            if any(int(x.numel()) != int(x0.numel()) for x in xs):
-                raise ValueError("all packed inputs must have same numel")
-            if any(str(getattr(x, "dtype", None)) != str(getattr(x0, "dtype", None)) for x in xs):
-                raise ValueError("all packed inputs must have same dtype")
-            if str(getattr(out, "dtype", None)) != str(getattr(x0, "dtype", None)):
+            if isinstance(inp, (list, tuple)):
+                xs = list(inp)
+                if len(xs) != self.world_size:
+                    raise ValueError("len(inp) must equal world_size in packed mode")
+                x0 = xs[0]
+                if any(int(x.numel()) != int(x0.numel()) for x in xs):
+                    raise ValueError("all packed inputs must have same numel")
+                if any(str(getattr(x, "dtype", None)) != str(getattr(x0, "dtype", None)) for x in xs):
+                    raise ValueError("all packed inputs must have same dtype")
+                dtype_str = self._dtype_str(x0)
+                N = int(x0.numel())
+                stacked = torch.stack(xs, dim=0).contiguous()
+            else:
+                stacked = inp
+                if int(stacked.shape[0]) != self.world_size:
+                    raise ValueError("packed input must have shape [world_size, N]")
+                dtype_str = self._dtype_str(stacked)
+                N = int(stacked.shape[1])
+
+            if str(getattr(out, "dtype", None)) != str(getattr(stacked, "dtype", None)):
                 raise ValueError("inp.scalar_type must equal out.scalar_type")
-            if int(out.numel()) != int(x0.numel()):
+            if int(out.numel()) != int(N):
                 raise ValueError("inp.numel must equal out.numel")
-            # Match C++ allreduce hard requirement: size must be multiple of pack elems.
-            pack_elems = self._pack_elems_for_tensor(x0)
-            if int(x0.numel()) % pack_elems != 0:
+            pack_elems = _pack_elems(dtype_str)
+            if int(N) % pack_elems != 0:
                 raise ValueError(f"custom allreduce currently requires input length to be multiple of {pack_elems}")
 
-            N = int(x0.numel())
-            dtype_str = self._dtype_str(x0)
-            stacked = torch.stack(xs, dim=0).contiguous()
             exe = self._compile(op="all_reduce", N=N, dtype_str=dtype_str, world_size=self.world_size)
             exe(stacked, out)
             return
