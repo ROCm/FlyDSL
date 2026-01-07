@@ -82,8 +82,10 @@ jobs:
       - name: Show logs
         if: failure()
         run: |
-          docker cp flydsl_test:/tmp/*.log .
-          cat *.log
+          docker exec flydsl_test sh -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/logs.tgz .
+          tar -xzf logs.tgz
+          cat *.log    
 
       - name: Clean up
         if: always()
