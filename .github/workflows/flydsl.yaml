@@ -1,0 +1,61 @@
+name: Fly DSL test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  DOCKER_IMAGE: "rocm/pytorch:latest"
+  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || 'ROCm/FlyDSL' }}
+  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        runners: [ 'flydsl-mi325-1gpu', 'flydsl-mi355-1gpu' ]
+      fail-fast: false
+    runs-on: ${{ matrix.runners }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITHUB_REPO_NAME }}
+          ref: ${{ env.GITHUB_COMMIT_SHA }}
+          path: flydsl-test
+    
+      - name: Start CI container
+        run: |
+          echo "Clean up containers..."
+          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm
+
+          echo "Start CI container..."
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          echo "Starting container: flydsl_test:ci"
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
+          -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
+          --ipc=host --group-add video \
+          --shm-size 16g \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          -w /flydsl-checkout \
+          --name flydsl_test \
+          ${{ env.DOCKER_IMAGE }}
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+
+      - name: Run tests
+        run: |
+          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh && pip install -e ."
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
