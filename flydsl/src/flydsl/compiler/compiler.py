@@ -38,6 +38,11 @@ def _pipeline_fragments(*, chip: str) -> list[str]:
     On some kernels this changes IR structure enough that later codegen/scheduling
     produces different ISA with measurable perf regressions.
     """
+    # Allow opting out of bare-pointer host ABI for experiments (e.g. memref descriptor calling convention).
+    # Defaults preserve historical behavior.
+    use_bare_host = _env_truthy("FLIR_USE_BARE_PTR_HOST", "1")
+    use_bare_kernels = _env_truthy("FLIR_USE_BARE_PTR_KERNELS", "1")
+
     return [
         "flir-to-standard",
         "trivial-dce",
@@ -50,7 +55,7 @@ def _pipeline_fragments(*, chip: str) -> list[str]:
         # Keep this as a formatted string so the chip is visible in dumps and matches
         # the non-dump compilation pipeline.
         f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
-        "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+        f"gpu-to-llvm{{intersperse-sizes-for-kernels=false use-bare-pointers-for-host={'true' if use_bare_host else 'false'} use-bare-pointers-for-kernels={'true' if use_bare_kernels else 'false'}}}",
         "reconcile-unrealized-casts",
         "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
     ]

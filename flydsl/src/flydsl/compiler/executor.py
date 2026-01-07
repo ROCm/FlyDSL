@@ -124,6 +124,11 @@ class ExecutionEngineExecutor:
     @staticmethod
     def _ctype_for_llvm_type(ty: str):
         ty = ty.strip()
+        # Memref descriptor (LLVM dialect prints a concrete struct type when bare-pointers are disabled).
+        # Example:
+        #   !llvm.struct<(ptr, ptr, i64, array<1 x i64>, array<1 x i64>)>
+        if ty.startswith("!llvm.struct<"):
+            return _ctype_for_llvm_struct(ty)
         if ty == "!llvm.ptr":
             return ctypes.c_void_p
         if ty == "i1":
@@ -187,15 +192,25 @@ class ExecutionEngineExecutor:
                     else:
                         raise TypeError(f"Unsupported pointer arg type: {type(a)}")
                 else:
+                    # Struct args: allow passing torch tensors / tensor-like objects, which we pack
+                    # into a StridedMemRef descriptor, and also allow passing pre-built ctypes structs.
                     cty = self._ctype_for_llvm_type(ty)
-                    if isinstance(a, bool):
-                        v = cty(bool(a))
-                    elif isinstance(a, int):
-                        v = cty(int(a))
-                    elif isinstance(a, float):
-                        v = cty(float(a))
+                    if issubclass(cty, ctypes.Structure):
+                        if isinstance(a, cty):
+                            v = a
+                        elif hasattr(a, "data_ptr") and callable(getattr(a, "data_ptr")) and hasattr(a, "shape"):
+                            v = _pack_tensor_as_memref_descriptor(a, cty)
+                        else:
+                            raise TypeError(f"Unsupported struct arg type: {type(a)} for {ty}")
                     else:
-                        raise TypeError(f"Unsupported scalar arg type: {type(a)} for {ty}")
+                        if isinstance(a, bool):
+                            v = cty(bool(a))
+                        elif isinstance(a, int):
+                            v = cty(int(a))
+                        elif isinstance(a, float):
+                            v = cty(float(a))
+                        else:
+                            raise TypeError(f"Unsupported scalar arg type: {type(a)} for {ty}")
 
                 owned.append(v)
                 arg_ptrs.append(ctypes.cast(ctypes.pointer(v), ctypes.c_void_p))
@@ -211,5 +226,130 @@ class ExecutionEngineExecutor:
 
 
 Executor = ExecutionEngineExecutor
+
+
+# ---- Minimal LLVM-dialect struct parsing for memref descriptors ----
+_STRUCT_CACHE: Dict[str, type] = {}
+
+
+def _split_top_level_commas(s: str) -> List[str]:
+    out: List[str] = []
+    cur = []
+    depth_angle = 0
+    depth_paren = 0
+    for ch in s:
+        if ch == "<":
+            depth_angle += 1
+        elif ch == ">":
+            depth_angle -= 1
+        elif ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren -= 1
+        if ch == "," and depth_angle == 0 and depth_paren == 0:
+            out.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    if cur:
+        out.append("".join(cur).strip())
+    return [x for x in out if x]
+
+
+def _parse_array_ty(ty: str) -> Tuple[int, str]:
+    # array<k x i64>
+    m = re.match(r"array<\s*(\d+)\s*x\s*([a-z0-9]+)\s*>", ty.strip())
+    if not m:
+        raise ValueError(f"Unsupported array type: {ty}")
+    return int(m.group(1)), m.group(2)
+
+
+def _ctype_for_llvm_struct(ty: str):
+    ty = ty.strip()
+    c = _STRUCT_CACHE.get(ty)
+    if c is not None:
+        return c
+    # Expect: !llvm.struct<( ... )>
+    inner = ty
+    inner = inner[len("!llvm.struct<") :].rstrip(">")
+    inner = inner.strip()
+    if inner.startswith("(") and inner.endswith(")"):
+        inner = inner[1:-1].strip()
+    fields = _split_top_level_commas(inner)
+
+    c_fields = []
+    for i, fty in enumerate(fields):
+        fty = fty.strip()
+        if fty in {"ptr", "!llvm.ptr"}:
+            c_fields.append((f"f{i}", ctypes.c_void_p))
+        elif fty in {"i64"}:
+            c_fields.append((f"f{i}", ctypes.c_int64))
+        elif fty.startswith("array<"):
+            n, et = _parse_array_ty(fty)
+            if et != "i64":
+                raise ValueError(f"Unsupported array element type: {fty}")
+            c_fields.append((f"f{i}", ctypes.c_int64 * n))
+        else:
+            # best-effort: treat unknowns as void*
+            c_fields.append((f"f{i}", ctypes.c_void_p))
+
+    cls_name = f"LLVMStruct_{abs(hash(ty))}"
+    cls = type(cls_name, (ctypes.Structure,), {"_fields_": c_fields})
+    _STRUCT_CACHE[ty] = cls
+    return cls
+
+
+def _pack_tensor_as_memref_descriptor(t, cty_struct: type) -> ctypes.Structure:
+    """Pack a tensor-like object into a StridedMemRef descriptor.
+
+    Supports the canonical MLIR ABI layout:
+      (ptr basePtr, ptr dataPtr, i64 offset, array<rank x i64> sizes, array<rank x i64> strides)
+    """
+    # Rank inferred from the struct field types.
+    f = getattr(cty_struct, "_fields_", [])
+    if len(f) != 5:
+        raise TypeError("Only StridedMemRef descriptors are supported (5-field struct)")
+    sizes_ty = f[3][1]
+    strides_ty = f[4][1]
+    if not (hasattr(sizes_ty, "_length_") and hasattr(strides_ty, "_length_")):
+        raise TypeError("Invalid memref descriptor struct (missing sizes/strides arrays)")
+    rank = int(sizes_ty._length_)
+
+    # Tensor metadata
+    shape = tuple(int(x) for x in getattr(t, "shape"))
+    if len(shape) != rank:
+        raise TypeError(f"Tensor rank {len(shape)} does not match descriptor rank {rank}")
+
+    # Strides are in elements.
+    strides = tuple(int(x) for x in getattr(t, "stride")()) if callable(getattr(t, "stride", None)) else None
+    if strides is None:
+        raise TypeError("Tensor-like object must provide stride()")
+
+    # Use storage base ptr + storage_offset if available, else fall back to data_ptr.
+    base_ptr = None
+    offset_elems = 0
+    try:
+        if hasattr(t, "untyped_storage"):
+            base_ptr = int(t.untyped_storage().data_ptr())
+        elif hasattr(t, "storage"):
+            base_ptr = int(t.storage().data_ptr())
+        offset_elems = int(getattr(t, "storage_offset", lambda: 0)())
+    except Exception:
+        base_ptr = None
+        offset_elems = 0
+
+    data_ptr = int(t.data_ptr())
+    if base_ptr is None:
+        base_ptr = data_ptr
+        offset_elems = 0
+
+    desc = cty_struct()
+    desc.f0 = ctypes.c_void_p(int(base_ptr))
+    desc.f1 = ctypes.c_void_p(int(data_ptr))
+    desc.f2 = ctypes.c_int64(int(offset_elems))
+    for i in range(rank):
+        desc.f3[i] = ctypes.c_int64(int(shape[i]))
+        desc.f4[i] = ctypes.c_int64(int(strides[i]))
+    return desc
 
 
