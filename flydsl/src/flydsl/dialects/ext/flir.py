@@ -2781,7 +2781,7 @@ def copy(copy_desc, src, dst,
                     mask=mask,
                 )
                 vec_elem_ty = VectorType.get((extent,), elem_ty)
-                return vector.BitCastOp(vec_elem_ty, i32_vec).result
+                return vector.BitCastOp(vec_elem_ty, _unwrap_value(i32_vec)).result
 
         # Generic path: vector.load
         base = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)

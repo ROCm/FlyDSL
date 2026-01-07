@@ -15,7 +15,9 @@ import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils import SmemAllocator
+from flydsl.utils import SmemAllocator, SmemPtr
+
+from _mlir import ir
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
@@ -28,6 +30,7 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
+from kernels.mfma_epilogues import mfma_epilog
 
 
 def compile_preshuffle_gemm_a8(
@@ -40,6 +43,8 @@ def compile_preshuffle_gemm_a8(
     tile_k: int,
     in_dtype: str = "fp8",
     lds_stage: int = 2,
+    # Epilogue options
+    use_cshuffle_epilog: bool = False,
 ):
     """Compile the preshuffle GEMM kernel and return the compiled executable.
 
@@ -115,7 +120,10 @@ def compile_preshuffle_gemm_a8(
     def _vec16_type():
         return T.i8x16 if is_int8 else T.f8x16
 
-    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}".replace("-", "_")
+    # GEMM epilogue toggle: optional LDS CShuffle + vectorized stores.
+    # Default: off (current measured cases show no benefit).
+    epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
+    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}".replace("-", "_")
 
     class _GEMM(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -124,10 +132,16 @@ def compile_preshuffle_gemm_a8(
         ]
 
         def init_gpu_module(self):
-            # LDS for A: either ping-pong (2 tiles) or single tile (CK v1 spirit).
-            _state["lds_a_decl"] = allocator.allocate_array(
-                _elem_type(), lds_stage * tile_m * lds_stride
-            )
+            # LDS scratch:
+            # - A tiles (fp8/int8): lds_stage * tile_m * lds_stride bytes
+            # - optional CShuffle output tile (fp16): tile_m * tile_n * 2 bytes
+            #
+            # When CShuffle is enabled, we reuse the same LDS allocation by aliasing it as fp16
+            # in the epilogue (the A LDS is dead after the mainloop).
+            lds_a_bytes = int(lds_stage) * int(tile_m) * int(lds_stride)  # 1B elems
+            lds_out_bytes = 2 * int(tile_m) * int(tile_n) if use_cshuffle_epilog else 0
+            lds_total_bytes = max(lds_a_bytes, lds_out_bytes)
+            _state["lds_a_decl"] = allocator.allocate_array(_elem_type(), lds_total_bytes)
             allocator.finalize()
 
         @flir.kernel
@@ -170,14 +184,20 @@ def compile_preshuffle_gemm_a8(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             # CK-style XOR16 swizzle parameter (const).
-            k_blocks16 = arith.constant(tile_k // 16, index=True)
+            k_blocks16 = arith.index(tile_k // 16)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
             by = gpu.block_id("y")
 
             base_ptr = allocator.get_base()
-            lds_a = _state["lds_a_decl"](base_ptr).get()
+            lds_a_ptr = _state["lds_a_decl"](base_ptr)
+            lds_a = lds_a_ptr.get()
+            lds_out = (
+                SmemPtr(base_ptr, lds_a_ptr.byte_offset, T.f16, shape=(tile_m * tile_n,)).get()
+                if use_cshuffle_epilog
+                else None
+            )
 
             a_rsrc = buffer_ops.create_buffer_resource(arg_a)
             b_rsrc = buffer_ops.create_buffer_resource(arg_b)
@@ -309,7 +329,7 @@ def compile_preshuffle_gemm_a8(
                 col_base_swz = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                 coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swz)
                 idx_a16 = flir.crd2idx(coord_a16, layout_lds)
-                idx_a16 = arith.ArithValue(idx_a16) + lds_base
+                idx_a16 = idx_a16 + lds_base
                 loaded_a16 = vector.load_op(_vec16_type(), lds_a, [idx_a16])
                 a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
                 a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
@@ -442,29 +462,102 @@ def compile_preshuffle_gemm_a8(
                             )
                 return current_accs_list, scales_pf
 
+            vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
+
             def store_output(final_accs, scales):
                 s_b_vals = scales["s_b_vals"]
                 s_a_vecs = scales["s_a_vecs"]
-                for mi in range_constexpr(m_repeat):
-                    row_base_m = bx_m + (mi * 16)
-                    s_a_vec4 = s_a_vecs[mi]
-                    for i in range_constexpr(4):
-                        row_off = (lane_div_16 * 4) + i
-                        row_g = row_base_m + row_off
-                        s_a = vector.extract(s_a_vec4, static_position=[i], dynamic_position=[])
-                        col_base = by_n + n_tile_base + lane_mod_16
-                        idx_base = flir.crd2idx(flir.make_coord(row_g, col_base), layout_c)
-                        byte_offset_base = idx_base * 2
+
+                if use_cshuffle_epilog:
+                    if lds_out is None:
+                        raise RuntimeError(
+                            "use_cshuffle_epilog=True but lds_out is not allocated/aliased."
+                        )
+
+                    def write_row_to_lds(
+                        *,
+                        mi: int,
+                        ii: int,
+                        row_in_tile,
+                        row,
+                        row_base_lds,
+                        col_base_local,
+                        num_acc_n: int,
+                        lds_out,
+                    ):
+                        s_a_vec4 = s_a_vecs[mi]
+                        s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                         for ni in range_constexpr(num_acc_n):
+                            col_local = col_base_local + (ni * 16)
                             acc_idx = mi * num_acc_n + ni
                             acc = final_accs[acc_idx]
-                            val = vector.extract(acc, static_position=[i], dynamic_position=[])
+                            val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                             if is_int8:
                                 val = arith.sitofp(T.f32, val)
                             val_s = (val * s_a) * s_b_vals[ni]
-                            val_f16 = arith.trunc_f(T.f16, val_s)
-                            byte_off = byte_offset_base + 32 * ni
-                            buffer_ops.buffer_store(val_f16, c_rsrc, byte_off, offset_is_bytes=True)
+                            v16 = arith.trunc_f(T.f16, val_s)
+
+                            lds_idx = row_base_lds + col_local
+                            v1 = vector.from_elements(vec1_f16, [v16])
+                            vector.store(v1, lds_out, [lds_idx], alignment=2)
+
+                    def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
+                        # Store vector<EVecxf16> to C at (row, col_g0).
+                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)
+                        buffer_ops.buffer_store(frag, c_rsrc, idx_out)
+
+                    # Prefer 16B stores when possible:
+                    # - EVec=4 => 4xf16 (8B) per store (and matches tile_n multiples of 128)
+                    # - EVec=2 => 2xf16 (4B) per store (tile_n multiples of 64)
+                    e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
+                    mfma_epilog(
+                        use_cshuffle=True,
+                        arith=arith,
+                        vector=vector,
+                        gpu=gpu,
+                        range_constexpr=range_constexpr,
+                        tile_m=tile_m,
+                        tile_n=tile_n,
+                        e_vec=e_vec,
+                        m_repeat=m_repeat,
+                        num_acc_n=num_acc_n,
+                        tx=tx,
+                        lane_div_16=lane_div_16,
+                        lane_mod_16=lane_mod_16,
+                        bx_m=bx_m,
+                        by_n=by_n,
+                        n_tile_base=n_tile_base,
+                        lds_out=lds_out,
+                        write_row_to_lds=write_row_to_lds,
+                        store_pair=store_pair,
+                    )
+                    return
+
+                def body_row(*, mi: int, ii: int, row_in_tile, row):
+                    s_a_vec4 = s_a_vecs[mi]
+                    s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                    col_base = by_n + n_tile_base + lane_mod_16
+                    idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
+                    for ni in range_constexpr(num_acc_n):
+                        acc_idx = mi * num_acc_n + ni
+                        acc = final_accs[acc_idx]
+                        val = vector.extract(acc, static_position=[ii], dynamic_position=[])
+                        if is_int8:
+                            val = arith.sitofp(T.f32, val)
+                        val_s = (val * s_a) * s_b_vals[ni]
+                        val_f16 = arith.trunc_f(T.f16, val_s)
+                        idx_out = idx_base + arith.constant(ni * 16, index=True)
+                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+
+                mfma_epilog(
+                    use_cshuffle=False,
+                    arith=arith,
+                    range_constexpr=range_constexpr,
+                    m_repeat=m_repeat,
+                    lane_div_16=lane_div_16,
+                    bx_m=bx_m,
+                    body_row=body_row,
+                )
 
             # ---------------- Scheduling hints (match CK-style) ----------------
             # These sched_group_barrier hints help the backend interleave VMEM/DS/MFMA

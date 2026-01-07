@@ -159,8 +159,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             step = BLOCK_SIZE * VEC_WIDTH
 
             # Base offset for this thread
-            tid_a = arith.ArithValue(tid)
-            thread_offset_base = tid_a * VEC_WIDTH
+            thread_offset_base = tid * VEC_WIDTH
 
             # Loop range(0, N, step)
             for base_idx_int in range_constexpr(0, N, step):
@@ -250,7 +249,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
             for i, item in enumerate(row_buffer):
                 if isinstance(item, tuple):
                     val, valid = item
-                    sub = arith.ArithValue(val) - global_max
+                    sub = val - global_max
                     scaled = sub * c_log2e
                     exp_val = flir.math.exp2(arith.as_value(scaled), fastmath=fm_fast)
 
@@ -266,7 +265,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         g_max_splat_vec = flir.vector.splat(vec_type, global_max)
                         log2e_splat = flir.vector.splat(vec_type, arith.as_value(c_log2e))
 
-                    sub = arith.ArithValue(vec_val) - g_max_splat_vec
+                    sub = vec_val - g_max_splat_vec
                     scaled = sub * log2e_splat
                     exp_vec = flir.math.exp2(arith.as_value(scaled), fastmath=fm_fast)
 
@@ -282,13 +281,13 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
             # 6. Normalize & Store
             c_one = arith.constant(1.0, type=compute_type)
-            inv_sum = arith.ArithValue(c_one) / global_sum
+            inv_sum = c_one / global_sum
 
             inv_sum_splat_vec = None
 
             # Reconstruct indices for store
             buf_idx = 0
-            thread_offset_base = tid_a * VEC_WIDTH
+            thread_offset_base = tid * VEC_WIDTH
 
             for base_idx_int in range_constexpr(0, N, step):
                 c_base = arith.index(base_idx_int)
@@ -305,7 +304,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         inv_sum_splat_vec = vector.splat(vec_type, inv_sum)
 
                     # Prefer fast-math for normalization multiply
-                    norm_vec = arith.as_value(arith.ArithValue(vec_exp) * inv_sum_splat_vec)
+                    norm_vec = arith.as_value(vec_exp * inv_sum_splat_vec)
 
                     if dtype_str == "bf16":
                         if USE_HW_CVT_PK_BF16_F32:
@@ -330,8 +329,8 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             u = flir.arith.bitcast(vec_i32_ty, norm_vec)
                             hi = arith.as_value(arith.shrui(u, c16_i32_v))
                             lsb = arith.as_value(arith.andi(hi, c1_i32_v))
-                            bias = arith.as_value(arith.ArithValue(c7fff_i32_v) + lsb)
-                            u_round = arith.as_value(arith.ArithValue(u) + bias)
+                            bias = arith.as_value(c7fff_i32_v + lsb)
+                            u_round = arith.as_value(u + bias)
                             bf16_bits = arith.as_value(arith.shrui(u_round, c16_i32_v))
 
                             even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
@@ -377,7 +376,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                         # If valid, store
                         if valid:
-                            norm_val = arith.as_value(arith.ArithValue(val_exp) * inv_sum)
+                            norm_val = arith.as_value(val_exp * inv_sum)
                             if dtype_str == "bf16":
                                 norm_val = arith.as_value(arith.trunc_f(elem_type, norm_val))
 

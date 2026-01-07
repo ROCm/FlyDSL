@@ -1,19 +1,23 @@
 """Reusable epilogue helpers for MFMA 16x16-based kernels.
 
-This module provides two high-level epilogue building blocks:
+This module provides:
 
-- `default_epilog(...)`
+- `mfma_epilog(...)`
+  A single entrypoint that dispatches to either the default row-epilogue or the
+  CK-style LDS CShuffle epilogue based on input parameters.
+
+- `default_epilog(...)` (implementation helper)
   A lightweight row-iterator for the common MFMA accumulator-to-output mapping
   (mi in [0,m_repeat), ii in [0,4), row = bx_m + mi*16 + lane_div_16*4 + ii).
   The caller supplies `body_row(...)` that performs the per-row epilogue work
   (e.g. loads scales once, loops over ni, stores).
 
-- `c_shuffle_epilog(...)`
+- `c_shuffle_epilog(...)` (implementation helper)
   A CK-style LDS CShuffle epilogue skeleton:
     1) call `write_row_to_lds(...)` for each MFMA output row to populate `lds_out`
        in row-major [tile_m, tile_n] order
     2) barrier
-    3) remap threads into (MLane, NLane) = (8,32) and read half2 (EVec=2) from LDS,
+    3) remap threads into (MLane, NLane) = (8,32) and read half2 from LDS,
        then call `store_pair(...)` to emit the final global store/atomic.
 
 These helpers are intentionally *dialect-agnostic*: callers pass the dialect
@@ -49,15 +53,15 @@ def default_epilog(
       body_row: callback invoked as:
         body_row(mi=<int>, ii=<int>, row_in_tile=<index>, row=<index>)
     """
-    bx_m_v = arith.ArithValue(bx_m)
-    lane_div_16_mul4 = arith.ArithValue(lane_div_16) * 4
+    bx_m_v = bx_m
+    lane_div_16_mul4 = lane_div_16 * 4
     ii_idx_list = [arith.constant(ii, index=True) for ii in range(4)]
 
     for mi in range_constexpr(m_repeat):
         mi_base = arith.constant(mi * 16, index=True)
         for ii in range_constexpr(4):
             row_off = lane_div_16_mul4 + ii_idx_list[ii]
-            row_in_tile = arith.ArithValue(mi_base) + row_off
+            row_in_tile = mi_base + row_off
             row = bx_m_v + row_in_tile
             body_row(mi=mi, ii=ii, row_in_tile=row_in_tile, row=row)
 
@@ -117,12 +121,12 @@ def c_shuffle_epilog(
 
     # ---------------- Step 1: write C tile to LDS (row-major, fp16) ----------------
     tile_n_idx = arith.constant(int(tile_n), index=True)
-    n_tile_base_v = arith.ArithValue(n_tile_base)
-    col_base_local = n_tile_base_v + arith.ArithValue(lane_mod_16)  # index within [0,tile_n)
+    n_tile_base_v = n_tile_base
+    col_base_local = n_tile_base_v + lane_mod_16  # index within [0,tile_n)
 
     def _write_row(mi: int, ii: int, row_in_tile, row):
         # row_base_lds = row_in_tile * tile_n
-        row_base_lds = arith.ArithValue(row_in_tile) * tile_n_idx
+        row_base_lds = row_in_tile * tile_n_idx
         write_row_to_lds(
             mi=mi,
             ii=ii,
@@ -155,17 +159,17 @@ def c_shuffle_epilog(
     n_reps_shuffle = int(tile_n) // (CShuffleNLane * EVec)
 
     c_nlane = arith.constant(CShuffleNLane, index=True)
-    m_lane = arith.ArithValue(tx) / c_nlane
-    n_lane = arith.ArithValue(tx) % c_nlane
+    m_lane = tx / c_nlane
+    n_lane = tx % c_nlane
     c_evec = arith.constant(EVec, index=True)
 
     vec_f16 = ir.VectorType.get([EVec], ir.F16Type.get())
-    bx_m_v = arith.ArithValue(bx_m)
-    by_n_v = arith.ArithValue(by_n)
+    bx_m_v = bx_m
+    by_n_v = by_n
 
     for mr in range_constexpr(m_reps_shuffle):
         row_base_m = arith.constant(mr * CShuffleMLane, index=True)
-        row_local = arith.ArithValue(row_base_m) + m_lane
+        row_local = row_base_m + m_lane
         row = bx_m_v + row_local
 
         row_ctx = (
@@ -175,7 +179,7 @@ def c_shuffle_epilog(
         row_base_lds = row_local * tile_n_idx
         for nr in range_constexpr(n_reps_shuffle):
             col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
-            col_pair0 = arith.ArithValue(col_base_nr) + (n_lane * c_evec)  # even col within tile
+            col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
             lds_idx_pair = row_base_lds + col_pair0
             frag = vector.load_op(vec_f16, lds_out, [lds_idx_pair])
@@ -188,4 +192,70 @@ def c_shuffle_epilog(
                 col_g0=by_n_v + col_pair0,
                 frag=frag,
             )
+
+
+def mfma_epilog(
+    *,
+    use_cshuffle: bool,
+    # Common (always required)
+    arith,
+    range_constexpr,
+    m_repeat: int,
+    lane_div_16,
+    bx_m,
+    # Default epilog (required when use_cshuffle=False)
+    body_row: Callable | None = None,
+    # CShuffle epilog (required when use_cshuffle=True)
+    vector=None,
+    gpu=None,
+    tile_m: int | None = None,
+    tile_n: int | None = None,
+    e_vec: int = 2,
+    cshuffle_nlane: int = 32,
+    block_size: int = 256,
+    num_acc_n: int | None = None,
+    tx=None,
+    lane_mod_16=None,
+    by_n=None,
+    n_tile_base=None,
+    lds_out=None,
+    write_row_to_lds: Callable | None = None,
+    precompute_row: Callable | None = None,
+    store_pair: Callable | None = None,
+):
+    if not use_cshuffle:
+        if body_row is None:
+            raise ValueError("mfma_epilog(use_cshuffle=False) requires `body_row`.")
+        return default_epilog(
+            arith=arith,
+            range_constexpr=range_constexpr,
+            m_repeat=m_repeat,
+            lane_div_16=lane_div_16,
+            bx_m=bx_m,
+            body_row=body_row,
+        )
+
+    return c_shuffle_epilog(
+        arith=arith,
+        vector=vector,
+        gpu=gpu,
+        range_constexpr=range_constexpr,
+        tile_m=int(tile_m),
+        tile_n=int(tile_n),
+        e_vec=int(e_vec),
+        cshuffle_nlane=int(cshuffle_nlane),
+        block_size=int(block_size),
+        m_repeat=m_repeat,
+        num_acc_n=int(num_acc_n),
+        tx=tx,
+        lane_div_16=lane_div_16,
+        lane_mod_16=lane_mod_16,
+        bx_m=bx_m,
+        by_n=by_n,
+        n_tile_base=n_tile_base,
+        lds_out=lds_out,
+        write_row_to_lds=write_row_to_lds,
+        precompute_row=precompute_row,
+        store_pair=store_pair,
+    )
 

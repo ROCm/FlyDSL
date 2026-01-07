@@ -235,9 +235,9 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                 max_bytes_per_load = 16
                 num_a_loads = (bytes_per_thread_a + max_bytes_per_load - 1) // max_bytes_per_load
 
-                vec_len_val = arith.constant(bytes_per_thread_a, index=True)
+                vec_len_val = arith.index(bytes_per_thread_a)
                 linear_id = tx * vec_len_val
-                c_tile_k_val = arith.constant(tile_k, index=True)
+                c_tile_k_val = arith.index(tile_k)
                 row_a_local = linear_id / c_tile_k_val
                 col_a_local = linear_id % c_tile_k_val
                 bx_m = bx * tile_m
@@ -259,13 +259,13 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                 n_per_wave = 16 * n_repeat
                 num_acc_n = n_repeat
                 by_n = by * tile_n
-                c_n_per_wave = arith.constant(n_per_wave, index=True)
+                c_n_per_wave = arith.index(n_per_wave)
                 wave_mod_4 = wave_id % 4
                 n_tile_base = wave_mod_4 * c_n_per_wave
 
                 global_n_list = []
                 for ni in range_constexpr(num_acc_n):
-                    c_offset = arith.constant(ni * 16, index=True)
+                    c_offset = arith.index(ni * 16)
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
                     global_n_list.append(global_n)
 
@@ -293,22 +293,19 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                 def swizzle_xor_16b(row_idx, col_idx):
                     # XOR swizzle on K at 16B granularity (matches preshuffle test)
-                    k_blocks16 = arith.constant(tile_k // 16, index=True)
+                    k_blocks16 = arith.index(tile_k // 16)
                     row_mod = row_idx % k_blocks16
                     xor_mask = row_mod * 16
-                    return arith.xori(col_idx, xor_mask)
+                    return col_idx ^ xor_mask
 
                 def load_b_pack_rowmajor(base_k, ki_step, ni):
                     # Match the preshuffle kernel’s (ki64, half, lane_div_16*16) addressing,
                     # but compute a normal row-major (N,K) byte offset.
                     ki64 = (ki_step // 2) * 64
-                    ki64_val = arith.constant(ki64, index=True)
                     half = ki_step % 2
-                    half_off = arith.constant(half * 8, index=True)
-                    k_start = base_k + ki64_val + col_offset_base + half_off  # bytes
+                    k_start = base_k + ki64 + col_offset_base + (half * 8)  # bytes
 
-                    cK = arith.constant(K, index=True)
-                    idx_bytes = (global_n_list[ni] * cK) + k_start
+                    idx_bytes = (global_n_list[ni] * K) + k_start
                     idx_i32 = idx_bytes / 4
 
                     b8 = buffer_ops.buffer_load(b_rsrc, idx_i32, vec_width=2, dtype=i32_type)
@@ -351,7 +348,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     scales_pf = {}
 
                     if not is_last_tile:
-                        next_k = k_iv + arith.constant(tile_k, index=True)
+                        next_k = k_iv + arith.index(tile_k)
                         next_k_div4 = next_k / 4
                         next_idx_a_div4 = idx_a_base_div4 + next_k_div4
                         vec_a_next_parts = load_a_split(next_idx_a_div4)
@@ -359,7 +356,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         # Prefetch scales for epilogue
                         s_b_vals = []
                         for ni in range_constexpr(num_acc_n):
-                            c_offset = arith.constant(ni * 16, index=True)
+                            c_offset = arith.index(ni * 16)
                             col_g = by_n + n_tile_base + c_offset + lane_mod_16
                             s_b_vals.append(buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=f32))
                         scales_pf["s_b_vals"] = s_b_vals
@@ -381,15 +378,13 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                             b_packs.append(load_b_pack_rowmajor(k_iv, ki_step, ni))
 
                         ki64 = (ki_step // 2) * 64
-                        ki64_val = arith.constant(ki64, index=True)
                         half = ki_step % 2
-                        half_off = arith.constant(half * 8, index=True)
-                        col_base = col_offset_base + ki64_val
+                        col_base = col_offset_base + ki64
 
                         for mi in range_constexpr(m_repeat):
-                            curr_row_a_lds = row_a_lds + arith.constant(mi * 16, index=True)
+                            curr_row_a_lds = row_a_lds + (mi * 16)
                             col_base_sw = swizzle_xor_16b(curr_row_a_lds, col_base)
-                            col_sw = col_base_sw + half_off
+                            col_sw = col_base_sw + (half * 8)
 
                             idx_a = flir.crd2idx(
                                 flir.make_coord(curr_row_a_lds, col_sw), layout_lds_a
@@ -408,10 +403,10 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     gpu.barrier()
                     return current_accs_list, vec_a_next_parts, scales_pf
 
-                c0 = arith.constant(0, index=True)
-                c_k_main = k_in - arith.constant(tile_k, index=True)
+                c0 = arith.index(0)
+                c_k_main = k_in - arith.index(tile_k)
 
-                for k_iv in range(c0, c_k_main, arith.constant(tile_k, index=True)):
+                for k_iv in range(c0, c_k_main, arith.index(tile_k)):
                     accs, vec_a_parts, _ = emit_tile(k_iv, accs, vec_a_parts, is_last_tile=False)
 
                 final_accs, _, scales = emit_tile(c_k_main, accs, vec_a_parts, is_last_tile=True)
@@ -433,7 +428,7 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                             s_b = s_b_vals[ni]
                             val_s = (val * s_a) * s_b
                             val_f16 = arith.trunc_f(T.f16(), val_s)
-                            c_offset = arith.constant(ni * 16, index=True)
+                            c_offset = arith.index(ni * 16)
                             col_g = by_n + n_tile_base + c_offset + lane_mod_16
                             idx = flir.crd2idx(flir.make_coord(row_g, col_g), layout_c)
                             buffer_ops.buffer_store(val_f16, c_rsrc, idx)
@@ -441,14 +436,14 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                 # --- FP16 pipeline ---
                 mlir_dtype = _mlir_dtype()
                 c0, c1 = 0, 1
-                c_tile_k = arith.constant(tile_k, index=True)
+                c_tile_k = arith.index(tile_k)
                 c16, c4, c64 = 16, 4, 64
                 identity_map = ir.AffineMap.get_identity(1)
 
                 c_tile_m = arith.index(tile_m)
                 c_tile_n = arith.index(tile_n)
 
-                c_lds_stride = arith.constant(lds_stride, index=True)
+                c_lds_stride = arith.index(lds_stride)
                 stride_lds = flir.make_stride(c_lds_stride, c1)
                 layout_lds_b = flir.make_layout(flir.make_shape(c_tile_n, c_tile_k), stride_lds)
 
@@ -481,15 +476,15 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                 # K loop: compile-time unrolled to avoid dominance issues.
                 for k_step in range_constexpr(0, K, tile_k):
-                    k_curr = arith.constant(k_step, index=True)
-                    c_vecs_per_row = arith.constant(tile_k // vec_load_size, index=True)
-                    c_vec_load_size = arith.constant(vec_load_size, index=True)
+                    k_curr = arith.index(k_step)
+                    c_vecs_per_row = arith.index(tile_k // vec_load_size)
+                    c_vec_load_size = arith.index(vec_load_size)
 
-                    c_vpt_a = arith.constant(fp16_vecs_per_thread_a, index=True)
+                    c_vpt_a = arith.index(fp16_vecs_per_thread_a)
                     vec_id_a_base = tx * c_vpt_a
                     bx_tile = bx * c_tile_m
                     for vi in range_constexpr(fp16_vecs_per_thread_a):
-                        vec_id = vec_id_a_base + arith.constant(vi, index=True)
+                        vec_id = vec_id_a_base + arith.index(vi)
                         row_l = vec_id // c_vecs_per_row
                         col_v = vec_id % c_vecs_per_row
                         col_l = col_v * c_vec_load_size
@@ -502,11 +497,11 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                         lds_idx = (row_l * c_lds_stride) + col_l
                         vector.store(vec_a, lds_a, [lds_idx])
 
-                    c_vpt_b = arith.constant(fp16_vecs_per_thread_b, index=True)
+                    c_vpt_b = arith.index(fp16_vecs_per_thread_b)
                     vec_id_b_base = tx * c_vpt_b
                     by_tile = by * c_tile_n
                     for vi in range_constexpr(fp16_vecs_per_thread_b):
-                        vec_id = vec_id_b_base + arith.constant(vi, index=True)
+                        vec_id = vec_id_b_base + arith.index(vi)
                         row_l = vec_id // c_vecs_per_row
                         col_v = vec_id % c_vecs_per_row
                         col_l = col_v * c_vec_load_size
@@ -522,10 +517,10 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
                     gpu.barrier()
 
                     for mi in range_constexpr(fp16_m_reps):
-                        c_m_off = arith.constant(mi * fp16_base_m, index=True)
+                        c_m_off = arith.index(mi * fp16_base_m)
                         row_a_lds = c_m_off + (wave_row * c16) + lane_mod_16
                         for ni in range_constexpr(fp16_n_reps):
-                            c_n_off = arith.constant(ni * fp16_base_n, index=True)
+                            c_n_off = arith.index(ni * fp16_base_n)
                             row_b_lds = c_n_off + (wave_col * c16) + lane_mod_16
                             acc_idx = (mi * fp16_n_reps) + ni
                             accs[acc_idx] = compute_16x16(accs[acc_idx], row_a_lds, row_b_lds)
@@ -534,11 +529,11 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
 
                 lane_rem_16 = lane_id % c16
                 for mi in range_constexpr(fp16_m_reps):
-                    c_m_off = arith.constant(mi * fp16_base_m, index=True)
+                    c_m_off = arith.index(mi * fp16_base_m)
                     row_wave_base = c_m_off + (wave_row * c16)
                     row_base_g = (bx * c_tile_m) + row_wave_base
                     for ni in range_constexpr(fp16_n_reps):
-                        c_n_off = arith.constant(ni * fp16_base_n, index=True)
+                        c_n_off = arith.index(ni * fp16_base_n)
                         col_wave_base = c_n_off + (wave_col * c16)
                         col_base_g = (by * c_tile_n) + col_wave_base
                         acc_idx = (mi * fp16_n_reps) + ni
@@ -564,10 +559,10 @@ def test_mfma_gemm_flir(dtype_config, M=1024, N=1024, K=1280, tile_m=128, tile_n
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
         ):
-            c1 = arith.constant(1, index=True)
-            bdx = arith.constant(block_size_x, index=True)
-            gx = arith.constant(M // tile_m, index=True)
-            gy = arith.constant(N // tile_n, index=True)
+            c1 = arith.index(1)
+            bdx = arith.index(block_size_x)
+            gx = arith.index(M // tile_m)
+            gy = arith.index(N // tile_n)
             flir.gpu_ext.LaunchFuncOp(
                 ["mfma_mod", "kernel"],
                 grid_size=(gx, gy, c1),

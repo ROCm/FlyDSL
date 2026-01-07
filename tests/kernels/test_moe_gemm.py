@@ -487,6 +487,7 @@ def run_moe_stage1(
         sorted_size=sorted_size,
         size_expert_ids=int(sorted_expert_ids.numel()),
         doweight_stage1=bool(doweight_stage1),
+        use_cshuffle_epilog=False,
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -631,6 +632,7 @@ def run_moe_stage2(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
+    out_dtype: str = "f16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -800,12 +802,16 @@ def run_moe_stage2(
     w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: stage2 supports two epilogues via env:
-    # - FLIR_MOE_STAGE2_CSHUFFLE=1 (default): fp16 output + atomic pk_add_f16 (f16x2)
-    # - FLIR_MOE_STAGE2_CSHUFFLE=0: fp32 output + atomic fadd f32 (baseline/compare)
-    use_cshuffle = os.environ.get("FLIR_MOE_STAGE2_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
-    out_dtype = torch.float16 if use_cshuffle else torch.float32
-    out = torch.zeros((tokens, model_dim), device=device, dtype=out_dtype)
+    # Output dtype is selected at compile-time via `compile_moe_gemm2(out_dtype=...)`.
+    out_s = str(out_dtype).strip().lower()
+    if out_s in ("f16", "fp16", "half"):
+        out_torch_dtype = torch.float16
+    elif out_s in ("f32", "fp32", "float"):
+        out_torch_dtype = torch.float32
+    else:
+        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+
+    out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
 
     doweight_stage2 = not bool(doweight_stage1)
@@ -816,6 +822,7 @@ def run_moe_stage2(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_s,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -878,7 +885,7 @@ def run_moe_stage2(
     bytes_moved = 0
     bytes_moved += int(sorted_size) * inter_dim * 1  # a2 fp8 (upper bound: padded rows)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_dtype == torch.float16 else 4)  # out
+    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += int(sorted_size) * 4  # a2_scale f32 (1D, padded upper bound)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
@@ -1168,7 +1175,8 @@ if __name__ == "__main__":
     )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    dtypes_to_run = ["int8", "int4"] 
+    # dtypes_to_run = ["fp8", "int8", "int4"] 
+    dtypes_to_run = ["fp8"] 
     for dt in dtypes_to_run:
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
