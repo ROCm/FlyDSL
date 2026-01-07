@@ -594,7 +594,13 @@ def _binary_op(
             op_name = "RemSI"  # Signed integer remainder
         else:
             if op in ["and", "or", "xor"]:
-                op_name = op.capitalize() + "I"  # AndI, OrI, XorI
+                # MLIR op spellings are a bit inconsistent:
+                # - AndIOp / OrIOp
+                # - XOrIOp (capital 'O')
+                if op == "xor":
+                    op_name = "XOrI"
+                else:
+                    op_name = op.capitalize() + "I"  # AndI, OrI
             else:
                 op_name += "I"
     else:
@@ -897,7 +903,8 @@ try:
     # op results can participate in Python operator overloading.
     from _mlir._mlir_libs._mlir import register_value_caster
 
-    for t in [F32Type, F64Type, IndexType, IntegerType]:
+    # Also include VectorType so vector-typed op results participate in operator overloading.
+    for t in [F32Type, F64Type, IndexType, IntegerType, VectorType]:
         register_value_caster(t.static_typeid)(ArithValue)
 except Exception:
     # Best-effort only.
