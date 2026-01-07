@@ -74,3 +74,11 @@ jobs:
       - name: Run tests
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
+          docker cp flydsl_test:/tmp/*.log .
+          cat *.log
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop flydsl_test
+          docker rm flydsl_test
