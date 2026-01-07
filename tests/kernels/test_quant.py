@@ -35,18 +35,22 @@ import argparse
 import numpy as np
 import pytest
 
+# Keep dependency checks precise so skip reasons are actionable.
 try:
     import torch
-    import aiter
-    from aiter.ops.quant import per_token_quant_hip
-
-    HAS_AITER = True
-except ImportError:
+except Exception:
     torch = None
-    HAS_AITER = False
 
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
+
+try:
+    import aiter
+    from aiter.ops.quant import per_token_quant_hip
+    HAS_AITER = True
+except Exception:
+    HAS_AITER = False
+    pytest.skip("AITer not available. Install `aiter` to run per-token quant GPU benchmarks.", allow_module_level=True)
 
 import flydsl
 from flydsl.dialects.ext import arith, flir, block_reduce_ops, scf as scf_ext
