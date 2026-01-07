@@ -5,11 +5,11 @@ import os
 import sys
 from pathlib import Path
 
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
+# Prefer embedded MLIR/flydsl to avoid mixing multiple runtimes.
 _repo = Path(__file__).resolve().parents[3]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
+_embedded = _repo / "build" / "python_packages" / "flydsl"
 if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
+    os.environ.setdefault("FLYDSL_USE_EMBEDDED_MLIR", "1")
     sys.path.insert(0, str(_embedded))
 _src_py = _repo / "python"
 if _src_py.exists():
@@ -86,7 +86,7 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
 
 
 def test_all():
-    shapes_env = os.environ.get("ROCDSL_CUSTOM_ALL_REDUCE_SHAPES", "").strip()
+    shapes_env = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_SHAPES", "").strip()
     
     if shapes_env:
         configs = []
@@ -103,7 +103,7 @@ def test_all():
                 ws = int(ws_s)
             configs.append((int(n_s), dt, ws))
     else:
-        # Default: run one case (can override via ROCDSL_CUSTOM_ALL_REDUCE_SHAPES)
+        # Default: run one case (can override via FLYDSL_CUSTOM_ALL_REDUCE_SHAPES)
         configs = [
             # allreduce requires N to be multiple of 16B pack: f16/bf16 -> 8 elems, f32 -> 4 elems
             (256 * 8 + 16, "f16", 1),
