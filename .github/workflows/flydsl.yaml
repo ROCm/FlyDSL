@@ -36,7 +36,7 @@ jobs:
       - name: Start CI container
         run: |
           echo "Clean up containers..."
-          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm
+          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm || true
 
           echo "Start CI container..."
           if [ -f "/etc/podinfo/gha-render-devices" ]; then
@@ -52,7 +52,7 @@ jobs:
           --shm-size 16g \
           --cap-add=SYS_PTRACE \
           --security-opt seccomp=unconfined \
-          -w /flydsl-checkout \
+          -w /flydsl-test \
           --name flydsl_test \
           ${{ env.DOCKER_IMAGE }}
         env:
@@ -82,10 +82,14 @@ jobs:
       - name: Show logs
         if: failure()
         run: |
-          docker exec flydsl_test sh -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/logs.tgz .
-          tar -xzf logs.tgz
-          cat *.log    
+          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/logs.tgz . || true
+          if [ -f logs.tgz ]; then
+            tar -xzf logs.tgz || true
+            cat *.log || true
+          else
+            echo "logs.tgz not found; skipping log extraction"
+          fi
 
       - name: Clean up
         if: always()
