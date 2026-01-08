@@ -126,7 +126,10 @@ def build_custom_all_reduce_module(
             if USE_FAST_VEC:
                 if world_size == 1:
                     v_e = flir.vector.load(vec_e_ty, In, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    v_c = v_e if dtype_str == "f32" else flir.arith.extf(vec_c_ty, (v_e))
+                    # NOTE: `arith` registers a global value caster that may wrap op results as
+                    # `ArithValue` (including vector results). Raw MLIR arith ops require `Value`,
+                    # so always go through ext-arith helpers here.
+                    v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
                 else:
                     zero = arith.constant(0.0, type=compute_type)
                     acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
@@ -137,16 +140,13 @@ def build_custom_all_reduce_module(
                             [flir.const_index(r), arith.as_value(base)],
                             alignment=VEC_ALIGN,
                         )
-                        v_c = v_e if dtype_str == "f32" else flir.arith.extf(vec_c_ty, (v_e))
+                        v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
                         acc = arith.as_value(arith.ArithValue(acc) + v_c)
                     v_c = acc
 
                 if is_valid_pack:
-                    if dtype_str == "f32":
-                        out_v = v_c
-                    else:
-                        out_v = flir.arith.truncf(vec_e_ty, (v_c))
-                    flir.vector.store(out_v, Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    out_v = v_c if dtype_str == "f32" else arith.trunc_f(vec_e_ty, v_c)
+                    flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
                 return
 
             # ---- Naive path: keep the same 16B "pack" contract but do scalar element ops ----
