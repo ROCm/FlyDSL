@@ -79,6 +79,13 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
 
+      - name: Run benchmarks
+        run: |
+          echo "========================================================================"
+          echo "Starting Benchmarks"
+          echo "========================================================================"
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_benchmark.sh"
+
       - name: Show logs
         if: failure()
         run: |

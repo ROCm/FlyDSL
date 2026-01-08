@@ -193,7 +193,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 rstd_splat = flir.vector.splat(vec_type_c, (rstd))
 
                 # Pipeline Gamma/Beta loads.
-                thread_offset_base = tid * VEC_WIDTH
+                c_vecw = flir.const_index(VEC_WIDTH)
+                thread_offset_base = tid * c_vecw
                 c_base0 = flir.const_index(0)
                 curr_idx0 = c_base0 + thread_offset_base
                 g_e_cur = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
@@ -221,10 +222,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         g_next = g_cur
                         b_next = b_cur
 
-                    diff = x - mean_splat
-                    norm = diff * rstd_splat
-                    scaled = norm * g_cur
-                    y = scaled + b_cur
+                    diff = arith.as_value(arith.subf(x, mean_splat))
+                    norm = arith.as_value(arith.mulf(diff, rstd_splat))
+                    scaled = arith.as_value(arith.mulf(norm, g_cur))
+                    y = arith.as_value(arith.addf(scaled, b_cur))
 
                     if dtype_str == "bf16":
                         if USE_HW_CVT_PK_BF16_F32:
@@ -244,8 +245,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                             even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                             odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = arith.as_value(arith.shli(odd, flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
-                            packed = arith.as_value(arith.ori(even, odd_sh))
+                            odd_sh = arith.as_value(arith.shli(arith.as_value(odd), flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
+                            packed = arith.as_value(arith.ori(arith.as_value(even), odd_sh))
                             out_e = flir.vector.bitcast(vec_bf16_ty, (packed))
                     else:
                         out_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, (y))
