@@ -70,9 +70,10 @@ def _free_port() -> int:
     return port
 
 
-def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: bool, port: int):
+def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: bool, port: int, profile: bool = False):
     import torch
     import torch.distributed as dist
+    import time
 
     torch.cuda.set_device(rank)
     device = torch.device(f"cuda:{rank}")
@@ -99,12 +100,11 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         raise ValueError(f"unsupported dtype_str: {dtype_str}")
 
     x = torch.randn(shape, device=device, dtype=dtype).contiguous()
-    x_flat = x.reshape(-1)
+    x_flat = x.reshape(-1).contiguous()
 
-    # Gather all ranks' inputs onto each rank (so we can exercise FlyDSL packed-input mode per-rank).
+    # Preallocate gather + packed buffer so profiling doesn't measure python allocations.
     gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
-    dist.all_gather(gathered, x_flat, group=group)
-    stacked = torch.stack(gathered, dim=0).contiguous()
+    stacked = torch.empty((world_size, x_flat.numel()), device=device, dtype=dtype).contiguous()
 
     # AIter-like handle shape (we don't use IPC handles in the FlyDSL demo).
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
@@ -119,20 +119,118 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
 
     out = torch.empty_like(x_flat)
 
+    # -------------------------------------------------------------------------
+    # Profiling
+    # - end-to-end: dist.all_gather + pack + kernel + sync
+    # - kernel-only: just fa.all_reduce_reg (timed by cuda events)
+    # -------------------------------------------------------------------------
+    iters = int(os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_PROFILE_ITERS", "50"))
+    warmup = int(os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_PROFILE_WARMUP", "5"))
+
     try:
         if with_graph:
             # NOTE: FlyDSL's current ROCm runtime path may call hipStreamSynchronize internally,
             # which is incompatible with HIP graph capture and can invalidate the capture state.
-            # For now we *accept* the CLI flag for parity with AIter, but run in eager mode.
-            print(f"[rank={rank}] WARN: --withGraph is not supported for FlyDSL custom_all_reduce on ROCm yet; running eager.", file=sys.stderr)
+            # Keep the flag for CLI parity but run eager.
+            print(
+                f"[rank={rank}] WARN: --withGraph is not supported for FlyDSL custom_all_reduce on ROCm yet; running eager.",
+                file=sys.stderr,
+            )
+
+        # Compile/warmup once (not included in steady-state timings).
+        dist.all_gather(gathered, x_flat, group=group)
+        for i in range(world_size):
+            stacked[i].copy_(gathered[i])
         fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+        torch.cuda.synchronize()
+
+        kernel_ms_list = []
+        e2e_ms_list = []
+        if profile:
+            # Extra warmup iterations (excluded).
+            for _ in range(warmup):
+                dist.all_gather(gathered, x_flat, group=group)
+                for i in range(world_size):
+                    stacked[i].copy_(gathered[i])
+                fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+            torch.cuda.synchronize()
+
+            start_evt = torch.cuda.Event(enable_timing=True)
+            end_evt = torch.cuda.Event(enable_timing=True)
+
+            for _ in range(iters):
+                t0 = time.perf_counter()
+
+                dist.all_gather(gathered, x_flat, group=group)
+                for i in range(world_size):
+                    stacked[i].copy_(gathered[i])
+
+                start_evt.record()
+                fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+                end_evt.record()
+                torch.cuda.synchronize()
+
+                t1 = time.perf_counter()
+                kernel_ms_list.append(float(start_evt.elapsed_time(end_evt)))
+                e2e_ms_list.append(float((t1 - t0) * 1e3))
+        else:
+            # Non-profiling path: run once (keep correctness coverage without spending time).
+            dist.all_gather(gathered, x_flat, group=group)
+            for i in range(world_size):
+                stacked[i].copy_(gathered[i])
+            fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+            torch.cuda.synchronize()
 
         torch.cuda.synchronize()
 
-        # Reference: sum across ranks.
+        # Correctness (one-shot, out of band).
         ref = stacked.to(torch.float32).sum(dim=0)
         max_err = (out.to(torch.float32) - ref).abs().max().item()
         assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
+
+        if profile:
+            # Report timings (rank0 prints).
+            avg_kernel_ms = sum(kernel_ms_list) / max(1, len(kernel_ms_list))
+            avg_e2e_ms = sum(e2e_ms_list) / max(1, len(e2e_ms_list))
+            max_kernel_ms = max(kernel_ms_list) if kernel_ms_list else 0.0
+            max_e2e_ms = max(e2e_ms_list) if e2e_ms_list else 0.0
+
+            stats = {
+                "rank": int(rank),
+                "dtype": str(dtype_str),
+                "shape": tuple(int(x) for x in shape),
+                "iters": int(iters),
+                "warmup": int(warmup),
+                "avg_kernel_ms": float(avg_kernel_ms),
+                "avg_e2e_ms": float(avg_e2e_ms),
+                "max_kernel_ms": float(max_kernel_ms),
+                "max_e2e_ms": float(max_e2e_ms),
+            }
+
+            gathered_stats = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered_stats, stats, group=group)
+            if rank == 0:
+                # Summarize
+                gathered_stats = sorted(gathered_stats, key=lambda x: x["rank"])
+                print(
+                    f"[custom_all_reduce profile] dtype={dtype_str} shape={shape} world_size={world_size} iters={iters} warmup={warmup}",
+                    flush=True,
+                )
+                for s in gathered_stats:
+                    print(
+                        f"  - rank{s['rank']}: kernel_avg={s['avg_kernel_ms']:.3f}ms (max={s['max_kernel_ms']:.3f}ms) "
+                        f"e2e_avg={s['avg_e2e_ms']:.3f}ms (max={s['max_e2e_ms']:.3f}ms)",
+                        flush=True,
+                    )
+                max_rank_kernel = max(s["avg_kernel_ms"] for s in gathered_stats)
+                max_rank_e2e = max(s["avg_e2e_ms"] for s in gathered_stats)
+                mean_kernel = sum(s["avg_kernel_ms"] for s in gathered_stats) / world_size
+                mean_e2e = sum(s["avg_e2e_ms"] for s in gathered_stats) / world_size
+                print(
+                    f"  => kernel_avg: mean={mean_kernel:.3f}ms max_rank={max_rank_kernel:.3f}ms; "
+                    f"e2e_avg: mean={mean_e2e:.3f}ms max_rank={max_rank_e2e:.3f}ms",
+                    flush=True,
+                )
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -354,7 +452,7 @@ if __name__ == "__main__":
             port = _free_port()
             mp.spawn(
                 _dist_worker,
-                args=(ws, shape, dtype_str, with_graph, port),
+                args=(ws, shape, dtype_str, with_graph, port, True),
                 nprocs=ws,
                 join=True,
             )
