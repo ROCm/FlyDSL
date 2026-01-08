@@ -270,7 +270,8 @@ if __name__ == "__main__":
     # Align with AIter harness: use spawn to avoid fork+CUDA issues.
     set_start_method("spawn", force=True)
 
-    l_dtype = ["fp16", "bf16"]
+    # FlyDSL demo: default to fp16 only (bf16 distributed path is not stable yet).
+    l_dtype = ["fp16"]
     l_shape = [(128, 8192)]
 
     parser = argparse.ArgumentParser(description="custom all-reduce test runner")
@@ -323,6 +324,9 @@ if __name__ == "__main__":
     if args.dtype is None:
         dtype_list = l_dtype
     else:
+        # If user explicitly requests bf16, fail fast with a clear message.
+        if _normalize_dtype_arg(args.dtype) == "bf16":
+            raise SystemExit("bf16 distributed mode is not supported/stable for FlyDSL custom_all_reduce yet (use -d fp16)")
         dtype_list = [args.dtype]
 
     if args.shape is None:
