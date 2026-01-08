@@ -88,10 +88,13 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         atol = 1e-4
     elif dtype_str == "f16":
         dtype = DTYPE_FP16
-        atol = 1e-3
+        # NOTE: allreduce accumulates in fp32 then casts to fp16; with world_size>1,
+        # fp16 rounding error can reach a few ulp of fp16 near |x|~O(1). Scale atol by world_size.
+        atol = 5e-4 * float(world_size) + 5e-4
     elif dtype_str == "bf16":
         dtype = DTYPE_BF16
-        atol = 1e-2
+        # bf16 has lower mantissa; scale tolerance similarly.
+        atol = 2e-3 * float(world_size) + 2e-3
     else:
         raise ValueError(f"unsupported dtype_str: {dtype_str}")
 
@@ -315,6 +318,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    import torch
+
     if args.dtype is None:
         dtype_list = l_dtype
     else:
@@ -334,6 +339,10 @@ if __name__ == "__main__":
     ws = int(args.tp_size)
     with_graph = bool(args.withGraph)
     import torch.multiprocessing as mp
+
+    ng = torch.cuda.device_count()
+    if ng < ws:
+        raise SystemExit(f"need >= {ws} GPUs for --tp_size {ws}, got {ng}")
 
     for dtype_arg in dtype_list:
         dtype_str = _normalize_dtype_arg(dtype_arg)
