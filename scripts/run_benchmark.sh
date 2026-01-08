@@ -66,7 +66,7 @@ op = sys.argv[1]
 shape = sys.argv[2]
 dtype = sys.argv[3]
 path = sys.argv[4]
-MN = sys.argv[5:]  # optional M N for effective flops
+MN = sys.argv[5:]  # deprecated (kept for backward-compat)
 
 tbps = None
 tflops = None
@@ -103,26 +103,6 @@ if tbps is None:
     if m_bw:
         tbps = float(m_bw.group(1)) / 1000.0
 
-if tflops is None and MN:
-    # "Effective FLOPs" model for softmax/rmsnorm/layernorm (rough, for relative perf only)
-    m_t = None
-    for m_t in re.finditer(r"Kernel avg time:\s*([0-9.]+)\s*ms", txt):
-        pass
-    if m_t:
-        avg_ms = float(m_t.group(1))
-        if avg_ms > 0:
-            M = int(MN[0]); N = int(MN[1])
-            # match older script: softmax=5MN, layernorm=9MN, rmsnorm=5MN
-            if op == "softmax":
-                flops = 5.0 * M * N
-            elif op == "rmsnorm":
-                flops = 5.0 * M * N
-            elif op == "layernorm":
-                flops = 9.0 * M * N
-            else:
-                flops = None
-            if flops is not None:
-                tflops = (flops / (avg_ms / 1e3)) / 1e12
 
 def fmt(x):
     return "-" if x is None else f"{x:.3f}"
@@ -151,7 +131,7 @@ for shape in "${SOFTMAX_SHAPES[@]}"; do
     ((FAIL_COUNT++))
     echo "softmax failed. Log: ${log}" >&2
   fi
-  row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}" "${M}" "${N}")"
+  row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
   IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
   _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
 done
@@ -167,7 +147,7 @@ for shape in "${LAYERNORM_SHAPES[@]}"; do
     ((FAIL_COUNT++))
     echo "rmsnorm failed. Log: ${log}" >&2
   fi
-  row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}" "${M}" "${N}")"
+  row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
   IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
   _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
 done
@@ -220,16 +200,16 @@ for shape in "${MOE_SHAPES[@]}"; do
   # Emit stage1 + stage2 rows (parse from log; keep terminal output concise).
   shape_moe="t${tokens}-md${model_dim}-id${inter_dim}-e${experts}-k${topk}"
 
-  dt_s1="$(grep -Eo 'FLIR MoE stage1\\[[^]]+\\]:' \"${log}\" | tail -1 | sed -E 's/.*stage1\\[([^]]+)\\].*/\\1/' || true)"
-  tf_s1="$(grep -Eo 'FLIR MoE stage1\\[[^]]+\\]:.* [0-9.]+ TFLOPS' \"${log}\" | tail -1 | awk '{print $(NF-1)}' || true)"
-  tb_s1="$(grep -Eo 'FLIR MoE stage1\\[[^]]+\\]:.* [0-9.]+ TB/s' \"${log}\" | tail -1 | awk '{print $(NF-1)}' || true)"
+  dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+  tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+  tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
   if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
     _emit_row "moe_s1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
   fi
 
-  dt_s2="$(grep -Eo 'FLIR MoE stage2\\[[^]]+\\]:' \"${log}\" | tail -1 | sed -E 's/.*stage2\\[([^]]+)\\].*/\\1/' || true)"
-  tf_s2="$(grep -Eo 'FLIR MoE stage2\\[[^]]+\\]:.* [0-9.]+ TFLOPS' \"${log}\" | tail -1 | awk '{print $(NF-1)}' || true)"
-  tb_s2="$(grep -Eo 'FLIR MoE stage2\\[[^]]+\\]:.* [0-9.]+ TB/s' \"${log}\" | tail -1 | awk '{print $(NF-1)}' || true)"
+  dt_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+  tf_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+  tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
   if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
     _emit_row "moe_s2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
   fi
