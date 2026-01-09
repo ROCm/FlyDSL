@@ -140,10 +140,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"Max absolute error: {error:.2e} (atol={atol})")
 
     if error < atol:
-        print("✅ PASSED")
+        print("PASSED")
         ok = True
     else:
-        print("❌ FAILED")
+        print("FAILED")
         print("First row Expected:")
         print(expected[0, :5])
         print("First row Actual:")

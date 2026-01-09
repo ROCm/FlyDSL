@@ -52,7 +52,10 @@ VENV_312="${VENV_ROOT}/cp312"
 FLIR_BUILD_DIR_310="${FLIR_BUILD_DIR_310:-.flir/build_py310}"
 FLIR_BUILD_DIR_312="${FLIR_BUILD_DIR_312:-.flir/build_py312}"
 
-MLIR_PATH="${MLIR_PATH:-${REPO_ROOT}/llvm-project/buildmlir}"
+if [[ -z "${MLIR_PATH:-}" ]]; then
+  # Prefer packaged install prefix if present (created by scripts/build_llvm.sh).
+  MLIR_PATH="${REPO_ROOT}/llvm-project/mlir_install"
+fi
 if [[ ! -d "${MLIR_PATH}" ]]; then
   echo "Error: MLIR_PATH not found: ${MLIR_PATH}" >&2
   echo "Set MLIR_PATH to your llvm-project build dir (must contain lib/cmake/mlir)." >&2
