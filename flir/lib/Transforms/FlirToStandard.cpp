@@ -1,6 +1,9 @@
 #include "flir/FlirDialect.h"
 #include "flir/FlirOps.h"
 #include "flir/FlirPasses.h"
+#include "flir/Support/fltuple.h"
+#include "flir/Support/fltuple_algorithms.hpp"
+#include "flir/Support/stride_algorithms.hpp"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -28,152 +31,17 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 // Structure to represent the tuple tree of a Layout (Shape and Stride)
-struct LayoutNode {
-  bool isLeaf;
-  Value value; // Only for leaf
-  std::vector<LayoutNode> children; // Only for non-leaf
-  
-  // Constructors
-  LayoutNode(Value v) : isLeaf(true), value(v) {}
-  LayoutNode(std::vector<LayoutNode> c) : isLeaf(false), children(std::move(c)) {}
-  
-  // Helpers
-  bool isTuple() const { return !isLeaf; }
-  size_t rank() const { return isLeaf ? 1 : children.size(); }
-  
-  // Flatten back to values and structure encoding
-  void flatten(SmallVectorImpl<Value>& values, SmallVectorImpl<int32_t>& structure) const {
-    if (isLeaf) {
-      values.push_back(value);
-      structure.push_back(-1);
-    } else {
-      structure.push_back(static_cast<int32_t>(children.size()));
-      for (const auto& child : children) {
-        child.flatten(values, structure);
-      }
-    }
-  }
-
-  // Helper to check if fully static (if Value is ConstantOp)
-  std::optional<int64_t> getConstantValue() const {
-    if (!isLeaf) return std::nullopt;
-    if (!value) return std::nullopt;
-    if (auto constOp = value.getDefiningOp<arith::ConstantIndexOp>()) {
-      return constOp.value();
-    }
-    return std::nullopt;
-  }
-};
+using LayoutNode = mlir::flir::support::FlTuple;
 
 // Try to extract an index constant from a Value.
 static std::optional<int64_t> tryGetConstIndex(Value v) {
-  if (!v)
-    return std::nullopt;
-  if (auto constIdx = v.getDefiningOp<arith::ConstantIndexOp>())
-    return constIdx.value();
-  if (auto cst = v.getDefiningOp<arith::ConstantOp>()) {
-    if (llvm::isa<IndexType>(cst.getType())) {
-      if (auto intAttr = llvm::dyn_cast<IntegerAttr>(cst.getValue()))
-        return intAttr.getInt();
-    }
-  }
-  if (auto cast = v.getDefiningOp<arith::IndexCastOp>())
-    return tryGetConstIndex(cast.getIn());
-  return std::nullopt;
+  return mlir::flir::support::tryGetConstIndex(v);
 }
 
 // Helper to deserialize from MakeShape/MakeStride ops
 static LayoutNode deserializeLayoutNode(Operation* op, PatternRewriter& rewriter, Location loc) {
-    SmallVector<Value> values;
-
-    if (isa<MakeShapeOp>(op)) {
-        auto makeShape = cast<MakeShapeOp>(op);
-        values = makeShape.getValues();
-    } else if (isa<MakeStrideOp>(op)) {
-        auto makeStride = cast<MakeStrideOp>(op);
-        values = makeStride.getValues();
-    } else {
-        if (!op) return LayoutNode(Value());
-        return LayoutNode(op->getResult(0));
-    }
-
-    // Type-mode:
-    // - Tuple structure and constants are encoded in the result type (structure+dims).
-    // - Operands contain only dynamic leaf values (in left-to-right leaf order).
-    auto tryTypeMode = [&]() -> std::optional<LayoutNode> {
-      if (!op || op->getNumResults() == 0)
-        return std::nullopt;
-
-      Type ty = op->getResult(0).getType();
-      ArrayRef<int32_t> structure;
-      ArrayRef<int64_t> dims;
-
-      if (auto st = dyn_cast<ShapeType>(ty)) {
-        structure = st.getStructure();
-        dims = st.getDims();
-      } else if (auto st = dyn_cast<StrideType>(ty)) {
-        structure = st.getStructure();
-        dims = st.getDims();
-      } else {
-        return std::nullopt;
-      }
-
-      // Require structured types. (Allow empty tuple: structure=[0], dims=[]).
-      if (structure.empty())
-        return std::nullopt;
-
-      // Leaf count = number of -1 tags.
-      int64_t leafCount = 0;
-      for (int32_t tag : structure)
-        if (tag == -1)
-          ++leafCount;
-      if ((int64_t)dims.size() != leafCount)
-        return std::nullopt;
-
-      int64_t dynCount = 0;
-      for (int64_t d : dims)
-        if (d == -1)
-          ++dynCount;
-      if ((int64_t)values.size() != dynCount)
-        return std::nullopt;
-
-      int64_t si = 0;
-      int64_t di = 0;
-      int64_t oi = 0;
-
-      std::function<LayoutNode()> parseNode = [&]() -> LayoutNode {
-        if (si >= (int64_t)structure.size())
-          return LayoutNode(Value());
-        int32_t tag = structure[si++];
-        if (tag == -1) {
-          if (di >= (int64_t)dims.size())
-            return LayoutNode(Value());
-          int64_t d = dims[di++];
-          if (d == -1) {
-            Value v = (oi < (int64_t)values.size()) ? values[oi] : Value();
-            ++oi;
-            return LayoutNode(v);
-          }
-          Value c = rewriter.create<arith::ConstantIndexOp>(loc, d).getResult();
-          return LayoutNode(c);
-        }
-        std::vector<LayoutNode> kids;
-        kids.reserve(tag);
-        for (int32_t i = 0; i < tag; ++i)
-          kids.push_back(parseNode());
-        return LayoutNode(kids);
-      };
-
-      LayoutNode root = parseNode();
-      if (oi != dynCount)
-        return std::nullopt;
-      return root;
-    };
-
-    if (auto n = tryTypeMode())
-      return *n;
-
-    // Not type-mode => reject.
+    if (auto t = mlir::flir::support::deserializeTypeModeFlTuple(op, rewriter, loc))
+      return *t;
     return LayoutNode(Value());
 }
 
@@ -185,62 +53,12 @@ static void flatten_to_leaves(const LayoutNode& node, std::vector<LayoutNode>& l
 // - Operands contain only dynamic leaves (in left-to-right leaf order).
 static Value serializeLayoutNodeToShape(const LayoutNode& node, Location loc, 
                                         PatternRewriter& rewriter, MLIRContext* ctx) {
-    SmallVector<Value> leafValues;
-    SmallVector<int32_t> structure;
-    // Canonicalize rank-1 as a 1-tuple "(x)" (matches python frontend printing).
-    if (node.isLeaf) {
-      structure.push_back(1);
-      structure.push_back(-1);
-      leafValues.push_back(node.value);
-    } else {
-      node.flatten(leafValues, structure);
-    }
-
-    SmallVector<int64_t> dims;
-    SmallVector<Value> dynOperands;
-    dims.reserve(leafValues.size());
-    dynOperands.reserve(leafValues.size());
-    for (auto v : leafValues) {
-      if (auto c = tryGetConstIndex(v)) {
-        dims.push_back(*c);
-      } else {
-        dims.push_back(-1);
-        dynOperands.push_back(v);
-      }
-    }
-
-    auto shapeType = ShapeType::get(ctx, structure, dims);
-    return rewriter.create<MakeShapeOp>(loc, shapeType, dynOperands).getResult();
+    return mlir::flir::support::serializeTypeModeMakeShapeOp(node, loc, rewriter, ctx);
 }
 
 static Value serializeLayoutNodeToStride(const LayoutNode& node, Location loc, 
                                          PatternRewriter& rewriter, MLIRContext* ctx) {
-    SmallVector<Value> leafValues;
-    SmallVector<int32_t> structure;
-    // Canonicalize rank-1 as a 1-tuple "(x)".
-    if (node.isLeaf) {
-      structure.push_back(1);
-      structure.push_back(-1);
-      leafValues.push_back(node.value);
-    } else {
-      node.flatten(leafValues, structure);
-    }
-
-    SmallVector<int64_t> dims;
-    SmallVector<Value> dynOperands;
-    dims.reserve(leafValues.size());
-    dynOperands.reserve(leafValues.size());
-    for (auto v : leafValues) {
-      if (auto c = tryGetConstIndex(v)) {
-        dims.push_back(*c);
-      } else {
-        dims.push_back(-1);
-        dynOperands.push_back(v);
-      }
-    }
-
-    auto strideType = StrideType::get(ctx, structure, dims);
-    return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
+    return mlir::flir::support::serializeTypeModeMakeStrideOp(node, loc, rewriter, ctx);
 }
 
 // Build a flat (rank-N) type-mode shape/stride from leaf values.
@@ -292,84 +110,6 @@ static Value makeFlatStrideTypeMode(ValueRange leafValues, Location loc,
 
   auto strideType = StrideType::get(ctx, structure, dims);
   return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
-}
-
-/// Compute a compact LayoutLeft (col-major) stride from a type-mode ShapeType,
-/// entirely at compile time.
-///
-/// @pre All shape leaves must be compile-time constants (no dynamic `?` leaves).
-///      This is required so the lowering does not introduce runtime arithmetic
-///      for stride construction.
-/// @note We mirror the common compact-stride convention where a size-1 mode
-///       yields a stride-0 leaf (enables filtering/coalescing behavior).
-static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
-                                                         Location loc,
-                                                         PatternRewriter &rewriter,
-                                                         MLIRContext *ctx) {
-  auto shapeTy = llvm::dyn_cast<ShapeType>(shapeVal.getType());
-  if (!shapeTy) {
-    emitError(loc, "Expected flir.shape type for tiler shape.");
-    return Value();
-  }
-
-  auto structure = shapeTy.getStructure();
-  auto shapeDims = shapeTy.getDims();
-
-  // Resolve any dynamic `?` leaves from the defining op operands, but require
-  // that all leaves can be folded to constants at compile time.
-  SmallVector<int64_t> resolvedShapeDims;
-  resolvedShapeDims.reserve(shapeDims.size());
-  SmallVector<Value> dynLeafOperands;
-  if (auto makeShape = shapeVal.getDefiningOp<MakeShapeOp>()) {
-    dynLeafOperands.append(makeShape.getValues().begin(), makeShape.getValues().end());
-  } else if (llvm::any_of(shapeDims, [](int64_t d) { return d == -1; })) {
-    emitError(loc,
-              "local_tile requires a tiler shape whose leaves are compile-time "
-              "constants (either encoded in the type or provided as constant operands "
-              "to flir.make_shape).");
-    return Value();
-  }
-
-  int64_t oi = 0;
-  for (int64_t d : shapeDims) {
-    if (d != -1) {
-      resolvedShapeDims.push_back(d);
-      continue;
-    }
-    if (oi >= (int64_t)dynLeafOperands.size()) {
-      emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
-      return Value();
-    }
-    auto c = tryGetConstIndex(dynLeafOperands[oi++]);
-    if (!c.has_value()) {
-      emitError(loc,
-                "local_tile requires a tiler shape whose dynamic leaves fold to "
-                "compile-time constants.");
-      return Value();
-    }
-    resolvedShapeDims.push_back(*c);
-  }
-  if (oi != (int64_t)dynLeafOperands.size()) {
-    emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
-    return Value();
-  }
-
-  SmallVector<int64_t> strideDims;
-  strideDims.reserve(resolvedShapeDims.size());
-
-  int64_t current = 1;
-  for (int64_t s : resolvedShapeDims) {
-    if (s == 1) {
-      strideDims.push_back(0);
-      // current unchanged
-    } else {
-      strideDims.push_back(current);
-      current *= s;
-    }
-  }
-
-  auto strideTy = StrideType::get(ctx, structure, strideDims);
-  return rewriter.create<MakeStrideOp>(loc, strideTy, ValueRange{}).getResult();
 }
 
 // Helper to aggressively fold binary arithmetic operations on constants
@@ -1147,10 +887,18 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
     for (size_t i = 0; i < leavesShape.size(); ++i) {
         auto s = leavesStride[i].getConstantValue();
         if (s.has_value()) {
-            modes.push_back({leavesShape[i].value, leavesStride[i].value, s.value()});
+            Mode m;
+            m.shape = leavesShape[i].value;
+            m.stride = leavesStride[i].value;
+            m.constStride = s.value();
+            modes.push_back(m);
         } else {
             allStatic = false;
-            modes.push_back({leavesShape[i].value, leavesStride[i].value, 0}); // Unsortable
+            Mode m;
+            m.shape = leavesShape[i].value;
+            m.stride = leavesStride[i].value;
+            m.constStride = 0; // Unsortable
+            modes.push_back(m);
         }
     }
 
@@ -2571,21 +2319,16 @@ struct LocalTileOpLowering : public OpRewritePattern<LocalTileOp> {
     // coord is used to select which tile, but we simplify to just tiling
     
     auto *ctx = rewriter.getContext();
-    // Create a layout from the tiler shape using compact LayoutLeft strides.
-    // This must be computed at compile time; dynamic tiler shapes are rejected.
-    Value makeStrideVal =
-        makeLayoutLeftStrideFromStaticShapeTypeMode(tilerShape, loc, rewriter, ctx);
-    if (!makeStrideVal)
+    // Construct the tiler layout from shape using compact LayoutLeft strides.
+    // This is a compile-time construction: all tiler shape leaves must fold to constants.
+    Value tilerLayout = mlir::flir::support::stride::make_layout(
+        tilerShape, mlir::flir::support::stride::LayoutLeft{}, loc, rewriter, ctx);
+    if (!tilerLayout)
       return failure();
-    auto layoutType = LayoutType::get(ctx,
-                                      llvm::cast<ShapeType>(tilerShape.getType()),
-                                      llvm::cast<StrideType>(makeStrideVal.getType()));
-    auto tilerLayout = rewriter.create<MakeLayoutOp>(
-        loc, layoutType, tilerShape, makeStrideVal);
     
     // Use logical_divide to partition the tensor
     auto logicalDiv = rewriter.create<LogicalDivideOp>(
-        loc, inputLayout.getType(), inputLayout, tilerLayout.getResult());
+        loc, inputLayout.getType(), inputLayout, tilerLayout);
     
     rewriter.replaceOp(op, logicalDiv.getResult());
     return success();
@@ -2685,7 +2428,108 @@ struct MakeLayoutOpLowering : public OpRewritePattern<MakeLayoutOp> {
       rewriter.eraseOp(op.getOperation());
       return success();
     }
-    return failure();
+
+    // Canonicalize type-mode constant layouts:
+    // If shape/stride are ultimately compile-time constants (including the case
+    // where the type has `?` leaves but operands are constant), rebuild them into
+    // fully-static type-mode values (no operands) and tighten the LayoutType.
+    //
+    // This keeps `flir.make_layout` as the IR carrier, but ensures the "layout
+    // object" is compile-time when possible.
+    Value shapeVal = op.getShape();
+    Value strideVal = op.getStride();
+
+    auto *shapeOp = shapeVal.getDefiningOp();
+    auto *strideOp = strideVal.getDefiningOp();
+    if (!shapeOp || !strideOp)
+      return failure();
+
+    // Only handle the canonical type-mode producers.
+    if (!isa<MakeShapeOp>(shapeOp) || !isa<MakeStrideOp>(strideOp))
+      return failure();
+
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+
+    auto origShapeOp = cast<MakeShapeOp>(shapeOp);
+    auto origStrideOp = cast<MakeStrideOp>(strideOp);
+    auto origShapeTy = cast<ShapeType>(shapeVal.getType());
+    auto origStrideTy = cast<StrideType>(strideVal.getType());
+
+    auto canonicalizeTypeMode = [&](ArrayRef<int32_t> structure, ArrayRef<int64_t> dims,
+                                    ValueRange dynOperands)
+        -> std::pair<llvm::SmallVector<int64_t>, llvm::SmallVector<Value>> {
+      llvm::SmallVector<int64_t> newDims;
+      llvm::SmallVector<Value> newDyn;
+      newDims.reserve(dims.size());
+      newDyn.reserve(dynOperands.size());
+
+      int64_t oi = 0;
+      for (int64_t d : dims) {
+        if (d != -1) {
+          newDims.push_back(d);
+          continue;
+        }
+        // Dynamic leaf in type: consume one operand.
+        if (oi >= (int64_t)dynOperands.size()) {
+          emitError(loc, "Malformed type-mode make op: operand count mismatch.");
+          return {llvm::SmallVector<int64_t>{}, llvm::SmallVector<Value>{}};
+        }
+        Value v = dynOperands[oi++];
+        if (auto c = tryGetConstIndex(v)) {
+          newDims.push_back(*c);
+        } else {
+          newDims.push_back(-1);
+          newDyn.push_back(v);
+        }
+      }
+      if (oi != (int64_t)dynOperands.size()) {
+        emitError(loc, "Malformed type-mode make op: operand count mismatch.");
+        return {llvm::SmallVector<int64_t>{}, llvm::SmallVector<Value>{}};
+      }
+      return {std::move(newDims), std::move(newDyn)};
+    };
+
+    auto [newShapeDims, newShapeDyn] =
+        canonicalizeTypeMode(origShapeTy.getStructure(), origShapeTy.getDims(),
+                             origShapeOp.getValues());
+    auto [newStrideDims, newStrideDyn] =
+        canonicalizeTypeMode(origStrideTy.getStructure(), origStrideTy.getDims(),
+                             origStrideOp.getValues());
+
+    if (newShapeDims.empty() && !origShapeTy.getDims().empty())
+      return failure();
+    if (newStrideDims.empty() && !origStrideTy.getDims().empty())
+      return failure();
+
+    llvm::SmallVector<Value> origShapeDynOps(origShapeOp.getValues().begin(),
+                                             origShapeOp.getValues().end());
+    llvm::SmallVector<Value> origStrideDynOps(origStrideOp.getValues().begin(),
+                                              origStrideOp.getValues().end());
+
+    bool sameShape =
+        llvm::ArrayRef<int64_t>(newShapeDims) == origShapeTy.getDims() &&
+        llvm::ArrayRef<Value>(newShapeDyn) == llvm::ArrayRef<Value>(origShapeDynOps);
+    bool sameStride =
+        llvm::ArrayRef<int64_t>(newStrideDims) == origStrideTy.getDims() &&
+        llvm::ArrayRef<Value>(newStrideDyn) == llvm::ArrayRef<Value>(origStrideDynOps);
+
+    if (sameShape && sameStride)
+      return failure();
+
+    auto canonShapeTy = ShapeType::get(ctx, origShapeTy.getStructure(), newShapeDims);
+    auto canonStrideTy = StrideType::get(ctx, origStrideTy.getStructure(), newStrideDims);
+    Value canonShape =
+        rewriter.create<MakeShapeOp>(loc, canonShapeTy, newShapeDyn).getResult();
+    Value canonStride =
+        rewriter.create<MakeStrideOp>(loc, canonStrideTy, newStrideDyn).getResult();
+
+    // IMPORTANT: Preserve the original layout result type (may be rank-only).
+    Value canonLayout =
+        rewriter.create<MakeLayoutOp>(loc, op.getResult().getType(), canonShape, canonStride)
+            .getResult();
+    rewriter.replaceOp(op, canonLayout);
+    return success();
   }
 };
 
@@ -2778,3 +2622,4 @@ std::unique_ptr<Pass> createFlirToStandardPass() {
 
 }
 }
+
