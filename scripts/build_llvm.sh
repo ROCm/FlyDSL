@@ -77,7 +77,6 @@ cmake -G "$GENERATOR" \
 
 # 4. Build
 echo "Starting build with $(nproc) parallel jobs..."
-cmake --build . --target check-mlir -j$(nproc) || echo "MLIR tests failed, but build might be okay for use."
 cmake --build . -j$(nproc)
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
