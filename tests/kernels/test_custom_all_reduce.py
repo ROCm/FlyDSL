@@ -122,6 +122,10 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
     rank_data = x_flat
     fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=False)
+    backend = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND", "flydsl")
+    aiter_impl = os.environ.get("FLYDSL_AITER_IMPL", "aiter")
+    if rank == 0:
+        print(f"[custom_all_reduce] backend={backend} aiter_impl={aiter_impl}", flush=True)
 
     # Warmup: align all ranks.
     dist.all_reduce(torch.zeros(1, device=device), group=group)
@@ -180,16 +184,17 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
 
         torch.cuda.synchronize()
 
-        # Correctness (one-shot, out of band):
-        # build a deterministic fp32 reference by gathering fp16 inputs once (not profiled).
-        gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
-        dist.all_gather(gathered, x_flat, group=group)
-        ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
-        for t in gathered:
-            ref_f32 += t.to(torch.float32)
-        # Kernel output is fp16/bf16; compare in fp32.
-        max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
-        assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
+        # Correctness (one-shot, out of band).
+        # For perf A/B, you can disable the check (e.g. FlyDSL IPC kernel lacks ROCm signalling):
+        #   FLYDSL_CUSTOM_ALL_REDUCE_SKIP_CHECK=1
+        if os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_SKIP_CHECK", "0") != "1":
+            gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
+            dist.all_gather(gathered, x_flat, group=group)
+            ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
+            for t in gathered:
+                ref_f32 += t.to(torch.float32)
+            max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
+            assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
 
         if profile:
             # Report timings (rank0 prints).
