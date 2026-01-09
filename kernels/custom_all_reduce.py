@@ -25,6 +25,9 @@ import _mlir.extras.types as T
 KERNEL_NAME_ALL_REDUCE = "custom_all_reduce_kernel"
 KERNEL_NAME_ALL_GATHER = "custom_all_gather_kernel"
 KERNEL_NAME_ALL_REDUCE_IPC = "custom_all_reduce_ipc_kernel"
+KERNEL_NAME_REDUCE_SCATTER_IPC = "custom_reduce_scatter_ipc_kernel"
+KERNEL_NAME_ALL_GATHER_IPC = "custom_all_gather_ipc_kernel"
+KERNEL_NAME_COPY_CHUNK_IPC = "custom_copy_chunk_ipc_kernel"
 
 
 def _dtype_to_mlir(dtype_str: str):
@@ -361,6 +364,391 @@ def build_custom_all_reduce_ipc_module(
     return _CustomAllReduceIPC().module
 
 
+def build_custom_reduce_scatter_ipc_module(
+    N: int,
+    dtype_str: str = "f16",
+    *,
+    world_size: int,
+    BLOCK_SIZE: int = 256,
+):
+    """IPC reduce-scatter:
+
+    Each rank computes the sum for its own chunk only (chunk = rank), writing into Out[chunk].
+    This reduces per-rank peer traffic from ~world_size*N to ~N.
+    """
+    if N <= 0:
+        raise ValueError("N must be > 0")
+    if world_size <= 1 or world_size > 8:
+        raise ValueError("world_size must be in [2, 8] for IPC mode")
+    if world_size % 2 != 0:
+        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
+    if dtype_str == "bf16":
+        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+    if N % world_size != 0:
+        raise ValueError("reduce-scatter requires N divisible by world_size")
+    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
+        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
+
+    PACK_ELEMS = _pack_elems(dtype_str)
+    if (N // world_size) % PACK_ELEMS != 0:
+        raise ValueError(f"chunk size must be multiple of {PACK_ELEMS} elems")
+
+    gpu_arch = get_hip_arch()
+    VEC_ALIGN = 16
+    total_bytes = (N // world_size) * _elem_size_bytes(dtype_str)
+    USE_FAST_VEC = (total_bytes % 128) == 0
+
+    chunk_elems = N // world_size
+    chunk_packs = chunk_elems // PACK_ELEMS
+    num_blocks = (chunk_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
+    _state = {}
+
+    class _ReduceScatterIPC(flir.MlirModule):
+        GPU_MODULE_NAME = f"custom_reduce_scatter_ipc_{dtype_str}_ws{world_size}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+        def init_gpu_module(self):
+            elem_type, compute_type = _dtype_to_mlir(dtype_str)
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+
+        @flir.kernel
+        def custom_reduce_scatter_ipc_kernel(
+            self: flir.T.i64,
+            rank_i32: flir.T.i32,
+            In0: lambda: T.memref(N, _state["elem_type"]),
+            In1: lambda: T.memref(N, _state["elem_type"]),
+            In2: lambda: T.memref(N, _state["elem_type"]),
+            In3: lambda: T.memref(N, _state["elem_type"]),
+            In4: lambda: T.memref(N, _state["elem_type"]),
+            In5: lambda: T.memref(N, _state["elem_type"]),
+            In6: lambda: T.memref(N, _state["elem_type"]),
+            In7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            Ins = [In0, In1, In2, In3, In4, In5, In6, In7]
+            tid = flir.const_index(flir.thread_idx("x"))
+            bid = flir.const_index(flir.block_idx("x"))
+            c_chunk_packs = flir.const_index(chunk_packs)
+            c0_idx = flir.const_index(0)
+
+            elem_type = _state["elem_type"]
+            compute_type = _state["compute_type"]
+            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
+            vec_c_ty = ir.VectorType.get([PACK_ELEMS], compute_type)
+
+            pack_in_chunk = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+            is_valid_pack = arith.ult(pack_in_chunk, c_chunk_packs)
+            pack_safe = arith.select(is_valid_pack, pack_in_chunk, c0_idx)
+
+            rank = arith.index_cast(ir.IndexType.get(), rank_i32)
+            base = arith.ArithValue(rank) * chunk_elems + arith.ArithValue(pack_safe) * PACK_ELEMS
+
+            if USE_FAST_VEC:
+                zero = arith.constant(0.0, type=compute_type)
+                acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
+                for r in range_constexpr(world_size):
+                    v_e = flir.vector.load(vec_e_ty, Ins[r], [arith.as_value(base)], alignment=VEC_ALIGN)
+                    v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
+                    acc = arith.as_value(arith.ArithValue(acc) + v_c)
+                if is_valid_pack:
+                    out_v = acc if dtype_str == "f32" else arith.trunc_f(vec_e_ty, acc)
+                    flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            if is_valid_pack:
+                for lane in range_constexpr(PACK_ELEMS):
+                    idx = arith.ArithValue(base) + lane
+                    acc = arith.constant(0.0, type=compute_type)
+                    for r in range_constexpr(world_size):
+                        x_e = flir.memref.load(Ins[r], [arith.as_value(idx)])
+                        x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                        acc = arith.ArithValue(acc) + x_c
+                    y_e = arith.as_value(acc) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, acc))
+                    flir.memref.store(y_e, Out, [arith.as_value(idx)])
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            rank_i32: flir.T.i32,
+            In0: lambda: T.memref(N, _state["elem_type"]),
+            In1: lambda: T.memref(N, _state["elem_type"]),
+            In2: lambda: T.memref(N, _state["elem_type"]),
+            In3: lambda: T.memref(N, _state["elem_type"]),
+            In4: lambda: T.memref(N, _state["elem_type"]),
+            In5: lambda: T.memref(N, _state["elem_type"]),
+            In6: lambda: T.memref(N, _state["elem_type"]),
+            In7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            c1 = arith.index(1)
+            gx = arith.index(num_blocks)
+            bx = arith.index(BLOCK_SIZE)
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, KERNEL_NAME_REDUCE_SCATTER_IPC],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[rank_i32, In0, In1, In2, In3, In4, In5, In6, In7, Out],
+            )
+
+    return _ReduceScatterIPC().module
+
+
+def build_custom_all_gather_ipc_module(
+    N: int,
+    dtype_str: str = "f16",
+    *,
+    world_size: int,
+    BLOCK_SIZE: int = 256,
+):
+    """IPC all-gather:
+
+    After reduce-scatter, each rank has written its chunk to Out[rank*chunk : (rank+1)*chunk].
+    This kernel gathers all chunks from peer Out buffers into the local Out buffer.
+    """
+    if N <= 0:
+        raise ValueError("N must be > 0")
+    if world_size <= 1 or world_size > 8:
+        raise ValueError("world_size must be in [2, 8] for IPC mode")
+    if world_size % 2 != 0:
+        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
+    if dtype_str == "bf16":
+        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+    if N % world_size != 0:
+        raise ValueError("all-gather requires N divisible by world_size")
+    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
+        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
+
+    PACK_ELEMS = _pack_elems(dtype_str)
+    if N % PACK_ELEMS != 0:
+        raise ValueError(f"N must be multiple of {PACK_ELEMS}")
+
+    gpu_arch = get_hip_arch()
+    VEC_ALIGN = 16
+    total_bytes = N * _elem_size_bytes(dtype_str)
+    USE_FAST_VEC = (total_bytes % 128) == 0
+
+    chunk_elems = N // world_size
+    chunk_packs = chunk_elems // PACK_ELEMS
+    num_packs = N // PACK_ELEMS
+    num_blocks = (num_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
+    _state = {}
+
+    class _AllGatherIPC(flir.MlirModule):
+        GPU_MODULE_NAME = f"custom_all_gather_ipc_{dtype_str}_ws{world_size}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+        def init_gpu_module(self):
+            elem_type, compute_type = _dtype_to_mlir(dtype_str)
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+
+        @flir.kernel
+        def custom_all_gather_ipc_kernel(
+            self: flir.T.i64,
+            Src0: lambda: T.memref(N, _state["elem_type"]),
+            Src1: lambda: T.memref(N, _state["elem_type"]),
+            Src2: lambda: T.memref(N, _state["elem_type"]),
+            Src3: lambda: T.memref(N, _state["elem_type"]),
+            Src4: lambda: T.memref(N, _state["elem_type"]),
+            Src5: lambda: T.memref(N, _state["elem_type"]),
+            Src6: lambda: T.memref(N, _state["elem_type"]),
+            Src7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            Srcs = [Src0, Src1, Src2, Src3, Src4, Src5, Src6, Src7]
+            tid = flir.const_index(flir.thread_idx("x"))
+            bid = flir.const_index(flir.block_idx("x"))
+            c_num_packs = flir.const_index(num_packs)
+            c0_idx = flir.const_index(0)
+            c_chunk_packs = flir.const_index(chunk_packs)
+
+            elem_type = _state["elem_type"]
+            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
+
+            pack_idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+            is_valid_pack = arith.ult(pack_idx, c_num_packs)
+            pack_safe = arith.select(is_valid_pack, pack_idx, c0_idx)
+
+            # src_rank = pack_idx / chunk_packs ; pack_in_chunk = pack_idx % chunk_packs
+            idx_i32 = arith.index_cast(T.i32(), pack_safe)
+            cp_i32 = arith.i32(chunk_packs)
+            src_r_i32 = flir.arith.DivUIOp(arith.as_value(idx_i32), arith.as_value(cp_i32)).result
+            p_i32 = flir.arith.RemUIOp(arith.as_value(idx_i32), arith.as_value(cp_i32)).result
+            src_r = arith.index_cast(ir.IndexType.get(), src_r_i32)
+            p = arith.index_cast(ir.IndexType.get(), p_i32)
+
+            base = arith.ArithValue(src_r) * chunk_elems + arith.ArithValue(p) * PACK_ELEMS
+
+            if USE_FAST_VEC:
+                if is_valid_pack:
+                    v = flir.vector.load(vec_e_ty, Src0, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 1:
+                        v = flir.vector.load(vec_e_ty, Src1, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 2:
+                        v = flir.vector.load(vec_e_ty, Src2, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 3:
+                        v = flir.vector.load(vec_e_ty, Src3, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 4:
+                        v = flir.vector.load(vec_e_ty, Src4, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 5:
+                        v = flir.vector.load(vec_e_ty, Src5, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 6:
+                        v = flir.vector.load(vec_e_ty, Src6, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if arith.ArithValue(src_r_i32) == 7:
+                        v = flir.vector.load(vec_e_ty, Src7, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    flir.vector.store(arith.as_value(v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            if is_valid_pack:
+                for lane in range_constexpr(PACK_ELEMS):
+                    idx = arith.ArithValue(base) + lane
+                    v = flir.memref.load(Src0, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 1:
+                        v = flir.memref.load(Src1, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 2:
+                        v = flir.memref.load(Src2, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 3:
+                        v = flir.memref.load(Src3, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 4:
+                        v = flir.memref.load(Src4, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 5:
+                        v = flir.memref.load(Src5, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 6:
+                        v = flir.memref.load(Src6, [arith.as_value(idx)])
+                    if arith.ArithValue(src_r_i32) == 7:
+                        v = flir.memref.load(Src7, [arith.as_value(idx)])
+                    flir.memref.store(arith.as_value(v), Out, [arith.as_value(idx)])
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            Src0: lambda: T.memref(N, _state["elem_type"]),
+            Src1: lambda: T.memref(N, _state["elem_type"]),
+            Src2: lambda: T.memref(N, _state["elem_type"]),
+            Src3: lambda: T.memref(N, _state["elem_type"]),
+            Src4: lambda: T.memref(N, _state["elem_type"]),
+            Src5: lambda: T.memref(N, _state["elem_type"]),
+            Src6: lambda: T.memref(N, _state["elem_type"]),
+            Src7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            c1 = arith.index(1)
+            gx = arith.index(num_blocks)
+            bx = arith.index(BLOCK_SIZE)
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, KERNEL_NAME_ALL_GATHER_IPC],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[Src0, Src1, Src2, Src3, Src4, Src5, Src6, Src7, Out],
+            )
+
+    return _AllGatherIPC().module
+
+
+def build_custom_copy_chunk_ipc_module(
+    N: int,
+    dtype_str: str = "f16",
+    *,
+    world_size: int,
+    BLOCK_SIZE: int = 256,
+):
+    """Copy one reduced chunk from a peer out buffer into local out buffer.
+
+    Args:
+      - src_rank_i32: which chunk to copy (0..world_size-1)
+      - Src: pointer to the peer out buffer (full length N)
+      - Out: local out buffer (full length N)
+    """
+    if N <= 0:
+        raise ValueError("N must be > 0")
+    if world_size <= 1 or world_size > 8:
+        raise ValueError("world_size must be in [2, 8] for IPC mode")
+    if world_size % 2 != 0:
+        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
+    if dtype_str == "bf16":
+        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+    if N % world_size != 0:
+        raise ValueError("chunk copy requires N divisible by world_size")
+    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
+        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
+
+    PACK_ELEMS = _pack_elems(dtype_str)
+    chunk_elems = N // world_size
+    if chunk_elems % PACK_ELEMS != 0:
+        raise ValueError(f"chunk size must be multiple of {PACK_ELEMS}")
+
+    gpu_arch = get_hip_arch()
+    VEC_ALIGN = 16
+    total_bytes = chunk_elems * _elem_size_bytes(dtype_str)
+    USE_FAST_VEC = (total_bytes % 128) == 0
+
+    chunk_packs = chunk_elems // PACK_ELEMS
+    num_blocks = (chunk_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
+    _state = {}
+
+    class _CopyChunkIPC(flir.MlirModule):
+        GPU_MODULE_NAME = f"custom_copy_chunk_ipc_{dtype_str}_ws{world_size}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+        def init_gpu_module(self):
+            elem_type, _compute_type = _dtype_to_mlir(dtype_str)
+            _state["elem_type"] = elem_type
+
+        @flir.kernel
+        def custom_copy_chunk_ipc_kernel(
+            self: flir.T.i64,
+            src_rank_i32: flir.T.i32,
+            Src: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            tid = flir.const_index(flir.thread_idx("x"))
+            bid = flir.const_index(flir.block_idx("x"))
+            c_chunk_packs = flir.const_index(chunk_packs)
+            c0_idx = flir.const_index(0)
+
+            elem_type = _state["elem_type"]
+            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
+
+            pack_in_chunk = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+            is_valid_pack = arith.ult(pack_in_chunk, c_chunk_packs)
+            pack_safe = arith.select(is_valid_pack, pack_in_chunk, c0_idx)
+
+            src_rank = arith.index_cast(ir.IndexType.get(), src_rank_i32)
+            base = arith.ArithValue(src_rank) * chunk_elems + arith.ArithValue(pack_safe) * PACK_ELEMS
+
+            if USE_FAST_VEC:
+                if is_valid_pack:
+                    v = flir.vector.load(vec_e_ty, Src, [arith.as_value(base)], alignment=VEC_ALIGN)
+                    flir.vector.store(arith.as_value(v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            if is_valid_pack:
+                for lane in range_constexpr(PACK_ELEMS):
+                    idx = arith.ArithValue(base) + lane
+                    v = flir.memref.load(Src, [arith.as_value(idx)])
+                    flir.memref.store(arith.as_value(v), Out, [arith.as_value(idx)])
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            src_rank_i32: flir.T.i32,
+            Src: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            c1 = arith.index(1)
+            gx = arith.index(num_blocks)
+            bx = arith.index(BLOCK_SIZE)
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, KERNEL_NAME_COPY_CHUNK_IPC],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[src_rank_i32, Src, Out],
+            )
+
+    return _CopyChunkIPC().module
+
+
 def build_custom_all_gather_module(
     N: int,
     dtype_str: str = "f32",
@@ -524,6 +912,8 @@ class CustomAllReduce:
         self._ipc_bases = None
         self._ipc_N = None
         self._ipc_dtype_str = None
+        self._ipc_out_ptrs = None
+        self._ipc_out_bases = None
 
     def _dtype_str(self, t):
         # Avoid importing torch in kernels/ by duck-typing.
@@ -551,6 +941,12 @@ class CustomAllReduce:
             m = build_custom_all_reduce_module(N, dtype_str=dtype_str, world_size=world_size)
         elif op == "all_reduce_ipc":
             m = build_custom_all_reduce_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
+        elif op == "reduce_scatter_ipc":
+            m = build_custom_reduce_scatter_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
+        elif op == "all_gather_ipc":
+            m = build_custom_all_gather_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
+        elif op == "copy_chunk_ipc":
+            m = build_custom_copy_chunk_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
         elif op == "all_gather":
             m = build_custom_all_gather_module(N, dtype_str=dtype_str, world_size=world_size)
         else:
@@ -580,9 +976,41 @@ class CustomAllReduce:
             if int(N) % pack_elems != 0:
                 raise ValueError(f"custom allreduce requires input length to be multiple of {pack_elems}")
 
-            exe = self._compile(op="all_reduce_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
-            # Pass peer device pointers as raw ints.
-            exe(*self._ipc_ptrs[:8], out)
+            # NOTE: A true reduce-scatter + all-gather requires device-side signalling / memory
+            # ordering to make remote reads observe peer writes. Without that, correctness is not
+            # guaranteed on ROCm. Keep it behind an explicit opt-in flag.
+            use_rsag = False
+            try:
+                import os
+
+                use_rsag = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_RSAG", "0") == "1"
+            except Exception:
+                use_rsag = False
+
+            if use_rsag and self._ipc_out_ptrs is not None and (int(N) % int(self.world_size) == 0):
+                exe_rs = self._compile(op="reduce_scatter_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
+                exe_copy = self._compile(op="copy_chunk_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
+                exe_rs(int(self.rank), *self._ipc_ptrs[:8], out)
+                # IMPORTANT: synchronize across processes between phases.
+                # We do not have device-side signalling yet; use torch.distributed barrier.
+                try:
+                    import torch  # type: ignore
+                    import torch.distributed as dist  # type: ignore
+
+                    if dist.is_initialized():
+                        # Ensure RS writes are visible before any rank starts AG reads.
+                        torch.cuda.synchronize()
+                        dist.barrier()
+                        torch.cuda.synchronize()
+                except Exception:
+                    pass
+                # All-gather: copy chunk r from rank r's output buffer into local output.
+                for r in range(self.world_size):
+                    exe_copy(int(r), int(self._ipc_out_ptrs[r]), out)
+            else:
+                exe = self._compile(op="all_reduce_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
+                # Pass peer device pointers as raw ints.
+                exe(*self._ipc_ptrs[:8], out)
             return
 
         # Packed mode:
@@ -696,11 +1124,18 @@ class CustomAllReduce:
                     if b is None:
                         continue
                     _ipc.close_ipc_handle(int(b))
+                if self._ipc_out_bases is not None:
+                    for b in self._ipc_out_bases:
+                        if b is None:
+                            continue
+                        _ipc.close_ipc_handle(int(b))
         finally:
             self._ipc_ptrs = None
             self._ipc_bases = None
             self._ipc_N = None
             self._ipc_dtype_str = None
+            self._ipc_out_ptrs = None
+            self._ipc_out_bases = None
         self._exe_cache.clear()
 
     # The following APIs exist in the C++ extension for IPC / graph capture integration.
@@ -756,6 +1191,49 @@ class CustomAllReduce:
         self._ipc_bases = bases
         self._ipc_N = N
         self._ipc_dtype_str = dtype_str
+
+    def register_out_buffer(self, t_out, handles, offsets):
+        """Register peer pointers for output buffer (used as source for all-gather phase)."""
+        from flydsl.runtime import ipc as _ipc
+
+        if self.world_size <= 1:
+            raise ValueError("register_out_buffer is only meaningful for world_size>1")
+        if len(handles) != self.world_size or len(offsets) != self.world_size:
+            raise ValueError("handles/offsets length must equal world_size")
+        if not _is_weak_contiguous(t_out):
+            raise ValueError("output buffer must be weak-contiguous")
+
+        dtype_str = self._dtype_str(t_out)
+        if dtype_str == "bf16":
+            raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+        if self._ipc_dtype_str is not None and dtype_str != self._ipc_dtype_str:
+            raise ValueError("out buffer dtype mismatch vs registered input buffer")
+        N = int(t_out.numel())
+        if self._ipc_N is not None and int(N) != int(self._ipc_N):
+            raise ValueError("out buffer length mismatch vs registered input buffer")
+
+        bases = [None for _ in range(self.world_size)]
+        ptrs = [None for _ in range(self.world_size)]
+        ptrs[self.rank] = int(t_out.data_ptr())
+        for r in range(self.world_size):
+            if r == self.rank:
+                continue
+            h = handles[r]
+            if hasattr(h, "detach") and hasattr(h, "cpu"):
+                hb = bytes(h.detach().cpu().numpy().tobytes())
+            else:
+                hb = bytes(h)
+            base_ptr = _ipc.open_ipc_handle(hb)
+            bases[r] = int(base_ptr)
+            ptrs[r] = int(base_ptr) + int(offsets[r])
+
+        pad_ptr = int(ptrs[0])
+        ptrs8 = [pad_ptr] * 8
+        for i in range(min(self.world_size, 8)):
+            ptrs8[i] = int(ptrs[i])
+
+        self._ipc_out_ptrs = [int(p) for p in ptrs8]
+        self._ipc_out_bases = bases
 
     def get_graph_buffer_ipc_meta(self):
         raise NotImplementedError("graph buffer IPC meta is not available in FlyDSL demo")
