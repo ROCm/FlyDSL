@@ -970,16 +970,16 @@ def test_complement_rank_1_error():
 
 
 def test_complement_simple_rank_2():
-    """Rank-2 injective layout should LOWER successfully (no compile-time error).
-
-    Example of an injective 2D layout:
-      shape = (3,2)
-      stride = (2,1)   # standard contiguous row-major
-
-    Lowering should succeed; we don't assert exact complement values here.
+    """Test complement operation: complement((3,2):(2,1), 12) should give (2):(6)
+    
+    behavior:
+    - Input: tiler = Layout((3,2):(2,1)), target_size = 12
+    - complement finds the "rest" stride: size(tiler) = 3 * 2 = 6
+    - complement finds the "rest" modes: 12 / 6 = 2, stride = 6
+    - Result: Layout(2:6)
     """
-    print("\n=== Test: Complement Rank-2 Injective (must succeed) ===")
-    print("complement(Layout((3,2):(2,1)), 12) -> should lower")
+    print("\n=== Test: Complement Rank-2 Injective ===")
+    print("complement(Layout((3,2):(2,1)), 12) -> Layout(2:6)")
 
     ctx = RAIIMLIRContextModule()
 
@@ -995,12 +995,28 @@ def test_complement_simple_rank_2():
         tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
 
         comp = flir.complement(tiler_layout, c12)
-        # Return something to keep IR non-empty; no value checks.
-        sz = flir.size(comp)
-        return [sz]
+        
+        # Get values to verify: expected Layout(2:6)
+        # 1. Shape should be 2
+        comp_shape = flir.get_shape(comp)
+        val_shape = flir.get(comp_shape, Index(0))
+        
+        # 2. Stride should be 6
+        comp_stride = flir.get_stride(comp)
+        val_stride = flir.get(comp_stride, Index(0))
+        
+        # 3. Size should be 12
+        comp_size = flir.size(comp)
+        
+        vals = []
+        vals.append(val_shape)
+        vals.append(val_stride)
+        vals.append(comp_size)
+        
+        return vals
 
     # Must NOT throw.
-    run_lowering_test(ctx, "complement_rank_2_ok")
+    run_lowering_test(ctx, "complement_rank_2_ok", expected_vals=[2, 6, 2])
 
 
 def test_complement_rank_2_dynamic_stride_error():
