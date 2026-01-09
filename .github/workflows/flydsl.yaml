@@ -72,7 +72,8 @@ jobs:
         with:
           path: mlir_install.tgz
           # Key includes LLVM commit and build scripts/workflow.
-          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('scripts/build_llvm.sh', 'flir/CMakeLists.txt', '.github/workflows/flydsl.yaml') }}
+          # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
+          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl-test/scripts/build_llvm.sh', 'flydsl-test/flir/CMakeLists.txt', '.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
