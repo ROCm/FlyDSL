@@ -89,9 +89,9 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         atol = 1e-4
     elif dtype_str == "f16":
         dtype = DTYPE_FP16
-        # NOTE: allreduce accumulates in fp32 then casts to fp16; with world_size>1,
-        # fp16 rounding error can reach a few ulp of fp16 near |x|~O(1). Scale atol by world_size.
-        atol = 5e-4 * float(world_size) + 5e-4
+        # NOTE: reference is fp32 sum; output is fp16, so error is dominated by fp16 quantization.
+        # Scale by sqrt(world_size) since sum magnitude grows ~sqrt(ws) for random inputs.
+        atol = 2e-3 * (float(world_size) ** 0.5) + 2e-3
     elif dtype_str == "bf16":
         dtype = DTYPE_BF16
         # bf16 has lower mantissa; scale tolerance similarly.
@@ -180,10 +180,15 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
 
         torch.cuda.synchronize()
 
-        # Correctness (one-shot, out of band): compare vs NCCL all_reduce.
-        ref = x_flat.clone()
-        dist.all_reduce(ref, op=dist.ReduceOp.SUM, group=group)
-        max_err = (out.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
+        # Correctness (one-shot, out of band):
+        # build a deterministic fp32 reference by gathering fp16 inputs once (not profiled).
+        gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
+        dist.all_gather(gathered, x_flat, group=group)
+        ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
+        for t in gathered:
+            ref_f32 += t.to(torch.float32)
+        # Kernel output is fp16/bf16; compare in fp32.
+        max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
         assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
 
         if profile:
