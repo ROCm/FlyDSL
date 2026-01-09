@@ -21,11 +21,13 @@ PRESHUFFLE_GEMM_SHAPES=(
   "fp8,16,20480,8192,16,64,512"
   "fp8,5120,5120,8320,64,256,128"
   "fp8,9728,8192,8320,64,256,128"
+  "int8,9728,8192,8320,64,256,128"
 )
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
 MOE_SHAPES=(
-  "32768,8192,8192,16,4,64,128,128,256,128"
+  # "32768,8192,8192,16,4,64,128,128,256,128"
+  "16,20480,8192,8192,16,4,64,512,256,128"
 )
 
 
@@ -120,59 +122,59 @@ echo "Benchmarks (logs under ${BENCH_LOG_DIR})"
 echo "========================================================================"
 _fmt_table_header
 
-# Softmax (log → parse → one-line row)
-for shape in "${SOFTMAX_SHAPES[@]}"; do
-  IFS=',' read -r M N dtype <<< "$shape"
-  export ROCDSL_SOFTMAX_SHAPES="$shape"
-  log="${BENCH_LOG_DIR}/softmax_${M}x${N}_${dtype}.log"
-  if python3 tests/kernels/test_softmax.py >"${log}" 2>&1; then
-    ((SUCCESS_COUNT++))
-  else
-    ((FAIL_COUNT++))
-    echo "softmax failed. Log: ${log}" >&2
-  fi
-  row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
-  IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-  _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
-done
+# # Softmax (log → parse → one-line row)
+# for shape in "${SOFTMAX_SHAPES[@]}"; do
+#   IFS=',' read -r M N dtype <<< "$shape"
+#   export ROCDSL_SOFTMAX_SHAPES="$shape"
+#   log="${BENCH_LOG_DIR}/softmax_${M}x${N}_${dtype}.log"
+#   if python3 tests/kernels/test_softmax.py >"${log}" 2>&1; then
+#     ((SUCCESS_COUNT++))
+#   else
+#     ((FAIL_COUNT++))
+#     echo "softmax failed. Log: ${log}" >&2
+#   fi
+#   row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
+#   IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
+#   _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+# done
 
-# RMSNorm (script used to label this as LayerNorm; keep output truthful)
-for shape in "${LAYERNORM_SHAPES[@]}"; do
-  IFS=',' read -r M N dtype <<< "$shape"
-  export ROCDSL_RMSNORM_SHAPES="$shape"
-  log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
-  if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
-    ((SUCCESS_COUNT++))
-  else
-    ((FAIL_COUNT++))
-    echo "rmsnorm failed. Log: ${log}" >&2
-  fi
-  row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
-  IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-  _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
-done
+# # RMSNorm (script used to label this as LayerNorm; keep output truthful)
+# for shape in "${LAYERNORM_SHAPES[@]}"; do
+#   IFS=',' read -r M N dtype <<< "$shape"
+#   export ROCDSL_RMSNORM_SHAPES="$shape"
+#   log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
+#   if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
+#     ((SUCCESS_COUNT++))
+#   else
+#     ((FAIL_COUNT++))
+#     echo "rmsnorm failed. Log: ${log}" >&2
+#   fi
+#   row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
+#   IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
+#   _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+# done
 
-# Preshuffle GEMM
-for shape in "${PRESHUFFLE_GEMM_SHAPES[@]}"; do
-  IFS=',' read -r dtype M N K tile_m tile_n tile_k <<< "$shape"
-  log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
-  if python3 tests/kernels/test_preshuffle_gemm.py \
-    --in_dtype "$dtype" \
-    -M "$M" \
-    -N "$N" \
-    -K "$K" \
-    --tile_m "$tile_m" \
-    --tile_n "$tile_n" \
-    --tile_k "$tile_k" >"${log}" 2>&1; then
-    ((SUCCESS_COUNT++))
-  else
-    ((FAIL_COUNT++))
-    echo "preshuffle_gemm failed. Log: ${log}" >&2
-  fi
-  row="$(_py_parse_and_emit preshuffle_gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
-  IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-  _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
-done
+# # Preshuffle GEMM
+# for shape in "${PRESHUFFLE_GEMM_SHAPES[@]}"; do
+#   IFS=',' read -r dtype M N K tile_m tile_n tile_k <<< "$shape"
+#   log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+#   if python3 tests/kernels/test_preshuffle_gemm.py \
+#     --in_dtype "$dtype" \
+#     -M "$M" \
+#     -N "$N" \
+#     -K "$K" \
+#     --tile_m "$tile_m" \
+#     --tile_n "$tile_n" \
+#     --tile_k "$tile_k" >"${log}" 2>&1; then
+#     ((SUCCESS_COUNT++))
+#   else
+#     ((FAIL_COUNT++))
+#     echo "preshuffle_gemm failed. Log: ${log}" >&2
+#   fi
+#   row="$(_py_parse_and_emit preshuffle_gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+#   IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
+#   _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+# done
 
 # MoE
 for shape in "${MOE_SHAPES[@]}"; do

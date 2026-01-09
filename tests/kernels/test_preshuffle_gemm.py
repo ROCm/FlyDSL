@@ -21,7 +21,7 @@ import pytest
 # Some environments have another `flydsl` (e.g. from a sibling checkout) earlier
 # on `sys.path`, which can miss newer ROCDL wrappers (notably INT8 MFMA helpers).
 # -----------------------------------------------------------------------------
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
