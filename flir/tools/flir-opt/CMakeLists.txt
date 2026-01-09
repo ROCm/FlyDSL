@@ -7,6 +7,7 @@ set(LIBS
   MLIRFuncDialect
   MLIRArithDialect
   MLIRMemRefDialect
+  MLIRControlFlowDialect
   MLIRMlirOptMain
 )
 

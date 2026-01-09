@@ -2,10 +2,12 @@
 #include "flir/FlirOps.h"
 #include "flir/FlirPasses.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Pass/Pass.h"
@@ -292,6 +294,84 @@ static Value makeFlatStrideTypeMode(ValueRange leafValues, Location loc,
   return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
 }
 
+/// Compute a compact LayoutLeft (col-major) stride from a type-mode ShapeType,
+/// entirely at compile time.
+///
+/// @pre All shape leaves must be compile-time constants (no dynamic `?` leaves).
+///      This is required so the lowering does not introduce runtime arithmetic
+///      for stride construction.
+/// @note We mirror the common compact-stride convention where a size-1 mode
+///       yields a stride-0 leaf (enables filtering/coalescing behavior).
+static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
+                                                         Location loc,
+                                                         PatternRewriter &rewriter,
+                                                         MLIRContext *ctx) {
+  auto shapeTy = llvm::dyn_cast<ShapeType>(shapeVal.getType());
+  if (!shapeTy) {
+    emitError(loc, "Expected flir.shape type for tiler shape.");
+    return Value();
+  }
+
+  auto structure = shapeTy.getStructure();
+  auto shapeDims = shapeTy.getDims();
+
+  // Resolve any dynamic `?` leaves from the defining op operands, but require
+  // that all leaves can be folded to constants at compile time.
+  SmallVector<int64_t> resolvedShapeDims;
+  resolvedShapeDims.reserve(shapeDims.size());
+  SmallVector<Value> dynLeafOperands;
+  if (auto makeShape = shapeVal.getDefiningOp<MakeShapeOp>()) {
+    dynLeafOperands.append(makeShape.getValues().begin(), makeShape.getValues().end());
+  } else if (llvm::any_of(shapeDims, [](int64_t d) { return d == -1; })) {
+    emitError(loc,
+              "local_tile requires a tiler shape whose leaves are compile-time "
+              "constants (either encoded in the type or provided as constant operands "
+              "to flir.make_shape).");
+    return Value();
+  }
+
+  int64_t oi = 0;
+  for (int64_t d : shapeDims) {
+    if (d != -1) {
+      resolvedShapeDims.push_back(d);
+      continue;
+    }
+    if (oi >= (int64_t)dynLeafOperands.size()) {
+      emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
+      return Value();
+    }
+    auto c = tryGetConstIndex(dynLeafOperands[oi++]);
+    if (!c.has_value()) {
+      emitError(loc,
+                "local_tile requires a tiler shape whose dynamic leaves fold to "
+                "compile-time constants.");
+      return Value();
+    }
+    resolvedShapeDims.push_back(*c);
+  }
+  if (oi != (int64_t)dynLeafOperands.size()) {
+    emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
+    return Value();
+  }
+
+  SmallVector<int64_t> strideDims;
+  strideDims.reserve(resolvedShapeDims.size());
+
+  int64_t current = 1;
+  for (int64_t s : resolvedShapeDims) {
+    if (s == 1) {
+      strideDims.push_back(0);
+      // current unchanged
+    } else {
+      strideDims.push_back(current);
+      current *= s;
+    }
+  }
+
+  auto strideTy = StrideType::get(ctx, structure, strideDims);
+  return rewriter.create<MakeStrideOp>(loc, strideTy, ValueRange{}).getResult();
+}
+
 // Helper to aggressively fold binary arithmetic operations on constants
 static Value foldBinaryOp(Location loc, Value lhs, Value rhs, 
                           std::function<int64_t(int64_t, int64_t)> op,
@@ -309,8 +389,37 @@ static Value foldBinaryOp(Location loc, Value lhs, Value rhs,
     return createOp(loc, lhs, rhs, rewriter);
 }
 
+// Ensure a denominator is non-zero before creating/folding divisions.
+// This prevents compile-time constant-fold UB (division by zero) and inserts a
+// runtime assertion for dynamic values.
+static bool ensureNonZero(Location loc, Value denom, PatternRewriter &rewriter,
+                          llvm::StringRef message) {
+  auto c = tryGetConstIndex(denom);
+  if (c.has_value() && *c == 0) {
+    emitError(loc, message);
+    return false;
+  }
+  if (!c.has_value()) {
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+    Value ok = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ne, denom, zero).getResult();
+    std::string runtimeMsg = (llvm::Twine(message) + " (runtime).").str();
+    rewriter.create<cf::AssertOp>(loc, ok, rewriter.getStringAttr(runtimeMsg));
+  }
+  return true;
+}
+
 // Helper to compute complement inline (without creating ComplementOp)
 // Returns (complementShape, complementStride) as Values
+//
+// @pre The input tiler has been conceptually normalized for the complement
+//      algorithm:
+//      - We operate on a flattened (leaf) view of (shape, stride).
+//      - For rank > 1 layouts, all stride leaves must be compile-time constants
+//        (we reject dynamic-stride complements for rank > 1).
+//      - Rank-1 stride-0 is handled as a special-case.
+//      - Divisions require non-zero denominators; dynamic cases are guarded via
+//        runtime asserts.
 static std::pair<Value, Value> computeComplementInline(
     const LayoutNode& tilerShapeNode, const LayoutNode& tilerStrideNode,
     Value targetSize, Location loc, PatternRewriter& rewriter) {
@@ -350,11 +459,29 @@ static std::pair<Value, Value> computeComplementInline(
       
       // new_shape = min_stride / last_result_stride
       auto newShape = foldBinaryOp(loc, minStride, lastResultStride,
-          [](int64_t a, int64_t b) { return b != 0 ? a / b : a; },
+          [](int64_t a, int64_t b) { return a / b; },
           [](Location l, Value a, Value b, PatternRewriter& r) {
               return r.create<arith::DivUIOp>(l, a, b).getResult();
           },
           rewriter);
+
+      // Non-injective check for rank-1:
+      // If stride==0 and shape>1, the layout overlaps (all indices map to 0).
+      // In our algorithm, this manifests as gap(new_shape) == 0.
+      if (auto c = tryGetConstIndex(newShape)) {
+        if (*c == 0) {
+          emitError(loc, "Non-injective Layout detected in complement.");
+          return {Value(), Value()};
+        }
+      } else {
+        // Runtime check for dynamic stride: gap must be non-zero.
+        Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+        Value ok = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+        rewriter.create<cf::AssertOp>(
+            loc, ok,
+            rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+      }
       
       // new_stride = min_stride * modeShape
       auto newStride = foldBinaryOp(loc, minStride, modeShape,
@@ -363,10 +490,25 @@ static std::pair<Value, Value> computeComplementInline(
               return r.create<arith::MulIOp>(l, a, b).getResult();
           },
           rewriter);
+
+      // Denominator safety for ceil_div: newStride must be non-zero.
+      // We assert here so we never constant-fold a division-by-zero.
+      if (auto ns = tryGetConstIndex(newStride); ns.has_value() && *ns == 0) {
+        emitError(loc, "Zero stride encountered in complement.");
+        return {Value(), Value()};
+      }
+      if (!tryGetConstIndex(newStride).has_value()) {
+        Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+        Value ok = rewriter.create<arith::CmpIOp>(
+            loc, arith::CmpIPredicate::ne, newStride, zero).getResult();
+        rewriter.create<cf::AssertOp>(
+            loc, ok,
+            rewriter.getStringAttr("Zero stride encountered in complement (runtime)."));
+      }
       
       // rest_shape = ceil_div(target_size, new_stride)
       auto restShape = foldBinaryOp(loc, targetSize, newStride,
-          [](int64_t a, int64_t b) { return b != 0 ? (a + b - 1) / b : a; },
+          [](int64_t a, int64_t b) { return (a + b - 1) / b; },
           [](Location l, Value a, Value b, PatternRewriter& r) {
               return r.create<arith::CeilDivUIOp>(l, a, b).getResult();
           },
@@ -430,6 +572,15 @@ static std::pair<Value, Value> computeComplementInline(
             modes.push_back({shapes[i], strides[i], 0});
         }
     }
+
+    // Complement requires a deterministic stride order for rank > 1.
+    // If any stride leaf is dynamic, sorting/folding by stride becomes unsound.
+    // In FLIR lowering, if rank > 1 and any stride is not a compile-time constant,
+    // we cannot soundly sort/fold by stride, so we reject early.
+    if (!allStatic && shapes.size() > 1) {
+      emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
+      return {Value(), Value()};
+    }
     
     // Sort by stride (only if all static)
     if (allStatic) {
@@ -447,13 +598,44 @@ static std::pair<Value, Value> computeComplementInline(
         Value minStride = modes[i].stride;
         Value modeShape = modes[i].shape;
         
+        if (!ensureNonZero(loc, currStride, rewriter,
+                           "Zero stride encountered in complement.")) {
+          return {Value(), Value()};
+        }
+
         // new_shape = min_stride / last_result_stride
         auto newShape = foldBinaryOp(loc, minStride, currStride,
-            [](int64_t a, int64_t b) { return b != 0 ? std::max(int64_t(1), a / b) : a; },
+            [](int64_t a, int64_t b) { return a / b; },
             [](Location l, Value a, Value b, PatternRewriter& r) {
                 return r.create<arith::DivUIOp>(l, a, b).getResult();
             },
             rewriter);
+            
+        // Check for Non-injective Layout (gap size == 0)
+        if (auto constNewShape = tryGetConstIndex(newShape)) {
+             if (constNewShape.value() == 0) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {Value(), Value()};
+             }
+        } else {
+             auto minStrideC = tryGetConstIndex(minStride);
+             auto currStrideC = tryGetConstIndex(currStride);
+             if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {Value(), Value()};
+             }
+             // Runtime check for dynamic cases: gap must be non-zero.
+             // This makes the failure deterministic at runtime instead of silent UB.
+             if (!(minStrideC && currStrideC)) {
+                 Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+                 Value ok = rewriter.create<arith::CmpIOp>(
+                     loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+                 rewriter.create<cf::AssertOp>(
+                     loc, ok,
+                     rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+             }
+        }
+
         
         // Skip size-1 gap modes.
         bool isOne = false;
@@ -482,12 +664,40 @@ static std::pair<Value, Value> computeComplementInline(
     // After fold: append last mode.
     Value lastMinStride = modes.back().stride;
     Value lastModeShape = modes.back().shape;
+    if (!ensureNonZero(loc, currStride, rewriter,
+                       "Zero stride encountered in complement.")) {
+      return {Value(), Value()};
+    }
     auto lastNewShape = foldBinaryOp(loc, lastMinStride, currStride,
-        [](int64_t a, int64_t b) { return b != 0 ? std::max(int64_t(1), a / b) : a; },
+        [](int64_t a, int64_t b) { return a / b; },
         [](Location l, Value a, Value b, PatternRewriter& r) {
             return r.create<arith::DivUIOp>(l, a, b).getResult();
         },
         rewriter);
+
+    // Check for Non-injective Layout (gap size == 0)
+    if (auto constNewShape = tryGetConstIndex(lastNewShape)) {
+            if (constNewShape.value() == 0) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {Value(), Value()};
+            }
+    } else {
+            auto minStrideC = tryGetConstIndex(lastMinStride);
+            auto currStrideC = tryGetConstIndex(currStride);
+            if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {Value(), Value()};
+            }
+            // Runtime check for dynamic cases: last gap must be non-zero.
+            if (!(minStrideC && currStrideC)) {
+                Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+                Value ok = rewriter.create<arith::CmpIOp>(
+                    loc, arith::CmpIPredicate::ne, lastNewShape, zero).getResult();
+                rewriter.create<cf::AssertOp>(
+                    loc, ok,
+                    rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+            }
+    }
     
     // Filter last size-1 mode
     bool lastIsOne = false;
@@ -513,8 +723,12 @@ static std::pair<Value, Value> computeComplementInline(
         rewriter);
     
     // Append rest mode that extends to targetSize.
+    if (!ensureNonZero(loc, currStride, rewriter,
+                       "Zero stride encountered in complement.")) {
+      return {Value(), Value()};
+    }
     auto restShape = foldBinaryOp(loc, targetSize, currStride,
-        [](int64_t a, int64_t b) { return b != 0 ? (a + b - 1) / b : a; },
+        [](int64_t a, int64_t b) { return (a + b - 1) / b; },
         [](Location l, Value a, Value b, PatternRewriter& r) {
             return r.create<arith::CeilDivUIOp>(l, a, b).getResult();
         },
@@ -761,8 +975,12 @@ static std::pair<LayoutNode, LayoutNode> composition_impl(
         
         // Fold logic derived from composition semantics.
         // next_shape = ceil_div(curr_shape, abs(rest_stride))
+        if (!ensureNonZero(loc, restStride, rewriter,
+                           "Division by zero encountered in composition.")) {
+          return {rhsShape, rhsStride};
+        }
         Value nextShape = foldBinaryOp(loc, currShape, restStride,
-            [](int64_t a, int64_t b) { return b != 0 ? (a + b - 1) / b : a; },  // ceil_div
+            [](int64_t a, int64_t b) { return (a + b - 1) / b; },  // ceil_div
             [](Location l, Value a, Value b, PatternRewriter& r) { 
                 return r.create<arith::CeilDivUIOp>(l, a, b).getResult(); 
             },
@@ -770,8 +988,12 @@ static std::pair<LayoutNode, LayoutNode> composition_impl(
         
         // Update restStride before checking for early exit.
         // Important: the fold returns next_stride even when breaking early.
+        if (!ensureNonZero(loc, currShape, rewriter,
+                           "Division by zero encountered in composition.")) {
+          return {rhsShape, rhsStride};
+        }
         Value nextStride = foldBinaryOp(loc, restStride, currShape,
-            [](int64_t a, int64_t b) { return b != 0 ? (a + b - 1) / b : a; },
+            [](int64_t a, int64_t b) { return (a + b - 1) / b; },
             [](Location l, Value a, Value b, PatternRewriter& r) {
                 return r.create<arith::CeilDivUIOp>(l, a, b).getResult();
             },
@@ -832,8 +1054,12 @@ static std::pair<LayoutNode, LayoutNode> composition_impl(
         resultStrideNodes.push_back(LayoutNode(newStride));
         
         // Update restShape = restShape / newShape with aggressive folding.
+        if (!ensureNonZero(loc, newShape, rewriter,
+                           "Division by zero encountered in composition.")) {
+          return {rhsShape, rhsStride};
+        }
         restShape = foldBinaryOp(loc, restShape, newShape,
-            [](int64_t a, int64_t b) { return b != 0 ? a / b : a; },
+            [](int64_t a, int64_t b) { return a / b; },
             [](Location l, Value a, Value b, PatternRewriter& r) {
                 return r.create<arith::DivUIOp>(l, a, b).getResult();
             },
@@ -888,6 +1114,14 @@ static std::pair<LayoutNode, LayoutNode> composition_impl(
 
 // complement(shape, stride, cosize_hi)
 // Returns a layout that complements the input within `cosize_hi`.
+//
+// @pre The input layout has been conceptually normalized for the complement
+//      algorithm:
+//      - We operate on a flattened (leaf) view of (shape, stride).
+//      - For rank > 1 layouts, all stride leaves must be compile-time constants
+//        (we reject dynamic-stride complements for rank > 1).
+//      - Divisions require non-zero denominators; dynamic cases are guarded via
+//        runtime asserts.
 static std::pair<LayoutNode, LayoutNode> complement_impl(
     const LayoutNode& shape, const LayoutNode& stride, Value cosizeHi,
     Location loc, PatternRewriter& rewriter) {
@@ -919,36 +1153,100 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
             modes.push_back({leavesShape[i].value, leavesStride[i].value, 0}); // Unsortable
         }
     }
+
+    // Complement requires a deterministic stride order for rank > 1.
+    // If any stride leaf is dynamic, sorting/folding by stride becomes unsound.
+    // Reject rank>1 dynamic-stride complements in FLIR lowering.
+    if (!allStatic && leavesShape.size() > 1) {
+      emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
+      return {LayoutNode(Value()), LayoutNode(Value())};
+    }
     
     if (allStatic) {
         std::sort(modes.begin(), modes.end(), [](const Mode& a, const Mode& b) {
             return a.constStride < b.constStride;
         });
     }
-    // If not all static, we proceed in given order (risky but best effort).
+    // If not all static, rank must be 1 (checked above), so sorting is unnecessary.
     
     // 3. Fold logic: accumulate gaps before each stride milestone.
     std::vector<Value> resShape;
     std::vector<Value> resStride;
     Value currStride = rewriter.create<arith::ConstantIndexOp>(loc, 1); // starts at 1
+    std::optional<int64_t> currStrideC = 1; // Compile-time tracking
+
     resStride.push_back(currStride);
     
     // Iterate through sorted modes
     for (const auto& mode : modes) {
         Value minStride = mode.stride;
         Value modeShape = mode.shape;
+        auto minStrideC = tryGetConstIndex(minStride);
+        auto modeShapeC = tryGetConstIndex(modeShape);
         
         // Gap before the current mode.
-        Value newShape = rewriter.create<arith::DivUIOp>(loc, minStride, currStride);
+        if (!ensureNonZero(loc, currStride, rewriter,
+                           "Zero stride encountered in complement.")) {
+          return {LayoutNode(Value()), LayoutNode(Value())};
+        }
+        Value newShape = foldBinaryOp(loc, minStride, currStride,
+            [](int64_t a, int64_t b) { return a / b; },
+            [](Location l, Value a, Value b, PatternRewriter& r) {
+                return r.create<arith::DivUIOp>(l, a, b).getResult();
+            },
+            rewriter);
+
+        // Check for non-injective layouts.
+        // If the gap size is 0, it means minStride < currStride, implying overlap.
+        // We use our explicit compile-time tracking (currStrideC) for robust checking.
+
+        // Compile-time check (best effort).
+        if (auto constNewShape = tryGetConstIndex(newShape); constNewShape.has_value()) {
+            if (constNewShape.value() == 0) {
+                emitError(loc, "Non-injective Layout detected in complement.");
+                return {LayoutNode(Value()), LayoutNode(Value())};
+            }
+        }
+
+        if (minStrideC.has_value() && currStrideC.has_value()) {
+            if (*minStrideC < *currStrideC) {
+                 emitError(loc, "Non-injective Layout detected in complement.");
+                 return {LayoutNode(Value()), LayoutNode(Value())};
+            }
+        } else {
+            // Runtime check for dynamic cases: gap must be non-zero.
+            Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
+            Value ok = rewriter.create<arith::CmpIOp>(
+                loc, arith::CmpIPredicate::ne, newShape, zero).getResult();
+            rewriter.create<cf::AssertOp>(
+                loc, ok,
+                rewriter.getStringAttr("Non-injective Layout detected in complement (runtime)."));
+        }
         
         resShape.push_back(newShape);
-        Value nextStride = rewriter.create<arith::MulIOp>(loc, minStride, modeShape);
+        Value nextStride = foldBinaryOp(loc, minStride, modeShape,
+            [](int64_t a, int64_t b) { return a * b; },
+            [](Location l, Value a, Value b, PatternRewriter& r) {
+                return r.create<arith::MulIOp>(l, a, b).getResult();
+            },
+            rewriter);
         
         // Advance coverage to include this mode.
         currStride = nextStride;
+        
+        // Update compile-time tracking
+        if (minStrideC.has_value() && modeShapeC.has_value()) {
+            currStrideC = (*minStrideC) * (*modeShapeC);
+        } else {
+            currStrideC = std::nullopt;
+        }
     }
     
     // 4. Append the final mode that stretches coverage to cosizeHi.
+    if (!ensureNonZero(loc, currStride, rewriter,
+                       "Zero stride encountered in complement.")) {
+      return {LayoutNode(Value()), LayoutNode(Value())};
+    }
     Value restShape = ceilDiv(loc, cosizeHi, currStride, rewriter);
     resShape.push_back(restShape);
     // Stride is currStride
@@ -978,6 +1276,10 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
     }
     
     // Final rest mode
+    if (!ensureNonZero(loc, currStride, rewriter,
+                       "Zero stride encountered in complement.")) {
+      return {LayoutNode(Value()), LayoutNode(Value())};
+    }
     Value finalRest = ceilDiv(loc, cosizeHi, currStride, rewriter);
     compShapeNodes.push_back(LayoutNode(finalRest));
     compStrideNodes.push_back(LayoutNode(currStride));
@@ -2268,15 +2570,13 @@ struct LocalTileOpLowering : public OpRewritePattern<LocalTileOp> {
     auto tilerShape = op.getOperand(1);   // tiler shape
     // coord is used to select which tile, but we simplify to just tiling
     
-    // Create a layout from the tiler shape (with default strides)
-    auto tilerRank = llvm::cast<ShapeType>(tilerShape.getType()).getRank();
-    SmallVector<Value> ones;
-    for (int i = 0; i < tilerRank; ++i) {
-      ones.push_back(rewriter.create<arith::ConstantIndexOp>(loc, 1));
-    }
-
     auto *ctx = rewriter.getContext();
-    Value makeStrideVal = makeFlatStrideTypeMode(ones, loc, rewriter, ctx);
+    // Create a layout from the tiler shape using compact LayoutLeft strides.
+    // This must be computed at compile time; dynamic tiler shapes are rejected.
+    Value makeStrideVal =
+        makeLayoutLeftStrideFromStaticShapeTypeMode(tilerShape, loc, rewriter, ctx);
+    if (!makeStrideVal)
+      return failure();
     auto layoutType = LayoutType::get(ctx,
                                       llvm::cast<ShapeType>(tilerShape.getType()),
                                       llvm::cast<StrideType>(makeStrideVal.getType()));
@@ -2300,6 +2600,9 @@ struct ComplementOpLowering : public OpRewritePattern<ComplementOp> {
   LogicalResult matchAndRewrite(ComplementOp op,
                                 PatternRewriter &rewriter) const override {
     // complement(tiler, target_size) computes the "rest" modes not covered by tiler.
+    // @pre We work on a flattened (leaf) view of (shape, stride). For rank > 1
+    //      tilers, all stride leaves must be compile-time constants (dynamic-stride
+    //      complements are rejected).
     // Algorithm outline:
     // 1. Filter tiler (remove stride-0, size-1 modes) 
     // 2. Sort by stride
@@ -2393,9 +2696,13 @@ struct FlirToStandardPass
     : public impl::FlirToStandardPassBase<FlirToStandardPass> {
   
   using impl::FlirToStandardPassBase<FlirToStandardPass>::FlirToStandardPassBase;
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    // The lowering may materialize `cf.assert` for runtime checks.
+    registry.insert<mlir::cf::ControlFlowDialect>();
+  }
   
   void runOnOperation() override {
-    
     RewritePatternSet patterns(&getContext());
     
     // Add all lowering patterns
@@ -2436,10 +2743,27 @@ struct FlirToStandardPass
     config.setMaxIterations(256);
 
     FrozenRewritePatternSet frozen(std::move(patterns));
-    // This pass is best-effort: patterns may not cover all IR combinations yet.
-    // Do not hard-fail the whole pipeline if greedy rewriting does not converge.
-    // (The test runner expects flir-opt to succeed even if some flir ops remain.)
-    (void)applyPatternsGreedily(getOperation(), frozen, config);
+    // If we emitted any error diagnostics (e.g. non-injective layout checks),
+    // we must fail the pass so the Python bindings convert it into an exception
+    // instead of aborting on "unhandled captured errors".
+    bool hadError = false;
+    int errorCount = 0;
+    ScopedDiagnosticHandler diagHandler(&getContext(), [&](Diagnostic &d) {
+      if (d.getSeverity() == DiagnosticSeverity::Error) {
+        hadError = true;
+        ++errorCount;
+        // Greedy rewriting may retry and re-emit the same error many times.
+        // Keep the first error, suppress subsequent ones to avoid log spam.
+        if (errorCount > 1)
+          return success();
+      }
+      // Do not suppress non-error diagnostics.
+      return failure();
+    });
+
+    auto res = applyPatternsGreedily(getOperation(), frozen, config);
+    if (hadError || failed(res))
+      signalPassFailure();
   }
 };
 
