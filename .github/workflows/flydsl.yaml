@@ -70,16 +70,15 @@ jobs:
         id: mlir-cache
         uses: actions/cache@v4
         with:
-          path: mlir_install_${{ matrix.runners }}.tgz
-          # Key includes runner type, docker image, and key build scripts.
-          # Any change in these will trigger a rebuild and refresh the cache.
-          key: mlir-install-${{ matrix.runners }}-${{ env.DOCKER_IMAGE }}-${{ env.LLVM_COMMIT }}-${{ hashFiles('scripts/build_llvm.sh', 'flir/CMakeLists.txt') }}
+          path: mlir_install.tgz
+          # Key includes LLVM commit and build scripts/workflow.
+          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('scripts/build_llvm.sh', 'flir/CMakeLists.txt', '.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
         run: |
-          ls -lh mlir_install_${{ matrix.runners }}.tgz
-          docker cp mlir_install_${{ matrix.runners }}.tgz flydsl_test:/tmp/mlir_install.tgz
+          ls -lh mlir_install.tgz
+          docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
           docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
 
@@ -89,24 +88,21 @@ jobs:
           set -ex
           docker exec flydsl_test bash -c "cd /flydsl-test && LLVM_COMMIT=${{ env.LLVM_COMMIT }} bash scripts/build_llvm.sh"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install_${{ matrix.runners }}.tgz || true
-          ls -lh ./mlir_install_${{ matrix.runners }}.tgz || true
+          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+          ls -lh ./mlir_install.tgz || true
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && ./flir/build.sh"
 
-      # Optional: export MLIR install prefix tarball as a GitHub Actions artifact for reuse.
-      # This is stored in GitHub Actions artifacts storage (NOT committed to the repo).
-      # To avoid huge artifacts on every PR, only do this for manual runs.
       - name: Export MLIR install tarball (workflow_dispatch only)
         if: github.event_name == 'workflow_dispatch'
         run: |
-          ls -lh ./mlir_install_${{ matrix.runners }}.tgz || true
+          ls -lh ./mlir_install.tgz || true
 
       - name: Upload MLIR install tarball artifact (workflow_dispatch only)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: mlir_install-${{ matrix.runners }}
-          path: mlir_install_${{ matrix.runners }}.tgz
+          path: mlir_install.tgz
           if-no-files-found: ignore
           retention-days: 7
         
