@@ -102,15 +102,25 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     x = torch.randn(shape, device=device, dtype=dtype).contiguous()
     x_flat = x.reshape(-1).contiguous()
 
-    # Preallocate gather + packed buffer so profiling doesn't measure python allocations.
-    gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
-    stacked = torch.empty((world_size, x_flat.numel()), device=device, dtype=dtype).contiguous()
+    # -------------------------------------------------------------------------
+    # Route B (IPC): exchange HIP IPC handles for each rank's input buffer.
+    # -------------------------------------------------------------------------
+    from flydsl.runtime import ipc as fly_ipc
 
-    # AIter-like handle shape (we don't use IPC handles in the FlyDSL demo).
+    my_ipc = fly_ipc.get_ipc_handle(x_flat)
+    gathered_ipc = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered_ipc, (my_ipc.handle, int(my_ipc.offset_bytes)), group=group)
+
+    # Pack handles into CPU uint8 tensors (AIter-like shape).
+    handles = []
+    offsets = []
+    for h_bytes, off in gathered_ipc:
+        handles.append(torch.tensor(list(h_bytes), device="cpu", dtype=torch.uint8))
+        offsets.append(int(off))
+
+    # AIter-like meta/rank_data (we repurpose rank_data as the local registered buffer).
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
-    rank_data = torch.empty((1,), device=device, dtype=torch.int8)
-    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
-    offsets = [0 for _ in range(world_size)]
+    rank_data = x_flat
     fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=False)
 
     # Warmup: align all ranks.
@@ -138,10 +148,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
             )
 
         # Compile/warmup once (not included in steady-state timings).
-        dist.all_gather(gathered, x_flat, group=group)
-        for i in range(world_size):
-            stacked[i].copy_(gathered[i])
-        fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+        fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
         torch.cuda.synchronize()
 
         kernel_ms_list = []
@@ -149,10 +156,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         if profile:
             # Extra warmup iterations (excluded).
             for _ in range(warmup):
-                dist.all_gather(gathered, x_flat, group=group)
-                for i in range(world_size):
-                    stacked[i].copy_(gathered[i])
-                fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
             torch.cuda.synchronize()
 
             start_evt = torch.cuda.Event(enable_timing=True)
@@ -161,12 +165,8 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
             for _ in range(iters):
                 t0 = time.perf_counter()
 
-                dist.all_gather(gathered, x_flat, group=group)
-                for i in range(world_size):
-                    stacked[i].copy_(gathered[i])
-
                 start_evt.record()
-                fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
                 end_evt.record()
                 torch.cuda.synchronize()
 
@@ -175,17 +175,15 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
                 e2e_ms_list.append(float((t1 - t0) * 1e3))
         else:
             # Non-profiling path: run once (keep correctness coverage without spending time).
-            dist.all_gather(gathered, x_flat, group=group)
-            for i in range(world_size):
-                stacked[i].copy_(gathered[i])
-            fa.all_reduce_reg(stacked, out, open_fp8_quant=False)
+            fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
             torch.cuda.synchronize()
 
         torch.cuda.synchronize()
 
-        # Correctness (one-shot, out of band).
-        ref = stacked.to(torch.float32).sum(dim=0)
-        max_err = (out.to(torch.float32) - ref).abs().max().item()
+        # Correctness (one-shot, out of band): compare vs NCCL all_reduce.
+        ref = x_flat.clone()
+        dist.all_reduce(ref, op=dist.ReduceOp.SUM, group=group)
+        max_err = (out.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
         assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
 
         if profile:

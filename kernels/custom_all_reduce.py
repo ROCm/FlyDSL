@@ -24,6 +24,7 @@ import _mlir.extras.types as T
 
 KERNEL_NAME_ALL_REDUCE = "custom_all_reduce_kernel"
 KERNEL_NAME_ALL_GATHER = "custom_all_gather_kernel"
+KERNEL_NAME_ALL_REDUCE_IPC = "custom_all_reduce_ipc_kernel"
 
 
 def _dtype_to_mlir(dtype_str: str):
@@ -32,7 +33,11 @@ def _dtype_to_mlir(dtype_str: str):
     if dtype_str == "f16":
         return T.f16(), T.f32()
     if dtype_str == "bf16":
-        return ir.BF16Type.get(), T.f32()
+        # NOTE: BF16 load/store/extf/trunc lowering has proven unreliable on some ROCm toolchains
+        # used in this repo (can produce wildly incorrect values).
+        # Keep BF16 as raw i16 storage and do explicit bit-based conversion to/from f32.
+        # BF16 encoding is the top 16 bits of IEEE fp32.
+        return T.i16(), T.f32()
     raise ValueError(f"unsupported dtype: {dtype_str}")
 
 def _pack_elems(dtype_str: str) -> int:
@@ -123,13 +128,17 @@ def build_custom_all_reduce_module(
             base = arith.ArithValue(pack_idx_safe) * PACK_ELEMS  # element index
 
             # ---- Fast vector path: vector.load/store of a 16B pack ----
-            if USE_FAST_VEC:
+            # NOTE: BF16 is kept on the scalar path for correctness (see `_dtype_to_mlir`).
+            if USE_FAST_VEC and dtype_str != "bf16":
                 if world_size == 1:
                     v_e = flir.vector.load(vec_e_ty, In, [arith.as_value(base)], alignment=VEC_ALIGN)
                     # NOTE: `arith` registers a global value caster that may wrap op results as
                     # `ArithValue` (including vector results). Raw MLIR arith ops require `Value`,
                     # so always go through ext-arith helpers here.
-                    v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
+                    if dtype_str == "f32":
+                        v_c = v_e
+                    else:
+                        v_c = arith.extf(vec_c_ty, v_e)
                 else:
                     zero = arith.constant(0.0, type=compute_type)
                     acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
@@ -140,12 +149,18 @@ def build_custom_all_reduce_module(
                             [flir.const_index(r), arith.as_value(base)],
                             alignment=VEC_ALIGN,
                         )
-                        v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
-                        acc = arith.as_value(arith.ArithValue(acc) + v_c)
+                        if dtype_str == "f32":
+                            v_c_lane = v_e
+                        else:
+                            v_c_lane = arith.extf(vec_c_ty, v_e)
+                        acc = arith.as_value(arith.ArithValue(acc) + v_c_lane)
                     v_c = acc
 
                 if is_valid_pack:
-                    out_v = v_c if dtype_str == "f32" else arith.trunc_f(vec_e_ty, v_c)
+                    if dtype_str == "f32":
+                        out_v = v_c
+                    else:
+                        out_v = arith.trunc_f(vec_e_ty, v_c)
                     flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
                 return
 
@@ -155,16 +170,41 @@ def build_custom_all_reduce_module(
                     idx = arith.ArithValue(base) + lane
                     if world_size == 1:
                         x_e = flir.memref.load(In, [arith.as_value(idx)])
-                        y_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                        if dtype_str == "f32":
+                            y_c = arith.ArithValue(x_e)
+                        elif dtype_str == "f16":
+                            y_c = arith.extf(compute_type, x_e)
+                        else:
+                            # bf16 storage is raw i16 bits (see `_dtype_to_mlir`).
+                            # f32_bits = (u16(bf16_bits) << 16)
+                            x_i32 = flir.arith.extui(T.i32(), arith.as_value(x_e))
+                            x_bits = arith.ArithValue(x_i32) << 16
+                            y_c = arith.ArithValue(flir.arith.bitcast(T.f32(), arith.as_value(x_bits)))
                     else:
                         acc = arith.constant(0.0, type=compute_type)
                         for r in range_constexpr(world_size):
                             x_e = flir.memref.load(In, [flir.const_index(r), arith.as_value(idx)])
-                            x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                            if dtype_str == "f32":
+                                x_c = arith.ArithValue(x_e)
+                            elif dtype_str == "f16":
+                                x_c = arith.extf(compute_type, x_e)
+                            else:
+                                x_i32 = flir.arith.extui(T.i32(), arith.as_value(x_e))
+                                x_bits = arith.ArithValue(x_i32) << 16
+                                x_c = arith.ArithValue(flir.arith.bitcast(T.f32(), arith.as_value(x_bits)))
                             acc = arith.ArithValue(acc) + x_c
                         y_c = acc
 
-                    y_e = arith.as_value(y_c) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, y_c))
+                    if dtype_str == "f32":
+                        y_e = arith.as_value(y_c)
+                    elif dtype_str == "f16":
+                        y_e = arith.as_value(arith.trunc_f(elem_type, y_c))
+                    else:
+                        # f32 -> bf16 by truncation: bf16_bits = (u32(f32_bits) >> 16)
+                        y_i32 = flir.arith.bitcast(T.i32(), arith.as_value(y_c))
+                        y_hi = arith.shrui(y_i32, arith.i32(16))
+                        y_i16 = flir.arith.trunci(T.i16(), arith.as_value(y_hi))
+                        y_e = arith.as_value(y_i16)
                     flir.memref.store(y_e, Out, [arith.as_value(idx)])
 
         @flir.jit
@@ -184,6 +224,141 @@ def build_custom_all_reduce_module(
             )
 
     return _CustomAllReduce().module
+
+
+def build_custom_all_reduce_ipc_module(
+    N: int,
+    dtype_str: str = "f16",
+    *,
+    world_size: int,
+    BLOCK_SIZE: int = 256,
+):
+    """Build a module containing an IPC-pointer-based all-reduce kernel.
+
+    Kernel args are specialized for `world_size`:
+      (In0, In1, ..., In{world_size-1}, Out)
+
+    Each In* is a pointer to a contiguous 1D buffer of length N on that rank's GPU,
+    made accessible via HIP IPC mapping in the current process.
+    """
+    if N <= 0:
+        raise ValueError("N must be > 0")
+    if world_size <= 1 or world_size > 8:
+        raise ValueError("world_size must be in [2, 8] for IPC mode")
+    if world_size % 2 != 0:
+        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
+    if dtype_str == "bf16":
+        # BF16 lowering in this repo has proven unreliable across toolchains;
+        # keep IPC path to fp16/fp32 for now.
+        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
+        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
+
+    PACK_ELEMS = _pack_elems(dtype_str)
+    if N % PACK_ELEMS != 0:
+        raise ValueError(f"custom allreduce requires input length to be multiple of {PACK_ELEMS}")
+
+    gpu_arch = get_hip_arch()
+    VEC_ALIGN = 16
+    total_bytes = N * _elem_size_bytes(dtype_str)
+    USE_FAST_VEC = (total_bytes % 128) == 0
+
+    # One thread handles one 16B pack.
+    num_packs = N // PACK_ELEMS
+    num_blocks = (num_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
+    _state = {}
+
+    class _CustomAllReduceIPC(flir.MlirModule):
+        GPU_MODULE_NAME = f"custom_all_reduce_ipc_{dtype_str}_ws{world_size}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+        def init_gpu_module(self):
+            elem_type, compute_type = _dtype_to_mlir(dtype_str)
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+
+        @flir.kernel
+        def custom_all_reduce_ipc_kernel(
+            self: flir.T.i64,
+            In0: lambda: T.memref(N, _state["elem_type"]),
+            In1: lambda: T.memref(N, _state["elem_type"]),
+            In2: lambda: T.memref(N, _state["elem_type"]),
+            In3: lambda: T.memref(N, _state["elem_type"]),
+            In4: lambda: T.memref(N, _state["elem_type"]),
+            In5: lambda: T.memref(N, _state["elem_type"]),
+            In6: lambda: T.memref(N, _state["elem_type"]),
+            In7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            Ins = [In0, In1, In2, In3, In4, In5, In6, In7]
+            tid = flir.const_index(flir.thread_idx("x"))
+            bid = flir.const_index(flir.block_idx("x"))
+
+            c_num_packs = flir.const_index(num_packs)
+            c0_idx = flir.const_index(0)
+
+            elem_type = _state["elem_type"]
+            compute_type = _state["compute_type"]
+            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
+            vec_c_ty = ir.VectorType.get([PACK_ELEMS], compute_type)
+
+            pack_idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
+            is_valid_pack = arith.ult(pack_idx, c_num_packs)
+            pack_idx_safe = arith.select(is_valid_pack, pack_idx, c0_idx)
+            base = arith.ArithValue(pack_idx_safe) * PACK_ELEMS
+
+            if USE_FAST_VEC:
+                zero = arith.constant(0.0, type=compute_type)
+                acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
+                for r in range_constexpr(world_size):
+                    v_e = flir.vector.load(vec_e_ty, Ins[r], [arith.as_value(base)], alignment=VEC_ALIGN)
+                    if dtype_str == "f32":
+                        v_c = v_e
+                    else:
+                        v_c = arith.extf(vec_c_ty, v_e)
+                    acc = arith.as_value(arith.ArithValue(acc) + v_c)
+
+                if is_valid_pack:
+                    out_v = acc if dtype_str == "f32" else arith.trunc_f(vec_e_ty, acc)
+                    flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
+                return
+
+            # Fallback scalar (should be rare; keep correctness).
+            if is_valid_pack:
+                for lane in range_constexpr(PACK_ELEMS):
+                    idx = arith.ArithValue(base) + lane
+                    acc = arith.constant(0.0, type=compute_type)
+                    for r in range_constexpr(world_size):
+                        x_e = flir.memref.load(Ins[r], [arith.as_value(idx)])
+                        x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
+                        acc = arith.ArithValue(acc) + x_c
+                    y_e = arith.as_value(acc) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, acc))
+                    flir.memref.store(y_e, Out, [arith.as_value(idx)])
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            In0: lambda: T.memref(N, _state["elem_type"]),
+            In1: lambda: T.memref(N, _state["elem_type"]),
+            In2: lambda: T.memref(N, _state["elem_type"]),
+            In3: lambda: T.memref(N, _state["elem_type"]),
+            In4: lambda: T.memref(N, _state["elem_type"]),
+            In5: lambda: T.memref(N, _state["elem_type"]),
+            In6: lambda: T.memref(N, _state["elem_type"]),
+            In7: lambda: T.memref(N, _state["elem_type"]),
+            Out: lambda: T.memref(N, _state["elem_type"]),
+        ):
+            c1 = arith.index(1)
+            gx = arith.index(num_blocks)
+            bx = arith.index(BLOCK_SIZE)
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, KERNEL_NAME_ALL_REDUCE_IPC],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[In0, In1, In2, In3, In4, In5, In6, In7, Out],
+            )
+
+    return _CustomAllReduceIPC().module
 
 
 def build_custom_all_gather_module(
@@ -342,6 +517,13 @@ class CustomAllReduce:
         self.rank = rank
         self.full_nvlink = bool(full_nvlink)
         self._exe_cache = {}
+        # IPC mapping state (route B):
+        # - `_ipc_ptrs[r]` is a device pointer (int) to rank r's buffer (base+offset)
+        # - `_ipc_bases[r]` is the IPC base pointer to close (None for self rank / unopened)
+        self._ipc_ptrs = None
+        self._ipc_bases = None
+        self._ipc_N = None
+        self._ipc_dtype_str = None
 
     def _dtype_str(self, t):
         # Avoid importing torch in kernels/ by duck-typing.
@@ -367,6 +549,8 @@ class CustomAllReduce:
             return exe
         if op == "all_reduce":
             m = build_custom_all_reduce_module(N, dtype_str=dtype_str, world_size=world_size)
+        elif op == "all_reduce_ipc":
+            m = build_custom_all_reduce_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
         elif op == "all_gather":
             m = build_custom_all_gather_module(N, dtype_str=dtype_str, world_size=world_size)
         else:
@@ -379,6 +563,27 @@ class CustomAllReduce:
         _ = open_fp8_quant  # not implemented in this FlyDSL demo
         if not _is_weak_contiguous(out):
             raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
+
+        # IPC fast path: world_size>1 and we have opened peer pointers.
+        if self.world_size > 1 and self._ipc_ptrs is not None:
+            # Expect `inp` to be the local rank buffer (for API parity); but we don't
+            # need it other than for shape/dtype validation.
+            dtype_str = self._dtype_str(out)
+            if self._ipc_dtype_str is not None and dtype_str != self._ipc_dtype_str:
+                raise ValueError("IPC buffer dtype mismatch vs registered buffer")
+            N = int(out.numel())
+            if self._ipc_N is not None and int(N) != int(self._ipc_N):
+                raise ValueError("IPC buffer length mismatch vs registered buffer")
+            if dtype_str == "bf16":
+                raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+            pack_elems = _pack_elems(dtype_str)
+            if int(N) % pack_elems != 0:
+                raise ValueError(f"custom allreduce requires input length to be multiple of {pack_elems}")
+
+            exe = self._compile(op="all_reduce_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
+            # Pass peer device pointers as raw ints.
+            exe(*self._ipc_ptrs[:8], out)
+            return
 
         # Packed mode:
         # - list/tuple of rank tensors, or
@@ -482,12 +687,75 @@ class CustomAllReduce:
         self.all_gather_reg(reg_buffer.view_as(inp), out)
 
     def dispose(self):
+        # Close any opened IPC mappings.
+        try:
+            if self._ipc_bases is not None:
+                from flydsl.runtime import ipc as _ipc
+
+                for b in self._ipc_bases:
+                    if b is None:
+                        continue
+                    _ipc.close_ipc_handle(int(b))
+        finally:
+            self._ipc_ptrs = None
+            self._ipc_bases = None
+            self._ipc_N = None
+            self._ipc_dtype_str = None
         self._exe_cache.clear()
 
     # The following APIs exist in the C++ extension for IPC / graph capture integration.
     # We keep them as explicit stubs to make the limitation clear.
     def register_buffer(self, t, handles, offsets):
-        raise NotImplementedError("register_buffer requires IPC runtime; not available in FlyDSL demo")
+        # Route B: open IPC handles for peer buffers and cache device pointers.
+        # `t` is the local rank's tensor buffer that peers will read from.
+        from flydsl.runtime import ipc as _ipc
+
+        if self.world_size <= 1:
+            raise ValueError("register_buffer is only meaningful for world_size>1")
+        if len(handles) != self.world_size or len(offsets) != self.world_size:
+            raise ValueError("handles/offsets length must equal world_size")
+        if not _is_weak_contiguous(t):
+            raise ValueError("registered buffer must be weak-contiguous")
+
+        dtype_str = self._dtype_str(t)
+        if dtype_str == "bf16":
+            raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
+        N = int(t.numel())
+        pack_elems = _pack_elems(dtype_str)
+        if N % pack_elems != 0:
+            raise ValueError(f"custom allreduce requires input length to be multiple of {pack_elems}")
+
+        # Close any previous mappings first.
+        self.dispose()
+
+        ptrs = [None for _ in range(self.world_size)]
+        bases = [None for _ in range(self.world_size)]
+
+        # Local rank pointer.
+        ptrs[self.rank] = int(t.data_ptr())
+
+        for r in range(self.world_size):
+            if r == self.rank:
+                continue
+            h = handles[r]
+            if hasattr(h, "detach") and hasattr(h, "cpu"):
+                hb = bytes(h.detach().cpu().numpy().tobytes())
+            else:
+                hb = bytes(h)
+            base_ptr = _ipc.open_ipc_handle(hb)
+            bases[r] = int(base_ptr)
+            ptrs[r] = int(base_ptr) + int(offsets[r])
+
+        # Kernel signature is fixed to 8 ptr args (In0..In7). Pad by repeating rank0 ptr.
+        pad_ptr = int(ptrs[0])
+        ptrs8 = [pad_ptr] * 8
+        for i in range(min(self.world_size, 8)):
+            ptrs8[i] = int(ptrs[i])
+
+        self._ipc_ptrs = [int(p) for p in ptrs8]
+        self._ipc_bases = bases
+        self._ipc_N = N
+        self._ipc_dtype_str = dtype_str
 
     def get_graph_buffer_ipc_meta(self):
         raise NotImplementedError("graph buffer IPC meta is not available in FlyDSL demo")
@@ -499,7 +767,6 @@ class CustomAllReduce:
 def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool):
     # Validate basic contract (match the C++ checks), but we don't consume IPC handles here.
     _ = meta
-    _ = rank_data
     world_size = len(offsets)
     if world_size > 8:
         raise ValueError("world size > 8 is not supported")
@@ -509,7 +776,14 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
         raise ValueError("handles length should equal to offsets length")
     if rank < 0 or rank >= world_size:
         raise ValueError("invalid rank passed in")
-    return CustomAllReduce(world_size=world_size, rank=rank, full_nvlink=full_nvlink)
+    fa = CustomAllReduce(world_size=world_size, rank=rank, full_nvlink=full_nvlink)
+    # If rank_data is a CUDA tensor, treat it as the registered buffer and open IPC handles.
+    try:
+        if hasattr(rank_data, "is_cuda") and bool(rank_data.is_cuda):
+            fa.register_buffer(rank_data, handles, offsets)
+    except Exception:
+        pass
+    return fa
 
 
 # ---- Optional free-function wrappers ----
