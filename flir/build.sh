@@ -21,15 +21,25 @@ fi
 
 # Set up environment
 if [ -z "$MLIR_PATH" ]; then
-    # Default path based on build_llvm.sh
-    DEFAULT_MLIR_PATH="${REPO_ROOT}/llvm-project/buildmlir"
-    if [ -d "$DEFAULT_MLIR_PATH" ]; then
-        echo "MLIR_PATH not set. Using default: $DEFAULT_MLIR_PATH"
-        export MLIR_PATH="$DEFAULT_MLIR_PATH"
-    else
-        echo "Error: MLIR_PATH not set and default location ($DEFAULT_MLIR_PATH) not found."
-        echo "Please run bash scripts/build_llvm.sh from the repo root first, or set MLIR_PATH."
-        exit 1
+    # Prefer packaged install prefix if present (created by scripts/build_llvm.sh).
+    candidates=(
+      "${REPO_ROOT}/llvm-project/mlir_install"
+    )
+    for p in "${candidates[@]}"; do
+      if [ -d "${p}/lib/cmake/mlir" ]; then
+        echo "MLIR_PATH not set. Using: ${p}"
+        export MLIR_PATH="${p}"
+        break
+      fi
+    done
+    if [ -z "${MLIR_PATH:-}" ]; then
+      echo "Error: MLIR_PATH not set and no default MLIR install/build dir found." >&2
+      echo "Tried:" >&2
+      for p in "${candidates[@]}"; do
+        echo "  - ${p}" >&2
+      done
+      echo "Please run: bash scripts/build_llvm.sh (which can package an install prefix), or set MLIR_PATH." >&2
+      exit 1
     fi
 fi
 
