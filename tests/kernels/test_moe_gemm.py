@@ -1029,8 +1029,6 @@ def test_moe_gemm_2stage(
     # outputs in CK paths for large (model_dim, inter_dim). Use a fan-in style init by default to keep
     # activations O(1) and avoid inf/nan (similar motivation to typical Transformer init).
     #
-    # `init_scale` is an extra global multiplier (keep at 1.0 unless you intentionally want larger/smaller
-    # activations).
     import math
 
     s = float(init_scale)
@@ -1168,9 +1166,8 @@ if __name__ == "__main__":
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=5, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=2, help="Benchmark warmup iters")
-    parser.add_argument("--init_scale", type=float, default=1.0, help="Extra scale applied on top of fan-in init for random x/w (use >1.0 only if you want to stress overflow).")
+    parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
 
     args = parser.parse_args()
 
@@ -1203,7 +1200,6 @@ if __name__ == "__main__":
             num_warmup=int(args.num_warmup),
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
-            init_scale=float(args.init_scale),
         )
 
 

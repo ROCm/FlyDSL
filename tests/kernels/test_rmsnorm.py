@@ -53,8 +53,8 @@ from kernels.rmsnorm_kernel import (
     BLOCK_THREADS,
 )
 
-WARMUP_ITERS = 10
-BENCH_ITERS = 100
+WARMUP_ITERS = 5
+BENCH_ITERS = 20
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
@@ -119,7 +119,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     # Bandwidth estimate: read input + read gamma + write output
     elem_bytes = 4 if dtype == "f32" else 2
-    total_bytes = 3 * M * N * elem_bytes
+    total_bytes = 2 * M * N * elem_bytes
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
 
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
@@ -134,10 +134,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"Max absolute error: {error:.2e} (atol={atol})")
 
     if error < atol:
-        print("✅ PASSED")
+        print("PASSED")
         ok = True
     else:
-        print("❌ FAILED")
+        print("FAILED")
         print("First row Expected:")
         print(expected[0, :5])
         print("First row Actual:")

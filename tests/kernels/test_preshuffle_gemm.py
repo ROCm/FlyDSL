@@ -51,7 +51,10 @@ except ImportError:
     HAS_AITER = False
 
 
-RUN_AITER_BENCH = os.environ.get("COMPARE_AITER_CK", "1") == "1"
+DEFAULT_LDS_STAGE = 2
+DEFAULT_BENCH_ITERS = 20
+DEFAULT_BENCH_WARMUP = 3
+DEFAULT_RUN_AITER_BENCH = True
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -74,23 +77,37 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
 
 @pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k", [(16, 10240, 8192, 16, 64, 512), (5120, 5120, 8320, 64, 256, 128), (9728, 8192, 8320, 64, 256, 128)]
+    "M, N, K, tile_m, tile_n, tile_k", 
+    [
+        (16, 5120, 8192, 16, 64, 512), 
+        (5120, 5120, 8320, 64, 256, 128), 
+        (9728, 8192, 8320, 128, 128, 128)
+    ]
 )
-def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
+def test_mfma_a8_flir_preshuffle(
+    in_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    lds_stage: int = DEFAULT_LDS_STAGE,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+):
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
     )
     print("=" * 80)
 
-    # Select LDS staging via env var:
-    #   - FLIR_PRESHUFFLE_GEMM_LDS_STAGE=2 : ping-pong LDS (2 buffers)  [default]
-    #   - FLIR_PRESHUFFLE_GEMM_LDS_STAGE=1 : single LDS buffer (CK intrawave bpreshuffle v1 spirit)
-    lds_stage = int(os.environ.get("FLIR_PRESHUFFLE_GEMM_LDS_STAGE", '2'))
-
+    lds_stage = int(lds_stage)
     if lds_stage not in (1, 2):
         raise ValueError(
-            f"FLIR_PRESHUFFLE_GEMM_LDS_STAGE must be 1 or 2, got {lds_stage!r}"
+            f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
     exe = compile_preshuffle_gemm_a8(
         M=M,
@@ -176,8 +193,8 @@ def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
         exe(c, a, b, sa, sb, M, N, K)
 
     # `run_perftest` requires num_iters > 1.
-    bench_iters = max(2, int(os.environ.get("flydsl_BENCH_ITERS", "20")))
-    bench_warmup = int(os.environ.get("flydsl_BENCH_WARMUP", "3"))
+    bench_iters = max(2, int(bench_iters))
+    bench_warmup = int(bench_warmup)
     _, us = run_perftest(
         launch_kernel,
         c_out_raw,
@@ -199,7 +216,7 @@ def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
-    if HAS_AITER and RUN_AITER_BENCH and (not is_int4):
+    if HAS_AITER and bool(run_aiter_bench) and (not is_int4):
         print("-" * 40)
         print("Running Aiter Benchmark...")
         try:
@@ -223,9 +240,9 @@ def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
             msg = str(e).splitlines()[0] if str(e) else repr(e)
             print(f"Skipping Aiter benchmark (not runnable here): {msg}")
             print("-" * 40)
-    elif HAS_AITER and not RUN_AITER_BENCH:
+    elif HAS_AITER and (not bool(run_aiter_bench)):
         print("-" * 40)
-        print("Skipping Aiter benchmark (set flydsl_RUN_AITER_BENCH=1 to enable)")
+        print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
 
 
@@ -243,6 +260,38 @@ if __name__ == "__main__":
     parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
     parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
     parser.add_argument("--tile_k", type=int, default=512, help="Tile K")
+    # Explicit CLI knobs (no env vars).
+    parser.add_argument(
+        "--lds_stage",
+        type=int,
+        default=DEFAULT_LDS_STAGE,
+        choices=[1, 2],
+        help="LDS staging: 2=ping-pong (default), 1=single.",
+    )
+    parser.add_argument(
+        "--num_iters",
+        type=int,
+        default=DEFAULT_BENCH_ITERS,
+        help="Benchmark iters (>=2).",
+    )
+    parser.add_argument(
+        "--num_warmup",
+        type=int,
+        default=DEFAULT_BENCH_WARMUP,
+        help="Benchmark warmup iters.",
+    )
+    parser.add_argument(
+        "--run_aiter_bench",
+        action="store_true",
+        default=DEFAULT_RUN_AITER_BENCH,
+        help="Run aiter comparison benchmark (fp8/int8 only). Default: enabled.",
+    )
+    parser.add_argument(
+        "--no_aiter_bench",
+        action="store_false",
+        dest="run_aiter_bench",
+        help="Disable aiter benchmark.",
+    )
     
     args = parser.parse_args()
     
@@ -254,6 +303,10 @@ if __name__ == "__main__":
         K=args.K, 
         tile_m=args.tile_m, 
         tile_n=args.tile_n, 
-        tile_k=args.tile_k
+        tile_k=args.tile_k,
+        lds_stage=args.lds_stage,
+        bench_iters=args.num_iters,
+        bench_warmup=args.num_warmup,
+        run_aiter_bench=bool(args.run_aiter_bench),
     )
 

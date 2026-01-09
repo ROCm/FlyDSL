@@ -50,8 +50,8 @@ def next_power_of_2(x: int) -> int:
 
 from kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
 
-WARMUP_ITERS = 10
-BENCH_ITERS = 100
+WARMUP_ITERS = 5
+BENCH_ITERS = 20
 
 def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
@@ -60,7 +60,7 @@ def run_test(M, N, dtype_str):
         m = build_softmax_module(M, N, dtype_str)
         exe = flydsl.compile(m)
     except Exception as e:
-        print(f"❌ Compilation Failed: {e}")
+        print(f"Compilation Failed: {e}")
         import traceback
         traceback.print_exc()
         return False, None
@@ -117,10 +117,10 @@ def run_test(M, N, dtype_str):
     print(f"  Max Absolute Error: {max_err:.2e} (atol={atol})")
     
     if max_err < atol:
-        print("  ✅ Passed")
+        print("  Passed")
         return True, flir_gpu_us
     else:
-        print("  ❌ Failed")
+        print("  Failed")
         return False, flir_gpu_us
 
 def test_all():

@@ -1020,10 +1020,10 @@ if __name__ == "__main__":
             passed += 1
             print(f"  {test_name}: PASSED\n")
         except AssertionError as e:
-            print(f"  ❌ {test_name}: FAILED - {e}\n")
+            print(f"  {test_name}: FAILED - {e}\n")
             failed += 1
         except Exception as e:
-            print(f"  ❌ {test_name}: ERROR - {e}")
+            print(f"  {test_name}: ERROR - {e}")
             traceback.print_exc()
             failed += 1
     
@@ -1035,6 +1035,6 @@ if __name__ == "__main__":
         print("All tests PASSED!")
         sys.exit(0)
     else:
-        print(f"❌ {failed} test(s) FAILED!")
+        print(f"{failed} test(s) FAILED!")
         sys.exit(1)
 
