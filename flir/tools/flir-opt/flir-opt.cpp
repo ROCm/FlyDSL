@@ -6,6 +6,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/FileUtilities.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -34,6 +35,7 @@ int main(int argc, char **argv) {
   registry.insert<mlir::arith::ArithDialect>();
   registry.insert<mlir::memref::MemRefDialect>();
   registry.insert<mlir::gpu::GPUDialect>();
+  registry.insert<mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::scf::SCFDialect>();
   registry.insert<mlir::ROCDL::ROCDLDialect>();
   

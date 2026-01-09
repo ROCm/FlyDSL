@@ -874,7 +874,7 @@ def test_complement_rank_2_error():
     
     ctx = RAIIMLIRContextModule()
     
-    @func.FuncOp.from_py_func()
+    @flir.jit()
     def run_complement_rank_2_error():
         # Create tiler layout: (3, 2) with stride (1, 2)
         # This is Rank-2, so it will hit your C++ logic.
@@ -908,9 +908,9 @@ def test_complement_rank_2_error():
         comp_size = flir.size(comp_layout)
         
         vals = []
-        vals.append(unwrap(val_shape))
-        vals.append(unwrap(val_stride))
-        vals.append(unwrap(comp_size))
+        vals.append(val_shape)
+        vals.append(val_stride)
+        vals.append(comp_size)
         
         # return vals
         return
@@ -944,7 +944,7 @@ def test_complement_rank_1_error():
 
     ctx = RAIIMLIRContextModule()
 
-    @func.FuncOp.from_py_func()
+    @flir.jit()
     def run_complement_rank_1_error():
         c3 = Index(3)
         c0 = Index(0)
@@ -983,7 +983,7 @@ def test_complement_simple_rank_2():
 
     ctx = RAIIMLIRContextModule()
 
-    @func.FuncOp.from_py_func()
+    @flir.jit()
     def run_complement_simple_rank_2():
         c3 = Index(3)
         c2 = Index(2)
@@ -997,7 +997,7 @@ def test_complement_simple_rank_2():
         comp = flir.complement(tiler_layout, c12)
         # Return something to keep IR non-empty; no value checks.
         sz = flir.size(comp)
-        return [unwrap(sz)]
+        return [sz]
 
     # Must NOT throw.
     run_lowering_test(ctx, "complement_rank_2_ok")
@@ -1014,7 +1014,7 @@ def test_complement_rank_2_dynamic_stride_error():
     ctx = RAIIMLIRContextModule()
     index_type = IndexType.get()
 
-    @func.FuncOp.from_py_func(index_type)
+    @flir.jit(index_type)
     def run_complement_rank_2_dynamic_stride_error(runtime_stride0):
         c3 = Index(3)
         c2 = Index(2)
@@ -1056,7 +1056,7 @@ def test_complement_simple_rank_1():
     
     ctx = RAIIMLIRContextModule()
     
-    @func.FuncOp.from_py_func()
+    @flir.jit()
     def run_complement_simple_rank_1():
         # Create tiler layout: 3:1
         c3 = Index(3)
