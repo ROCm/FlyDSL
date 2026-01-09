@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Complete tests for Flir layout algebra operations.
-Exactly following the layout algebra notebook examples from the CUTLASS tree.
+These tests follow a reference notebook for layout-algebra behavior.
 
 Each test corresponds to a specific cell in the notebook.
 """
@@ -849,7 +849,217 @@ def test_zipped_tiled_flat_product():
                             expected_vals=[(2, 5, 3, 4), (5, 1, 10, 30)])
 
 
-def test_complement_simple():
+def test_complement_rank_2_error():
+    """Rank-2 Non-injective complement MUST fail during lowering (compile-time).
+
+    This test intentionally builds an overlapping (non-injective) layout:
+      tiler = Layout((3,2):(1,2))
+
+    Intuition:
+      - Mode0 (3:1) covers indices {0,1,2}
+      - Mode1 (2:2) covers indices {0,2}
+      => overlap at index 2, so layout is non-injective.
+
+    During complement lowering, the algorithm computes a gap:
+      currStride starts at 1
+      - after mode0: currStride = 1 * 3 = 3
+      - mode1: gap = 2 / 3 = 0  (integer division)  => invalid
+
+    Expected behavior:
+      - Lowering should ERROR with "Non-injective Layout detected in complement."
+      - If lowering does NOT error, this test must FAIL.
+    """
+    print("\n=== Test: Complement Rank-2 Non-injective (must error) ===")
+    print("complement(Layout((3,2):(1,2)), 12) -> ERROR (non-injective)")
+    
+    ctx = RAIIMLIRContextModule()
+    
+    @flir.jit()
+    def run_complement_rank_2_error():
+        # Create tiler layout: (3, 2) with stride (1, 2)
+        # This is Rank-2, so it will hit your C++ logic.
+        # Stride 1 < 2, so order is Mode 0 then Mode 1.
+        # Mode 0 gap = 1/1 = 1.
+        # Mode 1 gap = 2/3 = 0 -> ERROR!
+        c3 = Index(3)
+        c2 = Index(2)
+        c1 = Index(1)
+        c12 = Index(12)
+        
+        tiler_shape = flir.make_shape(c3, c2)
+        tiler_stride = flir.make_stride(c1, c2)
+        # tiler_shape = flir.make_shape(c3)
+        # tiler_stride = flir.make_stride(c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
+        
+        # Compute complement
+        comp_layout = flir.complement(tiler_layout, c12)
+        
+        # Get values to verify: expected Layout(4:3)
+        # 1. Shape should be 4
+        comp_shape = flir.get_shape(comp_layout)
+        val_shape = flir.get(comp_shape, Index(0))
+        
+        # 2. Stride should be 3
+        comp_stride = flir.get_stride(comp_layout)
+        val_stride = flir.get(comp_stride, Index(0))
+
+        # 3. Size should be 4
+        comp_size = flir.size(comp_layout)
+        
+        vals = []
+        vals.append(val_shape)
+        vals.append(val_stride)
+        vals.append(comp_size)
+        
+        # return vals
+        return
+    
+    try:
+        run_lowering_test(ctx, "complement_rank_2_error")
+    except Exception as e:
+        # PASS: compilation/lowering failed as expected.
+        msg = str(e)
+        assert "Non-injective Layout detected in complement" in msg, (
+            "Expected non-injective complement error message, got:\n" + msg
+        )
+        return
+
+    # If we got here, lowering succeeded => FAIL.
+    raise AssertionError("Expected complement_rank_2_error to fail during lowering, but it succeeded.")
+
+
+def test_complement_rank_1_error():
+    """Rank-1 Non-injective complement MUST fail during lowering (compile-time).
+
+    This test intentionally builds an overlapping (non-injective) 1D layout:
+      tiler = Layout(3:0)
+
+    Since stride=0, indices {0,1,2} all map to the same linear index 0.
+    This must be rejected by complement lowering with:
+      "Non-injective Layout detected in complement."
+    """
+    print("\n=== Test: Complement Rank-1 Non-injective (must error) ===")
+    print("complement(Layout(3:0), 12) -> ERROR (non-injective)")
+
+    ctx = RAIIMLIRContextModule()
+
+    @flir.jit()
+    def run_complement_rank_1_error():
+        c3 = Index(3)
+        c0 = Index(0)
+        c12 = Index(12)
+
+        tiler_shape = flir.make_shape(c3)
+        tiler_stride = flir.make_stride(c0)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
+
+        _ = flir.complement(tiler_layout, c12)
+        return
+
+    try:
+        run_lowering_test(ctx, "complement_rank_1_error")
+    except Exception as e:
+        msg = str(e)
+        assert "Non-injective Layout detected in complement" in msg, (
+            "Expected non-injective complement error message, got:\n" + msg
+        )
+        return
+
+    raise AssertionError("Expected complement_rank_1_error to fail during lowering, but it succeeded.")
+
+
+def test_complement_simple_rank_2():
+    """Test complement operation: complement((3,2):(2,1), 12) should give (2):(6)
+    
+    behavior:
+    - Input: tiler = Layout((3,2):(2,1)), target_size = 12
+    - complement finds the "rest" stride: size(tiler) = 3 * 2 = 6
+    - complement finds the "rest" modes: 12 / 6 = 2, stride = 6
+    - Result: Layout(2:6)
+    """
+    print("\n=== Test: Complement Rank-2 Injective ===")
+    print("complement(Layout((3,2):(2,1)), 12) -> Layout(2:6)")
+
+    ctx = RAIIMLIRContextModule()
+
+    @flir.jit()
+    def run_complement_simple_rank_2():
+        c3 = Index(3)
+        c2 = Index(2)
+        c1 = Index(1)
+        c12 = Index(12)
+
+        tiler_shape = flir.make_shape(c3, c2)
+        tiler_stride = flir.make_stride(c2, c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
+
+        comp = flir.complement(tiler_layout, c12)
+        
+        # Get values to verify: expected Layout(2:6)
+        # 1. Shape should be 2
+        comp_shape = flir.get_shape(comp)
+        val_shape = flir.get(comp_shape, Index(0))
+        
+        # 2. Stride should be 6
+        comp_stride = flir.get_stride(comp)
+        val_stride = flir.get(comp_stride, Index(0))
+        
+        # 3. Size should be 12
+        comp_size = flir.size(comp)
+        
+        vals = []
+        vals.append(val_shape)
+        vals.append(val_stride)
+        vals.append(comp_size)
+        
+        return vals
+
+    # Must NOT throw.
+    run_lowering_test(ctx, "complement_rank_2_ok", expected_vals=[2, 6, 2])
+
+
+def test_complement_rank_2_dynamic_stride_error():
+    """Rank-2 complement with dynamic stride MUST fail during lowering.
+
+    For rank>1 complements, stride must be compile-time static:
+      "Dynamic-stride complement only for rank-1 layouts"
+    """
+    print("\n=== Test: Complement Rank-2 Dynamic Stride (must error) ===")
+
+    ctx = RAIIMLIRContextModule()
+    index_type = IndexType.get()
+
+    @flir.jit(index_type)
+    def run_complement_rank_2_dynamic_stride_error(runtime_stride0):
+        c3 = Index(3)
+        c2 = Index(2)
+        c1 = Index(1)
+        c12 = Index(12)
+
+        tiler_shape = flir.make_shape(c3, c2)
+        # Make stride dynamic in rank-2.
+        tiler_stride = flir.make_stride(runtime_stride0, c1)
+        tiler_layout = flir.make_layout(tiler_shape, tiler_stride)
+
+        _ = flir.complement(tiler_layout, c12)
+        return
+
+    try:
+        run_lowering_test(ctx, "complement_rank_2_dynamic_stride_error")
+    except Exception as e:
+        msg = str(e)
+        assert "Dynamic-stride complement only for rank-1 layouts" in msg, (
+            "Expected dynamic-stride complement error message, got:\n" + msg
+        )
+        return
+
+    raise AssertionError(
+        "Expected complement_rank_2_dynamic_stride_error to fail during lowering, but it succeeded."
+    )
+
+
+def test_complement_simple_rank_1():
     """Test complement operation: complement(3:1, 12) should give 4:3
     
     behavior:
@@ -862,8 +1072,8 @@ def test_complement_simple():
     
     ctx = RAIIMLIRContextModule()
     
-    @flir.jit
-    def run_complement_simple():
+    @flir.jit()
+    def run_complement_simple_rank_1():
         # Create tiler layout: 3:1
         c3 = Index(3)
         c1 = Index(1)
@@ -999,7 +1209,11 @@ if __name__ == "__main__":
         ("Composition Static vs Dynamic", test_composition_static_vs_dynamic),
         ("Composition By-Mode", test_composition_bymode),
         ("Composition with Tuple", test_composition_with_tuple),
-        ("Complement Simple", test_complement_simple),
+        ("Complement Rank-2 Non-injective (must error)", test_complement_rank_2_error),
+        ("Complement Rank-1 Non-injective (must error)", test_complement_rank_1_error),
+        ("Complement Rank-2 Injective (must succeed)", test_complement_simple_rank_2),
+        ("Complement Rank-2 Dynamic Stride (must error)", test_complement_rank_2_dynamic_stride_error),
+        ("Complement Simple Rank-1", test_complement_simple_rank_1),
         ("Complement with Divide", test_complement_with_divide),
         ("Logical Divide 1D", test_logical_divide_1d),
         ("Logical Divide 2D", test_logical_divide_2d),

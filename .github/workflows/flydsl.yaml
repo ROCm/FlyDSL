@@ -71,9 +71,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          # Key includes LLVM commit and build scripts/workflow.
+          # Key includes LLVM commit and hashes of build scripts/workflow.
           # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl-test/scripts/build_llvm.sh', 'flydsl-test/flir/CMakeLists.txt', '.github/workflows/flydsl.yaml') }}
+          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl-test/scripts/build_llvm.sh', 'flydsl-test/flir/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -91,6 +91,9 @@ jobs:
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
           docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
           ls -lh ./mlir_install.tgz || true
+
+      - name: Build FLIR (uses MLIR install prefix)
+        run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && ./flir/build.sh"
 
       - name: MLIR tarball artifact status

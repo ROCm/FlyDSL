@@ -16,6 +16,7 @@ add_mlir_library(FlirTransforms
   MLIRFuncDialect
   MLIRMemRefDialect
   MLIRSCFDialect
+  MLIRControlFlowDialect
   MLIRGPUDialect
   MLIRVectorDialect
 )
