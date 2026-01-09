@@ -2620,6 +2620,11 @@ struct FlirToStandardPass
     : public impl::FlirToStandardPassBase<FlirToStandardPass> {
   
   using impl::FlirToStandardPassBase<FlirToStandardPass>::FlirToStandardPassBase;
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    // The lowering may materialize `cf.assert` for runtime checks.
+    registry.insert<mlir::cf::ControlFlowDialect>();
+  }
   
   void runOnOperation() override {
     RewritePatternSet patterns(&getContext());
