@@ -79,7 +79,7 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
 
-      - name: Show logs
+      - name: Show tests logs
         if: failure()
         run: |
           docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
@@ -91,6 +91,22 @@ jobs:
             echo "logs.tgz not found; skipping log extraction"
           fi
 
+      - name: Run benchmarks
+        run: |
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_benchmark.sh"
+
+      - name: Show benchmarks logs
+        if: failure()
+        run: |
+          docker exec flydsl_test bash -c 'cd /tmp/flir_bench && tar czf /tmp/flir_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/flir_bench/logs.tgz . || true
+          if [ -f logs.tgz ]; then
+            tar -xzf logs.tgz || true
+            cat *.log || true
+          else
+            echo "logs.tgz not found; skipping log extraction"
+          fi
+      
       - name: Clean up
         if: always()
         run: |

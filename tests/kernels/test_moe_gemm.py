@@ -1143,7 +1143,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--in_dtype",
         type=str,
-        default="all",
+        default="fp8",
         choices=["fp8", "int8", "int4", "all"],
         help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
         "int4 means W4A8: A int8, W packed int4.",
@@ -1184,9 +1184,7 @@ if __name__ == "__main__":
     )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    # dtypes_to_run = ["fp8", "int8", "int4"] 
-    dtypes_to_run = ["fp8"] 
-    for dt in dtypes_to_run:
+    for dt in args.in_dtype.split(","):
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),

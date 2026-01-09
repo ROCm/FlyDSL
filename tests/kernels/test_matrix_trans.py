@@ -562,7 +562,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                 vec_val = vector.from_elements(vec_type, vals)
                 s_coord = flir.make_coord(row_off, col_off)
                 s_idx = flir.crd2idx(s_coord, smem_layout)
-                vector.store(vec_val, smem, [v(s_idx)])
+                vector.store(vec_val, smem, [s_idx])
 
         gpu.barrier()
 
@@ -593,7 +593,7 @@ def benchmark_matrix_transpose_flir(TILE_SIZE=4, BLOCK_TILE=32):
                 vec_val = vector.from_elements(vec_type, vals)
                 b_coord = flir.make_coord(base_row_b, base_col_b)
                 g_idx_b = flir.crd2idx(b_coord, b_layout)
-                vector.store(vec_val, B, [v(g_idx_b)])
+                vector.store(vec_val, B, [g_idx_b])
 
     _matrix_transpose_flir_impl = lower_range_for_loops(_matrix_transpose_flir_impl)
 

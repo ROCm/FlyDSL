@@ -7,7 +7,8 @@ performance. Only test-only helpers/imports are removed.
 
 import os
 
-from flydsl.dialects.ext import flir, arith
+from flydsl.dialects.ext import flir, arith, gpu
+from _mlir.dialects import vector
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -90,6 +91,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
         ):
             row = flir.const_index(flir.block_idx("x"))
             tid = flir.const_index(flir.thread_idx("x"))
+            c_vecw = flir.const_index(VEC_WIDTH)
 
             elem_type = _state["elem_type"]
             compute_type = _state["compute_type"]
@@ -159,14 +161,16 @@ def build_softmax_module(M, N, dtype_str="f32"):
             step = BLOCK_SIZE * VEC_WIDTH
 
             # Base offset for this thread
-            thread_offset_base = tid * VEC_WIDTH
+            # NOTE: `flir.const_index` returns a raw MLIR Value (OpResult). Use ArithValue wrapper
+            # so Python operators lower to MLIR arith ops.
+            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
 
             # Loop range(0, N, step)
             for base_idx_int in range_constexpr(0, N, step):
                 # Current global index base for this thread
                 # global_idx = base_idx_int + thread_offset_base
                 c_base = arith.index(base_idx_int)
-                curr_idx = c_base + thread_offset_base
+                curr_idx = (c_base + thread_offset_base).value
 
                 # Check bounds
                 # If fully within N, vector load We can check statically for the loop unroll? Since N is compile time constant, we check specific offsets. However, thread_id is dynamic. We rely on logic: If (base_idx_int + BLOCK_SIZE*VEC_WIDTH) <= N, then ALL threads are safe? No. tid=255 accesses last chunk. Safe logic: if (base_idx_int + (BLOCK_SIZE-1)*WIDTH + WIDTH) <= N.
@@ -190,7 +194,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     vec_val_e = vector.load(vec_type_e, frgA.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                     if dtype_str == "bf16":
                         vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        vec_val = flir.arith.extf(vec_type_c, vec_val_e)
+                        vec_val = flir.arith.extf(vec_type_c, arith.as_value(vec_val_e))
                     else:
                         vec_val = vec_val_e
                     row_buffer.append(vec_val)
@@ -199,7 +203,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     # Scalar tail handling with validity mask
                     for k in range_constexpr(VEC_WIDTH):
                         c_k = arith.index(k)
-                        idx_k = curr_idx + c_k
+                        idx_k = (arith.ArithValue(curr_idx) + c_k).value
 
                         c_N = arith.index(N)
                         is_valid = arith.ult(idx_k, c_N)
@@ -262,7 +266,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     vec_val = item
                     if g_max_splat_vec is None:
                         vec_type = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        g_max_splat_vec = flir.vector.splat(vec_type, global_max)
+                        g_max_splat_vec = flir.vector.splat(vec_type, arith.as_value(global_max))
                         log2e_splat = flir.vector.splat(vec_type, arith.as_value(c_log2e))
 
                     sub = vec_val - g_max_splat_vec
@@ -287,11 +291,11 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
             # Reconstruct indices for store
             buf_idx = 0
-            thread_offset_base = tid * VEC_WIDTH
+            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
 
             for base_idx_int in range_constexpr(0, N, step):
                 c_base = arith.index(base_idx_int)
-                curr_idx = c_base + thread_offset_base
+                curr_idx = (c_base + thread_offset_base).value
 
                 is_safe_vector = (base_idx_int + (BLOCK_SIZE - 1) * VEC_WIDTH + VEC_WIDTH) <= N
 
@@ -301,7 +305,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
 
                     if inv_sum_splat_vec is None:
                         vec_type = ir.VectorType.get([VEC_WIDTH], compute_type)
-                        inv_sum_splat_vec = vector.splat(vec_type, inv_sum)
+                        inv_sum_splat_vec = vector.splat(vec_type, arith.as_value(inv_sum))
 
                     # Prefer fast-math for normalization multiply
                     norm_vec = arith.as_value(vec_exp * inv_sum_splat_vec)
@@ -343,7 +347,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         blkC = gC[(row, tile_i)]
                         thrC = thr_copy_C.partition_S(blkC)
                         frgC = flir.make_fragment_like(thrC, elem_type)
-                        vector.store(out_bf16, frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                        vector.store(arith.as_value(out_bf16), frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                         flir.copy(
                             tiled_copy_C,
                             frgC,
@@ -359,7 +363,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         frgC = flir.make_fragment_like(thrC, elem_type)
                         vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                         norm_e = norm_vec if dtype_str != "bf16" else flir.arith.truncf(vec_type_e, norm_vec)
-                        vector.store(norm_e, frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                        vector.store(arith.as_value(norm_e), frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                         flir.copy(
                             tiled_copy_C,
                             frgC,
@@ -381,7 +385,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                                 norm_val = arith.as_value(arith.trunc_f(elem_type, norm_val))
 
                             c_k = arith.index(k)
-                            idx_k = curr_idx + c_k
+                            idx_k = (arith.ArithValue(curr_idx) + c_k).value
                             tensor_C[(row, arith.as_value(idx_k))] = norm_val
 
         @flir.jit

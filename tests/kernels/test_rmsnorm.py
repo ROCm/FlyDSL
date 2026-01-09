@@ -14,7 +14,8 @@ import os
 from pathlib import Path
 
 # Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-_repo = Path(__file__).resolve().parents[3]
+# Repo root is two levels above `tests/kernels/`.
+_repo = Path(__file__).resolve().parents[2]
 _embedded = _repo / "build" / "python_packages" / "rocdsl"
 if _embedded.exists():
     os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")

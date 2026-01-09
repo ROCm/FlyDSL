@@ -2638,13 +2638,16 @@ def copy(copy_desc, src, dst,
                         store_indices = _normalize_indices_to_memref(dst_view.memref, vec_dst_idx2, dst_view.strides, loc)
 
                         # Vector Load
-                        vec_val = vector.load(
+                        vec_load_op = vector.load(
                             vec_type,
                             src_view.memref,
                             load_indices,
                             nontemporal=nontemporal,
                             alignment=alignment,
                         )
+                        # MLIR Python bindings may return an Op wrapper; vector.store expects a Value.
+                        vec_val = vec_load_op.result if hasattr(vec_load_op, "result") else vec_load_op
+                        vec_val = _unwrap_value(vec_val)
                         if return_vector and captured_vec["val"] is None:
                             captured_vec["val"] = vec_val
 

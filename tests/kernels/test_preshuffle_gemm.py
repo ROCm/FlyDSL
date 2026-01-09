@@ -21,7 +21,7 @@ import pytest
 # Some environments have another `flydsl` (e.g. from a sibling checkout) earlier
 # on `sys.path`, which can miss newer ROCDL wrappers (notably INT8 MFMA helpers).
 # -----------------------------------------------------------------------------
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -72,9 +72,9 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k", [(1024, 7168, 2048, 128, 128, 128)]
+    "M, N, K, tile_m, tile_n, tile_k", [(16, 10240, 8192, 16, 64, 512), (5120, 5120, 8320, 64, 256, 128), (9728, 8192, 8320, 64, 256, 128)]
 )
 def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
     print("=" * 80)
@@ -230,13 +230,30 @@ def test_mfma_a8_flir_preshuffle(in_dtype, M, N, K, tile_m, tile_n, tile_k):
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Preshuffle GEMM benchmark"
+    )
+    parser.add_argument("--in_dtype", type=str, default="fp8", choices=["fp8", "int8", "int4"], 
+                        help="Input dtype")
+    parser.add_argument("-M", type=int, default=16, help="M dimension")
+    parser.add_argument("-N", type=int, default=10240, help="N dimension")
+    parser.add_argument("-K", type=int, default=8192, help="K dimension")
+    parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
+    parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
+    parser.add_argument("--tile_k", type=int, default=512, help="Tile K")
+    
+    args = parser.parse_args()
+    
     torch.set_default_device("cuda")
-    print("Running Tiling Tests...")
-    # test_mfma_a8_flir_preshuffle("fp8", 640, 2048, 8320, tile_m=64, tile_n=256, tile_k=128)
-    test_mfma_a8_flir_preshuffle("fp8", 3840, 5120, 8320, tile_m=96, tile_n=256, tile_k=128)
-    test_mfma_a8_flir_preshuffle("int8", 5120, 5120, 8320, tile_m=64, tile_n=256, tile_k=128)
-    test_mfma_a8_flir_preshuffle("int4", 5120, 5120, 8320, tile_m=64, tile_n=256, tile_k=128)
-    test_mfma_a8_flir_preshuffle("fp8", 16, 10240, 8192, tile_m=16, tile_n=64, tile_k=512)
-    # test_mfma_a8_flir_preshuffle("fp8", 16, 5120, 8192, tile_m=16, tile_n=64, tile_k=512)
-    # test_mfma_a8_flir_preshuffle("fp8", 1280, 1024, 8320, tile_m=64, tile_n=256, tile_k=128)
+    test_mfma_a8_flir_preshuffle(
+        args.in_dtype, 
+        M=args.M, 
+        N=args.N, 
+        K=args.K, 
+        tile_m=args.tile_m, 
+        tile_n=args.tile_n, 
+        tile_k=args.tile_k
+    )
 

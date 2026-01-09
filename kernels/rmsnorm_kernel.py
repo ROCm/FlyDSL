@@ -71,8 +71,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             compute_type = _state["compute_type"]
 
             zero_idx = flir.const_index(0)
-            n_float = arith.constant(compute_type, float(N))
-            eps = arith.constant(compute_type, EPS)
+            # `arith.constant` API takes value + `type=...` (do not pass type positionally).
+            n_float = arith.constant(float(N), type=compute_type)
+            eps = arith.constant(float(EPS), type=compute_type)
             fm_fast = flir.arith.FastMathFlags.fast
 
             base_ptr = allocator.get_base()
@@ -118,7 +119,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     thread_sumsq_next = thread_sumsq
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
+                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
                         x2 = x * x
                         thread_sumsq_next = thread_sumsq + x2
                     thread_sumsq = thread_sumsq_next
@@ -136,11 +137,11 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
                         g_e = flir.memref.load(Gamma, [arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
-                        g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (g_e))
-                        norm = x * rrms
-                        y = norm * g
-                        y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, (y))
+                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                        g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(g_e))
+                        norm = (arith.ArithValue(x) * rrms).value
+                        y = (arith.ArithValue(norm) * g).value
+                        y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(y))
                         flir.memref.store((y_e), Output, [(row), arith.as_value(idx)])
                 return
 
@@ -156,8 +157,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # Pass0: global -> LDS row cache (1-pass global read)
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = tid * VEC_WIDTH
-                curr_idx = c_base + thread_offset_base
+                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+                curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
@@ -191,8 +192,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = tid * VEC_WIDTH
-                curr_idx = c_base + thread_offset_base
+                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+                curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
@@ -201,8 +202,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         vec_type_e, s_row, [(c0_idx), (curr_idx)], alignment=VEC_ALIGN
                     )
                     vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                    vec = vec_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, (vec_e))
-                    vec2 = vec * vec
+                    vec = vec_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(vec_e))
+                    vec2 = (arith.ArithValue(vec) * vec).value
                     red2 = flir.vector.reduction(compute_type, "add", (vec2), fastmath=fm_fast)
                     thread_sumsq = thread_sumsq + red2
                 else:
@@ -214,9 +215,9 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         if is_valid:
                             v_e = tensor_S[((c0_idx), arith.as_value(idx_k))]
                         else:
-                            v_e = (arith.constant(elem_type, 0.0))
-                        v = (v_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (v_e))
-                        v2 = v * v
+                            v_e = arith.constant(0.0, type=elem_type)
+                        v = (v_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(v_e))
+                        v2 = (arith.ArithValue(v) * v).value
                         thread_sumsq = thread_sumsq + v2
 
             sum_sq = block_reduce_add(thread_sumsq, s_red)
@@ -234,15 +235,15 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             g_pref_e = None
             if N >= BLOCK_THREADS * VEC_WIDTH:
                 c_base0 = flir.const_index(0)
-                thread_offset0 = tid * VEC_WIDTH
-                curr0 = c_base0 + thread_offset0
+                thread_offset0 = (arith.ArithValue(tid) * VEC_WIDTH).value
+                curr0 = (arith.ArithValue(c_base0) + thread_offset0).value
                 vec_type_e0 = ir.VectorType.get([VEC_WIDTH], elem_type)
                 g_pref_e = flir.vector.load(vec_type_e0, Gamma, [arith.as_value(curr0)], alignment=VEC_ALIGN)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = tid * VEC_WIDTH
-                curr_idx = c_base + thread_offset_base
+                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+                curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
@@ -250,7 +251,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     next_base_int = base_idx_int + (BLOCK_THREADS * VEC_WIDTH)
                     if next_base_int < N:
                         c_base_n = flir.const_index(next_base_int)
-                        curr_idx_n = c_base_n + thread_offset_base
+                        curr_idx_n = (arith.ArithValue(c_base_n) + thread_offset_base).value
                         g_next_e = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx_n)], alignment=VEC_ALIGN)
                     else:
                         g_next_e = None
@@ -260,16 +261,16 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     )
                     # Gamma is reused across many blocks: do NOT use nontemporal here.
                     g_e = g_pref_e if g_pref_e is not None else flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx)], alignment=VEC_ALIGN)
-                    x = x_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, (x_e))
-                    g = g_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, (g_e))
-                    norm = x * rrms_splat
-                    y = norm * g
-                    y_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, (y))
+                    x = x_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(x_e))
+                    g = g_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e))
+                    norm = (arith.ArithValue(x) * rrms_splat).value
+                    y = (arith.ArithValue(norm) * g).value
+                    y_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, arith.as_value(y))
                     tile_i = base_idx_int // tile_cols  # python int
                     blkOut = gOut[((row), tile_i)]
                     thrOut = thr_copy_e.partition_S(blkOut)
                     frgOut = flir.make_fragment_like(thrOut, elem_type)
-                    flir.vector.store((y_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                    flir.vector.store(arith.as_value(y_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                     flir.copy(
                         tiled_copy_e,
                         frgOut,
@@ -287,11 +288,11 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         if is_valid:
                             x_e = tensor_S[((c0_idx), arith.as_value(idx_k))]
                             g_e = tensor_Gamma[arith.as_value(idx_k)]
-                            x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
-                            g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (g_e))
-                            norm = x * rrms
-                            y = norm * g
-                            y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, (y))
+                            x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                            g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(g_e))
+                            norm = (arith.ArithValue(x) * rrms).value
+                            y = (arith.ArithValue(norm) * g).value
+                            y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(y))
                             tensor_Out[((row), arith.as_value(idx_k))] = (y_e)
 
         @flir.jit
