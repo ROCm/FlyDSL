@@ -294,6 +294,84 @@ static Value makeFlatStrideTypeMode(ValueRange leafValues, Location loc,
   return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
 }
 
+/// Compute a compact LayoutLeft (col-major) stride from a type-mode ShapeType,
+/// entirely at compile time.
+///
+/// @pre All shape leaves must be compile-time constants (no dynamic `?` leaves).
+///      This is required so the lowering does not introduce runtime arithmetic
+///      for stride construction.
+/// @note We mirror the common compact-stride convention where a size-1 mode
+///       yields a stride-0 leaf (enables filtering/coalescing behavior).
+static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
+                                                         Location loc,
+                                                         PatternRewriter &rewriter,
+                                                         MLIRContext *ctx) {
+  auto shapeTy = llvm::dyn_cast<ShapeType>(shapeVal.getType());
+  if (!shapeTy) {
+    emitError(loc, "Expected flir.shape type for tiler shape.");
+    return Value();
+  }
+
+  auto structure = shapeTy.getStructure();
+  auto shapeDims = shapeTy.getDims();
+
+  // Resolve any dynamic `?` leaves from the defining op operands, but require
+  // that all leaves can be folded to constants at compile time.
+  SmallVector<int64_t> resolvedShapeDims;
+  resolvedShapeDims.reserve(shapeDims.size());
+  SmallVector<Value> dynLeafOperands;
+  if (auto makeShape = shapeVal.getDefiningOp<MakeShapeOp>()) {
+    dynLeafOperands.append(makeShape.getValues().begin(), makeShape.getValues().end());
+  } else if (llvm::any_of(shapeDims, [](int64_t d) { return d == -1; })) {
+    emitError(loc,
+              "local_tile requires a tiler shape whose leaves are compile-time "
+              "constants (either encoded in the type or provided as constant operands "
+              "to flir.make_shape).");
+    return Value();
+  }
+
+  int64_t oi = 0;
+  for (int64_t d : shapeDims) {
+    if (d != -1) {
+      resolvedShapeDims.push_back(d);
+      continue;
+    }
+    if (oi >= (int64_t)dynLeafOperands.size()) {
+      emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
+      return Value();
+    }
+    auto c = tryGetConstIndex(dynLeafOperands[oi++]);
+    if (!c.has_value()) {
+      emitError(loc,
+                "local_tile requires a tiler shape whose dynamic leaves fold to "
+                "compile-time constants.");
+      return Value();
+    }
+    resolvedShapeDims.push_back(*c);
+  }
+  if (oi != (int64_t)dynLeafOperands.size()) {
+    emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
+    return Value();
+  }
+
+  SmallVector<int64_t> strideDims;
+  strideDims.reserve(resolvedShapeDims.size());
+
+  int64_t current = 1;
+  for (int64_t s : resolvedShapeDims) {
+    if (s == 1) {
+      strideDims.push_back(0);
+      // current unchanged
+    } else {
+      strideDims.push_back(current);
+      current *= s;
+    }
+  }
+
+  auto strideTy = StrideType::get(ctx, structure, strideDims);
+  return rewriter.create<MakeStrideOp>(loc, strideTy, ValueRange{}).getResult();
+}
+
 // Helper to aggressively fold binary arithmetic operations on constants
 static Value foldBinaryOp(Location loc, Value lhs, Value rhs, 
                           std::function<int64_t(int64_t, int64_t)> op,
@@ -2492,15 +2570,13 @@ struct LocalTileOpLowering : public OpRewritePattern<LocalTileOp> {
     auto tilerShape = op.getOperand(1);   // tiler shape
     // coord is used to select which tile, but we simplify to just tiling
     
-    // Create a layout from the tiler shape (with default strides)
-    auto tilerRank = llvm::cast<ShapeType>(tilerShape.getType()).getRank();
-    SmallVector<Value> ones;
-    for (int i = 0; i < tilerRank; ++i) {
-      ones.push_back(rewriter.create<arith::ConstantIndexOp>(loc, 1));
-    }
-
     auto *ctx = rewriter.getContext();
-    Value makeStrideVal = makeFlatStrideTypeMode(ones, loc, rewriter, ctx);
+    // Create a layout from the tiler shape using compact LayoutLeft strides.
+    // This must be computed at compile time; dynamic tiler shapes are rejected.
+    Value makeStrideVal =
+        makeLayoutLeftStrideFromStaticShapeTypeMode(tilerShape, loc, rewriter, ctx);
+    if (!makeStrideVal)
+      return failure();
     auto layoutType = LayoutType::get(ctx,
                                       llvm::cast<ShapeType>(tilerShape.getType()),
                                       llvm::cast<StrideType>(makeStrideVal.getType()));
