@@ -544,6 +544,11 @@ def compile_preshuffle_gemm_a8(
                         raise RuntimeError(
                             "use_cshuffle_epilog=True but lds_out is not allocated/aliased."
                         )
+                    # We reuse the A LDS allocation as `lds_out` for the cshuffle epilogue.
+                    # Add a block-wide barrier before starting to write into LDS to avoid
+                    # racing with the tail of the mainloop's LDS reads (different waves can
+                    # reach the epilogue at slightly different times).
+                    gpu.barrier()
 
                     def write_row_to_lds(
                         *,
@@ -574,8 +579,29 @@ def compile_preshuffle_gemm_a8(
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
-                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)
-                        buffer_ops.buffer_store(frag, c_rsrc, idx_out)
+                        #
+                        # IMPORTANT:
+                        # RawPtrBufferStoreOp offsets are in BYTES. `buffer_ops.buffer_store()`
+                        # will scale by element bytes based on the *data type*. For f16 vectors,
+                        # some backends/paths can be fragile. We explicitly bitcast to i32
+                        # and pass a byte offset to keep the store well-defined.
+                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
+                        byte_off = idx_out * arith.constant(2, index=True)  # bytes
+
+                        if e_vec == 4:
+                            frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
+                            buffer_ops.buffer_store(
+                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
+                            )
+                        else:
+                            # e_vec == 2: pack 2xf16 -> 1xi32
+                            frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
+                            frag_i32 = vector.extract(
+                                frag_i32x1, static_position=[0], dynamic_position=[]
+                            )
+                            buffer_ops.buffer_store(
+                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True
+                            )
 
                     # Prefer 16B stores when possible:
                     # - EVec=4 => 4xf16 (8B) per store (and matches tile_n multiples of 128)
