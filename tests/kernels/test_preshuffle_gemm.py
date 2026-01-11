@@ -97,6 +97,7 @@ def test_mfma_a8_flir_preshuffle(
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    use_cshuffle_epilog: bool = False,
 ):
     print("=" * 80)
     print(
@@ -118,6 +119,7 @@ def test_mfma_a8_flir_preshuffle(
         tile_k=tile_k,
         in_dtype=in_dtype,
         lds_stage=lds_stage,
+        use_cshuffle_epilog=bool(use_cshuffle_epilog),
     )
     print(f"✓ Compiled (lds_stage={lds_stage})")
 
@@ -292,6 +294,12 @@ if __name__ == "__main__":
         dest="run_aiter_bench",
         help="Disable aiter benchmark.",
     )
+    parser.add_argument(
+        "--use_cshuffle_epilog",
+        action="store_true",
+        default=False,
+        help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
+    )
     
     args = parser.parse_args()
     
@@ -308,5 +316,6 @@ if __name__ == "__main__":
         bench_iters=args.num_iters,
         bench_warmup=args.num_warmup,
         run_aiter_bench=bool(args.run_aiter_bench),
+        use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
     )
 
