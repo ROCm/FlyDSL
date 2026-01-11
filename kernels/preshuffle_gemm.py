@@ -425,6 +425,78 @@ def compile_preshuffle_gemm_a8(
                         scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
 
                 current_accs_list = list(accs_in)
+
+                # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
+                # This is the key optimization from `zhimding/develop_0107` for FP8:
+                # use mfma.scale 16x16x128 to reduce instruction count in the hot loop.
+                #
+                # Notes:
+                # - Only valid for fp8 path (not int8/int4) and gfx95+
+                # - Requires tile_k divisible by 128
+                # - mfma.scale takes 9 operands: 3 vectors + 6 i32 flags/scales.
+                use_mfma_scale_128 = (("gfx95" in str(gpu_arch)) and (not is_int8) and (not is_int4))
+                if use_mfma_scale_128:
+                    if (int(tile_k) % 128) != 0:
+                        raise ValueError(
+                            f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
+                        )
+
+                    mfma_res_ty = T.f32x4
+                    vec4_i64 = T.vec(4, T.i64)
+                    vec8_i32 = T.vec(8, T.i32)
+
+                    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+                        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+                        return vector.bitcast(vec8_i32, v4)
+
+                    for ku128 in range_constexpr(k_unroll // 2):
+                        ku0 = ku128 * 2
+                        ku1 = ku0 + 1
+
+                        b0_packs0, b0_packs1 = b_tile_in[ku0]
+                        b1_packs0, b1_packs1 = b_tile_in[ku1]
+
+                        col_base0 = col_offset_base + (ku0 * 64)
+                        col_base1 = col_offset_base + (ku1 * 64)
+
+                        for mi in range_constexpr(m_repeat):
+                            mi_val = arith.constant(mi * 16, index=True)
+                            curr_row_a_lds = row_a_lds + mi_val
+
+                            if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
+                                a0, a1 = a0_prefetch
+                            else:
+                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+
+                            for ni in range_constexpr(num_acc_n):
+                                b0 = b0_packs0[ni]
+                                b1 = b0_packs1[ni]
+                                b2 = b1_packs0[ni]
+                                b3 = b1_packs1[ni]
+                                b128 = pack_i64x4_to_i32x8(b0, b1, b2, b3)
+
+                                acc_idx = mi * num_acc_n + ni
+                                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    mfma_res_ty,
+                                    [
+                                        a128,
+                                        b128,
+                                        current_accs_list[acc_idx],
+                                        # cbsz, abid, blgp: 0
+                                        0,
+                                        0,
+                                        0,
+                                        # op_sel_a + scale_a (1.0f as i32 bits)
+                                        0x3F800000,
+                                        # op_sel_b + scale_b (1.0f as i32 bits)
+                                        0,
+                                        0x3F800000,
+                                    ],
+                                )
+                    return current_accs_list, scales_pf
+
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                 mfma_fn = mfma_i32_k32 if is_int8 else rocdl.mfma_f32_16x16x32_fp8_fp8
 
