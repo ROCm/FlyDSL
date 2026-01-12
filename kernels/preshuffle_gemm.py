@@ -571,7 +571,6 @@ def compile_preshuffle_gemm_a8(
                         # - Store to the even column address / 2 in the i32 alias view
                         c0_i32 = arith.constant(0, type=T.i32)
                         c1_i32 = arith.constant(1, type=T.i32)
-                        c16_i32 = arith.constant(16, type=T.i32)
                         cFE_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
                         c2_i32 = arith.constant(2, type=T.i32)
 
