@@ -62,7 +62,8 @@ jobs:
       - name: Install dependencies
         run: |
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
-          docker exec flydsl_test bash -c "pip install ninja>=1.11.1"
+          docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
     
       # Cache MLIR install tarball across workflow runs.
@@ -70,16 +71,16 @@ jobs:
         id: mlir-cache
         uses: actions/cache@v4
         with:
-          path: mlir_install_${{ matrix.runners }}.tgz
-          # Key includes runner type, docker image, and key build scripts.
-          # Any change in these will trigger a rebuild and refresh the cache.
-          key: mlir-install-${{ matrix.runners }}-${{ env.DOCKER_IMAGE }}-${{ env.LLVM_COMMIT }}-${{ hashFiles('scripts/build_llvm.sh', 'flir/CMakeLists.txt') }}
+          path: mlir_install.tgz
+          # Key includes LLVM commit and hashes of build scripts/workflow.
+          # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
+          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl-test/scripts/build_llvm.sh', 'flydsl-test/flir/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
         run: |
-          ls -lh mlir_install_${{ matrix.runners }}.tgz
-          docker cp mlir_install_${{ matrix.runners }}.tgz flydsl_test:/tmp/mlir_install.tgz
+          ls -lh mlir_install.tgz
+          docker cp mlir_install.tgz flydsl_test:/tmp/mlir_install.tgz
           docker exec flydsl_test bash -c "rm -rf /llvm-project/mlir_install && mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
 
@@ -89,31 +90,42 @@ jobs:
           set -ex
           docker exec flydsl_test bash -c "cd /flydsl-test && LLVM_COMMIT=${{ env.LLVM_COMMIT }} bash scripts/build_llvm.sh"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
-          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install_${{ matrix.runners }}.tgz || true
-          ls -lh ./mlir_install_${{ matrix.runners }}.tgz || true
-          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && ./flir/build.sh"
+          docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+          ls -lh ./mlir_install.tgz || true
 
-      # Optional: export MLIR install prefix tarball as a GitHub Actions artifact for reuse.
-      # This is stored in GitHub Actions artifacts storage (NOT committed to the repo).
-      # To avoid huge artifacts on every PR, only do this for manual runs.
-      - name: Export MLIR install tarball (workflow_dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Build FLIR (uses MLIR install prefix)
         run: |
-          ls -lh ./mlir_install_${{ matrix.runners }}.tgz || true
+          docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
-      - name: Upload MLIR install tarball artifact (workflow_dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: MLIR tarball artifact status
+        run: |
+          echo "cache-hit: ${{ steps.mlir-cache.outputs.cache-hit }}"
+          echo "event:     ${{ github.event_name }}"
+          echo "ref:       ${{ github.ref }}"
+          if [[ "${{ steps.mlir-cache.outputs.cache-hit }}" == "true" ]]; then
+            echo "artifact:  skipped (MLIR restored from cache; no rebuild)"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "artifact:  will upload (workflow_dispatch + rebuilt)"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "artifact:  will upload (push to main + rebuilt, e.g. PR merged)"
+          else
+            echo "artifact:  skipped (PR runs do not upload)"
+          fi
+
+      - name: Export MLIR install tarball (workflow_dispatch OR push-to-main)
+        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        run: |
+          ls -lh ./mlir_install.tgz || true
+
+      - name: Upload MLIR install tarball artifact (workflow_dispatch OR push-to-main)
+        if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         uses: actions/upload-artifact@v4
         with:
-          name: mlir_install-${{ matrix.runners }}
-          path: mlir_install_${{ matrix.runners }}.tgz
+          name: mlir_install-${{ matrix.runners }}-${{ env.LLVM_COMMIT }}
+          path: mlir_install.tgz
           if-no-files-found: ignore
           retention-days: 7
         
-      - name: Install Python package
-        run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && pip install -e ."
-
       - name: Run tests
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"

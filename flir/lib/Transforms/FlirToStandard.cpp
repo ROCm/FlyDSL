@@ -49,8 +49,8 @@ static LayoutNode deserializeLayoutNode(Operation* op, PatternRewriter& rewriter
 static void flatten_to_leaves(const LayoutNode& node, std::vector<LayoutNode>& leaves);
 
 // Build type-mode MakeShapeOp from a LayoutNode:
-// - Nested structure is encoded in the result type (structure+dims).
-// - Operands contain only dynamic leaves (in left-to-right leaf order).
+// - Type carries a pattern Attribute tree (IntegerAttr / ArrayAttr / DyncI64Attr).
+// - Operands contain only dynamic leaves, indexed by dyncElemIdx.
 static Value serializeLayoutNodeToShape(const LayoutNode& node, Location loc, 
                                         PatternRewriter& rewriter, MLIRContext* ctx) {
     return mlir::flir::support::serializeTypeModeMakeShapeOp(node, loc, rewriter, ctx);
@@ -64,51 +64,59 @@ static Value serializeLayoutNodeToStride(const LayoutNode& node, Location loc,
 // Build a flat (rank-N) type-mode shape/stride from leaf values.
 static Value makeFlatShapeTypeMode(ValueRange leafValues, Location loc,
                                    PatternRewriter &rewriter, MLIRContext *ctx) {
-  SmallVector<int32_t> structure;
-  structure.reserve(1 + leafValues.size());
-  structure.push_back(static_cast<int32_t>(leafValues.size()));
-  for (size_t i = 0; i < leafValues.size(); ++i)
-    structure.push_back(-1);
-
-  SmallVector<int64_t> dims;
+  Builder b(ctx);
   SmallVector<Value> dynOperands;
-  dims.reserve(leafValues.size());
-  dynOperands.reserve(leafValues.size());
+  int32_t dyncIdx = 0;
+
+  SmallVector<Attribute, 8> elems;
+  elems.reserve(leafValues.size());
   for (auto v : leafValues) {
     if (auto c = tryGetConstIndex(v)) {
-      dims.push_back(*c);
+      elems.push_back(IntegerAttr::get(b.getIntegerType(64),
+                                       APInt(64, static_cast<uint64_t>(*c), true)));
     } else {
-      dims.push_back(-1);
+      int32_t idx = dyncIdx++;
       dynOperands.push_back(v);
+      elems.push_back(DyncI64Attr::get(ctx, idx, /*divisibility=*/1));
     }
   }
 
-  auto shapeType = ShapeType::get(ctx, structure, dims);
+  Attribute pat;
+  if (elems.size() == 1)
+    pat = elems.front();
+  else
+    pat = ArrayAttr::get(ctx, elems);
+
+  auto shapeType = ShapeType::get(ctx, pat);
   return rewriter.create<MakeShapeOp>(loc, shapeType, dynOperands).getResult();
 }
 
 static Value makeFlatStrideTypeMode(ValueRange leafValues, Location loc,
                                     PatternRewriter &rewriter, MLIRContext *ctx) {
-  SmallVector<int32_t> structure;
-  structure.reserve(1 + leafValues.size());
-  structure.push_back(static_cast<int32_t>(leafValues.size()));
-  for (size_t i = 0; i < leafValues.size(); ++i)
-    structure.push_back(-1);
-
-  SmallVector<int64_t> dims;
+  Builder b(ctx);
   SmallVector<Value> dynOperands;
-  dims.reserve(leafValues.size());
-  dynOperands.reserve(leafValues.size());
+  int32_t dyncIdx = 0;
+
+  SmallVector<Attribute, 8> elems;
+  elems.reserve(leafValues.size());
   for (auto v : leafValues) {
     if (auto c = tryGetConstIndex(v)) {
-      dims.push_back(*c);
+      elems.push_back(IntegerAttr::get(b.getIntegerType(64),
+                                       APInt(64, static_cast<uint64_t>(*c), true)));
     } else {
-      dims.push_back(-1);
+      int32_t idx = dyncIdx++;
       dynOperands.push_back(v);
+      elems.push_back(DyncI64Attr::get(ctx, idx, /*divisibility=*/1));
     }
   }
 
-  auto strideType = StrideType::get(ctx, structure, dims);
+  Attribute pat;
+  if (elems.size() == 1)
+    pat = elems.front();
+  else
+    pat = ArrayAttr::get(ctx, elems);
+
+  auto strideType = StrideType::get(ctx, pat);
   return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
 }
 
@@ -147,6 +155,15 @@ static bool ensureNonZero(Location loc, Value denom, PatternRewriter &rewriter,
     rewriter.create<cf::AssertOp>(loc, ok, rewriter.getStringAttr(runtimeMsg));
   }
   return true;
+}
+
+static std::pair<Value, Value> emitFatalComplementError(Location loc, PatternRewriter &rewriter,
+                                                        llvm::StringRef message) {
+  // Compile-time failure (original behavior): emit an error diagnostic and
+  // return null Values. The pass has a ScopedDiagnosticHandler and will
+  // signalPassFailure() on any error diagnostic.
+  emitError(loc, message);
+  return {Value(), Value()};
 }
 
 // Helper to compute complement inline (without creating ComplementOp)
@@ -210,8 +227,8 @@ static std::pair<Value, Value> computeComplementInline(
       // In our algorithm, this manifests as gap(new_shape) == 0.
       if (auto c = tryGetConstIndex(newShape)) {
         if (*c == 0) {
-          emitError(loc, "Non-injective Layout detected in complement.");
-          return {Value(), Value()};
+          return emitFatalComplementError(loc, rewriter,
+                                          "Non-injective Layout detected in complement.");
         }
       } else {
         // Runtime check for dynamic stride: gap must be non-zero.
@@ -234,8 +251,7 @@ static std::pair<Value, Value> computeComplementInline(
       // Denominator safety for ceil_div: newStride must be non-zero.
       // We assert here so we never constant-fold a division-by-zero.
       if (auto ns = tryGetConstIndex(newStride); ns.has_value() && *ns == 0) {
-        emitError(loc, "Zero stride encountered in complement.");
-        return {Value(), Value()};
+        return emitFatalComplementError(loc, rewriter, "Zero stride encountered in complement.");
       }
       if (!tryGetConstIndex(newStride).has_value()) {
         Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0).getResult();
@@ -318,8 +334,8 @@ static std::pair<Value, Value> computeComplementInline(
     // In FLIR lowering, if rank > 1 and any stride is not a compile-time constant,
     // we cannot soundly sort/fold by stride, so we reject early.
     if (!allStatic && shapes.size() > 1) {
-      emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
-      return {Value(), Value()};
+      return emitFatalComplementError(loc, rewriter,
+                                      "Dynamic-stride complement only for rank-1 layouts.");
     }
     
     // Sort by stride (only if all static)
@@ -354,15 +370,15 @@ static std::pair<Value, Value> computeComplementInline(
         // Check for Non-injective Layout (gap size == 0)
         if (auto constNewShape = tryGetConstIndex(newShape)) {
              if (constNewShape.value() == 0) {
-                 emitError(loc, "Non-injective Layout detected in complement.");
-                 return {Value(), Value()};
+                 return emitFatalComplementError(loc, rewriter,
+                                                 "Non-injective Layout detected in complement.");
              }
         } else {
              auto minStrideC = tryGetConstIndex(minStride);
              auto currStrideC = tryGetConstIndex(currStride);
              if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
-                 emitError(loc, "Non-injective Layout detected in complement.");
-                 return {Value(), Value()};
+                 return emitFatalComplementError(loc, rewriter,
+                                                 "Non-injective Layout detected in complement.");
              }
              // Runtime check for dynamic cases: gap must be non-zero.
              // This makes the failure deterministic at runtime instead of silent UB.
@@ -406,7 +422,7 @@ static std::pair<Value, Value> computeComplementInline(
     Value lastModeShape = modes.back().shape;
     if (!ensureNonZero(loc, currStride, rewriter,
                        "Zero stride encountered in complement.")) {
-      return {Value(), Value()};
+      return emitFatalComplementError(loc, rewriter, "Zero stride encountered in complement.");
     }
     auto lastNewShape = foldBinaryOp(loc, lastMinStride, currStride,
         [](int64_t a, int64_t b) { return a / b; },
@@ -418,15 +434,15 @@ static std::pair<Value, Value> computeComplementInline(
     // Check for Non-injective Layout (gap size == 0)
     if (auto constNewShape = tryGetConstIndex(lastNewShape)) {
             if (constNewShape.value() == 0) {
-                emitError(loc, "Non-injective Layout detected in complement.");
-                return {Value(), Value()};
+                return emitFatalComplementError(loc, rewriter,
+                                                "Non-injective Layout detected in complement.");
             }
     } else {
             auto minStrideC = tryGetConstIndex(lastMinStride);
             auto currStrideC = tryGetConstIndex(currStride);
             if (minStrideC && currStrideC && *minStrideC < *currStrideC) {
-                emitError(loc, "Non-injective Layout detected in complement.");
-                return {Value(), Value()};
+                return emitFatalComplementError(loc, rewriter,
+                                                "Non-injective Layout detected in complement.");
             }
             // Runtime check for dynamic cases: last gap must be non-zero.
             if (!(minStrideC && currStrideC)) {
@@ -465,7 +481,7 @@ static std::pair<Value, Value> computeComplementInline(
     // Append rest mode that extends to targetSize.
     if (!ensureNonZero(loc, currStride, rewriter,
                        "Zero stride encountered in complement.")) {
-      return {Value(), Value()};
+      return emitFatalComplementError(loc, rewriter, "Zero stride encountered in complement.");
     }
     auto restShape = foldBinaryOp(loc, targetSize, currStride,
         [](int64_t a, int64_t b) { return (a + b - 1) / b; },
@@ -1084,7 +1100,7 @@ static int getRankFromType(Type type) {
     return coordType.getRank();
   if (auto layoutType = llvm::dyn_cast<LayoutType>(type))
     return layoutType.getRank();
-  return -1;
+  llvm_unreachable("flir.rank input must be a flir ranked type");
 }
 
 //===----------------------------------------------------------------------===//
@@ -1335,8 +1351,6 @@ struct RankOpLowering : public RewritePattern {
     Value input = op->getOperand(0);
     
     int rank = getRankFromType(input.getType());
-    if (rank < 0)
-      return failure();
     
     auto rankConst = rewriter.create<arith::ConstantIndexOp>(loc, rank);
     rewriter.replaceOp(op, rankConst.getResult());

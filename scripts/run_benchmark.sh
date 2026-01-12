@@ -1,5 +1,10 @@
-#!/bin/bash
-set -uo pipefail
+#!/bin/sh
+# POSIX sh compatible (also works in bash).
+set -eu
+# Enable pipefail when supported (bash/ksh/zsh); ignore if unavailable (dash/posix sh).
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi
 cd "$(dirname "$0")/.."
 
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flir_bench}"
@@ -13,22 +18,27 @@ FAIL_COUNT=0
 # ============================================================================
 
 # Softmax/LayerNorm shapes: "M,N,dtype"
-SOFTMAX_SHAPES=("32768,8192,bf16")
-LAYERNORM_SHAPES=("32768,8192,bf16")
+SOFTMAX_SHAPES='
+32768,8192,bf16
+'
+LAYERNORM_SHAPES='
+32768,8192,bf16
+'
 
 # Preshuffle GEMM shapes: "dtype,M,N,K,tile_m,tile_n,tile_k"
-GEMM_SHAPES=(
-  "fp8,16,40960,5120,16,128,256"
-  "fp8,5120,5120,8320,64,256,128"
-  "fp8,9728,8192,8320,64,256,128"
-  "int8,9728,8192,8320,64,256,128"
-)
+GEMM_SHAPES='
+fp8,16,40960,5120,16,128,256
+fp8,16,77824,5120,16,128,256
+fp8,5120,5120,8320,64,256,128
+fp8,9728,8192,8320,64,256,128
+int8,9728,8192,8320,64,256,128
+'
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
-MOE_SHAPES=(
-  "32768,9728,8192,16,4,64,128,128,256,128"
-  "64,6144,1024,128,8,16,64,256,64,256"
-)
+MOE_SHAPES='
+32768,8192,8192,16,4,64,128,128,256,128
+64,6144,1024,128,8,16,64,256,64,256
+'
 
 
 # Memory bound threshold (M or tokens <= threshold => memory bound)
@@ -64,8 +74,8 @@ _die() {
 
 _show_fail_log() {
   # Args: log_path op_name
-  local log_path="$1"
-  local op_name="${2:-unknown}"
+  log_path="$1"
+  op_name="${2:-unknown}"
   if [ -f "${log_path}" ]; then
     echo "" >&2
     echo "-------------------- ${op_name} log (tail) --------------------" >&2
@@ -78,8 +88,8 @@ _show_fail_log() {
 }
 
 print_bound_info() {
-  local size=$1
-  local name=$2
+  size=$1
+  name=$2
   if [ "$size" -le "$MEMORY_BOUND_THRESHOLD" ]; then
     echo "    [Memory Bound Shape: small $name=$size]"
   else
@@ -96,13 +106,13 @@ _fmt_table_header() {
 }
 
 _emit_row() {
-  local op="$1" shape="$2" dtype="$3" tbps="$4" tflops="$5"
+  op="$1"; shape="$2"; dtype="$3"; tbps="$4"; tflops="$5"
   printf "%-14.14s %-34.34s %-10.10s %10s %10s\n" "${op}" "${shape}" "${dtype}" "${tbps}" "${tflops}"
 }
 
 _normalize_op() {
   # Normalize aliases to canonical op names.
-  local op="${1:-}"
+  op="${1:-}"
   case "${op}" in
     layernorm) echo "rmsnorm" ;;
     *) echo "${op}" ;;
@@ -120,7 +130,6 @@ _enable_only_ops() {
   RUN_RMSNORM=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
-  local op
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
@@ -134,9 +143,24 @@ _enable_only_ops() {
   done
 }
 
+# Append one selected op to a space-separated list.
+SELECTED_OPS=""
+SELECTED_OPS_COUNT=0
+_add_selected_op() {
+  # Arg: op
+  v="$1"
+  # Skip empty items (e.g., trailing commas).
+  [ -n "${v}" ] || return 0
+  if [ -z "${SELECTED_OPS}" ]; then
+    SELECTED_OPS="${v}"
+  else
+    SELECTED_OPS="${SELECTED_OPS} ${v}"
+  fi
+  SELECTED_OPS_COUNT=$((SELECTED_OPS_COUNT + 1))
+}
+
 # Parse args: if any ops are provided, run only those; otherwise run all.
 if [ "$#" -gt 0 ]; then
-  selected_ops=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h|--help)
@@ -153,26 +177,39 @@ if [ "$#" -gt 0 ]; then
       --only)
         shift
         [ "$#" -gt 0 ] || _die "--only requires a comma-separated op list"
-        IFS=',' read -r -a _ops <<< "$1"
-        selected_ops+=("${_ops[@]}")
+        oldIFS=$IFS
+        IFS=,
+        # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+        set -- $1
+        IFS=$oldIFS
+        for op in "$@"; do
+          _add_selected_op "$op"
+        done
         ;;
       --only=*)
         v="${1#--only=}"
         [ -n "${v}" ] || _die "--only= requires a comma-separated op list"
-        IFS=',' read -r -a _ops <<< "${v}"
-        selected_ops+=("${_ops[@]}")
+        oldIFS=$IFS
+        IFS=,
+        # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+        set -- $v
+        IFS=$oldIFS
+        for op in "$@"; do
+          _add_selected_op "$op"
+        done
         ;;
       --*)
         _die "unknown flag '$1'"
         ;;
       *)
-        selected_ops+=("$1")
+        _add_selected_op "$1"
         ;;
     esac
     shift
   done
-  if [ "${#selected_ops[@]}" -gt 0 ]; then
-    _enable_only_ops "${selected_ops[@]}"
+  if [ "${SELECTED_OPS_COUNT}" -gt 0 ]; then
+    # shellcheck disable=SC2086 # want word-splitting for ops list
+    _enable_only_ops ${SELECTED_OPS}
   fi
 fi
 
@@ -241,46 +278,62 @@ _fmt_table_header
 
 # Softmax (log → parse → one-line row)
 if [ "${RUN_SOFTMAX}" -eq 1 ]; then
-  for shape in "${SOFTMAX_SHAPES[@]}"; do
-    IFS=',' read -r M N dtype <<< "$shape"
+  for shape in $SOFTMAX_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
     export ROCDSL_SOFTMAX_SHAPES="$shape"
     log="${BENCH_LOG_DIR}/softmax_${M}x${N}_${dtype}.log"
     if python3 tests/kernels/test_softmax.py >"${log}" 2>&1; then
-      ((SUCCESS_COUNT++))
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      ((FAIL_COUNT++))
+      FAIL_COUNT=$((FAIL_COUNT + 1))
       echo "softmax failed. Log: ${log}" >&2
       _show_fail_log "${log}" "softmax"
     fi
     row="$(_py_parse_and_emit softmax "${M}x${N}" "${dtype}" "${log}")"
-    IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-    _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+    # row is tab-separated; default IFS includes tabs.
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 fi
 
 # RMSNorm (script used to label this as LayerNorm; keep output truthful)
 if [ "${RUN_RMSNORM}" -eq 1 ]; then
-  for shape in "${LAYERNORM_SHAPES[@]}"; do
-    IFS=',' read -r M N dtype <<< "$shape"
+  for shape in $LAYERNORM_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
     export ROCDSL_RMSNORM_SHAPES="$shape"
     log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
     if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
-      ((SUCCESS_COUNT++))
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      ((FAIL_COUNT++))
+      FAIL_COUNT=$((FAIL_COUNT + 1))
       echo "rmsnorm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "rmsnorm"
     fi
     row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
-    IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-    _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 fi
 
 # Preshuffle GEMM
 if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
-  for shape in "${GEMM_SHAPES[@]}"; do
-    IFS=',' read -r dtype M N K tile_m tile_n tile_k <<< "$shape"
+  for shape in $GEMM_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
@@ -290,22 +343,27 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       --tile_m "$tile_m" \
       --tile_n "$tile_n" \
       --tile_k "$tile_k" >"${log}" 2>&1; then
-      ((SUCCESS_COUNT++))
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      ((FAIL_COUNT++))
+      FAIL_COUNT=$((FAIL_COUNT + 1))
       echo "gemm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "gemm"
     fi
     row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
-    IFS=$'\t' read -r op_s shape_s dtype_s tbps_s tflops_s <<<"${row}"
-    _emit_row "${op_s}" "${shape_s}" "${dtype_s}" "${tbps_s}" "${tflops_s}"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
   done
 fi
 
 # MoE
 if [ "${RUN_MOE}" -eq 1 ]; then
-  for shape in "${MOE_SHAPES[@]}"; do
-    IFS=',' read -r tokens model_dim inter_dim experts topk tile_m tile_n tile_k tile_n2 tile_k2 <<< "$shape"
+  for shape in $MOE_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
     log="${BENCH_LOG_DIR}/moe_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
     if python3 tests/kernels/test_moe_gemm.py \
       --in_dtype fp8 \
@@ -319,9 +377,9 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
       --compare_aiter_ck false >"${log}" 2>&1; then
-      ((SUCCESS_COUNT++))
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
-      ((FAIL_COUNT++))
+      FAIL_COUNT=$((FAIL_COUNT + 1))
       echo "moe failed. Log: ${log}" >&2
       _show_fail_log "${log}" "moe"
     fi

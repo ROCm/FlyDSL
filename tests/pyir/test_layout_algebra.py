@@ -906,26 +906,17 @@ def test_complement_rank_2_error():
 
         # 3. Size should be 4
         comp_size = flir.size(comp_layout)
-        
-        vals = []
-        vals.append(val_shape)
-        vals.append(val_stride)
-        vals.append(comp_size)
-        
-        # return vals
-        return
+        return [val_shape, val_stride, comp_size]
     
     try:
         run_lowering_test(ctx, "complement_rank_2_error")
     except Exception as e:
-        # PASS: compilation/lowering failed as expected.
         msg = str(e)
         assert "Non-injective Layout detected in complement" in msg, (
             "Expected non-injective complement error message, got:\n" + msg
         )
         return
 
-    # If we got here, lowering succeeded => FAIL.
     raise AssertionError("Expected complement_rank_2_error to fail during lowering, but it succeeded.")
 
 

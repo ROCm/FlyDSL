@@ -7,6 +7,8 @@ add_mlir_dialect_library(FlirDialect
   DEPENDS
   FlirDialectIncGen
   FlirOpsIncGen
+  FlirAttrsIncGen
+  FlirTypesIncGen
   
   LINK_LIBS
   MLIRIR

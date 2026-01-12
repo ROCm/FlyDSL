@@ -10,6 +10,16 @@ mlir_tablegen(FlirOps.h.inc -gen-op-decls)
 mlir_tablegen(FlirOps.cpp.inc -gen-op-defs)
 add_public_tablegen_target(FlirOpsIncGen)
 
+set(LLVM_TARGET_DEFINITIONS FlirTypeDefs.td)
+mlir_tablegen(FlirTypes.h.inc -gen-typedef-decls)
+mlir_tablegen(FlirTypes.cpp.inc -gen-typedef-defs)
+add_public_tablegen_target(FlirTypesIncGen)
+
+set(LLVM_TARGET_DEFINITIONS FlirAttrDefs.td)
+mlir_tablegen(FlirAttrs.h.inc -gen-attrdef-decls)
+mlir_tablegen(FlirAttrs.cpp.inc -gen-attrdef-defs)
+add_public_tablegen_target(FlirAttrsIncGen)
+
 set(LLVM_TARGET_DEFINITIONS FlirRocmDialect.td)
 mlir_tablegen(FlirRocmDialect.h.inc -gen-dialect-decls -dialect=flir_rocm)
 mlir_tablegen(FlirRocmDialect.cpp.inc -gen-dialect-defs -dialect=flir_rocm)

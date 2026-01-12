@@ -7,9 +7,9 @@ func.func @test_idx2crd() {
   
   %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %coord = flir.idx2crd %c50, %layout : (index, !flir.layout<(?,?)>) -> !flir.coord<(?,?)>
+  %coord = flir.idx2crd %c50, %layout : (index, !flir.layout<(?,?):(?,?)>) -> !flir.coord<(?,?)>
   
   return
 }

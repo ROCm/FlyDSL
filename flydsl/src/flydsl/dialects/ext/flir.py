@@ -480,13 +480,14 @@ class ShapeType(Type):
     @staticmethod
     def get(rank: int, context=None):
         """Create a shape type with given rank."""
-        # This would need to be implemented in C++ bindings
-        # For now, return a generic type
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.shape rank must be > 0")
         if context is None:
             context = Context.current
-        # Placeholder - would use actual ODS-generated type
-        return Type.parse(f"!flir.shape<{rank}>", context=context)
+        spec = "(" + ",".join(["?"] * int(rank)) + ")"
+        # Rank-1 can be printed as "?" in C++, but keep tuple form here for clarity/stability.
+        return Type.parse(f"!flir.shape<{spec}>", context=context)
 
 
 class StrideType(Type):
@@ -496,9 +497,12 @@ class StrideType(Type):
     def get(rank: int, context=None):
         """Create a stride type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.stride rank must be > 0")
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.stride<{rank}>", context=context)
+        spec = "(" + ",".join(["?"] * int(rank)) + ")"
+        return Type.parse(f"!flir.stride<{spec}>", context=context)
 
 
 class LayoutType(Type):
@@ -508,9 +512,12 @@ class LayoutType(Type):
     def get(rank: int, context=None):
         """Create a layout type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.layout rank must be > 0")
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.layout<{rank}>", context=context)
+        spec = "(" + ",".join(["?"] * int(rank)) + ")"
+        return Type.parse(f"!flir.layout<{spec}:{spec}>", context=context)
 
 
 class CoordType(Type):
@@ -520,9 +527,12 @@ class CoordType(Type):
     def get(rank: int, context=None):
         """Create a coordinate type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.coord rank must be > 0")
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.coord<{rank}>", context=context)
+        spec = "(" + ",".join(["?"] * int(rank)) + ")"
+        return Type.parse(f"!flir.coord<{spec}>", context=context)
 
 
 # -----------------------------------------------------------------------------
@@ -676,18 +686,19 @@ def _parse_layout_type(type_str: str) -> tuple[int, _PatternNode, _PatternNode]:
         if split is None:
             # Backward compatible: layout<(...)> only encodes rank.
             rank = _count_leaves_in_tuple_spec(inner)
+            if rank <= 0:
+                raise ValueError("flir.layout rank must be > 0")
             flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
             return rank, flat, flat
         shape_spec, stride_spec = split
         shape = _parse_tuple_spec(shape_spec)
         stride = _parse_tuple_spec(stride_spec)
+        if shape.leaf_count() <= 0:
+            raise ValueError("flir.layout rank must be > 0")
         return shape.leaf_count(), shape, stride
-    try:
-        rank = int(inner)
-    except Exception:
-        rank = -1
-    if rank < 0:
-        return -1, _PatternNode.leaf(None), _PatternNode.leaf(None)
+    rank = int(inner)
+    if rank <= 0:
+        raise ValueError("flir.layout rank must be > 0")
     flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
     return rank, flat, flat
 
@@ -829,8 +840,18 @@ def _complement_impl(shape: _PatternNode, stride: _PatternNode, cosize_hi: Optio
 def _infer_layout_type_composition(a: Value, b: Value) -> Type:
     a_rank, a_shape, a_stride = _parse_layout_type(str(a.type))
     b_rank, b_shape, b_stride = _parse_layout_type(str(b.type))
-    if a_rank < 0 or b_rank < 0:
-        return LayoutType.get(-1)
+
+    # Runtime-capable policy: if we can't compute an exact static pattern,
+    # return a rank-only dynamic layout type and let lowering compute it.
+    if _size_of_shape(a_shape) is None or _size_of_shape(b_shape) is None:
+        return LayoutType.get(max(a_rank, b_rank))
+    a_stride_leaves: List[Optional[int]] = []
+    b_stride_leaves: List[Optional[int]] = []
+    a_stride.flatten_leaves(a_stride_leaves)
+    b_stride.flatten_leaves(b_stride_leaves)
+    if any(v is None for v in a_stride_leaves + b_stride_leaves):
+        return LayoutType.get(max(a_rank, b_rank))
+
     out_shape, out_stride = _composition_impl(a_shape, a_stride, b_shape, b_stride)
     return Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
 
@@ -838,8 +859,6 @@ def _infer_layout_type_composition(a: Value, b: Value) -> Type:
 def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
     b_rank, b_shape, b_stride = _parse_layout_type(str(block.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
-    if b_rank < 0 or t_rank < 0:
-        return LayoutType.get(-1)
 
     # Flatten then concatenate. Shapes: [block..., tiler...]
     b_shape_leaves: List[Optional[int]] = []
@@ -852,6 +871,9 @@ def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
     t_stride.flatten_leaves(t_stride_leaves)
 
     block_size = _size_of_shape(b_shape)
+    if block_size is None or any(v is None for v in b_stride_leaves + t_stride_leaves):
+        # Runtime-capable fallback: only rank is known.
+        return LayoutType.get(b_rank + t_rank)
     out_shape_leaves = b_shape_leaves + t_shape_leaves
     out_stride_leaves: List[Optional[int]] = list(b_stride_leaves)
     for s in t_stride_leaves:
@@ -865,10 +887,18 @@ def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
 def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
     l_rank, l_shape, l_stride = _parse_layout_type(str(layout.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
-    if l_rank < 0 or t_rank < 0:
-        return LayoutType.get(-1)
 
     input_size = _size_of_shape(l_shape)
+    if input_size is None:
+        return LayoutType.get(max(l_rank, t_rank))
+
+    # Require static strides (matches C++ inference: no fallback).
+    l_stride_leaves: List[Optional[int]] = []
+    t_stride_leaves: List[Optional[int]] = []
+    l_stride.flatten_leaves(l_stride_leaves)
+    t_stride.flatten_leaves(t_stride_leaves)
+    if any(v is None for v in l_stride_leaves + t_stride_leaves):
+        return LayoutType.get(max(l_rank, t_rank))
     comp_shape, comp_stride = _complement_impl(t_shape, t_stride, input_size)
 
     rhs_shape = _PatternNode.tup([t_shape, comp_shape])
@@ -876,6 +906,32 @@ def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
 
     out_shape, out_stride = _composition_impl(l_shape, l_stride, rhs_shape, rhs_stride)
     return Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+
+
+def _infer_layout_type_complement(tiler: Value, target_size: Value) -> Type:
+    """Infer result type for flir.complement in a strict/no-fallback way.
+
+    Requires:
+    - tiler layout type is fully static
+    - target_size is provably constant
+    """
+    t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+
+    cosize_hi = _try_get_constant_index(target_size)
+    if cosize_hi is None:
+        raise ValueError("Cannot infer complement type: target_size must be a compile-time constant index")
+
+    # If we can't compute a static complement pattern, return a rank-1 dynamic
+    # layout type and let lowering handle/diagnose.
+    if _size_of_shape(t_shape) is None:
+        return LayoutType.get(1)
+    t_stride_leaves: List[Optional[int]] = []
+    t_stride.flatten_leaves(t_stride_leaves)
+    if any(v is None for v in t_stride_leaves):
+        return LayoutType.get(1)
+
+    comp_shape, comp_stride = _complement_impl(t_shape, t_stride, cosize_hi)
+    return Type.parse(f"!flir.layout<{comp_shape.to_spec()}:{comp_stride.to_spec()}>")
 
 
 
@@ -1531,13 +1587,7 @@ def composition(layout_a: Value, layout_b: Value, loc: Optional[Location] = None
     """
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_composition(layout_a, layout_b)
-    except Exception:
-        ra = _extract_rank_from_flir_type_str(str(layout_a.type))
-        rb = _extract_rank_from_flir_type_str(str(layout_b.type))
-        r = max(ra, rb) if (ra is not None and rb is not None) else -1
-        result_type = LayoutType.get(r)
+    result_type = _infer_layout_type_composition(layout_a, layout_b)
 
     with ip or InsertionPoint.current:
         return flir_ops.CompositionOp(result_type, _unwrap_value(layout_a), _unwrap_value(layout_b), loc=loc).result
@@ -1573,7 +1623,7 @@ def complement(tiler: Value, target_size: Value, loc: Optional[Location] = None,
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_complement(tiler, target_size)
     
     with ip or InsertionPoint.current:
         return flir_ops.ComplementOp(result_type, _unwrap_value(tiler), _unwrap_value(target_size), loc=loc).result
@@ -1602,7 +1652,7 @@ def coalesce(layout: Value, loc: Optional[Location] = None, ip: Optional[Inserti
     from _mlir import ir as _ir
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    result_type = layout.type
     
     with ip or InsertionPoint.current:
         # Create the operation directly using generic OpView
@@ -1631,12 +1681,8 @@ def logical_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
         The tiled layout
     """
     
-    try:
-        loc = _get_location(loc)
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        loc = _get_location(loc)
-        result_type = LayoutType.get(-1)
+    loc = _get_location(loc)
+    result_type = _infer_layout_type_logical_product(block, tiler)
 
     with ip or InsertionPoint.current:
         return flir_ops.LogicalProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
@@ -1647,10 +1693,7 @@ def zipped_product(block: Value, tiler: Value, loc: Optional[Location] = None, i
     
     loc = _get_location(loc)
     # Lowering currently treats zipped_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.ZippedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1660,10 +1703,7 @@ def tiled_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     
     loc = _get_location(loc)
     # Lowering currently treats tiled_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.TiledProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1673,10 +1713,7 @@ def flat_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip:
     
     loc = _get_location(loc)
     # Lowering currently treats flat_product as logical_product (flattening happens later).
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.FlatProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1686,10 +1723,7 @@ def raked_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     
     loc = _get_location(loc)
     # Lowering currently treats raked_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.RakedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1699,10 +1733,7 @@ def blocked_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
     
     loc = _get_location(loc)
     # Lowering currently treats blocked_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.BlockedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1722,12 +1753,8 @@ def logical_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, 
         The partitioned layout
     """
     
-    try:
-        loc = _get_location(loc)
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        loc = _get_location(loc)
-        result_type = LayoutType.get(-1)
+    loc = _get_location(loc)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
 
     with ip or InsertionPoint.current:
         return flir_ops.LogicalDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
@@ -1756,10 +1783,7 @@ def zipped_divide(layout_or_tensor, tiler_or_shape, loc: Optional[Location] = No
     
     # Layout division case (lowering treats zipped_divide as logical_divide).
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout_or_tensor, tiler_or_shape)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout_or_tensor, tiler_or_shape)
     with ip or InsertionPoint.current:
         return flir_ops.ZippedDivideOp(result_type, _unwrap_value(layout_or_tensor), _unwrap_value(tiler_or_shape), loc=loc).result
 
@@ -1768,10 +1792,7 @@ def tiled_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip
     """Compute the tiled divide of a layout."""
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.TiledDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1780,10 +1801,7 @@ def flat_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip:
     """Compute the flat divide of a layout."""
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.FlatDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1809,7 +1827,8 @@ def local_partition(layout: Value, tile: Value, index: Value, loc: Optional[Loca
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Lowering models local_partition as logical_divide. Never emit rank-unknown.
+    result_type = _infer_layout_type_logical_divide(layout, tile)
     
     with ip or InsertionPoint.current:
         return flir_ops.LocalPartitionOp(result_type, _unwrap_value(layout), _unwrap_value(tile), _unwrap_value(index), loc=loc).result

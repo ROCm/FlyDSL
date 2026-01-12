@@ -13,10 +13,10 @@ module {
     %coord = flir.make_coord %c0, %c1 : (index, index) -> !flir.coord<(?,?)>
     %stride = flir.make_stride %s0, %s1 : (index, index) -> !flir.stride<(?,?)>
     %shape = flir.make_shape %c0, %c1 : (index, index) -> !flir.shape<(?,?)>
-    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Compute linear index: 2*1 + 3*16 = 2 + 48 = 50
-    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
+    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?):(?,?)>) -> index
     
     return %idx : index
   }

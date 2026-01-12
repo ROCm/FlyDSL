@@ -12,6 +12,7 @@ build/
 __pycache__/
 *.pyc
 .cache/
+flir/python_bindings/mlir/
 
 # Virtualenvs
 .venv/

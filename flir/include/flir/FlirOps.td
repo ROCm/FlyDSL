@@ -22,13 +22,14 @@ def Flir_CoordType : Type<CPred<"llvm::isa<::mlir::flir::CoordType>($_self)">, "
 //===----------------------------------------------------------------------===//
 
 def Flir_MakeShapeOp : Flir_Op<"make_shape", [Pure]> {
-  let summary = "Create a flir shape (type-mode: structure/spec in type, dynamic leaves in operands)";
+  let summary = "Create a flir shape (type-mode: pattern in type, dynamic leaves in operands)";
   let description = [{
     Creates a shape value.
     This op is **type-mode only**:
-      - The tuple structure and any compile-time constants are encoded in the result type
-        (`!flir.shape<...>` / structure+dims).
-      - The operands contain **only the dynamic leaf index values** (in left-to-right leaf order).
+      - The tuple/pattern (including constants) is encoded in the result type (`!flir.shape<...>`).
+      - Dynamic leaves are encoded as `?` in the type pattern and mapped to operands by
+        the embedded `dyncElemIdx` inside `!flir.dync_i*`.
+      - The operands contain **only the dynamic leaf values** (indexed by `dyncElemIdx`).
   }];
   let arguments = (ins Variadic<Index>:$values);
   let results = (outs Flir_ShapeType:$result);
@@ -37,13 +38,14 @@ def Flir_MakeShapeOp : Flir_Op<"make_shape", [Pure]> {
 }
 
 def Flir_MakeStrideOp : Flir_Op<"make_stride", [Pure]> {
-  let summary = "Create a flir stride (type-mode: structure/spec in type, dynamic leaves in operands)";
+  let summary = "Create a flir stride (type-mode: pattern in type, dynamic leaves in operands)";
   let description = [{
     Creates a stride value.
     This op is **type-mode only**:
-      - The tuple structure and any compile-time constants are encoded in the result type
-        (`!flir.stride<...>` / structure+dims).
-      - The operands contain **only the dynamic leaf index values** (in left-to-right leaf order).
+      - The tuple/pattern (including constants) is encoded in the result type (`!flir.stride<...>`).
+      - Dynamic leaves are encoded as `?` in the type pattern and mapped to operands by
+        the embedded `dyncElemIdx` inside `!flir.dync_i*`.
+      - The operands contain **only the dynamic leaf values** (indexed by `dyncElemIdx`).
   }];
   let arguments = (ins Variadic<Index>:$values);
   let results = (outs Flir_StrideType:$result);
@@ -214,22 +216,7 @@ def Flir_CompositionOp : Flir_Op<"composition", []> {
   let arguments = (ins Flir_LayoutType:$layoutA, Flir_LayoutType:$layoutB);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$layoutA `,` $layoutB attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$layoutA, "Value":$layoutB), [{
-      auto lhsTy = llvm::dyn_cast<::mlir::flir::LayoutType>(layoutA.getType());
-      auto rhsTy = llvm::dyn_cast<::mlir::flir::LayoutType>(layoutB.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (lhsTy && rhsTy) {
-        auto inferred = ::mlir::flir::inferCompositionType($_builder.getContext(), lhsTy, rhsTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(lhsTy.getRank(), rhsTy.getRank()));
-      }
-      build($_builder, $_state, resultTy, layoutA, layoutB);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_CoalesceOp : Flir_Op<"coalesce", []> {
@@ -281,21 +268,7 @@ def Flir_LogicalProductOp : Flir_Op<"logical_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_ZippedProductOp : Flir_Op<"zipped_product", []> {
@@ -308,22 +281,7 @@ def Flir_ZippedProductOp : Flir_Op<"zipped_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats zipped_product the same as logical_product.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_TiledProductOp : Flir_Op<"tiled_product", []> {
@@ -336,22 +294,7 @@ def Flir_TiledProductOp : Flir_Op<"tiled_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats tiled_product the same as logical_product.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_FlatProductOp : Flir_Op<"flat_product", []> {
@@ -364,22 +307,7 @@ def Flir_FlatProductOp : Flir_Op<"flat_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats flat_product the same as logical_product.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_RakedProductOp : Flir_Op<"raked_product", []> {
@@ -392,22 +320,7 @@ def Flir_RakedProductOp : Flir_Op<"raked_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats raked_product the same as logical_product.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_BlockedProductOp : Flir_Op<"blocked_product", []> {
@@ -420,22 +333,7 @@ def Flir_BlockedProductOp : Flir_Op<"blocked_product", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats blocked_product the same as logical_product.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 
@@ -453,22 +351,7 @@ def Flir_LogicalDivideOp : Flir_Op<"logical_divide", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_ZippedDivideOp : Flir_Op<"zipped_divide", []> {
@@ -481,23 +364,7 @@ def Flir_ZippedDivideOp : Flir_Op<"zipped_divide", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats zipped_divide the same as logical_divide.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 def Flir_TiledDivideOp : Flir_Op<"tiled_divide", []> {
@@ -510,23 +377,7 @@ def Flir_TiledDivideOp : Flir_Op<"tiled_divide", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats tiled_divide the same as logical_divide.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -548,23 +399,7 @@ def Flir_FlatDivideOp : Flir_Op<"flat_divide", []> {
   let arguments = (ins Flir_LayoutType:$input, Flir_LayoutType:$tiler);
   let results = (outs Flir_LayoutType:$result);
   let assemblyFormat = "$input `,` $tiler attr-dict `:` functional-type(operands, $result)";
-  let builders = [
-    OpBuilder<(ins "Value":$input, "Value":$tiler), [{
-      // Current lowering treats flat_divide the same as logical_divide.
-      auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
-      auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
-      if (aTy && bTy) {
-        auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
-        if (::mlir::succeeded(inferred))
-          resultTy = *inferred;
-        else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
-      }
-      build($_builder, $_state, resultTy, input, tiler);
-    }]>
-  ];
+  let hasVerifier = 1;
 }
 
 #endif // FLIR_OPS
