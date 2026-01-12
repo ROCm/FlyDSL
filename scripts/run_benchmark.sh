@@ -337,8 +337,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
-      --warmup 10 \
-      --iters 50 \
+      --num_warmup 10 \
+      --num_iters 50 \
       -M "$M" \
       -N "$N" \
       -K "$K" \
@@ -373,8 +373,8 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       -t "$tokens" \
       -e "$experts" \
       -k "$topk" \
-      --warmup 10 \
-      --iters 50 \
+      --num_warmup 10 \
+      --num_iters 50 \
       --tile_m "$tile_m" \
       --tile_n "$tile_n" \
       --tile_k "$tile_k" \
