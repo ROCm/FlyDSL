@@ -53,8 +53,8 @@ from kernels.rmsnorm_kernel import (
     BLOCK_THREADS,
 )
 
-WARMUP_ITERS = 5
-BENCH_ITERS = 20
+WARMUP_ITERS = 10
+BENCH_ITERS = 100
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")

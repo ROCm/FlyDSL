@@ -53,15 +53,15 @@ _usage() {
 Usage:
   bash scripts/run_benchmark.sh                  # run all benchmarks (default)
   bash scripts/run_benchmark.sh softmax          # run only softmax
-  bash scripts/run_benchmark.sh rmsnorm moe      # run only selected benchmarks
+  bash scripts/run_benchmark.sh layernorm moe      # run only selected benchmarks
   bash scripts/run_benchmark.sh --only softmax,moe
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | rmsnorm | gemm | moe
+  softmax | layernorm | gemm | moe
 
 Notes:
-  - `layernorm` is accepted as an alias of `rmsnorm` (script runs RMSNorm).
+  - `layernorm` is accepted as an alias of `layernorm` (script runs layernorm).
 USAGE
 }
 
@@ -114,27 +114,27 @@ _normalize_op() {
   # Normalize aliases to canonical op names.
   op="${1:-}"
   case "${op}" in
-    layernorm) echo "rmsnorm" ;;
+    layernorm) echo "layernorm" ;;
     *) echo "${op}" ;;
   esac
 }
 
 # Default: run all benchmarks unless user selected a subset.
 RUN_SOFTMAX=1
-RUN_RMSNORM=1
+RUN_LAYERNORM=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=1
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
-  RUN_RMSNORM=0
+  RUN_LAYERNORM=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
   for op in "$@"; do
     op="$(_normalize_op "${op}")"
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
-      rmsnorm) RUN_RMSNORM=1 ;;
+      layernorm) RUN_LAYERNORM=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
       "" ) ;;
@@ -169,7 +169,7 @@ if [ "$#" -gt 0 ]; then
         ;;
       --list)
         echo "softmax"
-        echo "rmsnorm"
+        echo "layernorm"
         echo "gemm"
         echo "moe"
         exit 0
@@ -301,8 +301,8 @@ if [ "${RUN_SOFTMAX}" -eq 1 ]; then
   done
 fi
 
-# RMSNorm (script used to label this as LayerNorm; keep output truthful)
-if [ "${RUN_RMSNORM}" -eq 1 ]; then
+# layernorm (script used to label this as LayerNorm; keep output truthful)
+if [ "${RUN_LAYERNORM}" -eq 1 ]; then
   for shape in $LAYERNORM_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -310,16 +310,16 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
     set -- $shape
     IFS=$oldIFS
     M=$1; N=$2; dtype=$3
-    export ROCDSL_RMSNORM_SHAPES="$shape"
-    log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
-    if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
+    export ROCDSL_LAYERNORM_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/layernorm_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_layernorm.py >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
       FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "rmsnorm failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "rmsnorm"
+      echo "layernorm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "layernorm"
     fi
-    row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
+    row="$(_py_parse_and_emit layernorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
@@ -337,6 +337,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
+      --warmup 10 \
+      --iters 50 \
       -M "$M" \
       -N "$N" \
       -K "$K" \
@@ -371,6 +373,8 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       -t "$tokens" \
       -e "$experts" \
       -k "$topk" \
+      --warmup 10 \
+      --iters 50 \
       --tile_m "$tile_m" \
       --tile_n "$tile_n" \
       --tile_k "$tile_k" \
