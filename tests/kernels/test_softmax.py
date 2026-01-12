@@ -194,6 +194,9 @@ def test_all():
     print("="*80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     test_all()

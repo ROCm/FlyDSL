@@ -338,7 +338,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
       --num_warmup 10 \
-      --num_iters 50 \
+      --num_iters 100 \
       -M "$M" \
       -N "$N" \
       -K "$K" \
@@ -374,7 +374,7 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       -e "$experts" \
       -k "$topk" \
       --num_warmup 10 \
-      --num_iters 50 \
+      --num_iters 100 \
       --tile_m "$tile_m" \
       --tile_n "$tile_n" \
       --tile_k "$tile_k" \
