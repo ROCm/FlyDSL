@@ -434,7 +434,7 @@ def compile_preshuffle_gemm_a8(
                 # - Only valid for fp8 path (not int8/int4) and gfx95+
                 # - Requires tile_k divisible by 128
                 # - mfma.scale takes 9 operands: 3 vectors + 6 i32 flags/scales.
-                use_mfma_scale_128 = (("gfx95" in str(gpu_arch)) and (not is_int8) and (not is_int4))
+                use_mfma_scale_128 = (str(gpu_arch).startswith("gfx95") and (not is_int8) and (not is_int4))
                 if use_mfma_scale_128:
                     if (int(tile_k) % 128) != 0:
                         raise ValueError(
