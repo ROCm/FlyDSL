@@ -17,8 +17,9 @@ using namespace mlir::flir;
 
 namespace {
 static int computeRankFromPattern(Attribute pat) {
+  // Rank-unknown is not supported anymore. Treat missing pattern as rank-0.
   if (!pat)
-    return -1;
+    return 0;
   int rank = 0;
   std::function<void(Attribute)> rec = [&](Attribute a) {
     if (auto arr = dyn_cast<ArrayAttr>(a)) {
@@ -148,18 +149,13 @@ int CoordType::getRank() const { return computeRankFromPattern(getPattern()); }
 int LayoutType::getRank() const { return computeRankFromPattern(getShapePattern()); }
 
 LayoutType LayoutType::get(MLIRContext *ctx, int rank) {
-  if (rank < 0)
-    return LayoutType::get(ctx, Attribute(), Attribute());
+  assert(rank > 0 && "rank must be > 0");
   Attribute pat;
-  if (rank == 0) {
-    pat = Attribute();
-  } else {
-    SmallVector<Attribute, 8> elems;
-    elems.reserve(rank);
-    for (int32_t i = 0; i < rank; ++i)
-      elems.push_back(DyncI64Attr::get(ctx, /*dyncElemIdx=*/i, /*divisibility=*/1));
-    pat = (rank == 1) ? elems.front() : ArrayAttr::get(ctx, elems);
-  }
+  SmallVector<Attribute, 8> elems;
+  elems.reserve(rank);
+  for (int32_t i = 0; i < rank; ++i)
+    elems.push_back(DyncI64Attr::get(ctx, /*dyncElemIdx=*/i, /*divisibility=*/1));
+  pat = (rank == 1) ? elems.front() : ArrayAttr::get(ctx, elems);
   return LayoutType::get(ctx, pat, pat);
 }
 
@@ -177,6 +173,10 @@ Type ShapeType::parse(AsmParser &parser) {
   if (failed(parser.parseLess()) || failed(parsePatternElem(parser, pat, dyncIdx)) ||
       failed(parser.parseGreater()))
     return Type();
+  if (computeRankFromPattern(pat) <= 0) {
+    parser.emitError(parser.getCurrentLocation(), "flir.shape rank must be > 0");
+    return Type();
+  }
   return ShapeType::get(parser.getContext(), pat);
 }
 
@@ -192,6 +192,10 @@ Type StrideType::parse(AsmParser &parser) {
   if (failed(parser.parseLess()) || failed(parsePatternElem(parser, pat, dyncIdx)) ||
       failed(parser.parseGreater()))
     return Type();
+  if (computeRankFromPattern(pat) <= 0) {
+    parser.emitError(parser.getCurrentLocation(), "flir.stride rank must be > 0");
+    return Type();
+  }
   return StrideType::get(parser.getContext(), pat);
 }
 
@@ -207,6 +211,10 @@ Type CoordType::parse(AsmParser &parser) {
   if (failed(parser.parseLess()) || failed(parsePatternElem(parser, pat, dyncIdx)) ||
       failed(parser.parseGreater()))
     return Type();
+  if (computeRankFromPattern(pat) <= 0) {
+    parser.emitError(parser.getCurrentLocation(), "flir.coord rank must be > 0");
+    return Type();
+  }
   return CoordType::get(parser.getContext(), pat);
 }
 
@@ -225,6 +233,10 @@ Type LayoutType::parse(AsmParser &parser) {
   dyncIdx = 0;
   if (failed(parsePatternElem(parser, stridePat, dyncIdx)) || failed(parser.parseGreater()))
     return Type();
+  if (computeRankFromPattern(shapePat) <= 0) {
+    parser.emitError(parser.getCurrentLocation(), "flir.layout rank must be > 0");
+    return Type();
+  }
   return LayoutType::get(parser.getContext(), shapePat, stridePat);
 }
 

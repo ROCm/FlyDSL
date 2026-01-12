@@ -162,9 +162,9 @@ module {
     
     // CHECK: flir.flat_product
     // CHECK: flir.logical_product
-    %flat = flir.flat_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
+    %flat = flir.flat_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %flat : !flir.layout<(?,?):(?,?)> -> index
+    %size = flir.size %flat : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -239,9 +239,9 @@ module {
     
     // CHECK: flir.logical_divide
     // CHECK: flir.composition
-    %partitioned = flir.logical_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+    %partitioned = flir.logical_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %partitioned : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
+    %size = flir.size %partitioned : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -263,9 +263,9 @@ module {
     
     // CHECK: flir.zipped_divide
     // CHECK: flir.logical_divide
-    %zipped = flir.zipped_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+    %zipped = flir.zipped_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %zipped : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
+    %size = flir.size %zipped : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -287,9 +287,9 @@ module {
     
     // CHECK: flir.tiled_divide
     // CHECK: flir.logical_divide
-    %tiled = flir.tiled_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+    %tiled = flir.tiled_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %tiled : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   

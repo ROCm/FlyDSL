@@ -481,6 +481,8 @@ class ShapeType(Type):
     def get(rank: int, context=None):
         """Create a shape type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.shape rank must be > 0")
         if context is None:
             context = Context.current
         spec = "(" + ",".join(["?"] * int(rank)) + ")"
@@ -495,6 +497,8 @@ class StrideType(Type):
     def get(rank: int, context=None):
         """Create a stride type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.stride rank must be > 0")
         if context is None:
             context = Context.current
         spec = "(" + ",".join(["?"] * int(rank)) + ")"
@@ -508,6 +512,8 @@ class LayoutType(Type):
     def get(rank: int, context=None):
         """Create a layout type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.layout rank must be > 0")
         if context is None:
             context = Context.current
         spec = "(" + ",".join(["?"] * int(rank)) + ")"
@@ -521,6 +527,8 @@ class CoordType(Type):
     def get(rank: int, context=None):
         """Create a coordinate type with given rank."""
         from _mlir.ir import Context
+        if int(rank) <= 0:
+            raise ValueError("flir.coord rank must be > 0")
         if context is None:
             context = Context.current
         spec = "(" + ",".join(["?"] * int(rank)) + ")"
@@ -678,18 +686,19 @@ def _parse_layout_type(type_str: str) -> tuple[int, _PatternNode, _PatternNode]:
         if split is None:
             # Backward compatible: layout<(...)> only encodes rank.
             rank = _count_leaves_in_tuple_spec(inner)
+            if rank <= 0:
+                raise ValueError("flir.layout rank must be > 0")
             flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
             return rank, flat, flat
         shape_spec, stride_spec = split
         shape = _parse_tuple_spec(shape_spec)
         stride = _parse_tuple_spec(stride_spec)
+        if shape.leaf_count() <= 0:
+            raise ValueError("flir.layout rank must be > 0")
         return shape.leaf_count(), shape, stride
-    try:
-        rank = int(inner)
-    except Exception:
-        rank = -1
-    if rank < 0:
-        return -1, _PatternNode.leaf(None), _PatternNode.leaf(None)
+    rank = int(inner)
+    if rank <= 0:
+        raise ValueError("flir.layout rank must be > 0")
     flat = _PatternNode.tup([_PatternNode.leaf(None) for _ in range(rank)])
     return rank, flat, flat
 
@@ -831,8 +840,6 @@ def _complement_impl(shape: _PatternNode, stride: _PatternNode, cosize_hi: Optio
 def _infer_layout_type_composition(a: Value, b: Value) -> Type:
     a_rank, a_shape, a_stride = _parse_layout_type(str(a.type))
     b_rank, b_shape, b_stride = _parse_layout_type(str(b.type))
-    if a_rank < 0 or b_rank < 0:
-        raise ValueError(f"Cannot infer composition type: operand ranks are unknown: {a.type} , {b.type}")
 
     # Runtime-capable policy: if we can't compute an exact static pattern,
     # return a rank-only dynamic layout type and let lowering compute it.
@@ -852,8 +859,6 @@ def _infer_layout_type_composition(a: Value, b: Value) -> Type:
 def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
     b_rank, b_shape, b_stride = _parse_layout_type(str(block.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
-    if b_rank < 0 or t_rank < 0:
-        raise ValueError(f"Cannot infer logical_product type: operand ranks are unknown: {block.type} , {tiler.type}")
 
     # Flatten then concatenate. Shapes: [block..., tiler...]
     b_shape_leaves: List[Optional[int]] = []
@@ -882,8 +887,6 @@ def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
 def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
     l_rank, l_shape, l_stride = _parse_layout_type(str(layout.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
-    if l_rank < 0 or t_rank < 0:
-        raise ValueError(f"Cannot infer logical_divide type: operand ranks are unknown: {layout.type} , {tiler.type}")
 
     input_size = _size_of_shape(l_shape)
     if input_size is None:
@@ -913,8 +916,6 @@ def _infer_layout_type_complement(tiler: Value, target_size: Value) -> Type:
     - target_size is provably constant
     """
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
-    if t_rank < 0:
-        raise ValueError(f"Cannot infer complement type: tiler rank is unknown: {tiler.type}")
 
     cosize_hi = _try_get_constant_index(target_size)
     if cosize_hi is None:
@@ -1651,7 +1652,7 @@ def coalesce(layout: Value, loc: Optional[Location] = None, ip: Optional[Inserti
     from _mlir import ir as _ir
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    result_type = layout.type
     
     with ip or InsertionPoint.current:
         # Create the operation directly using generic OpView
@@ -1680,12 +1681,8 @@ def logical_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
         The tiled layout
     """
     
-    try:
-        loc = _get_location(loc)
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        loc = _get_location(loc)
-        result_type = LayoutType.get(-1)
+    loc = _get_location(loc)
+    result_type = _infer_layout_type_logical_product(block, tiler)
 
     with ip or InsertionPoint.current:
         return flir_ops.LogicalProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
@@ -1696,10 +1693,7 @@ def zipped_product(block: Value, tiler: Value, loc: Optional[Location] = None, i
     
     loc = _get_location(loc)
     # Lowering currently treats zipped_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.ZippedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1709,10 +1703,7 @@ def tiled_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     
     loc = _get_location(loc)
     # Lowering currently treats tiled_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.TiledProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1722,10 +1713,7 @@ def flat_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip:
     
     loc = _get_location(loc)
     # Lowering currently treats flat_product as logical_product (flattening happens later).
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.FlatProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1735,10 +1723,7 @@ def raked_product(block: Value, tiler: Value, loc: Optional[Location] = None, ip
     
     loc = _get_location(loc)
     # Lowering currently treats raked_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.RakedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1748,10 +1733,7 @@ def blocked_product(block: Value, tiler: Value, loc: Optional[Location] = None, 
     
     loc = _get_location(loc)
     # Lowering currently treats blocked_product as logical_product.
-    try:
-        result_type = _infer_layout_type_logical_product(block, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_product(block, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.BlockedProductOp(result_type, _unwrap_value(block), _unwrap_value(tiler), loc=loc).result
 
@@ -1771,12 +1753,8 @@ def logical_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, 
         The partitioned layout
     """
     
-    try:
-        loc = _get_location(loc)
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        loc = _get_location(loc)
-        result_type = LayoutType.get(-1)
+    loc = _get_location(loc)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
 
     with ip or InsertionPoint.current:
         return flir_ops.LogicalDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
@@ -1805,10 +1783,7 @@ def zipped_divide(layout_or_tensor, tiler_or_shape, loc: Optional[Location] = No
     
     # Layout division case (lowering treats zipped_divide as logical_divide).
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout_or_tensor, tiler_or_shape)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout_or_tensor, tiler_or_shape)
     with ip or InsertionPoint.current:
         return flir_ops.ZippedDivideOp(result_type, _unwrap_value(layout_or_tensor), _unwrap_value(tiler_or_shape), loc=loc).result
 
@@ -1817,10 +1792,7 @@ def tiled_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip
     """Compute the tiled divide of a layout."""
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.TiledDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1829,10 +1801,7 @@ def flat_divide(layout: Value, tiler: Value, loc: Optional[Location] = None, ip:
     """Compute the flat divide of a layout."""
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_logical_divide(layout, tiler)
-    except Exception:
-        result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_logical_divide(layout, tiler)
     with ip or InsertionPoint.current:
         return flir_ops.FlatDivideOp(result_type, _unwrap_value(layout), _unwrap_value(tiler), loc=loc).result
 
@@ -1858,7 +1827,8 @@ def local_partition(layout: Value, tile: Value, index: Value, loc: Optional[Loca
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Lowering models local_partition as logical_divide. Never emit rank-unknown.
+    result_type = _infer_layout_type_logical_divide(layout, tile)
     
     with ip or InsertionPoint.current:
         return flir_ops.LocalPartitionOp(result_type, _unwrap_value(layout), _unwrap_value(tile), _unwrap_value(index), loc=loc).result
