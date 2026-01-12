@@ -18,10 +18,10 @@ func.func @test_logical_product() -> index {
   %layout_b = flir.make_layout %shape_b, %stride_b : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
   // Logical product
-  %product = flir.logical_product %layout_a, %layout_b : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
+  %product = flir.logical_product %layout_a, %layout_b : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
   
   // Get size of result
-  %size = flir.size %product : !flir.layout<(?,?):(?,?)> -> index
+  %size = flir.size %product : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   
   return %size : index
 }
@@ -43,9 +43,9 @@ func.func @test_zipped_product() -> index {
   %layout_b = flir.make_layout %shape_b, %stride_b : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
   // Zipped product
-  %product = flir.zipped_product %layout_a, %layout_b : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
+  %product = flir.zipped_product %layout_a, %layout_b : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
   
-  %size = flir.size %product : !flir.layout<(?,?):(?,?)> -> index
+  %size = flir.size %product : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   return %size : index
 }
 
