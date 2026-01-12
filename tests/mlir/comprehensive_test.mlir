@@ -35,9 +35,9 @@ func.func @test_cosize() -> index {
   
   %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %cosize = flir.cosize %layout : !flir.layout<(?,?)> -> index
+  %cosize = flir.cosize %layout : !flir.layout<(?,?):(?,?)> -> index
   // Expected lowering: max((8-1)*1, (128-1)*16) + 1 = max(7, 2032) + 1 = 2033
   
   return %cosize : index
@@ -55,9 +55,9 @@ func.func @test_crd2idx() -> index {
   %coord = flir.make_coord %c2, %c3 : (index, index) -> !flir.coord<(?,?)>
   %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
+  %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?):(?,?)>) -> index
   // Expected lowering: idx = 2*1 + 3*16 = 2 + 48 = 50
   
   return %idx : index
@@ -72,9 +72,9 @@ func.func @test_layout_size() -> index {
   
   %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c8_1 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %size = flir.size %layout : !flir.layout<(?,?)> -> index
+  %size = flir.size %layout : !flir.layout<(?,?):(?,?)> -> index
   // Expected lowering: size = 8 * 16 = 128
   
   return %size : index

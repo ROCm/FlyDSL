@@ -9,14 +9,14 @@ func.func @test_idx2crd() {
   // Create layout with shape (8, 128) and stride (1, 16)
   %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
   // Convert linear index 50 back to coordinate
   // Expected: (2, 3) since 50 = 2*1 + 3*16
-  %coord = flir.idx2crd %c50, %layout : (index, !flir.layout<(?,?)>) -> !flir.coord<(?,?)>
+  %coord = flir.idx2crd %c50, %layout : (index, !flir.layout<(?,?):(?,?)>) -> !flir.coord<(?,?)>
   
   // Verify coord was created (avoid DCE)
-  %size = flir.size %layout : !flir.layout<(?,?)> -> index
+  %size = flir.size %layout : !flir.layout<(?,?):(?,?)> -> index
   
   return
 }

@@ -271,7 +271,10 @@ FailureOr<LayoutType> mlir::flir::inferCompositionType(MLIRContext *ctx,
   PatternNode rhsShape = parsePatternAttr(rhs.getShapePattern());
   PatternNode rhsStride = parsePatternAttr(rhs.getStridePattern());
 
-  // Conservative: require fully static leaves for now.
+  // Runtime-capable policy: if any operand leaf is dynamic/unknown, return a
+  // rank-only dynamic layout type and let lowering compute values at runtime.
+  // (We cannot soundly predict the exact output rank/structure without static
+  // values because the decomposition depends on divisions and early-exit tests.)
   if (!allStaticLeaves(lhsShape) || !allStaticLeaves(lhsStride) ||
       !allStaticLeaves(rhsShape) || !allStaticLeaves(rhsStride))
     return LayoutType::get(ctx, std::max(lhs.getRank(), rhs.getRank()));

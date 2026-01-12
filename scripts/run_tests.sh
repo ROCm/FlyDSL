@@ -53,13 +53,13 @@ for test_file in tests/mlir/*.mlir; do
         MLIR_TEST_COUNT=$((MLIR_TEST_COUNT + 1))
         test_name=$(basename "$test_file" .mlir)
         echo "Running: $test_name"
-        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.out 2>&1
+        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.log 2>&1
         if [ $? -eq 0 ]; then
             echo "   PASS"
             MLIR_PASS_COUNT=$((MLIR_PASS_COUNT + 1))
         else
             echo "   FAIL"
-            echo "      Log: /tmp/${test_name}.out"
+            echo "      Log: /tmp/${test_name}.log"
         fi
     fi
 done

@@ -15,14 +15,9 @@ def Flir_Dialect : Dialect {
     hierarchical tensor layout manipulation.
   }];
   let cppNamespace = "::mlir::flir";
-  let useDefaultTypePrinterParser = 0;
+  let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
   let usePropertiesForAttributes = 1;
-  
-  let extraClassDeclaration = [{
-    Type parseType(DialectAsmParser &parser) const override;
-    void printType(Type type, DialectAsmPrinter &printer) const override;
-  }];
 }
 
 class Flir_Attr<string attrName, string attrMnemonic,

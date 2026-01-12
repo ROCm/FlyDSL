@@ -832,7 +832,19 @@ def _infer_layout_type_composition(a: Value, b: Value) -> Type:
     a_rank, a_shape, a_stride = _parse_layout_type(str(a.type))
     b_rank, b_shape, b_stride = _parse_layout_type(str(b.type))
     if a_rank < 0 or b_rank < 0:
-        return LayoutType.get(-1)
+        raise ValueError(f"Cannot infer composition type: operand ranks are unknown: {a.type} , {b.type}")
+
+    # Runtime-capable policy: if we can't compute an exact static pattern,
+    # return a rank-only dynamic layout type and let lowering compute it.
+    if _size_of_shape(a_shape) is None or _size_of_shape(b_shape) is None:
+        return LayoutType.get(max(a_rank, b_rank))
+    a_stride_leaves: List[Optional[int]] = []
+    b_stride_leaves: List[Optional[int]] = []
+    a_stride.flatten_leaves(a_stride_leaves)
+    b_stride.flatten_leaves(b_stride_leaves)
+    if any(v is None for v in a_stride_leaves + b_stride_leaves):
+        return LayoutType.get(max(a_rank, b_rank))
+
     out_shape, out_stride = _composition_impl(a_shape, a_stride, b_shape, b_stride)
     return Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
 
@@ -841,7 +853,7 @@ def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
     b_rank, b_shape, b_stride = _parse_layout_type(str(block.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
     if b_rank < 0 or t_rank < 0:
-        return LayoutType.get(-1)
+        raise ValueError(f"Cannot infer logical_product type: operand ranks are unknown: {block.type} , {tiler.type}")
 
     # Flatten then concatenate. Shapes: [block..., tiler...]
     b_shape_leaves: List[Optional[int]] = []
@@ -854,6 +866,9 @@ def _infer_layout_type_logical_product(block: Value, tiler: Value) -> Type:
     t_stride.flatten_leaves(t_stride_leaves)
 
     block_size = _size_of_shape(b_shape)
+    if block_size is None or any(v is None for v in b_stride_leaves + t_stride_leaves):
+        # Runtime-capable fallback: only rank is known.
+        return LayoutType.get(b_rank + t_rank)
     out_shape_leaves = b_shape_leaves + t_shape_leaves
     out_stride_leaves: List[Optional[int]] = list(b_stride_leaves)
     for s in t_stride_leaves:
@@ -868,9 +883,19 @@ def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
     l_rank, l_shape, l_stride = _parse_layout_type(str(layout.type))
     t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
     if l_rank < 0 or t_rank < 0:
-        return LayoutType.get(-1)
+        raise ValueError(f"Cannot infer logical_divide type: operand ranks are unknown: {layout.type} , {tiler.type}")
 
     input_size = _size_of_shape(l_shape)
+    if input_size is None:
+        return LayoutType.get(max(l_rank, t_rank))
+
+    # Require static strides (matches C++ inference: no fallback).
+    l_stride_leaves: List[Optional[int]] = []
+    t_stride_leaves: List[Optional[int]] = []
+    l_stride.flatten_leaves(l_stride_leaves)
+    t_stride.flatten_leaves(t_stride_leaves)
+    if any(v is None for v in l_stride_leaves + t_stride_leaves):
+        return LayoutType.get(max(l_rank, t_rank))
     comp_shape, comp_stride = _complement_impl(t_shape, t_stride, input_size)
 
     rhs_shape = _PatternNode.tup([t_shape, comp_shape])
@@ -878,6 +903,34 @@ def _infer_layout_type_logical_divide(layout: Value, tiler: Value) -> Type:
 
     out_shape, out_stride = _composition_impl(l_shape, l_stride, rhs_shape, rhs_stride)
     return Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+
+
+def _infer_layout_type_complement(tiler: Value, target_size: Value) -> Type:
+    """Infer result type for flir.complement in a strict/no-fallback way.
+
+    Requires:
+    - tiler layout type is fully static
+    - target_size is provably constant
+    """
+    t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+    if t_rank < 0:
+        raise ValueError(f"Cannot infer complement type: tiler rank is unknown: {tiler.type}")
+
+    cosize_hi = _try_get_constant_index(target_size)
+    if cosize_hi is None:
+        raise ValueError("Cannot infer complement type: target_size must be a compile-time constant index")
+
+    # If we can't compute a static complement pattern, return a rank-1 dynamic
+    # layout type and let lowering handle/diagnose.
+    if _size_of_shape(t_shape) is None:
+        return LayoutType.get(1)
+    t_stride_leaves: List[Optional[int]] = []
+    t_stride.flatten_leaves(t_stride_leaves)
+    if any(v is None for v in t_stride_leaves):
+        return LayoutType.get(1)
+
+    comp_shape, comp_stride = _complement_impl(t_shape, t_stride, cosize_hi)
+    return Type.parse(f"!flir.layout<{comp_shape.to_spec()}:{comp_stride.to_spec()}>")
 
 
 
@@ -1533,13 +1586,7 @@ def composition(layout_a: Value, layout_b: Value, loc: Optional[Location] = None
     """
     
     loc = _get_location(loc)
-    try:
-        result_type = _infer_layout_type_composition(layout_a, layout_b)
-    except Exception:
-        ra = _extract_rank_from_flir_type_str(str(layout_a.type))
-        rb = _extract_rank_from_flir_type_str(str(layout_b.type))
-        r = max(ra, rb) if (ra is not None and rb is not None) else -1
-        result_type = LayoutType.get(r)
+    result_type = _infer_layout_type_composition(layout_a, layout_b)
 
     with ip or InsertionPoint.current:
         return flir_ops.CompositionOp(result_type, _unwrap_value(layout_a), _unwrap_value(layout_b), loc=loc).result
@@ -1575,7 +1622,7 @@ def complement(tiler: Value, target_size: Value, loc: Optional[Location] = None,
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    result_type = _infer_layout_type_complement(tiler, target_size)
     
     with ip or InsertionPoint.current:
         return flir_ops.ComplementOp(result_type, _unwrap_value(tiler), _unwrap_value(target_size), loc=loc).result
