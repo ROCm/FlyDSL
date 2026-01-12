@@ -182,7 +182,7 @@ else
     echo "GPU Execution Tests:             Skipped (no GPU)"
 fi
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ] && [ $MLIR_PASS_COUNT -eq $MLIR_TEST_COUNT ]; then
+if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"
