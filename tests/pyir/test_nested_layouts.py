@@ -138,9 +138,7 @@ def test_composition_infers_structured_layout_type():
             return [flir.size(R)]
 
     ir_text = str(_M().module)
-    # Wrapper should infer a structured result type, not layout<-1>.
     assert "flir.composition" in ir_text
-    assert "!flir.layout<-1>" not in ir_text
     # This is the canonical expected structure from the reference notebook/tests.
     assert "!flir.layout<((2,2),3):((24,2),8)>" in ir_text
 

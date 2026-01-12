@@ -14,8 +14,8 @@ func.func @test_tiled_product() -> index {
   %stride_tiler = flir.make_stride %c1, %c2 : (index, index) -> !flir.stride<(?,?)>
   %tiler = flir.make_layout %shape_tiler, %stride_tiler : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %result = flir.tiled_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
-  %size = flir.size %result : !flir.layout<(?,?):(?,?)> -> index
+  %result = flir.tiled_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+  %size = flir.size %result : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   return %size : index
 }
 
@@ -32,8 +32,8 @@ func.func @test_flat_product() -> index {
   %stride_tiler = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
   %tiler = flir.make_layout %shape_tiler, %stride_tiler : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %result = flir.flat_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
-  %size = flir.size %result : !flir.layout<(?,?):(?,?)> -> index
+  %result = flir.flat_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+  %size = flir.size %result : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   return %size : index
 }
 
@@ -51,8 +51,8 @@ func.func @test_raked_product() -> index {
   %stride_tiler = flir.make_stride %c1, %c2 : (index, index) -> !flir.stride<(?,?)>
   %tiler = flir.make_layout %shape_tiler, %stride_tiler : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %result = flir.raked_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
-  %size = flir.size %result : !flir.layout<(?,?):(?,?)> -> index
+  %result = flir.raked_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+  %size = flir.size %result : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   return %size : index
 }
 
@@ -70,8 +70,8 @@ func.func @test_blocked_product() -> index {
   %stride_tiler = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
   %tiler = flir.make_layout %shape_tiler, %stride_tiler : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %result = flir.blocked_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
-  %size = flir.size %result : !flir.layout<(?,?):(?,?)> -> index
+  %result = flir.blocked_product %block, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
+  %size = flir.size %result : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
   return %size : index
 }
 

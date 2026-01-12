@@ -1365,7 +1365,7 @@ static int getRankFromType(Type type) {
     return coordType.getRank();
   if (auto layoutType = llvm::dyn_cast<LayoutType>(type))
     return layoutType.getRank();
-  return -1;
+  llvm_unreachable("flir.rank input must be a flir ranked type");
 }
 
 //===----------------------------------------------------------------------===//
@@ -1616,8 +1616,6 @@ struct RankOpLowering : public RewritePattern {
     Value input = op->getOperand(0);
     
     int rank = getRankFromType(input.getType());
-    if (rank < 0)
-      return failure();
     
     auto rankConst = rewriter.create<arith::ConstantIndexOp>(loc, rank);
     rewriter.replaceOp(op, rankConst.getResult());
