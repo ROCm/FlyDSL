@@ -204,7 +204,7 @@ create_venv_and_deps() {
 
   "${venv}/bin/python" -m pip install -U pip setuptools wheel
   # build deps + packaging tooling
-  "${venv}/bin/python" -m pip install -U numpy nanobind pybind11 auditwheel twine
+  "${venv}/bin/python" -m pip install -U numpy nanobind auditwheel twine
 }
 
 build_one() {

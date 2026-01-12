@@ -28,8 +28,10 @@ if(MLIR_FOUND)
     include(AddLLVM)
     include(AddMLIR)
     include(HandleLLVMOptions)
-    include(MLIRDetectPythonEnv)
-    mlir_configure_python_dev_packages()
+    if(BUILD_PYTHON_BINDINGS)
+      # Minimal Python discovery for building MLIR's nanobind-based python extensions.
+      find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+    endif()
 
     include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
     include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})

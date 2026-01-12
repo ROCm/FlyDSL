@@ -42,7 +42,7 @@ FlyDSL/
 - **ROCm**: required for GPU execution tests/benchmarks (IR-only tests do not need a GPU).
 - **Build tools**: `cmake`, C++ compiler, and optionally `ninja` (faster).
 - **Python**: Python 3 + `pip`.
-  - `scripts/build_llvm.sh` installs `nanobind`, `numpy`, `pybind11`.
+  - `scripts/build_llvm.sh` installs `nanobind`, `numpy`.
   - `flydsl/requirements.txt` exists for auxiliary deps (`numpy`, ) for runtime data initialize and result check.
 
 ### Build

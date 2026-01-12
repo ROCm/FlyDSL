@@ -4,7 +4,6 @@ requires = [
   "wheel",
   # `setup.py` may invoke `./flir/build.sh` which runs CMake configuration that expects
   # these Python build deps to be importable in the current environment.
-  "pybind11>=2.10",
   "nanobind>=2.0",
   "numpy",
   "cmake",
