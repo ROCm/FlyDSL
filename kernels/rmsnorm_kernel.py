@@ -72,7 +72,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             zero_idx = flir.const_index(0)
             # `arith.constant` API takes value + `type=...` (do not pass type positionally).
-            n_float = arith.constant(float(N), type=compute_type)
+            inv_n = arith.constant(1.0 / float(N), type=compute_type)
             eps = arith.constant(float(EPS), type=compute_type)
             fm_fast = flir.arith.FastMathFlags.fast
 
@@ -125,7 +125,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                     thread_sumsq = thread_sumsq_next
 
                 sum_sq = block_reduce_add(thread_sumsq, s_red)
-                mean_sq = sum_sq / n_float
+                mean_sq = (arith.ArithValue(sum_sq) * inv_n).value
                 ms_eps = mean_sq + eps
                 rrms = flir.math.rsqrt(arith.as_value(ms_eps))
 
@@ -154,10 +154,14 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             )
             thr_copy_e = tiled_copy_e.get_slice((tid))
 
+            # Hoist common values used by all vectorized passes (softmax-style: avoid re-materializing each loop).
+            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+
             # Pass0: global -> LDS row cache (1-pass global read)
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
                 curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
@@ -192,16 +196,13 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
                 curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
                 if tile_safe:
-                    vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                     vec_e = flir.vector.load(
                         vec_type_e, s_row, [(c0_idx), (curr_idx)], alignment=VEC_ALIGN
                     )
-                    vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
                     vec = vec_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(vec_e))
                     vec2 = (arith.ArithValue(vec) * vec).value
                     red2 = flir.vector.reduction(compute_type, "add", (vec2), fastmath=fm_fast)
@@ -221,28 +222,23 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq = thread_sumsq + v2
 
             sum_sq = block_reduce_add(thread_sumsq, s_red)
-            mean_sq = sum_sq / n_float
+            mean_sq = (arith.ArithValue(sum_sq) * inv_n).value
 
             ms_eps = mean_sq + eps
             rrms = flir.math.rsqrt(arith.as_value(ms_eps))
 
             # Pass2: normalize + gamma + store
-            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
             rrms_splat = flir.vector.splat(vec_type_c, arith.as_value(rrms))
 
             # Software pipeline for aligned tiles: prefetch Gamma
             g_pref_e = None
             if N >= BLOCK_THREADS * VEC_WIDTH:
                 c_base0 = flir.const_index(0)
-                thread_offset0 = (arith.ArithValue(tid) * VEC_WIDTH).value
-                curr0 = (arith.ArithValue(c_base0) + thread_offset0).value
-                vec_type_e0 = ir.VectorType.get([VEC_WIDTH], elem_type)
-                g_pref_e = flir.vector.load(vec_type_e0, Gamma, [arith.as_value(curr0)], alignment=VEC_ALIGN)
+                curr0 = (arith.ArithValue(c_base0) + thread_offset_base).value
+                g_pref_e = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr0)], alignment=VEC_ALIGN)
 
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                 c_base = flir.const_index(base_idx_int)
-                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
                 curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
                 tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
