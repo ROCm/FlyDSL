@@ -79,7 +79,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             base_ptr = allocator.get_base()
             s_red = _state["smem_red"](base_ptr).get()
             s_row = _state["smem_row"](base_ptr).get()
-            # FLir-style tensor views + tiled copies (like elementwise_add_kernel).
+            # FLir-style tensor views + tiled copies.
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
             tensor_In = flir.make_tensor(Input, shape=(M, N), strides=(N, 1))
@@ -154,7 +154,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             )
             thr_copy_e = tiled_copy_e.get_slice((tid))
 
-            # Hoist common values used by all vectorized passes (softmax-style: avoid re-materializing each loop).
+            # Hoist common values used by all vectorized passes.
             thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
