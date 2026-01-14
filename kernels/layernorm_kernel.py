@@ -163,23 +163,16 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                     if cache_as_elem:
                         in_local.append(vec_e)
-                        # Keep `x` as an ArithValue-like wrapper (so `x * x` works),
-                        # but ensure the input is an MLIR Value.
                         x = flir.arith.extf(vec_type_c, arith.as_value(vec_e))
                     else:
-                        x = vec_e
+                        x = arith.as_value(vec_e)
                         in_local.append(x)
 
-                    # Avoid Python `*` on MLIR `OpResult` (not overloaded); use ArithValue ops.
-                    x_av = arith.ArithValue(arith.as_value(x))
-                    x2 = x_av * x_av
-                    # `vector.reduction` expects an MLIR Value operand (not an ArithValue wrapper).
-                    red = flir.vector.reduction(
-                        compute_type, "add", arith.as_value(x), fastmath=fm_fast
-                    )
-                    red2 = flir.vector.reduction(
-                        compute_type, "add", arith.as_value(x2), fastmath=fm_fast
-                    )
+                    # Ensure `vector.reduction` always sees raw Values (not ArithValue wrappers).
+                    x = arith.as_value(x)
+                    x2 = (arith.ArithValue(x) * x).value
+                    red = flir.vector.reduction(compute_type, "add", (x), fastmath=fm_fast)
+                    red2 = flir.vector.reduction(compute_type, "add", (x2), fastmath=fm_fast)
                     thread_sum = thread_sum + red
                     thread_sumsq = thread_sumsq + red2
 
@@ -203,11 +196,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                 vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                # `vector.splat` expects a raw MLIR Value operand (not wrapper objects).
                 mean_splat = flir.vector.splat(vec_type_c, arith.as_value(mean))
                 rstd_splat = flir.vector.splat(vec_type_c, arith.as_value(rstd))
-                mean_splat_av = arith.ArithValue(arith.as_value(mean_splat))
-                rstd_splat_av = arith.ArithValue(arith.as_value(rstd_splat))
 
                 # Pipeline Gamma/Beta loads.
                 c_vecw = flir.const_index(VEC_WIDTH)
@@ -234,6 +224,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     x = in_local[tile_i]
                     if cache_as_elem:
                         x = flir.arith.extf(vec_type_c, arith.as_value(x))
+                    else:
+                        x = arith.as_value(x)
                     if tile_i + 1 < num_tiles_py:
                         next_base_idx_int = (tile_i + 1) * tile_cols
                         c_base_next = flir.const_index(next_base_idx_int)
@@ -248,47 +240,42 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         g_next = g_cur
                         b_next = b_cur
 
-                    # Keep math in ArithValue so operator overloads work, unwrap only at MLIR boundaries.
-                    x_av = arith.ArithValue(arith.as_value(x))
-                    g_av = arith.ArithValue(arith.as_value(g_cur))
-                    b_av = arith.ArithValue(arith.as_value(b_cur))
-                    y = (x_av - mean_splat_av) * rstd_splat_av
-                    y = (y * g_av) + b_av
-                    y = arith.as_value(y)
+                    # Use ArithValue ops (handles unwrapping) instead of non-existent helpers
+                    # like `arith.subf/mulf/addf` in this repo's ext.arith module.
+                    diff = (arith.ArithValue(arith.as_value(x)) - arith.as_value(mean_splat)).value
+                    norm = (arith.ArithValue(diff) * arith.as_value(rstd_splat)).value
+                    scaled = (arith.ArithValue(norm) * arith.as_value(g_cur)).value
+                    y = (arith.ArithValue(scaled) + arith.as_value(b_cur)).value
 
                     if dtype_str == "bf16":
                         if USE_HW_CVT_PK_BF16_F32:
                             out_e = flir.arith.truncf(vec_type_e, (y))
                         else:
-                            # Software bf16 pack with round-to-nearest-even (RNE).
-                            #
-                            # bf16 = round_to_nearest_even(f32) by adding:
-                            #   bias = 0x7FFF + ((u >> 16) & 1)
-                            # then taking the top 16 bits.
+                            # Software BF16 pack with round-to-nearest-even (RNE).
+                            # gfx94x lacks an efficient v_cvt_pk_bf16_f32, and some toolchains
+                            # generate very heavy code for native bf16 truncf. Keep the bit-pack
+                            # path but do proper RNE to satisfy correctness thresholds.
                             vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
                             vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
                             vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
                             c16_i32 = arith.constant(16, type=T.i32())
                             c16_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c16_i32))
+                            c1_i32 = arith.constant(1, type=T.i32())
+                            c1_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
+                            c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
+                            c7fff_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
 
                             u = flir.arith.bitcast(vec_i32_ty, (y))
-                            u = arith.as_value(u)
-
-                            upper = arith.shrui(u, c16_i32_v)  # i32 vector (upper 16 bits in low bits)
-                            c1_i32 = arith.constant(1, type=T.i32())
-                            c1_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
-                            lsb = arith.andi(upper, arith.as_value(c1_v))
-
-                            c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
-                            c7fff_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
-                            bias = arith.ArithValue(arith.as_value(c7fff_v)) + arith.ArithValue(arith.as_value(lsb))
-                            u_round = arith.ArithValue(u) + bias
-
-                            bf16_bits = arith.as_value(arith.shrui(u_round, c16_i32_v))
+                            # round_bias = 0x7FFF + ((u >> 16) & 1)
+                            hi = arith.as_value(arith.shrui(u, c16_i32_v))
+                            lsb = arith.as_value(arith.andi(arith.as_value(hi), c1_i32_v))
+                            round_bias = (arith.ArithValue(arith.as_value(c7fff_i32_v)) + arith.as_value(lsb)).value
+                            u_rounded = (arith.ArithValue(arith.as_value(u)) + arith.as_value(round_bias)).value
+                            bf16_bits = arith.as_value(arith.shrui(u_rounded, c16_i32_v))
 
                             even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
                             odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = arith.as_value(arith.shli(arith.as_value(odd), flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
+                            odd_sh = arith.as_value(arith.shli(arith.as_value(odd), arith.as_value(flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32)))))
                             packed = arith.as_value(arith.ori(arith.as_value(even), odd_sh))
                             out_e = flir.vector.bitcast(vec_bf16_ty, (packed))
                     else:
@@ -297,13 +284,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     blkOut = gOut[((row), tile_i)]
                     thrOut = thr_copy_e.partition_S(blkOut)
                     frgOut = flir.make_fragment_like(thrOut, elem_type)
-                    # `vector.store` expects a raw MLIR Value for the stored vector.
-                    flir.vector.store(
-                        arith.as_value(out_e),
-                        frgOut.memref,
-                        [c0_idx, c0_idx],
-                        alignment=VEC_ALIGN,
-                    )
+                    flir.vector.store(arith.as_value(out_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                     flir.copy(
                         tiled_copy_e,
                         frgOut,
@@ -332,8 +313,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
                         x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
-                        x_av = arith.ArithValue(arith.as_value(x))
-                        x2 = x_av * x_av
+                        x = arith.as_value(x)
+                        x2 = (arith.ArithValue(x) * x).value
                         thread_sum_next = thread_sum + x
                         thread_sumsq_next = thread_sumsq + x2
                     thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
