@@ -37,6 +37,8 @@ def test_matmul_with_flir():
         def coords_to_linear(
             self: flir.T.i64,
             C: lambda: T.memref(S, S, T.i32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
         ):
             bx = flir.block_idx("x")
             by = flir.block_idx("y")
@@ -48,8 +50,9 @@ def test_matmul_with_flir():
             row = (by * tile + ty)
             col = (bx * tile + tx)
 
-            m_c = arith.index(M)
-            n_c = arith.index(N)
+            # Use runtime sizes so the same compiled kernel can be reused for different M.
+            m_c = arith.ArithValue(m_in)
+            n_c = arith.ArithValue(n_in)
             one = arith.index(1)
 
             # Create flir layout for output matrix C
@@ -63,23 +66,30 @@ def test_matmul_with_flir():
             # Use crd2idx to compute linear index (will be lowered to arith ops)
             idx = flir.crd2idx(thread_coord, c_layout)
             idx_i32 = arith.index_cast(T.i32(), idx)
-            memref.store(idx_i32, C, [row, col])
+            valid = (arith.ArithValue(row) < m_c) & (arith.ArithValue(col) < n_c)
+            if valid:
+                memref.store(idx_i32, C, [row, col])
 
         @flir.jit
         def __call__(
             self: flir.T.i64,
             C: lambda: T.memref(S, S, T.i32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
         ):
             # Wrap the kernel launch inside a host-side function.
             c1 = arith.index(1)
             blk = arith.index(16)
-            gx = arith.index((N + 15) // 16)
-            gy = arith.index((M + 15) // 16)
+            blk = arith.index(16)
+            n_c = arith.ArithValue(n_in)
+            m_c = arith.ArithValue(m_in)
+            gx = arith.as_value((n_c + arith.index(15)) // blk)
+            gy = arith.as_value((m_c + arith.index(15)) // blk)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "coords_to_linear"],
                 grid_size=(gx, gy, c1),
                 block_size=(blk, blk, c1),
-                kernel_operands=[C],
+                kernel_operands=[C, m_in, n_in],
             )
 
     print("\n Generated MLIR with flir coordinate operations:")
@@ -98,7 +108,7 @@ def test_matmul_with_flir():
     expected = np.arange(M * N, dtype=np.int32).reshape(M, N)
     C = torch.empty((M, N), device="cuda", dtype=torch.int32)
 
-    exe(C)
+    exe(C, M, N)
     torch.cuda.synchronize()
     c_host = C.cpu().numpy()
 

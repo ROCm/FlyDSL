@@ -82,7 +82,7 @@ def run_test(M, N, dtype_str):
         c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
     
     def kernel_launch():
-        exe(a_dev, c_dev)
+        exe(a_dev, c_dev, M)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()

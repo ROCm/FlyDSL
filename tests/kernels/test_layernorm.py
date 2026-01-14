@@ -115,7 +115,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print("Launching kernel...")
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, beta_dev, output_dev)
+        exe(input_dev, gamma_dev, beta_dev, output_dev, M)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()

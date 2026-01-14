@@ -44,7 +44,6 @@ def create_vec_add_kernel(
     ITERS_PER_THREAD = TILE_SIZE // VEC_WIDTH
 
     gpu_arch = get_rocm_arch()
-    num_blocks = (size + TILE_ELEMS - 1) // TILE_ELEMS
     S = ir.ShapedType.get_dynamic_size()
 
     class _VecAdd(flir.MlirModule):
@@ -57,6 +56,7 @@ def create_vec_add_kernel(
             A: lambda: T.memref(S, dtype.get()),
             B: lambda: T.memref(S, dtype.get()),
             C: lambda: T.memref(S, dtype.get()),
+            n: lambda: T.index(),
         ):
             tid_x = flir.thread_idx("x")
             tid_y = flir.thread_idx("y")
@@ -92,9 +92,9 @@ def create_vec_add_kernel(
                 val_shape=(TILE_SIZE,),
             )
 
-            tensor_A = flir.make_tensor(A, shape=(size,), strides=(1,))
-            tensor_B = flir.make_tensor(B, shape=(size,), strides=(1,))
-            tensor_C = flir.make_tensor(C, shape=(size,), strides=(1,))
+            tensor_A = flir.make_tensor(A, shape=(n,), strides=(1,))
+            tensor_B = flir.make_tensor(B, shape=(n,), strides=(1,))
+            tensor_C = flir.make_tensor(C, shape=(n,), strides=(1,))
 
             tile_shape = (TILE_ELEMS,)
 
@@ -102,7 +102,7 @@ def create_vec_add_kernel(
             gB = flir.zipped_divide(tensor_B, tile_shape)
             gC = flir.zipped_divide(tensor_C, tile_shape)
 
-            idC = flir.make_identity_tensor((size,))
+            idC = flir.make_identity_tensor((n,))
             cC = flir.zipped_divide(idC, tile_shape)
 
             blk_coord = (bid_x,)
@@ -132,7 +132,7 @@ def create_vec_add_kernel(
             for linear in range(total_vals):
                 lin_idx = flir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
-                pred_val = flir.elem_less(coords, (size,))
+                pred_val = flir.elem_less(coords, (n,))
                 pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
                 frgPred[pred_offsets] = pred_val
 
@@ -158,15 +158,17 @@ def create_vec_add_kernel(
             A: lambda: T.memref(S, dtype.get()),
             B: lambda: T.memref(S, dtype.get()),
             C: lambda: T.memref(S, dtype.get()),
+            n: lambda: T.index(),
         ):
             c1 = arith.index(1)
-            gx = arith.index(num_blocks)
+            c_tile_elems = arith.index(TILE_ELEMS)
+            gx = (n + c_tile_elems - c1) // c_tile_elems
             bx = arith.index(THREADS_PER_BLOCK)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "vec_add"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[A, B, C],
+                kernel_operands=[A, B, C, n],
             )
 
     return _VecAdd().module
@@ -257,7 +259,7 @@ def benchmark_vector_add(tile_size: int = 4):
     c_dev = torch.empty_like(a_dev)
 
     def kernel_launch():
-        exe(a_dev, b_dev, c_dev)
+        exe(a_dev, b_dev, c_dev, SIZE)
         torch.cuda.synchronize()
 
     # Run benchmark

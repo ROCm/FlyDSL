@@ -5,12 +5,13 @@ embedded in `tests/kernels/test_rmsnorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
+from _mlir import ir
+
 from flydsl.dialects.ext import flir, arith
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator
-from _mlir import ir
 import _mlir.extras.types as T
 
 
@@ -39,6 +40,7 @@ VEC_ALIGN = 16
 
 def build_rmsnorm_module(M: int, N: int, dtype_str: str):
     arch = get_hip_arch()
+    DYN = ir.ShapedType.get_dynamic_size()
     allocator = SmemAllocator(None, arch=arch)
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     _state = {}
@@ -60,9 +62,10 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         @flir.kernel
         def rmsnorm_kernel(
             self: flir.T.i64,
-            Input: lambda: T.memref(M, N, _state["elem_type"]),
+            Input: lambda: T.memref(DYN, N, _state["elem_type"]),
             Gamma: lambda: T.memref(N, _state["elem_type"]),
-            Output: lambda: T.memref(M, N, _state["elem_type"]),
+            Output: lambda: T.memref(DYN, N, _state["elem_type"]),
+            m_in: lambda: T.index(),
         ):
             # Normalize to MLIR index Values early so downstream ops always see `Value`.
             row = flir.const_index(flir.block_idx("x"))
@@ -82,8 +85,8 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             # FLir-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
-            tensor_In = flir.make_tensor(Input, shape=(M, N), strides=(N, 1))
-            tensor_Out = flir.make_tensor(Output, shape=(M, N), strides=(N, 1))
+            tensor_In = flir.make_tensor(Input, shape=(m_in, N), strides=(N, 1))
+            tensor_Out = flir.make_tensor(Output, shape=(m_in, N), strides=(N, 1))
             tensor_Gamma = flir.make_tensor(Gamma, shape=(N,), strides=(1,))
             tensor_S = flir.make_tensor(s_row, shape=(1, N), strides=(N, 1))
             gIn = flir.zipped_divide(tensor_In, (1, tile_cols))
@@ -298,18 +301,19 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            Input: lambda: T.memref(M, N, _state["elem_type"]),
+            Input: lambda: T.memref(DYN, N, _state["elem_type"]),
             Gamma: lambda: T.memref(N, _state["elem_type"]),
-            Output: lambda: T.memref(M, N, _state["elem_type"]),
+            Output: lambda: T.memref(DYN, N, _state["elem_type"]),
+            m_in: lambda: T.index(),
         ):
             c1 = arith.as_value(flir.arith_ext.index(1))
-            gx = arith.as_value(flir.arith_ext.index(M))
+            gx = arith.as_value(m_in)
             bx = arith.as_value(flir.arith_ext.index(BLOCK_THREADS))
             flir.gpu_ext.LaunchFuncOp(
                 ["rmsnorm_module", "rmsnorm_kernel"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[Input, Gamma, Output],
+                kernel_operands=[Input, Gamma, Output, m_in],
             )
 
     return _RMSNorm()

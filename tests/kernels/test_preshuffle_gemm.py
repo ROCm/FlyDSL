@@ -81,7 +81,10 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     [
         (16, 5120, 8192, 16, 64, 512), 
         (5120, 5120, 8320, 64, 256, 128), 
-        (9728, 8192, 8320, 128, 128, 128)
+        (9728, 8192, 8320, 128, 128, 128),
+        # Tail case: M is not a multiple of tile_m (N stays aligned). Kernel should handle via
+        # OOB-checked A/scaleA/C buffer ops (max_size=False) + ceil_div grid sizing on M.
+        (5133, 5120, 8320, 64, 256, 128),
     ]
 )
 def test_mfma_a8_flir_preshuffle(

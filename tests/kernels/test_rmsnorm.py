@@ -107,7 +107,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print("Launching kernel...")
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, output_dev)
+        exe(input_dev, gamma_dev, output_dev, M)
 
     # run_perftest returns (data, avg_us)
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)

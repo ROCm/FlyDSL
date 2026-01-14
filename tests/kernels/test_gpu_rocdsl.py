@@ -63,13 +63,16 @@ def test_vector_add_flir_crd2idx_emits():
 
 def test_matrix_transpose_flir_layout_emits():
     M, N = 32, 64
+    S = ir.ShapedType.get_dynamic_size()
 
     class _Transpose(flir.MlirModule):
         @flir.kernel
         def matrixTranspose(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, T.f32()),
-            B: lambda: T.memref(N, M, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
         ):
             bx = flir.block_idx("x")
             by = flir.block_idx("y")
@@ -80,8 +83,11 @@ def test_matrix_transpose_flir_layout_emits():
             row = (by * tile + ty)
             col = (bx * tile + tx)
 
-            a_layout = flir.make_layout(flir.make_shape(M, N), flir.make_stride(N, 1))
-            b_layout = flir.make_layout(flir.make_shape(N, M), flir.make_stride(M, 1))
+            m_c = arith.ArithValue(m_in)
+            n_c = arith.ArithValue(n_in)
+            one = arith.index(1)
+            a_layout = flir.make_layout(flir.make_shape(arith.as_value(m_c), arith.as_value(n_c)), flir.make_stride(arith.as_value(n_c), one))
+            b_layout = flir.make_layout(flir.make_shape(arith.as_value(n_c), arith.as_value(m_c)), flir.make_stride(arith.as_value(m_c), one))
             _ = a_layout
             _ = b_layout
 
@@ -94,24 +100,30 @@ def test_matrix_transpose_flir_layout_emits():
             # We still emit flir.crd2idx above to exercise layout lowering.
             _ = a_idx
             _ = b_idx
-            a_val = memref.load(A, [row, col])
-            memref.store(a_val, B, [col, row])
+            valid = (arith.ArithValue(row) < m_c) & (arith.ArithValue(col) < n_c)
+            if valid:
+                a_val = memref.load(A, [row, col])
+                memref.store(a_val, B, [col, row])
 
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, T.f32()),
-            B: lambda: T.memref(N, M, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
         ):
             c1 = arith.index(1)
             blk = arith.index(16)
-            gx = arith.index((N + 15) // 16)
-            gy = arith.index((M + 15) // 16)
+            n_c = arith.ArithValue(n_in)
+            m_c = arith.ArithValue(m_in)
+            gx = arith.as_value((n_c + arith.index(15)) // blk)
+            gy = arith.as_value((m_c + arith.index(15)) // blk)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "matrixTranspose"],
                 grid_size=(gx, gy, c1),
                 block_size=(blk, blk, c1),
-                kernel_operands=[A, B],
+                kernel_operands=[A, B, m_in, n_in],
             )
 
     m = _Transpose()
@@ -123,14 +135,18 @@ def test_matrix_transpose_flir_layout_emits():
 
 def test_matmul_uses_scf_for_and_flir_layout():
     M, N, K = 32, 32, 64
+    S = ir.ShapedType.get_dynamic_size()
 
     class _Matmul(flir.MlirModule):
         @flir.kernel
         def matmul(
             self: flir.T.i64,
-            A: lambda: T.memref(M, K, T.f32()),
-            B: lambda: T.memref(K, N, T.f32()),
-            C: lambda: T.memref(M, N, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            C: lambda: T.memref(S, S, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
         ):
             bx = flir.block_idx("x")
             by = flir.block_idx("y")
@@ -141,20 +157,20 @@ def test_matmul_uses_scf_for_and_flir_layout():
             row = (by * tile + ty)
             col = (bx * tile + tx)
 
-            m_c = arith.index(M)
-            n_c = arith.index(N)
-            k_c = arith.index(K)
+            m_c = arith.ArithValue(m_in)
+            n_c = arith.ArithValue(n_in)
+            k_c = arith.ArithValue(k_in)
             one = arith.index(1)
 
-            c_layout = flir.make_layout(flir.make_shape(m_c, n_c), flir.make_stride(n_c, one))
+            c_layout = flir.make_layout(flir.make_shape(arith.as_value(m_c), arith.as_value(n_c)), flir.make_stride(arith.as_value(n_c), one))
             thread_coord = flir.make_coord(row, col)
             _ = flir.crd2idx(thread_coord, c_layout)
 
-            valid = (row < m_c) & (col < n_c)
+            valid = (arith.ArithValue(row) < m_c) & (arith.ArithValue(col) < n_c)
             if valid:
                 sum_val = arith.f32(0.0)
                 # Python `for` + reassignment is auto-lowered into scf.for with iter_args/yield/results.
-                for k in range(k_c):
+                for k in range(arith.as_value(k_c)):
                     a_val = memref.load(A, [row, k])
                     b_val = memref.load(B, [k, col])
                     sum_val = sum_val + (a_val * b_val)
@@ -164,19 +180,24 @@ def test_matmul_uses_scf_for_and_flir_layout():
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, K, T.f32()),
-            B: lambda: T.memref(K, N, T.f32()),
-            C: lambda: T.memref(M, N, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            C: lambda: T.memref(S, S, T.f32()),
+            m_in: lambda: T.index(),
+            n_in: lambda: T.index(),
+            k_in: lambda: T.index(),
         ):
             c1 = arith.index(1)
             blk = arith.index(16)
-            gx = arith.index((N + 15) // 16)
-            gy = arith.index((M + 15) // 16)
+            n_c = arith.ArithValue(n_in)
+            m_c = arith.ArithValue(m_in)
+            gx = arith.as_value((n_c + arith.index(15)) // blk)
+            gy = arith.as_value((m_c + arith.index(15)) // blk)
             flir.gpu_ext.LaunchFuncOp(
                 ["kernels", "matmul"],
                 grid_size=(gx, gy, c1),
                 block_size=(blk, blk, c1),
-                kernel_operands=[A, B, C],
+                kernel_operands=[A, B, C, m_in, n_in, k_in],
             )
 
     m = _Matmul()
