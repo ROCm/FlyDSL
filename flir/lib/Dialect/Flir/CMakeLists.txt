@@ -8,6 +8,8 @@ add_mlir_dialect_library(FlirDialect
   FlirAttrDefsIncGen
   FlirTypeDefsIncGen
   FlirOpsIncGen
+  FlirAttrsIncGen
+  FlirTypesIncGen
   
   LINK_LIBS
   MLIRIR

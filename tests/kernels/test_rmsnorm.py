@@ -53,8 +53,8 @@ from kernels.rmsnorm_kernel import (
     BLOCK_THREADS,
 )
 
-WARMUP_ITERS = 5
-BENCH_ITERS = 20
+WARMUP_ITERS = 10
+BENCH_ITERS = 100
 
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
@@ -63,10 +63,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         m = build_rmsnorm_module(M, N, dtype)
         exe = flydsl.compile(m)
     except Exception as e:
-        # Some shapes may hit rarely-used tail paths in the example kernel builder.
-        # Keep correctness harness robust: skip unsupported shapes instead of hard-failing the whole run.
-        print(f"[Skip] build_rmsnorm_module failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
-        return True, None
+        # Treat compile-time failures as test failures so wrapper scripts (run_tests.sh)
+        # can detect them via a non-zero exit code.
+        print(f"[FAIL] Compile failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
+        return False, None
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
     gamma_t = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
@@ -207,6 +207,9 @@ def test_all():
     print("="*80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     test_all()

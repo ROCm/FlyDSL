@@ -50,8 +50,8 @@ def next_power_of_2(x: int) -> int:
 
 from kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
 
-WARMUP_ITERS = 5
-BENCH_ITERS = 20
+WARMUP_ITERS = 10
+BENCH_ITERS = 100
 
 def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
@@ -194,6 +194,9 @@ def test_all():
     print("="*80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     test_all()

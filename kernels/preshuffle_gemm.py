@@ -425,6 +425,78 @@ def compile_preshuffle_gemm_a8(
                         scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
 
                 current_accs_list = list(accs_in)
+
+                # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
+                # This is the key optimization from `zhimding/develop_0107` for FP8:
+                # use mfma.scale 16x16x128 to reduce instruction count in the hot loop.
+                #
+                # Notes:
+                # - Only valid for fp8 path (not int8/int4) and gfx95+
+                # - Requires tile_k divisible by 128
+                # - mfma.scale takes 9 operands: 3 vectors + 6 i32 flags/scales.
+                use_mfma_scale_128 = (str(gpu_arch).startswith("gfx95") and (not is_int8) and (not is_int4))
+                if use_mfma_scale_128:
+                    if (int(tile_k) % 128) != 0:
+                        raise ValueError(
+                            f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
+                        )
+
+                    mfma_res_ty = T.f32x4
+                    vec4_i64 = T.vec(4, T.i64)
+                    vec8_i32 = T.vec(8, T.i32)
+
+                    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+                        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+                        return vector.bitcast(vec8_i32, v4)
+
+                    for ku128 in range_constexpr(k_unroll // 2):
+                        ku0 = ku128 * 2
+                        ku1 = ku0 + 1
+
+                        b0_packs0, b0_packs1 = b_tile_in[ku0]
+                        b1_packs0, b1_packs1 = b_tile_in[ku1]
+
+                        col_base0 = col_offset_base + (ku0 * 64)
+                        col_base1 = col_offset_base + (ku1 * 64)
+
+                        for mi in range_constexpr(m_repeat):
+                            mi_val = arith.constant(mi * 16, index=True)
+                            curr_row_a_lds = row_a_lds + mi_val
+
+                            if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
+                                a0, a1 = a0_prefetch
+                            else:
+                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+
+                            for ni in range_constexpr(num_acc_n):
+                                b0 = b0_packs0[ni]
+                                b1 = b0_packs1[ni]
+                                b2 = b1_packs0[ni]
+                                b3 = b1_packs1[ni]
+                                b128 = pack_i64x4_to_i32x8(b0, b1, b2, b3)
+
+                                acc_idx = mi * num_acc_n + ni
+                                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    mfma_res_ty,
+                                    [
+                                        a128,
+                                        b128,
+                                        current_accs_list[acc_idx],
+                                        # cbsz, abid, blgp: 0
+                                        0,
+                                        0,
+                                        0,
+                                        # op_sel_a + scale_a (1.0f as i32 bits)
+                                        0x3F800000,
+                                        # op_sel_b + scale_b (1.0f as i32 bits)
+                                        0,
+                                        0x3F800000,
+                                    ],
+                                )
+                    return current_accs_list, scales_pf
+
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                 mfma_fn = mfma_i32_k32 if is_int8 else rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -462,6 +534,10 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
+            vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
+            vec1_i16 = ir.VectorType.get([1], ir.IntegerType.get_signless(16))
+            vec2_i16 = ir.VectorType.get([2], ir.IntegerType.get_signless(16))
+            vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
 
             def store_output(final_accs, scales):
                 s_b_vals = scales["s_b_vals"]
@@ -472,6 +548,11 @@ def compile_preshuffle_gemm_a8(
                         raise RuntimeError(
                             "use_cshuffle_epilog=True but lds_out is not allocated/aliased."
                         )
+                    # We reuse the A LDS allocation as `lds_out` for the cshuffle epilogue.
+                    # Add a block-wide barrier before starting to write into LDS to avoid
+                    # racing with the tail of the mainloop's LDS reads (different waves can
+                    # reach the epilogue at slightly different times).
+                    gpu.barrier()
 
                     def write_row_to_lds(
                         *,
@@ -484,6 +565,21 @@ def compile_preshuffle_gemm_a8(
                         num_acc_n: int,
                         lds_out,
                     ):
+                        # Store packed half2 to LDS as i32:
+                        # - Each lane computes one f16 (for its lane_mod_16 column)
+                        # - Use ds_bpermute to grab the neighbor lane's f16 bits and pack (even, odd)
+                        # - Store to the even column address / 2 in the i32 alias view
+                        c0_i32 = arith.constant(0, type=T.i32)
+                        c1_i32 = arith.constant(1, type=T.i32)
+                        cFE_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
+                        c2_i32 = arith.constant(2, type=T.i32)
+
+                        lane_id_i32 = arith.index_cast(T.i32, lane_id)
+                        lane_lsb = arith.andi(lane_id_i32, c1_i32)
+                        is_odd = lane_lsb != c0_i32
+                        nbr_lane = arith.xori(lane_id_i32, c1_i32)
+                        nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)  # lane_id * 4 (bytes)
+
                         s_a_vec4 = s_a_vecs[mi]
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                         for ni in range_constexpr(num_acc_n):
@@ -496,14 +592,78 @@ def compile_preshuffle_gemm_a8(
                             val_s = (val * s_a) * s_b_vals[ni]
                             v16 = arith.trunc_f(T.f16, val_s)
 
-                            lds_idx = row_base_lds + col_local
-                            v1 = vector.from_elements(vec1_f16, [v16])
-                            vector.store(v1, lds_out, [lds_idx], alignment=2)
+                            # v16 (f16) -> bits in i32 low16
+                            v1_f16 = vector.from_elements(vec1_f16, [v16])
+                            v1_i16 = vector.bitcast(vec1_i16, v1_f16)
+                            v16_i16 = vector.extract(
+                                v1_i16, static_position=[0], dynamic_position=[]
+                            )
+                            # Zero-extend i16 bits to i32:
+                            # Build a 2xi16 vector (low16=v16 bits, high16=0) then bitcast to 1xi32.
+                            z16 = arith.constant(0, type=T.i16)
+                            v2_i16 = vector.from_elements(vec2_i16, [v16_i16, z16])
+                            v16_i32 = vector.extract(
+                                vector.bitcast(vec1_i32, v2_i16),
+                                static_position=[0],
+                                dynamic_position=[],
+                            )
+
+                            # Neighbor's bits (per-lane): ds_bpermute uses a byte index.
+                            nbr_i32 = rocdl.ds_bpermute(
+                                T.i32,
+                                arith.unwrap(nbr_lane_bytes),
+                                arith.unwrap(v16_i32),
+                            )
+
+                            # Convert neighbor bits back to f16 so we can store vec2<f16>.
+                            nbr_v1_i32 = vector.from_elements(vec1_i32, [nbr_i32])
+                            nbr_v2_i16 = vector.bitcast(vec2_i16, nbr_v1_i32)
+                            nbr_i16 = vector.extract(
+                                nbr_v2_i16, static_position=[0], dynamic_position=[]
+                            )
+                            nbr_v1_i16 = vector.from_elements(vec1_i16, [nbr_i16])
+                            nbr_v1_f16 = vector.bitcast(vec1_f16, nbr_v1_i16)
+                            nbr_f16 = vector.extract(
+                                nbr_v1_f16, static_position=[0], dynamic_position=[]
+                            )
+
+                            even_f16 = arith.select(is_odd, nbr_f16, v16)
+                            odd_f16 = arith.select(is_odd, v16, nbr_f16)
+
+                            # Store [even, odd] as a single 32-bit LDS write (2xf16).
+                            col_local_i32 = arith.index_cast(T.i32, col_local)
+                            col_even_i32 = arith.andi(col_local_i32, cFE_i32)
+                            col_even = arith.index_cast(T.index, col_even_i32)
+
+                            lds_idx = row_base_lds + col_even
+                            v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
+                            vector.store(v2, lds_out, [lds_idx], alignment=4)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
-                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)
-                        buffer_ops.buffer_store(frag, c_rsrc, idx_out)
+                        #
+                        # IMPORTANT:
+                        # RawPtrBufferStoreOp offsets are in BYTES. `buffer_ops.buffer_store()`
+                        # will scale by element bytes based on the *data type*. For f16 vectors,
+                        # some backends/paths can be fragile. We explicitly bitcast to i32
+                        # and pass a byte offset to keep the store well-defined.
+                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
+                        byte_off = idx_out * arith.constant(2, index=True)  # bytes
+
+                        if e_vec == 4:
+                            frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
+                            buffer_ops.buffer_store(
+                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
+                            )
+                        else:
+                            # e_vec == 2: pack 2xf16 -> 1xi32
+                            frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
+                            frag_i32 = vector.extract(
+                                frag_i32x1, static_position=[0], dynamic_position=[]
+                            )
+                            buffer_ops.buffer_store(
+                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True
+                            )
 
                     # Prefer 16B stores when possible:
                     # - EVec=4 => 4xf16 (8B) per store (and matches tile_n multiples of 128)
