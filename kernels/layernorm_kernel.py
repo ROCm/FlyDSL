@@ -163,9 +163,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         if is_valid_row and is_valid:
                             x_e = flir.memref.load(Input, [(row_r), arith.as_value(idx)])
                             x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
-                            x = arith.as_value(x)
-                            x2 = (arith.ArithValue(x) * x).value
-                            thread_sum_next = thread_sum + x
+                            x_val = arith.as_value(x)
+                            x2 = (arith.ArithValue(x_val) * x_val).value
+                            thread_sum_next = thread_sum + x_val
                             thread_sumsq_next = thread_sumsq + x2
                         thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
