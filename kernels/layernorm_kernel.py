@@ -6,6 +6,7 @@ codegen and performance. Only test-only helpers/imports are removed.
 """
 
 from _mlir import ir
+ 
 
 from flydsl.dialects.ext import flir, arith
 from flydsl.dialects.ext.python_control_flow import range_constexpr
@@ -168,6 +169,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         x = arith.as_value(vec_e)
                         in_local.append(x)
 
+                    # Always upcast to fp32 for reduction.
                     # Ensure `vector.reduction` always sees raw Values (not ArithValue wrappers).
                     x = arith.as_value(x)
                     x2 = (arith.ArithValue(x) * x).value
@@ -176,7 +178,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     thread_sum = thread_sum + red
                     thread_sumsq = thread_sumsq + red2
 
-                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
+                sum_val = block_reduce_add(thread_sum, s_sum)
+                sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
                 sum_val = arith.ArithValue(arith.as_value(sum_val))
@@ -248,36 +251,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     y = (arith.ArithValue(scaled) + arith.as_value(b_cur)).value
 
                     if dtype_str == "bf16":
-                        if USE_HW_CVT_PK_BF16_F32:
-                            out_e = flir.arith.truncf(vec_type_e, (y))
-                        else:
-                            # Software BF16 pack with round-to-nearest-even (RNE).
-                            # gfx94x lacks an efficient v_cvt_pk_bf16_f32, and some toolchains
-                            # generate very heavy code for native bf16 truncf. Keep the bit-pack
-                            # path but do proper RNE to satisfy correctness thresholds.
-                            vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
-                            vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
-                            vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
-                            c16_i32 = arith.constant(16, type=T.i32())
-                            c16_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c16_i32))
-                            c1_i32 = arith.constant(1, type=T.i32())
-                            c1_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
-                            c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
-                            c7fff_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
-
-                            u = flir.arith.bitcast(vec_i32_ty, (y))
-                            # round_bias = 0x7FFF + ((u >> 16) & 1)
-                            hi = arith.as_value(arith.shrui(u, c16_i32_v))
-                            lsb = arith.as_value(arith.andi(arith.as_value(hi), c1_i32_v))
-                            round_bias = (arith.ArithValue(arith.as_value(c7fff_i32_v)) + arith.as_value(lsb)).value
-                            u_rounded = (arith.ArithValue(arith.as_value(u)) + arith.as_value(round_bias)).value
-                            bf16_bits = arith.as_value(arith.shrui(u_rounded, c16_i32_v))
-
-                            even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
-                            odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = arith.as_value(arith.shli(arith.as_value(odd), arith.as_value(flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32)))))
-                            packed = arith.as_value(arith.ori(arith.as_value(even), odd_sh))
-                            out_e = flir.vector.bitcast(vec_bf16_ty, (packed))
+                        out_e = flir.arith.truncf(vec_type_e, (y))
                     else:
                         out_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, (y))
 
@@ -319,7 +293,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         thread_sumsq_next = thread_sumsq + x2
                     thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
-                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
+                sum_val = block_reduce_add(thread_sum, s_sum)
+                sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
                 sum_val = arith.ArithValue(arith.as_value(sum_val))
