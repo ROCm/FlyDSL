@@ -39,11 +39,15 @@ VEC_ALIGN = 16
 
 
 def build_layernorm_module(M: int, N: int, dtype_str: str):
+    ROW_PACK = int(os.environ.get("FLYDSL_LAYERNORM_ROW_PACK", "1"))
+    if ROW_PACK not in (1, 2, 4):
+        raise ValueError(f"FLYDSL_LAYERNORM_ROW_PACK must be 1/2/4, got {ROW_PACK}")
+    # Avoid LDS overflow on some chips (e.g., gfx942 64KB limit): row_pack=4 with N==8192 bf16/f16
+    # can exceed by a small margin once we include reduction scratch.
+    if ROW_PACK == 4 and N >= 8192 and dtype_str in ("bf16", "f16"):
+        ROW_PACK = 2
+
     arch = get_hip_arch()
-    # gfx950 supports efficient BF16 pack via v_cvt_pk_bf16_f32.
-    # gfx942 does *not* support it and tends to lower f32->bf16 to heavier sequences,
-    # so we keep the manual pack there for performance.
-    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or arch.startswith("gfx95")
     allocator = SmemAllocator(None, arch=arch)
 
     tile_cols_py = BLOCK_THREADS * VEC_WIDTH
@@ -63,6 +67,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             _state["compute_type"] = compute_type
             _state["smem_red_sum"] = allocator.allocate_array(T.f32(), RED_SLOTS)
             _state["smem_red_sumsq"] = allocator.allocate_array(T.f32(), RED_SLOTS)
+            # Cache one row into LDS.
+            _state["smem_row"] = allocator.allocate_tensor((ROW_PACK, N), elem_type)
             allocator.finalize()
 
         @flir.kernel
@@ -74,7 +80,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Output: lambda: T.memref(M, N, _state["elem_type"]),
         ):
             # Normalize to MLIR index Values early so downstream ops always see `Value`.
-            row = flir.const_index(flir.block_idx("x"))
+            bid = flir.const_index(flir.block_idx("x"))
+            c_rp = flir.const_index(ROW_PACK)
+            row_base = (arith.ArithValue(bid) * c_rp).value
             tid = flir.const_index(flir.thread_idx("x"))
 
             elem_type = _state["elem_type"]
@@ -88,6 +96,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             base_ptr = allocator.get_base()
             s_sum = _state["smem_red_sum"](base_ptr).get()
             s_sumsq = _state["smem_red_sumsq"](base_ptr).get()
+            s_row = _state["smem_row"](base_ptr).get()
             # FLIR-style tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_THREADS * VEC_WIDTH  # python int
@@ -95,8 +104,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             tensor_Out = flir.make_tensor(Output, shape=(M, N), strides=(N, 1))
             tensor_Gamma = flir.make_tensor(Gamma, shape=(N,), strides=(1,))
             tensor_Beta = flir.make_tensor(Beta, shape=(N,), strides=(1,))
+            tensor_S = flir.make_tensor(s_row, shape=(ROW_PACK, N), strides=(N, 1))
             gIn = flir.zipped_divide(tensor_In, (1, tile_cols))
             gOut = flir.zipped_divide(tensor_Out, (1, tile_cols))
+            gS = flir.zipped_divide(tensor_S, (1, tile_cols))
 
             thr_layout = flir.make_ordered_layout((1, BLOCK_THREADS), order=(1, 0))
             val_layout = flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
@@ -119,203 +130,252 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 ir=ir,
                 zero_idx=zero_idx,
             )
-            block_reduce_add2 = reduce_utils.make_block_reduce_add2(
-                tid=tid,
-                fm_fast=fm_fast,
-                WARP_SIZE=WARP_SIZE,
-                RED_SLOTS=RED_SLOTS,
-                gpu=flir.gpu_ext,
-                arith=arith,
-                arith_ops=flir.arith,
-                flir=flir,
-                T=T,
-                ir=ir,
-                zero_idx=zero_idx,
-            )
 
-            # Fast-path: keep the original register-row variant for the tuned (N==8192) case.
-            if N == (BLOCK_THREADS * VEC_WIDTH * 4):
-                num_tiles_py = 4
-                # Read Input once into registers (each thread holds 32 fp32 values = 4 vectors),
-                # then reuse those registers for reduction + normalize + writeback.
+            # For small/un-aligned N, use simple 2-pass global kernel.
+            # Row-pack is implemented too: Gamma/Beta loads are shared across packed rows.
+            if N < tile_cols:
+                c_N = flir.const_index(N)
+                c_M = flir.const_index(M)
                 c_zero = arith.constant(0.0, type=compute_type)
-                thread_sum = (c_zero)
-                thread_sumsq = (c_zero)
-                # Reduce VGPR pressure by caching bf16/f16 payload vectors when possible.
-                cache_as_elem = (dtype_str != "f32")
-                in_local = []  # bf16/f16: list[vector<VEC_WIDTH x elem_type>]; f32: list[vector<VEC_WIDTH x f32>]
-
-                vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                for tile_i in range_constexpr(num_tiles_py):
-                    blkIn = gIn[((row), tile_i)]
-                    thrIn = thr_copy_e.partition_S(blkIn)
-                    frgIn = flir.make_fragment_like(thrIn, elem_type)
-                    vec_e = flir.copy(
-                        tiled_copy_e,
-                        thrIn,
-                        frgIn,
-                        nontemporal=USE_NONTEMPORAL,
-                        alignment=VEC_ALIGN,
-                        return_vector=True,
-                    )
-
-                    if cache_as_elem:
-                        in_local.append(vec_e)
-                        x = flir.arith.extf(vec_type_c, arith.as_value(vec_e))
-                    else:
-                        x = arith.as_value(vec_e)
-                        in_local.append(x)
-
-                    # Always upcast to fp32 for reduction.
-                    # Ensure `vector.reduction` always sees raw Values (not ArithValue wrappers).
-                    x = arith.as_value(x)
-                    x2 = (arith.ArithValue(x) * x).value
-                    red = flir.vector.reduction(compute_type, "add", (x), fastmath=fm_fast)
-                    red2 = flir.vector.reduction(compute_type, "add", (x2), fastmath=fm_fast)
-                    thread_sum = thread_sum + red
-                    thread_sumsq = thread_sumsq + red2
-
-                sum_val = block_reduce_add(thread_sum, s_sum)
-                sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
-
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
-                mean = sum_val * inv_n
-                mean_sq = sumsq_val * inv_n
-                mean2 = mean * mean
-                var = mean_sq - mean2
-                # Numerical safety: with fast-math and cancellation, `var` can become slightly negative
-                # and lead to NaNs in rsqrt for small-N cases. Clamp to >= 0 before adding eps.
-                c0_f = arith.constant(0.0, type=compute_type)
-                is_neg = var < c0_f
-                var = arith.select(is_neg, c0_f, var)
 
-                var_eps = var + eps
-                rstd = flir.math.rsqrt(arith.as_value(var_eps), fastmath=fm_fast)
+                means = []
+                rstds = []
+                rows = []
+                valids = []
 
-                vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
-                mean_splat = flir.vector.splat(vec_type_c, arith.as_value(mean))
-                rstd_splat = flir.vector.splat(vec_type_c, arith.as_value(rstd))
+                # Pass1: compute mean/rstd per row.
+                for r in range_constexpr(ROW_PACK):
+                    c_r = flir.const_index(r)
+                    row_r = (arith.ArithValue(row_base) + c_r).value
+                    is_valid_row = arith.ult(row_r, c_M)
+                    rows.append(row_r)
+                    valids.append(is_valid_row)
 
-                # Pipeline Gamma/Beta loads.
-                c_vecw = flir.const_index(VEC_WIDTH)
-                thread_offset_base = (arith.ArithValue(tid) * c_vecw).value
-                c_base0 = flir.const_index(0)
-                curr_idx0 = (arith.ArithValue(c_base0) + thread_offset_base).value
-                g_e_cur = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
-                b_e_cur = flir.vector.load(vec_type_e, Beta, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
-                g_cur = g_e_cur if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e_cur))
-                b_cur = b_e_cur if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(b_e_cur))
+                    thread_sum = c_zero
+                    thread_sumsq = c_zero
+                    for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
+                        c_base = flir.const_index(base_idx_int)
+                        idx = c_base + tid
+                        is_valid = arith.ult(idx, c_N)
+                        thread_sum_next = thread_sum
+                        thread_sumsq_next = thread_sumsq
+                        if is_valid_row and is_valid:
+                            x_e = flir.memref.load(Input, [(row_r), arith.as_value(idx)])
+                            x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                            x = arith.as_value(x)
+                            x2 = (arith.ArithValue(x) * x).value
+                            thread_sum_next = thread_sum + x
+                            thread_sumsq_next = thread_sumsq + x2
+                        thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
-                for tile_i in range_constexpr(num_tiles_py):
-                    base_idx_int = tile_i * tile_cols
+                    sum_val = block_reduce_add(thread_sum, s_sum)
+                    sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
+                    mean = sum_val * inv_n
+                    mean_sq = sumsq_val * inv_n
+                    var = mean_sq - (mean * mean)
+                    c0_f = arith.constant(0.0, type=compute_type)
+                    var = arith.select(var < c0_f, c0_f, var)
+                    rstd = flir.math.rsqrt(arith.as_value(var + eps), fastmath=fm_fast)
+                    means.append(mean)
+                    rstds.append(rstd)
+
+                # Pass2: normalize + affine + store (Gamma/Beta shared across packed rows).
+                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
+                    c_base = flir.const_index(base_idx_int)
+                    idx = c_base + tid
+                    is_valid = arith.ult(idx, c_N)
+                    if is_valid:
+                        g_e = flir.memref.load(Gamma, [arith.as_value(idx)])
+                        b_e = flir.memref.load(Beta, [arith.as_value(idx)])
+                        g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (g_e))
+                        b = (b_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (b_e))
+                        for r in range_constexpr(ROW_PACK):
+                            if valids[r]:
+                                row_r = rows[r]
+                                x_e = flir.memref.load(Input, [(row_r), arith.as_value(idx)])
+                                x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
+                                y = (x - means[r]) * rstds[r] * g + b
+                                y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, (y))
+                                flir.memref.store((y_e), Output, [(row_r), (idx)])
+                return
+
+            # Vectorized path: global -> LDS row cache -> reduce from LDS -> affine from LDS.
+            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+
+            c_M = flir.const_index(M)
+            rows = []
+            valids = []
+            for r in range_constexpr(ROW_PACK):
+                c_r = flir.const_index(r)
+                row_r = (arith.ArithValue(row_base) + c_r).value
+                valids.append(arith.ult(row_r, c_M))
+                rows.append(row_r)
+
+            # Pass0: global -> LDS row cache (for each packed row)
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
+                c_base = flir.const_index(base_idx_int)
+                curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
+
+                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                if tile_safe:
+                    tile_i = base_idx_int // tile_cols  # python int
+                    for r in range_constexpr(ROW_PACK):
+                        if valids[r]:
+                            blkIn = gIn[((rows[r]), tile_i)]
+                            blkS = gS[(r, tile_i)]
+                            thrIn = thr_copy_e.partition_S(blkIn)
+                            thrS = thr_copy_e.partition_S(blkS)
+                            flir.copy(
+                                tiled_copy_e,
+                                thrIn,
+                                thrS,
+                                nontemporal=USE_NONTEMPORAL,
+                                alignment=VEC_ALIGN,
+                            )
+                else:
+                    c_N = flir.const_index(N)
+                    for k in range_constexpr(VEC_WIDTH):
+                        c_k = flir.const_index(k)
+                        idx_k = curr_idx + c_k
+                        is_valid = arith.ult(idx_k, c_N)
+                        if is_valid:
+                            for r in range_constexpr(ROW_PACK):
+                                if valids[r]:
+                                    v_e = tensor_In[((rows[r]), arith.as_value(idx_k))]
+                                    tensor_S[((flir.const_index(r)), arith.as_value(idx_k))] = (v_e)
+
+            flir.gpu_ext.barrier()
+
+            inv_n = arith.constant(1.0 / float(N), type=compute_type)
+            means = []
+            rstds = []
+            mean_splats = []
+            rstd_splats = []
+
+            # Pass1: sum + sumsq (from LDS row cache), per packed row.
+            for r in range_constexpr(ROW_PACK):
+                c_zero = arith.constant(0.0, type=compute_type)
+                thread_sum = c_zero
+                thread_sumsq = c_zero
+                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
                     c_base = flir.const_index(base_idx_int)
                     curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
 
-                    x = in_local[tile_i]
-                    if cache_as_elem:
-                        x = flir.arith.extf(vec_type_c, arith.as_value(x))
-                    else:
-                        x = arith.as_value(x)
-                    if tile_i + 1 < num_tiles_py:
-                        next_base_idx_int = (tile_i + 1) * tile_cols
-                        c_base_next = flir.const_index(next_base_idx_int)
-                        next_idx = (arith.ArithValue(c_base_next) + thread_offset_base).value
-                        g_e_next = flir.vector.load(vec_type_e, Gamma, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
-                        b_e_next = flir.vector.load(vec_type_e, Beta, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
-                        g_next = g_e_next if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e_next))
-                        b_next = b_e_next if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(b_e_next))
-                    else:
-                        g_next = g_cur
-                        b_next = b_cur
-
-                    # Use ArithValue ops (handles unwrapping) instead of non-existent helpers
-                    # like `arith.subf/mulf/addf` in this repo's ext.arith module.
-                    diff = (arith.ArithValue(arith.as_value(x)) - arith.as_value(mean_splat)).value
-                    norm = (arith.ArithValue(diff) * arith.as_value(rstd_splat)).value
-                    scaled = (arith.ArithValue(norm) * arith.as_value(g_cur)).value
-                    y = (arith.ArithValue(scaled) + arith.as_value(b_cur)).value
-
-                    if dtype_str == "bf16":
-                        out_e = flir.arith.truncf(vec_type_e, (y))
-                    else:
-                        out_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, (y))
-
-                    blkOut = gOut[((row), tile_i)]
-                    thrOut = thr_copy_e.partition_S(blkOut)
-                    frgOut = flir.make_fragment_like(thrOut, elem_type)
-                    flir.vector.store(arith.as_value(out_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
-                    flir.copy(
-                        tiled_copy_e,
-                        frgOut,
-                        thrOut,
-                        nontemporal=USE_NONTEMPORAL,
-                        alignment=VEC_ALIGN,
-                    )
-
-                    g_cur = g_next
-                    b_cur = b_next
-            else:
-                # Generic path: 2-pass global implementation supporting arbitrary N (incl. tail).
-                # For these small/unaligned-N test cases, correctness & robustness matter more than peak perf.
-                c_N = flir.const_index(N)
-                c_zero = (arith.constant(0.0, type=compute_type))
-                thread_sum = (c_zero)
-                thread_sumsq = (c_zero)
-
-                # Pass1: sum + sumsq
-                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
-                    c_base = flir.const_index(base_idx_int)
-                    idx = c_base + tid
-                    is_valid = arith.ult(idx, c_N)
-                    thread_sum_next = thread_sum
-                    thread_sumsq_next = thread_sumsq
-                    if is_valid:
-                        x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                    tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                    if tile_safe:
+                        x_e = flir.vector.load(vec_type_e, s_row, [(flir.const_index(r)), (curr_idx)], alignment=VEC_ALIGN)
+                        x = x_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(x_e))
                         x = arith.as_value(x)
                         x2 = (arith.ArithValue(x) * x).value
-                        thread_sum_next = thread_sum + x
-                        thread_sumsq_next = thread_sumsq + x2
-                    thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
+                        red = flir.vector.reduction(compute_type, "add", (x), fastmath=fm_fast)
+                        red2 = flir.vector.reduction(compute_type, "add", (x2), fastmath=fm_fast)
+                        thread_sum = thread_sum + red
+                        thread_sumsq = thread_sumsq + red2
+                    else:
+                        c_N = flir.const_index(N)
+                        for k in range_constexpr(VEC_WIDTH):
+                            c_k = flir.const_index(k)
+                            idx_k = curr_idx + c_k
+                            is_valid = arith.ult(idx_k, c_N)
+                            if is_valid:
+                                v_e = tensor_S[((flir.const_index(r)), arith.as_value(idx_k))]
+                            else:
+                                v_e = arith.constant(0.0, type=elem_type)
+                            v = (v_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(v_e))
+                            v2 = (arith.ArithValue(v) * v).value
+                            thread_sum = thread_sum + v
+                            thread_sumsq = thread_sumsq + v2
 
                 sum_val = block_reduce_add(thread_sum, s_sum)
                 sumsq_val = block_reduce_add(thread_sumsq, s_sumsq)
-
-                inv_n = arith.constant(1.0 / float(N), type=compute_type)
                 mean = sum_val * inv_n
                 mean_sq = sumsq_val * inv_n
-                mean2 = mean * mean
-                var = mean_sq - mean2
-                # Numerical safety: clamp variance to >=0 to avoid NaNs in rsqrt on small-N cases.
+                var = mean_sq - (mean * mean)
                 c0_f = arith.constant(0.0, type=compute_type)
-                is_neg = var < c0_f
-                var = arith.select(is_neg, c0_f, var)
-                var_eps = var + eps
-                rstd = flir.math.rsqrt(arith.as_value(var_eps), fastmath=fm_fast)
+                var = arith.select(var < c0_f, c0_f, var)
+                rstd = flir.math.rsqrt(arith.as_value(var + eps), fastmath=fm_fast)
+                means.append(mean)
+                rstds.append(rstd)
+                mean_splats.append(flir.vector.splat(vec_type_c, arith.as_value(mean)))
+                rstd_splats.append(flir.vector.splat(vec_type_c, arith.as_value(rstd)))
 
-                # Pass2: normalize + affine + store
-                for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
-                    c_base = flir.const_index(base_idx_int)
-                    idx = c_base + tid
-                    is_valid = arith.ult(idx, c_N)
-                    if is_valid:
-                        x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
-                        g_e = flir.memref.load(Gamma, [arith.as_value(idx)])
-                        b_e = flir.memref.load(Beta, [arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (x_e))
-                        g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (g_e))
-                        b = (b_e) if dtype_str == "f32" else flir.arith.extf(compute_type, (b_e))
-                        diff = x - mean
-                        norm = diff * rstd
-                        scaled = norm * g
-                        y = scaled + b
-                        if dtype_str == "bf16":
-                            y_e = flir.arith.truncf(elem_type, (y))
-                        else:
-                            y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, (y))
-                        flir.memref.store((y_e), Output, [(row), (idx)])
+            # Pass2: normalize + affine + store (from LDS row cache), with Gamma/Beta prefetch shared across rows.
+            g_pref_e = None
+            b_pref_e = None
+            if N >= BLOCK_THREADS * VEC_WIDTH:
+                c_base0 = flir.const_index(0)
+                curr0 = (arith.ArithValue(c_base0) + thread_offset_base).value
+                g_pref_e = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr0)], alignment=VEC_ALIGN)
+                b_pref_e = flir.vector.load(vec_type_e, Beta, [arith.as_value(curr0)], alignment=VEC_ALIGN)
+
+            for base_idx_int in range_constexpr(0, N, BLOCK_THREADS * VEC_WIDTH):
+                c_base = flir.const_index(base_idx_int)
+                curr_idx = (arith.ArithValue(c_base) + thread_offset_base).value
+
+                tile_safe = (base_idx_int + BLOCK_THREADS * VEC_WIDTH) <= N
+                if tile_safe:
+                    # Prefetch next Gamma/Beta early (software pipeline)
+                    next_base_int = base_idx_int + (BLOCK_THREADS * VEC_WIDTH)
+                    if next_base_int < N:
+                        c_base_n = flir.const_index(next_base_int)
+                        curr_idx_n = (arith.ArithValue(c_base_n) + thread_offset_base).value
+                        g_next_e = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx_n)], alignment=VEC_ALIGN)
+                        b_next_e = flir.vector.load(vec_type_e, Beta, [arith.as_value(curr_idx_n)], alignment=VEC_ALIGN)
+                    else:
+                        g_next_e = None
+                        b_next_e = None
+
+                    g_e = g_pref_e if g_pref_e is not None else flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx)], alignment=VEC_ALIGN)
+                    b_e = b_pref_e if b_pref_e is not None else flir.vector.load(vec_type_e, Beta, [arith.as_value(curr_idx)], alignment=VEC_ALIGN)
+                    g_v = g_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e))
+                    b_v = b_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(b_e))
+
+                    tile_i = base_idx_int // tile_cols  # python int
+                    for r in range_constexpr(ROW_PACK):
+                        if valids[r]:
+                            x_e = flir.vector.load(vec_type_e, s_row, [(flir.const_index(r)), arith.as_value(curr_idx)], alignment=VEC_ALIGN)
+                            x = x_e if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(x_e))
+                            diff = (arith.ArithValue(arith.as_value(x)) - arith.as_value(mean_splats[r])).value
+                            norm = (arith.ArithValue(diff) * arith.as_value(rstd_splats[r])).value
+                            y = (arith.ArithValue(norm) * arith.as_value(g_v)).value
+                            y = (arith.ArithValue(y) + arith.as_value(b_v)).value
+                            y_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, arith.as_value(y))
+
+                            blkOut = gOut[((rows[r]), tile_i)]
+                            thrOut = thr_copy_e.partition_S(blkOut)
+                            frgOut = flir.make_fragment_like(thrOut, elem_type)
+                            flir.vector.store(arith.as_value(y_e), frgOut.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                            flir.copy(
+                                tiled_copy_e,
+                                frgOut,
+                                thrOut,
+                                nontemporal=USE_NONTEMPORAL,
+                                alignment=VEC_ALIGN,
+                            )
+
+                    g_pref_e = g_next_e
+                    b_pref_e = b_next_e
+                else:
+                    c_N = flir.const_index(N)
+                    for k in range_constexpr(VEC_WIDTH):
+                        c_k = flir.const_index(k)
+                        idx_k = curr_idx + c_k
+                        is_valid = arith.ult(idx_k, c_N)
+                        if is_valid:
+                            g_e = tensor_Gamma[arith.as_value(idx_k)]
+                            b_e = tensor_Beta[arith.as_value(idx_k)]
+                            g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(g_e))
+                            b = (b_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(b_e))
+                            for r in range_constexpr(ROW_PACK):
+                                if valids[r]:
+                                    x_e = tensor_S[((flir.const_index(r)), arith.as_value(idx_k))]
+                                    x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                                    y = (x - means[r]) * rstds[r] * g + b
+                                    y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(y))
+                                    tensor_Out[((rows[r]), arith.as_value(idx_k))] = (y_e)
 
         @flir.jit
         def __call__(
@@ -326,7 +386,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Output: lambda: T.memref(M, N, _state["elem_type"]),
         ):
             c1 = (flir.arith_ext.index(1))
-            gx = (flir.arith_ext.index(M))
+            gx = (flir.arith_ext.index((M + ROW_PACK - 1) // ROW_PACK))
             bx = (flir.arith_ext.index(BLOCK_THREADS))
             flir.gpu_ext.LaunchFuncOp(
                 ["layernorm_module", "layernorm_kernel"],
