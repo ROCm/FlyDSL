@@ -24,6 +24,7 @@ from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import arith
 from flydsl.dialects.ext.arith import Index
 from flydsl.runtime.device import get_rocm_arch
+from _mlir import ir
 from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
 from flydsl.dialects.ext import arith as arith_ext
@@ -49,6 +50,10 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
     """
     print(f"\n[FLIR INFO] Creating elementwise add kernel for {M}x{N}")
     print(f"[FLIR INFO] Element type: {dtype}")
+
+    # NOTE: Kernel operands in the lowered module use dynamic memref types.
+    # Keep the host stub signature dynamic too so gpu.launch_func types match.
+    S = ir.ShapedType.get_dynamic_size()
     
     class _EltwiseAdd(flir.MlirModule):
         GPU_MODULE_NAME = "elementwise_kernels"
@@ -57,9 +62,9 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         @flir.kernel
         def elementwise_add_kernel(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, dtype.get()),
-            B: lambda: T.memref(M, N, dtype.get()),
-            C: lambda: T.memref(M, N, dtype.get()),
+            A: lambda: T.memref(S, S, dtype.get()),
+            B: lambda: T.memref(S, S, dtype.get()),
+            C: lambda: T.memref(S, S, dtype.get()),
         ):
             # ===== Step 1: Thread and Block IDs =====
             tid_x = flir.thread_idx("x")
@@ -167,9 +172,9 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, dtype.get()),
-            B: lambda: T.memref(M, N, dtype.get()),
-            C: lambda: T.memref(M, N, dtype.get()),
+            A: lambda: T.memref(S, S, dtype.get()),
+            B: lambda: T.memref(S, S, dtype.get()),
+            C: lambda: T.memref(S, S, dtype.get()),
         ):
             c1 = Index(1)
             tile_m = THR_M * VAL_M
