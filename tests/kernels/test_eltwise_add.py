@@ -214,30 +214,6 @@ TEST_SHAPES = [
     # (5120, 4000),
 ]
 
-# Compute Max Dims for shared kernel
-MAX_M = max(s[0] for s in TEST_SHAPES)
-MAX_N = max(s[1] for s in TEST_SHAPES)
-
-# Cache compiled kernel executor (singleton)
-_compiled_kernel_exe = None
-
-def get_or_compile_kernel(dtype=F32Type):
-    """Get or compile the single shared kernel for MAX dimensions."""
-    global _compiled_kernel_exe
-    
-    if _compiled_kernel_exe is None:
-        print(f"\n[FLIR INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
-        
-        # Create kernel with MAX dimensions
-        m = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
-        print(f"[FLIR INFO] Compiling via flydsl.compile...")
-        _compiled_kernel_exe = flydsl.compile(m)
-    else:
-        print(f"[FLIR INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
-    
-    return _compiled_kernel_exe
-
-
 @pytest.mark.parametrize(
     ("M", "N"),
     TEST_SHAPES,
@@ -252,19 +228,9 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
     
-    # Kernel selection:
-    # - If the requested MxN fits within TEST_SHAPES' MAX_M/MAX_N, reuse the shared MAX kernel
-    #   and use padded buffers.
-    # - If the requested M or N exceeds MAX, compile an exact-shape kernel and skip padding.
-    use_shared_max_kernel = (M <= MAX_M) and (N <= MAX_N)
-    if use_shared_max_kernel:
-        exe = get_or_compile_kernel(dtype)
-        compile_M, compile_N = MAX_M, MAX_N
-    else:
-        print(f"\n[FLIR INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
-        m = create_elementwise_add_kernel(M, N, dtype)
-        exe = flydsl.compile(m)
-        compile_M, compile_N = M, N
+    print(f"\n[FLIR INFO] Compiling exact-shape kernel for {M}x{N} (may hit compile cache)...")
+    m = create_elementwise_add_kernel(M, N, dtype)
+    exe = flydsl.compile(m)
     
     # Prepare data
     np.random.seed(42)
@@ -273,26 +239,10 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     b_host = np.random.randn(M, N).astype(torch_dtype)
     expected = a_host + b_host
     
-    if use_shared_max_kernel:
-        # Padded data for shared kernel (must match MAX_M x MAX_N strides)
-        # The kernel expects buffers of size MAX_M * MAX_N with stride MAX_N
-        a_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        b_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        c_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        
-        a_padded[:M, :N] = a_host
-        b_padded[:M, :N] = b_host
-        
-        # Device tensors (full MAX size)
-        t_dtype = torch.float32 if dtype == F32Type else torch.float16
-        A = torch.tensor(a_padded, device="cuda", dtype=t_dtype)
-        B = torch.tensor(b_padded, device="cuda", dtype=t_dtype)
-        C = torch.empty((MAX_M, MAX_N), device="cuda", dtype=t_dtype)
-    else:
-        t_dtype = torch.float32 if dtype == F32Type else torch.float16
-        A = torch.tensor(a_host, device="cuda", dtype=t_dtype)
-        B = torch.tensor(b_host, device="cuda", dtype=t_dtype)
-        C = torch.empty((M, N), device="cuda", dtype=t_dtype)
+    t_dtype = torch.float32 if dtype == F32Type else torch.float16
+    A = torch.tensor(a_host, device="cuda", dtype=t_dtype)
+    B = torch.tensor(b_host, device="cuda", dtype=t_dtype)
+    C = torch.empty((M, N), device="cuda", dtype=t_dtype)
     
     # Launch configuration (must match kernel tiling)
     # - blockDim should provide exactly THR_M*THR_N threads (tidx in [0, THR_M*THR_N))
@@ -304,7 +254,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     grid_y = (M + TILE_M - 1) // TILE_M
     
     print(f"\n[FLIR INFO] Launch configuration:")
-    kernel_tag = f"{compile_M}x{compile_N}"
+    kernel_tag = f"{M}x{N}"
     print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, kernel={kernel_tag}]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
@@ -312,10 +262,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     exe(A, B, C, M, N)
     torch.cuda.synchronize()
     
-    if use_shared_max_kernel:
-        c_host = C[:M, :N].cpu().numpy()
-    else:
-        c_host = C.cpu().numpy()
+    c_host = C.cpu().numpy()
     
     # Verify results
     error = np.max(np.abs(c_host - expected))
@@ -371,19 +318,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.run_all_shapes:
-        # Run all shapes to demonstrate kernel caching
+        # Run all shapes to demonstrate compile caching behavior (if enabled).
         print("\n" + "="*80)
-        print("Running all test shapes (demonstrates kernel caching)")
+        print("Running all test shapes (demonstrates compile caching)")
         print("="*80)
         for M, N in TEST_SHAPES:
             print(f"\n--- Testing shape {M}x{N} (1st run) ---")
             test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
             
-            # Run again to show kernel is reused
-            print(f"\n--- Testing shape {M}x{N} (2nd run - should reuse kernel) ---")
+            # Run again: flydsl.compile may hit its cache and avoid redoing heavy work.
+            print(f"\n--- Testing shape {M}x{N} (2nd run - should hit compile cache) ---")
             test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
         
-        print("\nPASS - All shapes tested with kernel caching!")
+        print("\nPASS - All shapes tested with compile caching!")
     else:
         test_compile_and_run(
             args.M, args.N,

@@ -155,33 +155,20 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     torch_dtype, dt_norm = _dtype_torch(dtype)
     dtype = dt_norm
 
-    # Cache FLIR executors by (op, N, dtype) now that kernels take runtime `m_in`.
-    # This enables reusing a single compiled kernel across different M values.
-    if not hasattr(_bench_flydsl_torch, "_exe_cache"):
-        _bench_flydsl_torch._exe_cache = {}  # type: ignore[attr-defined]
-    exe_cache = _bench_flydsl_torch._exe_cache  # type: ignore[attr-defined]
-
     if op == "softmax":
         from kernels.softmax_kernel import build_softmax_module
-        key = ("softmax", int(N), str(dtype))
-        exe = exe_cache.get(key)
-        if exe is None:
-            # M is runtime, compile once (pick a dummy M for module construction).
-            m = build_softmax_module(1, N, dtype)
-            exe = flydsl.compile(m)
-            exe_cache[key] = exe
+        # M is runtime; module construction uses a dummy M.
+        # `flydsl.compile()` already has its own cache.
+        m = build_softmax_module(1, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
         return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
 
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
-        key = ("layernorm", int(N), str(dtype))
-        exe = exe_cache.get(key)
-        if exe is None:
-            m = build_layernorm_module(1, N, dtype)
-            exe = flydsl.compile(m)
-            exe_cache[key] = exe
+        m = build_layernorm_module(1, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
@@ -190,12 +177,8 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
-        key = ("rmsnorm", int(N), str(dtype))
-        exe = exe_cache.get(key)
-        if exe is None:
-            m = build_rmsnorm_module(1, N, dtype)
-            exe = flydsl.compile(m)
-            exe_cache[key] = exe
+        m = build_rmsnorm_module(1, N, dtype)
+        exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)

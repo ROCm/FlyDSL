@@ -124,11 +124,6 @@ def compile_preshuffle_gemm_a8(
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
     module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}".replace("-", "_")
 
-    # Optional toggle:
-    # - 1: enable M-tail support (ceil-div grid.x + OOB-safe A/C/scaleA buffer resources)
-    # - 0: strict aligned behavior (grid.x = M/tile_m and max_size=True resources)
-    _enable_m_tail = os.environ.get("FLIR_PRESHUFFLE_M_TAIL", "1") in ("1", "true", "True", "YES", "yes")
-
     class _GEMM(flir.MlirModule):
         GPU_MODULE_NAME = module_name
         GPU_MODULE_TARGETS = [
@@ -208,14 +203,9 @@ def compile_preshuffle_gemm_a8(
             # - Tail-disabled: keep max_size=True everywhere (legacy behavior).
             #
             # Note: We assume N is aligned (no N-tail support in this kernel).
-            if _enable_m_tail:
-                a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-                c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-                scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
-            else:
-                a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=True)
-                c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=True)
-                scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
+            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
+            scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
 
             b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
             scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
@@ -962,11 +952,8 @@ def compile_preshuffle_gemm_a8(
             # We keep N aligned for perf: grid.y uses exact division (no N-tail support).
             tm = arith.constant(tile_m, index=True)
             tn = arith.constant(tile_n, index=True)
-            if _enable_m_tail:
-                one = arith.constant(1, index=True)
-                gx = (c_m + tm - one) / tm
-            else:
-                gx = c_m / tm
+            one = arith.constant(1, index=True)
+            gx = (c_m + tm - one) / tm
             gy = c_n / tn
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
