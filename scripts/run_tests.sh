@@ -25,6 +25,11 @@ if [ ! -x "${FLIR_OPT}" ]; then
       exit 1
     }
   fi
+  # Re-detect after build: modern builds place it under ${BUILD_DIR}/bin.
+  FLIR_OPT="${BUILD_DIR}/bin/flir-opt"
+  if [ ! -x "${FLIR_OPT}" ]; then
+    FLIR_OPT="${BUILD_DIR}/tools/flir-opt/flir-opt"
+  fi
   if [ ! -x "${FLIR_OPT}" ]; then
     echo "Error: flir-opt not found."
     echo "  Try: ./flir/build.sh"

@@ -35,10 +35,10 @@ module {
     %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
     
     // CHECK: flir.make_layout
-    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: arith.muli
-    %size = flir.size %layout : !flir.layout<(?,?)> -> index
+    %size = flir.size %layout : !flir.layout<(?,?):(?,?)> -> index
     
     return %size : index
   }
@@ -51,15 +51,15 @@ module {
     
     %shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
     %stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
-    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.get_shape
-    %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?)> -> !flir.shape<(?,?)>
+    %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?):(?,?)> -> !flir.shape<(?,?)>
     // CHECK: flir.get_stride
-    %extracted_stride = flir.get_stride %layout : !flir.layout<(?,?)> -> !flir.stride<(?,?)>
+    %extracted_stride = flir.get_stride %layout : !flir.layout<(?,?):(?,?)> -> !flir.stride<(?,?)>
     
     %size1 = flir.size %extracted_shape : !flir.shape<(?,?)> -> index
-    %size2 = flir.cosize %layout : !flir.layout<(?,?)> -> index
+    %size2 = flir.cosize %layout : !flir.layout<(?,?):(?,?)> -> index
     
     %result = arith.addi %size1, %size2 : index
     return %result : index
@@ -80,19 +80,19 @@ module {
     // Base layout: 16x32 column-major
     %base_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Tiler: 4x8
     %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.logical_product
     // CHECK: flir.composition
     // CHECK: arith.muli
-    %tiled = flir.logical_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %tiled = flir.logical_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -106,17 +106,17 @@ module {
     
     %base_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c2, %c4 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c2 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.zipped_product
     // CHECK: flir.logical_product
-    %zipped = flir.zipped_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %zipped = flir.zipped_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %zipped : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %zipped : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -130,17 +130,17 @@ module {
     
     %base_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.tiled_product
     // CHECK: flir.logical_product
-    %tiled = flir.tiled_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %tiled = flir.tiled_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -154,17 +154,17 @@ module {
     
     %base_shape = flir.make_shape %c16, %c8 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c4, %c2 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.flat_product
     // CHECK: flir.logical_product
-    %flat = flir.flat_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
+    %flat = flir.flat_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %flat : !flir.layout<(?,?)> -> index
+    %size = flir.size %flat : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -177,17 +177,17 @@ module {
     
     %base_shape = flir.make_shape %c32, %c8 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c8, %c4 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.raked_product
     // CHECK: flir.logical_product
-    %raked = flir.raked_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %raked = flir.raked_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %raked : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %raked : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -201,17 +201,17 @@ module {
     
     %base_shape = flir.make_shape %c64, %c16 : (index, index) -> !flir.shape<(?,?)>
     %base_stride = flir.make_stride %c1, %c64 : (index, index) -> !flir.stride<(?,?)>
-    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %base = flir.make_layout %base_shape, %base_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c8, %c4 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tiler = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.blocked_product
     // CHECK: flir.logical_product
-    %blocked = flir.blocked_product %base, %tiler : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %blocked = flir.blocked_product %base, %tiler : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %blocked : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %blocked : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -230,18 +230,18 @@ module {
     // Global layout: 128x256
     %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Tile: 16x32
     %tile_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.logical_divide
     // CHECK: flir.composition
-    %partitioned = flir.logical_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %partitioned = flir.logical_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %partitioned : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %partitioned : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -255,17 +255,17 @@ module {
     
     %global_shape = flir.make_shape %c64, %c128 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c64 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.zipped_divide
     // CHECK: flir.logical_divide
-    %zipped = flir.zipped_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %zipped = flir.zipped_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %zipped : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %zipped : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -279,17 +279,17 @@ module {
     
     %global_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c32 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
-    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.tiled_divide
     // CHECK: flir.logical_divide
-    %tiled = flir.tiled_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?,?,?)>
+    %tiled = flir.tiled_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?,?,?):(?,?,?,?)>
     
-    %size = flir.size %tiled : !flir.layout<(?,?,?,?)> -> index
+    %size = flir.size %tiled : !flir.layout<(?,?,?,?):(?,?,?,?)> -> index
     return %size : index
   }
   
@@ -303,17 +303,17 @@ module {
     
     %global_shape = flir.make_shape %c16, %c32 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %tile_shape = flir.make_shape %c4, %c8 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c4 : (index, index) -> !flir.stride<(?,?)>
-    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.flat_divide
     // CHECK: flir.logical_divide
-    %flat = flir.flat_divide %global, %tile : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
+    %flat = flir.flat_divide %global, %tile : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %flat : !flir.layout<(?,?)> -> index
+    %size = flir.size %flat : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -333,18 +333,18 @@ module {
     // Global tensor: 128x256
     %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Thread tile: 8x16
     %tile_shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %tile_stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %tile = flir.make_layout %tile_shape, %tile_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.local_partition
     // CHECK: flir.logical_divide
-    %thread_data = flir.local_partition %global, %tile, %c0 : (!flir.layout<(?,?)>, !flir.layout<(?,?)>, index) -> !flir.layout<(?,?)>
+    %thread_data = flir.local_partition %global, %tile, %c0 : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>, index) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %thread_data : !flir.layout<(?,?)> -> index
+    %size = flir.size %thread_data : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -360,7 +360,7 @@ module {
     // Global tensor: 128x256
     %global_shape = flir.make_shape %c128, %c256 : (index, index) -> !flir.shape<(?,?)>
     %global_stride = flir.make_stride %c1, %c128 : (index, index) -> !flir.stride<(?,?)>
-    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %global = flir.make_layout %global_shape, %global_stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CTA tile shape: 32x64
     %cta_shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
@@ -370,9 +370,9 @@ module {
     
     // CHECK: flir.local_tile
     // CHECK: flir.logical_divide
-    %cta_tile = flir.local_tile %global, %cta_shape, %cta_coord : (!flir.layout<(?,?)>, !flir.shape<(?,?)>, !flir.shape<(?,?)>) -> !flir.layout<(?,?)>
+    %cta_tile = flir.local_tile %global, %cta_shape, %cta_coord : (!flir.layout<(?,?):(?,?)>, !flir.shape<(?,?)>, !flir.shape<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %cta_tile : !flir.layout<(?,?)> -> index
+    %size = flir.size %cta_tile : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
   
@@ -390,18 +390,18 @@ module {
     
     %shape_a = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %stride_a = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-    %layout_a = flir.make_layout %shape_a, %stride_a : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout_a = flir.make_layout %shape_a, %stride_a : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     %shape_b = flir.make_shape %c4, %c2 : (index, index) -> !flir.shape<(?,?)>
     %stride_b = flir.make_stride %c2, %c1 : (index, index) -> !flir.stride<(?,?)>
-    %layout_b = flir.make_layout %shape_b, %stride_b : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout_b = flir.make_layout %shape_b, %stride_b : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // CHECK: flir.composition
     // CHECK: arith.muli
     // CHECK: arith.addi
-    %composed = flir.composition %layout_a, %layout_b : (!flir.layout<(?,?)>, !flir.layout<(?,?)>) -> !flir.layout<(?,?)>
+    %composed = flir.composition %layout_a, %layout_b : (!flir.layout<(?,?):(?,?)>, !flir.layout<(?,?):(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
-    %size = flir.size %composed : !flir.layout<(?,?)> -> index
+    %size = flir.size %composed : !flir.layout<(?,?):(?,?)> -> index
     return %size : index
   }
 }

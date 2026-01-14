@@ -218,14 +218,16 @@ def Flir_CompositionOp : Flir_Op<"composition", []> {
     OpBuilder<(ins "Value":$layoutA, "Value":$layoutB), [{
       auto lhsTy = llvm::dyn_cast<::mlir::flir::LayoutType>(layoutA.getType());
       auto rhsTy = llvm::dyn_cast<::mlir::flir::LayoutType>(layoutB.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = layoutA.getType();
       if (lhsTy && rhsTy) {
         auto inferred = ::mlir::flir::inferCompositionType($_builder.getContext(), lhsTy, rhsTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(lhsTy.getRank(), rhsTy.getRank()));
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              std::max(::mlir::flir::getPatternRank(lhsTy.getShapePattern()),
+                       ::mlir::flir::getPatternRank(rhsTy.getShapePattern())));
       }
       build($_builder, $_state, resultTy, layoutA, layoutB);
     }]>
@@ -285,13 +287,16 @@ def Flir_LogicalProductOp : Flir_Op<"logical_product", []> {
     OpBuilder<(ins "Value":$input, "Value":$tiler), [{
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -313,13 +318,16 @@ def Flir_ZippedProductOp : Flir_Op<"zipped_product", []> {
       // Current lowering treats zipped_product the same as logical_product.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -341,13 +349,16 @@ def Flir_TiledProductOp : Flir_Op<"tiled_product", []> {
       // Current lowering treats tiled_product the same as logical_product.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -369,13 +380,16 @@ def Flir_FlatProductOp : Flir_Op<"flat_product", []> {
       // Current lowering treats flat_product the same as logical_product.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -397,13 +411,16 @@ def Flir_RakedProductOp : Flir_Op<"raked_product", []> {
       // Current lowering treats raked_product the same as logical_product.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -425,13 +442,16 @@ def Flir_BlockedProductOp : Flir_Op<"blocked_product", []> {
       // Current lowering treats blocked_product the same as logical_product.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalProductType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), aTy.getRank() + bTy.getRank());
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              ::mlir::flir::getPatternRank(aTy.getShapePattern()) +
+                  ::mlir::flir::getPatternRank(bTy.getShapePattern()));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -457,14 +477,16 @@ def Flir_LogicalDivideOp : Flir_Op<"logical_divide", []> {
     OpBuilder<(ins "Value":$input, "Value":$tiler), [{
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              std::max(::mlir::flir::getPatternRank(aTy.getShapePattern()),
+                       ::mlir::flir::getPatternRank(bTy.getShapePattern())));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -486,14 +508,16 @@ def Flir_ZippedDivideOp : Flir_Op<"zipped_divide", []> {
       // Current lowering treats zipped_divide the same as logical_divide.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              std::max(::mlir::flir::getPatternRank(aTy.getShapePattern()),
+                       ::mlir::flir::getPatternRank(bTy.getShapePattern())));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -515,14 +539,16 @@ def Flir_TiledDivideOp : Flir_Op<"tiled_divide", []> {
       // Current lowering treats tiled_divide the same as logical_divide.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              std::max(::mlir::flir::getPatternRank(aTy.getShapePattern()),
+                       ::mlir::flir::getPatternRank(bTy.getShapePattern())));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>
@@ -553,14 +579,16 @@ def Flir_FlatDivideOp : Flir_Op<"flat_divide", []> {
       // Current lowering treats flat_divide the same as logical_divide.
       auto aTy = llvm::dyn_cast<::mlir::flir::LayoutType>(input.getType());
       auto bTy = llvm::dyn_cast<::mlir::flir::LayoutType>(tiler.getType());
-      ::mlir::Type resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(), -1);
+      ::mlir::Type resultTy = input.getType();
       if (aTy && bTy) {
         auto inferred = ::mlir::flir::inferLogicalDivideType($_builder.getContext(), aTy, bTy);
         if (::mlir::succeeded(inferred))
           resultTy = *inferred;
         else
-          resultTy = ::mlir::flir::LayoutType::get($_builder.getContext(),
-                                                    std::max(aTy.getRank(), bTy.getRank()));
+          resultTy = ::mlir::flir::makeRankOnlyLayoutType(
+              $_builder.getContext(),
+              std::max(::mlir::flir::getPatternRank(aTy.getShapePattern()),
+                       ::mlir::flir::getPatternRank(bTy.getShapePattern())));
       }
       build($_builder, $_state, resultTy, input, tiler);
     }]>

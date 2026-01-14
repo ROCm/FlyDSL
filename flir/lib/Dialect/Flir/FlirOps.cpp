@@ -7,6 +7,7 @@
 #include "flir/FlirOps.h"
 #include "flir/FlirDialect.h"
 #include "flir/FlirLayoutAlgebra.h"
+#include "flir/FlirPatternAttr.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/DialectImplementation.h"
@@ -28,35 +29,23 @@ static LogicalResult verifyStructuredTupleType(Operation *op, Type resultTy,
   if (!st)
     return op->emitOpError() << "expects " << prettyName << " result type";
 
-  auto structure = st.getStructure();
-  auto dims = st.getDims();
-  if (structure.empty())
-    return op->emitOpError() << "requires structured " << prettyName
-                             << " type (e.g. " << prettyName << "<(...)>)";
+  Attribute pattern = st.getPattern();
+  if (!pattern)
+    return op->emitOpError() << "requires " << prettyName
+                             << " type to carry a tuple pattern (e.g. "
+                             << prettyName << "<(...)>)";
 
-  int64_t leafCount = 0;
-  for (int32_t tag : structure)
-    if (tag == -1)
-      ++leafCount;
+  int64_t leafCount = getPatternRank(pattern);
+  int64_t dynCount = countDynLeaves(pattern);
 
-  if ((int64_t)dims.size() != leafCount)
-    return op->emitOpError() << "invalid " << prettyName << " type: dims size ("
-                             << dims.size() << ") must equal leaf count ("
-                             << leafCount << ")";
-
-  int64_t expectedOperands = leafCount;
-  if (operandsAreDynOnly) {
-    expectedOperands = 0;
-    for (int64_t d : dims)
-      if (d == -1)
-        ++expectedOperands;
-  }
+  int64_t expectedOperands = operandsAreDynOnly ? dynCount : leafCount;
 
   if ((int64_t)operands.size() != expectedOperands) {
     if (operandsAreDynOnly) {
       return op->emitOpError()
              << "expects " << expectedOperands
-             << " dynamic leaf operands but got " << operands.size();
+             << " dynamic leaf operands (for '?' leaves) but got "
+             << operands.size();
     }
     return op->emitOpError()
            << "expects " << expectedOperands

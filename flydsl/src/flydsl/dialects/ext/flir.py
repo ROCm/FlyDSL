@@ -192,6 +192,10 @@ def _count_leaves_in_tuple_spec(spec: str) -> int:
     leaves = 0
     while i < len(s):
         c = s[i]
+        if c == "*":
+            leaves += 1
+            i += 1
+            continue
         if c == "?":
             leaves += 1
             i += 1
@@ -479,14 +483,19 @@ class ShapeType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a shape type with given rank."""
-        # This would need to be implemented in C++ bindings
-        # For now, return a generic type
+        """Create a rank-N shape type.
+
+        rank is encoded by a tuple-pattern of N leaves:
+          !flir.shape<(?,?,...)>
+        """
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        # Placeholder - would use actual ODS-generated type
-        return Type.parse(f"!flir.shape<{rank}>", context=context)
+        if rank < 0:
+            # Fallback: rank-1 dynamic leaf.
+            return Type.parse("!flir.shape<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.shape<{pattern}>", context=context)
 
 
 class StrideType(Type):
@@ -494,11 +503,14 @@ class StrideType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a stride type with given rank."""
+        """Create a rank-N stride type (pattern-mode)."""
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.stride<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.stride<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.stride<{pattern}>", context=context)
 
 
 class LayoutType(Type):
@@ -506,11 +518,18 @@ class LayoutType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a layout type with given rank."""
+        """Create a rank-N layout type (pattern-mode).
+
+        Layout syntax is:
+          !flir.layout<shape_pattern:stride_pattern>
+        """
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.layout<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.layout<?:?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.layout<{pattern}:{pattern}>", context=context)
 
 
 class CoordType(Type):
@@ -518,11 +537,14 @@ class CoordType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a coordinate type with given rank."""
+        """Create a rank-N coordinate type (pattern-mode)."""
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.coord<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.coord<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.coord<{pattern}>", context=context)
 
 
 # -----------------------------------------------------------------------------
@@ -1573,7 +1595,16 @@ def complement(tiler: Value, target_size: Value, loc: Optional[Location] = None,
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Best-effort infer a precise result type from operand types + constant target_size.
+    # If inference fails, fall back to a rank-1 dynamic layout, which is sufficient
+    # for the current layout-algebra tests (and allows lowering to diagnose errors).
+    try:
+        t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+        ts = _try_eval_index_value(target_size)
+        out_shape, out_stride = _complement_impl(t_shape, t_stride, ts)
+        result_type = Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+    except Exception:
+        result_type = LayoutType.get(1)
     
     with ip or InsertionPoint.current:
         return flir_ops.ComplementOp(result_type, _unwrap_value(tiler), _unwrap_value(target_size), loc=loc).result
@@ -1602,7 +1633,8 @@ def coalesce(layout: Value, loc: Optional[Location] = None, ip: Optional[Inserti
     from _mlir import ir as _ir
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Coalesce is currently a no-op placeholder in lowering; keep the input type.
+    result_type = layout.type
     
     with ip or InsertionPoint.current:
         # Create the operation directly using generic OpView

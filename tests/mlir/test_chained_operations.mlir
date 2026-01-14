@@ -8,10 +8,10 @@ func.func @test_get_shape_then_size() {
   
   %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
   // Extract shape from layout
-  %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?)> -> !flir.shape<(?,?)>
+  %extracted_shape = flir.get_shape %layout : !flir.layout<(?,?):(?,?)> -> !flir.shape<(?,?)>
   
   // CRITICAL TEST: Can we compute size from extracted shape?
   %size = flir.size %extracted_shape : !flir.shape<(?,?)> -> index
@@ -27,10 +27,10 @@ func.func @test_get_stride_then_get() {
   
   %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
   // Extract stride from layout
-  %extracted_stride = flir.get_stride %layout : !flir.layout<(?,?)> -> !flir.stride<(?,?)>
+  %extracted_stride = flir.get_stride %layout : !flir.layout<(?,?):(?,?)> -> !flir.stride<(?,?)>
   
   // CRITICAL TEST: Can we get element from extracted stride?
   %stride0 = flir.get %extracted_stride, %c0 : !flir.stride<(?,?)>, index -> index
