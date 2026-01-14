@@ -261,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("-K", type=int, default=8192, help="K dimension")
     parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
     parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
-    parser.add_argument("--tile_k", type=int, default=512, help="Tile K")
+    parser.add_argument("--tile_k", type=int, default=256, help="Tile K")
     # Explicit CLI knobs (no env vars).
     parser.add_argument(
         "--lds_stage",

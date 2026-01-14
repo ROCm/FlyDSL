@@ -10,6 +10,7 @@ import flydsl
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, arith
 from flydsl.runtime.device import get_rocm_arch
+from _mlir import ir
 from _mlir.ir import F32Type, IntegerType
 import _mlir.extras.types as T
 import numpy as np
@@ -44,6 +45,7 @@ def create_vec_add_kernel(
 
     gpu_arch = get_rocm_arch()
     num_blocks = (size + TILE_ELEMS - 1) // TILE_ELEMS
+    S = ir.ShapedType.get_dynamic_size()
 
     class _VecAdd(flir.MlirModule):
         GPU_MODULE_NAME = "vec_kernels"
@@ -52,9 +54,9 @@ def create_vec_add_kernel(
         @flir.kernel
         def vec_add(
             self: flir.T.i64,
-            A: lambda: T.memref(size, dtype.get()),
-            B: lambda: T.memref(size, dtype.get()),
-            C: lambda: T.memref(size, dtype.get()),
+            A: lambda: T.memref(S, dtype.get()),
+            B: lambda: T.memref(S, dtype.get()),
+            C: lambda: T.memref(S, dtype.get()),
         ):
             tid_x = flir.thread_idx("x")
             tid_y = flir.thread_idx("y")
@@ -153,9 +155,9 @@ def create_vec_add_kernel(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(size, dtype.get()),
-            B: lambda: T.memref(size, dtype.get()),
-            C: lambda: T.memref(size, dtype.get()),
+            A: lambda: T.memref(S, dtype.get()),
+            B: lambda: T.memref(S, dtype.get()),
+            C: lambda: T.memref(S, dtype.get()),
         ):
             c1 = arith.index(1)
             gx = arith.index(num_blocks)

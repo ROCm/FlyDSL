@@ -14,6 +14,7 @@ from flydsl.dialects.ext import flir
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.dialects.ext import arith, memref
 import _mlir.extras.types as T
+from _mlir import ir
 import pytest
 import torch
 if not torch.cuda.is_available():
@@ -29,12 +30,13 @@ def test_matmul_with_flir():
     print("="*80)
 
     M, N = 32, 32
+    S = ir.ShapedType.get_dynamic_size()
 
     class _Coords(flir.MlirModule):
         @flir.kernel
         def coords_to_linear(
             self: flir.T.i64,
-            C: lambda: T.memref(M, N, T.i32()),
+            C: lambda: T.memref(S, S, T.i32()),
         ):
             bx = flir.block_idx("x")
             by = flir.block_idx("y")
@@ -66,7 +68,7 @@ def test_matmul_with_flir():
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            C: lambda: T.memref(M, N, T.i32()),
+            C: lambda: T.memref(S, S, T.i32()),
         ):
             # Wrap the kernel launch inside a host-side function.
             c1 = arith.index(1)

@@ -169,16 +169,207 @@ class ExecutionEngineExecutor:
                 if len(args) == 0 and len(llvm_arg_tys) == 0:
                     empty = (ctypes.c_void_p * 0)()
                     return func_exe(empty)
-                raise TypeError(f"{name} expects {len(llvm_arg_tys)} args, got {len(args)}")
+                # Fallback: try to expand tensor-like args into flattened ranked memref ABI.
+                def _is_tensor_like(x) -> bool:
+                    return (
+                        hasattr(x, "data_ptr")
+                        and callable(getattr(x, "data_ptr"))
+                        and hasattr(x, "numel")
+                        and callable(getattr(x, "numel"))
+                        and hasattr(x, "is_contiguous")
+                        and callable(getattr(x, "is_contiguous"))
+                    )
+
+                def _tensor_rank(x) -> int:
+                    if hasattr(x, "dim") and callable(getattr(x, "dim")):
+                        try:
+                            return int(x.dim())
+                        except Exception:
+                            return 1
+                    if hasattr(x, "shape"):
+                        try:
+                            return int(len(x.shape))
+                        except Exception:
+                            return 1
+                    return 1
+
+                def _tensor_shape(x):
+                    try:
+                        return tuple(int(d) for d in x.shape)
+                    except Exception:
+                        return None
+
+                def _tensor_strides(x):
+                    if hasattr(x, "stride") and callable(getattr(x, "stride")):
+                        try:
+                            return tuple(int(s) for s in x.stride())
+                        except Exception:
+                            return None
+                    return None
+
+                def _try_expand_flattened_memrefs(user_args, sig_tys):
+                    out = []
+                    i = 0  # sig index
+                    j = 0  # user arg index
+                    while i < len(sig_tys) and j < len(user_args):
+                        # Detect start of a flattened memref descriptor.
+                        if (
+                            _is_tensor_like(user_args[j])
+                            and i + 2 < len(sig_tys)
+                            and sig_tys[i].strip() == "!llvm.ptr"
+                            and sig_tys[i + 1].strip() == "!llvm.ptr"
+                            and sig_tys[i + 2].strip() == "i64"
+                        ):
+                            # How many consecutive i64s after the first 3?
+                            k = i + 3
+                            num_i64 = 0
+                            while k < len(sig_tys) and sig_tys[k].strip() == "i64":
+                                num_i64 += 1
+                                k += 1
+                            # Need an even number: sizes+strides.
+                            if num_i64 < 2 or (num_i64 % 2) != 0:
+                                return None
+                            max_rank = num_i64 // 2
+                            r = _tensor_rank(user_args[j])
+                            if r < 1 or r > max_rank:
+                                # Fall back to rank-1 if available.
+                                if max_rank >= 1:
+                                    r = 1
+                                else:
+                                    return None
+                            span = 3 + 2 * r
+
+                            t = user_args[j]
+                            if not bool(t.is_contiguous()):
+                                raise ValueError("Non-contiguous tensor passed to memref arg; call `.contiguous()` first.")
+                            base = int(t.data_ptr())
+                            out.append(ctypes.c_void_p(base))  # allocated
+                            out.append(ctypes.c_void_p(base))  # aligned
+                            out.append(int(0))                 # offset (elements)
+
+                            if r == 1:
+                                out.append(int(t.numel()))
+                                out.append(int(1))
+                            else:
+                                shape = _tensor_shape(t)
+                                strides = _tensor_strides(t)
+                                if shape is None or strides is None or len(shape) < r or len(strides) < r:
+                                    return None
+                                # Use the last r dims/strides (supports passing a flattened view tensor too).
+                                shape_r = tuple(int(d) for d in shape[-r:])
+                                strides_r = tuple(int(s) for s in strides[-r:])
+                                out.extend(list(shape_r))
+                                out.extend(list(strides_r))
+
+                            i += span
+                            j += 1
+                            continue
+
+                        # Default: 1:1 mapping (scalar or pointer)
+                        out.append(user_args[j])
+                        i += 1
+                        j += 1
+
+                    if i == len(sig_tys) and j == len(user_args):
+                        return out
+                    return None
+
+                expanded = _try_expand_flattened_memrefs(args, llvm_arg_tys)
+                if expanded is None:
+                    raise TypeError(f"{name} expects {len(llvm_arg_tys)} args, got {len(args)}")
+                args = tuple(expanded)
 
             owned = []  # keep ctypes temporaries alive for the duration of the call
             arg_ptrs = []
 
+            # If we're calling a ciface wrapper and the raw function uses a flattened
+            # memref ABI, then the ciface `!llvm.ptr` arguments are *pointers to
+            # memref descriptors*, not raw data pointers.
+            #
+            # We infer each memref rank from the raw signature and build a matching
+            # descriptor from the torch tensor argument.
+            is_ciface = sig_name.startswith("_mlir_ciface_")
+            raw_sig = self._llvm_sigs.get(name, [])
+            ciface_sig = self._llvm_sigs.get(sig_name, [])
+            ciface_uses_desc_ptrs = bool(is_ciface and raw_sig and ciface_sig and len(raw_sig) > len(ciface_sig))
+            memref_ranks = []
+            if ciface_uses_desc_ptrs:
+                # Number of scalar (non-ptr) args in ciface.
+                scalar_count = sum(1 for t in ciface_sig if t.strip() != "!llvm.ptr")
+                # Number of memref descriptor pointers in ciface.
+                memref_count = sum(1 for t in ciface_sig if t.strip() == "!llvm.ptr")
+                idx = 0
+                for mi in range(memref_count):
+                    if idx + 2 >= len(raw_sig) or raw_sig[idx].strip() != "!llvm.ptr" or raw_sig[idx + 1].strip() != "!llvm.ptr" or raw_sig[idx + 2].strip() != "i64":
+                        # Best-effort fallback.
+                        memref_ranks = []
+                        break
+                    if mi < memref_count - 1:
+                        # Find next memref descriptor start.
+                        nxt = idx + 3
+                        while nxt + 2 < len(raw_sig):
+                            if raw_sig[nxt].strip() == "!llvm.ptr" and raw_sig[nxt + 1].strip() == "!llvm.ptr" and raw_sig[nxt + 2].strip() == "i64":
+                                break
+                            nxt += 1
+                        d = nxt - (idx + 3)
+                        memref_ranks.append(max(1, d // 2) if d >= 2 and d % 2 == 0 else 1)
+                        idx = nxt
+                    else:
+                        # Last memref: remaining (excluding trailing scalars) encodes sizes+strides.
+                        d = (len(raw_sig) - scalar_count) - (idx + 3)
+                        memref_ranks.append(max(1, d // 2) if d >= 2 and d % 2 == 0 else 1)
+
+            def _make_memref_desc_type(rank: int):
+                class _MemRefDesc(ctypes.Structure):
+                    _fields_ = [
+                        ("allocated", ctypes.c_void_p),
+                        ("aligned", ctypes.c_void_p),
+                        ("offset", ctypes.c_int64),
+                        ("sizes", ctypes.c_int64 * rank),
+                        ("strides", ctypes.c_int64 * rank),
+                    ]
+                return _MemRefDesc
+
+            memref_i = 0
             for a, ty in zip(args, llvm_arg_tys):
                 ty = ty.strip()
                 if ty == "!llvm.ptr":
                     # Tensor-like: any object with a `.data_ptr()` method returning an int.
                     if hasattr(a, "data_ptr") and callable(getattr(a, "data_ptr")):
+                        if ciface_uses_desc_ptrs and memref_ranks and memref_i < len(memref_ranks):
+                            r = int(memref_ranks[memref_i])
+                            memref_i += 1
+                            if hasattr(a, "is_contiguous") and callable(getattr(a, "is_contiguous")) and not bool(a.is_contiguous()):
+                                raise ValueError("Non-contiguous tensor passed to memref argument; call `.contiguous()` first.")
+                            base = int(a.data_ptr())
+                            # Shape/stride in elements.
+                            shape = tuple(int(d) for d in getattr(a, "shape", (int(a.numel()),)))
+                            stride = tuple(int(s) for s in a.stride()) if hasattr(a, "stride") and callable(getattr(a, "stride")) else (1,)
+                            if r == 1:
+                                sizes = (int(a.numel()),)
+                                strides = (1,)
+                            else:
+                                # Use the last r dims (row-major torch contiguous expected).
+                                sizes = shape[-r:]
+                                strides = stride[-r:]
+                            DescT = _make_memref_desc_type(r)
+                            desc = DescT()
+                            desc.allocated = ctypes.c_void_p(base)
+                            desc.aligned = ctypes.c_void_p(base)
+                            desc.offset = ctypes.c_int64(0)
+                            for ii in range(r):
+                                desc.sizes[ii] = int(sizes[ii])
+                                desc.strides[ii] = int(strides[ii])
+                            owned.append(desc)
+                            # IMPORTANT: packed-call expects a pointer to the *argument value*.
+                            # For `!llvm.ptr` args, the argument value is itself a pointer,
+                            # so we must pass a pointer-to-(c_void_p) holding `&desc`, not
+                            # a pointer-to-struct.
+                            desc_ptr = ctypes.c_void_p(ctypes.addressof(desc))
+                            owned.append(desc_ptr)
+                            arg_ptrs.append(ctypes.cast(ctypes.pointer(desc_ptr), ctypes.c_void_p))
+                            continue
+
                         v = ctypes.c_void_p(int(a.data_ptr()))
                     elif isinstance(a, ctypes.c_void_p):
                         v = a

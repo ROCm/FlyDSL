@@ -89,10 +89,7 @@ def compile_preshuffle_gemm_a8(
     # This issues the *first* A-pack LDS read for the next tile between barriers, to overlap
     # with the VMEM prefetch of the following tile.
 
-    size_c = int(M) * int(N)
-    size_a = int(M) * int(K)
-    # B is packed int4 for W4A8: 2 values per byte.
-    size_b = (int(N) * int(K)) // 2 if is_int4 else (int(N) * int(K))
+    DYN = ir.ShapedType.get_dynamic_size()
 
     # Vector width calc (assume full tiles / no tail guards).
     total_threads = 256
@@ -147,11 +144,11 @@ def compile_preshuffle_gemm_a8(
         @flir.kernel
         def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: memref(size_c, T.f16),
-            arg_a: lambda: memref(size_a, _elem_type()),
-            arg_b: lambda: memref(size_b, _elem_type()),
-            arg_scale_a: lambda: memref(M, T.f32),
-            arg_scale_b: lambda: memref(N, T.f32),
+            arg_c: lambda: memref(DYN, T.f16),
+            arg_a: lambda: memref(DYN, _elem_type()),
+            arg_b: lambda: memref(DYN, _elem_type()),
+            arg_scale_a: lambda: memref(DYN, T.f32),
+            arg_scale_b: lambda: memref(DYN, T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
@@ -927,19 +924,23 @@ def compile_preshuffle_gemm_a8(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: memref(size_c, T.f16),
-            arg_a: lambda: memref(size_a, _elem_type()),
-            arg_b: lambda: memref(size_b, _elem_type()),
-            arg_scale_a: lambda: memref(M, T.f32),
-            arg_scale_b: lambda: memref(N, T.f32),
+            arg_c: lambda: memref(DYN, T.f16),
+            arg_a: lambda: memref(DYN, _elem_type()),
+            arg_b: lambda: memref(DYN, _elem_type()),
+            arg_scale_a: lambda: memref(DYN, T.f32),
+            arg_scale_b: lambda: memref(DYN, T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
-            gx = arith.constant(M // tile_m, index=True)
-            gy = arith.constant(N // tile_n, index=True)
+            # Dynamic launch sizes: avoid baking M/N into the host stub.
+            # NOTE: This assumes M and N are multiples of tile_m/tile_n (as in current tests).
+            tm = arith.constant(tile_m, index=True)
+            tn = arith.constant(tile_n, index=True)
+            gx = c_m / tm
+            gy = c_n / tn
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),
@@ -957,7 +958,12 @@ def compile_preshuffle_gemm_a8(
             )
 
     m = _GEMM()
-    return flydsl.compile(m)
+    return flydsl.compile(
+        m,
+        use_bare_ptr_memref_call_conv=False,
+        use_bare_pointers_for_host=False,
+        use_bare_pointers_for_kernels=False,
+    )
 
 
 __all__ = ["compile_preshuffle_gemm_a8"]

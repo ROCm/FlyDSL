@@ -15,6 +15,7 @@ from flydsl.compiler.context import ensure_flir_python_extensions
 from flydsl.runtime.device import get_rocm_arch
 
 from .executor import default_shared_libs
+from .cache import FileCache, cache_enabled, cache_rebuild_requested, default_key_payload, make_cache_key
 
 if TYPE_CHECKING:
     from .executor import ExecutionEngineExecutor as Executor
@@ -29,7 +30,13 @@ class CompileOptions:
     backend: Literal["execution_engine"] = "execution_engine"
 
 
-def _pipeline_fragments(*, chip: str) -> list[str]:
+def _pipeline_fragments(
+    *,
+    chip: str,
+    use_bare_ptr_memref_call_conv: bool = False,
+    use_bare_pointers_for_host: bool = False,
+    use_bare_pointers_for_kernels: bool = False,
+) -> list[str]:
     """FLIR compilation pipeline fragments as a plain list of strings.
 
     Each entry is the content inside `builtin.module(...)` for PassManager.parse.
@@ -38,6 +45,10 @@ def _pipeline_fragments(*, chip: str) -> list[str]:
     On some kernels this changes IR structure enough that later codegen/scheduling
     produces different ISA with measurable perf regressions.
     """
+    b2s = lambda b: "true" if bool(b) else "false"
+    rocdl_bare_ptr_opt = b2s(use_bare_ptr_memref_call_conv)
+    llvm_bare_host_opt = b2s(use_bare_pointers_for_host)
+    llvm_bare_kern_opt = b2s(use_bare_pointers_for_kernels)
     return [
         "flir-to-standard",
         "trivial-dce",
@@ -45,12 +56,17 @@ def _pipeline_fragments(*, chip: str) -> list[str]:
         "cse",
         "gpu-kernel-outlining{data-layout-str=}",
         "gpu.module(convert-scf-to-cf)",
-        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown use-bare-ptr-memref-call-conv=true})",
+        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown "
+        + f"use-bare-ptr-memref-call-conv={rocdl_bare_ptr_opt}"
+        + "})",
         "gpu.module(reconcile-unrealized-casts)",
         # Keep this as a formatted string so the chip is visible in dumps and matches
         # the non-dump compilation pipeline.
         f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
-        "gpu-to-llvm{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+        "gpu-to-llvm{intersperse-sizes-for-kernels=false "
+        + f"use-bare-pointers-for-host={llvm_bare_host_opt} "
+        + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
+        + "}",
         "reconcile-unrealized-casts",
         "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
     ]
@@ -69,9 +85,20 @@ def _stage_label_from_fragment(fragment: str) -> str:
     return base or "stage"
 
 
-def _build_pipeline_str(*, chip: str) -> str:
+def _build_pipeline_str(
+    *,
+    chip: str,
+    use_bare_ptr_memref_call_conv: bool = False,
+    use_bare_pointers_for_host: bool = False,
+    use_bare_pointers_for_kernels: bool = False,
+) -> str:
     """Build the full PassManager pipeline string from `_pipeline_fragments`."""
-    frags = _pipeline_fragments(chip=chip)
+    frags = _pipeline_fragments(
+        chip=chip,
+        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+        use_bare_pointers_for_host=use_bare_pointers_for_host,
+        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+    )
     return f"builtin.module({','.join(frags)})"
 
 
@@ -172,6 +199,9 @@ def compile(
     opt_level: int = 3,
     shared_libs: Optional[Sequence[str]] = None,
     backend: Literal["execution_engine"] = "execution_engine",
+    use_bare_ptr_memref_call_conv: bool = False,
+    use_bare_pointers_for_host: bool = False,
+    use_bare_pointers_for_kernels: bool = False,
 ) -> Executor:
     """Compile a FLIR module to an Executor.
 
@@ -222,10 +252,48 @@ def compile(
 
     chip = get_rocm_arch()
 
-    pipeline = _build_pipeline_str(chip=chip)
+    pipeline = _build_pipeline_str(
+        chip=chip,
+        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+        use_bare_pointers_for_host=use_bare_pointers_for_host,
+        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+    )
 
     with ctx:
         _override_gpu_module_targets(module, chip=chip)
+
+        # ------------------------------------------------------------------
+        # Cache lookup (post-target override, pre-pipeline).
+        # ------------------------------------------------------------------
+        cache = None
+        cache_key = None
+        if cache_enabled():
+            try:
+                key_payload = default_key_payload(
+                    chip=str(chip),
+                    pipeline=str(pipeline),
+                    input_asm=module.operation.get_asm(enable_debug_info=False),
+                )
+                cache_key = make_cache_key(key_payload)
+                cache = FileCache(key=cache_key)
+            except Exception:
+                cache = None
+                cache_key = None
+
+        if cache is not None and (not cache_rebuild_requested()):
+            cached_asm = cache.get_module_asm()
+            if cached_asm:
+                try:
+                    cached_mod = ir.Module.parse(cached_asm, context=ctx)
+                    if dump_enabled:
+                        print(f"[flir.compile] cache hit key={cache_key}")
+                    from .executor import ExecutionEngineExecutor as Executor
+                    if shared_libs is None:
+                        shared_libs = default_shared_libs().as_list()
+                    return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
+                except Exception:
+                    # Treat cache parse failures as misses.
+                    pass
         if dump_enabled:
             # When dumping is enabled, run the pipeline in stages so each intermediate
             # module state is captured to a file.
@@ -236,7 +304,12 @@ def compile(
             )
             print(f"[flir.compile] dump 00_target_overridden -> {out}")
             asm_for_isa: Optional[str] = None
-            stage_frags = _pipeline_fragments(chip=chip)
+            stage_frags = _pipeline_fragments(
+                chip=chip,
+                use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+                use_bare_pointers_for_host=use_bare_pointers_for_host,
+                use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+            )
             # Keep dump filenames stable vs the historical numbering scheme:
             # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
             stage_num_base = 3
@@ -270,6 +343,21 @@ def compile(
             pm.run(module.operation)
         if print_final_module:
             print(module)
+
+        # Cache store (post-pipeline, with binary embedded).
+        if cache is not None:
+            try:
+                cache.put_module_asm(
+                    module.operation.get_asm(enable_debug_info=False),
+                    meta={
+                        "chip": str(chip),
+                        "pipeline": str(pipeline),
+                    },
+                )
+                if dump_enabled:
+                    print(f"[flir.compile] cache put key={cache_key}")
+            except Exception:
+                pass
 
     from .executor import ExecutionEngineExecutor as Executor
 

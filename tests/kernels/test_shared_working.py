@@ -10,6 +10,7 @@ import time
 import numpy as np
 import pytest
 import _mlir.extras.types as T
+from _mlir import ir
 
 import flydsl
 import torch
@@ -31,6 +32,7 @@ def test_matmul_shared_working():
     gpu_arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
+    S = ir.ShapedType.get_dynamic_size()
 
     class _MatmulShared(flir.MlirModule):
         GPU_MODULE_NAME = "matmul_shared"
@@ -45,9 +47,9 @@ def test_matmul_shared_working():
         @flir.kernel
         def matmul_shared(
             self: flir.T.i64,
-            A: lambda: T.memref(M, K, T.f32()),
-            B: lambda: T.memref(K, N, T.f32()),
-            C: lambda: T.memref(M, N, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            C: lambda: T.memref(S, S, T.f32()),
         ):
             gpu = flir.gpu_ext
 
@@ -105,9 +107,9 @@ def test_matmul_shared_working():
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, K, T.f32()),
-            B: lambda: T.memref(K, N, T.f32()),
-            C: lambda: T.memref(M, N, T.f32()),
+            A: lambda: T.memref(S, S, T.f32()),
+            B: lambda: T.memref(S, S, T.f32()),
+            C: lambda: T.memref(S, S, T.f32()),
         ):
             c1 = arith.index(1)
             tile = arith.index(TILE_SIZE)
