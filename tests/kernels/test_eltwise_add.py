@@ -38,17 +38,17 @@ THR_M, THR_N = 4, 32
 VAL_M, VAL_N = 4, 4
 COPY_VEC = 8
 
-def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
+def create_elementwise_add_kernel(N: int, dtype=F32Type):
     """Create elementwise addition kernel demonstrating FLIR API.
     
     Args:
-        M, N: Tensor dimensions
+        N: Compile-time constant leading dimension (row stride)
         dtype: Element type
         
     Returns:
         Compiled kernel module
     """
-    print(f"\n[FLIR INFO] Creating elementwise add kernel for {M}x{N}")
+    print(f"\n[FLIR INFO] Creating elementwise add kernel (dynamic M, static N={N})")
     print(f"[FLIR INFO] Element type: {dtype}")
 
     # NOTE: Kernel operands in the lowered module use dynamic memref types.
@@ -66,7 +66,6 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             B: lambda: T.memref(S, S, dtype.get()),
             C: lambda: T.memref(S, S, dtype.get()),
             m_in: lambda: T.index(),
-            n_in: lambda: T.index(),
         ):
             # ===== Step 1: Thread and Block IDs =====
             tid_x = flir.thread_idx("x")
@@ -113,17 +112,12 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
                 val_shape=(VAL_M, VAL_N),
             )
 
-            # IMPORTANT:
-            # This kernel is typically compiled at a "max" shape (MAX_M x MAX_N) and runs on padded
-            # buffers where the physical row stride is the compile-time `N` (e.g. MAX_N).
-            #
-            # So:
-            # - **shape** should use runtime (m_in, n_in) so predication/bounds work for smaller M/N.
-            # - **strides** must remain the physical strides of the passed buffers, i.e. (N, 1),
-            #   NOT (n_in, 1), otherwise indexing becomes wrong for padded layouts.
-            tensor_A = flir.make_tensor(A, shape=(m_in, n_in), strides=(N, 1))
-            tensor_B = flir.make_tensor(B, shape=(m_in, n_in), strides=(N, 1))
-            tensor_C = flir.make_tensor(C, shape=(m_in, n_in), strides=(N, 1))
+            # Strides must be compile-time constants because downstream helpers like
+            # `make_fragment_like(TensorView)` require statically-known template.strides.
+            # This means the kernel is specialized on the leading dimension `N`.
+            tensor_A = flir.make_tensor(A, shape=(m_in, N), strides=(N, 1))
+            tensor_B = flir.make_tensor(B, shape=(m_in, N), strides=(N, 1))
+            tensor_C = flir.make_tensor(C, shape=(m_in, N), strides=(N, 1))
 
             TILE_M = THR_M * VAL_M
             TILE_N = THR_N * VAL_N
@@ -131,7 +125,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             gA = flir.zipped_divide(tensor_A, tile_shape)
             gB = flir.zipped_divide(tensor_B, tile_shape)
             gC = flir.zipped_divide(tensor_C, tile_shape)
-            idC = flir.make_identity_tensor((m_in, n_in))
+            idC = flir.make_identity_tensor((m_in, N))
             cC = flir.zipped_divide(idC, tile_shape)
 
             blk_coord = (blk_coord_y, blk_coord_x)
@@ -160,7 +154,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             for linear in range_constexpr(total_vals):
                 lin_idx = flir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
-                pred_val = flir.elem_less(coords, (m_in, n_in))
+                pred_val = flir.elem_less(coords, (m_in, N))
                 pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
                 frgPred[pred_offsets] = pred_val
 
@@ -186,12 +180,11 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             B: lambda: T.memref(S, S, dtype.get()),
             C: lambda: T.memref(S, S, dtype.get()),
             m_in: lambda: T.index(),
-            n_in: lambda: T.index(),
         ):
             c1 = Index(1)
             tile_m = THR_M * VAL_M
             tile_n = THR_N * VAL_N
-            gx = (n_in + Index(tile_n) - c1) // Index(tile_n)
+            gx = (Index(N) + Index(tile_n) - c1) // Index(tile_n)
             gy = (m_in + Index(tile_m) - c1) // Index(tile_m)
             bdx = Index(THR_N)
             bdy = Index(THR_M)
@@ -199,7 +192,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
                 ["elementwise_kernels", "elementwise_add_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, bdy, c1),
-                kernel_operands=[A, B, C, m_in, n_in],
+                kernel_operands=[A, B, C, m_in],
             )
 
     print("[FLIR INFO] Generated MLIR module")
@@ -228,8 +221,8 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
     
-    print(f"\n[FLIR INFO] Compiling exact-shape kernel for {M}x{N} (may hit compile cache)...")
-    m = create_elementwise_add_kernel(M, N, dtype)
+    print(f"\n[FLIR INFO] Compiling kernel for dynamic M, static N={N} (may hit compile cache)...")
+    m = create_elementwise_add_kernel(N, dtype)
     exe = flydsl.compile(m)
     
     # Prepare data
@@ -259,7 +252,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
     # Launch kernel via executor
-    exe(A, B, C, M, N)
+    exe(A, B, C, M)
     torch.cuda.synchronize()
     
     c_host = C.cpu().numpy()

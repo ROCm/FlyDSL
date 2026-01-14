@@ -197,11 +197,6 @@ def compile_preshuffle_gemm_a8(
                 else None
             )
 
-            # M-tail vs strict-aligned resource descriptors:
-            # - Tail-enabled: A / scale_a / C use logical sizes so OOB accesses from partial M tiles are safe
-            #   (loads return 0, stores are dropped).
-            # - Tail-disabled: keep max_size=True everywhere (legacy behavior).
-            #
             # Note: We assume N is aligned (no N-tail support in this kernel).
             a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
             c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
@@ -945,11 +940,9 @@ def compile_preshuffle_gemm_a8(
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
             # Dynamic launch sizes: avoid baking M/N into the host stub.
-            # Tail-enabled: support M-tail by launching ceil(M/tile_m) tiles in X and relying on
-            # hardware OOB checking (see max_size=False resources in the kernel).
-            # Tail-disabled: strict aligned behavior (grid.x = M/tile_m).
-            #
-            # We keep N aligned for perf: grid.y uses exact division (no N-tail support).
+            # We support M-tail by launching ceil(M/tile_m) tiles in X and relying on hardware
+            # OOB checking (see max_size=False resources in the kernel). We keep N aligned for perf:
+            # grid.y uses exact division (no N-tail support).
             tm = arith.constant(tile_m, index=True)
             tn = arith.constant(tile_n, index=True)
             one = arith.constant(1, index=True)
