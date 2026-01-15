@@ -942,9 +942,12 @@ def compile_preshuffle_gemm_a8(
                 if (num_tiles % 2) == 1:
                     for k_iv in range(0, c_k_main, tile_k * 2):
                         next_k1 = k_iv + tile_k
-                        # Prefetch B for the next tile early (can overlap with MFMA),
-                        # but delay A gmem->LDS until after compute to avoid keeping A regs live.
-                        a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
+                        # IMPORTANT (spill reduction):
+                        # Keep only ONE full B tile live during compute.
+                        # - Prefetch next A regs early (small) and stream to LDS during compute.
+                        # - Delay next B regs prefetch until AFTER compute (but BEFORE barrier)
+                        #   so VMEM can overlap with the barrier window without doubling B reg footprint.
+                        a_regs_ping = load_a_tile(next_k1 / 4)
 
                         accs, _ = compute_tile(
                             accs,
@@ -955,6 +958,7 @@ def compile_preshuffle_gemm_a8(
                             pending_store_lds_base=lds_base_ping,
                         )
                         a0_prefetch_pong = None
+                        b_tile_ping = load_b_tile(next_k1)
 
                         hot_loop_scheduler()
                         gpu.barrier()
@@ -963,7 +967,7 @@ def compile_preshuffle_gemm_a8(
                         a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
                         next_k2 = k_iv + tile_k * 2
-                        a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
+                        a_regs_pong = load_a_tile(next_k2 / 4)
 
                         accs, _ = compute_tile(
                             accs,
@@ -974,6 +978,7 @@ def compile_preshuffle_gemm_a8(
                             pending_store_lds_base=lds_base_pong,
                         )
                         a0_prefetch_ping = None
+                        b_tile_pong = load_b_tile(next_k2)
 
                         hot_loop_scheduler()
                         gpu.barrier()
@@ -992,7 +997,7 @@ def compile_preshuffle_gemm_a8(
                     c_k_stop = c_k - (tile_k * 3)
                     for k_iv in range(0, c_k_stop, tile_k * 2):
                         next_k1 = k_iv + tile_k
-                        a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
+                        a_regs_ping = load_a_tile(next_k1 / 4)
 
                         accs, _ = compute_tile(
                             accs,
@@ -1003,6 +1008,7 @@ def compile_preshuffle_gemm_a8(
                             pending_store_lds_base=lds_base_ping,
                         )
                         a0_prefetch_pong = None
+                        b_tile_ping = load_b_tile(next_k1)
 
                         hot_loop_scheduler()
                         gpu.barrier()
@@ -1010,7 +1016,7 @@ def compile_preshuffle_gemm_a8(
                         a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
                         next_k2 = k_iv + tile_k * 2
-                        a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
+                        a_regs_pong = load_a_tile(next_k2 / 4)
 
                         accs, _ = compute_tile(
                             accs,
@@ -1021,6 +1027,7 @@ def compile_preshuffle_gemm_a8(
                             pending_store_lds_base=lds_base_pong,
                         )
                         a0_prefetch_ping = None
+                        b_tile_pong = load_b_tile(next_k2)
 
                         hot_loop_scheduler()
                         gpu.barrier()
@@ -1028,7 +1035,7 @@ def compile_preshuffle_gemm_a8(
                         a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
                     last_k = c_k - tile_k
-                    a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
+                    a_regs_ping = load_a_tile(last_k / 4)
 
                     accs, _ = compute_tile(
                         accs,
@@ -1039,6 +1046,7 @@ def compile_preshuffle_gemm_a8(
                         pending_store_lds_base=lds_base_ping,
                     )
                     a0_prefetch_pong = None
+                    b_tile_ping = load_b_tile(last_k)
 
                     hot_loop_scheduler()
                     gpu.barrier()
