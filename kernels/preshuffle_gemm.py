@@ -45,8 +45,6 @@ def compile_preshuffle_gemm_a8(
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = False,
-    # Scheduling options
-    hot_loop_schedule: bool = True,
 ):
     """Compile the preshuffle GEMM kernel and return the compiled executable.
 
@@ -816,45 +814,6 @@ def compile_preshuffle_gemm_a8(
                     body_row=body_row,
                 )
 
-            # ---------------- Scheduling hints (match CK-style) ----------------
-            # These sched_group_barrier hints help the backend interleave VMEM/DS/MFMA
-            # similarly to CK's tuned pipelines.
-            rocdl.sched_barrier(0)
-
-            def hot_loop_scheduler():
-                # CK-like fine-grain schedule: interleave MFMA with DS/VMEM hints
-                # at a coarser granularity to reduce scheduling overhead.
-                mfma_total = (k_unroll * 2) * m_repeat * num_acc_n
-                sche_iters = mfma_total
-
-                # DS-read preload (CK default is 2).
-                rocdl.sched_dsrd(2)
-
-                # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                dswr_tail = num_a_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
-
-                # Use smaller cadence for DS/VMEM when N is wide (more MFMA).
-                dsrd_stride = 2 if num_acc_n >= 4 else 1
-                vmem_stride = 4 if num_acc_n >= 4 else 2
-
-                for sche_i in range_constexpr(sche_iters):
-                    rocdl.sched_mfma(1)
-                    if (sche_i % dsrd_stride) == 0:
-                        rocdl.sched_dsrd(1)
-                    if (sche_i % vmem_stride) == 0:
-                        rocdl.sched_vmem(1)
-                    if sche_i >= dswr_start:
-                        rocdl.sched_dswr(1)
-
-                rocdl.sched_barrier(0)
-
-            def maybe_hot_loop_scheduler():
-                if hot_loop_schedule:
-                    hot_loop_scheduler()
-
             # ---------------- Pipeline ----------------
             lds_tile_elems = arith.constant(tile_m * lds_stride, index=True)
             lds_base0 = arith.constant(0, index=True)
@@ -920,7 +879,6 @@ def compile_preshuffle_gemm_a8(
 
                     # Preload A from LDS pong for next compute
                     a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
-                    maybe_hot_loop_scheduler()
 
                     # Prefetch B(2i+2) into regs (ping)
                     b_tile_ping = load_b_tile(arith.constant(k2, index=True))
@@ -945,7 +903,6 @@ def compile_preshuffle_gemm_a8(
 
                     # Preload A from LDS ping for next compute
                     a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
-                    maybe_hot_loop_scheduler()
 
                     k_base = k_base + (tile_k * 2)
                     iCounter -= 1
@@ -966,7 +923,6 @@ def compile_preshuffle_gemm_a8(
                     a0_prefetch_ping = None
                     gpu.barrier()
                     a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
-                    maybe_hot_loop_scheduler()
 
                     final_accs, scales = compute_tile(
                         accs,
@@ -1010,7 +966,6 @@ def compile_preshuffle_gemm_a8(
                     # before any wave overwrites it with the next tile.
                     gpu.barrier()
                     store_a_tile_to_lds(a_next, lds_base)
-                    hot_loop_scheduler()
                     gpu.barrier()
                     b_tile_cur = b_next
 
