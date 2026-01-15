@@ -378,8 +378,13 @@ def run_moe_stage1(
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
+    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
+    def _p(msg: str):
+        if _dbg:
+            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
 
     # Data: input and weights (aiter shapes)
+    _p("stage1: alloc x/w")
     x_fp32 = (
         x_fp32_in
         if x_fp32_in is not None
@@ -398,6 +403,7 @@ def run_moe_stage1(
         else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
     )
 
+    _p("stage1: routing topk")
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
     if topk_ids_in is None or topk_weights_in is None:
         score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
@@ -407,6 +413,7 @@ def run_moe_stage1(
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
 
+    _p("stage1: build_routing_buffers")
     routing = (
         routing_in
         if routing_in is not None
@@ -430,6 +437,7 @@ def run_moe_stage1(
     is_int4 = in_dtype == "int4"
     is_int8 = in_dtype in ("int8", "int4")
 
+    _p("stage1: quantize inputs/weights")
     # Quantize inputs / weights.
     if in_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
@@ -446,6 +454,7 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
+    _p("stage1: shuffle weights")
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
@@ -483,6 +492,7 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
+    _p("stage1: compile kernel")
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -506,12 +516,14 @@ def run_moe_stage1(
             st,
             eids,
             sw_sorted,
+            num_valid_ids,
             tokens,
             inter_dim,
             model_dim,
-            int(st.numel()),
+            int(eids.numel()),
         )
 
+    _p("stage1: launch kernel")
     _, us = run_perftest(
         launch,
         out,
@@ -651,7 +663,9 @@ def run_moe_stage2(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
-    out_dtype: str = "f16",
+    # Default to f32 atomic path for stability on small-token/padded routing cases.
+    # (f16 half2 atomic path can fault on some ROCm stacks when padding is present.)
+    out_dtype: str = "f32",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -857,10 +871,11 @@ def run_moe_stage2(
             st,
             eids,
             sw_sorted,
+            num_valid_ids,
             tokens,
             model_dim,
             inter_dim,
-            int(st.numel()),
+            int(eids.numel()),
         )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -1044,6 +1059,11 @@ def test_moe_gemm_2stage(
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
+    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
+    def _p(msg: str):
+        if _dbg:
+            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
+    _p("enter test_moe_gemm_2stage()")
 
     # NOTE: With naive N(0,1) weights, stage1 output variance grows with K and can easily overflow fp16
     # outputs in CK paths for large (model_dim, inter_dim). Use a fan-in style init by default to keep
@@ -1052,16 +1072,19 @@ def test_moe_gemm_2stage(
     import math
 
     s = float(init_scale)
+    _p("alloc x/w")
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
     # fan_in = inter_dim for W2: [E, model, inter]
     w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
+    _p("routing: score/topk")
     score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
+    _p("build_routing_buffers()")
     routing = build_routing_buffers(
         topk_ids=topk_ids,
         topk_weights=topk_weights,
@@ -1071,6 +1094,7 @@ def test_moe_gemm_2stage(
         moe_sort_mode=moe_sort_mode,
     )
 
+    _p("run_moe_stage1()")
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
         model_dim=model_dim,
@@ -1102,6 +1126,7 @@ def test_moe_gemm_2stage(
     else:
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
 
+    _p("run_moe_stage2()")
     _out2_fp32, _us2 = run_moe_stage2(
         tokens=tokens,
         model_dim=model_dim,
@@ -1128,6 +1153,7 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
     )
+    _p("exit test_moe_gemm_2stage()")
 
 
 
@@ -1190,8 +1216,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
 
     args = parser.parse_args()
+    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
+    def _p(msg: str):
+        if _dbg:
+            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
 
     model_dim, inter_dim = args.dim
+    _p(f"parsed args: tokenNum={args.tokenNum} dim={args.dim} in_dtype={args.in_dtype} moe_sort_mode={args.moe_sort_mode} compare_aiter_ck={args.compare_aiter_ck}")
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = (
@@ -1202,6 +1233,7 @@ if __name__ == "__main__":
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
     for dt in args.in_dtype.split(","):
+        _p(f"call test_moe_gemm_2stage(dt={dt})")
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
