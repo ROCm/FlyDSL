@@ -956,6 +956,9 @@ def compile_moe_gemm1(
             k_in: lambda: T.index(),
         ):
             bdx = 256
+            # IMPORTANT: `arg_expert_ids` is a *compact* list of expert-block ids (length = num_m_blocks),
+            # as produced by `aiter.moe_sorting` / `build_sorted_routing`. Therefore grid.x must match
+            # that compact length, not `experts * ceil_div(tokens, tile_m)`.
             gx = size_expert_ids
             gy = inter_dim // tile_n
             flir.gpu_ext.LaunchFuncOp(
@@ -1904,6 +1907,7 @@ def compile_moe_gemm2(
             k_in: lambda: T.index(),
         ):
             bdx = 256
+            # See stage1 comment: expert_ids is compact (num_m_blocks).
             gx = size_expert_ids
             gy = model_dim // tile_n
             flir.gpu_ext.LaunchFuncOp(
