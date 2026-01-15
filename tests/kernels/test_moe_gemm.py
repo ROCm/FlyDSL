@@ -663,9 +663,8 @@ def run_moe_stage2(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
-    # Default to f32 atomic path for stability on small-token/padded routing cases.
-    # (f16 half2 atomic path can fault on some ROCm stacks when padding is present.)
-    out_dtype: str = "f32",
+    # Stage2 output is fp16 (half2 atomics + CShuffle). The legacy f32-atomic path was removed.
+    out_dtype: str = "f16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -835,14 +834,10 @@ def run_moe_stage2(
     w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output dtype is selected at compile-time via `compile_moe_gemm2(out_dtype=...)`.
     out_s = str(out_dtype).strip().lower()
-    if out_s in ("f16", "fp16", "half"):
-        out_torch_dtype = torch.float16
-    elif out_s in ("f32", "fp32", "float"):
-        out_torch_dtype = torch.float32
-    else:
-        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+    if out_s not in ("f16", "fp16", "half"):
+        raise ValueError(f"out_dtype must be 'f16' (stage2 f32 path removed), got {out_dtype!r}")
+    out_torch_dtype = torch.float16
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -854,7 +849,6 @@ def run_moe_stage2(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
-        out_dtype=out_s,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,

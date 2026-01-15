@@ -1034,7 +1034,7 @@ def compile_moe_gemm2(
     tile_k: int,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
-    out_dtype: str | None = None,
+    use_cshuffle_epilog: bool | None = None,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1043,10 +1043,8 @@ def compile_moe_gemm2(
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
 
-    out_dtype:
-      - "f16": output is f16, using the LDS CShuffle + half2 atomic path
-      - "f32": output is f32, using the scalar f32 atomic path
-      - None: fallback to env var `FLIR_MOE_STAGE2_CSHUFFLE` (backwards compatible)
+    Stage2 output is always **f16** (half2 atomics). `use_cshuffle_epilog` controls whether we
+    use the CK-style LDS CShuffle epilogue before global atomics (recommended for performance).
     """
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
@@ -1085,10 +1083,7 @@ def compile_moe_gemm2(
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
-    # Stage2 output dtype / epilogue mode:
-    # - f16: LDS CShuffle + half2 atomics
-    # - f32: scalar f32 atomics (no CShuffle/LDS scratch)
-    if out_dtype is None:
+    if use_cshuffle_epilog is None:
         _use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE2_CSHUFFLE", "1") in (
             "1",
             "true",
@@ -1097,18 +1092,17 @@ def compile_moe_gemm2(
             "yes",
         )
     else:
-        out_s = str(out_dtype).strip().lower()
-        if out_s in ("f16", "fp16", "half"):
-            _use_cshuffle_epilog = True
-        elif out_s in ("f32", "fp32", "float"):
-            _use_cshuffle_epilog = False
-        else:
-            raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+        _use_cshuffle_epilog = bool(use_cshuffle_epilog)
+    if not _use_cshuffle_epilog:
+        raise ValueError(
+            "stage2 currently requires CShuffle epilogue (FLIR_MOE_STAGE2_CSHUFFLE=1). "
+            "The legacy f32-atomic path has been removed."
+        )
 
     # NOTE: Keep this as a callable (not `T.f16()` / `T.f32()`) so we don't require an
     # MLIR Context at Python-time. It will be invoked inside the module-building context.
-    out_elem = T.f16 if _use_cshuffle_epilog else T.f32
-    epilog_tag = "cshuffle" if _use_cshuffle_epilog else "f32"
+    out_elem = T.f16
+    epilog_tag = "cshuffle"
     # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
     # binary for a different (tile_m, tile_n, tile_k) configuration.
     # See stage1 note: include ABI tag to prevent binary reuse across signature changes.
@@ -1802,13 +1796,12 @@ def compile_moe_gemm2(
                             buffer_ops.buffer_load(sw_rsrc, row_w_idx, vec_width=1, dtype=f32)
                         )
     
-                if _use_cshuffle_epilog:
-                    if lds_out is None:
-                        raise RuntimeError(
-                            "FLIR_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
-                        )
-    
-                    def write_row_to_lds(
+                if lds_out is None:
+                    raise RuntimeError(
+                        "FLIR_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
+                    )
+
+                def write_row_to_lds(
                         *,
                         mi: int,
                         ii: int,
@@ -1853,116 +1846,54 @@ def compile_moe_gemm2(
                             v1 = vector.from_elements(vec1_f16, [v16])
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
     
-                    def precompute_row(*, row_local, row):
-                        # Token id for this output row (same across all N pairs).
-                        fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                        t_s = fused_s & mask24_i32
-                        return t_s * model_i32  # i32 element index base
+                def precompute_row(*, row_local, row):
+                    # Token id for this output row (same across all N pairs).
+                    fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                    t_s = fused_s & mask24_i32
+                    return t_s * model_i32  # i32 element index base
     
-                    def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                        idx0 = row_ctx
-                        col_i32 = arith.index_cast(i32, col_g0)
-                        idx_elem = idx0 + col_i32
-                        idx_elem_even = idx_elem & mask_even_i32
-                        byte_off = idx_elem_even * c2_i32
-                        # Prevent OOB half2 atomics on sentinel padded rows (t == tokens).
-                        # Atomic ops don't reliably "OOB-drop" like normal buffer stores; without this
-                        # we can fault on small-token cases with padding.
-                        fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                        t_s = fused_s & mask24_i32
-                        t_valid = arith.andi(blk_valid, arith.cmpu(t_s, tokens_i32, "ult"))
-                        # Safety: only redirect the byte offset to 0. This avoids any potential
-                        # vector-select lowering issues on some toolchains while still preventing
-                        # OOB atomics (the only correctness requirement for padding).
-                        byte_off = arith.select(t_valid, byte_off, zero_i32)
-                        atomic_add_f16x2(frag, byte_off)
+                def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
+                    idx0 = row_ctx
+                    col_i32 = arith.index_cast(i32, col_g0)
+                    idx_elem = idx0 + col_i32
+                    idx_elem_even = idx_elem & mask_even_i32
+                    byte_off = idx_elem_even * c2_i32
+                    # Prevent OOB half2 atomics on sentinel padded rows (t == tokens).
+                    # Atomic ops don't reliably "OOB-drop" like normal buffer stores; without this
+                    # we can fault on small-token cases with padding.
+                    fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                    t_s = fused_s & mask24_i32
+                    t_valid = arith.andi(blk_valid, arith.cmpu(t_s, tokens_i32, "ult"))
+                    # Safety: only redirect the byte offset to 0. This avoids any potential
+                    # vector-select lowering issues on some toolchains while still preventing
+                    # OOB atomics (the only correctness requirement for padding).
+                    byte_off = arith.select(t_valid, byte_off, zero_i32)
+                    atomic_add_f16x2(frag, byte_off)
     
-                    c_shuffle_epilog(
-                        arith=arith,
-                        vector=vector,
-                        gpu=gpu,
-                        range_constexpr=range_constexpr,
-                        tile_m=tile_m,
-                        tile_n=tile_n,
-                        e_vec=2,
-                        m_repeat=m_repeat,
-                        num_acc_n=num_acc_n,
-                        tx=tx,
-                        lane_div_16=lane_div_16,
-                        lane_mod_16=lane_mod_16,
-                        bx_m=bx_m,
-                        by_n=by_n,
-                        n_tile_base=n_tile_base,
-                        lds_out=lds_out,
-                        write_row_to_lds=write_row_to_lds,
-                        precompute_row=precompute_row,
-                        store_pair=store_pair,
-                    )
-                else:
-                    # Default (no CShuffle): output f32 and use scalar atomic fadd (baseline/compare).
-                    # NOTE: In this mode, `arg_out` is f32 and `out_rsrc` is a f32 buffer.
-                    c4_i32 = arith.i32(4)
+                c_shuffle_epilog(
+                    arith=arith,
+                    vector=vector,
+                    gpu=gpu,
+                    range_constexpr=range_constexpr,
+                    tile_m=tile_m,
+                    tile_n=tile_n,
+                    e_vec=2,
+                    m_repeat=m_repeat,
+                    num_acc_n=num_acc_n,
+                    tx=tx,
+                    lane_div_16=lane_div_16,
+                    lane_mod_16=lane_mod_16,
+                    bx_m=bx_m,
+                    by_n=by_n,
+                    n_tile_base=n_tile_base,
+                    lds_out=lds_out,
+                    write_row_to_lds=write_row_to_lds,
+                    precompute_row=precompute_row,
+                    store_pair=store_pair,
+                )
     
-                    def atomic_add_f32(val_f32, byte_off_i32):
-                        rocdl.raw_ptr_buffer_atomic_fadd(
-                            val_f32,
-                            out_rsrc,
-                            byte_off_i32,
-                            zero_i32,
-                            zero_i32,
-                        )
-    
-                    def _stage2_row_atomic(*, mi: int, ii: int, row_in_tile, row):
-                        fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                        t2 = fused2 & mask24_i32
-                        s2 = fused2 >> 24
-    
-                        # a2_scale index = t*topk + s (i32). Hardware OOB handles sentinel padding.
-                        ts2 = t2 * topk_i32_v + s2
-                        sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
-    
-                        # out element base = t*model_dim (i32)
-                        idx0 = t2 * model_i32
-    
-                        # Prevent OOB atomics when routing uses sentinel token id (t2 == tokens).
-                        # For invalid rows, redirect atomic to byte_off=0 with val=0.
-                        t_valid = arith.andi(blk_valid, arith.cmpu(t2, tokens_i32, "ult"))
-    
-                        if doweight_stage2:
-                            tw_idx = (mi * 4) + ii
-                            if tw_pf is not None:
-                                tw = tw_pf[tw_idx]
-                            else:
-                                tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
-    
-                        for ni in range_constexpr(num_acc_n):
-                            col_g = col_g_list[ni]  # index
-                            sw = sw_vals[ni]
-                            acc_idx = mi * num_acc_n + ni
-                            v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
-                            if is_int8:
-                                v = arith.sitofp(f32, v)
-                            v = v * sx * sw
-                            if doweight_stage2:
-                                v = v * tw
-    
-                            col_i32 = arith.index_cast(i32, col_g)
-                            idx_elem = idx0 + col_i32
-                            byte_off = idx_elem * c4_i32
-                            byte_off = arith.select(t_valid, byte_off, zero_i32)
-                            v = arith.select(t_valid, v, arith.f32(0.0))
-                            atomic_add_f32(v, byte_off)
-    
-                    default_epilog(
-                        arith=arith,
-                        range_constexpr=range_constexpr,
-                        m_repeat=m_repeat,
-                        lane_div_16=lane_div_16,
-                        bx_m=bx_m,
-                        body_row=_stage2_row_atomic,
-                    )
-    
-            if blk_valid:
+            _if_blk = scf.IfOp(blk_valid)
+            with _if_blk.then():
                 _moe_gemm2_then_body()
         @flir.jit
         def __call__(
