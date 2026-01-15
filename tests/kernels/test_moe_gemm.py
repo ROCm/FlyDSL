@@ -425,8 +425,8 @@ def run_moe_stage1(
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
 
-    if in_dtype not in ("fp8", "int8", "int4"):
-        raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
+        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
     is_int4 = in_dtype == "int4"
     is_int8 = in_dtype in ("int8", "int4")
 
@@ -436,6 +436,12 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
     # w2 is not used by our kernel, but required by CK stage1 API
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        x_q = x_fp32.to(torch.float16)
+        w1_q = w1_fp32.to(torch.float16)
+        w2_q = w2_fp32.to(torch.float16)
+        scale_x = torch.ones((tokens, 1), device=device, dtype=torch.float32)
+        scale_w1 = torch.ones((experts, 2 * inter_dim, 1), device=device, dtype=torch.float32)
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -538,9 +544,10 @@ def run_moe_stage1(
     tflops = flops / (us / 1e6) / 1e12
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
+    elem_bytes = 2 if in_dtype == "fp16" else 1
     bytes_moved = 0
-    bytes_moved += tokens * model_dim * 1  # x fp8
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
+    bytes_moved += tokens * model_dim * elem_bytes  # x
+    bytes_moved += (experts * (2 * inter_dim) * model_dim * elem_bytes) // (2 if is_int4 else 1)  # w (packed for int4)
     # Output rows are logically tokens*topk, but kernel may touch padded rows due to routing blocks.
     bytes_moved += int(sorted_size) * inter_dim * 2  # out fp16 (upper bound for writes)
     bytes_moved += tokens * 4  # scale_x f32 (1D)
@@ -738,8 +745,8 @@ def run_moe_stage2(
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
 
-    if in_dtype not in ("fp8", "int8", "int4"):
-        raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
+        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
     is_int4 = in_dtype == "int4"
     is_int8 = in_dtype in ("int8", "int4")
 
@@ -748,6 +755,13 @@ def run_moe_stage2(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        x_q = x_fp32.to(torch.float16)
+        w1_q = w1_fp32.to(torch.float16)
+        w2_q = w2_fp32.to(torch.float16)
+        scale_x = torch.ones((tokens, 1), device=device, dtype=torch.float32)
+        scale_w1 = torch.ones((experts, 2 * inter_dim, 1), device=device, dtype=torch.float32)
+        scale_w2 = torch.ones((experts, model_dim, 1), device=device, dtype=torch.float32)
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -780,6 +794,9 @@ def run_moe_stage2(
         )  # [tokens, topk, inter] fp32
         if in_dtype == "fp8":
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
+        elif in_dtype == "fp16":
+            a2_q = out1_ref.to(torch.float16)
+            a2_scale = torch.ones((*out1_ref.shape[:-1], 1), device=device, dtype=torch.float32)
         else:
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
@@ -891,9 +908,10 @@ def run_moe_stage2(
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
+    elem_bytes = 2 if in_dtype == "fp16" else 1
     bytes_moved = 0
-    bytes_moved += int(sorted_size) * inter_dim * 1  # a2 fp8 (upper bound: padded rows)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += int(sorted_size) * inter_dim * elem_bytes  # a2 (upper bound: padded rows)
+    bytes_moved += (experts * model_dim * inter_dim * elem_bytes) // (2 if is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += int(sorted_size) * 4  # a2_scale f32 (1D, padded upper bound)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
@@ -1079,6 +1097,10 @@ def test_moe_gemm_2stage(
     out1_fp32 = out1_fp16.to(torch.float32)
     if in_dtype == "fp8":
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        # fp16 path: stage2 consumes fp16 directly (no quant).
+        a2_q = out1_fp16
+        a2_scale = torch.ones((*out1_fp16.shape[:-1], 1), device=device, dtype=torch.float32)
     else:
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
 
@@ -1142,8 +1164,8 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "int8", "int4", "all"],
-        help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
+        choices=["fp8", "fp16", "int8", "int4", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int4 / all (default: all). "
         "int4 means W4A8: A int8, W packed int4.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
