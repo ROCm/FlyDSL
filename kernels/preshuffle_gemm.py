@@ -122,7 +122,13 @@ def compile_preshuffle_gemm_a8(
     # GEMM epilogue toggle: optional LDS CShuffle + vectorized stores.
     # Default: off (current measured cases show no benefit).
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}".replace("-", "_")
+    # IMPORTANT: include tiling + shapes in the module name to avoid reusing a compiled binary
+    # across different GEMM configs (same issue we hit in MoE).
+    module_name = (
+        f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}"
+        f"_t{tile_m}x{tile_n}x{tile_k}"
+        f"_mnk{M}x{N}x{K}"
+    ).replace("-", "_")
 
     class _GEMM(flir.MlirModule):
         GPU_MODULE_NAME = module_name

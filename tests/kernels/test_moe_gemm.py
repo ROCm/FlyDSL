@@ -509,7 +509,7 @@ def run_moe_stage1(
             tokens,
             inter_dim,
             model_dim,
-            int(eids.numel()),
+            int(st.numel()),
         )
 
     _, us = run_perftest(
@@ -860,7 +860,7 @@ def run_moe_stage2(
             tokens,
             model_dim,
             inter_dim,
-            int(eids.numel()),
+            int(st.numel()),
         )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer

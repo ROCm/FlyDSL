@@ -114,8 +114,6 @@ def compile_moe_gemm1(
         raise ValueError("stage1 cshuffle epilog currently supports only f16 output (out_dtype='f16')")
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
-    # binary for a different (tile_m, tile_n, tile_k) configuration.
     module_name = f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}".replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -150,7 +148,7 @@ def compile_moe_gemm1(
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            max_token_id_in: lambda: T.index(),
         ):
             x_elem = I.i8 if is_int8 else I.f8
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
@@ -903,7 +901,7 @@ def compile_moe_gemm1(
                 fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                 t2 = fused2 & mask24_i32
                 s2 = fused2 >> 24
-                # Rely on buffer instruction OOB behavior (CK-style):
+                # Rely on buffer instruction OOB behavior:
                 # - For sentinel rows (t2 == tokens) or otherwise out-of-range, buffer_load returns 0.
                 # - For OOB stores, buffer_store is masked/dropped by the hardware bounds check.
                 sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
@@ -966,15 +964,11 @@ def compile_moe_gemm1(
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            max_token_id_in: lambda: T.index(),
         ):
             bdx = 256
-            # IMPORTANT: `arg_expert_ids` is a *compact* list of expert-block ids (length = num_m_blocks),
-            # as produced by `aiter.moe_sorting` / `build_sorted_routing`. Therefore grid.x must match
-            # that compact length, not `experts * ceil_div(tokens, tile_m)`.
-            # CK mapping: grid.x = N blocks, grid.y = expert blocks.
             gx = inter_in / arith.index(tile_n)
-            gy = size_expert_ids_in
+            gy = (max_token_id_in + arith.index(tile_m - 1)) / arith.index(tile_m)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -991,7 +985,7 @@ def compile_moe_gemm1(
                     tokens_in,
                     inter_in,
                     k_in,
-                    size_expert_ids_in,
+                    max_token_id_in,
                 ],
             )
 
@@ -1122,7 +1116,7 @@ def compile_moe_gemm2(
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            max_token_id_in: lambda: T.index(),
         ):
             x_elem = I.i8 if is_int8 else I.f8
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
@@ -1930,13 +1924,11 @@ def compile_moe_gemm2(
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            max_token_id_in: lambda: T.index(),
         ):
             bdx = 256
-            # See stage1 comment: expert_ids is compact (num_m_blocks).
-            # CK mapping: grid.x = N blocks, grid.y = expert blocks.
             gx = n_in / arith.index(tile_n)
-            gy = size_expert_ids_in
+            gy = (max_token_id_in + arith.index(tile_m - 1)) / arith.index(tile_m)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -1953,7 +1945,7 @@ def compile_moe_gemm2(
                     tokens_in,
                     n_in,
                     k_in,
-                    size_expert_ids_in,
+                    max_token_id_in,
                 ],
             )
 
