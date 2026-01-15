@@ -70,6 +70,11 @@ from kernels.moe_gemm_2stage import compile_moe_gemm1, compile_moe_gemm2
 
 logging.basicConfig(level=logging.INFO)
 
+# User requirement: only enable A16W4 on gfx950 (MI350).
+def _require_gfx950_for_a16w4():
+    if "gfx950" not in str(ARCH):
+        pytest.skip(f"A16W4 is only enabled on gfx950 (current arch: {ARCH}).")
+
 # Reduce noisy aiter log spam (e.g. "type hints mismatch, override to --> ...") so test output
 # stays readable. You can override via env: FLIR_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
 _aiter_level = os.environ.get("FLIR_AITER_LOG_LEVEL", "ERROR").upper().strip()
@@ -1116,6 +1121,7 @@ def _run_aiter_a16w4_moe_2stage(
     This is a harness-only path: it benchmarks and validates aiter's A16W4 kernels
     and ensures our weight/scale shuffles match aiter's.
     """
+    _require_gfx950_for_a16w4()
     if not HAS_AITER:
         pytest.skip("aiter not available; cannot run A16W4 MoE benchmark.")
     if not hasattr(aiter, "fp4_utils"):
@@ -1417,6 +1423,7 @@ def test_moe_gemm_2stage(
     )
 
     if str(in_dtype).strip().lower() == "a16w4":
+        _require_gfx950_for_a16w4()
         _run_aiter_a16w4_moe_2stage(
             x_fp32=x_fp32,
             w1_fp32=w1_fp32,
@@ -1506,6 +1513,7 @@ def test_moe_gemm_2stage_aiter_a16w4():
 
     Keep this smaller than the default fp8/fp16 coverage case to avoid long JIT times.
     """
+    _require_gfx950_for_a16w4()
     test_moe_gemm_2stage(
         tokens=256,
         model_dim=1024,
