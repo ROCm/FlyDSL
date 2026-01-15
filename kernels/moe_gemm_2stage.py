@@ -47,6 +47,7 @@ def compile_moe_gemm1(
     tile_k: int,
     doweight_stage1: bool,
     in_dtype: str = "fp8",
+    out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
@@ -62,6 +63,10 @@ def compile_moe_gemm1(
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
+    if out_dtype not in ("f16", "bf16"):
+        raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
+    # NOTE: don't materialize MLIR types outside an active MLIR Context.
+    out_mlir = lambda: (T.f16() if out_dtype == "f16" else T.bf16())
     # K64 micro-step uses 2x K32 MFMA (and 16B A/B packs); require tile_k divisible by 64.
     if (int(tile_k) % 64) != 0:
         raise ValueError(f"tile_k must be divisible by 64 (K64 unroll), got tile_k={tile_k}")
@@ -105,11 +110,13 @@ def compile_moe_gemm1(
     if use_cshuffle_epilog is None:
         use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
+    if out_dtype != "f16" and use_cshuffle_epilog:
+        raise ValueError("stage1 cshuffle epilog currently supports only f16 output (out_dtype='f16')")
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
     # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
     # binary for a different (tile_m, tile_n, tile_k) configuration.
-    module_name = f"mfma_moe1_{in_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}".replace("-", "_")
+    module_name = f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}".replace("-", "_")
 
     class _MOE1(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -132,7 +139,7 @@ def compile_moe_gemm1(
         @flir.kernel
         def moe_gemm1(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
+            arg_out: lambda: T.memref(size_out, out_mlir()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
@@ -197,8 +204,11 @@ def compile_moe_gemm1(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
-            bx = gpu.block_id("x")  # tile along sorted M
-            by = gpu.block_id("y")  # tile along inter_dim
+            # Align with CK/Aiter launch mapping (NSwizzle==false):
+            # - blockIdx.x -> N dimension (tile along inter_dim)
+            # - blockIdx.y -> expert-block id / M dimension (tile along sorted M)
+            by = gpu.block_id("x")  # tile along inter_dim
+            bx = gpu.block_id("y")  # tile along sorted M
 
             # Common constants/atoms (hoisted): keep IR small like GEMM.
             # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
@@ -893,8 +903,9 @@ def compile_moe_gemm1(
                 fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                 t2 = fused2 & mask24_i32
                 s2 = fused2 >> 24
-                # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
-                # sentinel (t2 == tokens) or otherwise out-of-range.
+                # Rely on buffer instruction OOB behavior (CK-style):
+                # - For sentinel rows (t2 == tokens) or otherwise out-of-range, buffer_load returns 0.
+                # - For OOB stores, buffer_store is masked/dropped by the hardware bounds check.
                 sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                 # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
@@ -926,7 +937,7 @@ def compile_moe_gemm1(
                     y = silu(vg) * vu
                     if doweight_stage1:
                         y = y * tw
-                    y = arith.trunc_f(T.f16(), y)
+                    y = arith.trunc_f(out_mlir(), y)
                     idx_out = idx0 + col_i32
                     buffer_ops.buffer_store(y, out_rsrc, idx_out)
 
@@ -944,7 +955,7 @@ def compile_moe_gemm1(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
+            arg_out: lambda: T.memref(size_out, out_mlir()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
@@ -961,8 +972,9 @@ def compile_moe_gemm1(
             # IMPORTANT: `arg_expert_ids` is a *compact* list of expert-block ids (length = num_m_blocks),
             # as produced by `aiter.moe_sorting` / `build_sorted_routing`. Therefore grid.x must match
             # that compact length, not `experts * ceil_div(tokens, tile_m)`.
-            gx = size_expert_ids_in
-            gy = inter_dim // tile_n
+            # CK mapping: grid.x = N blocks, grid.y = expert blocks.
+            gx = inter_in / arith.index(tile_n)
+            gy = size_expert_ids_in
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1153,8 +1165,11 @@ def compile_moe_gemm2(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
-            bx = gpu.block_id("x")  # tile along sorted M
-            by = gpu.block_id("y")  # tile along model_dim
+            # Align with CK/Aiter launch mapping (NSwizzle==false):
+            # - blockIdx.x -> N dimension (tile along model_dim)
+            # - blockIdx.y -> expert-block id / M dimension (tile along sorted M)
+            by = gpu.block_id("x")  # tile along model_dim
+            bx = gpu.block_id("y")  # tile along sorted M
 
             # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k // 16, index=True)
@@ -1863,6 +1878,10 @@ def compile_moe_gemm2(
                     # out element base = t*model_dim (i32)
                     idx0 = t2 * model_i32
 
+                    # Prevent OOB atomics when routing uses sentinel token id (t2 == tokens).
+                    # For invalid rows, redirect atomic to byte_off=0 with val=0.
+                    t_valid = arith.cmpu(t2, tokens_i32, "ult")
+
                     if doweight_stage2:
                         tw_idx = (mi * 4) + ii
                         if tw_pf is not None:
@@ -1884,6 +1903,8 @@ def compile_moe_gemm2(
                         col_i32 = arith.index_cast(i32, col_g)
                         idx_elem = idx0 + col_i32
                         byte_off = idx_elem * c4_i32
+                        byte_off = arith.select(t_valid, byte_off, zero_i32)
+                        v = arith.select(t_valid, v, arith.f32(0.0))
                         atomic_add_f32(v, byte_off)
 
                 default_epilog(
@@ -1913,8 +1934,9 @@ def compile_moe_gemm2(
         ):
             bdx = 256
             # See stage1 comment: expert_ids is compact (num_m_blocks).
-            gx = size_expert_ids_in
-            gy = model_dim // tile_n
+            # CK mapping: grid.x = N blocks, grid.y = expert blocks.
+            gx = n_in / arith.index(tile_n)
+            gy = size_expert_ids_in
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
