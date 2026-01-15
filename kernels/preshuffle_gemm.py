@@ -395,13 +395,113 @@ def compile_preshuffle_gemm_a8(
                         vec_part_i32x4=vec_a_parts[i],
                     )
 
+            def store_a_tile_chunk_to_lds(vec_a_parts, lds_base, i: int):
+                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                lds_store_16b_xor16(
+                    flir,
+                    arith,
+                    vector,
+                    lds_memref=lds_a,
+                    vec16_ty=_vec16_type(),
+                    elem_type=_elem_type(),
+                    atom_s16=atom_a_g2r16,
+                    layout_lds=layout_lds,
+                    row_local=row_a_local,
+                    col_local_i32=col_a_local_i32,
+                    tx_c4=c4,
+                    k_blocks16=k_blocks16,
+                    lds_base=lds_base,
+                    vec_part_i32x4=vec_a_parts[i],
+                )
+
+            # Stream A tile from global memory into LDS (avoid holding the full A tile in VGPRs).
+            #
+            # This significantly reduces live ranges / VGPR pressure versus:
+            #   a_regs = load_a_tile(...)
+            #   store_a_tile_to_lds(a_regs, ...)
+            #
+            # and helps prevent scratch spilling in the hot loop.
+            def copy_a_tile_gmem_to_lds(base_k, lds_base):
+                base_k_div4 = base_k / 4
+                # Batch VMEM loads before DS writes. Bigger batches increase VMEM overlap but
+                # can spike VGPR pressure. For the hot case (num_a_loads==8), loading all
+                # 8 chunks before DS writes gives the best overlap on gfx950 for tile_k=128.
+                def _load_chunk(i: int):
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    row_a_global = bx_m + row_a_local
+                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
+                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
+                    a_16B = load_a_16(idx_i32)
+                    return (row_a_local, col_a_local_i32, vector.bitcast(T.i32x4, a_16B))
+
+                def _store_chunk(row_a_local, col_a_local_i32, vec_part_i32x4):
+                    lds_store_16b_xor16(
+                        flir,
+                        arith,
+                        vector,
+                        lds_memref=lds_a,
+                        vec16_ty=_vec16_type(),
+                        elem_type=_elem_type(),
+                        atom_s16=atom_a_g2r16,
+                        layout_lds=layout_lds,
+                        row_local=row_a_local,
+                        col_local_i32=col_a_local_i32,
+                        tx_c4=c4,
+                        k_blocks16=k_blocks16,
+                        lds_base=lds_base,
+                        vec_part_i32x4=vec_part_i32x4,
+                    )
+
+                if num_a_loads == 8:
+                    # Load all 8, then store all 8.
+                    c0 = _load_chunk(0)
+                    c1 = _load_chunk(1)
+                    c2 = _load_chunk(2)
+                    c3 = _load_chunk(3)
+                    c4c = _load_chunk(4)
+                    c5 = _load_chunk(5)
+                    c6 = _load_chunk(6)
+                    c7 = _load_chunk(7)
+
+                    _store_chunk(*c0)
+                    _store_chunk(*c1)
+                    _store_chunk(*c2)
+                    _store_chunk(*c3)
+                    _store_chunk(*c4c)
+                    _store_chunk(*c5)
+                    _store_chunk(*c6)
+                    _store_chunk(*c7)
+                    return
+
+                batch = 4
+                if num_a_loads % batch != 0:
+                    raise ValueError(
+                        f"num_a_loads must be divisible by {batch} (got num_a_loads={num_a_loads})"
+                    )
+                for base_i in range_constexpr(num_a_loads // batch):
+                    chunks = []
+                    for j in range_constexpr(batch):
+                        i = (base_i * batch) + j
+                        chunks.append(_load_chunk(i))
+                    for j in range_constexpr(batch):
+                        _store_chunk(*chunks[j])
+
             def prefetch_ab_tile(base_k):
                 base_k_div4 = base_k / 4
                 a_regs = load_a_tile(base_k_div4)
                 b_regs = load_b_tile(base_k)
                 return a_regs, b_regs
 
-            def compute_tile(accs_in, b_tile_in, lds_base, *, is_last_tile=False, a0_prefetch=None):
+            def compute_tile(
+                accs_in,
+                b_tile_in,
+                lds_base,
+                *,
+                is_last_tile=False,
+                a0_prefetch=None,
+                pending_store_a_regs=None,
+                pending_store_lds_base=None,
+            ):
                 scales_pf = {}
                 if is_last_tile:
                     # Prefetch scales (same as original kernel).
@@ -425,6 +525,7 @@ def compile_preshuffle_gemm_a8(
                         scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
 
                 current_accs_list = list(accs_in)
+                pending_store_idx = 0
 
                 # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
                 # This is the key optimization from `zhimding/develop_0107` for FP8:
@@ -449,6 +550,19 @@ def compile_preshuffle_gemm_a8(
                         v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
                         return vector.bitcast(vec8_i32, v4)
 
+                    def maybe_store_next_a_chunk(*, mi: int):
+                        nonlocal pending_store_a_regs, pending_store_idx
+                        if pending_store_a_regs is None:
+                            return
+                        if mi < int(num_a_loads) and pending_store_idx < int(num_a_loads):
+                            rocdl.sched_dswr(1)
+                            store_a_tile_chunk_to_lds(
+                                pending_store_a_regs, pending_store_lds_base, pending_store_idx
+                            )
+                            pending_store_idx += 1
+                            if pending_store_idx >= int(num_a_loads):
+                                pending_store_a_regs = None
+
                     for ku128 in range_constexpr(k_unroll // 2):
                         ku0 = ku128 * 2
                         ku1 = ku0 + 1
@@ -470,6 +584,11 @@ def compile_preshuffle_gemm_a8(
                             a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
                             a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
+                            # Overlap: interleave a single A->LDS chunk write per mi.
+                            # This avoids a big clump of DS writes that can stall the MFMA stream.
+                            if ku128 == 0:
+                                maybe_store_next_a_chunk(mi=mi)
+
                             for ni in range_constexpr(num_acc_n):
                                 b0 = b0_packs0[ni]
                                 b1 = b0_packs1[ni]
@@ -489,10 +608,10 @@ def compile_preshuffle_gemm_a8(
                                         0,
                                         0,
                                         # op_sel_a + scale_a (1.0f as i32 bits)
-                                        0x3F800000,
+                                        0,
                                         # op_sel_b + scale_b (1.0f as i32 bits)
                                         0,
-                                        0x3F800000,
+                                        0,
                                     ],
                                 )
                     return current_accs_list, scales_pf
@@ -522,6 +641,20 @@ def compile_preshuffle_gemm_a8(
                             a0, a1 = a0_prefetch
                         else:
                             a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                        if ku == 0:
+                            if pending_store_a_regs is not None:
+                                if mi < int(num_a_loads) and pending_store_idx < int(num_a_loads):
+                                    rocdl.sched_dswr(1)
+                                    store_a_tile_chunk_to_lds(
+                                        pending_store_a_regs,
+                                        pending_store_lds_base,
+                                        pending_store_idx,
+                                    )
+                                    pending_store_idx += 1
+                                    if pending_store_idx >= int(num_a_loads):
+                                        pending_store_a_regs = None
+
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             current_accs_list[acc_idx] = mfma_k64(
@@ -725,6 +858,10 @@ def compile_preshuffle_gemm_a8(
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
+                # Keep a conservative, proven-good scheduler template.
+                # This function is called after staging the next A tile into LDS and is meant
+                # to help LLVM interleave remaining VMEM/DS work around the compute phase.
+
                 # - MFMA group size per "slot": num_acc_n
                 # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                 # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
@@ -785,8 +922,11 @@ def compile_preshuffle_gemm_a8(
 
                 # Prologue: tile-0
                 k0 = arith.constant(0, index=True)
-                a_regs0, b_tile0 = prefetch_ab_tile(k0)
-                store_a_tile_to_lds(a_regs0, lds_base0)
+                # Stream A0 directly to LDS to avoid holding the full tile in VGPRs.
+                # (For stage=2, we only stream A for the "next tile" after compute to
+                # keep the hotloop from being front-loaded by VMEM->DS waits.)
+                copy_a_tile_gmem_to_lds(k0, lds_base0)
+                b_tile0 = load_b_tile(k0)
                 gpu.barrier()
                 accs = [acc_init] * (num_acc_n * m_repeat)
 
@@ -802,14 +942,20 @@ def compile_preshuffle_gemm_a8(
                 if (num_tiles % 2) == 1:
                     for k_iv in range(0, c_k_main, tile_k * 2):
                         next_k1 = k_iv + tile_k
+                        # Prefetch B for the next tile early (can overlap with MFMA),
+                        # but delay A gmem->LDS until after compute to avoid keeping A regs live.
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
 
                         accs, _ = compute_tile(
-                            accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong
+                            accs,
+                            b_tile_pong,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                            pending_store_a_regs=a_regs_ping,
+                            pending_store_lds_base=lds_base_ping,
                         )
                         a0_prefetch_pong = None
 
-                        store_a_tile_to_lds(a_regs_ping, lds_base_ping)
                         hot_loop_scheduler()
                         gpu.barrier()
 
@@ -820,11 +966,15 @@ def compile_preshuffle_gemm_a8(
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
 
                         accs, _ = compute_tile(
-                            accs, b_tile_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping
+                            accs,
+                            b_tile_ping,
+                            lds_base_ping,
+                            a0_prefetch=a0_prefetch_ping,
+                            pending_store_a_regs=a_regs_pong,
+                            pending_store_lds_base=lds_base_pong,
                         )
                         a0_prefetch_ping = None
 
-                        store_a_tile_to_lds(a_regs_pong, lds_base_pong)
                         hot_loop_scheduler()
                         gpu.barrier()
 
@@ -845,11 +995,15 @@ def compile_preshuffle_gemm_a8(
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
 
                         accs, _ = compute_tile(
-                            accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong
+                            accs,
+                            b_tile_pong,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                            pending_store_a_regs=a_regs_ping,
+                            pending_store_lds_base=lds_base_ping,
                         )
                         a0_prefetch_pong = None
 
-                        store_a_tile_to_lds(a_regs_ping, lds_base_ping)
                         hot_loop_scheduler()
                         gpu.barrier()
 
@@ -859,11 +1013,15 @@ def compile_preshuffle_gemm_a8(
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
 
                         accs, _ = compute_tile(
-                            accs, b_tile_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping
+                            accs,
+                            b_tile_ping,
+                            lds_base_ping,
+                            a0_prefetch=a0_prefetch_ping,
+                            pending_store_a_regs=a_regs_pong,
+                            pending_store_lds_base=lds_base_pong,
                         )
                         a0_prefetch_ping = None
 
-                        store_a_tile_to_lds(a_regs_pong, lds_base_pong)
                         hot_loop_scheduler()
                         gpu.barrier()
 
@@ -873,11 +1031,15 @@ def compile_preshuffle_gemm_a8(
                     a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
 
                     accs, _ = compute_tile(
-                        accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong
+                        accs,
+                        b_tile_pong,
+                        lds_base_pong,
+                        a0_prefetch=a0_prefetch_pong,
+                        pending_store_a_regs=a_regs_ping,
+                        pending_store_lds_base=lds_base_ping,
                     )
                     a0_prefetch_pong = None
 
-                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
                     hot_loop_scheduler()
                     gpu.barrier()
 
