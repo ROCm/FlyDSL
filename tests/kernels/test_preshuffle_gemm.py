@@ -75,7 +75,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "fp16", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
@@ -129,7 +129,15 @@ def test_mfma_a8_flir_preshuffle(
     size_c = M * N
     size_a = M * K
     # B is packed int4 for W4A8: 2 values per byte.
-    size_b = (N * K) // 2 if in_dtype == "int4" else (N * K)
+    if in_dtype == "int4":
+        size_b = (N * K) // 2
+        elem_bytes = 1
+    elif in_dtype in ("fp16", "bf16"):
+        size_b = (N * K) * 2
+        elem_bytes = 2
+    else:
+        size_b = (N * K)
+        elem_bytes = 1
 
     device = torch.device("cuda")
 
@@ -141,17 +149,26 @@ def test_mfma_a8_flir_preshuffle(
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
 
-    quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
-    a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
-    if is_int4:
-        # Signed int4 range is [-8, 7]. Use dtypeMax=7 for symmetric per-row scaling.
-        b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.int8, dtypeMax=7)  # (N, K)
+    if in_dtype in ("fp16", "bf16"):
+        torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
+        a_q = a_fp32.to(torch_dtype)
+        b_q = b_fp32_t.to(torch_dtype)
+        # Keep kernel epilogue unchanged: scales are multiplicative, so set to 1.
+        scale_a = torch.ones((M, 1), device=device, dtype=torch.float32)
+        scale_b = torch.ones((N, 1), device=device, dtype=torch.float32)
     else:
-        b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)  # (N, K)
+        quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
+        a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
+        if is_int4:
+            # Signed int4 range is [-8, 7]. Use dtypeMax=7 for symmetric per-row scaling.
+            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.int8, dtypeMax=7)  # (N, K)
+        else:
+            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)  # (N, K)
 
     # When using fixed-width global loads (16B chunks), some threads can over-read.
     # Pad the underlying storage so the over-read stays in-bounds.
-    PAD_ELEMS = 64  # bytes for 8-bit; generous guard for safety
+    PAD_BYTES = 64  # bytes; generous guard for safety
+    PAD_ELEMS = PAD_BYTES // elem_bytes
     a_flat = a_q.contiguous().view(-1)
     a_storage = torch.empty(a_flat.numel() + PAD_ELEMS, device=device, dtype=a_q.dtype)
     a_storage[: a_flat.numel()] = a_flat
@@ -163,7 +180,12 @@ def test_mfma_a8_flir_preshuffle(
     b_q = b_storage[: b_flat.numel()].view(N, K)
 
     # Preshuffle B to CK/aiter layout.
-    b_shuffled = shuffle_weight(b_q)
+    #
+    # For fp16/bf16, this matches CK's `preShuffleBuffer` in
+    # `composable_kernel/.../gemm_multiply_multiply_xdl_fp16_bpreshuffle.cpp`:
+    # NLane=16, KLane=4, KPack=8 (for 16B pack), which is exactly what
+    # `shuffle_weight(layout=(16,16))` produces when element_size==2.
+    b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
         """
@@ -215,13 +237,13 @@ def test_mfma_a8_flir_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
-    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * 4
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
-    if HAS_AITER and bool(run_aiter_bench) and (not is_int4):
+    if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
         try:
@@ -257,7 +279,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Preshuffle GEMM benchmark"
     )
-    parser.add_argument("--in_dtype", type=str, default="fp8", choices=["fp8", "int8", "int4"], 
+    parser.add_argument(
+        "--in_dtype",
+        type=str,
+        default="fp8",
+        choices=["fp8", "int8", "int4", "fp16", "bf16"],
                         help="Input dtype")
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
