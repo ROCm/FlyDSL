@@ -484,7 +484,6 @@ def run_moe_stage1(
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
     exe = compile_moe_gemm1(
-        tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -493,14 +492,25 @@ def run_moe_stage1(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        sorted_size=sorted_size,
-        size_expert_ids=int(sorted_expert_ids.numel()),
         doweight_stage1=bool(doweight_stage1),
         use_cshuffle_epilog=False,
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        exe(o, x, w, sx, sw, st, eids, sw_sorted, tokens, inter_dim, model_dim)
+        exe(
+            o,
+            x,
+            w,
+            sx,
+            sw,
+            st,
+            eids,
+            sw_sorted,
+            tokens,
+            inter_dim,
+            model_dim,
+            int(eids.numel()),
+        )
 
     _, us = run_perftest(
         launch,
@@ -825,7 +835,6 @@ def run_moe_stage2(
 
     doweight_stage2 = not bool(doweight_stage1)
     exe = compile_moe_gemm2(
-        tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -835,13 +844,24 @@ def run_moe_stage2(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        sorted_size=sorted_size,
-        size_expert_ids=int(sorted_expert_ids.numel()),
         doweight_stage2=bool(doweight_stage2),
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        exe(o, x, w, sx, sw, st, eids, sw_sorted, tokens, model_dim, inter_dim)
+        exe(
+            o,
+            x,
+            w,
+            sx,
+            sw,
+            st,
+            eids,
+            sw_sorted,
+            tokens,
+            model_dim,
+            inter_dim,
+            int(eids.numel()),
+        )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run

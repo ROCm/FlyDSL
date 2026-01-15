@@ -38,7 +38,6 @@ from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 
 def compile_moe_gemm1(
     *,
-    tokens: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -46,8 +45,6 @@ def compile_moe_gemm1(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    sorted_size: int,
-    size_expert_ids: int,
     doweight_stage1: bool,
     in_dtype: str = "fp8",
     use_cshuffle_epilog: bool | None = None,
@@ -83,12 +80,13 @@ def compile_moe_gemm1(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    size_out = tokens * topk * inter_dim
-    size_x = tokens * model_dim
+    DYN = ir.ShapedType.get_dynamic_size()
+    size_out = DYN
+    size_x = DYN
     # W is packed int4 for W4A8: 2 values per byte.
     size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_int4 else (experts * (2 * inter_dim) * model_dim)
-    size_sorted = int(sorted_size)
-    size_expert_ids = int(size_expert_ids)
+    size_sorted = DYN
+    size_expert_ids = DYN
 
     total_threads = 256
     elems_x_per_tile = tile_m * tile_k
@@ -109,7 +107,9 @@ def compile_moe_gemm1(
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_moe1_{in_dtype}_{epilog_tag}".replace("-", "_")
+    # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
+    # binary for a different (tile_m, tile_n, tile_k) configuration.
+    module_name = f"mfma_moe1_{in_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}".replace("-", "_")
 
     class _MOE1(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -135,14 +135,15 @@ def compile_moe_gemm1(
             arg_out: lambda: T.memref(size_out, T.f16()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens, T.f32()),
+            arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
+            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             x_elem = I.i8 if is_int8 else I.f8
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
@@ -266,7 +267,7 @@ def compile_moe_gemm1(
             tx_i32_base = tx * c_chunk_i32
             mask24 = arith.i32(0xFFFFFF)
             # Keep i32 constants available for epilogue index math.
-            tokens_i32 = arith.i32(tokens)
+            tokens_i32 = arith.index_cast(i32, tokens_in)
             topk_i32 = arith.i32(topk)
 
             def x_tile_chunk_coord_i32(i: int):
@@ -946,20 +947,21 @@ def compile_moe_gemm1(
             arg_out: lambda: T.memref(size_out, T.f16()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens, T.f32()),
+            arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
+            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             bdx = 256
             # IMPORTANT: `arg_expert_ids` is a *compact* list of expert-block ids (length = num_m_blocks),
             # as produced by `aiter.moe_sorting` / `build_sorted_routing`. Therefore grid.x must match
             # that compact length, not `experts * ceil_div(tokens, tile_m)`.
-            gx = size_expert_ids
+            gx = size_expert_ids_in
             gy = inter_dim // tile_n
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
@@ -977,6 +979,7 @@ def compile_moe_gemm1(
                     tokens_in,
                     inter_in,
                     k_in,
+                    size_expert_ids_in,
                 ],
             )
 
@@ -987,7 +990,6 @@ def compile_moe_gemm1(
 
 def compile_moe_gemm2(
     *,
-    tokens: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -995,8 +997,6 @@ def compile_moe_gemm2(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    sorted_size: int,
-    size_expert_ids: int,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
     out_dtype: str | None = None,
@@ -1034,12 +1034,13 @@ def compile_moe_gemm2(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    size_out = tokens * model_dim
-    size_x = tokens * topk * inter_dim
+    DYN = ir.ShapedType.get_dynamic_size()
+    size_out = DYN
+    size_x = DYN
     # W is packed int4 for W4A8: 2 values per byte.
     size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
-    size_sorted = int(sorted_size)
-    size_expert_ids = int(size_expert_ids)
+    size_sorted = DYN
+    size_expert_ids = DYN
 
     total_threads = 256
     elems_x_per_tile = tile_m * tile_k
@@ -1073,7 +1074,9 @@ def compile_moe_gemm2(
     # MLIR Context at Python-time. It will be invoked inside the module-building context.
     out_elem = T.f16 if _use_cshuffle_epilog else T.f32
     epilog_tag = "cshuffle" if _use_cshuffle_epilog else "f32"
-    module_name = f"mfma_moe2_{in_dtype}_{epilog_tag}".replace("-", "_")
+    # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
+    # binary for a different (tile_m, tile_n, tile_k) configuration.
+    module_name = f"mfma_moe2_{in_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}".replace("-", "_")
 
     class _MOE2(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -1099,14 +1102,15 @@ def compile_moe_gemm2(
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens * topk, T.f32()),
+            arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
+            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             x_elem = I.i8 if is_int8 else I.f8
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
@@ -1217,7 +1221,7 @@ def compile_moe_gemm2(
 
             topk_i32 = arith.i32(topk)
             mask24 = arith.i32(0xFFFFFF)
-            tokens_i32 = arith.i32(tokens)
+            tokens_i32 = arith.index_cast(i32, tokens_in)
 
             def x_tile_chunk_coord_i32(i: int):
                 return tile_chunk_coord_i32(
@@ -1897,18 +1901,19 @@ def compile_moe_gemm2(
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens * topk, T.f32()),
+            arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
+            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             bdx = 256
             # See stage1 comment: expert_ids is compact (num_m_blocks).
-            gx = size_expert_ids
+            gx = size_expert_ids_in
             gy = model_dim // tile_n
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
@@ -1926,6 +1931,7 @@ def compile_moe_gemm2(
                     tokens_in,
                     n_in,
                     k_in,
+                    size_expert_ids_in,
                 ],
             )
 
