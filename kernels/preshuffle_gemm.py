@@ -241,13 +241,27 @@ def compile_preshuffle_gemm_a8(
                 else None
             )
 
-            # Note: We assume N is aligned (no N-tail support in this kernel).
-            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-            scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+            c2 = arith.constant(2, index=True)
+            c4 = arith.constant(4, index=True)
+            elem_bytes_idx = arith.constant(int(elem_bytes), index=True)
+            a_nbytes = c_m * c_k * elem_bytes_idx
+            c_nbytes = c_m * c_n * c2  # f16 output
+
+            # Note: N-tail for B layout is still not supported; this just makes OOB safe.
+            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes)
+            scale_a_rsrc = (
+                None
+                if is_f16_or_bf16
+                else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=(c_m * c4))
+            )
 
             b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
-            scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+            scale_b_rsrc = (
+                None
+                if is_f16_or_bf16
+                else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True, num_records_bytes=(c_n * c4))
+            )
 
             bx_m = bx * tile_m
             by_n = by * tile_n
@@ -441,15 +455,23 @@ def compile_preshuffle_gemm_a8(
             atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if elem_bytes == 1 else 8))
 
             def load_a_16(idx_elem):
-                return buffer_copy_gmem16_dwordx4(
-                    flir,
-                    arg=arg_a,
-                    elem_type=_elem_type(),
-                    idx_i32=idx_elem,
-                    atom_g2r16=atom_a_g2r16,
-                    rsrc=a_rsrc,
-                    vec_elems=(16 if elem_bytes == 1 else 8),
-                )
+                # Use buffer loads (with explicit num_records_bytes) so tails are safe.
+                if elem_bytes == 1:
+                    return buffer_copy_gmem16_dwordx4(
+                        flir,
+                        arg=arg_a,
+                        elem_type=_elem_type(),
+                        # For 1B types, this is still expressed in "dword elements" on the
+                        # address path via `layout_a_div4`.
+                        idx_i32=idx_elem,
+                        atom_g2r16=atom_a_g2r16,
+                        rsrc=a_rsrc,
+                        vec_elems=16,
+                    )
+
+                # fp16/bf16: load 16B == 8 elements using raw buffer_load.
+                ty = ir.F16Type.get() if is_f16 else ir.BF16Type.get()
+                return buffer_ops.buffer_load(a_rsrc, idx_elem, vec_width=8, dtype=ty)
 
             def a_tile_chunk_coord_i32(i: int):
                 return tile_chunk_coord_i32(
@@ -466,17 +488,21 @@ def compile_preshuffle_gemm_a8(
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     row_a_global = bx_m + row_a_local
-                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
-                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-                    # `idx_i32` is a dword offset. For 2B element types (fp16/bf16),
-                    # convert to element offset so the generic `vector.load` path reads
-                    # the right address (FLIR only specializes buffer_load_dwordx4 for 1B types).
-                    idx_elem = (
-                        idx_i32
-                        if elem_bytes == 1
-                        else (idx_i32 * arith.constant(2, index=True))
-                    )
+                    # A address:
+                    # - 1B types use dword indexing (`layout_a_div4`) to match the specialized 16B
+                    #   buffer-load path.
+                    # - 2B types use element indexing (row-major) for buffer_load(vec<8x{f16|bf16}>).
+                    if elem_bytes == 1:
+                        coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
+                        idx_elem = flir.crd2idx(coord_a_g, layout_a_div4)
+                    else:
+                        # Convert col_a_local_i32 (dword units) -> element units for 2B types:
+                        #   dword = 4 bytes = 2 elements (fp16/bf16)
+                        col_elems = (col_a_local_i32 * arith.constant(2, index=True))
+                        base_k_elems = (base_k_div4 * arith.constant(2, index=True))
+                        idx_elem = (row_a_global * c_k) + (base_k_elems + col_elems)
                     a_16B = load_a_16(idx_elem)
+                    # Keep the LDS store path unchanged: bitcast to i32x4 (16B) for swizzled store.
                     parts.append(vector.bitcast(T.i32x4, a_16B))
                 return parts
 
@@ -778,11 +804,16 @@ def compile_preshuffle_gemm_a8(
                         # and pass a byte offset to keep the store well-defined.
                         idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
                         byte_off = idx_out * arith.constant(2, index=True)  # bytes
+                        # Tail guards: only store if the entire vector is in-bounds.
+                        row_inb = row < c_m
+                        col_last = col_g0 + arith.constant(e_vec - 1, index=True)
+                        col_inb = col_last < c_n
+                        inb = row_inb & col_inb
 
                         if e_vec == 4:
                             frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
                             buffer_ops.buffer_store(
-                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
+                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True, mask=inb
                             )
                         else:
                             # e_vec == 2: pack 2xf16 -> 1xi32
@@ -791,7 +822,7 @@ def compile_preshuffle_gemm_a8(
                                 frag_i32x1, static_position=[0], dynamic_position=[]
                             )
                             buffer_ops.buffer_store(
-                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True
+                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True, mask=inb
                             )
 
                     # Prefer 16B stores when possible:
@@ -827,6 +858,8 @@ def compile_preshuffle_gemm_a8(
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     col_base = by_n + n_tile_base + lane_mod_16
                     idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
+                    # Row tail predicate (M may not be divisible by tile_m).
+                    row_inb = row < c_m
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
@@ -839,7 +872,10 @@ def compile_preshuffle_gemm_a8(
                             val_s = (val * s_a) * s_b_vals[ni]
                         val_f16 = arith.trunc_f(T.f16, val_s)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                        # Column tail predicate (N may not be divisible by tile_n in general).
+                        col_g = col_base + arith.constant(ni * 16, index=True)
+                        col_inb = col_g < c_n
+                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out, mask=(row_inb & col_inb))
 
                 mfma_epilog(
                     use_cshuffle=False,
