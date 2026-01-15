@@ -503,7 +503,7 @@ def compile_preshuffle_gemm_a8(
                 pending_store_lds_base=None,
             ):
                 scales_pf = {}
-                if is_last_tile:
+                if is_last_tile and (not use_cshuffle_epilog):
                     # Prefetch scales (same as original kernel).
                     s_b_vals = []
                     for ni in range_constexpr(num_acc_n):
@@ -573,23 +573,45 @@ def compile_preshuffle_gemm_a8(
                         col_base0 = col_offset_base + (ku0 * 64)
                         col_base1 = col_offset_base + (ku1 * 64)
 
+                        # Prefetch next-mi A pack mid-way through MFMA stream to interleave DS reads.
+                        a128_next = None
+
                         for mi in range_constexpr(m_repeat):
                             mi_val = arith.constant(mi * 16, index=True)
                             curr_row_a_lds = row_a_lds + mi_val
 
-                            if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
-                                a0, a1 = a0_prefetch
+                            if a128_next is not None:
+                                a128 = a128_next
+                                a128_next = None
                             else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
-                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(
+                                        curr_row_a_lds, col_base0, lds_base
+                                    )
+                                a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
                             # Overlap: interleave a single A->LDS chunk write per mi.
                             # This avoids a big clump of DS writes that can stall the MFMA stream.
                             if ku128 == 0:
                                 maybe_store_next_a_chunk(mi=mi)
 
+                            half_ni = num_acc_n // 2
                             for ni in range_constexpr(num_acc_n):
+                                if (ni == half_ni) and (mi + 1 < m_repeat) and (a128_next is None):
+                                    next_row_a_lds = row_a_lds + arith.constant(
+                                        (mi + 1) * 16, index=True
+                                    )
+                                    na0, na1 = lds_load_packs_k64(
+                                        next_row_a_lds, col_base0, lds_base
+                                    )
+                                    na2, na3 = lds_load_packs_k64(
+                                        next_row_a_lds, col_base1, lds_base
+                                    )
+                                    a128_next = pack_i64x4_to_i32x8(na0, na1, na2, na3)
+
                                 b0 = b0_packs0[ni]
                                 b1 = b0_packs1[ni]
                                 b2 = b1_packs0[ni]
@@ -673,9 +695,6 @@ def compile_preshuffle_gemm_a8(
             vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
 
             def store_output(final_accs, scales):
-                s_b_vals = scales["s_b_vals"]
-                s_a_vecs = scales["s_a_vecs"]
-
                 if use_cshuffle_epilog:
                     if lds_out is None:
                         raise RuntimeError(
@@ -714,8 +733,10 @@ def compile_preshuffle_gemm_a8(
                         nbr_lane = arith.xori(lane_id_i32, c1_i32)
                         nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)  # lane_id * 4 (bytes)
 
-                        s_a_vec4 = s_a_vecs[mi]
-                        s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                        # Load scale_a on demand (reduces live range vs. keeping all s_a_vecs).
+                        s_a = buffer_ops.buffer_load(
+                            scale_a_rsrc, row, vec_width=1, dtype=T.f32
+                        )
                         for ni in range_constexpr(num_acc_n):
                             col_local = col_base_local + (ni * 16)
                             acc_idx = mi * num_acc_n + ni
@@ -723,7 +744,11 @@ def compile_preshuffle_gemm_a8(
                             val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                             if is_int8:
                                 val = arith.sitofp(T.f32, val)
-                            val_s = (val * s_a) * s_b_vals[ni]
+                            col_g = by_n + col_local
+                            s_b = buffer_ops.buffer_load(
+                                scale_b_rsrc, col_g, vec_width=1, dtype=T.f32
+                            )
+                            val_s = (val * s_a) * s_b
                             v16 = arith.trunc_f(T.f16, val_s)
 
                             # v16 (f16) -> bits in i32 low16
@@ -799,9 +824,7 @@ def compile_preshuffle_gemm_a8(
                                 frag_i32, c_rsrc, byte_off, offset_is_bytes=True
                             )
 
-                    # Prefer 16B stores when possible:
-                    # - EVec=4 => 4xf16 (8B) per store (and matches tile_n multiples of 128)
-                    # - EVec=2 => 2xf16 (4B) per store (tile_n multiples of 64)
+                    # Use wider global stores (dwordx2) when tile_n allows it.
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
                     mfma_epilog(
                         use_cshuffle=True,
@@ -825,6 +848,9 @@ def compile_preshuffle_gemm_a8(
                         store_pair=store_pair,
                     )
                     return
+
+                s_b_vals = scales["s_b_vals"]
+                s_a_vecs = scales["s_a_vecs"]
 
                 def body_row(*, mi: int, ii: int, row_in_tile, row):
                     s_a_vec4 = s_a_vecs[mi]
