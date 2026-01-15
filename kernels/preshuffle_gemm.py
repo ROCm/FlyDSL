@@ -510,32 +510,26 @@ def compile_preshuffle_gemm_a8(
 
             def compute_tile(accs_in, b_tile_in, lds_base, *, is_last_tile=False, a0_prefetch=None):
                 scales_pf = {}
-                if is_last_tile:
-                    if is_f16_or_bf16:
-                        one_f32 = arith.constant(1.0, type=T.f32)
-                        scales_pf["s_b_vals"] = [one_f32 for _ in range_constexpr(num_acc_n)]
-                        one_vec = arith.constant_vector(1.0, T.f32x4)
-                        scales_pf["s_a_vecs"] = [one_vec for _ in range_constexpr(m_repeat)]
-                    else:
-                        # Prefetch scales (same as original kernel).
-                        s_b_vals = []
-                        for ni in range_constexpr(num_acc_n):
-                            offset = ni * 16
-                            c_offset = arith.constant(offset, index=True)
-                            col_g = by_n + n_tile_base + c_offset + lane_mod_16
-                            s_b_vals.append(
-                                buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=T.f32)
-                            )
-                        scales_pf["s_b_vals"] = s_b_vals
-                        scales_pf["s_a_vecs"] = []
-                        row_off_base = lane_div_16 * 4
-                        for mi in range_constexpr(m_repeat):
-                            row_base_m = bx_m + (mi * 16)
-                            row_g_base = row_base_m + row_off_base
-                            s_a_vec = buffer_ops.buffer_load(
-                                scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
-                            )
-                            scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
+                if is_last_tile and (not is_f16_or_bf16):
+                    # Prefetch scales (fp8/int8/int4 only).
+                    s_b_vals = []
+                    for ni in range_constexpr(num_acc_n):
+                        offset = ni * 16
+                        c_offset = arith.constant(offset, index=True)
+                        col_g = by_n + n_tile_base + c_offset + lane_mod_16
+                        s_b_vals.append(
+                            buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=T.f32)
+                        )
+                    scales_pf["s_b_vals"] = s_b_vals
+                    scales_pf["s_a_vecs"] = []
+                    row_off_base = lane_div_16 * 4
+                    for mi in range_constexpr(m_repeat):
+                        row_base_m = bx_m + (mi * 16)
+                        row_g_base = row_base_m + row_off_base
+                        s_a_vec = buffer_ops.buffer_load(
+                            scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
+                        )
+                        scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
 
                 current_accs_list = list(accs_in)
 
@@ -666,8 +660,13 @@ def compile_preshuffle_gemm_a8(
             vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
 
             def store_output(final_accs, scales):
-                s_b_vals = scales["s_b_vals"]
-                s_a_vecs = scales["s_a_vecs"]
+                # fp16/bf16: no scale fetch, no scale multiply in epilogue.
+                if is_f16_or_bf16:
+                    s_b_vals = None
+                    s_a_vecs = None
+                else:
+                    s_b_vals = scales["s_b_vals"]
+                    s_a_vecs = scales["s_a_vecs"]
 
                 if use_cshuffle_epilog:
                     if lds_out is None:
@@ -706,8 +705,9 @@ def compile_preshuffle_gemm_a8(
                         nbr_lane = arith.xori(lane_id_i32, c1_i32)
                         nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)  # lane_id * 4 (bytes)
 
-                        s_a_vec4 = s_a_vecs[mi]
-                        s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                        if not is_f16_or_bf16:
+                            s_a_vec4 = s_a_vecs[mi]
+                            s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                         for ni in range_constexpr(num_acc_n):
                             col_local = col_base_local + (ni * 16)
                             acc_idx = mi * num_acc_n + ni
@@ -715,7 +715,10 @@ def compile_preshuffle_gemm_a8(
                             val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                             if is_int8:
                                 val = arith.sitofp(T.f32, val)
-                            val_s = (val * s_a) * s_b_vals[ni]
+                            if is_f16_or_bf16:
+                                val_s = val
+                            else:
+                                val_s = (val * s_a) * s_b_vals[ni]
                             v16 = arith.trunc_f(T.f16, val_s)
 
                             # v16 (f16) -> bits in i32 low16
@@ -819,8 +822,9 @@ def compile_preshuffle_gemm_a8(
                     return
 
                 def body_row(*, mi: int, ii: int, row_in_tile, row):
-                    s_a_vec4 = s_a_vecs[mi]
-                    s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                    if not is_f16_or_bf16:
+                        s_a_vec4 = s_a_vecs[mi]
+                        s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     col_base = by_n + n_tile_base + lane_mod_16
                     idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
                     for ni in range_constexpr(num_acc_n):
@@ -829,7 +833,10 @@ def compile_preshuffle_gemm_a8(
                         val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                         if is_int8:
                             val = arith.sitofp(T.f32, val)
-                        val_s = (val * s_a) * s_b_vals[ni]
+                        if is_f16_or_bf16:
+                            val_s = val
+                        else:
+                            val_s = (val * s_a) * s_b_vals[ni]
                         val_f16 = arith.trunc_f(T.f16, val_s)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
                         buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)

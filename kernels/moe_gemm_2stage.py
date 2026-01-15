@@ -819,9 +819,9 @@ def compile_moe_gemm1(
             mask24_i32 = arith.i32(0xFFFFFF)
 
             if is_f16:
-                one_f32 = arith.constant(1.0, type=f32)
-                sw_gate_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
-                sw_up_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
+                # fp16: no scale fetch, no scale multiply in epilogue.
+                sw_gate_vals = None
+                sw_up_vals = None
             elif epilogue_pf is not None:
                 sw_gate_vals, sw_up_vals = epilogue_pf
             else:
@@ -866,7 +866,7 @@ def compile_moe_gemm1(
                     t2 = fused2 & mask24_i32
                     # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                     # sentinel (t2 == tokens) or otherwise out-of-range.
-                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                    sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                     # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                     if doweight_stage1:
@@ -874,8 +874,8 @@ def compile_moe_gemm1(
 
                     for ni in range_constexpr(num_acc_n):
                         col_local = col_base_local + (ni * 16)
-                        sw_gate = sw_gate_vals[ni]
-                        sw_up = sw_up_vals[ni]
+                        sw_gate = sw_gate_vals[ni] if (not is_f16) else None
+                        sw_up = sw_up_vals[ni] if (not is_f16) else None
 
                         acc_idx = mi * num_acc_n + ni
                         vg = vector.extract(
@@ -888,8 +888,9 @@ def compile_moe_gemm1(
                         if is_int8:
                             vg = arith.sitofp(f32, vg)
                             vu = arith.sitofp(f32, vu)
-                        vg = vg * sx * sw_gate
-                        vu = vu * sx * sw_up
+                        if not is_f16:
+                            vg = vg * sx * sw_gate
+                            vu = vu * sx * sw_up
 
                         y = silu(vg) * vu
                         if doweight_stage1:
@@ -943,7 +944,7 @@ def compile_moe_gemm1(
                 s2 = fused2 >> 24
                 # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                 # sentinel (t2 == tokens) or otherwise out-of-range.
-                sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                 # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
                 idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
@@ -954,8 +955,8 @@ def compile_moe_gemm1(
 
                 for ni in range_constexpr(num_acc_n):
                     col_i32 = col_i32_list[ni]
-                    sw_gate = sw_gate_vals[ni]
-                    sw_up = sw_up_vals[ni]
+                    sw_gate = sw_gate_vals[ni] if (not is_f16) else None
+                    sw_up = sw_up_vals[ni] if (not is_f16) else None
 
                     acc_idx = mi * num_acc_n + ni
                     vg = vector.extract(
@@ -968,8 +969,9 @@ def compile_moe_gemm1(
                     if is_int8:
                         vg = arith.sitofp(f32, vg)
                         vu = arith.sitofp(f32, vu)
-                    vg = vg * sx * sw_gate
-                    vu = vu * sx * sw_up
+                    if not is_f16:
+                        vg = vg * sx * sw_gate
+                        vu = vu * sx * sw_up
 
                     y = silu(vg) * vu
                     if doweight_stage1:
@@ -1834,8 +1836,8 @@ def compile_moe_gemm2(
 
             # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
             if is_f16:
-                one_f32 = arith.constant(1.0, type=f32)
-                sw_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
+                # fp16: no scale fetch, no scale multiply in epilogue.
+                sw_vals = None
             elif sw_pf is not None:
                 sw_vals = sw_pf
             else:
@@ -1871,7 +1873,7 @@ def compile_moe_gemm2(
 
                     # a2_scale index = t*topk + s (i32). Hardware OOB handles sentinel padding.
                     ts2 = t2 * topk_i32_v + s2
-                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                    sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     if doweight_stage2:
                         tw_idx = (mi * 4) + ii
@@ -1884,12 +1886,13 @@ def compile_moe_gemm2(
 
                     for ni in range_constexpr(num_acc_n):
                         col_local = col_base_local + (ni * 16)
-                        sw = sw_vals[ni]
+                        sw = sw_vals[ni] if (not is_f16) else None
                         acc_idx = mi * num_acc_n + ni
                         v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
                         if is_int8:
                             v = arith.sitofp(f32, v)
-                        v = v * sx * sw
+                        if not is_f16:
+                            v = v * sx * sw
                         if doweight_stage2:
                             v = v * tw
                         v16 = arith.trunc_f(T.f16(), v)
@@ -1954,7 +1957,7 @@ def compile_moe_gemm2(
 
                     # a2_scale index = t*topk + s (i32). Hardware OOB handles sentinel padding.
                     ts2 = t2 * topk_i32_v + s2
-                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                    sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     # out element base = t*model_dim (i32)
                     idx0 = t2 * model_i32
@@ -1968,12 +1971,13 @@ def compile_moe_gemm2(
 
                     for ni in range_constexpr(num_acc_n):
                         col_g = col_g_list[ni]  # index
-                        sw = sw_vals[ni]
+                        sw = sw_vals[ni] if (not is_f16) else None
                         acc_idx = mi * num_acc_n + ni
                         v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
                         if is_int8:
                             v = arith.sitofp(f32, v)
-                        v = v * sx * sw
+                        if not is_f16:
+                            v = v * sx * sw
                         if doweight_stage2:
                             v = v * tw
 
