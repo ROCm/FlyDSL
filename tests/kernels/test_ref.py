@@ -4,8 +4,8 @@ import torch.nn.functional as F
 def torch_moe_gemm1(
     x_fp8: torch.Tensor,
     w1_fp8_flat: torch.Tensor,
-    scale_x: torch.Tensor,
-    scale_w1_flat: torch.Tensor,
+    scale_x: torch.Tensor | None,
+    scale_w1_flat: torch.Tensor | None,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     inter_dim: int,
@@ -16,8 +16,12 @@ def torch_moe_gemm1(
     topk = topk_ids.shape[1]
     experts = int(topk_ids.max().item()) + 1
 
-    x = x_fp8.to(torch.float32) * scale_x  # [tokens, model_dim] (scale_x [tokens,1])
-    w1 = w1_fp8_flat.to(torch.float32) * scale_w1_flat  # [experts*2*inter_dim, model_dim] (scale [rows,1])
+    x = x_fp8.to(torch.float32) if scale_x is None else (x_fp8.to(torch.float32) * scale_x)
+    w1 = (
+        w1_fp8_flat.to(torch.float32)
+        if scale_w1_flat is None
+        else (w1_fp8_flat.to(torch.float32) * scale_w1_flat)
+    )
     w1 = w1.view(experts, 2 * inter_dim, model_dim)
 
     out = torch.zeros((tokens, topk, inter_dim), device="cuda", dtype=torch.float32)
@@ -42,8 +46,8 @@ def torch_moe_gemm1(
 def torch_moe_gemm2(
     a2_fp8: torch.Tensor,
     w2_fp8: torch.Tensor,
-    scale_a2: torch.Tensor,
-    scale_w2: torch.Tensor,
+    scale_a2: torch.Tensor | None,
+    scale_w2: torch.Tensor | None,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     model_dim: int,
@@ -62,8 +66,8 @@ def torch_moe_gemm2(
     experts = int(topk_ids.max().item()) + 1
 
     # Dequantize inputs.
-    a2 = a2_fp8.to(torch.float32) * scale_a2  # scale_a2: [tokens, topk, 1]
-    w2 = w2_fp8.to(torch.float32) * scale_w2  # scale_w2: [experts, model_dim, 1]
+    a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
+    w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
     w2 = w2.view(experts, model_dim, inter_dim)
 
     out = torch.zeros((tokens, model_dim), device="cuda", dtype=torch.float32)

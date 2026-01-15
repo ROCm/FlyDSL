@@ -246,8 +246,9 @@ def compile_moe_gemm1(
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
             out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+            # fp16 path ignores scales completely (implicit scale=1.0).
+            sx_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
+            sw_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
             sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
             expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
             sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
@@ -609,7 +610,7 @@ def compile_moe_gemm1(
                 # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
                 # matching the preshuffle GEMM pattern of overlapping scale loads with MFMA.
                 epilogue_pf = None
-                if prefetch_epilogue:
+                if prefetch_epilogue and (not is_f16):
                     expert_off_pf = expert_off_idx
                     sw_gate_pf = []
                     sw_up_pf = []
@@ -618,12 +619,8 @@ def compile_moe_gemm1(
                         valid_col = valid_col_list[ni]
                         row_gate_idx = expert_off_pf + col_g
                         row_up_idx = row_gate_idx + inter_idx
-                        sw_gate_pf.append(
-                            buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
-                        )
-                        sw_up_pf.append(
-                            buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
-                        )
+                        sw_gate_pf.append(buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32))
+                        sw_up_pf.append(buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32))
                     epilogue_pf = (sw_gate_pf, sw_up_pf)
 
                 def _i64_to_v4f16(x_i64):
@@ -821,7 +818,11 @@ def compile_moe_gemm1(
             inter_i32_v = arith.i32(inter_dim)
             mask24_i32 = arith.i32(0xFFFFFF)
 
-            if epilogue_pf is not None:
+            if is_f16:
+                one_f32 = arith.constant(1.0, type=f32)
+                sw_gate_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
+                sw_up_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
+            elif epilogue_pf is not None:
                 sw_gate_vals, sw_up_vals = epilogue_pf
             else:
                 sw_gate_vals = []
@@ -830,12 +831,8 @@ def compile_moe_gemm1(
                     col_g = col_g_list[ni]
                     row_gate_idx = expert_off + col_g
                     row_up_idx = row_gate_idx + inter_idx
-                    sw_gate_vals.append(
-                        buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
-                    )
-                    sw_up_vals.append(
-                        buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
-                    )
+                    sw_gate_vals.append(buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32))
+                    sw_up_vals.append(buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32))
 
             # Epilogue hoists to keep IR + Python build time small:
             col_i32_list = []
@@ -869,7 +866,7 @@ def compile_moe_gemm1(
                     t2 = fused2 & mask24_i32
                     # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                     # sentinel (t2 == tokens) or otherwise out-of-range.
-                    sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                     # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                     if doweight_stage1:
@@ -946,7 +943,7 @@ def compile_moe_gemm1(
                 s2 = fused2 >> 24
                 # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                 # sentinel (t2 == tokens) or otherwise out-of-range.
-                sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                 # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
                 idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
@@ -1247,8 +1244,9 @@ def compile_moe_gemm2(
             x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
             out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+            # fp16 path ignores scales completely (implicit scale=1.0).
+            sx_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
+            sw_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
             sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
             expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
             sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
@@ -1574,7 +1572,7 @@ def compile_moe_gemm2(
                 )
 
                 epilogue_pf = None
-                if prefetch_epilogue:
+                if prefetch_epilogue and (not is_f16):
                     expert_off_pf = expert_off_idx
                     sw_pf = []
                     for ni in range_constexpr(num_acc_n):
@@ -1835,7 +1833,10 @@ def compile_moe_gemm2(
                 sw_pf, tw_pf = epilogue_pf
 
             # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
-            if sw_pf is not None:
+            if is_f16:
+                one_f32 = arith.constant(1.0, type=f32)
+                sw_vals = [one_f32 for _ in range_constexpr(num_acc_n)]
+            elif sw_pf is not None:
                 sw_vals = sw_pf
             else:
                 sw_vals = []
@@ -1870,7 +1871,7 @@ def compile_moe_gemm2(
 
                     # a2_scale index = t*topk + s (i32). Hardware OOB handles sentinel padding.
                     ts2 = t2 * topk_i32_v + s2
-                    sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     if doweight_stage2:
                         tw_idx = (mi * 4) + ii
@@ -1953,7 +1954,7 @@ def compile_moe_gemm2(
 
                     # a2_scale index = t*topk + s (i32). Hardware OOB handles sentinel padding.
                     ts2 = t2 * topk_i32_v + s2
-                    sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                    sx = arith.constant(1.0, type=f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     # out element base = t*model_dim (i32)
                     idx0 = t2 * model_i32

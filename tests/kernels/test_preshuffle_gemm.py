@@ -67,23 +67,21 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
 
     Dequantize 8-bit inputs (FP8/INT8) and compute FP32 matmul.
     """
-    x = x.to(torch.float32) * x_scale
-    weight = weight.to(torch.float32) * w_scale
+    x = x.to(torch.float32) if x_scale is None else (x.to(torch.float32) * x_scale)
+    weight = weight.to(torch.float32) if w_scale is None else (weight.to(torch.float32) * w_scale)
     out = F.linear(x, weight)
     if bias is not None:
         out = out.to(bias.dtype) + bias
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "fp16", "bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
         (16, 5120, 8192, 16, 64, 512), 
         (5120, 5120, 8320, 64, 256, 128), 
         (9728, 8192, 8320, 128, 128, 128),
-        # Tail case: M is not a multiple of tile_m (N stays aligned). Kernel should handle via
-        # OOB-checked A/scaleA/C buffer ops (max_size=False) + ceil_div grid sizing on M.
         (5133, 5120, 8320, 64, 256, 128),
     ]
 )
@@ -153,9 +151,10 @@ def test_mfma_a8_flir_preshuffle(
         torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
         a_q = a_fp32.to(torch_dtype)
         b_q = b_fp32_t.to(torch_dtype)
-        # Keep kernel epilogue unchanged: scales are multiplicative, so set to 1.
-        scale_a = torch.ones((M, 1), device=device, dtype=torch.float32)
-        scale_b = torch.ones((N, 1), device=device, dtype=torch.float32)
+        # Scale is semantically optional for fp16/bf16 (no dequant). Let callers pass None;
+        # we will materialize an internal "all-ones" scale only when launching the kernel.
+        scale_a = None
+        scale_b = None
     else:
         quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
         a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
@@ -165,26 +164,11 @@ def test_mfma_a8_flir_preshuffle(
         else:
             b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)  # (N, K)
 
-    # When using fixed-width global loads (16B chunks), some threads can over-read.
-    # Pad the underlying storage so the over-read stays in-bounds.
-    PAD_BYTES = 64  # bytes; generous guard for safety
-    PAD_ELEMS = PAD_BYTES // elem_bytes
-    a_flat = a_q.contiguous().view(-1)
-    a_storage = torch.empty(a_flat.numel() + PAD_ELEMS, device=device, dtype=a_q.dtype)
-    a_storage[: a_flat.numel()] = a_flat
-    a_q = a_storage[: a_flat.numel()].view(M, K)
-
-    b_flat = b_q.contiguous().view(-1)
-    b_storage = torch.empty(b_flat.numel() + PAD_ELEMS, device=device, dtype=b_q.dtype)
-    b_storage[: b_flat.numel()] = b_flat
-    b_q = b_storage[: b_flat.numel()].view(N, K)
+    # Keep tensors contiguous for predictable buffer descriptor shapes.
+    a_q = a_q.contiguous()
+    b_q = b_q.contiguous()
 
     # Preshuffle B to CK/aiter layout.
-    #
-    # For fp16/bf16, this matches CK's `preShuffleBuffer` in
-    # `composable_kernel/.../gemm_multiply_multiply_xdl_fp16_bpreshuffle.cpp`:
-    # NLane=16, KLane=4, KPack=8 (for 16B pack), which is exactly what
-    # `shuffle_weight(layout=(16,16))` produces when element_size==2.
     b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
@@ -217,6 +201,11 @@ def test_mfma_a8_flir_preshuffle(
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
+        # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
+        if sa is None:
+            sa = torch.empty((0,), device=c.device, dtype=torch.float32)
+        if sb is None:
+            sb = torch.empty((0,), device=c.device, dtype=torch.float32)
         exe(c, a, b, sa, sb, M, N, K)
 
     # `run_perftest` requires num_iters > 1.

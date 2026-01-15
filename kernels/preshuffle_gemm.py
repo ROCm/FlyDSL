@@ -244,10 +244,10 @@ def compile_preshuffle_gemm_a8(
             # Note: We assume N is aligned (no N-tail support in this kernel).
             a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
             c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-            scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+            scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
 
             b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
-            scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+            scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
 
             bx_m = bx * tile_m
             by_n = by * tile_n
@@ -511,25 +511,31 @@ def compile_preshuffle_gemm_a8(
             def compute_tile(accs_in, b_tile_in, lds_base, *, is_last_tile=False, a0_prefetch=None):
                 scales_pf = {}
                 if is_last_tile:
-                    # Prefetch scales (same as original kernel).
-                    s_b_vals = []
-                    for ni in range_constexpr(num_acc_n):
-                        offset = ni * 16
-                        c_offset = arith.constant(offset, index=True)
-                        col_g = by_n + n_tile_base + c_offset + lane_mod_16
-                        s_b_vals.append(
-                            buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=T.f32)
-                        )
-                    scales_pf["s_b_vals"] = s_b_vals
-                    scales_pf["s_a_vecs"] = []
-                    row_off_base = lane_div_16 * 4
-                    for mi in range_constexpr(m_repeat):
-                        row_base_m = bx_m + (mi * 16)
-                        row_g_base = row_base_m + row_off_base
-                        s_a_vec = buffer_ops.buffer_load(
-                            scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
-                        )
-                        scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
+                    if is_f16_or_bf16:
+                        one_f32 = arith.constant(1.0, type=T.f32)
+                        scales_pf["s_b_vals"] = [one_f32 for _ in range_constexpr(num_acc_n)]
+                        one_vec = arith.constant_vector(1.0, T.f32x4)
+                        scales_pf["s_a_vecs"] = [one_vec for _ in range_constexpr(m_repeat)]
+                    else:
+                        # Prefetch scales (same as original kernel).
+                        s_b_vals = []
+                        for ni in range_constexpr(num_acc_n):
+                            offset = ni * 16
+                            c_offset = arith.constant(offset, index=True)
+                            col_g = by_n + n_tile_base + c_offset + lane_mod_16
+                            s_b_vals.append(
+                                buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=T.f32)
+                            )
+                        scales_pf["s_b_vals"] = s_b_vals
+                        scales_pf["s_a_vecs"] = []
+                        row_off_base = lane_div_16 * 4
+                        for mi in range_constexpr(m_repeat):
+                            row_base_m = bx_m + (mi * 16)
+                            row_g_base = row_base_m + row_off_base
+                            s_a_vec = buffer_ops.buffer_load(
+                                scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
+                            )
+                            scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
 
                 current_accs_list = list(accs_in)
 
@@ -1060,10 +1066,6 @@ def compile_preshuffle_gemm_a8(
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
-            # Dynamic launch sizes: avoid baking M/N into the host stub.
-            # We support M-tail by launching ceil(M/tile_m) tiles in X and relying on hardware
-            # OOB checking (see max_size=False resources in the kernel). We keep N aligned for perf:
-            # grid.y uses exact division (no N-tail support).
             tm = arith.constant(tile_m, index=True)
             tn = arith.constant(tile_n, index=True)
             one = arith.constant(1, index=True)
