@@ -14,7 +14,11 @@ def torch_moe_gemm1(
     """Return [tokens, topk, inter_dim] fp32."""
     tokens, model_dim = x_fp8.shape
     topk = topk_ids.shape[1]
-    experts = int(topk_ids.max().item()) + 1
+    # Derive experts from weight shapes (topk_ids may not cover all experts when tokens are tiny).
+    if w1_fp8_flat.dim() == 2:
+        experts = int(w1_fp8_flat.shape[0] // (2 * inter_dim))
+    else:
+        experts = int(w1_fp8_flat.shape[0])
 
     x = x_fp8.to(torch.float32) * scale_x  # [tokens, model_dim] (scale_x [tokens,1])
     w1 = w1_fp8_flat.to(torch.float32) * scale_w1_flat  # [experts*2*inter_dim, model_dim] (scale [rows,1])
@@ -59,7 +63,11 @@ def torch_moe_gemm2(
     """
     assert a2_fp8.is_cuda and w2_fp8.is_cuda
     tokens, topk, inter_dim = a2_fp8.shape
-    experts = int(topk_ids.max().item()) + 1
+    # Derive experts from weight shapes (topk_ids may not cover all experts when tokens are tiny).
+    if w2_fp8.dim() == 3:
+        experts = int(w2_fp8.shape[0])
+    else:
+        experts = int(w2_fp8.shape[0] // model_dim)
 
     # Dequantize inputs.
     a2 = a2_fp8.to(torch.float32) * scale_a2  # scale_a2: [tokens, topk, 1]

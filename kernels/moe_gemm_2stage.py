@@ -1239,8 +1239,7 @@ def compile_moe_gemm2(
             bx_m_i32 = arith.index_cast(i32, bx_m)
             blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
 
-            _if_blk = scf.IfOp(blk_valid)
-            with _if_blk.then():
+            def _moe_gemm2_then_body():
                 # Expert id for this M tile.
                 expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
                 expert_i32 = arith.select(blk_valid, expert_i32, arith.i32(0))
@@ -1963,6 +1962,8 @@ def compile_moe_gemm2(
                         body_row=_stage2_row_atomic,
                     )
     
+            if blk_valid:
+                _moe_gemm2_then_body()
         @flir.jit
         def __call__(
             self: flir.T.i64,
