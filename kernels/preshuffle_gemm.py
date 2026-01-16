@@ -164,6 +164,7 @@ def compile_preshuffle_gemm_a8(
                 if is_int8
                 else arith.constant_vector(0.0, T.f32x4)
             )
+            acc_elem_ty = T.i32x4 if is_int8 else T.f32x4
 
             # Layouts
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
@@ -237,22 +238,21 @@ def compile_preshuffle_gemm_a8(
             # Decompose global_n -> (n_blk, n_intra) once per ni.
             c_n0 = c_n / 16
             layout_n_blk_intra = flir.make_layout((c_n0, 16), stride=(16, 1))
-            n_intra_list = []
-            n_blk_list = []
-            for i in range_constexpr(num_acc_n):
-                offset = i * 16
-                c_offset = arith.constant(offset, index=True)
+            c16 = arith.constant(16, index=True)
+
+            def get_n_blk_intra(ni_idx):
+                # Dynamic compute of (n_blk, n_intra) for the given ni index.
+                c_offset = ni_idx * c16
                 global_n = by_n + n_tile_base + c_offset + lane_mod_16
                 coord_n = flir.idx2crd(global_n, layout_n_blk_intra)
-                n_blk_list.append(flir.get(coord_n, 0))
-                n_intra_list.append(flir.get(coord_n, 1))
+                return flir.get(coord_n, 0), flir.get(coord_n, 1)
 
             # --- B load logic (K64 micro-step), return i64 packs (two halves) ---
             # Shared loader supports:
             # - FP8/INT8: explicit 16B load (one full KPack) + extract 8B for this micro-step
             # - INT4 (W4A8): 4B load + 7-op unpack to 8B (no v_perm)
 
-            def load_b_pack(base_k, ki_step, ni):
+            def load_b_pack(base_k, ki_step, n_blk, n_intra):
                 return load_b_pack_k32(
                     buffer_ops,
                     flir,
@@ -263,8 +263,8 @@ def compile_preshuffle_gemm_a8(
                     layout_b=layout_b,
                     base_k=base_k,
                     ki_step=ki_step,
-                    n_blk=n_blk_list[ni],
-                    n_intra=n_intra_list[ni],
+                    n_blk=n_blk,
+                    n_intra=n_intra,
                     lane_div_16=lane_div_16,
                     elem_type=_elem_type(),
                     kpack_bytes=kpack_bytes,
@@ -277,17 +277,19 @@ def compile_preshuffle_gemm_a8(
             c64_b = 64
             c0_idx = 0
 
-            def load_b_packs_k64(base_k, ku: int, ni: int):
+            def load_b_packs_k64(base_k, ku, n_blk, n_intra):
                 if is_int4:
                     ki0 = (ku * 2) + 0
                     ki1 = (ku * 2) + 1
-                    return load_b_pack(base_k, ki0, ni), load_b_pack(base_k, ki1, ni)
+                    return load_b_pack(base_k, ki0, n_blk, n_intra), load_b_pack(
+                        base_k, ki1, n_blk, n_intra
+                    )
 
                 # FP8/INT8: load 16 bytes (one full KPack) and return both i64 halves.
                 k0_base = base_k / c64_b
                 k0 = k0_base + ku
                 k1 = lane_div_16
-                coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
+                coord_pack = flir.make_coord(n_blk, k0, k1, n_intra, c0_idx)
                 idx_pack_bytes = flir.crd2idx(coord_pack, layout_b)
                 b_view = flir.TensorView(
                     arg_b,
@@ -311,16 +313,14 @@ def compile_preshuffle_gemm_a8(
                 return b0, b1
 
             def load_b_tile(base_k):
-                # b_tile[ku] = (packs_half0[ni], packs_half1[ni])
-                b_tile = []
-                for ku in range_constexpr(k_unroll):
-                    packs0 = []
-                    packs1 = []
-                    for ni in range_constexpr(num_acc_n):
-                        b0, b1 = load_b_packs_k64(base_k, ku, ni)
-                        packs0.append(b0)
-                        packs1.append(b1)
-                    b_tile.append((packs0, packs1))
+                # b_tile[ku, ni, 0/1] = i64 packs (K64 halves)
+                b_tile = flir.make_rmem_tensor((k_unroll, num_acc_n, 2), T.i64)
+                for ku in range(k_unroll):
+                    for ni in range(num_acc_n):
+                        n_blk, n_intra = get_n_blk_intra(ni)
+                        b0, b1 = load_b_packs_k64(base_k, ku, n_blk, n_intra)
+                        b_tile[ku, ni, 0] = b0
+                        b_tile[ku, ni, 1] = b1
                 return b_tile
 
             # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
@@ -428,14 +428,11 @@ def compile_preshuffle_gemm_a8(
                 return a_regs, b_regs
 
             def compute_tile(
-                accs_in,
+                accs,
                 b_tile_in,
                 lds_base,
                 *,
                 is_last_tile=False,
-                a0_prefetch=None,
-                pending_store_a_regs=None,
-                pending_store_lds_base=None,
             ):
                 scales_pf = {}
                 if is_last_tile and (not use_cshuffle_epilog):
@@ -458,9 +455,6 @@ def compile_preshuffle_gemm_a8(
                             scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
                         )
                         scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
-
-                current_accs_list = list(accs_in)
-                pending_store_idx = 0
 
                 # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
                 # This is the key optimization from `zhimding/develop_0107` for FP8:
@@ -485,82 +479,37 @@ def compile_preshuffle_gemm_a8(
                         v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
                         return vector.bitcast(vec8_i32, v4)
 
-                    def maybe_store_next_a_chunk(*, mi: int):
-                        nonlocal pending_store_a_regs, pending_store_idx
-                        if pending_store_a_regs is None:
-                            return
-                        if mi < int(num_a_loads) and pending_store_idx < int(num_a_loads):
-                            rocdl.sched_dswr(1)
-                            store_a_tile_chunk_to_lds(
-                                pending_store_a_regs, pending_store_lds_base, pending_store_idx
-                            )
-                            pending_store_idx += 1
-                            if pending_store_idx >= int(num_a_loads):
-                                pending_store_a_regs = None
+                    c1 = arith.constant(1, index=True)
+                    c2 = arith.constant(2, index=True)
+                    c64 = arith.constant(64, index=True)
+                    for ku128 in range(k_unroll // 2):
+                        ku0 = ku128 * c2
+                        ku1 = ku0 + c1
 
-                    for ku128 in range_constexpr(k_unroll // 2):
-                        ku0 = ku128 * 2
-                        ku1 = ku0 + 1
+                        col_base0 = col_offset_base + (ku0 * c64)
+                        col_base1 = col_offset_base + (ku1 * c64)
 
-                        b0_packs0, b0_packs1 = b_tile_in[ku0]
-                        b1_packs0, b1_packs1 = b_tile_in[ku1]
-
-                        col_base0 = col_offset_base + (ku0 * 64)
-                        col_base1 = col_offset_base + (ku1 * 64)
-
-                        # Prefetch next-mi A pack mid-way through MFMA stream to interleave DS reads.
-                        a128_next = None
-
-                        for mi in range_constexpr(m_repeat):
-                            mi_val = arith.constant(mi * 16, index=True)
+                        for mi in range(m_repeat):
+                            mi_val = mi * c16
                             curr_row_a_lds = row_a_lds + mi_val
+                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
-                            if a128_next is not None:
-                                a128 = a128_next
-                                a128_next = None
-                            else:
-                                if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
-                                else:
-                                    a0, a1 = lds_load_packs_k64(
-                                        curr_row_a_lds, col_base0, lds_base
-                                    )
-                                a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
-
-                            # Overlap: interleave a single A->LDS chunk write per mi.
-                            # This avoids a big clump of DS writes that can stall the MFMA stream.
-                            if ku128 == 0:
-                                maybe_store_next_a_chunk(mi=mi)
-
-                            prefetch_ni = 1 if num_acc_n >= 3 else (num_acc_n // 2)
-                            for ni in range_constexpr(num_acc_n):
-                                if (ni == prefetch_ni) and (mi + 1 < m_repeat) and (a128_next is None):
-                                    rocdl.sched_dsrd(1)
-                                    next_row_a_lds = row_a_lds + arith.constant(
-                                        (mi + 1) * 16, index=True
-                                    )
-                                    na0, na1 = lds_load_packs_k64(
-                                        next_row_a_lds, col_base0, lds_base
-                                    )
-                                    na2, na3 = lds_load_packs_k64(
-                                        next_row_a_lds, col_base1, lds_base
-                                    )
-                                    a128_next = pack_i64x4_to_i32x8(na0, na1, na2, na3)
-
-                                b0 = b0_packs0[ni]
-                                b1 = b0_packs1[ni]
-                                b2 = b1_packs0[ni]
-                                b3 = b1_packs1[ni]
+                            for ni in range(num_acc_n):
+                                b0 = b_tile_in[ku0, ni, 0]
+                                b1 = b_tile_in[ku0, ni, 1]
+                                b2 = b_tile_in[ku1, ni, 0]
+                                b3 = b_tile_in[ku1, ni, 1]
                                 b128 = pack_i64x4_to_i32x8(b0, b1, b2, b3)
 
-                                acc_idx = mi * num_acc_n + ni
-                                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                acc_val = accs[mi, ni]
+                                acc_val = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                     mfma_res_ty,
                                     [
                                         a128,
                                         b128,
-                                        current_accs_list[acc_idx],
+                                        acc_val,
                                         # cbsz, abid, blgp: 0
                                         0,
                                         0,
@@ -572,7 +521,8 @@ def compile_preshuffle_gemm_a8(
                                         0,
                                     ],
                                 )
-                    return current_accs_list, scales_pf
+                                accs[mi, ni] = acc_val
+                    return accs, scales_pf
 
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
                 mfma_fn = mfma_i32_k32 if is_int8 else rocdl.mfma_f32_16x16x32_fp8_fp8
@@ -588,41 +538,21 @@ def compile_preshuffle_gemm_a8(
                         [a1, b1, acc_mid, 0, 0, 0],
                     )
 
-                for ku in range_constexpr(k_unroll):
-                    b_packs0, b_packs1 = b_tile_in[ku]
-                    ki64 = ku * 64
-                    col_base = col_offset_base + ki64
-                    for mi in range_constexpr(m_repeat):
-                        mi_val = arith.constant(mi * 16, index=True)
+                c64 = arith.constant(64, index=True)
+                for ku in range(k_unroll):
+                    col_base = col_offset_base + (ku * c64)
+                    for mi in range(m_repeat):
+                        mi_val = mi * c16
                         curr_row_a_lds = row_a_lds + mi_val
-                        if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                            a0, a1 = a0_prefetch
-                        else:
-                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                        a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
 
-                        if ku == 0:
-                            if pending_store_a_regs is not None:
-                                if mi < int(num_a_loads) and pending_store_idx < int(num_a_loads):
-                                    rocdl.sched_dswr(1)
-                                    store_a_tile_chunk_to_lds(
-                                        pending_store_a_regs,
-                                        pending_store_lds_base,
-                                        pending_store_idx,
-                                    )
-                                    pending_store_idx += 1
-                                    if pending_store_idx >= int(num_a_loads):
-                                        pending_store_a_regs = None
-
-                        for ni in range_constexpr(num_acc_n):
-                            acc_idx = mi * num_acc_n + ni
-                            current_accs_list[acc_idx] = mfma_k64(
-                                current_accs_list[acc_idx],
-                                a0,
-                                a1,
-                                b_packs0[ni],
-                                b_packs1[ni],
-                            )
-                return current_accs_list, scales_pf
+                        for ni in range(num_acc_n):
+                            b0 = b_tile_in[ku, ni, 0]
+                            b1 = b_tile_in[ku, ni, 1]
+                            acc_val = accs[mi, ni]
+                            acc_val = mfma_k64(acc_val, a0, a1, b0, b1)
+                            accs[mi, ni] = acc_val
+                return accs, scales_pf
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
             vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
@@ -630,7 +560,7 @@ def compile_preshuffle_gemm_a8(
             vec2_i16 = ir.VectorType.get([2], ir.IntegerType.get_signless(16))
             vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
 
-            def store_output(final_accs, scales):
+            def store_output(accs, scales):
                 if use_cshuffle_epilog:
                     if lds_out is None:
                         raise RuntimeError(
@@ -676,7 +606,7 @@ def compile_preshuffle_gemm_a8(
                         for ni in range_constexpr(num_acc_n):
                             col_local = col_base_local + (ni * 16)
                             acc_idx = mi * num_acc_n + ni
-                            acc = final_accs[acc_idx]
+                            acc = accs[mi, ni]
                             val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                             if is_int8:
                                 val = arith.sitofp(T.f32, val)
@@ -795,7 +725,7 @@ def compile_preshuffle_gemm_a8(
                     idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
-                        acc = final_accs[acc_idx]
+                        acc = accs[mi, ni]
                         val = vector.extract(acc, static_position=[ii], dynamic_position=[])
                         if is_int8:
                             val = arith.sitofp(T.f32, val)
@@ -827,10 +757,6 @@ def compile_preshuffle_gemm_a8(
                 # - C: regs
                 # - Hotloop: MFMA interleaved with DS/VMEM via sched hints
 
-                def prefetch_a0_pack(lds_base):
-                    # (mi=0, ku=0): prefetch both K32 halves (K64) for the first A-pack.
-                    return lds_load_packs_k64(row_a_lds, col_offset_base, lds_base)
-
                 # Prologue: load A0 -> LDS ping, B0 -> regs ping
                 k0 = arith.constant(0, index=True)
                 a_block_tile = load_a_tile(k0 / 4)
@@ -844,13 +770,13 @@ def compile_preshuffle_gemm_a8(
                     a_block_tile = load_a_tile(k1 / 4)
 
                 gpu.barrier()
-                accs = [acc_init] * (num_acc_n * m_repeat)
+                accs = flir.make_rmem_tensor((m_repeat, num_acc_n), acc_elem_ty)
+                for mi in range(m_repeat):
+                    for ni in range(num_acc_n):
+                        accs[mi, ni] = acc_init
 
                 lds_base_ping = lds_base0
                 lds_base_pong = lds_base1
-
-                # Preload first A pack from LDS ping (cross-tile overlap)
-                a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
                 # MAIN LOOP: handle two tiles per iteration (2i and 2i+1)
                 iCounter = (num_tiles - 1) // 2
@@ -872,13 +798,8 @@ def compile_preshuffle_gemm_a8(
                         accs,
                         b_tile_ping,
                         lds_base_ping,
-                        a0_prefetch=a0_prefetch_ping,
                     )
-                    a0_prefetch_ping = None
                     gpu.barrier()
-
-                    # Preload A from LDS pong for next compute
-                    a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
                     # Prefetch B(2i+2) into regs (ping)
                     b_tile_ping = load_b_tile(arith.constant(k2, index=True))
@@ -896,13 +817,8 @@ def compile_preshuffle_gemm_a8(
                         accs,
                         b_tile_pong,
                         lds_base_pong,
-                        a0_prefetch=a0_prefetch_pong,
                     )
-                    a0_prefetch_pong = None
                     gpu.barrier()
-
-                    # Preload A from LDS ping for next compute
-                    a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
                     k_base = k_base + (tile_k * 2)
                     iCounter -= 1
@@ -918,18 +834,14 @@ def compile_preshuffle_gemm_a8(
                         accs,
                         b_tile_ping,
                         lds_base_ping,
-                        a0_prefetch=a0_prefetch_ping,
                     )
-                    a0_prefetch_ping = None
                     gpu.barrier()
-                    a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
                     final_accs, scales = compute_tile(
                         accs,
                         b_tile_pong,
                         lds_base_pong,
                         is_last_tile=True,
-                        a0_prefetch=a0_prefetch_pong,
                     )
                 else:
                     # Odd tail: compute final tile using ping
@@ -938,7 +850,6 @@ def compile_preshuffle_gemm_a8(
                         b_tile_ping,
                         lds_base_ping,
                         is_last_tile=True,
-                        a0_prefetch=a0_prefetch_ping,
                     )
 
                 store_output(final_accs, scales)
@@ -952,7 +863,10 @@ def compile_preshuffle_gemm_a8(
                 a_regs0, b_tile0 = prefetch_ab_tile(k0)
                 store_a_tile_to_lds(a_regs0, lds_base0)
                 gpu.barrier()
-                accs = [acc_init] * (num_acc_n * m_repeat)
+                accs = flir.make_rmem_tensor((m_repeat, num_acc_n), acc_elem_ty)
+                for mi in range(m_repeat):
+                    for ni in range(num_acc_n):
+                        accs[mi, ni] = acc_init
 
                 lds_base = lds_base0
                 b_tile_cur = b_tile0
