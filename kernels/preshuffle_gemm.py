@@ -853,8 +853,7 @@ def compile_preshuffle_gemm_a8(
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     col_base = by_n + n_tile_base + lane_mod_16
                     idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
-                    # Row tail predicate (M may not be divisible by tile_m).
-                    row_inb = row < c_m
+                    # Rely on buffer descriptor OOB for tail M/N.
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]
@@ -867,10 +866,7 @@ def compile_preshuffle_gemm_a8(
                             val_s = (val * s_a) * s_b_vals[ni]
                         val_f16 = arith.trunc_f(T.f16, val_s)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        # Column tail predicate (N may not be divisible by tile_n in general).
-                        col_g = col_base + arith.constant(ni * 16, index=True)
-                        col_inb = col_g < c_n
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out, mask=(row_inb & col_inb))
+                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
 
                 mfma_epilog(
                     use_cshuffle=False,
