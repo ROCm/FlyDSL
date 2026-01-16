@@ -50,6 +50,7 @@ def compile_moe_gemm1(
     size_expert_ids: int,
     doweight_stage1: bool,
     in_dtype: str = "fp8",
+    out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
@@ -66,6 +67,10 @@ def compile_moe_gemm1(
 
     if in_dtype not in ("fp8", "fp16", "int8", "int4"):
         raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if out_dtype not in ("f16", "bf16"):
+        raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
+    # NOTE: keep this as a callable so we don't require an MLIR Context at Python-time.
+    out_mlir = lambda: (T.f16() if out_dtype == "f16" else T.bf16())
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -115,12 +120,22 @@ def compile_moe_gemm1(
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    _use_cshuffle_epilog_in = use_cshuffle_epilog
     if use_cshuffle_epilog is None:
         use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
+    if out_dtype == "bf16":
+        # Stage1 CShuffle epilogue is fp16-only (uses fp16 LDS + vectorized fp16 stores).
+        # For bf16 output, force direct stores unless caller explicitly forces cshuffle.
+        if _use_cshuffle_epilog_in is True:
+            raise ValueError(
+                "stage1 bf16 output currently does not support CShuffle epilogue; "
+                "set FLIR_MOE_STAGE1_CSHUFFLE=0 or pass use_cshuffle_epilog=False."
+            )
+        use_cshuffle_epilog = False
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_moe1_{in_dtype}_{epilog_tag}".replace("-", "_")
+    module_name = f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}".replace("-", "_")
 
     class _MOE1(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -145,7 +160,7 @@ def compile_moe_gemm1(
         @flir.kernel
         def moe_gemm1(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
+            arg_out: lambda: T.memref(size_out, out_mlir()),
             arg_x: lambda: T.memref(size_x, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(tokens, T.f32()),
@@ -976,7 +991,7 @@ def compile_moe_gemm1(
                     y = silu(vg) * vu
                     if doweight_stage1:
                         y = y * tw
-                    y = arith.trunc_f(T.f16(), y)
+                    y = arith.trunc_f(out_mlir(), y)
                     idx_out = idx0 + col_i32
                     buffer_ops.buffer_store(y, out_rsrc, idx_out)
 
@@ -994,7 +1009,7 @@ def compile_moe_gemm1(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, T.f16()),
+            arg_out: lambda: T.memref(size_out, out_mlir()),
             arg_x: lambda: T.memref(size_x, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(tokens, T.f32()),
