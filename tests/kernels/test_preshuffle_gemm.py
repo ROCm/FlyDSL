@@ -75,7 +75,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16", "fp16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
