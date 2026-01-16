@@ -2,7 +2,7 @@
 //
 //
 // These helpers are intentionally pure (no IR mutation) and operate on the
-// structure/dims stored in Flir types.
+// pattern Attributes stored in Flir types.
 //
 //===----------------------------------------------------------------------===//
 

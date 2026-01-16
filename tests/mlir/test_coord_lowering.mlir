@@ -9,7 +9,7 @@ module {
     
     %shape = flir.make_shape %c32, %c64 : (index, index) -> !flir.shape<(?,?)>
     %stride = flir.make_stride %c64, %c1 : (index, index) -> !flir.stride<(?,?)>
-    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Create coordinate (2, 3)
     %c2 = arith.constant 2 : index
@@ -17,7 +17,7 @@ module {
     %coord = flir.make_coord %c2, %c3 : (index, index) -> !flir.coord<(?,?)>
     
     // Convert to linear index: 2*64 + 3*1 = 131
-    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?)>) -> index
+    %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(?,?):(?,?)>) -> index
     
     // CHECK: %[[MUL0:.*]] = arith.muli %c2, %c64 : index
     // CHECK: %[[MUL1:.*]] = arith.muli %c3, %c1 : index
@@ -34,11 +34,11 @@ module {
     
     %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(?,?)>
     %stride = flir.make_stride %c16, %c1 : (index, index) -> !flir.stride<(?,?)>
-    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+    %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
     
     // Convert index 35 to coordinate: row=35/16=2, col=35%16=3
     %c35 = arith.constant 35 : index
-    %coord = flir.idx2crd %c35, %layout : (index, !flir.layout<(?,?)>) -> !flir.coord<(?,?)>
+    %coord = flir.idx2crd %c35, %layout : (index, !flir.layout<(?,?):(?,?)>) -> !flir.coord<(?,?)>
     
     // CHECK: %[[DIV:.*]] = arith.divui %c35, %c16 : index
     // CHECK: %[[REM:.*]] = arith.remui %c35, %c16 : index

@@ -5,6 +5,7 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "flir/FlirDialect.h"
+#include "flir/FlirPatternAttr.h"
 
 #define GET_OP_CLASSES
 #include "flir/FlirOps.h.inc"

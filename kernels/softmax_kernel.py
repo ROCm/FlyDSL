@@ -26,6 +26,7 @@ def next_power_of_2(x):
 
 def build_softmax_module(M, N, dtype_str="f32"):
     gpu_arch = get_hip_arch()
+    DYN = ir.ShapedType.get_dynamic_size()
 
     # Kernel Config
     # Adaptive Block Size
@@ -86,8 +87,9 @@ def build_softmax_module(M, N, dtype_str="f32"):
         @flir.kernel
         def softmax_kernel(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, _state["elem_type"]),
-            C: lambda: T.memref(M, N, _state["elem_type"]),
+            A: lambda: T.memref(DYN, N, _state["elem_type"]),
+            C: lambda: T.memref(DYN, N, _state["elem_type"]),
+            m_in: lambda: T.index(),
         ):
             row = flir.const_index(flir.block_idx("x"))
             tid = flir.const_index(flir.thread_idx("x"))
@@ -101,8 +103,8 @@ def build_softmax_module(M, N, dtype_str="f32"):
             # Rocir-style: tensor views + tiled copies (like elementwise_add_kernel).
             c0_idx = flir.const_index(0)
             tile_cols = BLOCK_SIZE * VEC_WIDTH  # python int
-            tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
-            tensor_C = flir.make_tensor(C, shape=(M, N), strides=(N, 1))
+            tensor_A = flir.make_tensor(A, shape=(m_in, N), strides=(N, 1))
+            tensor_C = flir.make_tensor(C, shape=(m_in, N), strides=(N, 1))
             s_red_tv = flir.make_tensor(s_red, shape=(RED_SLOTS,), strides=(1,))
             gA = flir.zipped_divide(tensor_A, (1, tile_cols))
             gC = flir.zipped_divide(tensor_C, (1, tile_cols))
@@ -391,17 +393,18 @@ def build_softmax_module(M, N, dtype_str="f32"):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, _state["elem_type"]),
-            C: lambda: T.memref(M, N, _state["elem_type"]),
+            A: lambda: T.memref(DYN, N, _state["elem_type"]),
+            C: lambda: T.memref(DYN, N, _state["elem_type"]),
+            m_in: lambda: T.index(),
         ):
             c1 = arith.as_value(flir.arith_ext.index(1))
-            gx = arith.as_value(flir.arith_ext.index(M))
+            gx = arith.as_value(m_in)
             bx = arith.as_value(flir.arith_ext.index(BLOCK_SIZE))
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "softmax_kernel"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[A, C],
+                kernel_operands=[A, C, m_in],
             )
 
     return _Softmax()

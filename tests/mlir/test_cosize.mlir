@@ -7,9 +7,9 @@ func.func @test_cosize() -> index {
   
   %shape = flir.make_shape %c8, %c128 : (index, index) -> !flir.shape<(?,?)>
   %stride = flir.make_stride %c1, %c16 : (index, index) -> !flir.stride<(?,?)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?)>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<(?,?)>, !flir.stride<(?,?)>) -> !flir.layout<(?,?):(?,?)>
   
-  %cosize = flir.cosize %layout : !flir.layout<(?,?)> -> index
+  %cosize = flir.cosize %layout : !flir.layout<(?,?):(?,?)> -> index
   
   return %cosize : index
 }

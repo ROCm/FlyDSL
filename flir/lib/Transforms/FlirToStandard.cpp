@@ -1,6 +1,7 @@
 #include "flir/FlirDialect.h"
 #include "flir/FlirOps.h"
 #include "flir/FlirPasses.h"
+#include "flir/FlirPatternAttr.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
@@ -97,74 +98,58 @@ static LayoutNode deserializeLayoutNode(Operation* op, PatternRewriter& rewriter
         return LayoutNode(op->getResult(0));
     }
 
-    // Type-mode:
-    // - Tuple structure and constants are encoded in the result type (structure+dims).
-    // - Operands contain only dynamic leaf values (in left-to-right leaf order).
     auto tryTypeMode = [&]() -> std::optional<LayoutNode> {
       if (!op || op->getNumResults() == 0)
         return std::nullopt;
 
       Type ty = op->getResult(0).getType();
-      ArrayRef<int32_t> structure;
-      ArrayRef<int64_t> dims;
+      Attribute pattern;
 
       if (auto st = dyn_cast<ShapeType>(ty)) {
-        structure = st.getStructure();
-        dims = st.getDims();
+        pattern = st.getPattern();
       } else if (auto st = dyn_cast<StrideType>(ty)) {
-        structure = st.getStructure();
-        dims = st.getDims();
+        pattern = st.getPattern();
       } else {
         return std::nullopt;
       }
 
-      // Require structured types. (Allow empty tuple: structure=[0], dims=[]).
-      if (structure.empty())
+      if (!pattern)
         return std::nullopt;
 
-      // Leaf count = number of -1 tags.
-      int64_t leafCount = 0;
-      for (int32_t tag : structure)
-        if (tag == -1)
-          ++leafCount;
-      if ((int64_t)dims.size() != leafCount)
-        return std::nullopt;
-
-      int64_t dynCount = 0;
-      for (int64_t d : dims)
-        if (d == -1)
-          ++dynCount;
+      int64_t dynCount = countDynLeaves(pattern);
       if ((int64_t)values.size() != dynCount)
         return std::nullopt;
 
-      int64_t si = 0;
-      int64_t di = 0;
       int64_t oi = 0;
 
-      std::function<LayoutNode()> parseNode = [&]() -> LayoutNode {
-        if (si >= (int64_t)structure.size())
+      std::function<LayoutNode(Attribute)> parseNode = [&](Attribute p) -> LayoutNode {
+        if (!p)
           return LayoutNode(Value());
-        int32_t tag = structure[si++];
-        if (tag == -1) {
-          if (di >= (int64_t)dims.size())
-            return LayoutNode(Value());
-          int64_t d = dims[di++];
-          if (d == -1) {
-            Value v = (oi < (int64_t)values.size()) ? values[oi] : Value();
-            ++oi;
-            return LayoutNode(v);
-          }
-          Value c = rewriter.create<arith::ConstantIndexOp>(loc, d).getResult();
+        if (auto arr = llvm::dyn_cast<ArrayAttr>(p)) {
+          std::vector<LayoutNode> kids;
+          kids.reserve(arr.size());
+          for (Attribute e : arr.getValue())
+            kids.push_back(parseNode(e));
+          return LayoutNode(kids);
+        }
+        if (auto i = llvm::dyn_cast<IntegerAttr>(p)) {
+          int64_t v = i.getValue().getSExtValue();
+          Value c = rewriter.create<arith::ConstantIndexOp>(loc, v).getResult();
           return LayoutNode(c);
         }
-        std::vector<LayoutNode> kids;
-        kids.reserve(tag);
-        for (int32_t i = 0; i < tag; ++i)
-          kids.push_back(parseNode());
-        return LayoutNode(kids);
+        if (llvm::isa<DyncI32Attr>(p)) {
+          Value v = (oi < (int64_t)values.size()) ? values[oi] : Value();
+          ++oi;
+          return LayoutNode(v);
+        }
+        if (llvm::isa<UnderscoreAttr>(p)) {
+          // Wildcard '*' does not correspond to a runtime operand.
+          return LayoutNode(Value());
+        }
+        return LayoutNode(Value());
       };
 
-      LayoutNode root = parseNode();
+      LayoutNode root = parseNode(pattern);
       if (oi != dynCount)
         return std::nullopt;
       return root;
@@ -183,114 +168,104 @@ static void flatten_to_leaves(const LayoutNode& node, std::vector<LayoutNode>& l
 // Build type-mode MakeShapeOp from a LayoutNode:
 // - Nested structure is encoded in the result type (structure+dims).
 // - Operands contain only dynamic leaves (in left-to-right leaf order).
-static Value serializeLayoutNodeToShape(const LayoutNode& node, Location loc, 
-                                        PatternRewriter& rewriter, MLIRContext* ctx) {
-    SmallVector<Value> leafValues;
-    SmallVector<int32_t> structure;
-    // Canonicalize rank-1 as a 1-tuple "(x)" (matches python frontend printing).
-    if (node.isLeaf) {
-      structure.push_back(1);
-      structure.push_back(-1);
-      leafValues.push_back(node.value);
-    } else {
-      node.flatten(leafValues, structure);
+static Attribute buildPatternAndCollectDyn(const LayoutNode &n,
+                                           SmallVectorImpl<Value> &dynOperands,
+                                           MLIRContext *ctx,
+                                           int32_t &dyncElemIdx) {
+  if (n.isLeaf) {
+    if (auto c = tryGetConstIndex(n.value)) {
+      return IntegerAttr::get(IntegerType::get(ctx, 32),
+                              APInt(32, static_cast<uint64_t>(*c),
+                                    /*isSigned=*/true));
     }
+    if (n.value)
+      dynOperands.push_back(n.value);
+    return DyncI32Attr::get(ctx, dyncElemIdx++, /*divisibility=*/1);
+  }
 
-    SmallVector<int64_t> dims;
-    SmallVector<Value> dynOperands;
-    dims.reserve(leafValues.size());
-    dynOperands.reserve(leafValues.size());
-    for (auto v : leafValues) {
-      if (auto c = tryGetConstIndex(v)) {
-        dims.push_back(*c);
-      } else {
-        dims.push_back(-1);
-        dynOperands.push_back(v);
-      }
-    }
-
-    auto shapeType = ShapeType::get(ctx, structure, dims);
-    return rewriter.create<MakeShapeOp>(loc, shapeType, dynOperands).getResult();
+  llvm::SmallVector<Attribute, 8> children;
+  children.reserve(n.children.size());
+  for (auto &c : n.children)
+    children.push_back(buildPatternAndCollectDyn(c, dynOperands, ctx, dyncElemIdx));
+  return ArrayAttr::get(ctx, children);
 }
 
-static Value serializeLayoutNodeToStride(const LayoutNode& node, Location loc, 
+static Value serializeLayoutNodeToShape(const LayoutNode& node, Location loc,
+                                        PatternRewriter& rewriter, MLIRContext* ctx) {
+  SmallVector<Value> dynOperands;
+  Attribute patternAttr;
+  // Canonicalize rank-1 as a 1-tuple "(x)" (matches python frontend printing).
+  if (node.isLeaf) {
+    int32_t di = 0;
+    Attribute leaf = buildPatternAndCollectDyn(node, dynOperands, ctx, di);
+    patternAttr = ArrayAttr::get(ctx, ArrayRef<Attribute>{leaf});
+  } else {
+    int32_t di = 0;
+    patternAttr = buildPatternAndCollectDyn(node, dynOperands, ctx, di);
+  }
+  auto shapeType = ShapeType::get(ctx, patternAttr);
+  return rewriter.create<MakeShapeOp>(loc, shapeType, dynOperands).getResult();
+}
+
+static Value serializeLayoutNodeToStride(const LayoutNode& node, Location loc,
                                          PatternRewriter& rewriter, MLIRContext* ctx) {
-    SmallVector<Value> leafValues;
-    SmallVector<int32_t> structure;
-    // Canonicalize rank-1 as a 1-tuple "(x)".
-    if (node.isLeaf) {
-      structure.push_back(1);
-      structure.push_back(-1);
-      leafValues.push_back(node.value);
-    } else {
-      node.flatten(leafValues, structure);
-    }
-
-    SmallVector<int64_t> dims;
-    SmallVector<Value> dynOperands;
-    dims.reserve(leafValues.size());
-    dynOperands.reserve(leafValues.size());
-    for (auto v : leafValues) {
-      if (auto c = tryGetConstIndex(v)) {
-        dims.push_back(*c);
-      } else {
-        dims.push_back(-1);
-        dynOperands.push_back(v);
-      }
-    }
-
-    auto strideType = StrideType::get(ctx, structure, dims);
-    return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
+  SmallVector<Value> dynOperands;
+  Attribute patternAttr;
+  // Canonicalize rank-1 as a 1-tuple "(x)".
+  if (node.isLeaf) {
+    int32_t di = 0;
+    Attribute leaf = buildPatternAndCollectDyn(node, dynOperands, ctx, di);
+    patternAttr = ArrayAttr::get(ctx, ArrayRef<Attribute>{leaf});
+  } else {
+    int32_t di = 0;
+    patternAttr = buildPatternAndCollectDyn(node, dynOperands, ctx, di);
+  }
+  auto strideType = StrideType::get(ctx, patternAttr);
+  return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
 }
 
 // Build a flat (rank-N) type-mode shape/stride from leaf values.
 static Value makeFlatShapeTypeMode(ValueRange leafValues, Location loc,
                                    PatternRewriter &rewriter, MLIRContext *ctx) {
-  SmallVector<int32_t> structure;
-  structure.reserve(1 + leafValues.size());
-  structure.push_back(static_cast<int32_t>(leafValues.size()));
-  for (size_t i = 0; i < leafValues.size(); ++i)
-    structure.push_back(-1);
-
-  SmallVector<int64_t> dims;
   SmallVector<Value> dynOperands;
-  dims.reserve(leafValues.size());
   dynOperands.reserve(leafValues.size());
+  SmallVector<Attribute, 8> elems;
+  elems.reserve(leafValues.size());
+  int32_t di = 0;
   for (auto v : leafValues) {
     if (auto c = tryGetConstIndex(v)) {
-      dims.push_back(*c);
+      elems.push_back(IntegerAttr::get(IntegerType::get(ctx, 32),
+                                       APInt(32, static_cast<uint64_t>(*c),
+                                             /*isSigned=*/true)));
     } else {
-      dims.push_back(-1);
       dynOperands.push_back(v);
+      elems.push_back(DyncI32Attr::get(ctx, di++, /*divisibility=*/1));
     }
   }
 
-  auto shapeType = ShapeType::get(ctx, structure, dims);
+  auto shapeType = ShapeType::get(ctx, ArrayAttr::get(ctx, elems));
   return rewriter.create<MakeShapeOp>(loc, shapeType, dynOperands).getResult();
 }
 
 static Value makeFlatStrideTypeMode(ValueRange leafValues, Location loc,
                                     PatternRewriter &rewriter, MLIRContext *ctx) {
-  SmallVector<int32_t> structure;
-  structure.reserve(1 + leafValues.size());
-  structure.push_back(static_cast<int32_t>(leafValues.size()));
-  for (size_t i = 0; i < leafValues.size(); ++i)
-    structure.push_back(-1);
-
-  SmallVector<int64_t> dims;
   SmallVector<Value> dynOperands;
-  dims.reserve(leafValues.size());
   dynOperands.reserve(leafValues.size());
+  SmallVector<Attribute, 8> elems;
+  elems.reserve(leafValues.size());
+  int32_t di = 0;
   for (auto v : leafValues) {
     if (auto c = tryGetConstIndex(v)) {
-      dims.push_back(*c);
+      elems.push_back(IntegerAttr::get(IntegerType::get(ctx, 32),
+                                       APInt(32, static_cast<uint64_t>(*c),
+                                             /*isSigned=*/true)));
     } else {
-      dims.push_back(-1);
       dynOperands.push_back(v);
+      elems.push_back(DyncI32Attr::get(ctx, di++, /*divisibility=*/1));
     }
   }
 
-  auto strideType = StrideType::get(ctx, structure, dims);
+  auto strideType = StrideType::get(ctx, ArrayAttr::get(ctx, elems));
   return rewriter.create<MakeStrideOp>(loc, strideType, dynOperands).getResult();
 }
 
@@ -312,17 +287,20 @@ static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
     return Value();
   }
 
-  auto structure = shapeTy.getStructure();
-  auto shapeDims = shapeTy.getDims();
+  Attribute pattern = shapeTy.getPattern();
+  if (!pattern) {
+    emitError(loc, "Expected flir.shape type to carry a tuple pattern.");
+    return Value();
+  }
 
   // Resolve any dynamic `?` leaves from the defining op operands, but require
   // that all leaves can be folded to constants at compile time.
   SmallVector<int64_t> resolvedShapeDims;
-  resolvedShapeDims.reserve(shapeDims.size());
+  resolvedShapeDims.reserve(getPatternRank(pattern));
   SmallVector<Value> dynLeafOperands;
   if (auto makeShape = shapeVal.getDefiningOp<MakeShapeOp>()) {
     dynLeafOperands.append(makeShape.getValues().begin(), makeShape.getValues().end());
-  } else if (llvm::any_of(shapeDims, [](int64_t d) { return d == -1; })) {
+  } else if (countDynLeaves(pattern) != 0) {
     emitError(loc,
               "local_tile requires a tiler shape whose leaves are compile-time "
               "constants (either encoded in the type or provided as constant operands "
@@ -331,26 +309,56 @@ static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
   }
 
   int64_t oi = 0;
-  for (int64_t d : shapeDims) {
-    if (d != -1) {
-      resolvedShapeDims.push_back(d);
-      continue;
+  std::function<void(Attribute)> walk = [&](Attribute p) {
+    if (auto arr = llvm::dyn_cast<ArrayAttr>(p)) {
+      for (Attribute e : arr.getValue())
+        walk(e);
+      return;
     }
+    if (auto i = llvm::dyn_cast<IntegerAttr>(p)) {
+      resolvedShapeDims.push_back(i.getValue().getSExtValue());
+      return;
+    }
+    if (llvm::isa<DyncI32Attr>(p)) {
+      if (oi >= (int64_t)dynLeafOperands.size()) {
+        emitError(loc, "Malformed flir.make_shape: operand count mismatch for '?' leaves.");
+        return;
+      }
+      auto c = tryGetConstIndex(dynLeafOperands[oi++]);
+      if (!c.has_value()) {
+        emitError(loc,
+                  "local_tile requires a tiler shape whose dynamic leaves fold to "
+                  "compile-time constants.");
+        return;
+      }
+      resolvedShapeDims.push_back(*c);
+      return;
+    }
+    if (llvm::isa<UnderscoreAttr>(p)) {
+      // Wildcard '*' does not consume an operand. For LayoutLeft stride
+      // construction we require fully-known compile-time shapes.
+      emitError(loc,
+                "local_tile requires tiler shape leaves to be compile-time constants; "
+                "wildcard '*' is not allowed here.");
+      return;
+    }
+    // Unknown leaf => treat as dynamic and require an operand.
     if (oi >= (int64_t)dynLeafOperands.size()) {
-      emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
-      return Value();
+      emitError(loc, "Malformed flir.make_shape: operand count mismatch.");
+      return;
     }
     auto c = tryGetConstIndex(dynLeafOperands[oi++]);
     if (!c.has_value()) {
       emitError(loc,
                 "local_tile requires a tiler shape whose dynamic leaves fold to "
                 "compile-time constants.");
-      return Value();
+      return;
     }
     resolvedShapeDims.push_back(*c);
-  }
+  };
+  walk(pattern);
   if (oi != (int64_t)dynLeafOperands.size()) {
-    emitError(loc, "Malformed type-mode flir.make_shape: operand count mismatch.");
+    emitError(loc, "Malformed flir.make_shape: operand count mismatch for '?' leaves.");
     return Value();
   }
 
@@ -368,7 +376,24 @@ static Value makeLayoutLeftStrideFromStaticShapeTypeMode(Value shapeVal,
     }
   }
 
-  auto strideTy = StrideType::get(ctx, structure, strideDims);
+  // Rebuild a stride pattern matching the shape pattern's structure.
+  int64_t li = 0;
+  std::function<Attribute(Attribute)> rebuild = [&](Attribute p) -> Attribute {
+    if (auto arr = llvm::dyn_cast<ArrayAttr>(p)) {
+      llvm::SmallVector<Attribute, 8> kids;
+      kids.reserve(arr.size());
+      for (Attribute e : arr.getValue())
+        kids.push_back(rebuild(e));
+      return ArrayAttr::get(ctx, kids);
+    }
+    if (li >= (int64_t)strideDims.size())
+      return IntegerAttr::get(IntegerType::get(ctx, 64), APInt(64, 0));
+    int64_t v = strideDims[li++];
+    return IntegerAttr::get(IntegerType::get(ctx, 64),
+                            APInt(64, static_cast<uint64_t>(v), /*isSigned=*/true));
+  };
+  Attribute stridePattern = rebuild(pattern);
+  auto strideTy = StrideType::get(ctx, stridePattern);
   return rewriter.create<MakeStrideOp>(loc, strideTy, ValueRange{}).getResult();
 }
 
@@ -1329,13 +1354,13 @@ static std::pair<LayoutNode, LayoutNode> complement_impl(
 // Get rank from ranked type
 static int getRankFromType(Type type) {
   if (auto shapeType = llvm::dyn_cast<ShapeType>(type))
-    return shapeType.getRank();
+    return static_cast<int>(getPatternRank(shapeType.getPattern()));
   if (auto strideType = llvm::dyn_cast<StrideType>(type))
-    return strideType.getRank();
+    return static_cast<int>(getPatternRank(strideType.getPattern()));
   if (auto coordType = llvm::dyn_cast<CoordType>(type))
-    return coordType.getRank();
+    return static_cast<int>(getPatternRank(coordType.getPattern()));
   if (auto layoutType = llvm::dyn_cast<LayoutType>(type))
-    return layoutType.getRank();
+    return static_cast<int>(getPatternRank(layoutType.getShapePattern()));
   return -1;
 }
 
@@ -1682,7 +1707,8 @@ struct Idx2CrdOpLowering : public RewritePattern {
 
     // Ensure result coord type rank matches leaf count when available.
     if (auto ct = dyn_cast<CoordType>(op->getResult(0).getType())) {
-      if (ct.getRank() >= 0 && ct.getRank() != (int)totalLeaves)
+      Attribute p = ct.getPattern();
+      if (p && getPatternRank(p) != totalLeaves)
         return failure();
     }
 
@@ -2067,7 +2093,8 @@ struct LogicalProductOpLowering : public OpRewritePattern<LogicalProductOp> {
       productShapeDims.push_back(x.value);
     
     // Determine the rank of the product
-    size_t productRank = productShapeDims.size();
+    // productRank used to be needed for rank-based LayoutType construction.
+    // We now build LayoutType from the produced pattern Attributes instead.
     
     auto *ctx = rewriter.getContext();
     // Create type-mode shape with combined dimensions
@@ -2094,8 +2121,14 @@ struct LogicalProductOpLowering : public OpRewritePattern<LogicalProductOp> {
     
     Value productStride = makeFlatStrideTypeMode(productStrideDims, loc, rewriter, ctx);
     
-    // Create the product layout with the correct type
-    auto productLayoutType = LayoutType::get(ctx, productRank);
+    // Create the product layout type from the produced shape/stride patterns.
+    auto productShapeTy = dyn_cast<ShapeType>(productShape.getType());
+    auto productStrideTy = dyn_cast<StrideType>(productStride.getType());
+    if (!productShapeTy || !productStrideTy)
+      return failure();
+    auto productLayoutType = LayoutType::get(ctx,
+                                            productShapeTy.getPattern(),
+                                            productStrideTy.getPattern());
     auto productLayout = rewriter.create<MakeLayoutOp>(
         loc, productLayoutType, productShape, 
         productStride);
@@ -2252,7 +2285,9 @@ static Value lowerLogicalDivide(
         auto outStrideTy = dyn_cast<StrideType>(makeStride.getType());
         if (!outShapeTy || !outStrideTy)
           return nullptr;
-        auto layoutType = LayoutType::get(ctx, outShapeTy, outStrideTy);
+        auto layoutType = LayoutType::get(ctx,
+                                          outShapeTy.getPattern(),
+                                          outStrideTy.getPattern());
         return rewriter.create<MakeLayoutOp>(loc, layoutType, makeShape, makeStride).getResult();
     }
     
@@ -2287,7 +2322,9 @@ static Value lowerLogicalDivide(
     auto outStrideTy = dyn_cast<StrideType>(resultStride.getType());
     if (!outShapeTy || !outStrideTy)
       return nullptr;
-    auto resultLayoutType = LayoutType::get(ctx, outShapeTy, outStrideTy);
+    auto resultLayoutType = LayoutType::get(ctx,
+                                            outShapeTy.getPattern(),
+                                            outStrideTy.getPattern());
     return rewriter.create<MakeLayoutOp>(loc, resultLayoutType, resultShape, resultStride).getResult();
 }
 
@@ -2577,9 +2614,13 @@ struct LocalTileOpLowering : public OpRewritePattern<LocalTileOp> {
         makeLayoutLeftStrideFromStaticShapeTypeMode(tilerShape, loc, rewriter, ctx);
     if (!makeStrideVal)
       return failure();
+    auto shapeTy = llvm::dyn_cast<ShapeType>(tilerShape.getType());
+    auto strideTy = llvm::dyn_cast<StrideType>(makeStrideVal.getType());
+    if (!shapeTy || !strideTy)
+      return failure();
     auto layoutType = LayoutType::get(ctx,
-                                      llvm::cast<ShapeType>(tilerShape.getType()),
-                                      llvm::cast<StrideType>(makeStrideVal.getType()));
+                                      shapeTy.getPattern(),
+                                      strideTy.getPattern());
     auto tilerLayout = rewriter.create<MakeLayoutOp>(
         loc, layoutType, tilerShape, makeStrideVal);
     
@@ -2625,19 +2666,90 @@ struct ComplementOpLowering : public OpRewritePattern<ComplementOp> {
     LayoutNode tilerShapeNode = deserializeLayoutNode(tilerShapeVal.getDefiningOp(), rewriter, loc);
     LayoutNode tilerStrideNode = deserializeLayoutNode(tilerStrideVal.getDefiningOp(), rewriter, loc);
 
+    std::vector<LayoutNode> shapeLeaves;
+    std::vector<LayoutNode> strideLeaves;
+    flatten_to_leaves(tilerShapeNode, shapeLeaves);
+    flatten_to_leaves(tilerStrideNode, strideLeaves);
+    if (shapeLeaves.size() != strideLeaves.size() || shapeLeaves.empty())
+      return failure();
+
+    const int64_t rank = static_cast<int64_t>(shapeLeaves.size());
+    // Dynamic stride only allowed for rank-1.
+    if (rank > 1) {
+      for (auto &s : strideLeaves) {
+        if (!tryGetConstIndex(s.value)) {
+          emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
+          return failure();
+        }
+      }
+    }
+
+    // Rank-1 non-injective: stride == 0 and shape > 1.
+    if (rank == 1) {
+      auto sh = tryGetConstIndex(shapeLeaves[0].value);
+      auto st = tryGetConstIndex(strideLeaves[0].value);
+      if (st && *st == 0 && sh && *sh > 1) {
+        emitError(loc, "Non-injective Layout detected in complement.");
+        return failure();
+      }
+    }
+
+    // Rank-2+ non-injective: if after sorting by stride, a stride is < the
+    // accumulated stride (previous stride * previous shape), then gap becomes 0.
+    if (rank > 1) {
+      struct ModeC {
+        int64_t shape;
+        int64_t stride;
+      };
+      SmallVector<ModeC, 8> modes;
+      modes.reserve(rank);
+      bool allShapeConst = true;
+      for (int64_t i = 0; i < rank; ++i) {
+        auto sh = tryGetConstIndex(shapeLeaves[i].value);
+        auto st = tryGetConstIndex(strideLeaves[i].value);
+        if (!st) {
+          // Already guarded above for rank>1; keep for safety.
+          emitError(loc, "Dynamic-stride complement only for rank-1 layouts.");
+          return failure();
+        }
+        if (!sh)
+          allShapeConst = false;
+        modes.push_back(ModeC{sh.value_or(1), *st});
+
+        // Early non-injective: stride==0 with shape>1.
+        if (*st == 0 && sh && *sh > 1) {
+          emitError(loc, "Non-injective Layout detected in complement.");
+          return failure();
+        }
+      }
+
+      if (allShapeConst) {
+        llvm::sort(modes, [](const ModeC &a, const ModeC &b) { return a.stride < b.stride; });
+        int64_t currStride = 1;
+        for (auto &m : modes) {
+          if (m.stride < currStride) {
+            emitError(loc, "Non-injective Layout detected in complement.");
+            return failure();
+          }
+          // Advance: stride * shape (matches computeComplementInline fold update).
+          currStride = m.stride * m.shape;
+        }
+      }
+    }
+
     auto [compShape, compStride] = computeComplementInline(
         tilerShapeNode, tilerStrideNode, targetSize, loc, rewriter);
 
     if (!compShape || !compStride)
       return failure();
 
-    int rank = 1;
-    if (auto st = dyn_cast<ShapeType>(compShape.getType()))
-      rank = st.getRank();
-    else if (auto st = dyn_cast<StrideType>(compStride.getType()))
-      rank = st.getRank();
-
-    auto resultLayoutType = LayoutType::get(rewriter.getContext(), rank);
+    auto shapeTy = dyn_cast<ShapeType>(compShape.getType());
+    auto strideTy = dyn_cast<StrideType>(compStride.getType());
+    if (!shapeTy || !strideTy)
+      return failure();
+    auto resultLayoutType = LayoutType::get(rewriter.getContext(),
+                                            shapeTy.getPattern(),
+                                            strideTy.getPattern());
     auto complementLayout = rewriter.create<MakeLayoutOp>(loc, resultLayoutType, compShape, compStride);
 
     // Keep behavior consistent with previous lowering: coalesce the result.

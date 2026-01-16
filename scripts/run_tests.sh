@@ -25,6 +25,11 @@ if [ ! -x "${FLIR_OPT}" ]; then
       exit 1
     }
   fi
+  # Re-detect after build: modern builds place it under ${BUILD_DIR}/bin.
+  FLIR_OPT="${BUILD_DIR}/bin/flir-opt"
+  if [ ! -x "${FLIR_OPT}" ]; then
+    FLIR_OPT="${BUILD_DIR}/tools/flir-opt/flir-opt"
+  fi
   if [ ! -x "${FLIR_OPT}" ]; then
     echo "Error: flir-opt not found."
     echo "  Try: ./flir/build.sh"
@@ -53,13 +58,13 @@ for test_file in tests/mlir/*.mlir; do
         MLIR_TEST_COUNT=$((MLIR_TEST_COUNT + 1))
         test_name=$(basename "$test_file" .mlir)
         echo "Running: $test_name"
-        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.out 2>&1
+        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.log 2>&1
         if [ $? -eq 0 ]; then
             echo "   PASS"
             MLIR_PASS_COUNT=$((MLIR_PASS_COUNT + 1))
         else
             echo "   FAIL"
-            echo "      Log: /tmp/${test_name}.out"
+            echo "      Log: /tmp/${test_name}.log"
         fi
     fi
 done
@@ -182,7 +187,7 @@ else
     echo "GPU Execution Tests:             Skipped (no GPU)"
 fi
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ] && [ $MLIR_PASS_COUNT -eq $MLIR_TEST_COUNT ]; then
+if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"

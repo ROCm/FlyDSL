@@ -24,6 +24,7 @@ from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import arith
 from flydsl.dialects.ext.arith import Index
 from flydsl.runtime.device import get_rocm_arch
+from _mlir import ir
 from _mlir.ir import F16Type, F32Type, IntegerType
 from _mlir.dialects import arith
 from flydsl.dialects.ext import arith as arith_ext
@@ -37,18 +38,22 @@ THR_M, THR_N = 4, 32
 VAL_M, VAL_N = 4, 4
 COPY_VEC = 8
 
-def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
+def create_elementwise_add_kernel(N: int, dtype=F32Type):
     """Create elementwise addition kernel demonstrating FLIR API.
     
     Args:
-        M, N: Tensor dimensions
+        N: Compile-time constant leading dimension (row stride)
         dtype: Element type
         
     Returns:
         Compiled kernel module
     """
-    print(f"\n[FLIR INFO] Creating elementwise add kernel for {M}x{N}")
+    print(f"\n[FLIR INFO] Creating elementwise add kernel (dynamic M, static N={N})")
     print(f"[FLIR INFO] Element type: {dtype}")
+
+    # NOTE: Kernel operands in the lowered module use dynamic memref types.
+    # Keep the host stub signature dynamic too so gpu.launch_func types match.
+    S = ir.ShapedType.get_dynamic_size()
     
     class _EltwiseAdd(flir.MlirModule):
         GPU_MODULE_NAME = "elementwise_kernels"
@@ -57,9 +62,10 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         @flir.kernel
         def elementwise_add_kernel(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, dtype.get()),
-            B: lambda: T.memref(M, N, dtype.get()),
-            C: lambda: T.memref(M, N, dtype.get()),
+            A: lambda: T.memref(S, S, dtype.get()),
+            B: lambda: T.memref(S, S, dtype.get()),
+            C: lambda: T.memref(S, S, dtype.get()),
+            m_in: lambda: T.index(),
         ):
             # ===== Step 1: Thread and Block IDs =====
             tid_x = flir.thread_idx("x")
@@ -106,9 +112,12 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
                 val_shape=(VAL_M, VAL_N),
             )
 
-            tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
-            tensor_B = flir.make_tensor(B, shape=(M, N), strides=(N, 1))
-            tensor_C = flir.make_tensor(C, shape=(M, N), strides=(N, 1))
+            # Strides must be compile-time constants because downstream helpers like
+            # `make_fragment_like(TensorView)` require statically-known template.strides.
+            # This means the kernel is specialized on the leading dimension `N`.
+            tensor_A = flir.make_tensor(A, shape=(m_in, N), strides=(N, 1))
+            tensor_B = flir.make_tensor(B, shape=(m_in, N), strides=(N, 1))
+            tensor_C = flir.make_tensor(C, shape=(m_in, N), strides=(N, 1))
 
             TILE_M = THR_M * VAL_M
             TILE_N = THR_N * VAL_N
@@ -116,7 +125,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             gA = flir.zipped_divide(tensor_A, tile_shape)
             gB = flir.zipped_divide(tensor_B, tile_shape)
             gC = flir.zipped_divide(tensor_C, tile_shape)
-            idC = flir.make_identity_tensor((M, N))
+            idC = flir.make_identity_tensor((m_in, N))
             cC = flir.zipped_divide(idC, tile_shape)
 
             blk_coord = (blk_coord_y, blk_coord_x)
@@ -145,7 +154,7 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
             for linear in range_constexpr(total_vals):
                 lin_idx = flir.const_index(linear)
                 coords = thrCrd.coords_from_linear(lin_idx)
-                pred_val = flir.elem_less(coords, (M, N))
+                pred_val = flir.elem_less(coords, (m_in, N))
                 pred_offsets = tuple(frgPred.offsets_from_linear(lin_idx))
                 frgPred[pred_offsets] = pred_val
 
@@ -167,22 +176,23 @@ def create_elementwise_add_kernel(M: int, N: int, dtype=F32Type):
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A: lambda: T.memref(M, N, dtype.get()),
-            B: lambda: T.memref(M, N, dtype.get()),
-            C: lambda: T.memref(M, N, dtype.get()),
+            A: lambda: T.memref(S, S, dtype.get()),
+            B: lambda: T.memref(S, S, dtype.get()),
+            C: lambda: T.memref(S, S, dtype.get()),
+            m_in: lambda: T.index(),
         ):
             c1 = Index(1)
             tile_m = THR_M * VAL_M
             tile_n = THR_N * VAL_N
-            gx = Index((N + tile_n - 1) // tile_n)
-            gy = Index((M + tile_m - 1) // tile_m)
+            gx = (Index(N) + Index(tile_n) - c1) // Index(tile_n)
+            gy = (m_in + Index(tile_m) - c1) // Index(tile_m)
             bdx = Index(THR_N)
             bdy = Index(THR_M)
             flir.gpu_ext.LaunchFuncOp(
                 ["elementwise_kernels", "elementwise_add_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bdx, bdy, c1),
-                kernel_operands=[A, B, C],
+                kernel_operands=[A, B, C, m_in],
             )
 
     print("[FLIR INFO] Generated MLIR module")
@@ -196,30 +206,6 @@ TEST_SHAPES = [
     # (1021, 515),
     # (5120, 4000),
 ]
-
-# Compute Max Dims for shared kernel
-MAX_M = max(s[0] for s in TEST_SHAPES)
-MAX_N = max(s[1] for s in TEST_SHAPES)
-
-# Cache compiled kernel executor (singleton)
-_compiled_kernel_exe = None
-
-def get_or_compile_kernel(dtype=F32Type):
-    """Get or compile the single shared kernel for MAX dimensions."""
-    global _compiled_kernel_exe
-    
-    if _compiled_kernel_exe is None:
-        print(f"\n[FLIR INFO] Compiling SHARED kernel for max dimensions: {MAX_M}x{MAX_N}")
-        
-        # Create kernel with MAX dimensions
-        m = create_elementwise_add_kernel(MAX_M, MAX_N, dtype)
-        print(f"[FLIR INFO] Compiling via flydsl.compile...")
-        _compiled_kernel_exe = flydsl.compile(m)
-    else:
-        print(f"[FLIR INFO] Reusing SHARED kernel (max: {MAX_M}x{MAX_N})")
-    
-    return _compiled_kernel_exe
-
 
 @pytest.mark.parametrize(
     ("M", "N"),
@@ -235,19 +221,9 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
     
-    # Kernel selection:
-    # - If the requested MxN fits within TEST_SHAPES' MAX_M/MAX_N, reuse the shared MAX kernel
-    #   and use padded buffers.
-    # - If the requested M or N exceeds MAX, compile an exact-shape kernel and skip padding.
-    use_shared_max_kernel = (M <= MAX_M) and (N <= MAX_N)
-    if use_shared_max_kernel:
-        exe = get_or_compile_kernel(dtype)
-        compile_M, compile_N = MAX_M, MAX_N
-    else:
-        print(f"\n[FLIR INFO] Requested shape {M}x{N} exceeds shared max {MAX_M}x{MAX_N}; compiling exact-shape kernel.")
-        m = create_elementwise_add_kernel(M, N, dtype)
-        exe = flydsl.compile(m)
-        compile_M, compile_N = M, N
+    print(f"\n[FLIR INFO] Compiling kernel for dynamic M, static N={N} (may hit compile cache)...")
+    m = create_elementwise_add_kernel(N, dtype)
+    exe = flydsl.compile(m)
     
     # Prepare data
     np.random.seed(42)
@@ -256,26 +232,10 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     b_host = np.random.randn(M, N).astype(torch_dtype)
     expected = a_host + b_host
     
-    if use_shared_max_kernel:
-        # Padded data for shared kernel (must match MAX_M x MAX_N strides)
-        # The kernel expects buffers of size MAX_M * MAX_N with stride MAX_N
-        a_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        b_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        c_padded = np.zeros((MAX_M, MAX_N), dtype=torch_dtype)
-        
-        a_padded[:M, :N] = a_host
-        b_padded[:M, :N] = b_host
-        
-        # Device tensors (full MAX size)
-        t_dtype = torch.float32 if dtype == F32Type else torch.float16
-        A = torch.tensor(a_padded, device="cuda", dtype=t_dtype)
-        B = torch.tensor(b_padded, device="cuda", dtype=t_dtype)
-        C = torch.empty((MAX_M, MAX_N), device="cuda", dtype=t_dtype)
-    else:
-        t_dtype = torch.float32 if dtype == F32Type else torch.float16
-        A = torch.tensor(a_host, device="cuda", dtype=t_dtype)
-        B = torch.tensor(b_host, device="cuda", dtype=t_dtype)
-        C = torch.empty((M, N), device="cuda", dtype=t_dtype)
+    t_dtype = torch.float32 if dtype == F32Type else torch.float16
+    A = torch.tensor(a_host, device="cuda", dtype=t_dtype)
+    B = torch.tensor(b_host, device="cuda", dtype=t_dtype)
+    C = torch.empty((M, N), device="cuda", dtype=t_dtype)
     
     # Launch configuration (must match kernel tiling)
     # - blockDim should provide exactly THR_M*THR_N threads (tidx in [0, THR_M*THR_N))
@@ -287,18 +247,15 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
     grid_y = (M + TILE_M - 1) // TILE_M
     
     print(f"\n[FLIR INFO] Launch configuration:")
-    kernel_tag = f"{compile_M}x{compile_N}"
+    kernel_tag = f"{M}x{N}"
     print(f"  Grid: ({grid_x}, {grid_y}, 1) [Tiles: {TILE_M}x{TILE_N}, kernel={kernel_tag}]")
     print(f"  Block: ({BLOCK_X}, {BLOCK_Y}, 1)")
     
     # Launch kernel via executor
-    exe(A, B, C)
+    exe(A, B, C, M)
     torch.cuda.synchronize()
     
-    if use_shared_max_kernel:
-        c_host = C[:M, :N].cpu().numpy()
-    else:
-        c_host = C.cpu().numpy()
+    c_host = C.cpu().numpy()
     
     # Verify results
     error = np.max(np.abs(c_host - expected))
@@ -313,7 +270,7 @@ def test_compile_and_run(M, N, dtype=F32Type, benchmark=False, iterations=100):
         print(f"\n[FLIR INFO] Running benchmark via run_perftest ({iterations} iterations)...")
 
         def kernel_launch():
-            exe(A, B, C)
+            exe(A, B, C, M, N)
 
         # run_perftest returns (data, avg_us)
         _, avg_us = run_perftest(kernel_launch, num_iters=iterations, num_warmup=10)
@@ -354,19 +311,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     if args.run_all_shapes:
-        # Run all shapes to demonstrate kernel caching
+        # Run all shapes to demonstrate compile caching behavior (if enabled).
         print("\n" + "="*80)
-        print("Running all test shapes (demonstrates kernel caching)")
+        print("Running all test shapes (demonstrates compile caching)")
         print("="*80)
         for M, N in TEST_SHAPES:
             print(f"\n--- Testing shape {M}x{N} (1st run) ---")
             test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
             
-            # Run again to show kernel is reused
-            print(f"\n--- Testing shape {M}x{N} (2nd run - should reuse kernel) ---")
+            # Run again: flydsl.compile may hit its cache and avoid redoing heavy work.
+            print(f"\n--- Testing shape {M}x{N} (2nd run - should hit compile cache) ---")
             test_compile_and_run(M, N, dtype=F32Type, benchmark=False)
         
-        print("\nPASS - All shapes tested with kernel caching!")
+        print("\nPASS - All shapes tested with compile caching!")
     else:
         test_compile_and_run(
             args.M, args.N,

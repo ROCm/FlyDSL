@@ -1,6 +1,7 @@
 //===- FlirLayoutAlgebra.cpp - Type-level layout algebra helpers ---------===//
 
 #include "flir/FlirLayoutAlgebra.h"
+#include "flir/FlirPatternAttr.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include <algorithm>
@@ -52,48 +53,38 @@ static void flattenLeaves(const PatternNode &n,
     flattenLeaves(c, out);
 }
 
-static PatternNode parsePattern(ArrayRef<int32_t> structure, ArrayRef<int64_t> dims) {
-  // structure: preorder encoding (tuple -> N, leaf -> -1)
-  // dims: leaf values (int64), -1 means dynamic
-  size_t sIdx = 0;
-  size_t dIdx = 0;
-
-  std::function<PatternNode()> parse = [&]() -> PatternNode {
-    if (sIdx >= structure.size())
-      return PatternNode::leaf(std::nullopt);
-    int32_t code = structure[sIdx++];
-    if (code == -1) {
-      if (dIdx >= dims.size())
-        return PatternNode::leaf(std::nullopt);
-      int64_t v = dims[dIdx++];
-      if (v == -1)
-        return PatternNode::leaf(std::nullopt);
-      return PatternNode::leaf(v);
-    }
-    // tuple
-    int32_t arity = code;
+static PatternNode parsePattern(Attribute pattern) {
+  if (!pattern)
+    return PatternNode::leaf(std::nullopt);
+  if (auto arr = llvm::dyn_cast<ArrayAttr>(pattern)) {
     std::vector<PatternNode> children;
-    children.reserve(std::max<int32_t>(0, arity));
-    for (int32_t i = 0; i < arity; ++i)
-      children.push_back(parse());
+    children.reserve(arr.size());
+    for (Attribute e : arr.getValue())
+      children.push_back(parsePattern(e));
     return PatternNode::tuple(std::move(children));
-  };
-
-  PatternNode root = parse();
-  return root;
+  }
+  if (auto i = llvm::dyn_cast<IntegerAttr>(pattern))
+    return PatternNode::leaf(i.getValue().getSExtValue());
+  if (llvm::isa<DyncI32Attr>(pattern) || llvm::isa<UnderscoreAttr>(pattern))
+    return PatternNode::leaf(std::nullopt);
+  // Unknown leaf kind => treat as dynamic/unknown.
+  return PatternNode::leaf(std::nullopt);
 }
 
-static void serializePattern(const PatternNode &n,
-                             llvm::SmallVectorImpl<int32_t> &structure,
-                             llvm::SmallVectorImpl<int64_t> &dims) {
+static Attribute serializePatternAttr(MLIRContext *ctx, const PatternNode &n,
+                                      int32_t &dyncElemIdx) {
   if (n.isLeaf) {
-    structure.push_back(-1);
-    dims.push_back(n.value.has_value() ? *n.value : -1);
-    return;
+    if (!n.value.has_value())
+      return DyncI32Attr::get(ctx, dyncElemIdx++, /*divisibility=*/1);
+    return IntegerAttr::get(IntegerType::get(ctx, 32),
+                            APInt(32, static_cast<uint64_t>(*n.value),
+                                  /*isSigned=*/true));
   }
-  structure.push_back(static_cast<int32_t>(n.children.size()));
+  llvm::SmallVector<Attribute, 8> children;
+  children.reserve(n.children.size());
   for (auto &c : n.children)
-    serializePattern(c, structure, dims);
+    children.push_back(serializePatternAttr(ctx, c, dyncElemIdx));
+  return ArrayAttr::get(ctx, children);
 }
 
 static PatternNode makeFlatTupleFromLeaves(const std::vector<std::optional<int64_t>> &leaves) {
@@ -170,7 +161,10 @@ compositionImpl(const PatternNode &lhsShape, const PatternNode &lhsStride,
 
   for (size_t i = 0; i < lhsShapes.size(); ++i) {
     auto currShape = lhsShapes[i];
-    auto currStride = (i < lhsStrides.size()) ? lhsStrides[i] : std::nullopt;
+    // Avoid GCC false-positive maybe-uninitialized warnings on std::optional.
+    std::optional<int64_t> currStride = std::nullopt;
+    if (i < lhsStrides.size())
+      currStride = lhsStrides[i];
 
     auto nextShape = ceilDivUI(currShape, restStride);
     auto nextStride = ceilDivUI(restStride, currShape);
@@ -277,41 +271,46 @@ static std::optional<int64_t> sizeOfShape(const PatternNode &shape) {
 FailureOr<LayoutType> mlir::flir::inferCompositionType(MLIRContext *ctx,
                                                        LayoutType lhs,
                                                        LayoutType rhs) {
-  // Need structure+dims to do anything meaningful.
-  if (lhs.getShapeDims().empty() || lhs.getStrideDims().empty() ||
-      rhs.getShapeDims().empty() || rhs.getStrideDims().empty())
-    return LayoutType::get(ctx, std::max(lhs.getRank(), rhs.getRank()));
+  auto lhsShapeAttr = lhs.getShapePattern();
+  auto lhsStrideAttr = lhs.getStridePattern();
+  auto rhsShapeAttr = rhs.getShapePattern();
+  auto rhsStrideAttr = rhs.getStridePattern();
 
-  PatternNode lhsShape = parsePattern(lhs.getShapeStructure(), lhs.getShapeDims());
-  PatternNode lhsStride = parsePattern(lhs.getStrideStructure(), lhs.getStrideDims());
-  PatternNode rhsShape = parsePattern(rhs.getShapeStructure(), rhs.getShapeDims());
-  PatternNode rhsStride = parsePattern(rhs.getStrideStructure(), rhs.getStrideDims());
+  int64_t lhsRank = getPatternRank(lhsShapeAttr);
+  int64_t rhsRank = getPatternRank(rhsShapeAttr);
+
+  PatternNode lhsShape = parsePattern(lhsShapeAttr);
+  PatternNode lhsStride = parsePattern(lhsStrideAttr);
+  PatternNode rhsShape = parsePattern(rhsShapeAttr);
+  PatternNode rhsStride = parsePattern(rhsStrideAttr);
 
   // Conservative: require fully static leaves for now.
   if (!allStaticLeaves(lhsShape) || !allStaticLeaves(lhsStride) ||
       !allStaticLeaves(rhsShape) || !allStaticLeaves(rhsStride))
-    return LayoutType::get(ctx, std::max(lhs.getRank(), rhs.getRank()));
+    return makeRankOnlyLayoutType(ctx, std::max(lhsRank, rhsRank));
 
   auto [outShape, outStride] = compositionImpl(lhsShape, lhsStride, rhsShape, rhsStride);
-
-  llvm::SmallVector<int32_t, 16> shapeStruct, strideStruct;
-  llvm::SmallVector<int64_t, 16> shapeDims, strideDims;
-  serializePattern(outShape, shapeStruct, shapeDims);
-  serializePattern(outStride, strideStruct, strideDims);
-  return LayoutType::get(ctx, shapeStruct, shapeDims, strideStruct, strideDims);
+  int32_t si = 0, di = 0;
+  return LayoutType::get(ctx,
+                         serializePatternAttr(ctx, outShape, si),
+                         serializePatternAttr(ctx, outStride, di));
 }
 
 FailureOr<LayoutType> mlir::flir::inferLogicalProductType(MLIRContext *ctx,
                                                           LayoutType block,
                                                           LayoutType tiler) {
-  if (block.getShapeDims().empty() || block.getStrideDims().empty() ||
-      tiler.getShapeDims().empty() || tiler.getStrideDims().empty())
-    return LayoutType::get(ctx, block.getRank() + tiler.getRank());
+  auto bShapeAttr = block.getShapePattern();
+  auto bStrideAttr = block.getStridePattern();
+  auto tShapeAttr = tiler.getShapePattern();
+  auto tStrideAttr = tiler.getStridePattern();
 
-  PatternNode bShape = parsePattern(block.getShapeStructure(), block.getShapeDims());
-  PatternNode bStride = parsePattern(block.getStrideStructure(), block.getStrideDims());
-  PatternNode tShape = parsePattern(tiler.getShapeStructure(), tiler.getShapeDims());
-  PatternNode tStride = parsePattern(tiler.getStrideStructure(), tiler.getStrideDims());
+  int64_t bRank = getPatternRank(bShapeAttr);
+  int64_t tRank = getPatternRank(tShapeAttr);
+
+  PatternNode bShape = parsePattern(bShapeAttr);
+  PatternNode bStride = parsePattern(bStrideAttr);
+  PatternNode tShape = parsePattern(tShapeAttr);
+  PatternNode tStride = parsePattern(tStrideAttr);
 
   // Match current lowering's semantics: flatten then concatenate.
   std::vector<std::optional<int64_t>> bShapeLeaves, bStrideLeaves, tShapeLeaves, tStrideLeaves;
@@ -323,13 +322,13 @@ FailureOr<LayoutType> mlir::flir::inferLogicalProductType(MLIRContext *ctx,
   // Conservative: require static.
   auto blockSize = sizeOfShape(bShape);
   if (!blockSize)
-    return LayoutType::get(ctx, block.getRank() + tiler.getRank());
+    return makeRankOnlyLayoutType(ctx, bRank + tRank);
   for (auto &v : bStrideLeaves)
     if (!v)
-      return LayoutType::get(ctx, block.getRank() + tiler.getRank());
+      return makeRankOnlyLayoutType(ctx, bRank + tRank);
   for (auto &v : tStrideLeaves)
     if (!v)
-      return LayoutType::get(ctx, block.getRank() + tiler.getRank());
+      return makeRankOnlyLayoutType(ctx, bRank + tRank);
 
   std::vector<std::optional<int64_t>> outShapeLeaves = bShapeLeaves;
   outShapeLeaves.insert(outShapeLeaves.end(), tShapeLeaves.begin(), tShapeLeaves.end());
@@ -340,29 +339,31 @@ FailureOr<LayoutType> mlir::flir::inferLogicalProductType(MLIRContext *ctx,
 
   PatternNode outShape = makeFlatTupleFromLeaves(outShapeLeaves);
   PatternNode outStride = makeFlatTupleFromLeaves(outStrideLeaves);
-
-  llvm::SmallVector<int32_t, 16> shapeStruct, strideStruct;
-  llvm::SmallVector<int64_t, 16> shapeDims, strideDims;
-  serializePattern(outShape, shapeStruct, shapeDims);
-  serializePattern(outStride, strideStruct, strideDims);
-  return LayoutType::get(ctx, shapeStruct, shapeDims, strideStruct, strideDims);
+  int32_t si = 0, di = 0;
+  return LayoutType::get(ctx,
+                         serializePatternAttr(ctx, outShape, si),
+                         serializePatternAttr(ctx, outStride, di));
 }
 
 FailureOr<LayoutType> mlir::flir::inferLogicalDivideType(MLIRContext *ctx,
                                                          LayoutType layout,
                                                          LayoutType tiler) {
-  if (layout.getShapeDims().empty() || layout.getStrideDims().empty() ||
-      tiler.getShapeDims().empty() || tiler.getStrideDims().empty())
-    return LayoutType::get(ctx, std::max(layout.getRank(), tiler.getRank()));
+  auto lShapeAttr = layout.getShapePattern();
+  auto lStrideAttr = layout.getStridePattern();
+  auto tShapeAttr = tiler.getShapePattern();
+  auto tStrideAttr = tiler.getStridePattern();
 
-  PatternNode lShape = parsePattern(layout.getShapeStructure(), layout.getShapeDims());
-  PatternNode lStride = parsePattern(layout.getStrideStructure(), layout.getStrideDims());
-  PatternNode tShape = parsePattern(tiler.getShapeStructure(), tiler.getShapeDims());
-  PatternNode tStride = parsePattern(tiler.getStrideStructure(), tiler.getStrideDims());
+  int64_t lRank = getPatternRank(lShapeAttr);
+  int64_t tRank = getPatternRank(tShapeAttr);
+
+  PatternNode lShape = parsePattern(lShapeAttr);
+  PatternNode lStride = parsePattern(lStrideAttr);
+  PatternNode tShape = parsePattern(tShapeAttr);
+  PatternNode tStride = parsePattern(tStrideAttr);
 
   if (!allStaticLeaves(lShape) || !allStaticLeaves(lStride) ||
       !allStaticLeaves(tShape) || !allStaticLeaves(tStride))
-    return LayoutType::get(ctx, std::max(layout.getRank(), tiler.getRank()));
+    return makeRankOnlyLayoutType(ctx, std::max(lRank, tRank));
 
   auto inputSize = sizeOfShape(lShape);
   auto [compShape, compStride] = complementImpl(tShape, tStride, inputSize);
@@ -372,12 +373,10 @@ FailureOr<LayoutType> mlir::flir::inferLogicalDivideType(MLIRContext *ctx,
   PatternNode rhsStride = PatternNode::tuple({tStride, compStride});
 
   auto [outShape, outStride] = compositionImpl(lShape, lStride, rhsShape, rhsStride);
-
-  llvm::SmallVector<int32_t, 16> shapeStruct, strideStruct;
-  llvm::SmallVector<int64_t, 16> shapeDims, strideDims;
-  serializePattern(outShape, shapeStruct, shapeDims);
-  serializePattern(outStride, strideStruct, strideDims);
-  return LayoutType::get(ctx, shapeStruct, shapeDims, strideStruct, strideDims);
+  int32_t si = 0, di = 0;
+  return LayoutType::get(ctx,
+                         serializePatternAttr(ctx, outShape, si),
+                         serializePatternAttr(ctx, outStride, di));
 }
 
 

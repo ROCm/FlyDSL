@@ -157,30 +157,32 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "softmax":
         from kernels.softmax_kernel import build_softmax_module
-        m = build_softmax_module(M, N, dtype)
+        # M is runtime; module construction uses a dummy M.
+        # `flydsl.compile()` already has its own cache.
+        m = build_softmax_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, y), warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, y, M), warmup=warmup, iters=iters)
 
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
-        m = build_layernorm_module(M, N, dtype)
+        m = build_layernorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         beta = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y), warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, gamma, beta, y, M), warmup=warmup, iters=iters)
 
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
-        m = build_rmsnorm_module(M, N, dtype)
+        m = build_rmsnorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
         y = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-        return bench_gpu_us_torch(lambda: exe(x, gamma, y), warmup=warmup, iters=iters)
+        return bench_gpu_us_torch(lambda: exe(x, gamma, y, M), warmup=warmup, iters=iters)
 
     raise ValueError(f"unknown op: {op}")
 

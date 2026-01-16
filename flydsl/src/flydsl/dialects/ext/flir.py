@@ -192,6 +192,10 @@ def _count_leaves_in_tuple_spec(spec: str) -> int:
     leaves = 0
     while i < len(s):
         c = s[i]
+        if c == "*":
+            leaves += 1
+            i += 1
+            continue
         if c == "?":
             leaves += 1
             i += 1
@@ -276,16 +280,49 @@ class TensorView:
         wrap_arith: bool = False,
     ):
         self.memref = _unwrap_value(memref_value) if memref_value is not None else None
-        self.shape = tuple(int(s) for s in shape) if shape is not None else ()
+        # Support dynamic shapes: allow MLIR Values (typically index-typed) in `shape`.
+        # Only cast Python numerics to int; keep MLIR Values as-is.
+        if shape is None:
+            self.shape = ()
+        else:
+            _shape = []
+            for s in shape:
+                # IMPORTANT: keep Python ints as ints (do NOT materialize index constants here),
+                # otherwise static shapes turn into Values and break shape/stride inference.
+                if isinstance(s, int):
+                    _shape.append(int(s))
+                    continue
+                s_u = _unwrap_value(s)
+                if isinstance(s_u, Value):
+                    _shape.append(s_u)
+                else:
+                    _shape.append(int(s_u))
+            self.shape = tuple(_shape)
         self.rank = len(self.shape)
         self.wrap_arith = bool(wrap_arith)
         if strides is None:
+            # If any shape dim is dynamic, caller must provide explicit strides.
+            if any(isinstance(d, Value) for d in self.shape):
+                raise ValueError(
+                    "TensorView(strides=None) requires fully-static `shape` (Python ints). "
+                    "For dynamic shapes, pass explicit `strides=`."
+                )
             strides = []
             stride = 1
             for size in reversed(self.shape):
                 strides.insert(0, stride)
                 stride *= int(size)
-        self.strides = tuple(int(s) for s in strides)
+        _strides = []
+        for s in strides:
+            if isinstance(s, int):
+                _strides.append(int(s))
+                continue
+            s_u = _unwrap_value(s)
+            if isinstance(s_u, Value):
+                _strides.append(s_u)
+            else:
+                _strides.append(int(s_u))
+        self.strides = tuple(_strides)
         if base_indices is None:
             base_indices = [0] * self.rank
         self.base_indices = [_to_index_value(b) for b in base_indices]
@@ -296,6 +333,8 @@ class TensorView:
 
     def numel(self) -> int:
         """Return total number of elements in the view."""
+        if any(isinstance(d, Value) for d in self.shape):
+            raise ValueError("TensorView.numel() requires fully-static shape (Python ints).")
         total = 1
         for size in self.shape:
             total *= int(size)
@@ -479,14 +518,19 @@ class ShapeType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a shape type with given rank."""
-        # This would need to be implemented in C++ bindings
-        # For now, return a generic type
+        """Create a rank-N shape type.
+
+        rank is encoded by a tuple-pattern of N leaves:
+          !flir.shape<(?,?,...)>
+        """
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        # Placeholder - would use actual ODS-generated type
-        return Type.parse(f"!flir.shape<{rank}>", context=context)
+        if rank < 0:
+            # Fallback: rank-1 dynamic leaf.
+            return Type.parse("!flir.shape<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.shape<{pattern}>", context=context)
 
 
 class StrideType(Type):
@@ -494,11 +538,14 @@ class StrideType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a stride type with given rank."""
+        """Create a rank-N stride type (pattern-mode)."""
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.stride<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.stride<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.stride<{pattern}>", context=context)
 
 
 class LayoutType(Type):
@@ -506,11 +553,18 @@ class LayoutType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a layout type with given rank."""
+        """Create a rank-N layout type (pattern-mode).
+
+        Layout syntax is:
+          !flir.layout<shape_pattern:stride_pattern>
+        """
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.layout<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.layout<?:?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.layout<{pattern}:{pattern}>", context=context)
 
 
 class CoordType(Type):
@@ -518,11 +572,14 @@ class CoordType(Type):
     
     @staticmethod
     def get(rank: int, context=None):
-        """Create a coordinate type with given rank."""
+        """Create a rank-N coordinate type (pattern-mode)."""
         from _mlir.ir import Context
         if context is None:
             context = Context.current
-        return Type.parse(f"!flir.coord<{rank}>", context=context)
+        if rank < 0:
+            return Type.parse("!flir.coord<?>", context=context)
+        pattern = "(" + ",".join("?" for _ in range(rank)) + ")"
+        return Type.parse(f"!flir.coord<{pattern}>", context=context)
 
 
 # -----------------------------------------------------------------------------
@@ -1573,7 +1630,16 @@ def complement(tiler: Value, target_size: Value, loc: Optional[Location] = None,
     """
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Best-effort infer a precise result type from operand types + constant target_size.
+    # If inference fails, fall back to a rank-1 dynamic layout, which is sufficient
+    # for the current layout-algebra tests (and allows lowering to diagnose errors).
+    try:
+        t_rank, t_shape, t_stride = _parse_layout_type(str(tiler.type))
+        ts = _try_eval_index_value(target_size)
+        out_shape, out_stride = _complement_impl(t_shape, t_stride, ts)
+        result_type = Type.parse(f"!flir.layout<{out_shape.to_spec()}:{out_stride.to_spec()}>")
+    except Exception:
+        result_type = LayoutType.get(1)
     
     with ip or InsertionPoint.current:
         return flir_ops.ComplementOp(result_type, _unwrap_value(tiler), _unwrap_value(target_size), loc=loc).result
@@ -1602,7 +1668,8 @@ def coalesce(layout: Value, loc: Optional[Location] = None, ip: Optional[Inserti
     from _mlir import ir as _ir
     
     loc = _get_location(loc)
-    result_type = LayoutType.get(-1)
+    # Coalesce is currently a no-op placeholder in lowering; keep the input type.
+    result_type = layout.type
     
     with ip or InsertionPoint.current:
         # Create the operation directly using generic OpView
@@ -2025,14 +2092,42 @@ def make_fragment_like(template, element_type: Type = None, loc: Optional[Locati
     loc = _get_location(loc)
     if isinstance(template, TensorView):
         elem_ty = element_type or template.element_type
-        memref_type = MemRefType.get(template.shape, elem_ty)
+        # Fragments are register/scratch buffers: their shapes must be statically known.
+        shape_ints: list[int] = []
+        for s in template.shape:
+            s_u = _unwrap_value(s)
+            if isinstance(s_u, Value):
+                c = _try_get_constant_index(s_u)
+                if c is None:
+                    raise ValueError(
+                        "make_fragment_like(TensorView) requires a statically-known template.shape; "
+                        "got a non-constant Value."
+                    )
+                shape_ints.append(int(c))
+            else:
+                shape_ints.append(int(s_u))
+        memref_type = MemRefType.get(shape_ints, elem_ty)
         with ip or InsertionPoint.current:
             buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
         zeros = [0] * template.rank
+        # Prefer static shape/strides for the fragment view.
+        strides_ints: list[int] = []
+        for st in template.strides:
+            st_u = _unwrap_value(st)
+            if isinstance(st_u, Value):
+                c = _try_get_constant_index(st_u)
+                if c is None:
+                    raise ValueError(
+                        "make_fragment_like(TensorView) requires statically-known template.strides; "
+                        "got a non-constant Value."
+                    )
+                strides_ints.append(int(c))
+            else:
+                strides_ints.append(int(st_u))
         return TensorView(
             buffer,
-            template.shape,
-            strides=template.strides,
+            shape_ints,
+            strides=strides_ints,
             base_indices=zeros,
             element_type=elem_ty,
             wrap_arith=True,
@@ -2041,13 +2136,26 @@ def make_fragment_like(template, element_type: Type = None, loc: Optional[Locati
         if element_type is None:
             raise ValueError("make_fragment_like(tiled_copy, element_type=...) requires element_type")
         val_shape = template.val_shape
-        memref_type = MemRefType.get(val_shape, element_type)
+        # TiledCopy shapes should be static; accept Value constants defensively.
+        shape_ints: list[int] = []
+        for s in val_shape:
+            s_u = _unwrap_value(s)
+            if isinstance(s_u, Value):
+                c = _try_get_constant_index(s_u)
+                if c is None:
+                    raise ValueError(
+                        "make_fragment_like(TiledCopy) requires a statically-known val_shape; got a non-constant Value."
+                    )
+                shape_ints.append(int(c))
+            else:
+                shape_ints.append(int(s_u))
+        memref_type = MemRefType.get(shape_ints, element_type)
         with ip or InsertionPoint.current:
             buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
-        zeros = [0] * len(val_shape)
+        zeros = [0] * len(shape_ints)
         return TensorView(
             buffer,
-            val_shape,
+            shape_ints,
             strides=None,
             base_indices=zeros,
             element_type=element_type,
@@ -2074,11 +2182,24 @@ def make_rmem_tensor(shape, element_type: Type, loc: Optional[Location] = None, 
     loc = _get_location(loc)
     if not isinstance(shape, (tuple, list)):
         raise NotImplementedError("Dynamic shape not supported in make_rmem_tensor yet")
-    memref_type = MemRefType.get(shape, element_type)
+    # Register memrefs must have statically-known shapes.
+    shape_ints: list[int] = []
+    for s in shape:
+        s_u = _unwrap_value(s)
+        if isinstance(s_u, Value):
+            c = _try_get_constant_index(s_u)
+            if c is None:
+                raise NotImplementedError(
+                    "Dynamic (non-constant) shapes not supported in make_rmem_tensor yet"
+                )
+            shape_ints.append(int(c))
+        else:
+            shape_ints.append(int(s_u))
+    memref_type = MemRefType.get(shape_ints, element_type)
     with ip or InsertionPoint.current:
         buffer = memref.AllocaOp(memref_type, [], [], loc=loc).result
-    zeros = [0] * len(shape)
-    return TensorView(buffer, tuple(int(s) for s in shape), strides=None, base_indices=zeros, element_type=element_type)
+    zeros = [0] * len(shape_ints)
+    return TensorView(buffer, shape_ints, strides=None, base_indices=zeros, element_type=element_type)
 
 
 def make_identity_tensor(shape, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
@@ -2103,14 +2224,22 @@ def make_identity_tensor(shape, loc: Optional[Location] = None, ip: Optional[Ins
     if isinstance(shape, TensorView):
         dims = shape.shape
     elif isinstance(shape, (tuple, list)):
-        dims = tuple(int(s) for s in shape)
+        _dims = []
+        for s in shape:
+            s_u = _unwrap_value(s)
+            if isinstance(s_u, Value):
+                _dims.append(s_u)
+            else:
+                _dims.append(int(s_u))
+        dims = tuple(_dims)
     else:
         raise ValueError("make_identity_tensor expects a TensorView or shape tuple")
-    strides = []
-    stride = 1
+    # Row-major strides, computed in MLIR index arithmetic to support dynamic dims.
+    strides: list[Value] = []
+    stride = _unwrap_value(_to_index_value(1, loc))
     for size in reversed(dims):
         strides.insert(0, stride)
-        stride *= int(size)
+        stride = arith.MulIOp(_unwrap_value(stride), _unwrap_value(_to_index_value(size, loc)), loc=loc).result
     base = [_to_index_value(0, loc) for _ in dims]
     return TensorView(None, dims, strides=strides, base_indices=base, element_type=IndexType.get())
 
@@ -2318,6 +2447,12 @@ def make_tensor(memref, layout=None, shape=None, strides=None, loc: Optional[Loc
     if layout is not None:
         _unwrap_value(layout)
     if strides is None:
+        # For dynamic shapes, require explicit strides (can't compute them in Python).
+        if any(isinstance(_unwrap_value(s), Value) for s in shape):
+            raise ValueError(
+                "make_tensor(strides=None) requires fully-static `shape` (Python ints). "
+                "For dynamic shapes, pass explicit `strides=`."
+            )
         strides = []
         stride = 1
         for size in reversed(shape):
@@ -2334,10 +2469,22 @@ class ZippedTensor:
         self.tensor = tensor_view
         self.tile_shape = tuple(int(s) for s in tile_shape)
         self.rank = tensor_view.rank
-        self.block_shape = tuple(
-            max(1, (tensor_view.shape[i] + self.tile_shape[i] - 1) // self.tile_shape[i])
-            for i in range(self.rank)
-        )
+        # Support dynamic tensor shapes by computing block_shape using MLIR index arithmetic.
+        # For static shapes (Python ints), this still works via `_to_index_value`.
+        one = _unwrap_value(_to_index_value(1))
+        block_shape = []
+        for i in range(self.rank):
+            dim = _unwrap_value(_to_index_value(tensor_view.shape[i]))
+            tile_i = int(self.tile_shape[i])
+            tile = _unwrap_value(_to_index_value(tile_i))
+            # ceil_div(dim, tile) = (dim + tile - 1) // tile
+            numer = _unwrap_value(_add_index(dim, tile_i - 1))
+            blk = _unwrap_value(arith.DivUIOp(_unwrap_value(numer), _unwrap_value(tile)).result)
+            # Best-effort clamp to >=1 to avoid degenerate zero shapes.
+            cmp = _unwrap_value(arith.CmpIOp(arith.CmpIPredicate.ult, _unwrap_value(blk), _unwrap_value(one)).result)
+            blk = _unwrap_value(arith.SelectOp(_unwrap_value(cmp), _unwrap_value(one), _unwrap_value(blk)).result)
+            block_shape.append(blk)
+        self.block_shape = tuple(block_shape)
 
     def _normalize_indices(self, key):
         if isinstance(key, tuple):
@@ -2603,7 +2750,17 @@ def copy(copy_desc, src, dst,
                     memref_dialect.store(val, dst_view.memref, store_idx)
                 return
 
-            extent = int(copy_shape[dim])
+            extent_dim = _unwrap_value(copy_shape[dim])
+            if isinstance(extent_dim, Value):
+                c = _try_get_constant_index(extent_dim)
+                if c is None:
+                    raise ValueError(
+                        "flir.copy requires statically-known copy extents for the scalar recursion path; "
+                        "got a non-constant Value."
+                    )
+                extent = int(c)
+            else:
+                extent = int(extent_dim)
             
             # Check for vectorization opportunity on the last dimension
             if dim == len(copy_shape) - 1 and vector_size > 1 and extent % vector_size == 0:
@@ -2733,7 +2890,16 @@ def copy(copy_desc, src, dst,
         if len(copy_shape) != 1:
             raise ValueError("copy(load-only) currently supports only 1D shapes")
 
-        extent = int(copy_shape[0])
+        extent0 = _unwrap_value(copy_shape[0])
+        if isinstance(extent0, Value):
+            c = _try_get_constant_index(extent0)
+            if c is None:
+                raise ValueError(
+                    "copy(load-only) requires a statically-known 1D extent; got a non-constant Value."
+                )
+            extent = int(c)
+        else:
+            extent = int(extent0)
 
         vector_size = 1
         if isinstance(copy_desc, TiledCopy) and copy_desc.copy_atom:

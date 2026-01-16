@@ -63,8 +63,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         m = build_layernorm_module(M, N, dtype)
         exe = flydsl.compile(m)
     except ValueError as e:
-        print(f"[Skip] {e}")
-        return True, None
+        # Treat compile-time failures as test failures so wrapper scripts (run_tests.sh)
+        # can detect them via a non-zero exit code.
+        print(f"[FAIL] Compile failed: {e}")
+        return False, None
 
     torch.manual_seed(42)
     input_t = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
@@ -113,7 +115,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print("Launching kernel...")
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, beta_dev, output_dev)
+        exe(input_dev, gamma_dev, beta_dev, output_dev, M)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -214,6 +216,9 @@ def test_all():
     print("="*80)
     if do_compare and perf_rows:
         print_perf_table(perf_rows)
+    # Ensure a non-zero exit code on failure for shell wrappers.
+    if failures != 0:
+        raise SystemExit(1)
 
 if __name__ == "__main__":
     test_all()

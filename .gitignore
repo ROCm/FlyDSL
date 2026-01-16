@@ -1,9 +1,10 @@
 # Build outputs
 build/
-.flydsl/
+.flydsl*/
 .flir
 ## Legacy build outputs (pre-rename)
 *.log
+*.diff
 
 # Backups
 *.old
@@ -12,6 +13,9 @@ build/
 __pycache__/
 *.pyc
 .cache/
+flir/python_bindings/mlir/
+my_ir_dumps*/
+*.mlir
 
 # Virtualenvs
 .venv/
