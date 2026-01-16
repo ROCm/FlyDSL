@@ -23,6 +23,7 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import (
     pertoken_quant,
     shuffle_weight,
+    dequant_mxfp4_e8m0_to_fp16,
 )
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
@@ -42,24 +43,8 @@ def _require_gfx950_for_a16w4():
 
 
 def _dequant_mxfp4_e8m0_to_fp16(w_fp32_2d: torch.Tensor) -> torch.Tensor:
-    """Quantize to (MXFP4 + e8m0 per_1x32 scales) then dequantize back to fp16.
-
-    This lets us benchmark FlyDSL kernels using A16W4-style weight quantization,
-    without requiring FlyDSL kernels to directly consume FP4.
-    """
-    _require_gfx950_for_a16w4()
-    if not HAS_AITER or not hasattr(aiter, "fp4_utils"):
-        pytest.skip("A16W4 requires aiter.fp4_utils for MXFP4 pack/unpack in this test harness.")
-    fu = aiter.fp4_utils
-
-    w_bf16 = w_fp32_2d.to(torch.bfloat16).contiguous()
-    w_q, w_s = fu.dynamic_mxfp4_quant(w_bf16, shuffle=False)  # q: float4_e2m1fn_x2, s: float8_e8m0fnu (padded rows)
-    w_f32 = fu.mxfp4_to_f32(w_q)  # (rows, K)
-    # Scale tensor is padded in row dimension; slice to logical rows and expand per 32 columns.
-    rows = w_bf16.shape[0]
-    s_f32 = fu.e8m0_to_f32(w_s[:rows, :])  # (rows, K/32)
-    s_exp = s_f32.repeat_interleave(32, dim=1)  # (rows, K)
-    return (w_f32 * s_exp).to(torch.float16).contiguous()
+    # Backwards-compat wrapper (kept local so diffs stay small).
+    return dequant_mxfp4_e8m0_to_fp16(w_fp32_2d)
 
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
     """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
@@ -1116,7 +1101,6 @@ def run_moe_stage2(
     [
         (256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, "fp8"),
         (256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, "fp16"),
-        # A16W4: aiter-only benchmark, enabled only on gfx950.
         (256, 1024, 256, 4, 2, 64, 128, 128, 256, 128, False, "a16w4"),
     ],
 )

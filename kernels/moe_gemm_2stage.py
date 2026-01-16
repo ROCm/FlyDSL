@@ -170,7 +170,6 @@ def compile_moe_gemm1(
             vec4_f16 = I.vec(4, f16)
             vec1_f16 = I.vec(1, f16)
             vec4_i16 = I.vec(4, I.i16)
-            # (fp16 is the stable 2B path.)
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec4_elems = 4 if elem_bytes == 1 else 2
@@ -243,13 +242,6 @@ def compile_moe_gemm1(
                 else None
             )
 
-            # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
-            # used directly (CK-style). This allows us to avoid `select`-based masking for
-            # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
-            #
-            # IMPORTANT: these are dynamically-shaped memrefs (`memref<?xT>`), so without an
-            # explicit `num_records_bytes`, the descriptor helper can fall back to "max size",
-            # which effectively disables hardware OOB checks and can turn tail OOB into GPU faults.
             x_rsrc = buffer_ops.create_buffer_resource(
                 arg_x,
                 max_size=False,
@@ -524,12 +516,8 @@ def compile_moe_gemm1(
                             b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list)
                             v0 = vector.from_elements(vec1_i64, [b0])
                             v1 = vector.from_elements(vec1_i64, [b1])
-                            if is_f16:
-                                b0 = vector.bitcast(vec4_f16, v0)
-                                b1 = vector.bitcast(vec4_f16, v1)
-                            else:
-                                b0 = vector.bitcast(vec4_i16, v0)
-                                b1 = vector.bitcast(vec4_i16, v1)
+                            b0 = vector.bitcast(vec4_f16, v0)
+                            b1 = vector.bitcast(vec4_f16, v1)
                         else:
                             # FP8/INT8: load 16 bytes (one full KPack) and split into 2x i64 halves.
                             k0_base = base_k / arith.index(64)
@@ -1252,7 +1240,6 @@ def compile_moe_gemm2(
             vec1_f16 = I.vec(1, f16)
             vec2_f16 = I.vec(2, f16)
             vec4_i16 = I.vec(4, I.i16)
-            # (fp16 is the stable 2B path.)
             vec4_f32 = I.vec(4, I.f32)
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
@@ -1314,9 +1301,6 @@ def compile_moe_gemm2(
             )
 
             # Buffer resources (logical sizes: allow hardware OOB checks).
-            # See stage1 notes above re: dynamic memref types and `num_records_bytes`.
-            # Stage2 input activation is laid out as a flat buffer of shape (sorted_size, inter_dim)
-            # (sorted_size == tokens*topk, possibly padded). Use that for descriptor bounds.
             x_rsrc = buffer_ops.create_buffer_resource(
                 arg_x,
                 max_size=False,
@@ -1573,12 +1557,8 @@ def compile_moe_gemm2(
                             b1 = load_b_pack(base_k, ki1, ni)
                             v0 = vector.from_elements(vec1_i64, [b0])
                             v1 = vector.from_elements(vec1_i64, [b1])
-                            if is_f16:
-                                b0 = vector.bitcast(vec4_f16, v0)
-                                b1 = vector.bitcast(vec4_f16, v1)
-                            else:
-                                b0 = vector.bitcast(vec4_i16, v0)
-                                b1 = vector.bitcast(vec4_i16, v1)
+                            b0 = vector.bitcast(vec4_f16, v0)
+                            b1 = vector.bitcast(vec4_f16, v1)
                         else:
                             k0_base = base_k / arith.index(64)
                             k0 = k0_base + arith.constant(ku, index=True)

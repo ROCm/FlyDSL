@@ -383,3 +383,32 @@ def shuffle_scale_a16w4(src: torch.Tensor, experts_cnt: int, gate_up: bool) -> t
         shfl_scale = src.view(experts_cnt, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane)
         shfl_scale = shfl_scale.permute(0, 1, 4, 6, 3, 5, 2).contiguous()
     return shfl_scale.view(*src.shape).contiguous()
+
+
+def dequant_mxfp4_e8m0_to_fp16(w_fp32_2d: torch.Tensor) -> torch.Tensor:
+    """Quantize to (MXFP4 + e8m0 per_1x32 scales) then dequantize back to fp16.
+
+    This mirrors aiter's (MXFP4 + e8m0) quant scheme but returns a dense fp16 tensor.
+    Intended for **test harnesses** that want A16W4-style weights while running fp16 kernels.
+    """
+    import pytest
+    from flydsl.runtime.device import get_rocm_arch
+
+    arch = str(get_rocm_arch())
+    if "gfx950" not in arch:
+        pytest.skip(f"MXFP4/e8m0 dequant helper is only enabled on gfx950 (current arch: {arch}).")
+    try:
+        import aiter
+    except Exception:
+        pytest.skip("aiter not available; cannot use fp4_utils for MXFP4 pack/unpack.")
+    if not hasattr(aiter, "fp4_utils"):
+        pytest.skip("aiter.fp4_utils not available; cannot use MXFP4 pack/unpack.")
+
+    fu = aiter.fp4_utils
+    w_bf16 = w_fp32_2d.to(torch.bfloat16).contiguous()
+    w_q, w_s = fu.dynamic_mxfp4_quant(w_bf16, shuffle=False)  # q: float4_e2m1fn_x2, s: float8_e8m0fnu
+    w_f32 = fu.mxfp4_to_f32(w_q)  # (rows, K)
+    rows = w_bf16.shape[0]
+    s_f32 = fu.e8m0_to_f32(w_s[:rows, :])  # (rows, K/32)
+    s_exp = s_f32.repeat_interleave(32, dim=1)  # (rows, K)
+    return (w_f32 * s_exp).to(torch.float16).contiguous()

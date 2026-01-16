@@ -256,7 +256,15 @@ def compile_preshuffle_gemm_a8(
                 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=(c_m * c4))
             )
 
-            b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
+            # Enable hardware OOB checking for B as well (dynamic memref => must pass size).
+            # For packed-int4 mode, keep max-size because the packed layout's logical size
+            # differs from (N*K*elem_bytes) and the kernel currently assumes its layout.
+            b_nbytes = c_n * c_k * elem_bytes_idx
+            b_rsrc = (
+                buffer_ops.create_buffer_resource(arg_b, max_size=True)
+                if is_int4
+                else buffer_ops.create_buffer_resource(arg_b, max_size=False, num_records_bytes=b_nbytes)
+            )
             scale_b_rsrc = (
                 None
                 if is_f16_or_bf16
