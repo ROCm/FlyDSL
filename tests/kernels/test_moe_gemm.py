@@ -35,6 +35,32 @@ if "gfx95" in ARCH:
 else:
     DTYPE_FP8 = torch.float8_e4m3fnuz
 
+
+def _require_gfx950_for_a16w4():
+    if "gfx950" not in str(ARCH):
+        pytest.skip(f"A16W4 is only enabled on gfx950 (current arch: {ARCH}).")
+
+
+def _dequant_mxfp4_e8m0_to_fp16(w_fp32_2d: torch.Tensor) -> torch.Tensor:
+    """Quantize to (MXFP4 + e8m0 per_1x32 scales) then dequantize back to fp16.
+
+    This lets us benchmark FlyDSL kernels using A16W4-style weight quantization,
+    without requiring FlyDSL kernels to directly consume FP4.
+    """
+    _require_gfx950_for_a16w4()
+    if not HAS_AITER or not hasattr(aiter, "fp4_utils"):
+        pytest.skip("A16W4 requires aiter.fp4_utils for MXFP4 pack/unpack in this test harness.")
+    fu = aiter.fp4_utils
+
+    w_bf16 = w_fp32_2d.to(torch.bfloat16).contiguous()
+    w_q, w_s = fu.dynamic_mxfp4_quant(w_bf16, shuffle=False)  # q: float4_e2m1fn_x2, s: float8_e8m0fnu (padded rows)
+    w_f32 = fu.mxfp4_to_f32(w_q)  # (rows, K)
+    # Scale tensor is padded in row dimension; slice to logical rows and expand per 32 columns.
+    rows = w_bf16.shape[0]
+    s_f32 = fu.e8m0_to_f32(w_s[:rows, :])  # (rows, K/32)
+    s_exp = s_f32.repeat_interleave(32, dim=1)  # (rows, K)
+    return (w_f32 * s_exp).to(torch.float16).contiguous()
+
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
     """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
 
@@ -1090,6 +1116,8 @@ def run_moe_stage2(
     [
         (256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, "fp8"),
         (256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, "fp16"),
+        # A16W4: aiter-only benchmark, enabled only on gfx950.
+        (256, 1024, 256, 4, 2, 64, 128, 128, 256, 128, False, "a16w4"),
     ],
 )
 def test_moe_gemm_2stage(
@@ -1142,6 +1170,75 @@ def test_moe_gemm_2stage(
         tile_m=tile_m,
         moe_sort_mode=moe_sort_mode,
     )
+
+    if str(in_dtype).strip().lower() == "a16w4":
+        # FlyDSL A16W4 path: quantize weights to MXFP4(+e8m0 scales) then dequantize back
+        # to fp16 and run the fp16 FlyDSL kernels. This keeps execution in FlyDSL while
+        # still exercising A16W4-style weight quantization.
+        _require_gfx950_for_a16w4()
+        x_a16 = x_fp32.to(torch.bfloat16)
+        w1_fp16 = _dequant_mxfp4_e8m0_to_fp16(
+            w1_fp32.view(experts * (2 * inter_dim), model_dim)
+        ).view(experts, 2 * inter_dim, model_dim)
+        w2_fp16 = _dequant_mxfp4_e8m0_to_fp16(
+            w2_fp32.view(experts * model_dim, inter_dim)
+        ).view(experts, model_dim, inter_dim)
+
+        out1_fp16, _us1 = run_moe_stage1(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype="fp16",
+            tile_m=tile_m,
+            tile_n=tile_n1,
+            tile_k=tile_k1,
+            doweight_stage1=bool(doweight_stage1),
+            seed=seed,
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            compare_aiter_ck=False,
+            moe_sort_mode=moe_sort_mode,
+            x_fp32_in=x_a16,
+            w1_fp32_in=w1_fp16,
+            w2_fp32_in=w2_fp16,
+            topk_ids_in=topk_ids,
+            topk_weights_in=topk_weights,
+            routing_in=routing,
+            return_outputs=True,
+        )
+
+        a2_q = out1_fp16
+        a2_scale = torch.ones((*out1_fp16.shape[:-1], 1), device=device, dtype=torch.float32)
+
+        _out2_fp32, _us2 = run_moe_stage2(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype="fp16",
+            tile_m=tile_m,
+            tile_n=tile_n2,
+            tile_k=tile_k2,
+            doweight_stage1=bool(doweight_stage1),
+            seed=seed,
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            compare_aiter_ck=False,
+            moe_sort_mode=moe_sort_mode,
+            x_fp32_in=x_a16,
+            w1_fp32_in=w1_fp16,
+            w2_fp32_in=w2_fp16,
+            topk_ids_in=topk_ids,
+            topk_weights_in=topk_weights,
+            routing_in=routing,
+            a2_fp8_in=a2_q,
+            a2_scale_in=a2_scale,
+            return_outputs=True,
+        )
+        return
 
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
@@ -1238,7 +1335,7 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "bf16", "int8", "int4", "all"],
+        choices=["fp8", "fp16", "bf16", "int8", "int4", "a16w4", "all"],
         help="Kernel input dtype: fp8 / fp16 / bf16 / int8 / int4 / all (default: all). "
         "int4 means W4A8: A int8, W packed int4. "
     )
@@ -1279,7 +1376,7 @@ if __name__ == "__main__":
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
     dts = [s.strip() for s in str(args.in_dtype).split(",") if s.strip()]
     if len(dts) == 1 and dts[0] == "all":
-        dts = ["fp8", "fp16", "int8", "int4"]
+        dts = ["fp8", "fp16", "int8", "int4", "a16w4"]
     for dt in dts:
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),

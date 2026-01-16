@@ -1315,20 +1315,24 @@ def compile_moe_gemm2(
 
             # Buffer resources (logical sizes: allow hardware OOB checks).
             # See stage1 notes above re: dynamic memref types and `num_records_bytes`.
+            # Stage2 input activation is laid out as a flat buffer of shape (sorted_size, inter_dim)
+            # (sorted_size == tokens*topk, possibly padded). Use that for descriptor bounds.
             x_rsrc = buffer_ops.create_buffer_resource(
                 arg_x,
                 max_size=False,
-                num_records_bytes=int(tokens * inter_dim * 2),  # stage2 input is fp16 activations
+                num_records_bytes=int(sorted_size * inter_dim * 2),  # fp16 activations
             )
             w_rsrc = buffer_ops.create_buffer_resource(
                 arg_w,
                 max_size=False,
                 num_records_bytes=int(experts * model_dim * inter_dim * elem_bytes),
             )
+            # Stage2 output is shape (tokens, model_dim) with element type selected by out_dtype.
+            out_elem_bytes = 2 if _use_cshuffle_epilog else 4
             out_rsrc = buffer_ops.create_buffer_resource(
                 arg_out,
                 max_size=False,
-                num_records_bytes=int(tokens * topk * model_dim * 2),  # fp16 output
+                num_records_bytes=int(tokens * model_dim * out_elem_bytes),
             )
             # fp16 path ignores scales completely (implicit scale=1.0).
             sx_rsrc = (

@@ -637,11 +637,15 @@ def compile_preshuffle_gemm_a8(
 
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
 
+                use_f16_k32 = bool(is_f16) and str(gpu_arch).startswith("gfx950")
                 if is_int8:
                     mfma_fn = mfma_i32_k32
                 elif is_f16:
-                    # gfx942 fp16 MFMA: 16x16x16 f16 (operands are v4f16, 8B packs)
-                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                    mfma_fn = (
+                        rocdl.mfma_f32_16x16x32_f16
+                        if use_f16_k32
+                        else rocdl.mfma_f32_16x16x16f16
+                    )
                 elif is_bf16:
                     # bf16 MFMA K16 variant uses i16 bit-pattern packs (v4i16)
                     mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
@@ -653,6 +657,17 @@ def compile_preshuffle_gemm_a8(
 
                 # "K64-byte wrapper": two back-to-back MFMA/WMMA ops using the two 8B halves.
                 def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    if use_f16_k32:
+                        # Pack 2x8B f16 packs into one 16B f16x8 and use single K32 MFMA.
+                        a_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), a0), static_position=[0], dynamic_position=[])
+                        a_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), a1), static_position=[0], dynamic_position=[])
+                        b_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), b0), static_position=[0], dynamic_position=[])
+                        b_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), b1), static_position=[0], dynamic_position=[])
+                        a2 = vector.from_elements(T.vec(2, T.i64), [a_i64_0, a_i64_1])
+                        b2 = vector.from_elements(T.vec(2, T.i64), [b_i64_0, b_i64_1])
+                        a8 = vector.bitcast(T.f16x8, a2)
+                        b8 = vector.bitcast(T.f16x8, b2)
+                        return mfma_step(acc_in, a8, b8)
                     acc_mid = mfma_step(acc_in, a0, b0)
                     return mfma_step(acc_mid, a1, b1)
 
