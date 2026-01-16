@@ -616,13 +616,14 @@ def run_moe_stage1(
                     sorted_weights=sorted_w_ if doweight_stage1 else None,
                     quant_type=QuantType.per_Token,
                     activation=ActivationType.Silu,
+                    dst_type=o.dtype,
                 )
 
             # Benchmark CK stage1
             _, us_ck = run_perftest(
                 launch_ck,
                 out_ck,
-                x_q,
+                x_fp32.to(torch.float16),
                 w1_ck,
                 w2_ck,
                 sorted_token_ids,

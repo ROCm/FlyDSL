@@ -1123,7 +1123,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi16_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi17_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1931,19 +1931,28 @@ def compile_moe_gemm2(
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def precompute_row(*, row_local, row):
-                        fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                        t_s = fused_s & mask24_i32
-                        t_valid = arith.cmpu(t_s, tokens_i32, "ult")
-                        t_s_safe = arith.select(t_valid, t_s, arith.i32(0))
-                        return t_s_safe * model_i32  # i32 element index base (safe)
+                        # Precompute row context for cshuffle stores: the fused (token,slot) i32.
+                        # This lets `store_pair` skip atomics for invalid/sentinel rows without reloading.
+                        return buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                        idx0 = row_ctx
-                        col_i32 = arith.index_cast(i32, col_g0)
-                        idx_elem = idx0 + col_i32
-                        idx_elem_even = idx_elem & mask_even_i32
-                        byte_off = idx_elem_even * c2_i32
-                        atomic_add_f16x2(frag, byte_off)
+                        # Skip atomics for invalid / sentinel rows (token==tokens or slot>=topk).
+                        # aiter routing can be extremely sparse for small token counts, which would
+                        # otherwise cause a huge number of zero atomics.
+                        fused = row_ctx
+                        t = fused & mask24_i32
+                        s = arith.shrui(fused, arith.i32(24))
+                        t_valid = arith.cmpu(t, tokens_i32, "ult")
+                        s_valid = arith.cmpu(s, topk_i32_v, "ult")
+                        valid = arith.andi(t_valid, s_valid)
+                        _if = scf.IfOp(valid)
+                        with _if.then():
+                            idx0 = t * model_i32
+                            col_i32 = arith.index_cast(i32, col_g0)
+                            idx_elem = idx0 + col_i32
+                            idx_elem_even = idx_elem & mask_even_i32
+                            byte_off = idx_elem_even * c2_i32
+                            atomic_add_f16x2(frag, byte_off)
 
                     c_shuffle_epilog(
                         arith=arith,
