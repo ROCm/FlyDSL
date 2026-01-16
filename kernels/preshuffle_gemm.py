@@ -804,16 +804,11 @@ def compile_preshuffle_gemm_a8(
                         # and pass a byte offset to keep the store well-defined.
                         idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
                         byte_off = idx_out * arith.constant(2, index=True)  # bytes
-                        # Tail guards: only store if the entire vector is in-bounds.
-                        row_inb = row < c_m
-                        col_last = col_g0 + arith.constant(e_vec - 1, index=True)
-                        col_inb = col_last < c_n
-                        inb = row_inb & col_inb
 
                         if e_vec == 4:
                             frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
                             buffer_ops.buffer_store(
-                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True, mask=inb
+                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
                             )
                         else:
                             # e_vec == 2: pack 2xf16 -> 1xi32
@@ -822,7 +817,7 @@ def compile_preshuffle_gemm_a8(
                                 frag_i32x1, static_position=[0], dynamic_position=[]
                             )
                             buffer_ops.buffer_store(
-                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True, mask=inb
+                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True
                             )
 
                     # Prefer 16B stores when possible:
