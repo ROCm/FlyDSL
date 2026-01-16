@@ -1123,7 +1123,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi15_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi16_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1203,11 +1203,11 @@ def compile_moe_gemm2(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
-            # Align with origin/main launch mapping:
-            # - blockIdx.x -> expert-block id / M dimension (tile along sorted M)
-            # - blockIdx.y -> N dimension (tile along model_dim)
-            bx = gpu.block_id("x")  # tile along sorted M
-            by = gpu.block_id("y")  # tile along model_dim
+            # Align with CK/Aiter launch mapping:
+            # - blockIdx.x -> N dimension (tile along model_dim)
+            # - blockIdx.y -> expert-block id / M dimension (tile along sorted M)
+            by = gpu.block_id("x")  # tile along model_dim
+            bx = gpu.block_id("y")  # tile along sorted M
 
             # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k // 16, index=True)
@@ -1988,8 +1988,8 @@ def compile_moe_gemm2(
             size_expert_ids_in: lambda: T.index(),
         ):
             bdx = 256
-            gx = size_expert_ids_in
-            gy = n_in / arith.index(tile_n)
+            gx = n_in / arith.index(tile_n)
+            gy = size_expert_ids_in
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
