@@ -241,13 +241,35 @@ def compile_preshuffle_gemm_a8(
                 else None
             )
 
-            # Note: We assume N is aligned (no N-tail support in this kernel).
-            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-            scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+            c2 = arith.constant(2, index=True)
+            c4 = arith.constant(4, index=True)
+            elem_bytes_idx = arith.constant(int(elem_bytes), index=True)
+            a_nbytes = c_m * c_k * elem_bytes_idx
+            c_nbytes = c_m * c_n * c2  # f16 output
 
-            b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
-            scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+            # Note: N-tail for B layout is still not supported; this just makes OOB safe.
+            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes)
+            scale_a_rsrc = (
+                None
+                if is_f16_or_bf16
+                else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=(c_m * c4))
+            )
+
+            # Enable hardware OOB checking for B as well (dynamic memref => must pass size).
+            # For packed-int4 mode, keep max-size because the packed layout's logical size
+            # differs from (N*K*elem_bytes) and the kernel currently assumes its layout.
+            b_nbytes = c_n * c_k * elem_bytes_idx
+            b_rsrc = (
+                buffer_ops.create_buffer_resource(arg_b, max_size=True)
+                if is_int4
+                else buffer_ops.create_buffer_resource(arg_b, max_size=False, num_records_bytes=b_nbytes)
+            )
+            scale_b_rsrc = (
+                None
+                if is_f16_or_bf16
+                else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True, num_records_bytes=(c_n * c4))
+            )
 
             bx_m = bx * tile_m
             by_n = by * tile_n
@@ -441,15 +463,23 @@ def compile_preshuffle_gemm_a8(
             atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if elem_bytes == 1 else 8))
 
             def load_a_16(idx_elem):
-                return buffer_copy_gmem16_dwordx4(
-                    flir,
-                    arg=arg_a,
-                    elem_type=_elem_type(),
-                    idx_i32=idx_elem,
-                    atom_g2r16=atom_a_g2r16,
-                    rsrc=a_rsrc,
-                    vec_elems=(16 if elem_bytes == 1 else 8),
-                )
+                # Use buffer loads (with explicit num_records_bytes) so tails are safe.
+                if elem_bytes == 1:
+                    return buffer_copy_gmem16_dwordx4(
+                        flir,
+                        arg=arg_a,
+                        elem_type=_elem_type(),
+                        # For 1B types, this is still expressed in "dword elements" on the
+                        # address path via `layout_a_div4`.
+                        idx_i32=idx_elem,
+                        atom_g2r16=atom_a_g2r16,
+                        rsrc=a_rsrc,
+                        vec_elems=16,
+                    )
+
+                # fp16/bf16: load 16B == 8 elements using raw buffer_load.
+                ty = ir.F16Type.get() if is_f16 else ir.BF16Type.get()
+                return buffer_ops.buffer_load(a_rsrc, idx_elem, vec_width=8, dtype=ty)
 
             def a_tile_chunk_coord_i32(i: int):
                 return tile_chunk_coord_i32(
@@ -466,17 +496,21 @@ def compile_preshuffle_gemm_a8(
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     row_a_global = bx_m + row_a_local
-                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
-                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-                    # `idx_i32` is a dword offset. For 2B element types (fp16/bf16),
-                    # convert to element offset so the generic `vector.load` path reads
-                    # the right address (FLIR only specializes buffer_load_dwordx4 for 1B types).
-                    idx_elem = (
-                        idx_i32
-                        if elem_bytes == 1
-                        else (idx_i32 * arith.constant(2, index=True))
-                    )
+                    # A address:
+                    # - 1B types use dword indexing (`layout_a_div4`) to match the specialized 16B
+                    #   buffer-load path.
+                    # - 2B types use element indexing (row-major) for buffer_load(vec<8x{f16|bf16}>).
+                    if elem_bytes == 1:
+                        coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
+                        idx_elem = flir.crd2idx(coord_a_g, layout_a_div4)
+                    else:
+                        # Convert col_a_local_i32 (dword units) -> element units for 2B types:
+                        #   dword = 4 bytes = 2 elements (fp16/bf16)
+                        col_elems = (col_a_local_i32 * arith.constant(2, index=True))
+                        base_k_elems = (base_k_div4 * arith.constant(2, index=True))
+                        idx_elem = (row_a_global * c_k) + (base_k_elems + col_elems)
                     a_16B = load_a_16(idx_elem)
+                    # Keep the LDS store path unchanged: bitcast to i32x4 (16B) for swizzled store.
                     parts.append(vector.bitcast(T.i32x4, a_16B))
                 return parts
 
@@ -611,11 +645,15 @@ def compile_preshuffle_gemm_a8(
 
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
 
+                use_f16_k32 = bool(is_f16) and str(gpu_arch).startswith("gfx950")
                 if is_int8:
                     mfma_fn = mfma_i32_k32
                 elif is_f16:
-                    # gfx942 fp16 MFMA: 16x16x16 f16 (operands are v4f16, 8B packs)
-                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                    mfma_fn = (
+                        rocdl.mfma_f32_16x16x32_f16
+                        if use_f16_k32
+                        else rocdl.mfma_f32_16x16x16f16
+                    )
                 elif is_bf16:
                     # bf16 MFMA K16 variant uses i16 bit-pattern packs (v4i16)
                     mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
@@ -627,6 +665,17 @@ def compile_preshuffle_gemm_a8(
 
                 # "K64-byte wrapper": two back-to-back MFMA/WMMA ops using the two 8B halves.
                 def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    if use_f16_k32:
+                        # Pack 2x8B f16 packs into one 16B f16x8 and use single K32 MFMA.
+                        a_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), a0), static_position=[0], dynamic_position=[])
+                        a_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), a1), static_position=[0], dynamic_position=[])
+                        b_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), b0), static_position=[0], dynamic_position=[])
+                        b_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), b1), static_position=[0], dynamic_position=[])
+                        a2 = vector.from_elements(T.vec(2, T.i64), [a_i64_0, a_i64_1])
+                        b2 = vector.from_elements(T.vec(2, T.i64), [b_i64_0, b_i64_1])
+                        a8 = vector.bitcast(T.f16x8, a2)
+                        b8 = vector.bitcast(T.f16x8, b2)
+                        return mfma_step(acc_in, a8, b8)
                     acc_mid = mfma_step(acc_in, a0, b0)
                     return mfma_step(acc_mid, a1, b1)
 
@@ -827,6 +876,7 @@ def compile_preshuffle_gemm_a8(
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     col_base = by_n + n_tile_base + lane_mod_16
                     idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
+                    # Rely on buffer descriptor OOB for tail M/N.
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
                         acc = final_accs[acc_idx]

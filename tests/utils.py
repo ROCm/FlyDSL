@@ -321,3 +321,94 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Te
     x_ = x_.view(x_type)
     x_.is_shuffled = True
     return x_
+
+
+def shuffle_weight_a16w4(src: torch.Tensor, NLane: int, gate_up: bool) -> torch.Tensor:
+    """Shuffle MXFP4 weights for A16W4 MoE kernels (layout matches aiter).
+
+    Args:
+      src: shape [experts_cnt, N, K_pk], where K_pk = K // 2 for fp4x2 packing.
+      NLane: N lane factor (aiter uses 16).
+      gate_up: whether N dimension is (gate, up) concatenation (N=2*inter_dim).
+
+    Returns:
+      Tensor with the same shape/dtype as src, with `is_shuffled=True` attribute.
+    """
+    src_type = src.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and src_type == torch.float4_e2m1fn_x2:
+        src = src.view(torch.uint8)
+    experts_cnt, N, K_pk = src.shape
+    if gate_up:
+        N = N // 2
+    KPack = 16
+    KLane = 64 // NLane  # 4
+    N0 = N // NLane
+    K0 = K_pk // (KLane * KPack)
+    if gate_up:
+        src_reshaped = src.view(experts_cnt, 2, N0, NLane, K0, KLane, KPack)
+        src_reshaped = src_reshaped.permute(0, 2, 1, 4, 5, 3, 6).contiguous()
+        interleaved = src_reshaped.view(*src.shape)
+    else:
+        src_reshaped = src.view(experts_cnt, N0, NLane, K0, KLane, KPack)
+        interleaved = src_reshaped.permute(0, 1, 3, 4, 2, 5).contiguous().view(*src.shape)
+    out = interleaved.contiguous().view(src_type)
+    out.is_shuffled = True
+    return out
+
+
+def shuffle_scale_a16w4(src: torch.Tensor, experts_cnt: int, gate_up: bool) -> torch.Tensor:
+    """Shuffle MXFP4 e8m0 scales for A16W4 MoE kernels (layout matches aiter).
+
+    src is expected to be 2D, where rows correspond to (experts * N) and columns
+    correspond to (K // 32) blocks (MXFP4_QUANT_BLOCK_SIZE=32).
+    """
+    n_experts, k_ = src.shape
+    n_ = n_experts // experts_cnt
+    # MXFP4 constants
+    K_Pack = 2
+    N_Pack = 2
+    N_Lane = 16
+    K_Lane = 64 // N_Lane  # 4
+
+    # Basic dimensions
+    K1 = k_ // K_Pack // K_Lane  # k_ // 8
+    N1 = n_ // N_Lane // N_Pack  # n_ // 32
+    real_k = 32 * k_ * K_Pack * K_Lane  # 1x32 quant
+    assert real_k >= 256, f"K {real_k} must be larger than Tile_K(256)"
+
+    if gate_up:
+        shfl_scale = src.view(experts_cnt, N_Pack, N1, N_Lane, K1, K_Pack, K_Lane)
+        shfl_scale = shfl_scale.permute(0, 2, 4, 6, 3, 5, 1).contiguous()
+    else:
+        shfl_scale = src.view(experts_cnt, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane)
+        shfl_scale = shfl_scale.permute(0, 1, 4, 6, 3, 5, 2).contiguous()
+    return shfl_scale.view(*src.shape).contiguous()
+
+
+def dequant_mxfp4_e8m0_to_fp16(w_fp32_2d: torch.Tensor) -> torch.Tensor:
+    """Quantize to (MXFP4 + e8m0 per_1x32 scales) then dequantize back to fp16.
+
+    This mirrors aiter's (MXFP4 + e8m0) quant scheme but returns a dense fp16 tensor.
+    Intended for **test harnesses** that want A16W4-style weights while running fp16 kernels.
+    """
+    import pytest
+    from flydsl.runtime.device import get_rocm_arch
+
+    arch = str(get_rocm_arch())
+    if "gfx950" not in arch:
+        pytest.skip(f"MXFP4/e8m0 dequant helper is only enabled on gfx950 (current arch: {arch}).")
+    try:
+        import aiter
+    except Exception:
+        pytest.skip("aiter not available; cannot use fp4_utils for MXFP4 pack/unpack.")
+    if not hasattr(aiter, "fp4_utils"):
+        pytest.skip("aiter.fp4_utils not available; cannot use MXFP4 pack/unpack.")
+
+    fu = aiter.fp4_utils
+    w_bf16 = w_fp32_2d.to(torch.bfloat16).contiguous()
+    w_q, w_s = fu.dynamic_mxfp4_quant(w_bf16, shuffle=False)  # q: float4_e2m1fn_x2, s: float8_e8m0fnu
+    w_f32 = fu.mxfp4_to_f32(w_q)  # (rows, K)
+    rows = w_bf16.shape[0]
+    s_f32 = fu.e8m0_to_f32(w_s[:rows, :])  # (rows, K/32)
+    s_exp = s_f32.repeat_interleave(32, dim=1)  # (rows, K)
+    return (w_f32 * s_exp).to(torch.float16).contiguous()
