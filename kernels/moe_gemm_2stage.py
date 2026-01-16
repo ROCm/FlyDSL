@@ -1024,7 +1024,6 @@ def compile_moe_gemm1(
 
 def compile_moe_gemm2(
     *,
-    tokens: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -1032,8 +1031,6 @@ def compile_moe_gemm2(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    sorted_size: int,
-    size_expert_ids: int,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
@@ -1078,12 +1075,14 @@ def compile_moe_gemm2(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    size_out = int(tokens) * int(model_dim)
-    size_x = int(tokens) * int(topk) * int(inter_dim)
+    DYN = ir.ShapedType.get_dynamic_size()
+    size_out = DYN
+    size_x = DYN
+    size_sorted = DYN
+    size_expert_ids_shape = DYN
+    size_scale_x = DYN
     # W is packed int4 for W4A8: 2 values per byte.
     size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
-    size_sorted = int(sorted_size)
-    size_expert_ids = int(size_expert_ids)
 
     total_threads = 256
     elems_x_per_tile = tile_m * tile_k
@@ -1121,12 +1120,11 @@ def compile_moe_gemm2(
     # binary for a different (tile_m, tile_n, tile_k) configuration.
     # See stage1 note: include ABI tag to prevent binary reuse across signature changes.
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
-    # Since stage2 uses **static memref sizes** (tokens/sorted_size/size_expert_ids),
-    # include those in the name to prevent cross-shape binary reuse.
+    # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
+    # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi12"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi14_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_tok{int(tokens)}_ss{int(sorted_size)}_eid{int(size_expert_ids)}"
     ).replace("-", "_")
 
     class _MOE2(flir.MlirModule):
@@ -1153,14 +1151,16 @@ def compile_moe_gemm2(
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens * topk, T.f32()),
+            arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
+            arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             x_elem = I.i8 if is_int8 else I.f8
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
@@ -1242,6 +1242,15 @@ def compile_moe_gemm2(
             sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
             bx_m = bx * arith.constant(tile_m, index=True)
 
+            # Early-exit guard (as in 2ce65fb): some routing paths can produce extra/garbage
+            # expert blocks beyond `num_valid_ids`. Skip those blocks entirely to avoid OOB.
+            numids_rsrc = buffer_ops.create_buffer_resource(arg_num_valid_ids, max_size=False)
+            num_valid_i32 = buffer_ops.buffer_load(
+                numids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
+            )
+            bx_m_i32 = arith.index_cast(i32, bx_m)
+            blk_valid = arith.cmpu(bx_m_i32, num_valid_i32, "ult")
+
             def _moe_gemm2_then_body():
                 # Expert id for this M tile.
                 expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
@@ -1274,8 +1283,8 @@ def compile_moe_gemm2(
     
                 topk_i32 = arith.i32(topk)
                 mask24 = arith.i32(0xFFFFFF)
-                # Match origin/main: keep `tokens` as a compile-time constant for the sentinel clamp.
-                tokens_i32 = arith.i32(int(tokens))
+                # Sentinel clamp uses `tokens` as the upper bound: t_valid = (t < tokens).
+                tokens_i32 = arith.index_cast(i32, tokens_in)
     
                 def x_tile_chunk_coord_i32(i: int):
                     return tile_chunk_coord_i32(
@@ -1942,24 +1951,28 @@ def compile_moe_gemm2(
                         store_pair=store_pair,
                     )
     
-            _moe_gemm2_then_body()
+            _if_blk = scf.IfOp(blk_valid)
+            with _if_blk.then():
+                _moe_gemm2_then_body()
         @flir.jit
         def __call__(
             self: flir.T.i64,
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
             arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
-            arg_scale_x: lambda: T.memref(tokens * topk, T.f32()),
+            arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids, T.i32()),
+            arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
+            arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
+            size_expert_ids_in: lambda: T.index(),
         ):
             bdx = 256
-            gx = arith.constant(size_expert_ids, index=True)
+            gx = size_expert_ids_in
             gy = n_in / arith.index(tile_n)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
@@ -1974,9 +1987,11 @@ def compile_moe_gemm2(
                     arg_sorted_token_ids,
                     arg_expert_ids,
                     arg_sorted_weights,
+                    arg_num_valid_ids,
                     tokens_in,
                     n_in,
                     k_in,
+                    size_expert_ids_in,
                 ],
             )
 

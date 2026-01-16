@@ -760,7 +760,9 @@ def run_moe_stage2(
     sorted_expert_ids = routing.sorted_expert_ids
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
-    # Stage2 relies on `num_valid_ids` to avoid processing sentinel padded rows (token==tokens).
+    # NOTE: routing pads sorted_token_ids/weights to full blocks with sentinel token==tokens.
+    # Stage2 handles these via sentinel clamp/guards. For aiter mode, `num_valid_ids` is still
+    # used upstream to trim potential garbage entries from aiter outputs.
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
@@ -836,7 +838,6 @@ def run_moe_stage2(
 
     doweight_stage2 = not bool(doweight_stage1)
     exe = compile_moe_gemm2(
-        tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -845,8 +846,6 @@ def run_moe_stage2(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        sorted_size=sorted_size,
-        size_expert_ids=int(sorted_expert_ids.numel()),
         doweight_stage2=bool(doweight_stage2),
     )
 
@@ -860,9 +859,11 @@ def run_moe_stage2(
             st,
             eids,
             sw_sorted,
+            num_valid_ids,
             tokens,
             model_dim,
             inter_dim,
+            int(eids.numel()),
         )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
