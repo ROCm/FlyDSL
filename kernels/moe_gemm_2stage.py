@@ -1449,12 +1449,14 @@ def compile_moe_gemm2(
                 fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                 t_i32 = arith.andi(fused_i, mask24)
                 s_i32 = arith.shrui(fused_i, arith.i32(24))
-                # Guard sentinel padded token id (t_i32 == tokens) / any OOB:
-                # clamp row index so global loads stay in-bounds; masked stores/atomics
-                # will zero out contributions for invalid rows.
+                # A2 row index = t*topk + s (still i32 here).
+                #
+                # TODO: Stage2 uses buffer atomics for output accumulation. On some
+                # stacks/arches, OOB buffer atomics are not reliably suppressed by the
+                # buffer descriptor bounds, and can fault. Clamp sentinel/padded token ids
+                # to keep atomic addresses in-bounds.
                 t_valid = arith.ult(t_i32, tokens_i32)
                 t_i32_safe = arith.select(t_valid, t_i32, arith.i32(0))
-                # A2 row index = t*topk + s (still i32 here).
                 row_ts_i32 = t_i32_safe * topk_i32 + s_i32
                 row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
                 # Base row offset in dword units: row_ts_idx * (k_in/4)
