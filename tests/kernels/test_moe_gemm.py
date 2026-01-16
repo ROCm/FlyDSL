@@ -760,6 +760,7 @@ def run_moe_stage2(
     sorted_expert_ids = routing.sorted_expert_ids
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
+    # Stage2 relies on `num_valid_ids` to avoid processing sentinel padded rows (token==tokens).
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
@@ -815,17 +816,8 @@ def run_moe_stage2(
     if is_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
 
-    # Pad storage for forced global dwordx4 loads (same trick as existing GEMM tests).
-    PAD_ELEMS = 256
-    a2_flat = a2_q.contiguous().view(-1)
-    a2_storage = torch.empty(a2_flat.numel() + PAD_ELEMS, device=device, dtype=a2_q.dtype)
-    a2_storage[: a2_flat.numel()] = a2_flat
-    a2_q = a2_storage[: a2_flat.numel()].view(tokens, topk, inter_dim)
-
     w2_flat = w2_kernel.contiguous().view(-1)
-    w2_storage = torch.empty(w2_flat.numel() + PAD_ELEMS, device=device, dtype=w2_flat.dtype)
-    w2_storage[: w2_flat.numel()] = w2_flat
-    w2_kernel = w2_storage[: w2_flat.numel()]
+    w2_kernel = w2_flat
     if not is_int4:
         w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
 
@@ -844,6 +836,7 @@ def run_moe_stage2(
 
     doweight_stage2 = not bool(doweight_stage1)
     exe = compile_moe_gemm2(
+        tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -852,6 +845,8 @@ def run_moe_stage2(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
+        sorted_size=sorted_size,
+        size_expert_ids=int(sorted_expert_ids.numel()),
         doweight_stage2=bool(doweight_stage2),
     )
 
@@ -865,11 +860,9 @@ def run_moe_stage2(
             st,
             eids,
             sw_sorted,
-            num_valid_ids,
             tokens,
             model_dim,
             inter_dim,
-            int(eids.numel()),
         )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
