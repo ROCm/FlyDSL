@@ -29,9 +29,11 @@ if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
+from tests.kernels.utils import fp4_utils
 
 
 logging.basicConfig(level=logging.INFO)
@@ -262,6 +264,191 @@ def test_mfma_a8_flir_preshuffle(
         print("-" * 40)
 
 
+@pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
+@pytest.mark.parametrize("b_dtype", ["fp4"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k", 
+    [
+        (32, 5120, 8192, 32, 64, 512), 
+        (5120, 5120, 8320, 64, 256, 128), 
+        (9728, 8192, 8320, 128, 128, 128),
+        (5133, 5120, 8320, 64, 256, 128),
+    ]
+)
+def test_mfma_w4_flir_preshuffle(
+    a_dtype,
+    b_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    lds_stage: int = DEFAULT_LDS_STAGE,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    use_cshuffle_epilog: bool = False,
+):
+    print("=" * 80)
+    print(
+        f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
+    )
+    print("=" * 80)
+
+    def per_1x32_f4_quant(x, scale=None, quant_dtype=fp4_utils.fp4x2, shuffle=False):
+        assert quant_dtype == fp4_utils.fp4x2
+        block_size = 32
+        F8E8M0_EXP_BIAS = 127
+        F4E2M1_MAX = 6.0
+        MAX_POW2 = int(torch.log2(torch.tensor(F4E2M1_MAX, dtype=torch.float32)).item())
+        # dtypeMax = F4E2M1_MAX
+        dtypeMax = 2.0**MAX_POW2
+
+        shape_original = x.shape
+        x = x.view(-1, shape_original[-1])
+
+        m, n = x.shape
+        x = x.view(-1, block_size)
+        max_abs = torch.amax(torch.abs(x.float()), 1)
+        # max_abs = max_abs.view(torch.int32)
+        # max_abs = ((max_abs + 0x200000) & 0xFF800000).view(torch.float32)
+
+        # fp8e8m0fnu_from_fp32_value
+        scale_e8m0_biased = fp4_utils.f32_to_e8m0(max_abs / dtypeMax)
+
+        # Float8_e8m0fnu to float
+        scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0_biased)
+
+        y = x.float() / scale_f32.view(-1, 1)
+        y = fp4_utils.f32_to_mxfp4(y)
+        y = y.view(*shape_original[:-1], -1)
+        scale = scale_e8m0_biased.view(m, -1).view(torch.uint8)
+        if shuffle:
+            scale = fp4_utils.e8m0_shuffle(scale)
+        return y, scale.view(fp8_e8m0)
+
+    lds_stage = int(lds_stage)
+    if lds_stage not in (1, 2):
+        raise ValueError(
+            f"lds_stage must be 1 or 2, got {lds_stage!r}"
+        )
+    exe = compile_mxfp4_preshuffle_gemm(
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
+        lds_stage=lds_stage,
+        use_cshuffle_epilog=bool(use_cshuffle_epilog),
+    )
+    print(f"✓ Compiled (lds_stage={lds_stage})")
+
+    size_c = M * N
+    size_b = (N * K) // 2
+    elem_bytes = 1
+
+    # A is packed fp4 for A8W4: 2 values per byte.
+    if a_dtype == "fp8":
+        size_a = M * K
+    else:
+        size_a = (M * K) // 2
+
+    device = torch.device("cuda")
+
+    torch.manual_seed(42)
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
+
+    if a_dtype == "fp4":
+        a_q, scale_a = per_1x32_f4_quant(a_fp32)  # (M, K)
+    else:
+        a_q = a_q.to(DTYPE_FP8)
+        scale_a = torch.ones([M, N // 32], dtype=fp8_e8m0, device=a1.device)
+
+    b_q, scale_b = per_1x32_f4_quant(b_fp32)  # (N, K)
+
+    # Keep tensors contiguous for predictable buffer descriptor shapes.
+    a_q = a_q.contiguous()
+    b_q = b_q.contiguous()
+
+    # Preshuffle B to CK/aiter layout.
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(b_q, 1, False)
+
+    # Reference (dequant + matmul).
+    # c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
+    c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
+
+    # Run kernel (f16 output, in-kernel scaling).
+    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
+
+    def launch_kernel(c, a, b, sa, sb):
+        # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
+        if sa is None:
+            sa = torch.empty((0,), device=c.device, dtype=torch.float32)
+        if sb is None:
+            sb = torch.empty((0,), device=c.device, dtype=torch.float32)
+        exe(c, a, b, sa, sb, M, N, K)
+
+    # `run_perftest` requires num_iters > 1.
+    bench_iters = max(2, int(bench_iters))
+    bench_warmup = int(bench_warmup)
+    # _, us = run_perftest(
+    #     launch_kernel,
+    #     c_out_raw,
+    #     a_q,
+    #     b_shuffled,
+    #     scale_a,
+    #     scale_b_shuffled,
+    #     num_iters=bench_iters,
+    #     num_warmup=bench_warmup,
+    # )
+    # torch.cuda.synchronize()
+    c_out_scaled = c_out_raw.to(torch.float32)
+
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+    # if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
+    #     print("-" * 40)
+    #     print("Running Aiter Benchmark...")
+    #     try:
+    #         def launch_aiter(a, b, sa, sb):
+    #             return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
+    #
+    #         c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b)
+    #         verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+    #
+    #         tflops_aiter = flops / (us1 / 1e6) / 1e12
+    #         bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
+    #         print(
+    #             f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
+    #         )
+    #         print(
+    #             f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
+    #         )
+    #         print("-" * 40)
+    #     except Exception as e:
+    #         # Best-effort only: aiter can be importable but fail to load its JIT .so deps.
+    #         msg = str(e).splitlines()[0] if str(e) else repr(e)
+    #         print(f"Skipping Aiter benchmark (not runnable here): {msg}")
+    #         print("-" * 40)
+    # elif HAS_AITER and (not bool(run_aiter_bench)):
+    #     print("-" * 40)
+    #     print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
+    #     print("-" * 40)
+
+
 if __name__ == "__main__":
     import argparse
     
@@ -318,22 +505,45 @@ if __name__ == "__main__":
         default=False,
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
+    parser.add_argument(
+        "--wfp4",
+        action="store_true",
+        default=False,
+        help="Use weight fp4 gemm.",
+    )
     
     args = parser.parse_args()
     
     torch.set_default_device("cuda")
-    test_mfma_a8_flir_preshuffle(
-        args.in_dtype, 
-        M=args.M, 
-        N=args.N, 
-        K=args.K, 
-        tile_m=args.tile_m, 
-        tile_n=args.tile_n, 
-        tile_k=args.tile_k,
-        lds_stage=args.lds_stage,
-        bench_iters=args.num_iters,
-        bench_warmup=args.num_warmup,
-        run_aiter_bench=bool(args.run_aiter_bench),
-        use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
-    )
+    if not args.wfp4:
+        test_mfma_a8_flir_preshuffle(
+            args.in_dtype, 
+            M=args.M, 
+            N=args.N, 
+            K=args.K, 
+            tile_m=args.tile_m, 
+            tile_n=args.tile_n, 
+            tile_k=args.tile_k,
+            lds_stage=args.lds_stage,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
+            run_aiter_bench=bool(args.run_aiter_bench),
+            use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+        )
+    else:
+        test_mfma_w4_flir_preshuffle(
+            args.in_dtype if args.in_dtype == "fp8" else "fp4", 
+            "fp4", 
+            M=args.M, 
+            N=args.N, 
+            K=args.K, 
+            tile_m=args.tile_m, 
+            tile_n=args.tile_n, 
+            tile_k=args.tile_k,
+            lds_stage=args.lds_stage,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
+            run_aiter_bench=bool(args.run_aiter_bench),
+            use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+        )
 
