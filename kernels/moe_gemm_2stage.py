@@ -1123,7 +1123,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi14_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi15_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1832,8 +1832,13 @@ def compile_moe_gemm2(
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
 
-                        ts2 = t2 * topk_i32_v + s2
+                        # Guard sentinel padded rows (t2 == tokens) / any OOB: clamp indices to stay
+                        # in-bounds for dynamic memrefs (do not rely on hardware OOB behavior).
+                        t_valid = arith.cmpu(t2, tokens_i32, "ult")
+                        t2_safe = arith.select(t_valid, t2, arith.i32(0))
+                        ts2 = t2_safe * topk_i32_v + s2
                         sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                        sx = arith.select(t_valid, sx, arith.constant(0.0, type=f32))
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
@@ -1842,7 +1847,7 @@ def compile_moe_gemm2(
                             else:
                                 tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
 
-                        idx0 = t2 * model_i32  # i32 element index base (OOB for sentinel padded rows)
+                        idx0 = t2_safe * model_i32  # i32 element index base (safe for sentinel padded rows)
 
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
@@ -1857,7 +1862,11 @@ def compile_moe_gemm2(
                             col_i32 = arith.index_cast(i32, col_g)
                             idx_elem = idx0 + col_i32
                             byte_off = idx_elem * c4_i32
-                            atomic_add_f32(v, byte_off)
+                            # IMPORTANT: for sentinel padded rows, skip atomics entirely.
+                            # (A 0.0 atomic-add still costs; b27aaab relied on OOB drop behavior.)
+                            _if = scf.IfOp(t_valid)
+                            with _if.then():
+                                atomic_add_f32(v, byte_off)
 
                     default_epilog(
                         arith=arith,
@@ -1888,8 +1897,13 @@ def compile_moe_gemm2(
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
-                        ts2 = t2 * topk_i32_v + s2
+                        # Guard sentinel padded rows (t2 == tokens) / any OOB: clamp indices to stay
+                        # in-bounds for dynamic memrefs (do not rely on hardware OOB behavior).
+                        t_valid = arith.cmpu(t2, tokens_i32, "ult")
+                        t2_safe = arith.select(t_valid, t2, arith.i32(0))
+                        ts2 = t2_safe * topk_i32_v + s2
                         sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                        sx = arith.select(t_valid, sx, arith.constant(0.0, type=f32))
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
@@ -1919,7 +1933,9 @@ def compile_moe_gemm2(
                     def precompute_row(*, row_local, row):
                         fused_s = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t_s = fused_s & mask24_i32
-                        return t_s * model_i32  # i32 element index base
+                        t_valid = arith.cmpu(t_s, tokens_i32, "ult")
+                        t_s_safe = arith.select(t_valid, t_s, arith.i32(0))
+                        return t_s_safe * model_i32  # i32 element index base (safe)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         idx0 = row_ctx
