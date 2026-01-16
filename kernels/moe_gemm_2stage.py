@@ -246,15 +246,51 @@ def compile_moe_gemm1(
             # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
             # used directly (CK-style). This allows us to avoid `select`-based masking for
             # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
+            #
+            # IMPORTANT: these are dynamically-shaped memrefs (`memref<?xT>`), so without an
+            # explicit `num_records_bytes`, the descriptor helper can fall back to "max size",
+            # which effectively disables hardware OOB checks and can turn tail OOB into GPU faults.
+            x_rsrc = buffer_ops.create_buffer_resource(
+                arg_x,
+                max_size=False,
+                num_records_bytes=int(tokens * model_dim * elem_bytes),
+            )
+            # Weights are flattened/preshuffled; size is the full expert matrix.
+            w_rsrc = buffer_ops.create_buffer_resource(
+                arg_w,
+                max_size=False,
+                num_records_bytes=int(experts * (2 * inter_dim) * model_dim * elem_bytes),
+            )
+            # Output is fp16.
+            out_rsrc = buffer_ops.create_buffer_resource(
+                arg_out,
+                max_size=False,
+                num_records_bytes=int(tokens * topk * inter_dim * 2),
+            )
             # fp16 path ignores scales completely (implicit scale=1.0).
-            sx_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
+            sx_rsrc = (
+                None
+                if is_f16
+                else buffer_ops.create_buffer_resource(
+                    arg_scale_x, max_size=False, num_records_bytes=int(tokens * 4)
+                )
+            )
+            sw_rsrc = (
+                None
+                if is_f16
+                else buffer_ops.create_buffer_resource(
+                    arg_scale_w, max_size=False, num_records_bytes=int(experts * (2 * inter_dim) * 4)
+                )
+            )
+            sorted_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_token_ids, max_size=False, num_records_bytes=int(sorted_size * 4)
+            )
+            expert_rsrc = buffer_ops.create_buffer_resource(
+                arg_expert_ids, max_size=False, num_records_bytes=int(size_expert_ids * 4)
+            )
+            sorted_w_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_weights, max_size=False, num_records_bytes=int(sorted_size * 4)
+            )
 
             # Expert id for this M tile (keep address math in `index`)
             expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
@@ -338,15 +374,20 @@ def compile_moe_gemm1(
                 For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                 """
                 if x_load_bytes == 16:
-                    idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
-                    return buffer_copy_gmem16_dwordx4(
-                        flir,
-                        arg=arg_x,
-                        elem_type=x_elem,
-                        idx_i32=idx_elem,
-                        atom_g2r16=atom_x_g2r16,
-                        rsrc=x_rsrc,
-                        vec_elems=vec16_elems,
+                    if elem_bytes == 1:
+                        return buffer_copy_gmem16_dwordx4(
+                            flir,
+                            arg=arg_x,
+                            elem_type=x_elem,
+                            idx_i32=idx_i32,
+                            atom_g2r16=atom_x_g2r16,
+                            rsrc=x_rsrc,
+                            vec_elems=vec16_elems,
+                        )
+                    # fp16 path: avoid the dword-indexed helper (it is tuned for 1B types).
+                    idx_elem = idx_i32 * arith.index(2)  # dword -> element
+                    return buffer_ops.buffer_load(
+                        x_rsrc, idx_elem, vec_width=8, dtype=ir.F16Type.get()
                     )
                 idx_bytes = idx_i32 * arith.index(4)
                 atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -617,11 +658,16 @@ def compile_moe_gemm1(
             ):
                 gate_list = list(acc_gate_in)
                 up_list = list(acc_up_in)
+                use_f16_k32 = bool(is_f16) and str(gpu_arch).startswith("gfx950")
                 mfma_res_ty = vec4_i32 if is_int8 else vec4_f32
                 if is_int8:
                     mfma_fn = mfma_i32_k32
                 elif is_f16:
-                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                    mfma_fn = (
+                        rocdl.mfma_f32_16x16x32_f16
+                        if use_f16_k32
+                        else rocdl.mfma_f32_16x16x16f16
+                    )
                 else:
                     mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -641,7 +687,17 @@ def compile_moe_gemm1(
                         sw_up_pf.append(buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32))
                     epilogue_pf = (sw_gate_pf, sw_up_pf)
 
+                def _pack_f16x8(v0_f16x4, v1_f16x4):
+                    b0_i64 = vector.extract(vector.bitcast(vec1_i64, v0_f16x4), static_position=[0], dynamic_position=[])
+                    b1_i64 = vector.extract(vector.bitcast(vec1_i64, v1_f16x4), static_position=[0], dynamic_position=[])
+                    v2 = vector.from_elements(vec2_i64, [b0_i64, b1_i64])
+                    return vector.bitcast(vec16_x, v2)  # vec16_x is 16B: 8xf16 when elem_bytes==2
+
                 def mfma_k64(acc_in, a0, a1, b0, b1):
+                    if use_f16_k32:
+                        a8 = _pack_f16x8(a0, a1)
+                        b8 = _pack_f16x8(b0, b1)
+                        return mfma_fn(mfma_res_ty, [a8, b8, acc_in, 0, 0, 0])
                     acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
                     return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
 
@@ -1258,15 +1314,46 @@ def compile_moe_gemm2(
             )
 
             # Buffer resources (logical sizes: allow hardware OOB checks).
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
+            # See stage1 notes above re: dynamic memref types and `num_records_bytes`.
+            x_rsrc = buffer_ops.create_buffer_resource(
+                arg_x,
+                max_size=False,
+                num_records_bytes=int(tokens * inter_dim * 2),  # stage2 input is fp16 activations
+            )
+            w_rsrc = buffer_ops.create_buffer_resource(
+                arg_w,
+                max_size=False,
+                num_records_bytes=int(experts * model_dim * inter_dim * elem_bytes),
+            )
+            out_rsrc = buffer_ops.create_buffer_resource(
+                arg_out,
+                max_size=False,
+                num_records_bytes=int(tokens * topk * model_dim * 2),  # fp16 output
+            )
             # fp16 path ignores scales completely (implicit scale=1.0).
-            sx_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = None if is_f16 else buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
+            sx_rsrc = (
+                None
+                if is_f16
+                else buffer_ops.create_buffer_resource(
+                    arg_scale_x, max_size=False, num_records_bytes=int(tokens * 4)
+                )
+            )
+            sw_rsrc = (
+                None
+                if is_f16
+                else buffer_ops.create_buffer_resource(
+                    arg_scale_w, max_size=False, num_records_bytes=int(experts * model_dim * 4)
+                )
+            )
+            sorted_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_token_ids, max_size=False, num_records_bytes=int(sorted_size * 4)
+            )
+            expert_rsrc = buffer_ops.create_buffer_resource(
+                arg_expert_ids, max_size=False, num_records_bytes=int(size_expert_ids * 4)
+            )
+            sorted_w_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_weights, max_size=False, num_records_bytes=int(sorted_size * 4)
+            )
 
             # Expert id for this M tile.
             expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
@@ -1328,15 +1415,19 @@ def compile_moe_gemm2(
 
             def load_x(idx_i32):
                 if x_load_bytes == 16:
-                    idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
-                    return buffer_copy_gmem16_dwordx4(
-                        flir,
-                        arg=arg_x,
-                        elem_type=x_elem,
-                        idx_i32=idx_elem,
-                        atom_g2r16=atom_x_g2r16,
-                        rsrc=x_rsrc,
-                        vec_elems=vec16_elems,
+                    if elem_bytes == 1:
+                        return buffer_copy_gmem16_dwordx4(
+                            flir,
+                            arg=arg_x,
+                            elem_type=x_elem,
+                            idx_i32=idx_i32,
+                            atom_g2r16=atom_x_g2r16,
+                            rsrc=x_rsrc,
+                            vec_elems=vec16_elems,
+                        )
+                    idx_elem = idx_i32 * arith.index(2)  # dword -> element
+                    return buffer_ops.buffer_load(
+                        x_rsrc, idx_elem, vec_width=8, dtype=ir.F16Type.get()
                     )
                 idx_bytes = idx_i32 * arith.index(4)
                 atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -1595,11 +1686,16 @@ def compile_moe_gemm2(
 
             def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
                 acc_list = list(acc_in)
+                use_f16_k32 = bool(is_f16) and str(gpu_arch).startswith("gfx950")
                 mfma_res_ty = vec4_i32 if is_int8 else vec4_f32
                 if is_int8:
                     mfma_fn = mfma_i32_k32
                 elif is_f16:
-                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                    mfma_fn = (
+                        rocdl.mfma_f32_16x16x32_f16
+                        if use_f16_k32
+                        else rocdl.mfma_f32_16x16x16f16
+                    )
                 else:
                     mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -1632,10 +1728,25 @@ def compile_moe_gemm2(
                                 )
                     epilogue_pf = (sw_pf, tw_pf)
 
+                def _pack_f16x8(v0_f16x4, v1_f16x4):
+                    b0_i64 = vector.extract(
+                        vector.bitcast(vec1_i64, v0_f16x4),
+                        static_position=[0],
+                        dynamic_position=[],
+                    )
+                    b1_i64 = vector.extract(
+                        vector.bitcast(vec1_i64, v1_f16x4),
+                        static_position=[0],
+                        dynamic_position=[],
+                    )
+                    v2 = vector.from_elements(vec2_i64, [b0_i64, b1_i64])
+                    return vector.bitcast(vec16_x, v2)  # 16B: 8xf16 when elem_bytes==2
+
                 def mfma_k64(acc0, a0, a1, b0, b1):
-                    if is_f16:
-                        acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
-                        return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
+                    if use_f16_k32:
+                        a8 = _pack_f16x8(a0, a1)
+                        b8 = _pack_f16x8(b0, b1)
+                        return mfma_fn(mfma_res_ty, [a8, b8, acc0, 0, 0, 0])
                     acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
                     return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
 
