@@ -274,6 +274,7 @@ class RoutingBuffers:
     sorted_expert_ids: torch.Tensor
     num_valid_ids: torch.Tensor
     sorted_size: int
+    blocks: int
 
 
 def build_routing_buffers(
@@ -328,12 +329,14 @@ def build_routing_buffers(
         block_m=tile_m,
     )
     sorted_size = int(sorted_token_ids.numel())
+    blocks = int(sorted_expert_ids.numel())
     return RoutingBuffers(
         sorted_token_ids=sorted_token_ids,
         sorted_weights=sorted_weights,
         sorted_expert_ids=sorted_expert_ids,
         num_valid_ids=num_valid_ids,
         sorted_size=sorted_size,
+        blocks=blocks,
     )
 
 
@@ -418,11 +421,13 @@ def run_moe_stage1(
             moe_sort_mode=moe_sort_mode,
         )
     )
+    blocks = int(routing.blocks)
     sorted_token_ids = routing.sorted_token_ids
     sorted_weights = routing.sorted_weights
     sorted_expert_ids = routing.sorted_expert_ids
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
+    blocks = int(routing.blocks)
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
@@ -512,7 +517,7 @@ def run_moe_stage1(
             tokens,
             inter_dim,
             model_dim,
-            int(eids.numel()),
+            int(blocks),
         )
 
     _p("stage1: launch kernel")
@@ -748,6 +753,7 @@ def run_moe_stage2(
             moe_sort_mode=moe_sort_mode,
         )
     )
+    blocks = int(routing.blocks)
     sorted_token_ids = routing.sorted_token_ids
     sorted_weights = routing.sorted_weights
     sorted_expert_ids = routing.sorted_expert_ids
@@ -856,7 +862,7 @@ def run_moe_stage2(
             tokens,
             model_dim,
             inter_dim,
-            int(eids.numel()),
+            int(blocks),
         )
 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
