@@ -285,48 +285,40 @@ def build_routing_buffers(
     tile_m: int,
     moe_sort_mode: Optional[str] = None,
 ) -> RoutingBuffers:
-    """Build/pad routing buffers once (CK format), reusable across stage1 + stage2."""
+    """Build/pad routing buffers once (CK format), reusable across stage1 + stage2.
+
+    NOTE: This is intentionally aligned with `aiter/op_tests/test_moe_2stage.py`:
+    - Always use aiter's `moe_sorting` to build routing buffers (no torch fallback).
+    - Trim garbage tails using `num_valid_ids` returned by aiter.
+    - Pad (sorted_ids, sorted_weights) to `blocks*tile_m` with sentinel token==tokens.
+    """
     device = topk_ids.device
-    sort_mode = (
-        (moe_sort_mode or os.environ.get("flydsl_MOE_SORT_MODE", "aiter" if HAS_AITER else "torch"))
-        .lower()
-        .strip()
-    )
-
-    sorted_token_ids = sorted_weights = sorted_expert_ids = num_valid_ids = None
-    if sort_mode == "aiter":
-        res = _maybe_aiter_moe_sorting(
-            topk_ids,
-            topk_weights,
-            num_experts=experts,
-            model_dim=model_dim,
-            block_m=tile_m,
-        )
-        if res is not None:
-            sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
-            # Some aiter builds return `sorted_expert_ids` with extra garbage entries.
-            # Trim based on `num_valid_ids` to keep expert ids in-range and consistent with sorted ids.
-            valid = int(num_valid_ids.view(-1)[0].item())
-            blocks = (valid + int(tile_m) - 1) // int(tile_m)
-            sorted_token_ids = sorted_token_ids[:valid].contiguous()
-            sorted_weights = sorted_weights[:valid].contiguous()
-            sorted_expert_ids = sorted_expert_ids[:blocks].contiguous()
-        else:
-            logging.warning(
-                "aiter moe_sorting unavailable; falling back to torch routing buffers. "
-                "Set flydsl_MOE_SORT_MODE=torch to silence this, or ensure aiter JIT deps are available."
-            )
-            sort_mode = "torch"
-
+    sort_mode = str(moe_sort_mode or os.environ.get("flydsl_MOE_SORT_MODE", "aiter")).lower().strip()
     if sort_mode != "aiter":
-        sorted_token_ids, sorted_weights, sorted_expert_ids = build_sorted_routing(
-            topk_ids,
-            topk_weights,
-            num_experts=experts,
-            model_dim=model_dim,
-            tile_m=tile_m,
+        raise ValueError(
+            f"routing buffer build is aligned to aiter moe_sorting only; got moe_sort_mode={sort_mode!r}"
         )
-        num_valid_ids = torch.tensor([int(sorted_token_ids.numel())], device=device, dtype=torch.int32)
+    if not HAS_AITER:
+        raise RuntimeError("aiter is not available; cannot build routing buffers (moe_sort_mode='aiter').")
+
+    res = _maybe_aiter_moe_sorting(
+        topk_ids,
+        topk_weights,
+        num_experts=experts,
+        model_dim=model_dim,
+        block_m=tile_m,
+    )
+    if res is None:
+        raise RuntimeError("aiter moe_sorting failed/unavailable; cannot build routing buffers.")
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
+
+    # Some aiter builds return `sorted_expert_ids` with extra garbage entries.
+    # Trim based on `num_valid_ids` to keep expert ids in-range and consistent with sorted ids.
+    valid = int(num_valid_ids.view(-1)[0].item())
+    blocks = (valid + int(tile_m) - 1) // int(tile_m)
+    sorted_expert_ids = sorted_expert_ids[:blocks].contiguous()
+    sorted_token_ids = sorted_token_ids[:valid].contiguous()
+    sorted_weights = sorted_weights[:valid].contiguous()
 
     sorted_token_ids, sorted_weights = _pad_sorted_buffers_to_full_blocks(
         sorted_ids=sorted_token_ids,
@@ -1048,32 +1040,20 @@ def test_moe_gemm_2stage(
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
-    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
-    def _p(msg: str):
-        if _dbg:
-            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
-    _p("enter test_moe_gemm_2stage()")
 
-    # NOTE: With naive N(0,1) weights, stage1 output variance grows with K and can easily overflow fp16
-    # outputs in CK paths for large (model_dim, inter_dim). Use a fan-in style init by default to keep
-    # activations O(1) and avoid inf/nan (similar motivation to typical Transformer init).
-    #
     import math
 
     s = float(init_scale)
-    _p("alloc x/w")
     x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
     # fan_in = inter_dim for W2: [E, model, inter]
     w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
-    _p("routing: score/topk")
     score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
-    _p("build_routing_buffers()")
     routing = build_routing_buffers(
         topk_ids=topk_ids,
         topk_weights=topk_weights,
@@ -1083,7 +1063,6 @@ def test_moe_gemm_2stage(
         moe_sort_mode=moe_sort_mode,
     )
 
-    _p("run_moe_stage1()")
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
         model_dim=model_dim,
@@ -1115,7 +1094,6 @@ def test_moe_gemm_2stage(
     else:
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
 
-    _p("run_moe_stage2()")
     _out2_fp32, _us2 = run_moe_stage2(
         tokens=tokens,
         model_dim=model_dim,
@@ -1142,7 +1120,6 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
     )
-    _p("exit test_moe_gemm_2stage()")
 
 
 
@@ -1205,13 +1182,8 @@ if __name__ == "__main__":
     parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
 
     args = parser.parse_args()
-    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
-    def _p(msg: str):
-        if _dbg:
-            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
 
     model_dim, inter_dim = args.dim
-    _p(f"parsed args: tokenNum={args.tokenNum} dim={args.dim} in_dtype={args.in_dtype} moe_sort_mode={args.moe_sort_mode} compare_aiter_ck={args.compare_aiter_ck}")
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = (
@@ -1222,7 +1194,6 @@ if __name__ == "__main__":
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
     for dt in args.in_dtype.split(","):
-        _p(f"call test_moe_gemm_2stage(dt={dt})")
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
