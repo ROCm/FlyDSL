@@ -322,12 +322,12 @@ def test_mfma_w4_flir_preshuffle(
         scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0_biased)
 
         y = x.float() / scale_f32.view(-1, 1)
-        y = fp4_utils.f32_to_mxfp4(y)
-        y = y.view(*shape_original[:-1], -1)
+        y_fp4 = fp4_utils.f32_to_mxfp4(y)
+        y_fp4 = y_fp4.view(*shape_original[:-1], -1)
         scale = scale_e8m0_biased.view(m, -1).view(torch.uint8)
         if shuffle:
             scale = fp4_utils.e8m0_shuffle(scale)
-        return y, scale.view(fp8_e8m0)
+        return y_fp4, scale.view(fp4_utils.fp8_e8m0), y
 
     lds_stage = int(lds_stage)
     if lds_stage not in (1, 2):
@@ -365,24 +365,25 @@ def test_mfma_w4_flir_preshuffle(
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     if a_dtype == "fp4":
-        a_q, scale_a = per_1x32_f4_quant(a_fp32)  # (M, K)
+        a_q, scale_a, _ = per_1x32_f4_quant(a_fp32)  # (M, K)
     else:
-        a_q = a_q.to(DTYPE_FP8)
-        scale_a = torch.ones([M, N // 32], dtype=fp8_e8m0, device=a1.device)
+        a_q = a_fp32.to(DTYPE_FP8)
+        scale_a = torch.ones([M, N // 32], dtype=fp4_utils.fp8_e8m0, device=device)
 
-    b_q, scale_b = per_1x32_f4_quant(b_fp32)  # (N, K)
+    b_q, scale_b, b_convert = per_1x32_f4_quant(b_fp32)  # (N, K)
 
     # Keep tensors contiguous for predictable buffer descriptor shapes.
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
     # Preshuffle B to CK/aiter layout.
-    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False)
-    scale_b_shuffled = fp4_utils.shuffle_scale_w4(b_q, 1, False)
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
     # Reference (dequant + matmul).
     # c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
-    c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
+    c_ref = run_torch(a_fp32, b_convert.reshape([-1, 256]), 1, 1, bias=None, dtype=torch.float32)
+    # c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # Run kernel (f16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
@@ -398,17 +399,17 @@ def test_mfma_w4_flir_preshuffle(
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
     bench_warmup = int(bench_warmup)
-    # _, us = run_perftest(
-    #     launch_kernel,
-    #     c_out_raw,
-    #     a_q,
-    #     b_shuffled,
-    #     scale_a,
-    #     scale_b_shuffled,
-    #     num_iters=bench_iters,
-    #     num_warmup=bench_warmup,
-    # )
-    # torch.cuda.synchronize()
+    _, us = run_perftest(
+        launch_kernel,
+        c_out_raw,
+        a_q,
+        b_shuffled,
+        scale_a,
+        scale_b_shuffled,
+        num_iters=2,
+        num_warmup=1,
+    )
+    torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
@@ -461,11 +462,11 @@ if __name__ == "__main__":
         default="fp8",
         choices=["fp8", "int8", "int4", "fp16", "bf16"],
                         help="Input dtype")
-    parser.add_argument("-M", type=int, default=16, help="M dimension")
-    parser.add_argument("-N", type=int, default=10240, help="N dimension")
-    parser.add_argument("-K", type=int, default=8192, help="K dimension")
+    parser.add_argument("-M", type=int, default=32, help="M dimension")
+    parser.add_argument("-N", type=int, default=128, help="N dimension")
+    parser.add_argument("-K", type=int, default=256, help="K dimension")
     parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
-    parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
+    parser.add_argument("--tile_n", type=int, default=128, help="Tile N")
     parser.add_argument("--tile_k", type=int, default=256, help="Tile K")
     # Explicit CLI knobs (no env vars).
     parser.add_argument(
@@ -531,13 +532,14 @@ if __name__ == "__main__":
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
         )
     else:
+        pack_M = 2
         test_mfma_w4_flir_preshuffle(
             args.in_dtype if args.in_dtype == "fp8" else "fp4", 
             "fp4", 
             M=args.M, 
             N=args.N, 
             K=args.K, 
-            tile_m=args.tile_m, 
+            tile_m=args.tile_m * pack_M, 
             tile_n=args.tile_n, 
             tile_k=args.tile_k,
             lds_stage=args.lds_stage,
