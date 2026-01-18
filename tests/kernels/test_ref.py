@@ -74,7 +74,12 @@ def torch_moe_gemm2(
         experts = int(w2_fp8.shape[0] // model_dim)
 
     # Dequantize inputs.
-    a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
+    # For fp16/a16w4 stage2, callers may pass an empty placeholder tensor for scale_a2.
+    # Treat it as "no scale".
+    if scale_a2 is None or (hasattr(scale_a2, "numel") and scale_a2.numel() == 0):
+        a2 = a2_fp8.to(torch.float32)
+    else:
+        a2 = a2_fp8.to(torch.float32) * scale_a2
     w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
     w2 = w2.view(experts, model_dim, inter_dim)
 
