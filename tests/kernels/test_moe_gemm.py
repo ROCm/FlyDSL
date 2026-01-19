@@ -137,8 +137,10 @@ def moe_sorting_torch_native(
     *,
     num_experts: int,
     block_size: int,
+    expert_mask: Optional[torch.Tensor] = None,
+    num_local_tokens: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Torch reference for aiter's moe_sorting (see aiter/op_tests/test_moe_sorting.py::moe_sorting_native).
+    """Torch reference for aiter's moe_sorting.
 
     Returns:
       - sorted_ids[int32]: fused (topk_slot<<24 | token_id)
@@ -147,56 +149,52 @@ def moe_sorting_torch_native(
       - num_tokens_post_pad[int32]: [0]=total padded tokens, [1]=num_tokens (logical)
 
     Notes:
-      - We *must* pad each expert segment to `block_size` so each M-block maps to exactly one expert.
-      - Sentinel padded rows use token==M and weight==0 (safe for our kernels without s_valid checks).
+      - This function intentionally mirrors `aiter/op_tests/test_moe_sorting.py::moe_sorting_native`.
     """
     assert topk_ids.is_cuda and topk_weights.is_cuda
     device = topk_ids.device
     M, topk = topk_ids.shape
+    topk = topk_ids.shape[1]
 
     # Upper bound allocation (matches aiter op_tests; not strictly required but keeps shapes predictable).
-    max_num_tokens_padded = int(topk_ids.numel() + num_experts * int(block_size) - int(topk))
+    max_num_tokens_padded = int(topk_ids.numel() + int(num_experts) * int(block_size) - int(topk))
     max_num_m_blocks = int((max_num_tokens_padded + int(block_size) - 1) // int(block_size))
 
-    # Sentinel: token==M, slot==0 (NOT slot==topk) to avoid ts2 OOB in kernels.
-    init_val = int(M)  # (0<<24)|M
+    init_val = (int(topk) << 24) | int(M)
     sorted_ids = torch.full((max_num_tokens_padded,), init_val, dtype=torch.int32, device=device)
-    sorted_weights = torch.zeros((max_num_tokens_padded,), dtype=torch.float32, device=device)
+    sorted_weights = torch.empty((max_num_tokens_padded,), dtype=torch.float32, device=device)
     sorted_expert_ids = torch.full((max_num_m_blocks,), -1, dtype=torch.int32, device=device)
     num_tokens_post_pad = torch.empty((2,), dtype=torch.int32, device=device)
 
+    if num_local_tokens is not None:
+        topk_ids = topk_ids[: num_local_tokens.item()]
+
     sorted_ids_begin = 0
     sorted_expert_ids_begin = 0
-
+    skip_expert_num = 0
     for expertId in range(int(num_experts)):
+        if expert_mask is not None and int(expert_mask[expertId].item()) == 0:
+            skip_expert_num += 1
+            continue
         token_id, topk_id = torch.where(topk_ids == expertId)
         tokensNum = int(token_id.numel())
         sorted_expert_ids_num = int((tokensNum + int(block_size) - 1) // int(block_size))
         tokensNumPad = int(sorted_expert_ids_num * int(block_size))
-
-        if tokensNum:
-            sorted_ids[sorted_ids_begin : sorted_ids_begin + tokensNum] = (
-                (topk_id.to(torch.int32) << 24) | token_id.to(torch.int32)
-            )
-            sorted_weights[sorted_ids_begin : sorted_ids_begin + tokensNum] = topk_weights[
-                token_id, topk_id
-            ].to(torch.float32)
-
-        # advance by padded block size (even if tokensNum==0, tokensNumPad==0)
-        sorted_ids_begin += tokensNumPad
-        if sorted_expert_ids_num:
-            sorted_expert_ids[
-                sorted_expert_ids_begin : sorted_expert_ids_begin + sorted_expert_ids_num
-            ] = int(expertId)
-            sorted_expert_ids_begin += sorted_expert_ids_num
+        sorted_ids[sorted_ids_begin : sorted_ids_begin + tokensNum] = (
+            (topk_id.to(torch.int32) << 24) | token_id.to(torch.int32)
+        )
+        sorted_weights[sorted_ids_begin : sorted_ids_begin + tokensNum] = topk_weights[
+            token_id, topk_id
+        ].to(torch.float32)
+        sorted_ids_begin = int(sorted_ids_begin + tokensNumPad)
+        sorted_expert_ids[
+            sorted_expert_ids_begin : sorted_expert_ids_begin + sorted_expert_ids_num
+        ] = int(expertId - skip_expert_num)
+        sorted_expert_ids_begin = int(sorted_expert_ids_begin + sorted_expert_ids_num)
 
     num_tokens_post_pad[0] = int(sorted_ids_begin)
-    num_tokens_post_pad[1] = int(M)
+    num_tokens_post_pad[1] = int(topk_ids.shape[0])
 
-    # Trim to the actually used prefix (keeps launch grids minimal and avoids extra -1 expert ids).
-    sorted_ids = sorted_ids[:sorted_ids_begin].contiguous()
-    sorted_weights = sorted_weights[:sorted_ids_begin].contiguous()
-    sorted_expert_ids = sorted_expert_ids[:sorted_expert_ids_begin].contiguous()
     return sorted_ids, sorted_weights, sorted_expert_ids, num_tokens_post_pad
 
 
@@ -275,7 +273,7 @@ def build_routing_buffers(
     - Use aiter's `moe_sorting` output directly (no host trim/pad of sorted buffers)
     - Launch full expert-block range; kernels use `num_valid_ids` to early-exit extra blocks
     - `moe_sort_mode="torch"` is a portable fallback when aiter isn't available:
-      - Builds a CK-style per-expert padded block layout so expert-id mapping is valid
+      - Mirrors `aiter/op_tests/test_moe_sorting.py::moe_sorting_native` for consistent semantics
     """
     device = topk_ids.device
     default_mode = "aiter" if HAS_AITER else "torch"
