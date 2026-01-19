@@ -5,6 +5,7 @@ import torch
 import torch.profiler as tpf
 import os
 import copy
+import time
 import numpy as np
 import pandas as pd
 import logging
@@ -24,6 +25,10 @@ def perftest(
 ):
     def decorator(func):
         def wrapper(*args, **kwargs):
+            # ROCm torch.profiler (ROCTracer) is not always stable when invoked repeatedly
+            # under pytest (multiple tests, repeated init/teardown). For unit tests, the
+            # profiler is not required; fall back to simple timing.
+            #
             num = num_rotate_args
             if num < 1:
                 gpu_id = torch.cuda.current_device()
@@ -46,6 +51,7 @@ def perftest(
             ] + [(args, kwargs)]
             run_iters(num_warmup, func, *args, **kwargs)
             torch.cuda.synchronize()
+
             if int(os.environ.get("FLIR_LOG_MORE", 0)):
                 latencies = []
                 start_event = torch.cuda.Event(enable_timing=True)

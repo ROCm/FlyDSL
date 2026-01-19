@@ -390,6 +390,7 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       --tile_k "$tile_k" \
       --tile_n2 "$tile_n2" \
       --tile_k2 "$tile_k2" \
+      --skip_ref false \
       --compare_aiter_ck false >"${log}" 2>&1; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else

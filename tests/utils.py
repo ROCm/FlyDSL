@@ -286,9 +286,11 @@ def pertoken_quant(
     per_token_scale = scale
     if scale is None:
         # [m, 1]
-        per_token_amax, _ = torch.max(
-            input=torch.abs(hidden_states), dim=-1, keepdim=True
-        )
+        # Avoid materializing a full-size abs() temporary (can be huge for MoE weights).
+        # max(abs(x)) = max(max(x), -min(x))
+        per_token_max = torch.amax(hidden_states, dim=-1, keepdim=True)
+        per_token_min = torch.amin(hidden_states, dim=-1, keepdim=True)
+        per_token_amax = torch.maximum(per_token_max, -per_token_min)
         per_token_scale = per_token_amax / dtypeMax
         per_token_scale[per_token_scale == 0] = 1
 
