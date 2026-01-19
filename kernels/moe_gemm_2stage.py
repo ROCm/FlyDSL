@@ -280,13 +280,9 @@ def compile_moe_gemm1(
                 # Buffer resources: for dynamic memrefs, provide `num_records_bytes` explicitly so
                 # hardware OOB behavior is stable (otherwise it falls back to a large max size).
                 c_topk = arith.constant(topk, index=True)
-                c_max_bytes = arith.constant(0x7FFFFFFE, index=True)
 
                 # X: [tokens, k] bytes = tokens*k*elem_bytes
                 x_nbytes_idx = tokens_in * k_in * arith.constant(int(elem_bytes), index=True)
-                x_nbytes_idx = arith.select(
-                    arith.cmpu(x_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, x_nbytes_idx
-                )
                 x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
                 x_rsrc = buffer_ops.create_buffer_resource(
                     arg_x, max_size=False, num_records_bytes=x_nbytes_i32
@@ -297,9 +293,6 @@ def compile_moe_gemm1(
                 # OUT: [tokens, topk, inter] f16/bf16 -> bytes = tokens*topk*inter*out_elem_bytes
                 out_elem_bytes = 2  # f16/bf16
                 out_nbytes_idx = tokens_in * c_topk * inter_in * arith.constant(out_elem_bytes, index=True)
-                out_nbytes_idx = arith.select(
-                    arith.cmpu(out_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, out_nbytes_idx
-                )
                 out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
                 out_rsrc = buffer_ops.create_buffer_resource(
                     arg_out, max_size=False, num_records_bytes=out_nbytes_i32
@@ -1346,7 +1339,6 @@ def compile_moe_gemm2(
             # For dynamic memrefs, `max_size=False` cannot infer the logical size from the memref *type*,
             # so we should pass `num_records_bytes` explicitly for stable hardware OOB behavior.
             c_topk = arith.constant(topk, index=True)
-            c_max_bytes = arith.constant(0x7FFFFFFE, index=True)
 
             # X(A2): [tokens*topk, inter_dim] bytes = tokens*topk*k*elem_bytes
             x_nbytes_idx = (tokens_in * c_topk) * k_in * arith.constant(int(elem_bytes), index=True)
@@ -1367,9 +1359,6 @@ def compile_moe_gemm2(
                     * n_in
                     * arith.constant(out_elem_bytes, index=True)
                 )
-            out_nbytes_idx = arith.select(
-                arith.cmpu(out_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, out_nbytes_idx
-            )
             out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
             out_rsrc = buffer_ops.create_buffer_resource(
                 arg_out, max_size=False, num_records_bytes=out_nbytes_i32
@@ -1381,9 +1370,6 @@ def compile_moe_gemm2(
             else:
                 # scale_x (A2 scale): [tokens*topk] f32 -> bytes = tokens*topk*4
                 sx_nbytes_idx = (tokens_in * c_topk) * arith.constant(4, index=True)
-                sx_nbytes_idx = arith.select(
-                    arith.cmpu(sx_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, sx_nbytes_idx
-                )
                 sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
                 sx_rsrc = buffer_ops.create_buffer_resource(
                     arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
@@ -1396,11 +1382,6 @@ def compile_moe_gemm2(
                 size_expert_ids_in
                 * arith.constant(tile_m, index=True)
                 * arith.constant(4, index=True)
-            )
-            sorted_nbytes_idx = arith.select(
-                arith.cmpu(sorted_nbytes_idx, c_max_bytes, "ugt"),
-                c_max_bytes,
-                sorted_nbytes_idx,
             )
             sorted_nbytes_i32 = arith.index_cast(i32, sorted_nbytes_idx)
             sorted_rsrc = buffer_ops.create_buffer_resource(

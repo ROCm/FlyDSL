@@ -29,13 +29,6 @@ def perftest(
             # under pytest (multiple tests, repeated init/teardown). For unit tests, the
             # profiler is not required; fall back to simple timing.
             #
-            # Opt-out knobs:
-            # - FLIR_DISABLE_TORCH_PROFILER=1
-            # - running under pytest (PYTEST_CURRENT_TEST is set)
-            disable_profiler = (
-                os.environ.get("FLIR_DISABLE_TORCH_PROFILER", "0") in ("1", "true", "True", "YES", "yes")
-                or ("PYTEST_CURRENT_TEST" in os.environ)
-            )
             num = num_rotate_args
             if num < 1:
                 gpu_id = torch.cuda.current_device()
@@ -58,18 +51,6 @@ def perftest(
             ] + [(args, kwargs)]
             run_iters(num_warmup, func, *args, **kwargs)
             torch.cuda.synchronize()
-
-            if disable_profiler:
-                # Time the full loop with CUDA events (low overhead).
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
-                start_event.record()
-                data = run_iters_rotate(num_iters, func, rotate_args)
-                end_event.record()
-                end_event.synchronize()
-                total_ms = float(start_event.elapsed_time(end_event))
-                avg_us = (total_ms * 1000.0) / float(num_iters)
-                return data, avg_us
 
             if int(os.environ.get("FLIR_LOG_MORE", 0)):
                 latencies = []

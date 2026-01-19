@@ -997,13 +997,6 @@ def test_moe_gemm_2stage(
 
     import math
 
-    # Unit-test mode: keep iterations tiny to avoid allocating deep-copied rotate buffers.
-    # (The perf harness deep-copies inputs to defeat cache effects; that's great for benchmarking
-    # but can be too memory-heavy for pytest parameter sweeps.)
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        num_iters = 2
-        num_warmup = 1
-
     # Keep inputs tame by default; fp16 paths are less robust to overflow.
     # (Callers can still override via pytest param / direct invocation.)
     if init_scale == 1.0:
@@ -1035,19 +1028,6 @@ def test_moe_gemm_2stage(
         moe_sort_mode = "torch"
     if compare_aiter_ck is None:
         compare_aiter_ck = False
-
-    # PyTorch reference is very expensive. For broad dtype/shape coverage, keep it as:
-    # - enabled only for fp8 small case
-    # - disabled for fp16/int8/int4 and for larger shapes
-    if (
-        (in_dtype != "fp8")
-        or (tokens > 64)
-        or (model_dim > 256)
-        or (inter_dim > 128)
-        or (experts > 4)
-        or (topk > 2)
-    ):
-        skip_ref = True
 
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
