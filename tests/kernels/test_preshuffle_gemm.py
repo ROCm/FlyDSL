@@ -360,18 +360,35 @@ def test_mfma_w4_flir_preshuffle(
 
     device = torch.device("cuda")
 
-    torch.manual_seed(42)
+    # torch.manual_seed(42)
+    M_align_32 = (M + 31 // 32) * 32
+    N_align_32 = (N + 31 // 32) * 32
+
     a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    # a_fp32 = torch.ones(M, K, device=device, dtype=torch.float32)
+    # for i in range(M):
+    #     a_fp32[i] = a_fp32[i] * (i + 1)
+        # if i % 4 != 0:
+        #     a_fp32[i] = a_fp32[i] * (i + 1)
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
 
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+
+    a_fp32_padded[:M] = a_fp32[:M]
+    b_fp32_padded[:N] = b_fp32[:N]
+
     if a_dtype == "fp4":
-        a_q, scale_a, _ = per_1x32_f4_quant(a_fp32)  # (M, K)
+        a_q, scale_a, a_convert = per_1x32_f4_quant(a_fp32_padded)  # (M, K)
+        a_q = a_q[:M]
         scale_a = fp4_utils.shuffle_scale_w4(scale_a, 1, False)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
+        a_convert = a_fp32
         scale_a = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
 
-    b_q, scale_b, b_convert = per_1x32_f4_quant(b_fp32)  # (N, K)
+    b_q, scale_b, b_convert = per_1x32_f4_quant(b_fp32_padded)  # (N, K)
+    b_q = b_q[:N]
 
     # Keep tensors contiguous for predictable buffer descriptor shapes.
     a_q = a_q.contiguous()
@@ -386,8 +403,9 @@ def test_mfma_w4_flir_preshuffle(
 
     """
     # test with quant date
-    c_ref = run_torch(a_fp32, b_convert.reshape([-1, 256]), 1, 1, bias=None, dtype=torch.float32)
+    c_ref = run_torch(a_convert.reshape([-1, K]), b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
     """
+    # c_ref = run_torch(a_convert.reshape([-1, K])[:M], b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
     c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
@@ -422,6 +440,11 @@ def test_mfma_w4_flir_preshuffle(
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
+    verify_output(c_out_scaled[0], c_ref[0], rtol=0.1, atol=0.1)
+    verify_output(c_out_scaled[1], c_ref[1], rtol=0.1, atol=0.1)
+    verify_output(c_out_scaled[2], c_ref[2], rtol=0.1, atol=0.1)
+    verify_output(c_out_scaled[3], c_ref[3], rtol=0.1, atol=0.1)
+    verify_output(c_out_scaled[4], c_ref[4], rtol=0.1, atol=0.1)
     import pdb;pdb.set_trace()
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
@@ -472,7 +495,7 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "int8", "int4", "fp16", "bf16"],
+        choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
                         help="Input dtype")
     parser.add_argument("-M", type=int, default=32, help="M dimension")
     parser.add_argument("-N", type=int, default=128, help="N dimension")
