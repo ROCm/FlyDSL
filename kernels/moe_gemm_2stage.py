@@ -21,7 +21,7 @@ from _mlir import ir
 import _mlir.extras.types as T
 from flydsl.lang.ir.types import T as I
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf
+from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -109,7 +109,7 @@ def compile_moe_gemm1(
     # split into <=16B pieces and use `flir.copy(load-only)` for buffer_load_dwordx4.
     # (Compute the split lens inside the kernel so the code matches GEMM structure.)
 
-    # CK-style LDS128 mode (same idea as test_preshuffle_gemm.py):
+    # LDS128 mode (same idea as test_preshuffle_gemm.py):
     # - LDS stride == tile_k (no extra padding) + XOR16 swizzle
     # - Use ds_{read,write}_b128 (16B) and extract 8B halves for MFMA steps
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
@@ -125,7 +125,7 @@ def compile_moe_gemm1(
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
     module_name = (
-        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_abi14"
+        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -180,7 +180,7 @@ def compile_moe_gemm1(
             vec2_i64 = I.vec(2, i64)
 
             def silu(x):
-                # Align with CK's device fast path:
+                # device fast path:
                 #   emu = exp(-x)  ~= exp2(log2e * (-x))  -> v_exp_f32
                 #   sig = rcp(1 + emu)                   -> v_rcp_f32
                 #   y = x * sig
@@ -216,7 +216,7 @@ def compile_moe_gemm1(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
-            # Align with CK/Aiter launch mapping (NSwizzle==false):
+            # Align with Aiter launch mapping (NSwizzle==false):
             # - blockIdx.x -> N dimension (tile along inter_dim)
             # - blockIdx.y -> expert-block id / M dimension (tile along sorted M)
             by = gpu.block_id("x")  # tile along inter_dim
@@ -234,7 +234,7 @@ def compile_moe_gemm1(
             bx_m_i32 = arith.index_cast(i32, bx_m)
             blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
             # Common constants/atoms (hoisted): keep IR small like GEMM.
-            # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
+            # XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k // 16, index=True)
             atom_x_s16 = flir.make_copy_atom(x_elem, vector_size=16)
             atom_x_s8 = flir.make_copy_atom(x_elem, vector_size=8)
@@ -350,7 +350,7 @@ def compile_moe_gemm1(
                         chunk_i32=chunk_i32,
                     )
     
-                # CK-aligned: decode token once (per thread's M-slice) and build a base row offset.
+                # decode token once (per thread's M-slice) and build a base row offset.
                 x_row_base_div4 = []
                 x_col_local_i32 = []
                 x_row_local = []
@@ -706,7 +706,6 @@ def compile_moe_gemm1(
                     mfma_per_iter = 2 * mfma_group
                     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
     
-                    # DS-read preload (CK default is 2); clamp to non-negative.
                     rocdl.sched_dsrd(2)
                     rocdl.sched_mfma(2)
                     rocdl.sched_dsrd(1)
@@ -862,7 +861,6 @@ def compile_moe_gemm1(
                 lane_div_16_mul4 = lane_div_16 * arith.index(4)
                 inter_i32_local = inter_i32_v
     
-                # Optional: CK-style CShuffle epilogue for better global store coalescing.
                 # Uses EVec=4 (buffer store "x4" of fp16 elements).
                 _use_cshuffle_epilog = bool(use_cshuffle_epilog)
     
@@ -1094,7 +1092,7 @@ def compile_moe_gemm2(
       - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
       - out_dtype="f32": fp32 scalar atomics (slower, but avoids fp16 atomic overflow)
 
-    `use_cshuffle_epilog` controls whether we use the CK-style LDS CShuffle epilogue before
+    `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
     gpu_arch = get_hip_arch()
@@ -1104,9 +1102,10 @@ def compile_moe_gemm2(
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("f16", "fp16", "half", "f32", "fp32", "float"):
-        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
+    if out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
+        raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
     out_is_f32 = out_s in ("f32", "fp32", "float")
+    out_is_bf16 = out_s in ("bf16", "bfloat16")
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
@@ -1139,6 +1138,10 @@ def compile_moe_gemm2(
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
+    if out_is_bf16:
+        if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
+            raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
+
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
         _use_cshuffle_epilog = False if use_cshuffle_epilog is None else bool(use_cshuffle_epilog)
@@ -1161,7 +1164,7 @@ def compile_moe_gemm2(
             )
 
     # NOTE: Keep this as a callable so we don't require an MLIR Context at Python-time.
-    out_elem = (T.f32 if out_is_f32 else T.f16)
+    out_elem = (T.f32 if out_is_f32 else (T.bf16 if out_is_bf16 else T.f16))
     epilog_tag = "cshuffle"
     # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
     # binary for a different (tile_m, tile_n, tile_k) configuration.
@@ -1170,7 +1173,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi23_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1250,13 +1253,13 @@ def compile_moe_gemm2(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
-            # Align with CK/Aiter launch mapping:
+            # Align with Aiter launch mapping:
             # - blockIdx.x -> N dimension (tile along model_dim)
             # - blockIdx.y -> expert-block id / M dimension (tile along sorted M)
             by = gpu.block_id("x")  # tile along model_dim
             bx = gpu.block_id("y")  # tile along sorted M
 
-            # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
+            # XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k // 16, index=True)
             atom_x_s16 = flir.make_copy_atom(x_elem, vector_size=16)
             atom_x_s8 = flir.make_copy_atom(x_elem, vector_size=8)
@@ -1271,12 +1274,12 @@ def compile_moe_gemm2(
             base_ptr = allocator.get_base()
             lds_x_ptr = _state["lds_x_decl"](base_ptr)
             lds_x = lds_x_ptr.get()
-            # Alias the same underlying LDS bytes as fp16 for epilogue shuffle.
+            # Alias the same underlying LDS bytes as f16/bf16 for epilogue shuffle.
             lds_out = (
                 SmemPtr(
                     base_ptr,
                     lds_x_ptr.byte_offset,
-                    I.f16,
+                    (I.bf16 if out_is_bf16 else I.f16),
                     shape=(tile_m * tile_n,),
                 ).get()
                 if _use_cshuffle_epilog
@@ -1403,7 +1406,7 @@ def compile_moe_gemm2(
                         src_buffer_offset_in_bytes=True,
                     )
     
-                # CK-aligned: decode routed token once (per thread's M-slice) and build a base offset.
+                # decode routed token once (per thread's M-slice) and build a base offset.
                 x_row_base_div4 = []
                 x_col_local_i32 = []
                 x_row_local = []
@@ -1726,7 +1729,6 @@ def compile_moe_gemm2(
                     mfma_per_iter = 2 * mfma_group
                     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
     
-                    # DS-read preload (CK default is 2).
                     rocdl.sched_dsrd(2)
                     rocdl.sched_mfma(1)
                     if tile_m == 16:
@@ -1979,10 +1981,11 @@ def compile_moe_gemm2(
                             v = v * sx * sw
                             if doweight_stage2:
                                 v = v * tw
-                            v_out = arith.trunc_f(T.f16(), v)
+                            v_out = arith.trunc_f(out_elem(), v)
 
                             lds_idx = row_base_lds + col_local
-                            v1 = vector.from_elements(vec1_f16, [v_out])
+                            vec1_out = I.vec(1, out_elem())
+                            v1 = vector.from_elements(vec1_out, [v_out])
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def precompute_row(*, row_local, row):
@@ -1998,7 +2001,25 @@ def compile_moe_gemm2(
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
                         byte_off = idx_elem_even * c2_i32
-                        atomic_add_f16x2(frag, byte_off)
+                        if out_is_bf16:
+                            # Use global atomicrmw fadd on <2 x bf16> (CK path) instead of buffer atomic.
+                            out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                            byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)
+                            ptr_addr_idx = out_base_idx + byte_off_idx
+                            out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
+                            # LLVM dialect ops don't accept FlyDSL wrappers; unwrap if needed.
+                            out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
+                            frag_v = frag._value if hasattr(frag, "_value") else frag
+                            llvm.AtomicRMWOp(
+                                llvm.AtomicBinOp.fadd,
+                                out_ptr_v,
+                                frag_v,
+                                llvm.AtomicOrdering.monotonic,
+                                syncscope="agent",
+                                alignment=4,
+                            )
+                        else:
+                            atomic_add_f16x2(frag, byte_off)
 
                     c_shuffle_epilog(
                         arith=arith,
@@ -2017,6 +2038,7 @@ def compile_moe_gemm2(
                         by_n=by_n,
                         n_tile_base=n_tile_base,
                         lds_out=lds_out,
+                        frag_elem_type=(ir.BF16Type.get() if out_is_bf16 else ir.F16Type.get()),
                         write_row_to_lds=write_row_to_lds,
                         precompute_row=precompute_row,
                         store_pair=store_pair,
