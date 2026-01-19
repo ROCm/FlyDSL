@@ -935,6 +935,7 @@ def compile_moe_gemm1(
                         arith=arith,
                         vector=vector,
                         gpu=gpu,
+                        scf=scf,
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,
@@ -1080,6 +1081,10 @@ def compile_moe_gemm2(
     # NOTE: aiter swap passes this; stage2 uses `num_valid_ids` for early-exit so it is ignored.
     dynamic_blocks: bool | None = None,
     use_cshuffle_epilog: bool | None = None,
+    # Optional experiment: write per-(token,slot) output (no atomics) into an output shaped
+    # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
+    # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
+    accumulate: bool = True,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1106,6 +1111,8 @@ def compile_moe_gemm2(
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
     out_is_f32 = out_s in ("f32", "fp32", "float")
     out_is_bf16 = out_s in ("bf16", "bfloat16")
+    if (not bool(accumulate)) and out_is_f32:
+        raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
@@ -1173,7 +1180,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi33_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi35_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1304,6 +1311,13 @@ def compile_moe_gemm2(
             # OUT: [tokens, model_dim] -> clamp to descriptor max (i32 bytes) to avoid overflow on huge tokens.
             out_elem_bytes = 4 if out_is_f32 else 2
             out_nbytes_idx = tokens_in * n_in * arith.constant(out_elem_bytes, index=True)
+            if not bool(accumulate):
+                out_nbytes_idx = (
+                    tokens_in
+                    * arith.index(topk)
+                    * n_in
+                    * arith.constant(out_elem_bytes, index=True)
+                )
             out_nbytes_idx = arith.select(
                 arith.cmpu(out_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, out_nbytes_idx
             )
@@ -1996,26 +2010,29 @@ def compile_moe_gemm2(
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def precompute_row(*, row_local, row):
-                        # Precompute row context for cshuffle stores: the fused (token,slot) i32.
-                        # This lets `store_pair` skip atomics for invalid/sentinel rows without reloading.
-                        return buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                        # Precompute row context for cshuffle stores.
+                        # Return (fused_i32, row_valid_i1) so the epilogue can skip the entire row
+                        # for invalid tail rows (CK-style), avoiding per-store branching.
+                        fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                        row_i32 = arith.index_cast(i32, row)
+                        row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
+                        return (fused2, row_valid)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         fused = row_ctx
                         t = fused & mask24_i32
+                        s = fused >> 24
                         idx0 = t * model_i32
+                        if not bool(accumulate):
+                            ts = t * topk_i32_v + s
+                            idx0 = ts * model_i32
                         col_i32 = arith.index_cast(i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
                         if out_is_bf16:
-                            # CK-aligned safety: in the last partial block, rows >= num_valid_ids are invalid.
-                            # For bf16 we use global atomics (no buffer OOB), so we must skip invalid rows.
-                            row_i32 = arith.index_cast(i32, row)
-                            row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
-                            _if_row = scf.IfOp(row_valid)
-                            with _if_row.then():
+                            if bool(accumulate):
                                 # Use global atomicrmw fadd on <2 x bf16> (CK path).
-                                # Compute byte address from base + (idx_elem_even * 2) and inttoptr to ptr<1>.
+                                # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
@@ -2030,14 +2047,21 @@ def compile_moe_gemm2(
                                     syncscope="agent",
                                     alignment=4,
                                 )
+                            else:
+                                # Scatter store (no atomic): store bf16x2 directly via buffer store.
+                                buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
                             byte_off = idx_elem_even * c2_i32
-                            atomic_add_f16x2(frag, byte_off)
+                            if bool(accumulate):
+                                atomic_add_f16x2(frag, byte_off)
+                            else:
+                                buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
 
                     c_shuffle_epilog(
                         arith=arith,
                         vector=vector,
                         gpu=gpu,
+                        scf=scf,
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,

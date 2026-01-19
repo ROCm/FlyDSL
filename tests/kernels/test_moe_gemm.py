@@ -19,7 +19,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from test_ref import torch_moe_gemm1, torch_moe_gemm2
+from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
@@ -132,78 +132,73 @@ def _pick_stage2_tile_k(*, inter_dim: int, tile_m: int, prefer: int) -> int:
     return feasible[0]
 
 
-def build_sorted_routing(
+def moe_sorting_torch_native(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     *,
     num_experts: int,
-    model_dim: int,
-    tile_m: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Build CK-style routing buffers:
-    - `sorted_token_ids[int32]` (fused token_idx[23:0] + topk_slot[31:24])
-    - `sorted_weights[fp32]` aligned with sorted_token_ids
-    - `sorted_expert_ids[int32]` per M-block
+    block_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Torch reference for aiter's moe_sorting (see aiter/op_tests/test_moe_sorting.py::moe_sorting_native).
 
-    Torch fallback routing builder (deterministic):
-    - Sort by (expert, token, slot)
-    - Pad each expert segment to `tile_m`
+    Returns:
+      - sorted_ids[int32]: fused (topk_slot<<24 | token_id)
+      - sorted_weights[fp32]: aligned with sorted_ids
+      - sorted_expert_ids[int32]: one expert id per M-block (size = num_blocks)
+      - num_tokens_post_pad[int32]: [0]=total padded tokens, [1]=num_tokens (logical)
 
-    NOTE: aiter routing is handled by `build_routing_buffers(..., moe_sort_mode="aiter")`.
+    Notes:
+      - We *must* pad each expert segment to `block_size` so each M-block maps to exactly one expert.
+      - Sentinel padded rows use token==M and weight==0 (safe for our kernels without s_valid checks).
     """
     assert topk_ids.is_cuda and topk_weights.is_cuda
-    tokens, topk = topk_ids.shape
-    # Build the same CK-style buffers using torch.
-    topk_ids_i64 = topk_ids.to(torch.int64)
-    topk_w_f32 = topk_weights.to(torch.float32)
+    device = topk_ids.device
+    M, topk = topk_ids.shape
 
-    token_idx = torch.arange(tokens, device="cuda", dtype=torch.int64).unsqueeze(1).expand(tokens, topk)
-    slot_idx = torch.arange(topk, device="cuda", dtype=torch.int64).unsqueeze(0).expand(tokens, topk)
+    # Upper bound allocation (matches aiter op_tests; not strictly required but keeps shapes predictable).
+    max_num_tokens_padded = int(topk_ids.numel() + num_experts * int(block_size) - int(topk))
+    max_num_m_blocks = int((max_num_tokens_padded + int(block_size) - 1) // int(block_size))
 
-    expert_flat = topk_ids_i64.reshape(-1)
-    token_flat = token_idx.reshape(-1)
-    slot_flat = slot_idx.reshape(-1)
-    fused_flat = (token_flat & 0xFFFFFF) | ((slot_flat & 0xFF) << 24)
-    weight_flat = topk_w_f32.reshape(-1)
+    # Sentinel: token==M, slot==0 (NOT slot==topk) to avoid ts2 OOB in kernels.
+    init_val = int(M)  # (0<<24)|M
+    sorted_ids = torch.full((max_num_tokens_padded,), init_val, dtype=torch.int32, device=device)
+    sorted_weights = torch.zeros((max_num_tokens_padded,), dtype=torch.float32, device=device)
+    sorted_expert_ids = torch.full((max_num_m_blocks,), -1, dtype=torch.int32, device=device)
+    num_tokens_post_pad = torch.empty((2,), dtype=torch.int32, device=device)
 
-    # Sort by (expert, token, slot) to make ordering stable/deterministic.
-    linear = token_flat * topk + slot_flat
-    key = expert_flat * (tokens * topk) + linear
-    order = torch.argsort(key)
+    sorted_ids_begin = 0
+    sorted_expert_ids_begin = 0
 
-    expert_sorted = expert_flat[order]
-    fused_sorted = fused_flat[order].to(torch.int32)
-    w_sorted = weight_flat[order]
+    for expertId in range(int(num_experts)):
+        token_id, topk_id = torch.where(topk_ids == expertId)
+        tokensNum = int(token_id.numel())
+        sorted_expert_ids_num = int((tokensNum + int(block_size) - 1) // int(block_size))
+        tokensNumPad = int(sorted_expert_ids_num * int(block_size))
 
-    counts = torch.bincount(expert_flat.clamp(min=0, max=num_experts - 1), minlength=num_experts).to("cpu").tolist()
-    out_ids = []
-    out_w = []
-    out_expert_ids: list[int] = []
-    off = 0
-    sentinel = torch.tensor([tokens], device="cuda", dtype=torch.int32)
-    sentinel_w = torch.tensor([0.0], device="cuda", dtype=torch.float32)
-    for e in range(num_experts):
-        cnt = int(counts[e])
-        seg_ids = fused_sorted[off : off + cnt]
-        seg_w = w_sorted[off : off + cnt]
-        off += cnt
+        if tokensNum:
+            sorted_ids[sorted_ids_begin : sorted_ids_begin + tokensNum] = (
+                (topk_id.to(torch.int32) << 24) | token_id.to(torch.int32)
+            )
+            sorted_weights[sorted_ids_begin : sorted_ids_begin + tokensNum] = topk_weights[
+                token_id, topk_id
+            ].to(torch.float32)
 
-        # pad to tile_m
-        pad = (-cnt) % tile_m
-        if pad:
-            seg_ids = torch.cat([seg_ids, sentinel.expand(pad)])
-            seg_w = torch.cat([seg_w, sentinel_w.expand(pad)])
+        # advance by padded block size (even if tokensNum==0, tokensNumPad==0)
+        sorted_ids_begin += tokensNumPad
+        if sorted_expert_ids_num:
+            sorted_expert_ids[
+                sorted_expert_ids_begin : sorted_expert_ids_begin + sorted_expert_ids_num
+            ] = int(expertId)
+            sorted_expert_ids_begin += sorted_expert_ids_num
 
-        out_ids.append(seg_ids)
-        out_w.append(seg_w)
-        for _ in range(int(seg_ids.numel() // tile_m)):
-            out_expert_ids.append(e)
+    num_tokens_post_pad[0] = int(sorted_ids_begin)
+    num_tokens_post_pad[1] = int(M)
 
-    sorted_token_ids = torch.cat(out_ids, dim=0)
-    sorted_weights = torch.cat(out_w, dim=0)
-    sorted_expert_ids = torch.tensor(out_expert_ids, device="cuda", dtype=torch.int32)
-    return sorted_token_ids, sorted_weights, sorted_expert_ids
+    # Trim to the actually used prefix (keeps launch grids minimal and avoids extra -1 expert ids).
+    sorted_ids = sorted_ids[:sorted_ids_begin].contiguous()
+    sorted_weights = sorted_weights[:sorted_ids_begin].contiguous()
+    sorted_expert_ids = sorted_expert_ids[:sorted_expert_ids_begin].contiguous()
+    return sorted_ids, sorted_weights, sorted_expert_ids, num_tokens_post_pad
 
 
 @pytest.mark.parametrize(
@@ -251,20 +246,8 @@ def _pad_sorted_buffers_to_full_blocks(
     tokens: int,
     block_m: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Pad (sorted_ids, sorted_weights) to len(sorted_expert_ids)*block_m for safe OOB-free indexing."""
-    assert sorted_ids.dtype == torch.int32
-    assert sorted_weights.dtype == torch.float32
-    blocks = int(sorted_expert_ids.numel())
-    padded_len = blocks * block_m
-    if int(sorted_ids.numel()) >= padded_len:
-        return sorted_ids[:padded_len], sorted_weights[:padded_len]
-    pad_ids = torch.empty((padded_len,), device="cuda", dtype=torch.int32)
-    pad_w = torch.empty((padded_len,), device="cuda", dtype=torch.float32)
-    pad_ids.fill_(tokens)  # sentinel fused token (token=tokens, slot=0)
-    pad_w.zero_()
-    pad_ids[: sorted_ids.numel()] = sorted_ids
-    pad_w[: sorted_weights.numel()] = sorted_weights
-    return pad_ids, pad_w
+    """(Deprecated) Previously padded routing buffers to full blocks; kept for history only."""
+    return sorted_ids, sorted_weights
 
 
 @dataclass(frozen=True)
@@ -286,19 +269,42 @@ def build_routing_buffers(
     tile_m: int,
     moe_sort_mode: Optional[str] = None,
 ) -> RoutingBuffers:
-    """Build/pad routing buffers once (CK format), reusable across stage1 + stage2.
+    """Build routing buffers once (CK format), reusable across stage1 + stage2.
 
-    NOTE: This is intentionally aligned with `aiter/op_tests/test_moe_2stage.py`:
-    - Always use aiter's `moe_sorting` to build routing buffers (no torch fallback).
-    - Trim garbage tails using `num_valid_ids` returned by aiter.
-    - Pad (sorted_ids, sorted_weights) to `blocks*tile_m` with sentinel token==tokens.
+    NOTE:
+    - `moe_sort_mode="aiter"` aligns with `aiter/aiter/test_moe_flydsl.py` (swap path):
+    - Use aiter's `moe_sorting` output directly (no host trim/pad of sorted buffers)
+    - Launch full expert-block range; kernels use `num_valid_ids` to early-exit extra blocks
+    - `moe_sort_mode="torch"` is a portable fallback when aiter isn't available:
+      - Builds a CK-style per-expert padded block layout so expert-id mapping is valid
     """
     device = topk_ids.device
-    sort_mode = str(moe_sort_mode or os.environ.get("flydsl_MOE_SORT_MODE", "aiter")).lower().strip()
-    if sort_mode != "aiter":
-        raise ValueError(
-            f"routing buffer build is aligned to aiter moe_sorting only; got moe_sort_mode={sort_mode!r}"
+    default_mode = "aiter" if HAS_AITER else "torch"
+    sort_mode = str(moe_sort_mode or os.environ.get("flydsl_MOE_SORT_MODE", default_mode)).lower().strip()
+    if sort_mode not in ("aiter", "torch"):
+        raise ValueError(f"invalid moe_sort_mode={sort_mode!r} (expected 'aiter' or 'torch')")
+
+    if sort_mode == "torch":
+        sorted_token_ids, sorted_weights, sorted_expert_ids, num_tokens_post_pad = moe_sorting_torch_native(
+            topk_ids=topk_ids.to(torch.int32),
+            topk_weights=topk_weights.to(torch.float32),
+            num_experts=int(experts),
+            block_size=int(tile_m),
         )
+        # num_valid_ids[0] == total padded rows (CK-style); kernels use this for early-exit.
+        num_valid_ids = num_tokens_post_pad[:1].contiguous()
+        sorted_size = int(sorted_token_ids.numel())
+        blocks = int(sorted_expert_ids.numel())
+        return RoutingBuffers(
+            sorted_token_ids=sorted_token_ids,
+            sorted_weights=sorted_weights,
+            sorted_expert_ids=sorted_expert_ids,
+            num_valid_ids=num_valid_ids,
+            sorted_size=sorted_size,
+            blocks=blocks,
+        )
+
+    # aiter mode
     if not HAS_AITER:
         raise RuntimeError("aiter is not available; cannot build routing buffers (moe_sort_mode='aiter').")
 
@@ -313,21 +319,10 @@ def build_routing_buffers(
         raise RuntimeError("aiter moe_sorting failed/unavailable; cannot build routing buffers.")
     sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids = res
 
-    # Some aiter builds return `sorted_expert_ids` with extra garbage entries.
-    # Trim based on `num_valid_ids` to keep expert ids in-range and consistent with sorted ids.
-    valid = int(num_valid_ids.view(-1)[0].item())
-    blocks = (valid + int(tile_m) - 1) // int(tile_m)
-    sorted_expert_ids = sorted_expert_ids[:blocks].contiguous()
-    sorted_token_ids = sorted_token_ids[:valid].contiguous()
-    sorted_weights = sorted_weights[:valid].contiguous()
-
-    sorted_token_ids, sorted_weights = _pad_sorted_buffers_to_full_blocks(
-        sorted_ids=sorted_token_ids,
-        sorted_weights=sorted_weights,
-        sorted_expert_ids=sorted_expert_ids,
-        tokens=int(topk_ids.shape[0]),
-        block_m=tile_m,
-    )
+    # Keep moe_sorting outputs as-is (no host trim/pad). Launch full expert-block range.
+    sorted_token_ids = sorted_token_ids.contiguous()
+    sorted_weights = sorted_weights.contiguous()
+    sorted_expert_ids = sorted_expert_ids.contiguous()
     sorted_size = int(sorted_token_ids.numel())
     blocks = int(sorted_expert_ids.numel())
     return RoutingBuffers(
@@ -461,25 +456,13 @@ def run_moe_stage1(
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
     scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
 
-    # Pad storage for forced global dwordx4 loads (same trick as existing GEMM tests)
-    PAD_ELEMS = 256
-    x_flat = x_q.contiguous().view(-1)
-    x_storage = torch.empty(x_flat.numel() + PAD_ELEMS, device=device, dtype=x_q.dtype)
-    x_storage[: x_flat.numel()] = x_flat
-    x_q = x_storage[: x_flat.numel()].view(tokens, model_dim)
-
-    # Weight storage:
-    # - fp8/int8: preshuffled bytes (1B/elem)
-    # - int4: packed int4 bytes (2 values per byte)
-    w_flat = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
-    ).contiguous().view(-1)
-    w_storage = torch.empty(w_flat.numel() + PAD_ELEMS, device=device, dtype=w_flat.dtype)
-    w_storage[: w_flat.numel()] = w_flat
-    w_kernel = w_storage[: w_flat.numel()]
+    # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
+    x_q = x_q.contiguous().view(tokens, model_dim)
     w_kernel = (
-        w_kernel.view(experts * (2 * inter_dim), model_dim) if (not is_int4) else w_kernel
-    )
+        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
+    ).contiguous()
+    if not is_int4:
+        w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
 
     # Flatten scales to 1D memrefs
     scale_x_1d = scale_x.view(-1).contiguous()  # [tokens]
@@ -551,8 +534,7 @@ def run_moe_stage1(
     atol = 0.5 if is_int4 else 0.25
     assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
-    # Note: kernel executes `sorted_size` rows (padded to full tile_m blocks per-expert),
-    # which can be > tokens*topk. Report both:
+    # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
     tflops = flops / (us / 1e6) / 1e12
 
@@ -560,8 +542,7 @@ def run_moe_stage1(
     bytes_moved = 0
     bytes_moved += tokens * model_dim * 1  # x fp8
     bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
-    # Output rows are logically tokens*topk, but kernel may touch padded rows due to routing blocks.
-    bytes_moved += int(sorted_size) * inter_dim * 2  # out fp16 (upper bound for writes)
+    bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += tokens * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
@@ -617,17 +598,20 @@ def run_moe_stage1(
                 )
 
             # Benchmark CK stage1
+            # Align with aiter swap rules:
+            # - CK takes quantized activations (fp8) + per-token scale
+            # - routing buffers are used as-is (no host trim/pad); launch range is sorted_eids.numel()
             _, us_ck = run_perftest(
                 launch_ck,
                 out_ck,
-                x_fp32.to(torch.float16),
+                x_q,  # fp8 activations
                 w1_ck,
                 w2_ck,
                 sorted_token_ids,
                 sorted_expert_ids,
                 num_valid_ids,
                 w1_scale_ck,
-                scale_x,
+                scale_x_1d,  # [tokens]
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
@@ -759,9 +743,8 @@ def run_moe_stage2(
     sorted_expert_ids = routing.sorted_expert_ids
     num_valid_ids = routing.num_valid_ids
     sorted_size = routing.sorted_size
-    # NOTE: routing pads sorted_token_ids/weights to full blocks with sentinel token==tokens.
-    # Stage2 handles these via sentinel clamp/guards. For aiter mode, `num_valid_ids` is still
-    # used upstream to trim potential garbage entries from aiter outputs.
+    # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
+    # are gated by `num_valid_ids` inside the kernels.
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
@@ -784,6 +767,7 @@ def run_moe_stage2(
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
+    w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
@@ -909,15 +893,15 @@ def run_moe_stage2(
     )
     assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
-    # Same note as stage1: executed rows = sorted_size (padded), logical rows = tokens*topk.
+    # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
     tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
-    bytes_moved += int(sorted_size) * inter_dim * 1  # a2 fp8 (upper bound: padded rows)
+    bytes_moved += tokens * topk * inter_dim * 1  # a2 fp8 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
-    bytes_moved += int(sorted_size) * 4  # a2_scale f32 (1D, padded upper bound)
+    bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
     bytes_moved += int(sorted_token_ids.numel()) * 4
@@ -971,7 +955,7 @@ def run_moe_stage2(
                 launch_ck,
                 out_ck_perf,
                 a2_q,
-                shuffle_weight(w1_q),  # stage2 signature includes w1; provide preshuffled tensor
+                w1_shuffled,  # stage2 signature includes w1; provide preshuffled tensor
                 w2_shuffled,
                 sorted_token_ids,
                 sorted_expert_ids,
@@ -996,7 +980,7 @@ def run_moe_stage2(
             launch_ck(
                 out_ck,
                 a2_q,
-                shuffle_weight(w1_q),
+                w1_shuffled,
                 w2_shuffled,
                 sorted_token_ids,
                 sorted_expert_ids,

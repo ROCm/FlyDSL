@@ -71,6 +71,7 @@ def c_shuffle_epilog(
     arith,
     vector,
     gpu,
+    scf=None,
     range_constexpr,
     # Tile params
     tile_m: int,
@@ -176,26 +177,46 @@ def c_shuffle_epilog(
         row_local = row_base_m + m_lane
         row = bx_m_v + row_local
 
-        row_ctx = (
+        row_ctx_raw = (
             precompute_row(row_local=row_local, row=row) if precompute_row is not None else None
         )
 
-        row_base_lds = row_local * tile_n_idx
-        for nr in range_constexpr(n_reps_shuffle):
-            col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
-            col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
+        # Optional row-level predicate: if `precompute_row` returns `(ctx, pred_i1)` and `scf`
+        # is provided, we can skip the entire N-loop for invalid rows (cheaper than per-store checks).
+        row_ctx = row_ctx_raw
+        row_pred = None
+        if (
+            scf is not None
+            and row_ctx_raw is not None
+            and isinstance(row_ctx_raw, tuple)
+            and len(row_ctx_raw) == 2
+        ):
+            row_ctx, row_pred = row_ctx_raw
 
-            lds_idx_pair = row_base_lds + col_pair0
-            frag = vector.load_op(vec_frag, lds_out, [lds_idx_pair])
+        def _do_store_row():
+            row_base_lds = row_local * tile_n_idx
+            for nr in range_constexpr(n_reps_shuffle):
+                col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
+                col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
-            store_pair(
-                row_local=row_local,
-                row=row,
-                row_ctx=row_ctx,
-                col_pair0=col_pair0,
-                col_g0=by_n_v + col_pair0,
-                frag=frag,
-            )
+                lds_idx_pair = row_base_lds + col_pair0
+                frag = vector.load_op(vec_frag, lds_out, [lds_idx_pair])
+
+                store_pair(
+                    row_local=row_local,
+                    row=row,
+                    row_ctx=row_ctx,
+                    col_pair0=col_pair0,
+                    col_g0=by_n_v + col_pair0,
+                    frag=frag,
+                )
+
+        if row_pred is not None:
+            _if_row = scf.IfOp(row_pred)
+            with _if_row.then():
+                _do_store_row()
+        else:
+            _do_store_row()
 
 
 def mfma_epilog(
@@ -212,6 +233,7 @@ def mfma_epilog(
     # CShuffle epilog (required when use_cshuffle=True)
     vector=None,
     gpu=None,
+    scf=None,
     tile_m: int | None = None,
     tile_n: int | None = None,
     e_vec: int = 2,
@@ -244,6 +266,7 @@ def mfma_epilog(
         arith=arith,
         vector=vector,
         gpu=gpu,
+        scf=scf,
         range_constexpr=range_constexpr,
         tile_m=int(tile_m),
         tile_n=int(tile_n),
