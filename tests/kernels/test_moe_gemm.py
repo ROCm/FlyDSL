@@ -2,7 +2,6 @@
 import logging
 import os
 import sys
-from dataclasses import dataclass
 from typing import Tuple, Optional, List
 
 import pytest
@@ -250,14 +249,14 @@ def _pad_sorted_buffers_to_full_blocks(
     return sorted_ids, sorted_weights
 
 
-@dataclass(frozen=True)
-class RoutingBuffers:
-    sorted_token_ids: torch.Tensor
-    sorted_weights: torch.Tensor
-    sorted_expert_ids: torch.Tensor
-    num_valid_ids: torch.Tensor
-    sorted_size: int
-    blocks: int
+RoutingBuffers = Tuple[
+    torch.Tensor,  # sorted_token_ids
+    torch.Tensor,  # sorted_weights
+    torch.Tensor,  # sorted_expert_ids
+    torch.Tensor,  # num_valid_ids (shape [1], i32)
+    int,  # sorted_size
+    int,  # blocks
+]
 
 
 def build_routing_buffers(
@@ -295,13 +294,13 @@ def build_routing_buffers(
         num_valid_ids = num_tokens_post_pad[:1].contiguous()
         sorted_size = int(sorted_token_ids.numel())
         blocks = int(sorted_expert_ids.numel())
-        return RoutingBuffers(
-            sorted_token_ids=sorted_token_ids,
-            sorted_weights=sorted_weights,
-            sorted_expert_ids=sorted_expert_ids,
-            num_valid_ids=num_valid_ids,
-            sorted_size=sorted_size,
-            blocks=blocks,
+        return (
+            sorted_token_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            sorted_size,
+            blocks,
         )
 
     # aiter mode
@@ -325,13 +324,13 @@ def build_routing_buffers(
     sorted_expert_ids = sorted_expert_ids.contiguous()
     sorted_size = int(sorted_token_ids.numel())
     blocks = int(sorted_expert_ids.numel())
-    return RoutingBuffers(
-        sorted_token_ids=sorted_token_ids,
-        sorted_weights=sorted_weights,
-        sorted_expert_ids=sorted_expert_ids,
-        num_valid_ids=num_valid_ids,
-        sorted_size=sorted_size,
-        blocks=blocks,
+    return (
+        sorted_token_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        sorted_size,
+        blocks,
     )
 
 
@@ -361,6 +360,7 @@ def run_moe_stage1(
     topk_weights_in: Optional[torch.Tensor] = None,
     routing_in: Optional[RoutingBuffers] = None,
     return_outputs: bool = False,
+    skip_ref: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -368,13 +368,8 @@ def run_moe_stage1(
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
-    _dbg = os.environ.get("DSL2_MOE_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
-    def _p(msg: str):
-        if _dbg:
-            print(f"[dsl2-moe-debug] {msg}", file=sys.stderr, flush=True)
 
     # Data: input and weights (aiter shapes)
-    _p("stage1: alloc x/w")
     x_fp32 = (
         x_fp32_in
         if x_fp32_in is not None
@@ -393,7 +388,6 @@ def run_moe_stage1(
         else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
     )
 
-    _p("stage1: routing topk")
     # Routing: aiter uses fused_topk; we use torch topk+softmax for portability/determinism.
     if topk_ids_in is None or topk_weights_in is None:
         score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
@@ -403,7 +397,6 @@ def run_moe_stage1(
         topk_ids = topk_ids_in
         topk_weights = topk_weights_in
 
-    _p("stage1: build_routing_buffers")
     routing = (
         routing_in
         if routing_in is not None
@@ -416,20 +409,20 @@ def run_moe_stage1(
             moe_sort_mode=moe_sort_mode,
         )
     )
-    blocks = int(routing.blocks)
-    sorted_token_ids = routing.sorted_token_ids
-    sorted_weights = routing.sorted_weights
-    sorted_expert_ids = routing.sorted_expert_ids
-    num_valid_ids = routing.num_valid_ids
-    sorted_size = routing.sorted_size
-    blocks = int(routing.blocks)
+    (
+        sorted_token_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        sorted_size,
+        blocks,
+    ) = routing
 
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
     is_int4 = in_dtype == "int4"
     is_int8 = in_dtype in ("int8", "int4")
 
-    _p("stage1: quantize inputs/weights")
     # Quantize inputs / weights.
     if in_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
@@ -446,7 +439,6 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    _p("stage1: shuffle weights")
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
@@ -472,7 +464,6 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    _p("stage1: compile kernel")
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -503,7 +494,6 @@ def run_moe_stage1(
             int(blocks),
         )
 
-    _p("stage1: launch kernel")
     _, us = run_perftest(
         launch,
         out,
@@ -519,20 +509,21 @@ def run_moe_stage1(
     )
     torch.cuda.synchronize()
 
-    ref = torch_moe_gemm1(
-        x_q,
-        w1_q_flat,
-        scale_x,
-        scale_w1_flat,
-        topk_ids.to(torch.int64),
-        topk_weights,
-        inter_dim=inter_dim,
-        doweight_stage1=doweight_stage1,
-    )
+    if not bool(skip_ref):
+        ref = torch_moe_gemm1(
+            x_q,
+            w1_q_flat,
+            scale_x,
+            scale_w1_flat,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            inter_dim=inter_dim,
+            doweight_stage1=doweight_stage1,
+        )
 
-    rtol = 0.5 if is_int4 else 0.25
-    atol = 0.5 if is_int4 else 0.25
-    assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
+        rtol = 0.5 if is_int4 else 0.25
+        atol = 0.5 if is_int4 else 0.25
+        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -662,6 +653,7 @@ def run_moe_stage2(
     a2_fp8_in: Optional[torch.Tensor] = None,
     a2_scale_in: Optional[torch.Tensor] = None,
     return_outputs: bool = False,
+    skip_ref: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
     # Parameter sanity checks with actionable hints (avoid bare AssertionError).
@@ -737,12 +729,14 @@ def run_moe_stage2(
             moe_sort_mode=moe_sort_mode,
         )
     )
-    blocks = int(routing.blocks)
-    sorted_token_ids = routing.sorted_token_ids
-    sorted_weights = routing.sorted_weights
-    sorted_expert_ids = routing.sorted_expert_ids
-    num_valid_ids = routing.num_valid_ids
-    sorted_size = routing.sorted_size
+    (
+        sorted_token_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        sorted_size,
+        blocks,
+    ) = routing
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
@@ -777,6 +771,12 @@ def run_moe_stage2(
     else:
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
         scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
+        # Build stage2 input via reference stage1 only when correctness is enabled.
+        if bool(skip_ref):
+            raise RuntimeError(
+                "run_moe_stage2(skip_ref=True) requires providing a2_fp8_in and a2_scale_in "
+                "(so we don't have to run the huge torch reference stage1)."
+            )
         out1_ref = torch_moe_gemm1(
             x_q,
             w1_q_flat,
@@ -881,17 +881,18 @@ def run_moe_stage2(
     )
     torch.cuda.synchronize()
 
-    ref2 = torch_moe_gemm2(
-        a2_q,
-        w2_q,
-        a2_scale,
-        scale_w2,
-        topk_ids.to(torch.int64),
-        topk_weights,
-        model_dim=model_dim,
-        doweight_stage2=doweight_stage2,
-    )
-    assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+    if not bool(skip_ref):
+        ref2 = torch_moe_gemm2(
+            a2_q,
+            w2_q,
+            a2_scale,
+            scale_w2,
+            topk_ids.to(torch.int64),
+            topk_weights,
+            model_dim=model_dim,
+            doweight_stage2=doweight_stage2,
+        )
+        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
@@ -1026,6 +1027,7 @@ def test_moe_gemm_2stage(
     moe_sort_mode: Optional[str] = None,
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
+    skip_ref: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1076,6 +1078,7 @@ def test_moe_gemm_2stage(
         topk_weights_in=topk_weights,
         routing_in=routing,
         return_outputs=True,
+        skip_ref=bool(skip_ref),
     )
 
     out1_fp32 = out1_fp16.to(torch.float32)
@@ -1109,6 +1112,7 @@ def test_moe_gemm_2stage(
         a2_fp8_in=a2_q,
         a2_scale_in=a2_scale,
         return_outputs=True,
+        skip_ref=bool(skip_ref),
     )
 
 
@@ -1165,6 +1169,7 @@ if __name__ == "__main__":
     # Sorting / comparison knobs
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
+    parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
@@ -1202,6 +1207,7 @@ if __name__ == "__main__":
             num_warmup=int(args.num_warmup),
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
+            skip_ref=bool(args.skip_ref),
         )
 
 

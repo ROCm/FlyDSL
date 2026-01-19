@@ -150,9 +150,9 @@ def compile_moe_gemm1(
         @flir.kernel
         def moe_gemm1(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, out_mlir()),
-            arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
-            arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
+            arg_out: lambda: T.memref(DYN, out_mlir()),
+            arg_x: lambda: T.memref(DYN, I.i8 if is_int8 else I.f8),
+            arg_w: lambda: T.memref(DYN, I.i8 if is_int8 else I.f8),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
@@ -1016,9 +1016,9 @@ def compile_moe_gemm1(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, out_mlir()),
-            arg_x: lambda: T.memref(size_x, I.i8 if is_int8 else I.f8),
-            arg_w: lambda: T.memref(size_w, I.i8 if is_int8 else I.f8),
+            arg_out: lambda: T.memref(DYN, out_mlir()),
+            arg_x: lambda: T.memref(DYN, I.i8 if is_int8 else I.f8),
+            arg_w: lambda: T.memref(DYN, I.i8 if is_int8 else I.f8),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
@@ -1180,7 +1180,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi35_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1325,16 +1325,51 @@ def compile_moe_gemm2(
             out_rsrc = buffer_ops.create_buffer_resource(
                 arg_out, max_size=False, num_records_bytes=out_nbytes_i32
             )
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
+            # scale_x (A2 scale): [tokens*topk] f32 -> bytes = tokens*topk*4
+            sx_nbytes_idx = (tokens_in * c_topk) * arith.constant(4, index=True)
+            sx_nbytes_idx = arith.select(
+                arith.cmpu(sx_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, sx_nbytes_idx
+            )
+            sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
+            sx_rsrc = buffer_ops.create_buffer_resource(
+                arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
+            )
+
+            # scale_w: [experts*model_dim] f32 (static shape in practice)
             sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
+
+            # sorted_token_ids / sorted_weights: [blocks*tile_m] (CK-style padded length)
+            sorted_nbytes_idx = (
+                size_expert_ids_in
+                * arith.constant(tile_m, index=True)
+                * arith.constant(4, index=True)
+            )
+            sorted_nbytes_idx = arith.select(
+                arith.cmpu(sorted_nbytes_idx, c_max_bytes, "ugt"),
+                c_max_bytes,
+                sorted_nbytes_idx,
+            )
+            sorted_nbytes_i32 = arith.index_cast(i32, sorted_nbytes_idx)
+            sorted_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_i32
+            )
+            sorted_w_rsrc = buffer_ops.create_buffer_resource(
+                arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_i32
+            )
+
+            # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
+            eid_nbytes_idx = size_expert_ids_in * arith.constant(4, index=True)
+            eid_nbytes_i32 = arith.index_cast(i32, eid_nbytes_idx)
+            expert_rsrc = buffer_ops.create_buffer_resource(
+                arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
+            )
             bx_m = bx * arith.constant(tile_m, index=True)
 
             # Early-exit guard (as in 2ce65fb): some routing paths can produce extra/garbage
             # expert blocks beyond `num_valid_ids`. Skip those blocks entirely to avoid OOB.
-            numids_rsrc = buffer_ops.create_buffer_resource(arg_num_valid_ids, max_size=False)
+            numids_rsrc = buffer_ops.create_buffer_resource(
+                arg_num_valid_ids, max_size=False, num_records_bytes=arith.i32(4)
+            )
             num_valid_i32 = buffer_ops.buffer_load(
                 numids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
             )
