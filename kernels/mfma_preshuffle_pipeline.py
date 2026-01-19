@@ -91,6 +91,7 @@ def make_preshuffle_scale_layout(
     mn_pack: int = 2,
     k_pack: int = 2,
     elem_bytes: int = 4,
+    scale_block_size: int = 32,
 ) -> object:
     """Build scale layout matching aiter/CK preshuffle for MXFP4 MFMA kernels.
     scale dtype is e8m0
@@ -99,13 +100,15 @@ def make_preshuffle_scale_layout(
     Shape: (N1, K1, KLane, NLane, [K_Pack, N_Pack]) = (N/32, K/8, 4, 16, [2, 2])
     """
     c16 = arith.constant(16, index=True)
+    c32 = arith.constant(32, index=True)
     c4 = arith.constant(4, index=True)
 
     c_mn_pack = arith.constant(mn_pack, index=True)
     c_k_pack = arith.constant(k_pack, index=True)
+    c_k_scale = c_k / scale_block_size
 
     c_mn1 = c_mn / c16 / c_mn_pack
-    c_k1 = c_k / c4 / c_k_pack
+    c_k1 = c_k_scale / c4 / c_k_pack
 
     # We keep the same 64B K0 "macro-step" used by CK/aiter preshuffle.
     if elem_bytes != mn_pack * k_pack:

@@ -368,7 +368,7 @@ def test_mfma_w4_flir_preshuffle(
         a_q, scale_a, _ = per_1x32_f4_quant(a_fp32)  # (M, K)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
-        scale_a = torch.ones([M, N // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        scale_a = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
 
     b_q, scale_b, b_convert = per_1x32_f4_quant(b_fp32)  # (N, K)
 
@@ -382,8 +382,18 @@ def test_mfma_w4_flir_preshuffle(
 
     # Reference (dequant + matmul).
     # c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
+
+    """
+    # test with quant date
     c_ref = run_torch(a_fp32, b_convert.reshape([-1, 256]), 1, 1, bias=None, dtype=torch.float32)
-    # c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
+    """
+    c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
+
+    # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
+    # b_dequant = b_convert.reshape(N * K // 32, -1)
+    # b_scale = scale_b.reshape(N * K // 32, -1)
+    # b_dequant  = b_dequant * b_scale.to(torch.float)
+    # c_ref = run_torch(a_fp32, b_dequant.reshape(N, K), 1, 1, bias=None, dtype=torch.float32)
 
     # Run kernel (f16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
@@ -411,6 +421,7 @@ def test_mfma_w4_flir_preshuffle(
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
+    import pdb;pdb.set_trace()
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
