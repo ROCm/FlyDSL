@@ -89,6 +89,8 @@ def c_shuffle_epilog(
     n_tile_base,
     # LDS buffer (f16 view, row-major [tile_m, tile_n] flattened)
     lds_out,
+    # Element type for LDS loads (defaults to f16). Pass bf16 to support bf16 epilogues.
+    frag_elem_type: ir.Type | None = None,
     # Callbacks
     write_row_to_lds: Callable,
     precompute_row: Callable | None = None,
@@ -163,7 +165,9 @@ def c_shuffle_epilog(
     n_lane = tx % c_nlane
     c_evec = arith.constant(EVec, index=True)
 
-    vec_f16 = ir.VectorType.get([EVec], ir.F16Type.get())
+    if frag_elem_type is None:
+        frag_elem_type = ir.F16Type.get()
+    vec_frag = ir.VectorType.get([EVec], frag_elem_type)
     bx_m_v = bx_m
     by_n_v = by_n
 
@@ -182,7 +186,7 @@ def c_shuffle_epilog(
             col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
 
             lds_idx_pair = row_base_lds + col_pair0
-            frag = vector.load_op(vec_f16, lds_out, [lds_idx_pair])
+            frag = vector.load_op(vec_frag, lds_out, [lds_idx_pair])
 
             store_pair(
                 row_local=row_local,
@@ -222,6 +226,7 @@ def mfma_epilog(
     write_row_to_lds: Callable | None = None,
     precompute_row: Callable | None = None,
     store_pair: Callable | None = None,
+    frag_elem_type: ir.Type | None = None,
 ):
     if not use_cshuffle:
         if body_row is None:
@@ -254,6 +259,7 @@ def mfma_epilog(
         by_n=by_n,
         n_tile_base=n_tile_base,
         lds_out=lds_out,
+        frag_elem_type=frag_elem_type,
         write_row_to_lds=write_row_to_lds,
         precompute_row=precompute_row,
         store_pair=store_pair,

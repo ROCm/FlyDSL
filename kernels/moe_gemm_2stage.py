@@ -125,7 +125,7 @@ def compile_moe_gemm1(
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
     module_name = (
-        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_abi2"
+        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_abi14"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -222,6 +222,17 @@ def compile_moe_gemm1(
             by = gpu.block_id("x")  # tile along inter_dim
             bx = gpu.block_id("y")  # tile along sorted M
 
+            # Block validity: compute as early as possible so invalid blocks skip all buffer-resource
+            # setup, LDS pointer math, and gmem prefetch work.
+            bx_m = bx * arith.constant(tile_m, index=True)
+            maxids_rsrc = buffer_ops.create_buffer_resource(
+                arg_max_token_ids, max_size=False, num_records_bytes=arith.i32(4)
+            )
+            max_token_id_i32 = buffer_ops.buffer_load(
+                maxids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
+            )
+            bx_m_i32 = arith.index_cast(i32, bx_m)
+            blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
             # Common constants/atoms (hoisted): keep IR small like GEMM.
             # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k // 16, index=True)
@@ -234,43 +245,67 @@ def compile_moe_gemm1(
             layout_tx_wave_lane = flir.make_layout((4, 64), stride=(64, 1))
             layout_lane16 = flir.make_layout((4, 16), stride=(16, 1))
 
-            base_ptr = allocator.get_base()
-            lds_x_ptr = _state["lds_x_decl"](base_ptr)
-            lds_x = lds_x_ptr.get()
-            # Alias LDS bytes as fp16 for optional CShuffle epilogue.
-            _use_cshuffle_epilog = bool(use_cshuffle_epilog)
-            lds_out = (
-                SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f16, shape=(tile_m * tile_n,)).get()
-                if _use_cshuffle_epilog
-                else None
-            )
-
-            # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
-            # used directly (CK-style). This allows us to avoid `select`-based masking for
-            # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
-            w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
-            sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
-            sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
-            sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
-            expert_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False)
-            sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
-            maxids_rsrc = buffer_ops.create_buffer_resource(arg_max_token_ids, max_size=False)
-
-            bx_m = bx * arith.constant(tile_m, index=True)
-
-            # CK-aligned block validity:
-            # grid.y is an *upper bound* (max m-blocks). Use device max_token_id to mask
-            # blocks beyond the valid padded range, instead of host-sync `.item()`.
-            max_token_id_i32 = buffer_ops.buffer_load(
-                maxids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
-            )
-            bx_m_i32 = arith.index_cast(i32, bx_m)
-            blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
-
+            # Everything below is gated by `blk_valid` to avoid doing buffer-resource setup and
+            # gmem work for padding blocks.
             _if_blk = scf.IfOp(blk_valid)
             with _if_blk.then():
+                base_ptr = allocator.get_base()
+                lds_x_ptr = _state["lds_x_decl"](base_ptr)
+                lds_x = lds_x_ptr.get()
+                # Alias LDS bytes as fp16 for optional CShuffle epilogue.
+                _use_cshuffle_epilog = bool(use_cshuffle_epilog)
+                lds_out = (
+                    SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f16, shape=(tile_m * tile_n,)).get()
+                    if _use_cshuffle_epilog
+                    else None
+                )
+
+                # Buffer resources: for dynamic memrefs, provide `num_records_bytes` explicitly so
+                # hardware OOB behavior is stable (otherwise it falls back to a large max size).
+                c_topk = arith.constant(topk, index=True)
+                c_max_bytes = arith.constant(0x7FFFFFFE, index=True)
+
+                # X: [tokens, k] fp8 -> bytes = tokens*k
+                x_nbytes_idx = tokens_in * k_in
+                x_nbytes_idx = arith.select(
+                    arith.cmpu(x_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, x_nbytes_idx
+                )
+                x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
+                x_rsrc = buffer_ops.create_buffer_resource(
+                    arg_x, max_size=False, num_records_bytes=x_nbytes_i32
+                )
+
+                w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
+
+                # OUT: [tokens, topk, inter] f16/bf16 -> bytes = tokens*topk*inter*out_elem_bytes
+                out_elem_bytes = 2  # f16/bf16
+                out_nbytes_idx = tokens_in * c_topk * inter_in * arith.constant(out_elem_bytes, index=True)
+                out_nbytes_idx = arith.select(
+                    arith.cmpu(out_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, out_nbytes_idx
+                )
+                out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
+                out_rsrc = buffer_ops.create_buffer_resource(
+                    arg_out, max_size=False, num_records_bytes=out_nbytes_i32
+                )
+
+                # scale_x: [tokens] f32 -> bytes = tokens*4
+                sx_nbytes_idx = tokens_in * arith.constant(4, index=True)
+                sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
+                sx_rsrc = buffer_ops.create_buffer_resource(
+                    arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
+                )
+
+                sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+
+                sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
+                sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
+
+                # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
+                eid_nbytes_i32 = arith.index_cast(i32, size_expert_ids_in * arith.constant(4, index=True))
+                expert_rsrc = buffer_ops.create_buffer_resource(
+                    arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
+                )
+
                 # Expert id for this M tile (keep address math in `index`)
                 expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
                 expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
@@ -325,9 +360,11 @@ def compile_moe_gemm1(
                     x_col_local_i32.append(col_local_i32)
     
                     sorted_row_i = bx_m + row_local
+                    # NOTE: rows beyond `num_valid_ids` can contain garbage (within the allocated
+                    # buffer). That's OK as long as we never use an out-of-range token id to index X.
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
-                    t_i32 = arith.andi(fused_i, mask24)
-                    t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
+                    t_raw = arith.andi(fused_i, mask24)
+                    t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
                     x_row_base_div4.append(t_idx * c_k_div4)
     
                 vec1_i32 = I.vec(1, i32)
@@ -410,7 +447,6 @@ def compile_moe_gemm1(
                 n_intra_up = []
                 n_blk_up = []
                 col_g_list = []
-                valid_col_list = []
                 inter_idx = arith.constant(inter_dim, index=True)
                 # layout for (row -> (blk,intra)) where intra is 0..15
                 c_n0 = c_n_total / arith.index(16)
@@ -433,7 +469,6 @@ def compile_moe_gemm1(
                     n_blk_up.append(flir.get(coord_up, 0))
                     n_intra_up.append(flir.get(coord_up, 1))
     
-                    valid_col_list.append(arith.ult(col_g, inter_idx))
     
                 m_repeat = tile_m // 16
                 k_unroll = tile_k // 64  # K64 micro-step (2x K32 MFMA)
@@ -605,7 +640,6 @@ def compile_moe_gemm1(
                         sw_up_pf = []
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
-                            valid_col = valid_col_list[ni]
                             row_gate_idx = expert_off_pf + col_g
                             row_up_idx = row_gate_idx + inter_idx
                             sw_gate_pf.append(
@@ -924,16 +958,16 @@ def compile_moe_gemm1(
     
                 def _stage1_store_row(*, mi: int, ii: int, row_in_tile, row):
                     # `row` is the sorted-row index (bx_m + row_in_tile).
+                    # Block-level early-exit already guards `bx_m` range.
+                    # Here we rely on buffer OOB semantics for any tail rows.
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                    t2 = fused2 & mask24_i32
-                    s2 = fused2 >> 24
-                    # Guard OOB rows within a valid block (partial padding in the last block).
-                    t_valid = arith.cmpu(t2, tokens_i32, "ult")
-                    s_valid = arith.cmpu(s2, topk_i32_v, "ult")
-                    valid = arith.andi(blk_valid, arith.andi(t_valid, s_valid))
-    
-                    sx = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
-                    zero_i32 = arith.i32(0)
+                    t2_raw = fused2 & mask24_i32
+                    s2_raw = fused2 >> 24
+                    t2 = t2_raw
+                    s2 = s2_raw
+
+                    sx0 = buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                    sx = sx0
                     zero_out = arith.constant(0.0, type=out_mlir())
     
                     # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
@@ -967,9 +1001,7 @@ def compile_moe_gemm1(
                             y = y * tw
                         y = arith.trunc_f(out_mlir(), y)
                         idx_out0 = idx0 + col_i32
-                        idx_out = arith.select(valid, idx_out0, zero_i32)
-                        y = arith.select(valid, y, zero_out)
-                        buffer_ops.buffer_store(y, out_rsrc, idx_out)
+                        buffer_ops.buffer_store(y, out_rsrc, idx_out0)
     
                 mfma_epilog(
     
@@ -1138,7 +1170,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi17_dyn"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi23_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1241,15 +1273,41 @@ def compile_moe_gemm2(
             lds_x = lds_x_ptr.get()
             # Alias the same underlying LDS bytes as fp16 for epilogue shuffle.
             lds_out = (
-                SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f16, shape=(tile_m * tile_n,)).get()
+                SmemPtr(
+                    base_ptr,
+                    lds_x_ptr.byte_offset,
+                    I.f16,
+                    shape=(tile_m * tile_n,),
+                ).get()
                 if _use_cshuffle_epilog
                 else None
             )
 
-            # Buffer resources (logical sizes: allow hardware OOB checks).
-            x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
+            # Buffer resources.
+            # For dynamic memrefs, `max_size=False` cannot infer the logical size from the memref *type*,
+            # so we should pass `num_records_bytes` explicitly for stable hardware OOB behavior.
+            c_topk = arith.constant(topk, index=True)
+            c_max_bytes = arith.constant(0x7FFFFFFE, index=True)
+
+            # X(A2): [tokens*topk, inter_dim] fp8 -> 1 byte/elem
+            x_nbytes_idx = (tokens_in * c_topk) * k_in  # bytes (1B/elem)
+            x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
+            x_rsrc = buffer_ops.create_buffer_resource(
+                arg_x, max_size=False, num_records_bytes=x_nbytes_i32
+            )
+
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
-            out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
+
+            # OUT: [tokens, model_dim] -> clamp to descriptor max (i32 bytes) to avoid overflow on huge tokens.
+            out_elem_bytes = 4 if out_is_f32 else 2
+            out_nbytes_idx = tokens_in * n_in * arith.constant(out_elem_bytes, index=True)
+            out_nbytes_idx = arith.select(
+                arith.cmpu(out_nbytes_idx, c_max_bytes, "ugt"), c_max_bytes, out_nbytes_idx
+            )
+            out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
+            out_rsrc = buffer_ops.create_buffer_resource(
+                arg_out, max_size=False, num_records_bytes=out_nbytes_i32
+            )
             sx_rsrc = buffer_ops.create_buffer_resource(arg_scale_x, max_size=False)
             sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
             sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
@@ -1358,13 +1416,8 @@ def compile_moe_gemm2(
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_i32 = arith.andi(fused_i, mask24)
                     s_i32 = arith.shrui(fused_i, arith.i32(24))
-                    # Guard sentinel padded token id (t_i32 == tokens) / any OOB:
-                    # clamp row index so global loads stay in-bounds; masked stores/atomics
-                    # will zero out contributions for invalid rows.
-                    t_valid = arith.ult(t_i32, tokens_i32)
-                    t_i32_safe = arith.select(t_valid, t_i32, arith.i32(0))
-                    # A2 row index = t*topk + s (still i32 here).
-                    row_ts_i32 = t_i32_safe * topk_i32 + s_i32
+                    # Keep `blk_valid` only; remove per-row token validity checks.
+                    row_ts_i32 = t_i32 * topk_i32 + s_i32
                     row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
@@ -1800,7 +1853,7 @@ def compile_moe_gemm2(
                 topk_i32_v = topk_i32
     
                 zero_i32 = arith.i32(0)
-                c2_i32 = arith.i32(2)  # fp16 element size in bytes
+                c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
     
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
@@ -1811,6 +1864,7 @@ def compile_moe_gemm2(
                         zero_i32,
                         zero_i32,
                     )
+
     
                 sw_pf = None
                 tw_pf = None
@@ -1847,13 +1901,8 @@ def compile_moe_gemm2(
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
 
-                        # Guard sentinel padded rows (t2 == tokens) / any OOB: clamp indices to stay
-                        # in-bounds for dynamic memrefs (do not rely on hardware OOB behavior).
-                        t_valid = arith.cmpu(t2, tokens_i32, "ult")
-                        t2_safe = arith.select(t_valid, t2, arith.i32(0))
-                        ts2 = t2_safe * topk_i32_v + s2
+                        ts2 = t2 * topk_i32_v + s2
                         sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
-                        sx = arith.select(t_valid, sx, arith.constant(0.0, type=f32))
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
@@ -1862,7 +1911,7 @@ def compile_moe_gemm2(
                             else:
                                 tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
 
-                        idx0 = t2_safe * model_i32  # i32 element index base (safe for sentinel padded rows)
+                        idx0 = t2 * model_i32  # i32 element index base
 
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
@@ -1877,11 +1926,7 @@ def compile_moe_gemm2(
                             col_i32 = arith.index_cast(i32, col_g)
                             idx_elem = idx0 + col_i32
                             byte_off = idx_elem * c4_i32
-                            # IMPORTANT: for sentinel padded rows, skip atomics entirely.
-                            # (A 0.0 atomic-add still costs; b27aaab relied on OOB drop behavior.)
-                            _if = scf.IfOp(t_valid)
-                            with _if.then():
-                                atomic_add_f32(v, byte_off)
+                            atomic_add_f32(v, byte_off)
 
                     default_epilog(
                         arith=arith,
@@ -1912,13 +1957,8 @@ def compile_moe_gemm2(
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
-                        # Guard sentinel padded rows (t2 == tokens) / any OOB: clamp indices to stay
-                        # in-bounds for dynamic memrefs (do not rely on hardware OOB behavior).
-                        t_valid = arith.cmpu(t2, tokens_i32, "ult")
-                        t2_safe = arith.select(t_valid, t2, arith.i32(0))
-                        ts2 = t2_safe * topk_i32_v + s2
+                        ts2 = t2 * topk_i32_v + s2
                         sx = buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
-                        sx = arith.select(t_valid, sx, arith.constant(0.0, type=f32))
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
@@ -1939,10 +1979,10 @@ def compile_moe_gemm2(
                             v = v * sx * sw
                             if doweight_stage2:
                                 v = v * tw
-                            v16 = arith.trunc_f(T.f16(), v)
+                            v_out = arith.trunc_f(T.f16(), v)
 
                             lds_idx = row_base_lds + col_local
-                            v1 = vector.from_elements(vec1_f16, [v16])
+                            v1 = vector.from_elements(vec1_f16, [v_out])
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def precompute_row(*, row_local, row):
@@ -1951,23 +1991,14 @@ def compile_moe_gemm2(
                         return buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                        # Skip atomics for invalid / sentinel rows (token==tokens or slot>=topk).
-                        # aiter routing can be extremely sparse for small token counts, which would
-                        # otherwise cause a huge number of zero atomics.
                         fused = row_ctx
                         t = fused & mask24_i32
-                        s = arith.shrui(fused, arith.i32(24))
-                        t_valid = arith.cmpu(t, tokens_i32, "ult")
-                        s_valid = arith.cmpu(s, topk_i32_v, "ult")
-                        valid = arith.andi(t_valid, s_valid)
-                        _if = scf.IfOp(valid)
-                        with _if.then():
-                            idx0 = t * model_i32
-                            col_i32 = arith.index_cast(i32, col_g0)
-                            idx_elem = idx0 + col_i32
-                            idx_elem_even = idx_elem & mask_even_i32
-                            byte_off = idx_elem_even * c2_i32
-                            atomic_add_f16x2(frag, byte_off)
+                        idx0 = t * model_i32
+                        col_i32 = arith.index_cast(i32, col_g0)
+                        idx_elem = idx0 + col_i32
+                        idx_elem_even = idx_elem & mask_even_i32
+                        byte_off = idx_elem_even * c2_i32
+                        atomic_add_f16x2(frag, byte_off)
 
                     c_shuffle_epilog(
                         arith=arith,
