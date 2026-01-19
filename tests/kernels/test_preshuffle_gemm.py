@@ -366,6 +366,7 @@ def test_mfma_w4_flir_preshuffle(
 
     if a_dtype == "fp4":
         a_q, scale_a, _ = per_1x32_f4_quant(a_fp32)  # (M, K)
+        scale_a = fp4_utils.shuffle_scale_w4(scale_a, 1, False)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
         scale_a = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
