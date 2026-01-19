@@ -18,6 +18,7 @@ from _mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
+_ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
 _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
@@ -66,6 +67,19 @@ def mfma_f32_16x16x16f16_op(result_type, operands, *, loc=None, ip=None):
 def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
     """Return the op result directly (no `.result` needed at call sites)."""
     return mfma_f32_16x16x16f16_op(result_type, operands, loc=loc, ip=ip).result
+
+# for bf16 version mfma
+def mfma_f32_16x16x16bf16_1k_op(result_type, operands, *, loc=None, ip=None):
+    """Return the op view (original behavior)."""
+    if _ods_mfma_f32_16x16x16bf16_1k is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_16x16x16bf16_1k")
+    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_mfma_f32_16x16x16bf16_1k(result_type, ops, loc=loc, ip=ip)
+
+
+def mfma_f32_16x16x16bf16_1k(result_type, operands, *, loc=None, ip=None):
+    """Return the op result directly (no `.result` needed at call sites)."""
+    return mfma_f32_16x16x16bf16_1k_op(result_type, operands, loc=loc, ip=ip).result
 
 
 def mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, *, loc=None, ip=None):
@@ -162,12 +176,14 @@ __all__ = [
     
     # Matrix operations - MFMA (Matrix Fused Multiply-Add)
     'mfma_f32_32x32x8f16', 'mfma_f32_16x16x16f16',
+    'mfma_f32_16x16x16bf16_1k',
     'mfma_f32_32x32x4bf16', 'mfma_f32_16x16x8bf16',
     'mfma_i32_32x32x8i8', 'mfma_i32_16x16x16i8',
     'mfma_i32_16x16x32_i8',
     'mfma_scale_f32_16x16x128_f8f6f4',
     # Raw-op constructors (return op view) for the above
     'mfma_f32_16x16x16f16_op', 'mfma_f32_16x16x32_fp8_fp8_op',
+    'mfma_f32_16x16x16bf16_1k_op',
     'mfma_i32_16x16x32_i8_op',
     'mfma_scale_f32_16x16x128_f8f6f4_op',
     
