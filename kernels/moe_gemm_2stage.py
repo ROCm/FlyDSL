@@ -1173,7 +1173,7 @@ def compile_moe_gemm2(
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
     module_name = (
-        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
+        f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}_abi33_dyn"
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
@@ -1944,6 +1944,13 @@ def compile_moe_gemm2(
                             "FLIR_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                         )
 
+                    # For bf16 global atomics, precompute the output base address once.
+                    # (We still need an inttoptr per atomic unless we can rely on GEPOp; keep the
+                    # stable path here.)
+                    out_base_idx = None
+                    if out_is_bf16:
+                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+
                     def write_row_to_lds(
                         *,
                         mi: int,
@@ -2000,25 +2007,31 @@ def compile_moe_gemm2(
                         col_i32 = arith.index_cast(i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
-                        byte_off = idx_elem_even * c2_i32
                         if out_is_bf16:
-                            # Use global atomicrmw fadd on <2 x bf16> (CK path) instead of buffer atomic.
-                            out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
-                            byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)
-                            ptr_addr_idx = out_base_idx + byte_off_idx
-                            out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
-                            # LLVM dialect ops don't accept FlyDSL wrappers; unwrap if needed.
-                            out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
-                            frag_v = frag._value if hasattr(frag, "_value") else frag
-                            llvm.AtomicRMWOp(
-                                llvm.AtomicBinOp.fadd,
-                                out_ptr_v,
-                                frag_v,
-                                llvm.AtomicOrdering.monotonic,
-                                syncscope="agent",
-                                alignment=4,
-                            )
+                            # CK-aligned safety: in the last partial block, rows >= num_valid_ids are invalid.
+                            # For bf16 we use global atomics (no buffer OOB), so we must skip invalid rows.
+                            row_i32 = arith.index_cast(i32, row)
+                            row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
+                            _if_row = scf.IfOp(row_valid)
+                            with _if_row.then():
+                                # Use global atomicrmw fadd on <2 x bf16> (CK path).
+                                # Compute byte address from base + (idx_elem_even * 2) and inttoptr to ptr<1>.
+                                byte_off = idx_elem_even * c2_i32
+                                byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)
+                                ptr_addr_idx = out_base_idx + byte_off_idx
+                                out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
+                                out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
+                                frag_v = frag._value if hasattr(frag, "_value") else frag
+                                llvm.AtomicRMWOp(
+                                    llvm.AtomicBinOp.fadd,
+                                    out_ptr_v,
+                                    frag_v,
+                                    llvm.AtomicOrdering.monotonic,
+                                    syncscope="agent",
+                                    alignment=4,
+                                )
                         else:
+                            byte_off = idx_elem_even * c2_i32
                             atomic_add_f16x2(frag, byte_off)
 
                     c_shuffle_epilog(
