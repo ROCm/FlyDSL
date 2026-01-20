@@ -62,6 +62,7 @@ except Exception:
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
 from kernels.moe_gemm_2stage import compile_moe_gemm1, compile_moe_gemm2
+from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
 logging.basicConfig(level=logging.INFO)
 
@@ -491,21 +492,39 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    exe = compile_moe_gemm1(
-        tokens=tokens,
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        in_dtype=in_dtype,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        sorted_size=sorted_size,
-        size_expert_ids=int(sorted_expert_ids.numel()),
-        doweight_stage1=bool(doweight_stage1),
-        use_cshuffle_epilog=False,
-    )
+    if not w_fp4_kernel:
+        exe = compile_moe_gemm1(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            sorted_size=sorted_size,
+            size_expert_ids=int(sorted_expert_ids.numel()),
+            doweight_stage1=bool(doweight_stage1),
+            use_cshuffle_epilog=False,
+        )
+    else:
+        exe = compile_mixed_moe_gemm1(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            a_dtype="fp8",
+            b_dtype="fp4",
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            sorted_size=sorted_size,
+            size_expert_ids=int(sorted_expert_ids.numel()),
+            doweight_stage1=bool(doweight_stage1),
+            use_cshuffle_epilog=False,
+        )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         if in_dtype == "fp16":
@@ -533,10 +552,14 @@ def run_moe_stage1(
     torch.cuda.synchronize()
 
     ref = torch_moe_gemm1(
-        x_q,
-        w1_q_flat,
-        scale_x,
-        scale_w1_flat,
+        # x_q,
+        # w1_q_flat,
+        # scale_x,
+        # scale_w1_flat,
+        x_fp32,
+        w1_fp32,
+        None,
+        None,
         topk_ids.to(torch.int64),
         topk_weights,
         inter_dim=inter_dim,
