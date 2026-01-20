@@ -853,9 +853,71 @@ def compile_preshuffle_gemm_a8(
                 a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
                 # MAIN LOOP: handle two tiles per iteration (2i and 2i+1)
-                iCounter = (num_tiles - 1) // 2
-                k_base = 0
-                while iCounter > 0:
+                num_main_iters = (num_tiles - 1) // 2
+                has_odd_tail = (num_tiles % 2) == 1
+                full_iters = (
+                    num_main_iters - 1 if (has_odd_tail and num_main_iters > 0) else num_main_iters
+                )
+
+                # Use range() to enable scf.for lowering (avoid full unrolling).
+                # Pass Value-typed bounds to avoid arith.constant on Python ints.
+                c0 = arith.constant(0, index=True)
+                c1 = arith.constant(1, index=True)
+                c_full_iters = arith.constant(full_iters, index=True)
+                for i in range(c0, c_full_iters, c1):
+                    # Reconstruct k_base from loop index
+                    k_base = i * (tile_k * 2)
+
+                    # Prefetch B(2i+1) into regs (pong)
+                    k1 = k_base + tile_k
+                    b_tile_pong = load_b_tile(k1)
+
+                    # Prefill A(2i+1) into LDS pong (A regs -> LDS)
+                    store_a_tile_to_lds(a_block_tile, lds_base_pong)
+
+                    # Prefetch A(2i+2) into regs for next LDS store
+                    k2 = k_base + (tile_k * 2)
+                    a_block_tile = load_a_tile(k2 / 4)
+
+                    # GEMM 2i (ping)
+                    accs, _ = compute_tile(
+                        accs,
+                        b_tile_ping,
+                        lds_base_ping,
+                        a0_prefetch=a0_prefetch_ping,
+                    )
+                    gpu.barrier()
+
+                    # Preload A from LDS pong for next compute
+                    a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
+
+                    # Prefetch B(2i+2) into regs (ping)
+                    b_tile_ping = load_b_tile(k2)
+
+                    # Prefill A(2i+2) into LDS ping
+                    store_a_tile_to_lds(a_block_tile, lds_base_ping)
+
+                    # Prefetch A(2i+3) into regs (guaranteed to exist for full_iters)
+                    k3 = k_base + (tile_k * 3)
+                    a_block_tile = load_a_tile(k3 / 4)
+
+                    # GEMM 2i+1 (pong)
+                    accs, _ = compute_tile(
+                        accs,
+                        b_tile_pong,
+                        lds_base_pong,
+                        a0_prefetch=a0_prefetch_pong,
+                    )
+                    gpu.barrier()
+
+                    # Preload A from LDS ping for next compute
+                    a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
+
+                # If odd tail, run the last iteration without prefetching A(2i+3).
+                if has_odd_tail and num_main_iters > 0:
+                    i = num_main_iters - 1
+                    k_base = i * (tile_k * 2)
+
                     # Prefetch B(2i+1) into regs (pong)
                     k1 = k_base + tile_k
                     b_tile_pong = load_b_tile(arith.constant(k1, index=True))
@@ -874,7 +936,6 @@ def compile_preshuffle_gemm_a8(
                         lds_base_ping,
                         a0_prefetch=a0_prefetch_ping,
                     )
-                    a0_prefetch_ping = None
                     gpu.barrier()
 
                     # Preload A from LDS pong for next compute
@@ -886,11 +947,6 @@ def compile_preshuffle_gemm_a8(
                     # Prefill A(2i+2) into LDS ping
                     store_a_tile_to_lds(a_block_tile, lds_base_ping)
 
-                    # Prefetch A(2i+3) into regs if it exists
-                    k3 = k_base + (tile_k * 3)
-                    if not ((num_tiles % 2) == 1 and iCounter == 1):
-                        a_block_tile = load_a_tile(arith.constant(k3, index=True) / 4)
-
                     # GEMM 2i+1 (pong)
                     accs, _ = compute_tile(
                         accs,
@@ -898,14 +954,13 @@ def compile_preshuffle_gemm_a8(
                         lds_base_pong,
                         a0_prefetch=a0_prefetch_pong,
                     )
-                    a0_prefetch_pong = None
                     gpu.barrier()
 
                     # Preload A from LDS ping for next compute
                     a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
-                    k_base = k_base + (tile_k * 2)
-                    iCounter -= 1
+                # Fix up k_base for tail
+                k_base = num_main_iters * (tile_k * 2)
 
                 # TAIL: handle remaining 1 or 2 tiles
                 if (num_tiles % 2) == 0:
@@ -920,7 +975,6 @@ def compile_preshuffle_gemm_a8(
                         lds_base_ping,
                         a0_prefetch=a0_prefetch_ping,
                     )
-                    a0_prefetch_ping = None
                     gpu.barrier()
                     a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
@@ -958,8 +1012,12 @@ def compile_preshuffle_gemm_a8(
                 b_tile_cur = b_tile0
 
                 # For each tile except last: prefetch next tile, compute current, then overwrite LDS.
-                for k_base in range(0, c_k - tile_k, tile_k):
-                    next_k = k_base + tile_k
+                # Use range_constexpr here to avoid scf.for_ iter_args issues in the single-LDS path.
+                # Force python unroll to avoid scf.for lowering issues
+                k_loop_range = list(range(0, K - tile_k, tile_k))
+                for k_base in k_loop_range:
+                    k_base_val = arith.constant(k_base, index=True)
+                    next_k = arith.constant(k_base + tile_k, index=True)
                     a_next, b_next = prefetch_ab_tile(next_k)
                     accs, _ = compute_tile(accs, b_tile_cur, lds_base)
                     # Single LDS buffer: ensure *all* waves are done reading A from LDS
