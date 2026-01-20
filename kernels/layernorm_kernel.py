@@ -5,6 +5,7 @@ embedded in `tests/kernels/test_layernorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
+from _mlir import ir
 import os
 
 from flydsl.dialects.ext import flir, arith
@@ -47,6 +48,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         ROW_PACK = 2
 
     arch = get_hip_arch()
+    DYN = ir.ShapedType.get_dynamic_size()
     allocator = SmemAllocator(None, arch=arch)
 
     tile_cols_py = BLOCK_THREADS * VEC_WIDTH
