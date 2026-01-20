@@ -403,7 +403,9 @@ def compile_preshuffle_gemm_a8(
                     return load_b_pack(base_k, ki0, ni), load_b_pack(base_k, ki1, ni)
 
                 if is_a16w4:
-                    # A16W4: B is fp4x2 packed bytes, and we convert to f16 packs in-kernel.
+                    # A16W4: B is fp4x2 packed bytes. We prefetch (pk, scale_bits) here, and
+                    # convert right before MFMA in the hot loop to avoid doing cvt immediately
+                    # after the gmem load.
                     if scale_b_rsrc is None:
                         raise RuntimeError("A16W4 requires scale_b_rsrc (per-1x32 scales).")
                     base_k_pk = base_k / arith.constant(2, index=True)  # element -> packed-byte index
@@ -416,7 +418,6 @@ def compile_preshuffle_gemm_a8(
                     coord_pk = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], k2)
                     idx_pk_bytes = flir.crd2idx(coord_pk, layout_b)
                     idx_pk_dword = idx_pk_bytes / arith.index(4)
-                    pk = buffer_ops.buffer_load(b_rsrc, idx_pk_dword, vec_width=1, dtype=T.i32)
 
                     # Scale index (aiter shuffle_scale_a16w4, gate_up=False, experts_cnt=1):
                     # row = n_blk*16 + n_intra
@@ -442,36 +443,12 @@ def compile_preshuffle_gemm_a8(
                         ((((((n1 * K1_size + k1_idx) * c4 + k_lane) * c16 + n_lane) * c2 + k_pack) * c2 + n_pack))
                     )
 
-                    from _mlir.dialects import llvm as _llvm_dialect
-                    scale_bits = buffer_ops.buffer_load(scale_b_rsrc, idx_scale, vec_width=1, dtype=T.i32)
-                    scale_f32 = _llvm_dialect.BitcastOp(T.f32, arith.unwrap(scale_bits)).result
-
-                    vec2_f16 = T.f16x2
-
-                    def call_cvt(byte_idx: int):
-                        return llvm.call_intrinsic(
-                            vec2_f16,
-                            "llvm.amdgcn.cvt.scalef32.pk.f16.fp4",
-                            [pk, scale_f32, arith.i32(int(byte_idx))],
-                            [],
-                            [],
-                        )
-
-                    h0 = call_cvt(0)
-                    h1 = call_cvt(1)
-                    h2 = call_cvt(2)
-                    h3 = call_cvt(3)
-                    f0 = vector.extract(h0, static_position=[0], dynamic_position=[])
-                    f1 = vector.extract(h0, static_position=[1], dynamic_position=[])
-                    f2 = vector.extract(h1, static_position=[0], dynamic_position=[])
-                    f3 = vector.extract(h1, static_position=[1], dynamic_position=[])
-                    f4 = vector.extract(h2, static_position=[0], dynamic_position=[])
-                    f5 = vector.extract(h2, static_position=[1], dynamic_position=[])
-                    f6 = vector.extract(h3, static_position=[0], dynamic_position=[])
-                    f7 = vector.extract(h3, static_position=[1], dynamic_position=[])
-                    b0 = vector.from_elements(T.f16x4, [f0, f1, f2, f3])
-                    b1 = vector.from_elements(T.f16x4, [f4, f5, f6, f7])
-                    return b0, b1
+                    # Prefetch scale first to overlap with pk load as much as possible.
+                    scale_bits = buffer_ops.buffer_load(
+                        scale_b_rsrc, idx_scale, vec_width=1, dtype=T.i32
+                    )
+                    pk = buffer_ops.buffer_load(b_rsrc, idx_pk_dword, vec_width=1, dtype=T.i32)
+                    return pk, scale_bits
 
                 # FP8/INT8/FP16/BF16: load 16 bytes (one full KPack).
                 base_k_bytes = base_k * arith.constant(int(b_elem_bytes), index=True)
@@ -518,16 +495,27 @@ def compile_preshuffle_gemm_a8(
                 # int8 path should not reach here (handled by the outer is_int8 branch).
 
             def load_b_tile(base_k):
-                # b_tile[ku] = (packs_half0[ni], packs_half1[ni])
+                # b_tile[ku] =
+                # - non-a16w4: (packs_half0[ni], packs_half1[ni])
+                # - a16w4: (pk_i32[ni], scale_bits_i32[ni]) and we convert later right before MFMA
                 b_tile = []
                 for ku in range_constexpr(k_unroll):
-                    packs0 = []
-                    packs1 = []
-                    for ni in range_constexpr(num_acc_n):
-                        b0, b1 = load_b_packs_k64(base_k, ku, ni)
-                        packs0.append(b0)
-                        packs1.append(b1)
-                    b_tile.append((packs0, packs1))
+                    if is_a16w4:
+                        pks = []
+                        scales_bits = []
+                        for ni in range_constexpr(num_acc_n):
+                            pk, scale_bits = load_b_packs_k64(base_k, ku, ni)
+                            pks.append(pk)
+                            scales_bits.append(scale_bits)
+                        b_tile.append((pks, scales_bits))
+                    else:
+                        packs0 = []
+                        packs1 = []
+                        for ni in range_constexpr(num_acc_n):
+                            b0, b1 = load_b_packs_k64(base_k, ku, ni)
+                            packs0.append(b0)
+                            packs1.append(b1)
+                        b_tile.append((packs0, packs1))
                 return b_tile
 
             def lds_load_16b(curr_row_a_lds, col_base, lds_base):
@@ -787,7 +775,51 @@ def compile_preshuffle_gemm_a8(
                     return mfma_step(acc_mid, a1, b1)
 
                 for ku in range_constexpr(k_unroll):
-                    b_packs0, b_packs1 = b_tile_in[ku]
+                    # For a16w4 we prefetch (pk, scale_bits) and convert here right before MFMA.
+                    if is_a16w4:
+                        b_pks, b_scales_bits = b_tile_in[ku]
+
+                        from _mlir.dialects import llvm as _llvm_dialect
+
+                        def a16w4_pk_to_f16x4(pk_i32, scale_bits_i32):
+                            scale_f32 = _llvm_dialect.BitcastOp(
+                                T.f32, arith.unwrap(scale_bits_i32)
+                            ).result
+                            vec2_f16 = T.f16x2
+
+                            def call_cvt(byte_idx: int):
+                                return llvm.call_intrinsic(
+                                    vec2_f16,
+                                    "llvm.amdgcn.cvt.scalef32.pk.f16.fp4",
+                                    [pk_i32, scale_f32, arith.i32(int(byte_idx))],
+                                    [],
+                                    [],
+                                )
+
+                            h0 = call_cvt(0)
+                            h1 = call_cvt(1)
+                            h2 = call_cvt(2)
+                            h3 = call_cvt(3)
+                            f0 = vector.extract(h0, static_position=[0], dynamic_position=[])
+                            f1 = vector.extract(h0, static_position=[1], dynamic_position=[])
+                            f2 = vector.extract(h1, static_position=[0], dynamic_position=[])
+                            f3 = vector.extract(h1, static_position=[1], dynamic_position=[])
+                            f4 = vector.extract(h2, static_position=[0], dynamic_position=[])
+                            f5 = vector.extract(h2, static_position=[1], dynamic_position=[])
+                            f6 = vector.extract(h3, static_position=[0], dynamic_position=[])
+                            f7 = vector.extract(h3, static_position=[1], dynamic_position=[])
+                            b0 = vector.from_elements(T.f16x4, [f0, f1, f2, f3])
+                            b1 = vector.from_elements(T.f16x4, [f4, f5, f6, f7])
+                            return b0, b1
+
+                        b_packs0 = []
+                        b_packs1 = []
+                        for ni in range_constexpr(num_acc_n):
+                            b0, b1 = a16w4_pk_to_f16x4(b_pks[ni], b_scales_bits[ni])
+                            b_packs0.append(b0)
+                            b_packs1.append(b1)
+                    else:
+                        b_packs0, b_packs1 = b_tile_in[ku]
                     # Byte-addressed K stepping (64B per ku).
                     ki64 = ku * 64
                     col_base = col_offset_base_bytes + ki64
