@@ -286,11 +286,9 @@ def pertoken_quant(
     per_token_scale = scale
     if scale is None:
         # [m, 1]
-        # Avoid materializing a full-size abs() temporary (can be huge for MoE weights).
-        # max(abs(x)) = max(max(x), -min(x))
-        per_token_max = torch.amax(hidden_states, dim=-1, keepdim=True)
-        per_token_min = torch.amin(hidden_states, dim=-1, keepdim=True)
-        per_token_amax = torch.maximum(per_token_max, -per_token_min)
+        per_token_amax, _ = torch.max(
+            input=torch.abs(hidden_states), dim=-1, keepdim=True
+        )
         per_token_scale = per_token_amax / dtypeMax
         per_token_scale[per_token_scale == 0] = 1
 
@@ -323,3 +321,100 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Te
     x_ = x_.view(x_type)
     x_.is_shuffled = True
     return x_
+
+
+def shuffle_weight_a16w4(src: torch.Tensor, NLane: int, gate_up: bool) -> torch.Tensor:
+    """Shuffle MXFP4 weights for A16W4 MoE kernels (layout matches aiter/CK).
+
+    Args:
+      src: shape [experts_cnt, N, K_pk], where K_pk = K // 2 for fp4x2 packing.
+      NLane: N lane factor (aiter uses 16).
+      gate_up: whether N dimension is (gate, up) concatenation (N=2*inter_dim).
+
+    Returns:
+      Tensor with the same shape/dtype as src, with `is_shuffled=True` attribute.
+    """
+    src_type = src.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and src_type == torch.float4_e2m1fn_x2:
+        src = src.view(torch.uint8)
+    experts_cnt, N, K_pk = src.shape
+    
+    KPack = 32 # 16 bytes = 32 elements of fp4
+    KLane = 64 // NLane  # 4
+    K0 = K_pk // (KLane * (KPack // 2))
+    
+    if gate_up:
+        # (experts, 2, N0, 16, K0, 4, 32) -> (experts, N0, 2, K0, 4, 16, 32)
+        N0 = (N // 2) // NLane
+        src = src.view(experts_cnt, 2, N0, NLane, K0, KLane, KPack // 2)
+        shuffled = src.permute(0, 2, 1, 4, 5, 3, 6).contiguous()
+    else:
+        # (experts, N0, 16, K0, 4, 32) -> (experts, N0, K0, 4, 16, 32)
+        N0 = N // NLane
+        src = src.view(experts_cnt, N0, NLane, K0, KLane, KPack // 2)
+        shuffled = src.permute(0, 1, 3, 4, 2, 5).contiguous()
+        
+    out = shuffled.view(-1).contiguous().view(src_type)
+    out.is_shuffled = True
+    return out
+
+
+def shuffle_scale_a16w4(src: torch.Tensor, experts_cnt: int, gate_up: bool) -> torch.Tensor:
+    """Shuffle MXFP4 e8m0 scales for A16W4 MoE kernels (layout matches aiter).
+
+    src: (rows, k_), where rows = experts * (2*inter if gate_up else N)
+         and k_ = K // 32 (one scale per 32 elements).
+
+    Note: This matches `aiter/ops/shuffle.py::shuffle_scale_a16w4` exactly.
+    """
+    n_experts, k_ = src.shape
+    n_ = n_experts // experts_cnt
+    # MXFP4 constants (as in aiter)
+    K_Pack = 2
+    N_Pack = 2
+    N_Lane = 16
+    K_Lane = 64 // N_Lane  # 4
+
+    # Basic dimensions
+    K1 = k_ // K_Pack // K_Lane  # k_ // 8
+    N1 = n_ // N_Lane // N_Pack  # n_ // 32 (or inter_dim//16 for gate_up=True)
+
+    if gate_up:
+        # [E, N_Pack(gate/up), N1, N_Lane, K1, K_Pack, K_Lane] -> [E, N1, K1, K_Lane, N_Lane, K_Pack, N_Pack]
+        shfl_scale = src.view(experts_cnt, N_Pack, N1, N_Lane, K1, K_Pack, K_Lane)
+        shfl_scale = shfl_scale.permute(0, 2, 4, 6, 3, 5, 1).contiguous()
+    else:
+        # [E, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane] -> [E, N1, K1, K_Lane, N_Lane, K_Pack, N_Pack]
+        shfl_scale = src.view(experts_cnt, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane)
+        shfl_scale = shfl_scale.permute(0, 1, 4, 6, 3, 5, 2).contiguous()
+
+    return shfl_scale.view(*src.shape).contiguous()
+
+
+def dequant_mxfp4_e8m0_to_fp16(w_fp32_2d: torch.Tensor) -> torch.Tensor:
+    """Quantize to (MXFP4 + e8m0 per_1x32 scales) then dequantize back to fp16.
+
+    This mirrors aiter's (MXFP4 + e8m0) quant scheme but returns a dense fp16 tensor.
+    Intended for **test harnesses** that want A16W4-style weights while running fp16 kernels.
+    """
+    import pytest
+    from flydsl.runtime.device import get_rocm_arch
+
+    arch = str(get_rocm_arch())
+    if "gfx950" not in arch:
+        pytest.skip(f"MXFP4/e8m0 dequant helper is only enabled on gfx950 (current arch: {arch}).")
+    try:
+        import aiter
+    except Exception:
+        pytest.skip("aiter not available; cannot use fp4_utils for MXFP4 pack/unpack.")
+    if not hasattr(aiter, "fp4_utils"):
+        pytest.skip("aiter.fp4_utils not available; cannot use MXFP4 pack/unpack.")
+
+    fu = aiter.fp4_utils
+    w_bf16 = w_fp32_2d.to(torch.bfloat16).contiguous()
+    w_q, w_s = fu.dynamic_mxfp4_quant(w_bf16, shuffle=False)  # q: float4_e2m1fn_x2, s: float8_e8m0fnu
+    w_f32 = fu.mxfp4_to_f32(w_q)  # (rows, K)
+    rows = w_bf16.shape[0]
+    s_f32 = fu.e8m0_to_f32(w_s[:rows, :])  # (rows, K/32)
+    s_exp = s_f32.repeat_interleave(32, dim=1)  # (rows, K)
+    return (w_f32 * s_exp).to(torch.float16).contiguous()
