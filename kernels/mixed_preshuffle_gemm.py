@@ -922,7 +922,7 @@ def compile_mxfp4_preshuffle_gemm(
                 # Prologue: tile-0
                 k0 = arith.constant(0, index=True)
                 a_regs0, b_tile0 = prefetch_ab_tile(k0)
-                a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(k0 // 2)
+                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
 
 
                 """

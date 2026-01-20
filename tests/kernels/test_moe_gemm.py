@@ -371,6 +371,7 @@ def run_moe_stage1(
     topk_weights_in: Optional[torch.Tensor] = None,
     routing_in: Optional[RoutingBuffers] = None,
     return_outputs: bool = False,
+    w_fp4_kernel: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -468,13 +469,22 @@ def run_moe_stage1(
     w_flat = (
         _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
     ).contiguous().view(-1)
-    w_kernel = w_flat
-    w_kernel = (
-        w_kernel.view(experts * (2 * inter_dim), model_dim) if (not is_int4) else w_kernel
-    )
 
-    # Flatten scales to 1D memrefs
+    if w_fp4_kernel:
+        w_kernel = w_flat
+        w_kernel = (
+            w_kernel.view(experts * (2 * inter_dim), model_dim) if (not is_int4) else w_kernel
+        )
+    else:
+        w_q, scale_w, _ = fp4_utils.per_1x32_f4_quant(w1_fp32)  # (N, K)
+        w_kernel = fp4_utils.shuffle_weight_w4(w_q, 16, True, True)
+        scale_w1_flat = fp4_utils.shuffle_scale_w4(scale_w, w_q.shape[0], True)
+
+        x_q = x_fp32.to(DTYPE_FP8)
+        scale_x = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+
     scale_x_1d = None if scale_x is None else scale_x.view(-1).contiguous()  # [tokens]
+    # Flatten scales to 1D memrefs
     scale_w1_1d = None if scale_w1_flat is None else scale_w1_flat.view(-1).contiguous()  # [rows]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
@@ -1035,6 +1045,7 @@ def test_moe_gemm_2stage(
     moe_sort_mode: Optional[str] = None,
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
+    w_fp4_kernel: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1089,6 +1100,7 @@ def test_moe_gemm_2stage(
         topk_weights_in=topk_weights,
         routing_in=routing,
         return_outputs=True,
+        w_fp4_kernel=w_fp4_kernel,
     )
 
     out1_fp32 = out1_fp16.to(torch.float32)
@@ -1126,6 +1138,7 @@ def test_moe_gemm_2stage(
         a2_fp8_in=a2_q,
         a2_scale_in=a2_scale,
         return_outputs=True,
+        w_fp4_kernel=w_fp4_kernel,
     )
 
 
@@ -1188,6 +1201,14 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
 
+    # w fp4 moe kernel
+    parser.add_argument(
+        "--wfp4",
+        action="store_true",
+        default=False,
+        help="Use weight fp4 gemm.",
+    )
+
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
@@ -1219,6 +1240,7 @@ if __name__ == "__main__":
             num_warmup=int(args.num_warmup),
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
+            w_fp4_kernel=args.wfp4,
         )
 
 
