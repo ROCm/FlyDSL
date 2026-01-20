@@ -21,7 +21,7 @@ from flydsl.utils import SmemAllocator, SmemPtr
 
 from _mlir import ir
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
+from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl
 from flydsl.lang.ir.types import T, memref
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -61,21 +61,32 @@ def compile_preshuffle_gemm_a8(
           - 2: ping-pong LDS for A (2 LDS buffers), tuned schedule (original).
           - 1: single LDS buffer for A .
     """
-    if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16"):
+    if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16", "a16w4"):
         raise ValueError(
-            "in_dtype must be one of ('fp8','int8','int4','fp16','bf16'), "
+            "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','a16w4'), "
             f"got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int8 = (in_dtype == "int8") or is_int4
-    is_f16 = in_dtype == "fp16"
+    is_a16w4 = in_dtype == "a16w4"
+    is_fp16 = in_dtype == "fp16"
+    is_f16 = is_fp16 or is_a16w4
     is_bf16 = in_dtype == "bf16"
-    is_f16_or_bf16 = is_f16 or is_bf16
-    elem_bytes = 1 if (in_dtype in ("fp8", "int8", "int4")) else 2
+    # A behaves like fp16 for a16w4 (A is fp16 activations).
+    is_f16_like = is_f16 or is_bf16
+    # For legacy branches that mean "no external (per-row) scales and mfma operand packs are f16/bf16",
+    # include a16w4 here (since A packs are f16 and B packs are converted to f16 in-kernel).
+    is_f16_or_bf16 = is_f16_like
+
+    # Element sizes differ for A16W4:
+    # - A is fp16 (2B)
+    # - B is fp4x2 packed bytes (1B)
+    a_elem_bytes = 1 if (in_dtype in ("fp8", "int8", "int4")) else 2
+    b_elem_bytes = 1 if (in_dtype in ("fp8", "int8", "int4", "a16w4")) else 2
 
     # Pipeline is byte-addressed along K (16B loads, XOR16 swizzle in bytes).
     # For fp16/bf16 (2B/elem), user passes tile_k halved so tile_k_bytes stays constant.
-    tile_k_bytes = int(tile_k) * int(elem_bytes)
+    tile_k_bytes = int(tile_k) * int(a_elem_bytes)
 
     # K64-byte micro-step wrapper uses 2x "half-pack" MFMA.
     # - fp8/i8: mfma K32, wrapper covers 64B (=64 elems)
@@ -83,7 +94,7 @@ def compile_preshuffle_gemm_a8(
     if (tile_k_bytes % 64) != 0:
         raise ValueError(
             f"tile_k_bytes must be divisible by 64, got tile_k_bytes={tile_k_bytes} "
-            f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
+            f"(tile_k={tile_k}, a_elem_bytes={a_elem_bytes})"
         )
 
     # INT8 must use a K32 MFMA so the micro-step matches the FP8 path (strict alignment).
@@ -99,6 +110,12 @@ def compile_preshuffle_gemm_a8(
             )
 
     gpu_arch = get_hip_arch()
+    if is_a16w4:
+        if not str(gpu_arch).startswith("gfx950"):
+            raise ValueError(f"a16w4 is only supported on gfx950 (current arch: {gpu_arch})")
+        # Scale shuffle/indexing uses K1=(K/32)/8 => K must be multiple of 256.
+        if (int(K) % 256) != 0:
+            raise ValueError(f"a16w4 requires K divisible by 256 (got K={K})")
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -111,11 +128,11 @@ def compile_preshuffle_gemm_a8(
 
     # Vector width calc (assume full tiles / no tail guards).
     total_threads = 256
-    bytes_a_per_tile = int(tile_m) * int(tile_k) * int(elem_bytes)
+    bytes_a_per_tile = int(tile_m) * int(tile_k) * int(a_elem_bytes)
     if bytes_a_per_tile % total_threads != 0:
         raise ValueError(
-            "tile_m*tile_k*elem_bytes must be divisible by "
-            f"{total_threads}: tile_m={tile_m}, tile_k={tile_k}, elem_bytes={elem_bytes}"
+            "tile_m*tile_k*a_elem_bytes must be divisible by "
+            f"{total_threads}: tile_m={tile_m}, tile_k={tile_k}, a_elem_bytes={a_elem_bytes}"
         )
     bytes_per_thread_a = bytes_a_per_tile // total_threads
 
@@ -135,6 +152,12 @@ def compile_preshuffle_gemm_a8(
         if is_bf16:
             return T.bf16
         return T.i8 if is_int8 else T.f8
+
+    def _b_elem_type():
+        # A16W4 stores B as packed bytes (i8).
+        if is_a16w4:
+            return T.i8
+        return _elem_type()
 
     def _vec16_type():
         if is_f16:
@@ -177,7 +200,7 @@ def compile_preshuffle_gemm_a8(
             lds_total_bytes = max(lds_a_bytes, lds_out_bytes)
             # Keep LDS allocation sized in bytes: element_size * num_elems.
             # Allocate element type == _elem_type() and scale element count accordingly.
-            lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
+            lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
             _state["lds_a_decl"] = allocator.allocate_array(_elem_type(), lds_total_elems)
             allocator.finalize()
 
@@ -186,7 +209,7 @@ def compile_preshuffle_gemm_a8(
             self: flir.T.i64,
             arg_c: lambda: memref(DYN, T.f16),
             arg_a: lambda: memref(DYN, _elem_type()),
-            arg_b: lambda: memref(DYN, _elem_type()),
+            arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
             arg_scale_b: lambda: memref(DYN, T.f32),
             c_m: lambda: T.index,
@@ -206,8 +229,8 @@ def compile_preshuffle_gemm_a8(
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
             # A uses dword indexing (buffer-load dwordx4). Convert element index -> dword index:
-            #   dword_index = (elem_index * elem_bytes) / 4
-            if (int(elem_bytes) == 2):
+            #   dword_index = (elem_index * a_elem_bytes) / 4
+            if (int(a_elem_bytes) == 2):
                 c_k_div4bytes = (c_k * 2) / 4
             else:
                 c_k_div4bytes = c_k / 4
@@ -215,12 +238,14 @@ def compile_preshuffle_gemm_a8(
 
             # B preshuffle layout (shared with MoE kernels).
             kpack_bytes = 8 if is_int4 else 16
+            # A16W4 weights are fp4x2 packed bytes => logical K bytes is halved (K_pk = K/2).
+            c_k_b = (c_k / arith.constant(2, index=True)) if is_a16w4 else c_k
             layout_b = make_preshuffle_b_layout(
-                flir, arith, c_n=c_n, c_k=c_k, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
+                flir, arith, c_n=c_n, c_k=c_k_b, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes
             ).layout_b
 
             # LDS layout is element-indexed, but XOR16 swizzle is byte-based.
-            # Represent LDS as (tile_m, tile_k) in elements and scale swizzle math by elem_bytes.
+            # Represent LDS as (tile_m, tile_k) in elements and scale swizzle math by a_elem_bytes.
             shape_lds = flir.make_shape(tile_m, tile_k)
             stride_lds = flir.make_stride(tile_k, 1)
             layout_lds = flir.make_layout(shape_lds, stride_lds)
@@ -243,8 +268,9 @@ def compile_preshuffle_gemm_a8(
 
             c2 = arith.constant(2, index=True)
             c4 = arith.constant(4, index=True)
-            elem_bytes_idx = arith.constant(int(elem_bytes), index=True)
-            a_nbytes = c_m * c_k * elem_bytes_idx
+            a_elem_bytes_idx = arith.constant(int(a_elem_bytes), index=True)
+            b_elem_bytes_idx = arith.constant(int(b_elem_bytes), index=True)
+            a_nbytes = c_m * c_k * a_elem_bytes_idx
             c_nbytes = c_m * c_n * c2  # f16 output
 
             # Note: N-tail for B layout is still not supported; this just makes OOB safe.
@@ -252,16 +278,33 @@ def compile_preshuffle_gemm_a8(
             c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes)
             scale_a_rsrc = (
                 None
-                if is_f16_or_bf16
+                if is_f16_like
                 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=(c_m * c4))
             )
 
-            b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
-            scale_b_rsrc = (
-                None
-                if is_f16_or_bf16
-                else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True, num_records_bytes=(c_n * c4))
+            # Enable hardware OOB checking for B as well (dynamic memref => must pass size).
+            # For packed-int4 mode, keep max-size because the packed layout's logical size
+            # differs from (N*K*elem_bytes) and the kernel currently assumes its layout.
+            b_nbytes = c_n * c_k_b * b_elem_bytes_idx
+            b_rsrc = (
+                buffer_ops.create_buffer_resource(arg_b, max_size=True)
+                if is_int4
+                else buffer_ops.create_buffer_resource(arg_b, max_size=False, num_records_bytes=b_nbytes)
             )
+            if is_fp16 or is_bf16:
+                scale_b_rsrc = None
+            elif is_a16w4:
+                # A16W4: one f32 scale per (row, 1x32 K-block) => [N, K/32]
+                c32 = arith.constant(32, index=True)
+                scale_b_rsrc = buffer_ops.create_buffer_resource(
+                    arg_scale_b,
+                    max_size=False,
+                    num_records_bytes=(c_n * (c_k / c32) * c4),
+                )
+            else:
+                scale_b_rsrc = buffer_ops.create_buffer_resource(
+                    arg_scale_b, max_size=True, num_records_bytes=(c_n * c4)
+                )
 
             bx_m = bx * tile_m
             by_n = by * tile_n
@@ -286,14 +329,15 @@ def compile_preshuffle_gemm_a8(
             # - fp16/bf16: 8 elems (2B)
             #
             # We express `col_offset_base` in *elements*.
-            kpack_elems = 16 if elem_bytes == 1 else 8
-            col_offset_base = lane_div_16 * arith.constant(int(kpack_elems), index=True)
+            # A pack size in elements (for LDS swizzle math): 16B pack is 16 elems for 1B types, 8 elems for f16/bf16.
+            kpack_elems_a = 16 if a_elem_bytes == 1 else 8
+            col_offset_base = lane_div_16 * arith.constant(int(kpack_elems_a), index=True)
             # `col_offset_base` is in element units (multiples of 16). We do LDS swizzle/math
             # in bytes, so scale by element size for fp16/bf16.
             col_offset_base_bytes = (
                 col_offset_base
-                if elem_bytes == 1
-                else (col_offset_base * arith.constant(int(elem_bytes), index=True))
+                if a_elem_bytes == 1
+                else (col_offset_base * arith.constant(int(a_elem_bytes), index=True))
             )
 
             m_repeat = tile_m // 16
@@ -340,9 +384,9 @@ def compile_preshuffle_gemm_a8(
                     n_blk=n_blk_list[ni],
                     n_intra=n_intra_list[ni],
                     lane_div_16=lane_div_16,
-                    elem_type=_elem_type(),
+                    elem_type=_b_elem_type(),
                     kpack_bytes=kpack_bytes,
-                    elem_bytes=elem_bytes,
+                    elem_bytes=b_elem_bytes,
                     unpack_int4=is_int4,
                 )
 
@@ -358,36 +402,107 @@ def compile_preshuffle_gemm_a8(
                     ki1 = (ku * 2) + 1
                     return load_b_pack(base_k, ki0, ni), load_b_pack(base_k, ki1, ni)
 
+                if is_a16w4:
+                    # A16W4: B is fp4x2 packed bytes, and we convert to f16 packs in-kernel.
+                    if scale_b_rsrc is None:
+                        raise RuntimeError("A16W4 requires scale_b_rsrc (per-1x32 scales).")
+                    base_k_pk = base_k / arith.constant(2, index=True)  # element -> packed-byte index
+                    k0_base = base_k_pk / arith.index(64)
+                    # Robust mapping: each K0 (64B) contains 4 packs (16B each) selected by KLane.
+                    k0 = k0_base + arith.constant(int(ku // 4), index=True)
+                    k1 = arith.constant(int(ku % 4), index=True)  # KLane 0..3
+                    # Within the 16B pack, each lane_div_16 selects a different dword (4B).
+                    k2 = lane_div_16 * arith.index(4)  # byte offset within the 16B pack
+                    coord_pk = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], k2)
+                    idx_pk_bytes = flir.crd2idx(coord_pk, layout_b)
+                    idx_pk_dword = idx_pk_bytes / arith.index(4)
+                    pk = buffer_ops.buffer_load(b_rsrc, idx_pk_dword, vec_width=1, dtype=T.i32)
+
+                    # Scale index (aiter shuffle_scale_a16w4, gate_up=False, experts_cnt=1):
+                    # row = n_blk*16 + n_intra
+                    # k32_idx = (base_k/32) + ku
+                    c16 = arith.index(16)
+                    c2 = arith.index(2)
+                    c4 = arith.index(4)
+                    c8 = arith.index(8)
+                    c32 = arith.index(32)
+                    row = n_blk_list[ni] * c16 + n_intra_list[ni]
+                    n1 = row / c32
+                    n_rem = row % c32
+                    n_pack = n_rem / c16
+                    n_lane = n_rem % c16
+                    k32_idx = (base_k / c32) + arith.constant(int(ku), index=True)
+                    k1_idx = k32_idx / c8
+                    k_rem = k32_idx % c8
+                    k_pack = k_rem / c4
+                    k_lane = k_rem % c4
+                    N1_size = c_n / c32
+                    K1_size = (c_k / c32) / c8
+                    idx_scale = (
+                        ((((((n1 * K1_size + k1_idx) * c4 + k_lane) * c16 + n_lane) * c2 + k_pack) * c2 + n_pack))
+                    )
+
+                    from _mlir.dialects import llvm as _llvm_dialect
+                    scale_bits = buffer_ops.buffer_load(scale_b_rsrc, idx_scale, vec_width=1, dtype=T.i32)
+                    scale_f32 = _llvm_dialect.BitcastOp(T.f32, arith.unwrap(scale_bits)).result
+
+                    vec2_f16 = T.f16x2
+
+                    def call_cvt(byte_idx: int):
+                        return llvm.call_intrinsic(
+                            vec2_f16,
+                            "llvm.amdgcn.cvt.scalef32.pk.f16.fp4",
+                            [pk, scale_f32, arith.i32(int(byte_idx))],
+                            [],
+                            [],
+                        )
+
+                    h0 = call_cvt(0)
+                    h1 = call_cvt(1)
+                    h2 = call_cvt(2)
+                    h3 = call_cvt(3)
+                    f0 = vector.extract(h0, static_position=[0], dynamic_position=[])
+                    f1 = vector.extract(h0, static_position=[1], dynamic_position=[])
+                    f2 = vector.extract(h1, static_position=[0], dynamic_position=[])
+                    f3 = vector.extract(h1, static_position=[1], dynamic_position=[])
+                    f4 = vector.extract(h2, static_position=[0], dynamic_position=[])
+                    f5 = vector.extract(h2, static_position=[1], dynamic_position=[])
+                    f6 = vector.extract(h3, static_position=[0], dynamic_position=[])
+                    f7 = vector.extract(h3, static_position=[1], dynamic_position=[])
+                    b0 = vector.from_elements(T.f16x4, [f0, f1, f2, f3])
+                    b1 = vector.from_elements(T.f16x4, [f4, f5, f6, f7])
+                    return b0, b1
+
                 # FP8/INT8/FP16/BF16: load 16 bytes (one full KPack).
-                base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+                base_k_bytes = base_k * arith.constant(int(b_elem_bytes), index=True)
                 k0_base = base_k_bytes / c64_b
                 k0 = k0_base + ku
                 k1 = lane_div_16
                 coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
                 idx_pack = flir.crd2idx(coord_pack, layout_b)
-                vec_elems = 16 if elem_bytes == 1 else 8
+                vec_elems = 16 if b_elem_bytes == 1 else 8
                 b_view = flir.TensorView(
                     arg_b,
                     (vec_elems,),
                     strides=(1,),
                     base_indices=(idx_pack,),
-                    element_type=_elem_type(),
+                    element_type=_b_elem_type(),
                 )
                 b16 = flir.copy(
-                    flir.make_copy_atom(_elem_type(), vector_size=vec_elems),
+                    flir.make_copy_atom(_b_elem_type(), vector_size=vec_elems),
                     b_view,
                     None,
                     alignment=8,
                     return_vector=True,
-                    src_buffer_resource=(b_rsrc if elem_bytes == 1 else None),
-                    src_buffer_offset_in_bytes=(elem_bytes == 1),
+                    src_buffer_resource=(b_rsrc if b_elem_bytes == 1 else None),
+                    src_buffer_offset_in_bytes=(b_elem_bytes == 1),
                 )
                 # Split 16B pack into two 8B halves.
                 b_i64x2 = vector.bitcast(T.i64x2, b16)
                 b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
                 b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
 
-                if not is_f16_or_bf16:
+                if not (is_f16 or is_bf16):
                     return b0_i64, b1_i64
 
                 # For fp16/bf16 MFMA 16x16x16, operands are 8B packs:
@@ -418,7 +533,7 @@ def compile_preshuffle_gemm_a8(
             def lds_load_16b(curr_row_a_lds, col_base, lds_base):
                 # Swizzle in bytes, then convert to element offset for memref indexing.
                 col_base_swz_bytes = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-                col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
+                col_base_swz = col_base_swz_bytes if a_elem_bytes == 1 else (col_base_swz_bytes / 2)
                 coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swz)
                 idx_a16 = flir.crd2idx(coord_a16, layout_lds)
                 idx_a16 = idx_a16 + lds_base
@@ -444,19 +559,19 @@ def compile_preshuffle_gemm_a8(
             # --- A load/store (16B chunks), XOR16 swizzle ---
             num_a_loads = bytes_per_thread_a // a_load_bytes
             # A tile mapping in dwords along K:
-            #   tile_k_dwords = (tile_k * elem_bytes) / 4
-            if elem_bytes == 2:
+            #   tile_k_dwords = (tile_k * a_elem_bytes) / 4
+            if a_elem_bytes == 2:
                 tile_k_dwords = (tile_k * 2) // 4
             else:
                 tile_k_dwords = tile_k // 4
             layout_a_tile_div4 = flir.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
             c4 = arith.constant(4, index=True)
             tx_i32_base = tx * c4
-            atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if elem_bytes == 1 else 8))
+            atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if a_elem_bytes == 1 else 8))
 
             def load_a_16(idx_elem):
                 # Use buffer loads (with explicit num_records_bytes) so tails are safe.
-                if elem_bytes == 1:
+                if a_elem_bytes == 1:
                     return buffer_copy_gmem16_dwordx4(
                         flir,
                         arg=arg_a,
@@ -492,7 +607,7 @@ def compile_preshuffle_gemm_a8(
                     # - 1B types use dword indexing (`layout_a_div4`) to match the specialized 16B
                     #   buffer-load path.
                     # - 2B types use element indexing (row-major) for buffer_load(vec<8x{f16|bf16}>).
-                    if elem_bytes == 1:
+                    if a_elem_bytes == 1:
                         coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
                         idx_elem = flir.crd2idx(coord_a_g, layout_a_div4)
                     else:
@@ -524,11 +639,11 @@ def compile_preshuffle_gemm_a8(
                         k_blocks16=k_blocks16,
                         lds_base=lds_base,
                         vec_part_i32x4=vec_a_parts[i],
-                        elem_bytes=elem_bytes,
+                        elem_bytes=a_elem_bytes,
                     )
 
             def prefetch_ab_tile(base_k):
-                base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+                base_k_bytes = base_k * arith.constant(int(a_elem_bytes), index=True)
                 base_k_div4 = base_k_bytes / 4
                 a_regs = load_a_tile(base_k_div4)
                 b_regs = load_b_tile(base_k)
@@ -637,11 +752,15 @@ def compile_preshuffle_gemm_a8(
 
                 mfma_res_ty = T.i32x4 if is_int8 else T.f32x4
 
+                use_f16_k32 = bool(is_f16) and str(gpu_arch).startswith("gfx950")
                 if is_int8:
                     mfma_fn = mfma_i32_k32
                 elif is_f16:
-                    # gfx942 fp16 MFMA: 16x16x16 f16 (operands are v4f16, 8B packs)
-                    mfma_fn = rocdl.mfma_f32_16x16x16f16
+                    mfma_fn = (
+                        rocdl.mfma_f32_16x16x32_f16
+                        if use_f16_k32
+                        else rocdl.mfma_f32_16x16x16f16
+                    )
                 elif is_bf16:
                     # bf16 MFMA K16 variant uses i16 bit-pattern packs (v4i16)
                     mfma_fn = rocdl.mfma_f32_16x16x16bf16_1k
@@ -653,6 +772,17 @@ def compile_preshuffle_gemm_a8(
 
                 # "K64-byte wrapper": two back-to-back MFMA/WMMA ops using the two 8B halves.
                 def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                    if use_f16_k32:
+                        # Pack 2x8B f16 packs into one 16B f16x8 and use single K32 MFMA.
+                        a_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), a0), static_position=[0], dynamic_position=[])
+                        a_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), a1), static_position=[0], dynamic_position=[])
+                        b_i64_0 = vector.extract(vector.bitcast(T.vec(1, T.i64), b0), static_position=[0], dynamic_position=[])
+                        b_i64_1 = vector.extract(vector.bitcast(T.vec(1, T.i64), b1), static_position=[0], dynamic_position=[])
+                        a2 = vector.from_elements(T.vec(2, T.i64), [a_i64_0, a_i64_1])
+                        b2 = vector.from_elements(T.vec(2, T.i64), [b_i64_0, b_i64_1])
+                        a8 = vector.bitcast(T.f16x8, a2)
+                        b8 = vector.bitcast(T.f16x8, b2)
+                        return mfma_step(acc_in, a8, b8)
                     acc_mid = mfma_step(acc_in, a0, b0)
                     return mfma_step(acc_mid, a1, b1)
 
@@ -1091,7 +1221,7 @@ def compile_preshuffle_gemm_a8(
             self: flir.T.i64,
             arg_c: lambda: memref(DYN, T.f16),
             arg_a: lambda: memref(DYN, _elem_type()),
-            arg_b: lambda: memref(DYN, _elem_type()),
+            arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
             arg_scale_b: lambda: memref(DYN, T.f32),
             c_m: lambda: T.index,

@@ -30,7 +30,7 @@ if _PYFLIR_SRC not in sys.path:
 
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 from tests.test_common import run_perftest, verify_output
-from tests.utils import pertoken_quant, shuffle_weight
+from tests.utils import pertoken_quant, shuffle_weight, shuffle_weight_a16w4, shuffle_scale_a16w4
 from flydsl.runtime.device import get_rocm_arch
 
 
@@ -75,7 +75,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16", "fp16", "a16w4"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
@@ -100,6 +100,11 @@ def test_mfma_a8_flir_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
 ):
+    if in_dtype == "a16w4":
+        if (K % 256) != 0:
+            pytest.skip(f"a16w4 requires K divisible by 256 for per-1x32 scale layout (got K={K}).")
+        if (N % 32) != 0:
+            pytest.skip(f"a16w4 requires N divisible by 32 for scale shuffle layout (got N={N}).")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -126,8 +131,13 @@ def test_mfma_a8_flir_preshuffle(
 
     size_c = M * N
     size_a = M * K
-    # B is packed int4 for W4A8: 2 values per byte.
+    # B storage:
+    # - int4: packed int4 (2 values per byte)
+    # - a16w4: fp4x2 packed bytes (K_pk = K/2)
     if in_dtype == "int4":
+        size_b = (N * K) // 2
+        elem_bytes = 1
+    elif in_dtype == "a16w4":
         size_b = (N * K) // 2
         elem_bytes = 1
     elif in_dtype in ("fp16", "bf16"):
@@ -155,6 +165,24 @@ def test_mfma_a8_flir_preshuffle(
         # we will materialize an internal "all-ones" scale only when launching the kernel.
         scale_a = None
         scale_b = None
+    elif in_dtype == "a16w4":
+        if "gfx950" not in str(ARCH):
+            pytest.skip(f"a16w4 preshuffle gemm is only supported on gfx950 (arch={ARCH}).")
+        if not HAS_AITER or (not hasattr(aiter, "fp4_utils")):
+            pytest.skip("a16w4 requires aiter.fp4_utils for MXFP4 pack/unpack.")
+        fu = aiter.fp4_utils
+        a_q = a_fp32.to(torch.float16)
+        scale_a = None
+        # Pack B to MXFP4(+e8m0 per-1x32 scales), then shuffle to CK/aiter layout.
+        b_bf16 = b_fp32_t.to(torch.bfloat16).contiguous()
+        b_q_pk, b_s_e8m0 = fu.dynamic_mxfp4_quant(b_bf16, shuffle=False)
+        b_q_pk = b_q_pk.view(1, N, K // 2)
+        b_shuf = shuffle_weight_a16w4(b_q_pk, NLane=16, gate_up=False).view(N, K // 2)
+        # Scales: e8m0 -> f32 -> aiter shuffle layout [N, K/32]
+        s_f32 = fu.e8m0_to_f32(b_s_e8m0[:N, :]).contiguous()
+        scale_b = shuffle_scale_a16w4(s_f32, experts_cnt=1, gate_up=False).contiguous()
+        # Kernel expects packed bytes (i8).
+        b_q = b_shuf.view(torch.int8).contiguous()
     else:
         quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
         a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
@@ -169,7 +197,10 @@ def test_mfma_a8_flir_preshuffle(
     b_q = b_q.contiguous()
 
     # Preshuffle B to CK/aiter layout.
-    b_shuffled = shuffle_weight(b_q, layout=(16, 16))
+    if in_dtype == "a16w4":
+        b_shuffled = b_q
+    else:
+        b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
         """
@@ -194,8 +225,16 @@ def test_mfma_a8_flir_preshuffle(
     if is_int4:
         b_packed = _pack_shuffled_int8_to_packed_int4_no_perm(b_shuffled)
 
-    # Reference (dequant + matmul).
-    c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
+    # Reference
+    if in_dtype == "a16w4":
+        # Dequantize MXFP4(+e8m0 per-1x32 scales) to fp32 and matmul.
+        # b_q_pk is fp4x2 packed; mxfp4_to_f32 expands to (N, K) float32.
+        w_f32 = fu.mxfp4_to_f32(b_q_pk.view(-1, K // 2)).view(N, K)
+        s_exp = s_f32.repeat_interleave(32, dim=1)
+        w_deq = (w_f32 * s_exp).contiguous()
+        c_ref = F.linear(a_q.to(torch.float32), w_deq, bias=None).to(torch.float32)
+    else:
+        c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
 
     # Run kernel (f16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
@@ -224,7 +263,9 @@ def test_mfma_a8_flir_preshuffle(
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
-    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+    atol = 0.5 if in_dtype == "a16w4" else 0.1
+    rtol = 0.5 if in_dtype == "a16w4" else 0.1
+    assert verify_output(c_out_scaled, c_ref, rtol=rtol, atol=atol)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
