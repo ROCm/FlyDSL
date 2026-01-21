@@ -445,7 +445,6 @@ def run_moe_stage1(
         )
     else:
         exe = compile_mixed_moe_gemm1(
-            tokens=tokens,
             model_dim=model_dim,
             inter_dim=inter_dim,
             experts=experts,
@@ -521,10 +520,14 @@ def run_moe_stage1(
 
     if not bool(skip_ref):
         ref = torch_moe_gemm1(
-            x_q,
-            w1_q_flat,
-            scale_x,
-            scale_w1_flat,
+            x_fp32,
+            w1_fp32,
+            None,
+            None,
+            # x_q,
+            # w1_q_flat,
+            # scale_x,
+            # scale_w1_flat,
             topk_ids.to(torch.int64),
             topk_weights,
             inter_dim=inter_dim,
@@ -1099,6 +1102,7 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
+    w_fp4_kernel: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")

@@ -21,7 +21,8 @@ from _mlir import ir
 import _mlir.extras.types as T
 from flydsl.lang.ir.types import T as I
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl
+# from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl
+from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -1193,7 +1194,6 @@ def compile_mixed_moe_gemm1(
     return exe
 
 
-@functools.lru_cache(maxsize=1024)
 def compile_mixed_moe_gemm2(
     *,
     model_dim: int,
@@ -2143,6 +2143,8 @@ def compile_mixed_moe_gemm2(
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
                 b_cur = load_b_tile(k0)
+                a_scale_pong, b_scale_pong = None, None
+                a_scale_ping, b_scale_ping = None, None
                 if is_f4_b:
                     a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // pack_K // 128)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
