@@ -452,11 +452,10 @@ def run_moe_stage1(
             topk=topk,
             a_dtype="fp8",
             b_dtype="fp4",
+            out_dtype="bf16",
             tile_m=tile_m,
             tile_n=tile_n,
             tile_k=tile_k,
-            sorted_size=sorted_size,
-            size_expert_ids=int(sorted_expert_ids.numel()),
             doweight_stage1=bool(doweight_stage1),
             use_cshuffle_epilog=False,
         )
