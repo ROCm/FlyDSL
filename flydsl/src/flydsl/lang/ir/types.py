@@ -87,6 +87,10 @@ class Types:
         return ir.VectorType.get([4], ir.IntegerType.get_signless(32))
 
     @property
+    def ui32(self) -> ir.Type:
+        return ir.IntegerType.get_unsigned(32)
+
+    @property
     def i64(self) -> ir.Type:
         return ir.IntegerType.get_signless(64)
     @property
