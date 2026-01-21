@@ -140,8 +140,8 @@ def test_mfma_a8_flir_preshuffle(
     device = torch.device("cuda")
 
     torch.manual_seed(42)
-    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
+    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.

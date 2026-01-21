@@ -10,6 +10,7 @@ It is extracted from `tests/kernels/test_moe_gemm.py` so that:
 """
 
 import os
+import functools
 
 import flydsl
 from flydsl.dialects.ext import flir
@@ -36,11 +37,9 @@ from kernels.mfma_preshuffle_pipeline import (
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 
 
+@functools.lru_cache(maxsize=1024)
 def compile_moe_gemm1(
     *,
-    # NOTE: kept for compatibility with aiter's `op_tests/test_moe_2stage.py` swap path.
-    # Stage1 is compiled with dynamic shapes; `tokens` is provided at runtime to the launcher.
-    tokens: int | None = None,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -49,13 +48,9 @@ def compile_moe_gemm1(
     tile_n: int,
     tile_k: int,
     # NOTE: aiter swap passes these for API symmetry; stage1 uses dynamic memrefs so they are ignored.
-    sorted_size: int | None = None,
-    size_expert_ids: int | None = None,
     doweight_stage1: bool,
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
-    # NOTE: aiter swap passes this; stage1 always supports dynamic blocks via `num_valid_ids`.
-    dynamic_blocks: bool | None = None,
     use_cshuffle_epilog: bool | None = None,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
@@ -1084,11 +1079,9 @@ def compile_moe_gemm1(
     return exe
 
 
+@functools.lru_cache(maxsize=1024)
 def compile_moe_gemm2(
     *,
-    # NOTE: kept for compatibility with aiter's `op_tests/test_moe_2stage.py` swap path.
-    # Stage2 is compiled with dynamic shapes; `tokens/sorted_size/size_expert_ids` are runtime.
-    tokens: int | None = None,
     model_dim: int,
     inter_dim: int,
     experts: int,
@@ -1096,13 +1089,9 @@ def compile_moe_gemm2(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    sorted_size: int | None = None,
-    size_expert_ids: int | None = None,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
-    # NOTE: aiter swap passes this; stage2 uses `num_valid_ids` for early-exit so it is ignored.
-    dynamic_blocks: bool | None = None,
     use_cshuffle_epilog: bool | None = None,
     # Optional experiment: write per-(token,slot) output (no atomics) into an output shaped
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.

@@ -635,22 +635,22 @@ def run_moe_stage2(
     x_fp32 = (
         x_fp32_in
         if x_fp32_in is not None
-        else torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
+        else torch.rand((tokens, model_dim), device=device, dtype=torch.float32)
     )
     w1_fp32 = (
         w1_fp32_in
         if w1_fp32_in is not None
-        else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+        else torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
     )
     w2_fp32 = (
         w2_fp32_in
         if w2_fp32_in is not None
-        else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
+        else torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32)
     )
 
     # Routing: deterministic torch topk + softmax.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+        score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
         topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
         topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
@@ -1002,13 +1002,13 @@ def test_moe_gemm_2stage(
     if init_scale == 1.0:
         init_scale = 0.2
     s = float(init_scale)
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
+    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
     # fan_in = inter_dim for W2: [E, model, inter]
-    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
-    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
