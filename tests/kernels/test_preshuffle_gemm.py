@@ -408,11 +408,6 @@ def test_mfma_w4_flir_preshuffle(
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
-    verify_output(c_out_scaled[0], c_ref[0], rtol=0.1, atol=0.1)
-    verify_output(c_out_scaled[1], c_ref[1], rtol=0.1, atol=0.1)
-    verify_output(c_out_scaled[2], c_ref[2], rtol=0.1, atol=0.1)
-    verify_output(c_out_scaled[3], c_ref[3], rtol=0.1, atol=0.1)
-    verify_output(c_out_scaled[4], c_ref[4], rtol=0.1, atol=0.1)
     import pdb;pdb.set_trace()
 
     verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)

@@ -87,8 +87,7 @@ def compile_mxfp4_preshuffle_gemm(
 
 
 
-    # cbsz = 0 if is_fp8_a else 4
-    cbsz = 4
+    cbsz = 0 if is_fp8_a else 4
     blgp = 4
 
     # Pipeline is byte-addressed along K (16B loads, XOR16 swizzle in bytes).
@@ -412,8 +411,8 @@ def compile_mxfp4_preshuffle_gemm(
                             ni + (by_n + n_tile_base) // pack_N // 16,
                             # 0,
                         )
-                        if bx == 0 and tx == 127:
-                            flir.printf("nidx, %d \n", ni + n_tile_base // pack_K)
+                        # if bx == 0 and tx == 127:
+                        #     flir.printf("nidx, %d \n", ni + n_tile_base // pack_K)
                         b_scale_tile.append(scale)
                 return b_scale_tile
 
@@ -433,7 +432,7 @@ def compile_mxfp4_preshuffle_gemm(
                 return a_scale_tile
 
             def prefetch_ab_scale_tile(base_k):
-                return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
+                return [load_a_scale_tile(0), load_b_scale_tile(base_k)]
 
             def lds_load_16b(curr_row_a_lds, col_base, lds_base):
                 # Swizzle in bytes, then convert to element offset for memref indexing.
@@ -511,11 +510,11 @@ def compile_mxfp4_preshuffle_gemm(
                     a0 = vector.extract(debug_a, static_position=[0], dynamic_position=[])
                     a1 = vector.extract(debug_a, static_position=[1], dynamic_position=[])
 
-                    if bx == 0 and tx == 128:
-                        flir.printf("row_a_local %ld col_a_locaal_i32 %ld \n", row_a_local, col_a_local_i32)
-                        flir.printf("offset, %ld \n", idx_elem)
-                        flir.printf("a0, %ld \n", a0)
-                        flir.printf("a1, %ld \n", a1)
+                    # if bx == 0 and tx == 128:
+                    #     flir.printf("row_a_local %ld col_a_locaal_i32 %ld \n", row_a_local, col_a_local_i32)
+                    #     flir.printf("offset, %ld \n", idx_elem)
+                    #     flir.printf("a0, %ld \n", a0)
+                    #     flir.printf("a1, %ld \n", a1)
                     parts.append(vector.bitcast(T.i32x4, a_16B))
                 return parts
 
@@ -523,9 +522,9 @@ def compile_mxfp4_preshuffle_gemm(
                 flir.print("num_a_loads", num_a_loads)
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
-                    if bx == 0 and tx == 128: 
-                        flir.printf("store row_a_local %d \n", row_a_local)
-                        flir.printf("store col_a_local_i32 %d \n", col_a_local_i32)
+                    # if bx == 0 and tx == 128: 
+                    #     flir.printf("store row_a_local %d \n", row_a_local)
+                    #     flir.printf("store col_a_local_i32 %d \n", col_a_local_i32)
                     lds_store_16b_xor16(
                         flir,
                         arith,
@@ -548,7 +547,8 @@ def compile_mxfp4_preshuffle_gemm(
                 base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
                 base_k_div4 = base_k_bytes / 4
                 a_regs = load_a_tile(base_k_div4)
-                b_regs = load_b_tile(base_k)
+                # b_regs = a_regs
+                b_regs = load_b_tile(base_k // 2)
                 return a_regs, b_regs
 
             def compute_tile(
@@ -611,8 +611,9 @@ def compile_mxfp4_preshuffle_gemm(
                                     else:
                                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                                    if bx == 0 and tx == 0:
-                                       flir.printf("curr_row_a_lds, %ld col %ld \n", curr_row_a_lds, col_base0)
+                                    # if bx == 0 and tx == 0:
+                                    #    flir.printf("curr_row_a_lds, %ld col %ld \n", curr_row_a_lds, col_base0)
+
                                     if is_fp8_a:
                                         col_base1 = col_base + 64
                                         a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
@@ -620,16 +621,16 @@ def compile_mxfp4_preshuffle_gemm(
                                     else:
                                         a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
-                                    if bx == 0 and tx == 52: 
-                                        b0 = b_packs0[mi * pack_M + imxdl]
-                                        b1 = b_packs1[mi * pack_M + imxdl]
-                                        # flir.print("mfma a type", a0)
-                                        flir.printf("tx %d: mfma a0, %ld \n", tx, a0)
-                                        flir.printf("tx %d: mfma a1, %ld \n", tx, a1)
-                                        flir.printf("tx %d: mfma b0, %ld \n", tx, b0)
-                                        flir.printf("tx %d: mfma b1, %ld \n", tx, b1)
-                                        # flir.printf("tx %d: scale a, %d \n",  tx, a_scale_val)
-                                        # flir.printf("tx %d: scale b, %d \n",  tx, b_scale_val)
+                                    # if bx == 0 and tx == 52: 
+                                    #     b0 = b_packs0[mi * pack_M + imxdl]
+                                    #     b1 = b_packs1[mi * pack_M + imxdl]
+                                    #     # flir.print("mfma a type", a0)
+                                    #     flir.printf("tx %d: mfma a0, %ld \n", tx, a0)
+                                    #     flir.printf("tx %d: mfma a1, %ld \n", tx, a1)
+                                    #     flir.printf("tx %d: mfma b0, %ld \n", tx, b0)
+                                    #     flir.printf("tx %d: mfma b1, %ld \n", tx, b1)
+                                    #     # flir.printf("tx %d: scale a, %d \n",  tx, a_scale_val)
+                                    #     # flir.printf("tx %d: scale b, %d \n",  tx, b_scale_val)
 
                                     for inxdl in range_constexpr(pack_N):
                                         ni_idx = ni * pack_N + inxdl
@@ -662,19 +663,19 @@ def compile_mxfp4_preshuffle_gemm(
                                                 b_scale_val,
                                             ],
                                         )
-                                        if bx == 0 and tx < 8: 
-                                            # c_scale0 = vector.extract(current_accs_list[acc_idx], static_position=[0], dynamic_position=[])
-                                            # c_scale1 = vector.extract(current_accs_list[acc_idx], static_position=[1], dynamic_position=[])
-                                            c_scale2 = vector.extract(current_accs_list[acc_idx], static_position=[2], dynamic_position=[])
-                                            # c_scale3 = vector.extract(current_accs_list[acc_idx], static_position=[3], dynamic_position=[])
-                                            flir.printf("%d c_out %f\n", tx, c_scale2)
-                                            # flir.printf("c_out %f, %f, %f, %f",
-                                            #         c_scale0,
-                                            #         c_scale1,
-                                            #         c_scale2,
-                                            #         c_scale3)
+                                        # if bx == 0 and tx < 8: 
+                                        #     # c_scale0 = vector.extract(current_accs_list[acc_idx], static_position=[0], dynamic_position=[])
+                                        #     # c_scale1 = vector.extract(current_accs_list[acc_idx], static_position=[1], dynamic_position=[])
+                                        #     c_scale2 = vector.extract(current_accs_list[acc_idx], static_position=[2], dynamic_position=[])
+                                        #     # c_scale3 = vector.extract(current_accs_list[acc_idx], static_position=[3], dynamic_position=[])
+                                        #     flir.printf("%d c_out %f\n", tx, c_scale2)
+                                        #     # flir.printf("c_out %f, %f, %f, %f",
+                                        #     #         c_scale0,
+                                        #     #         c_scale1,
+                                        #     #         c_scale2,
+                                        #     #         c_scale3)
 
-                    return current_accs_list, None
+                return current_accs_list, None
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
             vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
@@ -962,7 +963,8 @@ def compile_mxfp4_preshuffle_gemm(
                     for k_iv in range(0, c_k_main, tile_k * 2):
                         next_k1 = k_iv + tile_k
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                        a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(next_k1 // pack_K)
+                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // 256)
+                        # a_scale_ping, b_scale_ping = a_scale_pong, b_scale_pong
                 
                         accs, _ = compute_tile(
                             accs,
@@ -983,7 +985,7 @@ def compile_mxfp4_preshuffle_gemm(
                 
                         next_k2 = k_iv + tile_k * 2
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // pack_K)
+                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // 256)
                 
                         accs, _ = compute_tile(
                             accs,
@@ -1015,7 +1017,7 @@ def compile_mxfp4_preshuffle_gemm(
                     for k_iv in range(0, c_k_stop, tile_k * 2):
                         next_k1 = k_iv + tile_k
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                        a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(next_k1 // pack_K)
+                        a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(next_k1 // 256)
                 
                         accs, _ = compute_tile(
                             accs,
@@ -1035,7 +1037,7 @@ def compile_mxfp4_preshuffle_gemm(
                 
                         next_k2 = k_iv + tile_k * 2
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // pack_K)
+                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // 256)
                 
                         accs, _ = compute_tile(
                             accs,
@@ -1055,7 +1057,7 @@ def compile_mxfp4_preshuffle_gemm(
                 
                     last_k = c_k - tile_k
                     a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
-                    a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(last_k // pack_K)
+                    a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(last_k // 256)
                 
                     accs, _ = compute_tile(
                         accs,

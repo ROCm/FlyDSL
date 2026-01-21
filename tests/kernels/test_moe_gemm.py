@@ -23,6 +23,7 @@ from test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
+from tests.kernels.utils import fp4_utils
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -387,11 +388,13 @@ def run_moe_stage1(
         if x_fp32_in is not None
         else torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
     )
+    # x_fp32 = torch.ones((tokens, model_dim), device=device, dtype=torch.float32) / 10
     w1_fp32 = (
         w1_fp32_in
         if w1_fp32_in is not None
         else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
     )
+    # w1_fp32 = torch.ones((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) / 10
     # w2 is required by aiter CK API even for stage1; keep it allocated to avoid null ptr.
     # Stage1 kernels should not touch it, but we allocate a correct-shape tensor for safety.
     w2_fp32 = (
@@ -471,7 +474,7 @@ def run_moe_stage1(
         _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
     ).contiguous().view(-1)
 
-    if w_fp4_kernel:
+    if not w_fp4_kernel:
         w_kernel = w_flat
         w_kernel = (
             w_kernel.view(experts * (2 * inter_dim), model_dim) if (not is_int4) else w_kernel
@@ -482,7 +485,7 @@ def run_moe_stage1(
         scale_w1_flat = fp4_utils.shuffle_scale_w4(scale_w, w_q.shape[0], True)
 
         x_q = x_fp32.to(DTYPE_FP8)
-        scale_x = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        scale_x = torch.ones([sorted_size, model_dim // 32], dtype=fp4_utils.fp8_e8m0, device=device)
 
     scale_x_1d = None if scale_x is None else scale_x.view(-1).contiguous()  # [tokens]
     # Flatten scales to 1D memrefs
@@ -490,7 +493,8 @@ def run_moe_stage1(
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    # out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    out = torch.zeros((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
     if not w_fp4_kernel:
         exe = compile_moe_gemm1(
@@ -536,8 +540,7 @@ def run_moe_stage1(
                 sw = torch.empty((0,), device=o.device, dtype=torch.float32)
         exe(o, x, w, sx, sw, st, eids, sw_sorted, tokens, inter_dim, model_dim)
 
-    _, us = run_perftest(
-        launch,
+    launch(
         out,
         x_q,
         w_kernel,
@@ -546,11 +549,7 @@ def run_moe_stage1(
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
-        num_iters=int(num_iters),
-        num_warmup=int(num_warmup),
     )
-    torch.cuda.synchronize()
-
     ref = torch_moe_gemm1(
         # x_q,
         # w1_q_flat,
@@ -565,6 +564,23 @@ def run_moe_stage1(
         inter_dim=inter_dim,
         doweight_stage1=doweight_stage1,
     )
+    verify_output(out.to(torch.float32), ref, rtol=0.1, atol=0.1)
+    import pdb;pdb.set_trace()
+
+    _, us = run_perftest(
+        launch,
+        out,
+        x_q,
+        w_kernel,
+        scale_x_1d,
+        scale_w1_1d,
+        sorted_token_ids,
+        sorted_expert_ids,
+        sorted_weights_1d,
+        num_iters=int(num_iters),
+        num_warmup=int(num_warmup),
+    )
+    torch.cuda.synchronize()
 
     rtol = 0.5 if is_int4 else 0.25
     atol = 0.5 if is_int4 else 0.25
@@ -1203,15 +1219,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
-    parser.add_argument("-t", "--tokenNum", type=int, default=2048, help="Number of tokens (e.g. -t 1024)")
+    parser.add_argument("-t", "--tokenNum", type=int, default=32, help="Number of tokens (e.g. -t 1024)")
     parser.add_argument("-e", "--expert", type=int, default=8, help="Number of experts (e.g. -e 8)")
     parser.add_argument("-k", "--topk", type=int, default=2, help="Top-k (e.g. -k 2)")
     parser.add_argument("-s", "--doweight_stage1", type=_str2bool, nargs="?", const=True, default=False, help="Whether to multiply routed weight in stage1 (t/f).")
 
     # Stage1-specific kernel tiling knobs
-    parser.add_argument("--tile_m", type=int, default=64, help="Tile M / block_m (routing block size).")
+    parser.add_argument("--tile_m", type=int, default=32, help="Tile M / block_m (routing block size).")
     parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
-    parser.add_argument("--tile_k", type=int, default=128, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_k", type=int, default=256, help="Tile K (model dim tile).")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
@@ -1221,8 +1237,8 @@ if __name__ == "__main__":
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
+    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
 
     # w fp4 moe kernel
     parser.add_argument(
