@@ -62,7 +62,7 @@ except Exception:
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
 from kernels.moe_gemm_2stage import compile_moe_gemm1, compile_moe_gemm2
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
+from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 
 logging.basicConfig(level=logging.INFO)
 
@@ -664,6 +664,7 @@ def run_moe_stage2(
     a2_scale_in: Optional[torch.Tensor] = None,
     return_outputs: bool = False,
     skip_ref: bool = False,
+    w_fp4_kernel: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
     # Parameter sanity checks with actionable hints (avoid bare AssertionError).
@@ -813,14 +814,41 @@ def run_moe_stage2(
     scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
     # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
-    w2_kernel = w2_shuffled_flat
-    if is_int4:
-        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
+    if not w_fp4_kernel:
+        w2_kernel = w2_shuffled_flat
+        if is_int4:
+            w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
 
-    w2_flat = w2_kernel.contiguous().view(-1)
-    w2_kernel = w2_flat
-    if not is_int4:
-        w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+        w2_flat = w2_kernel.contiguous().view(-1)
+        w2_kernel = w2_flat
+        if not is_int4:
+            w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+    else:
+        # fp4 kernel path
+        w_q, scale_w, _ = fp4_utils.per_1x32_f4_quant(w2_fp32)  # (N, K)
+        w2_kernel = fp4_utils.shuffle_weight_w4(w_q, 16, True, True)
+        scale_w2_flat = fp4_utils.shuffle_scale_w4(scale_w, w_q.shape[0], True)
+
+        # For fp4 kernel, a2 should be fp8
+        if a2_fp8_in is not None:
+            a2_q = a2_fp8_in.to(DTYPE_FP8) if a2_fp8_in.dtype != DTYPE_FP8 else a2_fp8_in
+        else:
+            # Build stage2 input via reference stage1
+            w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+            scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+            out1_ref = torch_moe_gemm1(
+                x_q,
+                w1_q_flat,
+                scale_x,
+                scale_w1_flat,
+                topk_ids.to(torch.int64),
+                topk_weights,
+                inter_dim=inter_dim,
+                doweight_stage1=bool(doweight_stage1),
+            )  # [tokens, topk, inter] fp32
+            a2_q = out1_ref.to(DTYPE_FP8)
+        
+        a2_scale = torch.ones([sorted_size, inter_dim // 32], dtype=fp4_utils.fp8_e8m0, device=device)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
     if a2_scale is None:
@@ -842,17 +870,32 @@ def run_moe_stage2(
     out_perf = torch.zeros_like(out)
 
     doweight_stage2 = not bool(doweight_stage1)
-    exe = compile_moe_gemm2(
-        model_dim=model_dim,
-        inter_dim=inter_dim,
-        experts=experts,
-        topk=topk,
-        in_dtype=in_dtype,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        doweight_stage2=bool(doweight_stage2),
-    )
+    if not w_fp4_kernel:
+        exe = compile_moe_gemm2(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=bool(doweight_stage2),
+        )
+    else:
+        exe = compile_mixed_moe_gemm2(
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            a_dtype="fp8",
+            b_dtype="fp4",
+            out_dtype="f16",
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            doweight_stage2=bool(doweight_stage2),
+        )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         exe(
