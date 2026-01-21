@@ -8,6 +8,7 @@ This is intentionally minimal:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -146,6 +147,15 @@ class FileCache:
         except Exception:
             pass
 
+    @contextlib.contextmanager
+    def lock(self):
+        """Process-level lock for this cache key (best-effort)."""
+        fd = self._lock_fd()
+        try:
+            yield fd
+        finally:
+            self._unlock_fd(fd)
+
     def get_module_asm(self) -> Optional[str]:
         p = self.paths.module_mlir
         if not p.exists():
@@ -155,9 +165,9 @@ class FileCache:
         except Exception:
             return None
 
-    def put_module_asm(self, asm: str, *, meta: Optional[dict] = None) -> None:
+    def put_module_asm(self, asm: str, *, meta: Optional[dict] = None, lock_fd=None) -> None:
         # Atomic write pattern from Triton cache: write to temp dir then replace.
-        fd = self._lock_fd()
+        fd = lock_fd if lock_fd is not None else self._lock_fd()
         try:
             rnd_id = str(uuid.uuid4())
             pid = os.getpid()
@@ -176,7 +186,8 @@ class FileCache:
                 tmp_meta.write_text(json.dumps(meta, sort_keys=True, indent=2), encoding="utf-8")
                 os.replace(str(tmp_meta), str(self.paths.meta_json))
         finally:
-            self._unlock_fd(fd)
+            if lock_fd is None:
+                self._unlock_fd(fd)
 
 
 def default_key_payload(*, chip: str, pipeline: str, input_asm: str) -> dict:
