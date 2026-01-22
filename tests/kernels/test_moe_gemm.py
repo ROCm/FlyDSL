@@ -1092,6 +1092,191 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
     )
+
+
+@pytest.mark.parametrize(
+    "model_dim, inter_dim, experts, topk",
+    [
+        pytest.param(4096, 16384, 8, 2, id="E8K2"),
+        pytest.param(6144, 24576, 16, 4, id="E16K4"),
+        pytest.param(7168, 18432, 32, 8, id="E32K8"),
+    ],
+)
+@pytest.mark.parametrize("in_dtype", ["fp8"])
+def test_moe_stage2_standalone(
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    in_dtype: str,
+    *,
+    tokens: int = 16384,
+    tile_m: int = 64,
+    tile_n: int = 128,
+    tile_k: int = 128,
+    seed: int = 0,
+    num_iters: int = 10,
+    num_warmup: int = 3,
+):
+    """Standalone stage2 test for optimization development."""
+
+    import math
+
+    device = torch.device("cuda")
+    torch.manual_seed(seed)
+
+    # Tiling validation
+    if model_dim % tile_n != 0:
+        raise ValueError(f"model_dim ({model_dim}) must be divisible by tile_n ({tile_n}).")
+    if inter_dim % tile_k != 0:
+        raise ValueError(f"inter_dim ({inter_dim}) must be divisible by tile_k ({tile_k}).")
+    if (tile_m * tile_k) % 256 != 0:
+        raise ValueError(f"tile_m*tile_k must be divisible by 256. Got {tile_m}*{tile_k}={tile_m*tile_k}.")
+    bytes_per_thread_x = (tile_m * tile_k) // 256
+    if bytes_per_thread_x % 4 != 0:
+        raise ValueError(f"(tile_m*tile_k)/256 must be divisible by 4. Got {bytes_per_thread_x}.")
+
+    is_int4 = in_dtype == "int4"
+    is_int8 = in_dtype in ("int8", "int4")
+    init_scale = 0.2
+
+    # Data generation
+    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * init_scale
+    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (init_scale / math.sqrt(model_dim))
+    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (init_scale / math.sqrt(inter_dim))
+
+    # Routing
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+        moe_sort_mode="torch",
+    )
+    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, blocks = routing
+
+    # Quantize weights
+    if in_dtype == "fp8":
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        w2_q = w2_fp32.to(torch.float16)
+        scale_w2 = None
+    elif in_dtype == "int8":
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    else:  # int4 (W4A8)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+
+    w2_shuffled = shuffle_weight(w2_q)
+    w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
+    scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
+
+    # Generate valid a2 via torch reference stage1
+    if in_dtype == "fp8":
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        x_q, w1_q = x_fp32.to(torch.float16), w1_fp32.to(torch.float16)
+        scale_x, scale_w1 = None, None
+    elif in_dtype == "int8":
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+    else:  # int4 (W4A8): A is int8
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+
+    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+    scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+
+    doweight_stage1 = False  # Apply weight in stage2
+    out1_ref = torch_moe_gemm1(
+        x_q, w1_q_flat, scale_x, scale_w1_flat,
+        topk_ids.to(torch.int64), topk_weights,
+        inter_dim=inter_dim, doweight_stage1=doweight_stage1,
+    )
+
+    # Quantize stage1 output as stage2 input
+    if in_dtype == "fp8":
+        a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
+    elif in_dtype == "fp16":
+        a2_q, a2_scale = out1_ref.to(torch.float16), None
+    else:  # int8/int4: A2 is int8
+        a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
+
+    # Prepare w2_kernel
+    w2_kernel = w2_shuffled_flat
+    if is_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
+    w2_kernel = w2_kernel.contiguous().view(-1)
+    if not is_int4:
+        w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+
+    # Flatten scales
+    a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32) if a2_scale is None else a2_scale.view(-1).contiguous()
+    w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32) if scale_w2_flat is None else scale_w2_flat.view(-1).contiguous()
+    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+
+    # Reference output (use un-shuffled w2_q and un-flat scale_w2)
+    doweight_stage2 = not doweight_stage1
+    ref_out = torch_moe_gemm2(
+        a2_q, w2_q, a2_scale, scale_w2,
+        topk_ids.to(torch.int64), topk_weights,
+        model_dim=model_dim, doweight_stage2=doweight_stage2,
+    )
+
+    # Helper to run and benchmark a stage2 kernel implementation
+    def _run_stage2_kernel(compile_fn, kernel_name: str):
+        exe = compile_fn(
+            model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage2=doweight_stage2, in_dtype=in_dtype,
+        )
+
+        out = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
+        out_perf = torch.zeros_like(out)
+
+        def launch(o, *args):
+            exe(o, a2_q.view(-1), w2_kernel.view(-1), a2_scale_1d, w2_scale_1d,
+                sorted_token_ids, sorted_expert_ids, sorted_weights_1d,
+                num_valid_ids, tokens, model_dim, inter_dim, int(blocks))
+
+        # Benchmark using run_perftest
+        _, us = run_perftest(launch, out_perf, num_iters=num_iters, num_warmup=num_warmup)
+        torch.cuda.synchronize()
+
+        # Correctness run (clean buffer)
+        out.zero_()
+        launch(out)
+        torch.cuda.synchronize()
+
+        passed = verify_output(out.to(torch.float32), ref_out, rtol=0.5, atol=0.5)
+
+        # Performance metrics
+        flops = 2 * tokens * topk * model_dim * inter_dim
+        tflops = flops / (us / 1e6) / 1e12
+        bytes_moved = (
+            tokens * topk * inter_dim * (1 if not is_int4 else 1) +  # a2
+            (experts * model_dim * inter_dim) // (2 if is_int4 else 1) +  # w2 (packed for int4)
+            tokens * model_dim * 2 +  # out fp16
+            tokens * topk * 4 + experts * model_dim * 4 +  # scales
+            sorted_weights.numel() * 4 + sorted_token_ids.numel() * 4 + sorted_expert_ids.numel() * 4
+        )
+        tbps = bytes_moved / 1e12 / (us / 1e6)
+
+        status = "PASS" if passed else "FAIL"
+        print(f"[{kernel_name}] {status} | {model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
+              f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s")
+        assert passed, f"{kernel_name} correctness check failed"
+        return us, tflops
+
+    # Run baseline
+    _run_stage2_kernel(compile_moe_gemm2, "stage2_baseline")
+
+
 if __name__ == "__main__":
     torch.set_default_device("cuda")
     # CLI (mirrors key knobs from aiter/op_tests/test_moe_2stage.py, stage1 subset)
