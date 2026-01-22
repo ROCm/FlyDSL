@@ -75,7 +75,6 @@ def compile_mxfp4_preshuffle_gemm(
 
     a_elem_vec_pack = 2 if is_fp4_a else  1
     b_elem_vec_pack = 2
-    for ni in range_constexpr()
 
     elem_bytes = 1
 
