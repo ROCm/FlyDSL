@@ -76,6 +76,7 @@ def c_shuffle_epilog(
     # Tile params
     tile_m: int,
     tile_n: int,
+    tile_n_lds: int | None = None,
     e_vec: int = 2,
     cshuffle_nlane: int = 32,
     block_size: int = 256,
@@ -92,6 +93,9 @@ def c_shuffle_epilog(
     lds_out,
     # Element type for LDS loads (defaults to f16). Pass bf16 to support bf16 epilogues.
     frag_elem_type: ir.Type | None = None,
+    # Scheduling (optional)
+    rocdl=None,
+    sched_epilog: bool = False,
     # Callbacks
     write_row_to_lds: Callable,
     precompute_row: Callable | None = None,
@@ -124,12 +128,18 @@ def c_shuffle_epilog(
 
     # ---------------- Step 1: write C tile to LDS (row-major, fp16) ----------------
     tile_n_idx = arith.constant(int(tile_n), index=True)
+    tile_n_lds_i = int(tile_n if tile_n_lds is None else tile_n_lds)
+    if tile_n_lds_i < int(tile_n):
+        raise ValueError(
+            f"tile_n_lds ({tile_n_lds_i}) must be >= tile_n ({tile_n})"
+        )
+    tile_n_lds_idx = arith.constant(tile_n_lds_i, index=True)
     n_tile_base_v = n_tile_base
     col_base_local = n_tile_base_v + lane_mod_16  # index within [0,tile_n)
 
     def _write_row(mi: int, ii: int, row_in_tile, row):
-        # row_base_lds = row_in_tile * tile_n
-        row_base_lds = row_in_tile * tile_n_idx
+        # row_base_lds = row_in_tile * tile_n_lds
+        row_base_lds = row_in_tile * tile_n_lds_idx
         write_row_to_lds(
             mi=mi,
             ii=ii,
@@ -140,6 +150,8 @@ def c_shuffle_epilog(
             num_acc_n=num_acc_n,
             lds_out=lds_out,
         )
+        if sched_epilog and rocdl is not None:
+            rocdl.sched_dswr(1)
 
     default_epilog(
         arith=arith,
@@ -162,8 +174,19 @@ def c_shuffle_epilog(
     n_reps_shuffle = int(tile_n) // (CShuffleNLane * EVec)
 
     c_nlane = arith.constant(CShuffleNLane, index=True)
-    m_lane = tx / c_nlane
-    n_lane = tx % c_nlane
+    # Use bitwise lane mapping when NLane is power-of-two (matches CK).
+    if (CShuffleNLane & (CShuffleNLane - 1)) == 0:
+        i32 = ir.IntegerType.get_signless(32)
+        tx_i32 = arith.index_cast(i32, tx)
+        mask = arith.i32(CShuffleNLane - 1)
+        n_lane_i32 = arith.andi(tx_i32, mask)
+        shift = int((CShuffleNLane).bit_length() - 1)
+        m_lane_i32 = arith.shrui(tx_i32, arith.i32(shift))
+        m_lane = arith.index_cast(ir.IndexType.get(), m_lane_i32)
+        n_lane = arith.index_cast(ir.IndexType.get(), n_lane_i32)
+    else:
+        m_lane = tx / c_nlane
+        n_lane = tx % c_nlane
     c_evec = arith.constant(EVec, index=True)
 
     if frag_elem_type is None:
@@ -194,14 +217,24 @@ def c_shuffle_epilog(
             row_ctx, row_pred = row_ctx_raw
 
         def _do_store_row():
-            row_base_lds = row_local * tile_n_idx
+            row_base_lds = row_local * tile_n_lds_idx
+            if sched_epilog and rocdl is not None:
+                rocdl.sched_dsrd(1)
+
+            # Issue all LDS reads first, then all stores/atomics.
+            frag_list = []
+            col_pair_list = []
             for nr in range_constexpr(n_reps_shuffle):
                 col_base_nr = arith.constant(nr * (CShuffleNLane * EVec), index=True)
                 col_pair0 = col_base_nr + (n_lane * c_evec)  # even col within tile
-
                 lds_idx_pair = row_base_lds + col_pair0
                 frag = vector.load_op(vec_frag, lds_out, [lds_idx_pair])
+                frag_list.append(frag)
+                col_pair_list.append(col_pair0)
 
+            for nr in range_constexpr(n_reps_shuffle):
+                col_pair0 = col_pair_list[nr]
+                frag = frag_list[nr]
                 store_pair(
                     row_local=row_local,
                     row=row,
@@ -236,6 +269,7 @@ def mfma_epilog(
     scf=None,
     tile_m: int | None = None,
     tile_n: int | None = None,
+    tile_n_lds: int | None = None,
     e_vec: int = 2,
     cshuffle_nlane: int = 32,
     block_size: int = 256,
@@ -270,6 +304,7 @@ def mfma_epilog(
         range_constexpr=range_constexpr,
         tile_m=int(tile_m),
         tile_n=int(tile_n),
+        tile_n_lds=(int(tile_n_lds) if tile_n_lds is not None else None),
         e_vec=int(e_vec),
         cshuffle_nlane=int(cshuffle_nlane),
         block_size=int(block_size),

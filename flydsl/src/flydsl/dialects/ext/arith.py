@@ -226,13 +226,29 @@ def extf(result_type: Type, value: Union["ArithValue", Value], *, loc: Location 
         
     Returns:
         ArithValue wrapping the extended value
-        
+    
     Example:
         >>> f16_val = ...  # some f16 value
         >>> f32_val = arith.extf(T.vector(32, T.f32()), f16_val)
     """
     val = _unwrap_value(value) if isinstance(value, ArithValue) else value
     result = _arith.ExtFOp(result_type, val, loc=loc).result
+    return ArithValue(result)
+
+def extui(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Zero-extend integer value to a wider type (e.g., i16 -> i32).
+    
+    Args:
+        result_type: Target integer type
+        value: Value to extend
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the extended value
+    """
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.ExtUIOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
 def fptosi(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
@@ -460,6 +476,22 @@ def trunc_f(target_type: Type, value: Union["ArithValue", Value], *, loc: Locati
     loc = maybe_default_loc(loc)
     val = _unwrap_value(value)
     result = _arith.TruncFOp(target_type, val, loc=loc).result
+    return ArithValue(result)
+
+def trunc_i(target_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Truncate integer value to narrower type (e.g., i32 -> i16).
+    
+    Args:
+        target_type: Target integer type
+        value: Value to truncate
+        loc: Optional source location
+        
+    Returns:
+        ArithValue wrapping the truncated result
+    """
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.TruncIOp(target_type, val, loc=loc).result
     return ArithValue(result)
 
 def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optional[Value] = None, loc: Location = None) -> "ArithValue":
@@ -879,19 +911,19 @@ from _mlir.dialects.arith import (
     AddIOp, AddFOp, SubIOp, SubFOp, MulIOp, MulFOp,
     DivSIOp, DivFOp, RemSIOp, RemFOp,
     CmpIOp, CmpFOp, CmpIPredicate, CmpFPredicate,
-    IndexCastOp, ExtSIOp, TruncIOp, ExtFOp, TruncFOp,
+    IndexCastOp, ExtSIOp, ExtUIOp, TruncIOp, ExtFOp, TruncFOp,
     SIToFPOp, FPToSIOp, SelectOp,
 )
 
 __all__ = [
     "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
-    "maximum", "minimum", "select", "extf", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
-    "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f",
+    "maximum", "minimum", "select", "extf", "extui", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
+    "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f", "trunc_i",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
     "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",
     "CmpIOp", "CmpFOp", "CmpIPredicate", "CmpFPredicate",
-    "IndexCastOp", "ExtSIOp", "TruncIOp", "ExtFOp", "TruncFOp",
+    "IndexCastOp", "ExtSIOp", "ExtUIOp", "TruncIOp", "ExtFOp", "TruncFOp",
     "SIToFPOp", "FPToSIOp", "SelectOp",
 ]
 

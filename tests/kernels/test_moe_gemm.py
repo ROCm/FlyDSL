@@ -1123,7 +1123,7 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4", "all"],
+        choices=["fp8", "fp16", "int8", "int4", "bf16","all"],
         help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
         "int4 means W4A8: A int8, W packed int4.",
     )
