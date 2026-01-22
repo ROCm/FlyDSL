@@ -75,6 +75,7 @@ def compile_mxfp4_preshuffle_gemm(
 
     a_elem_vec_pack = 2 if is_fp4_a else  1
     b_elem_vec_pack = 2
+    for ni in range_constexpr()
 
     elem_bytes = 1
 
@@ -546,7 +547,7 @@ def compile_mxfp4_preshuffle_gemm(
             def prefetch_ab_tile(base_k):
                 base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
                 base_k_div4 = base_k_bytes / 4
-                a_regs = load_a_tile(base_k_div4)
+                a_regs = load_a_tile(base_k_div4 // a_elem_vec_pack)
                 # b_regs = a_regs
                 b_regs = load_b_tile(base_k // 2)
                 return a_regs, b_regs

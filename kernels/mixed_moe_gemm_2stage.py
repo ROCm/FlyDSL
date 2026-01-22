@@ -719,6 +719,7 @@ def compile_mixed_moe_gemm1(
                             up_bias.append( 
                                 buffer_ops.buffer_load(bias_rsrc, up_offset, vec_width=1, dtype=f32)
                             )
+                        epilogue_pf = (gate_bias, up_bias)
 
                     # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
                     # This is the key optimization from `zhimding/develop_0107` for FP8:
@@ -1233,6 +1234,7 @@ def compile_mixed_moe_gemm2(
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
+    enable_bias: bool = False
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2028,7 +2030,16 @@ def compile_mixed_moe_gemm2(
                     mfma_res_ty = vec4_i32 if is_int8 else vec4_f32
     
                     epilogue_pf = None
+                    bias = None
                     if prefetch_epilogue:
+                        if enable_bias:
+                            bias = []
+                            for ni in range_constexpr(num_acc_n):
+                                global_n = by_n + n_tile_base + ni * 16 + lane_mod_16
+                                bias_offset = expert_off_idx + global_n
+                                bias.append( 
+                                    buffer_ops.buffer_load(bias_rsrc, bias_offset, vec_width=2, dtype=f32)
+                                )
                         tw_pf = None
                         if doweight_stage2:
                             tw_pf = []
@@ -2045,7 +2056,7 @@ def compile_mixed_moe_gemm2(
                                             sorted_w_rsrc, sorted_row_pf, vec_width=1, dtype=f32
                                         )
                                     )
-                        epilogue_pf = (None, tw_pf)
+                        epilogue_pf = (None, tw_pf, bias)
 
     
                     c0_i64 = arith.i64(0)
@@ -2132,6 +2143,8 @@ def compile_mixed_moe_gemm2(
                                                     b_scale_val,
                                                 ],
                                             )
+                                            if bias is not None:
+                                                acc_list[acc_idx] = arith.addf(acc_list[acc_idx], bias[ni_idx])
                                             # if bx == 0 and tx > 256 - 64: 
                                             #     # c_scale0 = vector.extract(current_accs_list[acc_idx], static_position=[0], dynamic_position=[])
                                             #     # c_scale1 = vector.extract(current_accs_list[acc_idx], static_position=[1], dynamic_position=[])
@@ -2326,8 +2339,29 @@ def compile_mixed_moe_gemm2(
     
                 # ---------------- Epilogue: LDS CShuffle + atomic half2 (x2) ----------------
                 # Reuse the shared helper so GEMM / MoE kernels share the exact same CShuffle skeleton.
+    
+                sw_pf = None
+                tw_pf = None
+                if epilogue_pf is not None:
+                    sw_pf, tw_pf, bias_pf = epilogue_pf
 
-                epilogue_pf = None
+                # simply load bias & add.
+                # TODO: change the bias load pattern into cshuffle, need to calc map of expert
+                # if enable_bias:
+                #     acc_list = list(acc_in)
+                #     bias_pf
+                #     
+                #     for ni in range_constexpr(num_acc_n):
+                #         bias = bias_pf[ni]
+                #         for mi in range_constexpr(m_repeat):
+                #             acc_idx = mi * num_acc_n + ni
+                #             for i in range_constexpr(4):
+                #             acc1 = vector.extract(acc_list[acc_idx], static_position=[i], dynamic_position=[])
+                #             acc1 = acc1 + bias
+                #             acc_s[idx] = vector.insert(unwrap(acc1), unwrap(acc_s[idx]), static_position=[j], dynamic_position=[])
+                    
+
+                # epilogue_pf = None
                 expert_off = expert_off_idx
                 mask24_i32 = arith.i32(0xFFFFFF)
                 model_i32 = arith.i32(model_dim)
@@ -2346,11 +2380,6 @@ def compile_mixed_moe_gemm2(
                         zero_i32,
                     )
 
-    
-                sw_pf = None
-                tw_pf = None
-                if epilogue_pf is not None:
-                    sw_pf, tw_pf = epilogue_pf
     
                 # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
                 if lds_out is None:
