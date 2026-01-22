@@ -53,6 +53,7 @@ def compile_mixed_moe_gemm1(
     b_dtype: str = "fp4",
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    enable_bias: bool = False
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -99,6 +100,8 @@ def compile_mixed_moe_gemm1(
     a_elem_vec_pack = 2 if is_f4_a else 1
     cbsz = 0 if is_f8_a else 4
     blgp = 4
+
+    enable_bias = False
 
     # K64-byte micro-step: always 64 bytes per `ku`. For fp16, this is 32 elements (2xK16 MFMA).
     if (tile_k_bytes % 64) != 0:
@@ -205,6 +208,7 @@ def compile_mixed_moe_gemm1(
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             arg_max_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_bias: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
@@ -242,6 +246,20 @@ def compile_mixed_moe_gemm1(
                 den = 1.0 + emu
                 sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den], [], [])
                 return x * sig
+
+            def swiglu(gate, up, alpha=-1.702, limit=7.0):
+                # Align with CK's device fast path
+                #
+                # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
+                # sequences that introduce extra compares/cndmasks.
+                gate = arith.minimum(gate, limit)
+                up = arith.minimum(up, limit)
+
+                t = gate * (alpha) * (-1.4426950408889634)  # -log2(e)
+                emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [t], [], [])
+                den = 1.0 + emu
+                sig = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den], [], [])
+                return gate * sig * (up + 1)
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
@@ -295,6 +313,11 @@ def compile_mixed_moe_gemm1(
             max_token_id_i32 = buffer_ops.buffer_load(
                 maxids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
             )
+
+            gate_bias_rsrc = buffer_ops.create_buffer_resource(
+                arg_max_token_ids, max_size=False, num_records_bytes=arith.i32(4)
+            )
+
             bx_m_i32 = arith.index_cast(i32, bx_m)
             blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
             # Common constants/atoms (hoisted): keep IR small like GEMM.
@@ -505,10 +528,10 @@ def compile_mixed_moe_gemm1(
                 for i in range_constexpr(num_acc_n):
                     offset = i * 16
 
-                    col_g = by_n + n_tile_base
-                    col_g = col_g // 2 + offset
-                    col_g = col_g + lane_mod_16
-                    col_g_list.append(col_g)
+                    # col_g = by_n + n_tile_base
+                    # col_g = col_g // 2 + offset
+                    # col_g = col_g + lane_mod_16
+                    # col_g_list.append(col_g)
 
                     c_offset = arith.constant(offset, index=True)
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
@@ -675,9 +698,27 @@ def compile_mixed_moe_gemm1(
                         a0_prefetch=None,
                         a_scale=None,
                         b_scale=None,
+                        prefetch_epilogue: bool = False
                     ):
                     gate_list = list(acc_gate_in)
                     up_list = list(acc_up_in)
+
+                    epilogue_pf = None
+                    if enable_bias and prefetch_epilogue:
+                        expert_off_idx + by_n + n_tile_base
+
+                        gate_bias = []
+                        up_bias = []
+                        for ni in range_constexpr(num_acc_n_packed):
+                            global_n = by_n + n_tile_base + ni * 16 + lane_mod_16
+                            gate_offset = expert_off_idx + global_n
+                            up_offset = expert_off_idx + global_n + inter_dim
+                            gate_bias.append( 
+                                buffer_ops.buffer_load(bias_rsrc, gate_offset, vec_width=1, dtype=f32)
+                            )
+                            up_bias.append( 
+                                buffer_ops.buffer_load(bias_rsrc, up_offset, vec_width=1, dtype=f32)
+                            )
 
                     # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
                     # This is the key optimization from `zhimding/develop_0107` for FP8:
@@ -801,7 +842,7 @@ def compile_mixed_moe_gemm1(
                                     #             #         c_scale2,
                                     #             #         c_scale3)
 
-                    return gate_list, up_list, None
+                    return gate_list, up_list, epilogue_pf
 
                 # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
                 lds_tile_elems = arith.constant(tile_m * lds_stride, index=True)
@@ -934,7 +975,7 @@ def compile_mixed_moe_gemm1(
                 a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base, lds_base_ping)
 
                 # Epilogue: compute last tile with epilogue scale prefetch to overlap loads with MFMA.
-                acc_gate, acc_up, _ = compute_f8f6f4_tile(
+                acc_gate, acc_up, epilogue_pf = compute_f8f6f4_tile(
                     acc_gate,
                     acc_up,
                     w_regs_ping,
@@ -942,9 +983,8 @@ def compile_mixed_moe_gemm1(
                     a0_prefetch=a0_prefetch_ping,
                     a_scale=a_scale_ping,
                     b_scale=b_scale_ping,
+                    prefetch_epilogue=False,
                 )
-
-                epilogue_pf = None
 
                 # Store epilogue to out[t, slot, inter]
                 expert_off = expert_off_idx
@@ -1015,7 +1055,8 @@ def compile_mixed_moe_gemm1(
                                 vg = vg * sx * sw_gate
                                 vu = vu * sx * sw_up
 
-                            y = silu(vg) * vu
+                            # y = silu(vg) * vu
+                            y = swiglu(vg, vu)
                             if doweight_stage1:
                                 y = y * tw
                             y16 = arith.trunc_f(T.f16(), y)
@@ -1089,6 +1130,11 @@ def compile_mixed_moe_gemm1(
                         vu = vector.extract(
                             acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                         )
+                        if enable_bias:
+                            gate_bias_list, up_bias_list = epilogue_pf
+                            vg = vg + gate_bias_list[ni]
+                            vu = vu + up_bias_list[ni]
+
                         if is_int8:
                             vg = arith.sitofp(f32, vg)
                             vu = arith.sitofp(f32, vu)
@@ -1096,7 +1142,8 @@ def compile_mixed_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
-                        y = silu(vg) * vu
+                        # y = silu(vg) * vu
+                        y = swiglu(vg, vu)
                         # flir.printf("vg %f, vu %f y %f \n", vg, vu, y)
 
                         if doweight_stage1:
@@ -1128,6 +1175,7 @@ def compile_mixed_moe_gemm1(
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
             arg_max_token_ids: lambda: T.memref(DYN, T.i32()),
+            arg_bias: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
@@ -1154,6 +1202,7 @@ def compile_mixed_moe_gemm1(
                     arg_expert_ids,
                     arg_sorted_weights,
                     arg_max_token_ids,
+                    arg_bias,
                     tokens_in,
                     inter_in,
                     k_in,
@@ -1373,6 +1422,7 @@ def compile_mixed_moe_gemm2(
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
             arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
+            arg_bias: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
@@ -1541,6 +1591,10 @@ def compile_mixed_moe_gemm2(
             )
             bx_m_i32 = arith.index_cast(i32, bx_m)
             blk_valid = arith.cmpu(bx_m_i32, num_valid_i32, "ult")
+
+            bias_rsrc = buffer_ops.create_buffer_resource(
+                arg_bias, max_size=False, num_records_bytes=arith.i32(4)
+            )
 
             def _moe_gemm2_then_body():
                 # Expert id for this M tile.
@@ -2125,41 +2179,6 @@ def compile_mixed_moe_gemm2(
     
                 rocdl.sched_barrier(0)
     
-                # def hot_loop_scheduler():
-                #     mfma_group = num_acc_n
-                #     # K64 micro-step: 2x K32 MFMA per accumulator update.
-                #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                #     mfma_per_iter = 2 * mfma_group
-                #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                #     rocdl.sched_dsrd(2)
-                #     rocdl.sched_mfma(1)
-                #     rocdl.sched_mfma(1)
-                #     if num_acc_n < 4:
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_vmem(1)
-    
-                #     dswr_tail = num_x_loads
-                #     if dswr_tail > sche_iters:
-                #         dswr_tail = sche_iters
-                #     dswr_start = sche_iters - dswr_tail
-                #     for sche_i in range_constexpr(sche_iters):
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(mfma_group)
-                #         if sche_i >= dswr_start - 1:
-                #             rocdl.sched_dswr(1)
-                #     rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
                     # - MFMA group size per "slot": num_acc_n
@@ -2490,6 +2509,7 @@ def compile_mixed_moe_gemm2(
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
             arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
+            arg_bias: lambda: T.memref(DYN, T.f32()),
             tokens_in: lambda: T.index(),
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
