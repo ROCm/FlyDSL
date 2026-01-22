@@ -1106,6 +1106,73 @@ def test_moe_gemm_2stage(
     )
 
 
+def compile_moe_gemm2_no_atomic_with_reduce(
+    *,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    doweight_stage2: bool,
+    in_dtype: str = "fp8",
+    out_dtype: str = "f16",
+):
+    """Wrapper: compile stage2 with accumulate=False, then reduce sum over topk.
+
+    This avoids atomic contention by writing per-(token, slot) results to
+    [tokens*topk, model_dim], then reducing to [tokens, model_dim] outside the kernel.
+    """
+    # Compile the underlying kernel with accumulate=False
+    inner_exe = compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage2=doweight_stage2,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        accumulate=False,  # No atomics, output [tokens*topk, model_dim]
+    )
+
+    # Return a wrapper executor that handles the intermediate buffer and reduce
+    class _ReduceWrapper:
+        def __init__(self, exe, topk, model_dim):
+            self._exe = exe
+            self._topk = topk
+            self._model_dim = model_dim
+            self._intermediate = None
+
+        def __call__(self, out, *args):
+            # args: a2, w2, scale_a2, scale_w2, sorted_ids, expert_ids, sorted_weights,
+            #       num_valid_ids, tokens, model_dim, inter_dim, blocks
+            tokens = args[8]  # tokens is the 9th argument (0-indexed: 8)
+
+            # Allocate intermediate buffer [tokens*topk, model_dim] if needed
+            expanded_size = tokens * self._topk * self._model_dim
+            if self._intermediate is None or self._intermediate.numel() < expanded_size:
+                self._intermediate = torch.zeros(
+                    tokens * self._topk, self._model_dim,
+                    device=out.device, dtype=out.dtype
+                )
+            intermediate = self._intermediate[:tokens * self._topk, :self._model_dim]
+            intermediate.zero_()
+
+            # Run kernel: output to [tokens*topk, model_dim]
+            self._exe(intermediate.view(-1), *args)
+
+            # NEED TO OPTIMIZE THIS REDUCE SUM AND COPY!
+            # Reduce sum over topk: [tokens*topk, model_dim] -> [tokens, model_dim]
+            reduced = intermediate.view(tokens, self._topk, self._model_dim).sum(dim=1)
+            out.copy_(reduced)
+
+    return _ReduceWrapper(inner_exe, topk, model_dim)
+
+
 @pytest.mark.parametrize(
     "model_dim, inter_dim, experts, topk",
     [
@@ -1132,12 +1199,12 @@ def test_moe_stage2_standalone(
 ):
     """Standalone stage2 test for optimization development.
 
-    To compare multiple stage2 implementations:
-    1. Run baseline: run_moe_stage2(..., kernel_name="baseline")
-    2. Run optimized: run_moe_stage2(..., compile_fn=compile_moe_gemm2_v2, kernel_name="v2")
+    Compares:
+    1. Baseline: atomic accumulation (accumulate=True)
+    2. No-atomic + reduce: write expanded output then reduce (accumulate=False)
     """
-    # Run baseline stage2
-    run_moe_stage2(
+    # Common args
+    common_args = dict(
         tokens=tokens,
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -1154,7 +1221,16 @@ def test_moe_stage2_standalone(
         moe_sort_mode="torch",
         compare_aiter_ck=False,
         skip_ref=False,
-        kernel_name="stage2_baseline",
+    )
+
+    # Run baseline stage2 (atomic accumulation)
+    run_moe_stage2(**common_args, kernel_name="moe_gemm2_atomic")
+
+    # Run no-atomic + reduce version
+    run_moe_stage2(
+        **common_args,
+        compile_fn=compile_moe_gemm2_no_atomic_with_reduce,
+        kernel_name="moe_gemm2_no_atomic_reduce",
     )
 
 
