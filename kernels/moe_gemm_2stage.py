@@ -2260,6 +2260,5 @@ def compile_moe_gemm2(
 
     m = _MOE2()
     exe = flydsl.compile(m)
-    # print(f"Compile_moe_gemm2 end...")
     return exe
 
