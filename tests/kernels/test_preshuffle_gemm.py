@@ -376,7 +376,11 @@ def test_mfma_w4_flir_preshuffle(
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
-    c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
+    if a_dtype == "fp4":
+        c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
+    else:
+        # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
+        c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # Keep tensors contiguous for predictable buffer descriptor shapes.
     a_q = a_q.contiguous()

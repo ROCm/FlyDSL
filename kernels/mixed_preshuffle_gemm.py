@@ -432,7 +432,7 @@ def compile_mxfp4_preshuffle_gemm(
                 return a_scale_tile
 
             def prefetch_ab_scale_tile(base_k):
-                return [load_a_scale_tile(0), load_b_scale_tile(base_k)]
+                return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
 
             def lds_load_16b(curr_row_a_lds, col_base, lds_base):
                 # Swizzle in bytes, then convert to element offset for memref indexing.
