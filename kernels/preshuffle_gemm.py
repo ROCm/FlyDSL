@@ -211,7 +211,7 @@ def compile_preshuffle_gemm_a8(
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
-            arg_scale_b: lambda: memref(DYN, T.f32),
+            arg_scale_b: lambda: memref(DYN, T.i8 if is_a16w4 else T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
@@ -294,12 +294,12 @@ def compile_preshuffle_gemm_a8(
             if is_fp16 or is_bf16:
                 scale_b_rsrc = None
             elif is_a16w4:
-                # A16W4: one f32 scale per (row, 1x32 K-block) => [N, K/32]
+                # A16W4: one i8 scale per (row, 1x32 K-block) => [N, K/32]
                 c32 = arith.constant(32, index=True)
                 scale_b_rsrc = buffer_ops.create_buffer_resource(
                     arg_scale_b,
                     max_size=False,
-                    num_records_bytes=(c_n * (c_k / c32) * c4),
+                    num_records_bytes=(c_n * (c_k / c32)),
                 )
             else:
                 scale_b_rsrc = buffer_ops.create_buffer_resource(
@@ -444,9 +444,19 @@ def compile_preshuffle_gemm_a8(
                     )
 
                     # Prefetch scale first to overlap with pk load as much as possible.
-                    scale_bits = buffer_ops.buffer_load(
-                        scale_b_rsrc, idx_scale, vec_width=1, dtype=T.i32
+                    # Load scale as i8 (E8M0 bits) and broadcast to share data between threads (v_permlane spirit).
+                    # 16 rows share 16 scales across 64 lanes.
+                    scale_i8 = buffer_ops.buffer_load(
+                        scale_b_rsrc, idx_scale, vec_width=1, dtype=T.i8
                     )
+                    scale_i32_raw = arith.extui(T.i32, scale_i8)
+                    # Broadcast scale using ds_bpermute (Spirit of v_permlane).
+                    # Target lane index: 0..15. Byte offset = lane * 4.
+                    lane_id_i32 = arith.index_cast(T.i32, lane_id)
+                    target_lane_i32 = lane_id_i32 % arith.i32(16)
+                    bperm_addr = arith.shli(target_lane_i32, arith.i32(2))
+                    scale_bits = rocdl.ds_bpermute(T.i32, bperm_addr, scale_i32_raw)
+
                     pk = buffer_ops.buffer_load(b_rsrc, idx_pk_dword, vec_width=1, dtype=T.i32)
                     return pk, scale_bits
 
@@ -782,8 +792,11 @@ def compile_preshuffle_gemm_a8(
                         from _mlir.dialects import llvm as _llvm_dialect
 
                         def a16w4_pk_to_f16x4(pk_i32, scale_bits_i32):
+                            # CK style: scale is E8M0 bits shifted to f32 exponent.
+                            # uint32_t uscale = uint32_t(scale.data) << 23;
+                            uscale = arith.shli(scale_bits_i32, arith.i32(23))
                             scale_f32 = _llvm_dialect.BitcastOp(
-                                T.f32, arith.unwrap(scale_bits_i32)
+                                T.f32, arith.unwrap(uscale)
                             ).result
                             vec2_f16 = T.f16x2
 
@@ -1255,7 +1268,7 @@ def compile_preshuffle_gemm_a8(
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
-            arg_scale_b: lambda: memref(DYN, T.f32),
+            arg_scale_b: lambda: memref(DYN, T.i8 if is_a16w4 else T.f32),
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,

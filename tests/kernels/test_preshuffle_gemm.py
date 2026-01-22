@@ -178,9 +178,11 @@ def test_mfma_a8_flir_preshuffle(
         b_q_pk, b_s_e8m0 = fu.dynamic_mxfp4_quant(b_bf16, shuffle=False)
         b_q_pk = b_q_pk.view(1, N, K // 2)
         b_shuf = shuffle_weight_a16w4(b_q_pk, NLane=16, gate_up=False).view(N, K // 2)
-        # Scales: e8m0 -> f32 -> aiter shuffle layout [N, K/32]
+        # Scales: aiter shuffle layout [N, K/32] (E8M0 bits passed as i8 to kernel)
+        scale_b = shuffle_scale_a16w4(b_s_e8m0[:N, :], experts_cnt=1, gate_up=False).contiguous()
+        scale_b = scale_b.view(torch.int8).contiguous()
+        # Reference scales (f32)
         s_f32 = fu.e8m0_to_f32(b_s_e8m0[:N, :]).contiguous()
-        scale_b = shuffle_scale_a16w4(s_f32, experts_cnt=1, gate_up=False).contiguous()
         # Kernel expects packed bytes (i8).
         b_q = b_shuf.view(torch.int8).contiguous()
     else:

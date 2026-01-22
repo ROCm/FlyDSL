@@ -274,6 +274,20 @@ def sitofp(result_type: Type, value: Union["ArithValue", Value], *, loc: Locatio
     result = _arith.SIToFPOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
+def extui(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Zero-extend integer value."""
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.ExtUIOp(result_type, val, loc=loc).result
+    return ArithValue(result)
+
+def extsi(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Sign-extend integer value."""
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.ExtSIOp(result_type, val, loc=loc).result
+    return ArithValue(result)
+
 def constant_vector(element_value: Union[int, float], vector_type: Type, *, loc: Location = None) -> "ArithValue":
     """Create a constant vector with all elements set to the same value.
     

@@ -29,6 +29,7 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
 _ods_readlane = readlane
 _ods_readfirstlane = readfirstlane
 _ods_ds_swizzle = ds_swizzle
+_ods_ds_bpermute = ds_bpermute
 _ods_raw_ptr_buffer_atomic_fadd = raw_ptr_buffer_atomic_fadd
 
 mask_mfma = 0x008
@@ -105,6 +106,30 @@ def mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, *, loc=None, ip=None):
 def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
     """Return the op result directly (no `.result` needed at call sites)."""
     return mfma_f32_16x16x32_fp8_fp8_op(result_type, operands, loc=loc, ip=ip).result
+
+
+def ds_bpermute(result_type, index, src, *, loc=None, ip=None):
+    """Return the ds_bpermute result directly (unwraps operands)."""
+    from . import arith as _arith_ext
+
+    index_val = _arith_ext.unwrap(index, loc=loc)
+    src_val = _arith_ext.unwrap(src, loc=loc)
+    res = _ods_ds_bpermute(result_type, index_val, src_val, loc=loc, ip=ip)
+    if hasattr(res, "result"):
+        return res.result
+    return res
+
+
+def ds_bpermute(result_type, index, src, *, loc=None, ip=None):
+    """Return the ds_bpermute result directly (unwraps operands)."""
+    from . import arith as _arith_ext
+
+    index_val = _arith_ext.unwrap(index, loc=loc)
+    src_val = _arith_ext.unwrap(src, loc=loc)
+    res = _ods_ds_bpermute(result_type, index_val, src_val, loc=loc, ip=ip)
+    if hasattr(res, "result"):
+        return res.result
+    return res
 
 
 def mfma_i32_16x16x32_i8_op(result_type, operands, *, loc=None, ip=None):
