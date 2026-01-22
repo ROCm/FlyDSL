@@ -279,10 +279,10 @@ def run_moe_stage1(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
+    out_dtype: str = "fp16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
-    compare_aiter_ck: Optional[bool] = None,
     moe_sort_mode: Optional[str] = None,
     # Optional overrides (used by the 2-stage runner to avoid duplicated setup/sorting).
     x_fp32_in: Optional[torch.Tensor] = None,
@@ -405,8 +405,16 @@ def run_moe_stage1(
         scale_w1_1d = scale_w1_flat.view(-1).contiguous()  # [rows]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
-    # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    out_s = str(out_dtype).strip().lower()
+    if out_s in ("fp16", "half"):
+        out_torch_dtype = torch.float16
+    elif out_s in ("bf16", "bfloat16"):
+        out_torch_dtype = torch.bfloat16
+    else:
+        raise ValueError(f"stage1 out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}")
+
+    # Output: [tokens, topk, inter_dim]
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=out_torch_dtype)
 
     exe = compile_moe_gemm1(
         model_dim=model_dim,
@@ -414,6 +422,7 @@ def run_moe_stage1(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -477,7 +486,7 @@ def run_moe_stage1(
     bytes_moved = 0
     bytes_moved += tokens * model_dim * 1  # x fp8
     bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
-    bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
+    bytes_moved += tokens * topk * inter_dim * int(out.element_size())  # out
     bytes_moved += tokens * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
@@ -486,18 +495,14 @@ def run_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"FLIR MoE stage1[{in_dtype}]: "
+        f"FLIR MoE stage1[{in_dtype}->{out_dtype}]: "
         f"{us:.1f} us, "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
     # Compare + benchmark vs aiter CK stage1 (optional; enabled by default when aiter is runnable).
-    if compare_aiter_ck is None:
-        compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
-    else:
-        compare_ck = bool(compare_aiter_ck)
+    compare_ck = os.environ.get("COMPARE_AITER_CK", "0" if HAS_AITER else "0") == "1"
     # aiter CK paths are fp8-only in our setup.
-    compare_ck = compare_ck and (in_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
             pytest.skip("aiter not available; cannot compare to CK moe stage1.", allow_module_level=False)
@@ -580,12 +585,11 @@ def run_moe_stage2(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
-    # Stage2 output is fp16 (half2 atomics + CShuffle). The legacy f32-atomic path was removed.
-    out_dtype: str = "f16",
+    # Stage2 output dtype (kernel supports fp16/bf16/f32; bf16 requires arch support for bf16 atomics).
+    out_dtype: str = "fp16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
-    compare_aiter_ck: Optional[bool] = None,
     moe_sort_mode: Optional[str] = None,
     # Optional overrides (used by the 2-stage runner to avoid duplicated setup/sorting).
     x_fp32_in: Optional[torch.Tensor] = None,
@@ -768,9 +772,14 @@ def run_moe_stage2(
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("f16", "fp16", "half"):
-        raise ValueError(f"out_dtype must be 'f16' (stage2 f32 path removed), got {out_dtype!r}")
-    out_torch_dtype = torch.float16
+    if out_s in ("fp16", "half"):
+        out_torch_dtype = torch.float16
+    elif out_s in ("bf16", "bfloat16"):
+        out_torch_dtype = torch.bfloat16
+    elif out_s in ("fp32", "float"):
+        out_torch_dtype = torch.float32
+    else:
+        raise ValueError(f"out_dtype must be one of ('fp16','bf16','f32'), got {out_dtype!r}")
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -782,6 +791,7 @@ def run_moe_stage2(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -857,7 +867,7 @@ def run_moe_stage2(
     bytes_moved = 0
     bytes_moved += tokens * topk * inter_dim * 1  # a2 fp8 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
+    bytes_moved += tokens * model_dim * int(out.element_size())  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
@@ -865,18 +875,14 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2[{in_dtype}]: "
+        f"FLIR MoE stage2[{in_dtype}->{out_dtype}]: "
         f"{us:.1f} us, "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage2={doweight_stage2})"
     )
     # Optional compare vs aiter CK stage2.
-    if compare_aiter_ck is None:
-        compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
-    else:
-        compare_ck = bool(compare_aiter_ck)
-    # aiter CK paths are fp8-only in our setup.
-    compare_ck = compare_ck and (in_dtype == "fp8")
+    compare_ck = os.environ.get("COMPARE_AITER_CK", "0" if HAS_AITER else "0") == "1"
+    # aiter CK paths are fp8-only in our setup, and typically assume fp16 output.
     if compare_ck:
         if not HAS_AITER:
             pytest.skip("aiter not available; cannot compare to CK moe stage2.", allow_module_level=False)
@@ -987,9 +993,9 @@ def test_moe_gemm_2stage(
     num_iters: int = 5,
     num_warmup: int = 2,
     moe_sort_mode: Optional[str] = None,
-    compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
+    out_dtype: str = "fp16",
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1026,8 +1032,6 @@ def test_moe_gemm_2stage(
     # - Only compare CK for fp8, and only when explicitly requested.
     if moe_sort_mode is None:
         moe_sort_mode = "torch"
-    if compare_aiter_ck is None:
-        compare_aiter_ck = False
 
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
@@ -1036,6 +1040,7 @@ def test_moe_gemm_2stage(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n1,
         tile_k=tile_k1,
@@ -1043,7 +1048,6 @@ def test_moe_gemm_2stage(
         seed=seed,
         num_iters=num_iters,
         num_warmup=num_warmup,
-        compare_aiter_ck=bool(compare_aiter_ck) and (in_dtype == "fp8"),
         moe_sort_mode=moe_sort_mode,
         x_fp32_in=x_fp32,
         w1_fp32_in=w1_fp32,
@@ -1059,7 +1063,8 @@ def test_moe_gemm_2stage(
         out1_fp32 = out1_fp16.to(torch.float32)
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
-        a2_q = out1_fp16
+        # Stage2 fp16 path expects fp16 A2. If stage1 emits bf16, cast down here.
+        a2_q = out1_fp16.to(torch.float16)
         a2_scale = None
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
@@ -1072,6 +1077,7 @@ def test_moe_gemm_2stage(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n2,
         tile_k=tile_k2,
@@ -1079,7 +1085,6 @@ def test_moe_gemm_2stage(
         seed=seed,
         num_iters=num_iters,
         num_warmup=num_warmup,
-        compare_aiter_ck=compare_aiter_ck,
         moe_sort_mode=moe_sort_mode,
         x_fp32_in=x_fp32,
         w1_fp32_in=w1_fp32,
@@ -1123,9 +1128,12 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4", "bf16","all"],
-        help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
-        "int4 means W4A8: A int8, W packed int4.",
+        choices=["fp8", "fp16", "int8", "int4"], 
+        help=(
+            "Kernel input dtype(s): fp8 / fp16 / int8 / int4.\n"
+            "You can pass a comma-separated list, e.g. --in_dtype fp8,fp16.\n"
+            "Note: kernel does NOT support bf16 inputs; bf16 is supported as stage2 output via --out_dtype2."
+        ),
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1140,10 +1148,16 @@ if __name__ == "__main__":
     parser.add_argument("--tile_k", type=int, default=128, help="Tile K (model dim tile).")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="fp16",
+        choices=["fp16", "bf16", "f32"],
+        help="Output dtype knob: stage2 out = fp16/bf16/f32; stage1 out uses fp16/bf16 (f32 maps to fp16).",
+    )
 
     # Sorting / comparison knobs
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
-    parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
 
     # Benchmark knobs
@@ -1159,7 +1173,7 @@ if __name__ == "__main__":
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    for dt in args.in_dtype.split(","):
+    for dt in [s.strip() for s in str(args.in_dtype).split(",") if s.strip()]:
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
@@ -1177,8 +1191,8 @@ if __name__ == "__main__":
             num_iters=int(args.num_iters),
             num_warmup=int(args.num_warmup),
             moe_sort_mode=args.moe_sort_mode,
-            compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
+            out_dtype=str(args.out_dtype),
         )
 
 

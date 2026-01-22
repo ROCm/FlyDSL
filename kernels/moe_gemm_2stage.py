@@ -50,7 +50,7 @@ def compile_moe_gemm1(
     # NOTE: aiter swap passes these for API symmetry; stage1 uses dynamic memrefs so they are ignored.
     doweight_stage1: bool,
     in_dtype: str = "fp8",
-    out_dtype: str = "f16",
+    out_dtype: str = "fp16",
     use_cshuffle_epilog: bool | None = None,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
@@ -69,11 +69,11 @@ def compile_moe_gemm1(
         raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
-    if out_dtype not in ("f16", "bf16"):
+    if out_dtype not in ("fp16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
     out_is_bf16 = out_dtype == "bf16"
     # NOTE: don't materialize MLIR types outside an active MLIR Context.
-    out_mlir = lambda: (T.f16() if out_dtype == "f16" else T.bf16())
+    out_mlir = lambda: (T.f16() if out_dtype == "fp16" else T.bf16())
     tile_k_bytes = int(tile_k) * int(elem_bytes)
     # K64-byte micro-step: always 64 bytes per `ku`. For fp16 this is 32 elements.
     if (tile_k_bytes % 64) != 0:
@@ -125,7 +125,7 @@ def compile_moe_gemm1(
     if use_cshuffle_epilog is None:
         use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
-    if out_dtype != "f16" and use_cshuffle_epilog:
+    if out_dtype != "fp16" and use_cshuffle_epilog:
         raise ValueError("stage1 cshuffle epilog currently supports only f16 output (out_dtype='f16')")
 
     cshuffle_pad = int(os.environ.get("FLIR_CSHUFFLE_PAD", "8"))
@@ -1117,7 +1117,7 @@ def compile_moe_gemm2(
     tile_k: int,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
-    out_dtype: str = "f16",
+    out_dtype: str = "fp16",
     use_cshuffle_epilog: bool | None = None,
     # Optional experiment: write per-(token,slot) output (no atomics) into an output shaped
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
@@ -1133,7 +1133,7 @@ def compile_moe_gemm2(
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
 
     Stage2 output supports:
-      - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
+      - out_dtype="fp16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
       - out_dtype="f32": fp32 scalar atomics (slower, but avoids fp16 atomic overflow)
 
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
@@ -1148,7 +1148,7 @@ def compile_moe_gemm2(
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
+    if out_s not in ("fp16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
     out_is_f32 = out_s in ("f32", "fp32", "float")
     out_is_bf16 = out_s in ("bf16", "bfloat16")
@@ -2096,6 +2096,28 @@ def compile_moe_gemm2(
                         out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
 
                     if out_is_bf16:
+                        def atomic_add_bf16x2_global(val_bf16x2, byte_off_i32):
+                            # gfx942: inline asm for global_atomic_pk_add_bf16 (voffset + saddr).
+                            base_i64 = arith.index_cast(i64, out_base_idx)
+                            # Pack bf16x2 into i32 bits.
+                            val_i16x2 = vector.bitcast(I.i16x2, val_bf16x2)
+                            lo_i16 = vector.extract(val_i16x2, [0])
+                            hi_i16 = vector.extract(val_i16x2, [1])
+                            val_i32 = arith.extui(i32, lo_i16) | arith.shli(arith.extui(i32, hi_i16), arith.i32(16))
+
+                            # Constraints: $0=byte_off_i32 (v), $1=val_i32 (v), $2=base_i64 (s)
+                            asm = "global_atomic_pk_add_bf16 $1, $0, $2"
+                            constraints = "v,v,s,~{memory}"
+                            def _u(v):
+                                return v._value if hasattr(v, "_value") else v
+                            llvm.InlineAsmOp(
+                                None,
+                                [_u(byte_off_i32), _u(val_i32), _u(base_i64)],
+                                asm,
+                                constraints,
+                                has_side_effects=True,
+                            )
+
                         def _convert_out(val_f32):
                             # Truncate f32 to bf16 bits (top 16 bits).
                             v1_f32 = vector.from_elements(vec1_f32, [val_f32])
