@@ -300,7 +300,7 @@ def compile_mxfp4_preshuffle_gemm(
             k_unroll = tile_k_bytes // 128
 
             # --- Dynamic tiling along N (4 waves) ---
-            num_waves = 4
+            num_waves = 8
             n_per_wave = tile_n // num_waves
             num_acc_n = n_per_wave // 16
 
@@ -1132,7 +1132,7 @@ def compile_mxfp4_preshuffle_gemm(
             c_k: lambda: T.index,
         ):
             c1 = arith.constant(1, index=True)
-            bdx = arith.constant(256, index=True)
+            bdx = arith.constant(512, index=True)
             tm = arith.constant(tile_m, index=True)
             tn = arith.constant(tile_n, index=True)
             one = arith.constant(1, index=True)
