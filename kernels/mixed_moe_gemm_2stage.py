@@ -1210,8 +1210,8 @@ def compile_mixed_moe_gemm1(
                             #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
                             #         flir.printf("vg %f, vu %f y %f\n", vg, vu, y)
                             # # flir.printf("vg %f, vu %f y %f \n", vg, vu, y)
-                            if y > 100:
-                                flir.printf("y %f \n", y)
+                            # if y > 100:
+                            #     flir.printf("y %f \n", y)
 
                             if doweight_stage1:
                                 y = y * tw
@@ -1768,13 +1768,13 @@ def compile_mixed_moe_gemm2(
                     sorted_row_i = bx_m + row_local
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_i32 = arith.andi(fused_i, mask24)
-
-
-
                     s_i32 = arith.shrui(fused_i, arith.i32(24))
                     # Keep `blk_valid` only; remove per-row token validity checks.
                     row_ts_i32 = t_i32 * topk_i32 + s_i32
                     row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
+                    # if bx == 0:
+                    #     if tx ==0:
+                    #         flir.printf("t_i32 %d, topk_i32 %d, s_i32 %d, row_ts_ids %d \n", t_i32, topk_i32, s_i32, row_ts_i32)
 
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
@@ -2196,35 +2196,19 @@ def compile_mixed_moe_gemm2(
                                                     b_scale_val,
                                                 ],
                                             )
-                                            if bx == 0:
-                                                if tx < 8: 
-                                                    if by == 0: 
-                                                        c_scale0 = vector.extract(acc_list[acc_idx], static_position=[0], dynamic_position=[])
-                                                        c_scale1 = vector.extract(acc_list[acc_idx], static_position=[1], dynamic_position=[])
-                                                        c_scale2 = vector.extract(acc_list[acc_idx], static_position=[2], dynamic_position=[])
-                                                        c_scale3 = vector.extract(acc_list[acc_idx], static_position=[3], dynamic_position=[])
-                                                        # flir.printf("%d c_out %f\n", tx, c_scale0)
-                                                        flir.printf("c_out %d, %f, %f, %f, %f \n", acc_idx,
-                                                                c_scale0,
-                                                                c_scale1,
-                                                                c_scale2,
-                                                                c_scale3)
-                        if bias is not None:
-                            flir.print("ennter bias")
-                            for ni in range_constexpr(num_acc_n):
-                                # acc_list[acc_idx] = arith.addf(acc_list[acc_idx], bias[ni_idx])
-                                for mi in range_constexpr(m_repeat):
-                                    acc_idx = mi * num_acc_n + ni
-                                    add_list = []
-                                    for ii in range_constexpr(4):
-                                        c_val = vector.extract(acc_list[acc_idx], static_position=[ii], dynamic_position=[])
-                                        c_val = c_val + bias[ni]
-                                        # if bx == 0:
-                                        #     if tx == 0:
-                                        #         flir.printf("%f, %f \n", c_val, bias[ni])
-                                        add_list.append(c_val)
-                                    acc_list[acc_idx] = vector.from_elements(vec4_f32, add_list)
-
+                                            # if bx == 0:
+                                            #     if tx < 8: 
+                                            #         if by == 0: 
+                                            #             c_scale0 = vector.extract(acc_list[acc_idx], static_position=[0], dynamic_position=[])
+                                            #             c_scale1 = vector.extract(acc_list[acc_idx], static_position=[1], dynamic_position=[])
+                                            #             c_scale2 = vector.extract(acc_list[acc_idx], static_position=[2], dynamic_position=[])
+                                            #             c_scale3 = vector.extract(acc_list[acc_idx], static_position=[3], dynamic_position=[])
+                                            #             # flir.printf("%d c_out %f\n", tx, c_scale0)
+                                            #             flir.printf("c_out %d, %f, %f, %f, %f \n", acc_idx,
+                                            #                     c_scale0,
+                                            #                     c_scale1,
+                                            #                     c_scale2,
+                                            #                     c_scale3)
 
                     return acc_list, epilogue_pf
                     # else:
@@ -2411,6 +2395,7 @@ def compile_mixed_moe_gemm2(
     
                 sw_pf = None
                 tw_pf = None
+                bias_pf = None
                 if epilogue_pf is not None:
                     sw_pf, tw_pf, bias_pf = epilogue_pf
 
@@ -2497,6 +2482,8 @@ def compile_mixed_moe_gemm2(
                         v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
                         if is_int8:
                             v = arith.sitofp(f32, v)
+                        if enable_bias:
+                            v = v + bias_pf[ni]
                         # v = v * sx * sw
                         # flir.printf("%f, \n", v)
                         if doweight_stage2:
