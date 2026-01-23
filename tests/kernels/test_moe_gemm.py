@@ -1148,6 +1148,10 @@ def compile_moe_gemm2_no_atomic_with_reduce(
             self._intermediate = None
 
         def __call__(self, out, *args):
+
+            # print(f"run compile_moe_gemm2_no_atomic_with_reduce: "
+            #       f"out.shape={out.shape}, top_k={self._topk}")
+
             # args: a2, w2, scale_a2, scale_w2, sorted_ids, expert_ids, sorted_weights,
             #       num_valid_ids, tokens, model_dim, inter_dim, blocks
             tokens = args[8]  # tokens is the 9th argument (0-indexed: 8)
@@ -1165,10 +1169,9 @@ def compile_moe_gemm2_no_atomic_with_reduce(
             # Run kernel: output to [tokens*topk, model_dim]
             self._exe(intermediate.view(-1), *args)
 
-            # NEED TO OPTIMIZE THIS REDUCE SUM AND COPY!
+            # OPTIMIZE this reduce sum!
             # Reduce sum over topk: [tokens*topk, model_dim] -> [tokens, model_dim]
-            reduced = intermediate.view(tokens, self._topk, self._model_dim).sum(dim=1)
-            out.copy_(reduced)
+            torch.sum(intermediate.view(tokens, self._topk, self._model_dim), dim=1, out=out)
 
     return _ReduceWrapper(inner_exe, topk, model_dim)
 
@@ -1178,7 +1181,8 @@ def compile_moe_gemm2_no_atomic_with_reduce(
     [
         pytest.param(4096, 16384, 8, 2, id="E8K2"),
         pytest.param(6144, 24576, 16, 4, id="E16K4"),
-        pytest.param(7168, 18432, 32, 8, id="E32K8"),
+        pytest.param(4096, 16384, 32, 8, id="E32K8-small"),
+        pytest.param(7168, 18432, 32, 8, id="E32K8-large"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
