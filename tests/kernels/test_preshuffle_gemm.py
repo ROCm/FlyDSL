@@ -56,6 +56,23 @@ def run_torch_w4(x, w, x_scales, w_scales, dtype):
     w_f32 = w_f32 * w_scales_f32
     return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
 
+def run_torch_w4(x, w, x_scales, w_scales, dtype):
+    m, k = x.shape
+    n, k = w.shape
+    # First convert the x and w inputs to f32.
+    x_f32 = fp4_utils.mxfp4_to_f32(x)
+    w_f32 = fp4_utils.mxfp4_to_f32(w)
+    # Next convert the e8m0 scales to f32.
+    x_scales = x_scales[:m]
+    x_scales = x_scales.repeat_interleave(32, dim=1)
+    x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales)
+    x_f32 = x_f32 * x_scales_f32
+    w_scales = w_scales[:n]
+    w_scales = w_scales.repeat_interleave(32, dim=1)
+    w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales)
+    w_f32 = w_f32 * w_scales_f32
+    return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
+
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -159,9 +176,9 @@ def test_mfma_a8_flir_preshuffle(
 
     device = torch.device("cuda")
 
-    torch.manual_seed(42)
-    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
+    # torch.manual_seed(42)
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
@@ -397,7 +414,7 @@ def test_mfma_w4_flir_preshuffle(
     # test with quant date
     c_ref = run_torch(a_convert.reshape([-1, K]), b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
     """
-    # c_ref = run_torch(a_convert.reshape([-1, K])[:M], b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
+    c_ref = run_torch(a_convert.reshape([-1, K])[:M], b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
     # c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
@@ -432,9 +449,9 @@ def test_mfma_w4_flir_preshuffle(
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
-    import pdb;pdb.set_trace()
 
     verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+    import pdb;pdb.set_trace()
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K

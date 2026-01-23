@@ -46,7 +46,7 @@ def compile_preshuffle_gemm_a8(
     in_dtype: str = "fp8",
     lds_stage: int = 2,
     # Epilogue options
-    use_cshuffle_epilog: bool = False,
+    use_cshuffle_epilog: bool = True,
 ):
     """Compile the preshuffle GEMM kernel and return the compiled executable.
 
