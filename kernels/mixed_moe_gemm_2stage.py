@@ -415,6 +415,8 @@ def compile_mixed_moe_gemm1(
                     # Keep i32 constants available for epilogue index math.
                     topk_i32 = arith.i32(topk)
 
+                    tokens_i32 = arith.index_cast(i32, tokens_in)
+
                     def x_tile_chunk_coord_i32(i: int):
                         return tile_chunk_coord_i32(
                             flir,
@@ -1163,9 +1165,11 @@ def compile_mixed_moe_gemm1(
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
+
+                        t_valid = arith.cmpu(t2, tokens_i32, "ult")
                         # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                         # sentinel (t2 == tokens) or otherwise out-of-range.
-                        sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                        # sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                         # out linear index base = ((t*topk + s)*inter_dim) (invariant across ni)
                         idx0 = (t2 * topk_i32_v + s2) * inter_i32_local
@@ -1174,52 +1178,54 @@ def compile_mixed_moe_gemm1(
                         if doweight_stage1:
                             tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
 
-                        for ni in range_constexpr(num_acc_n_packed):
-                            col_i32 = col_i32_list[ni]
-                            sw_gate = sw_gate_vals[ni] if (not is_f16 and not is_f4_b) else None
-                            sw_up = sw_up_vals[ni] if (not is_f16 and not is_f4_b) else None
+                        _if_valid = scf.IfOp(t_valid)
+                        with _if_valid.then():
+                            for ni in range_constexpr(num_acc_n_packed):
+                                col_i32 = col_i32_list[ni]
+                                sw_gate = sw_gate_vals[ni] if (not is_f16 and not is_f4_b) else None
+                                sw_up = sw_up_vals[ni] if (not is_f16 and not is_f4_b) else None
 
-                            acc_idx = mi * num_acc_n_packed + ni
-                            vg = vector.extract(
-                                acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
-                            )
-                            vu = vector.extract(
-                                acc_up[acc_idx], static_position=[ii], dynamic_position=[]
-                            )
-                            if enable_bias:
-                                gate_bias_list, up_bias_list = epilogue_pf
-                                # flir.print("gate_bias_list", gate_bias_list[ni])
+                                acc_idx = mi * num_acc_n_packed + ni
+                                vg = vector.extract(
+                                    acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
+                                )
+                                vu = vector.extract(
+                                    acc_up[acc_idx], static_position=[ii], dynamic_position=[]
+                                )
+                                if enable_bias:
+                                    gate_bias_list, up_bias_list = epilogue_pf
+                                    # flir.print("gate_bias_list", gate_bias_list[ni])
+                                    # if by == 23:
+                                    #     if tx == 0:
+                                    #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
+                                    #         flir.printf("vg %f, vu %f  \n", vg, vu)
+                                    vg = vg + gate_bias_list[ni]
+                                    vu = vu + up_bias_list[ni]
+
+                                if is_int8:
+                                    vg = arith.sitofp(f32, vg)
+                                    vu = arith.sitofp(f32, vu)
+                                if not is_f16 and not is_f4_b:
+                                    vg = vg * sx * sw_gate
+                                    vu = vu * sx * sw_up
+
+                                # y = silu(vg) * vu
+                                y = swiglu(vg, vu)
                                 # if by == 23:
                                 #     if tx == 0:
                                 #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
-                                #         flir.printf("vg %f, vu %f  \n", vg, vu)
-                                vg = vg + gate_bias_list[ni]
-                                vu = vu + up_bias_list[ni]
+                                #         flir.printf("vg %f, vu %f y %f\n", vg, vu, y)
+                                # # flir.printf("vg %f, vu %f y %f \n", vg, vu, y)
+                                # if y > 100:
+                                #     flir.printf("y %f \n", y)
 
-                            if is_int8:
-                                vg = arith.sitofp(f32, vg)
-                                vu = arith.sitofp(f32, vu)
-                            if not is_f16 and not is_f4_b:
-                                vg = vg * sx * sw_gate
-                                vu = vu * sx * sw_up
+                                if doweight_stage1:
+                                    y = y * tw
 
-                            # y = silu(vg) * vu
-                            y = swiglu(vg, vu)
-                            # if by == 23:
-                            #     if tx == 0:
-                            #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
-                            #         flir.printf("vg %f, vu %f y %f\n", vg, vu, y)
-                            # # flir.printf("vg %f, vu %f y %f \n", vg, vu, y)
-                            # if y > 100:
-                            #     flir.printf("y %f \n", y)
-
-                            if doweight_stage1:
-                                y = y * tw
-
-                            y = arith.trunc_f(T.bf16(), y)
-                            idx_out = idx0 + col_i32
-                            # flir.printf("idx_out %d \n", idx_out)
-                            buffer_ops.buffer_store(y, out_rsrc, idx_out)
+                                y = arith.trunc_f(T.bf16(), y)
+                                idx_out = idx0 + col_i32
+                                # flir.printf("idx_out %d \n", idx_out)
+                                buffer_ops.buffer_store(y, out_rsrc, idx_out)
 
                     mfma_epilog(
                         use_cshuffle=False,
@@ -1770,7 +1776,15 @@ def compile_mixed_moe_gemm2(
                     t_i32 = arith.andi(fused_i, mask24)
                     s_i32 = arith.shrui(fused_i, arith.i32(24))
                     # Keep `blk_valid` only; remove per-row token validity checks.
-                    row_ts_i32 = t_i32 * topk_i32 + s_i32
+
+                    # row_ts_i32 = t_i32 * topk_i32 + s_i32
+
+                    t_valid = arith.cmpu(t_i32, tokens_i32, "ult")
+                    s_valid = arith.cmpu(s_i32, topk_i32, "ult")
+                    ts_valid = arith.andi(t_valid, s_valid)
+                    t_safe = arith.select(ts_valid, t_i32, arith.i32(0))
+                    s_safe = arith.select(ts_valid, s_i32, arith.i32(0))
+                    row_ts_i32 = t_safe * topk_i32 + s_safe
                     row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
                     # if bx == 0:
                     #     if tx ==0:
@@ -2463,7 +2477,15 @@ def compile_mixed_moe_gemm2(
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                     t2 = fused2 & mask24_i32
                     s2 = fused2 >> 24
-                    ts2 = t2 * topk_i32_v + s2
+                    # ts2 = t2 * topk_i32_v + s2
+
+                    t_ok = arith.cmpu(t2, tokens_i32, "ult")
+                    s_ok = arith.cmpu(s2, topk_i32_v, "ult")
+                    ts_ok = arith.andi(t_ok, s_ok)
+                    t2_safe = arith.select(ts_ok, t2, arith.i32(0))
+                    s2_safe = arith.select(ts_ok, s2, arith.i32(0))
+                    ts2 = t2_safe * topk_i32_v + s2_safe
+
                     # sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     if doweight_stage2:
@@ -2504,8 +2526,17 @@ def compile_mixed_moe_gemm2(
                     # Return (fused_i32, row_valid_i1) so the epilogue can skip the entire row
                     # for invalid tail rows (CK-style), avoiding per-store branching.
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                    # row_i32 = arith.index_cast(i32, row)
+                    # row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
+
                     row_i32 = arith.index_cast(i32, row)
-                    row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
+                    row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
+                    t = fused2 & mask24_i32
+                    s = fused2 >> 24
+                    t_ok = arith.cmpu(t, tokens_i32, "ult")
+                    s_ok = arith.cmpu(s, topk_i32_v, "ult")
+                    row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
+
                     return (fused2, row_valid)
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
