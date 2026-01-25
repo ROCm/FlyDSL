@@ -1,30 +1,53 @@
-# Build outputs
+# Build directories
 build/
-.flydsl*/
-.flir
-## Legacy build outputs (pre-rename)
+build_*/
+cmake-build-*/
+
+# git 
 *.log
 *.diff
 
-# Backups
-*.old
-
-# Python caches
+# Python
 __pycache__/
-*.pyc
-.cache/
-flir/python_bindings/mlir/
-my_ir_dumps*/
-*.mlir
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+.eggs/
+lib/python*/site-packages/
 
 # Virtualenvs
 .venv/
 .venv*/
 .venvs/
 
-# setuptools metadata from editable installs
-*.egg-info/
-flydsl/src/*.egg-info/
+# C++
+.cache/
 
-# Wheels / packaging outputs
-dist/
+# IDE
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.obj
+*.a
+*.s
+*.asm
+*.hasco
+*.cubin
+*.ptx
+
+# Temporary files
+/tmp/
+*.tmp
+
+# MACOS
+.DS_Store
+Thumbs.db
