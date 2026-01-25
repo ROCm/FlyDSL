@@ -101,6 +101,9 @@ class Types:
     def f16(self) -> ir.Type:
         return ir.F16Type.get()
     @property
+    def f16x1(self) -> ir.Type:
+        return ir.VectorType.get([1], ir.F16Type.get())
+    @property
     def f16x2(self) -> ir.Type:
         return ir.VectorType.get([2], ir.F16Type.get())
     @property
@@ -146,6 +149,9 @@ class Types:
     @property
     def f8(self) -> ir.Type:
         return _flir_default_f8_type()
+    @property
+    def f8x1(self) -> ir.Type:
+        return ir.VectorType.get([1], _flir_default_f8_type())
     @property
     def f8x2(self) -> ir.Type:
         return ir.VectorType.get([2], _flir_default_f8_type())

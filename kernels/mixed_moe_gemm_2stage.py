@@ -55,6 +55,8 @@ def compile_mixed_moe_gemm1(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     enable_bias: bool = False
+    model_dim_pad: int = 0,
+    inter_dim_pad: int = 0,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -138,6 +140,12 @@ def compile_mixed_moe_gemm1(
 
     def _scale_elem_type():
         return I.i32
+
+    def _out_elem_type():
+        return I.bf16 if out_dtype == "bf16" else I.fp8
+
+    def _out_vec_type():
+        return I.bf16x1 if out_dtype == "bf16" else I.fp8x1
 
     # size_out = tokens * topk * inter_dim
     # size_x = tokens * model_dim
@@ -280,6 +288,11 @@ def compile_mixed_moe_gemm1(
             )
             layout_b = b_layout.layout_b
 
+            def check_c_n_valid_gate(base_n):
+                return arith.cmpu(base_n, 2 * (inter_dim - inter_dim_pad), "ult")
+            def check_c_k_valid_gate(base_k):
+                return arith.cmpu(base_k, model_dim - model_dim_pad, "ult")
+                
             m_repeat = tile_m // 16
             k_unroll = tile_k_bytes // 128  # K64-byte micro-step
             # flir.print("k_unroll", k_unroll)
@@ -558,6 +571,19 @@ def compile_mixed_moe_gemm1(
                         k1 = lane_div_16
                         coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], 0)
                         idx_pack = flir.crd2idx(coord_pack, layout_b)
+                        
+                        # Calculate mask for boundary check
+                        c_offset = arith.constant(ni * 16, index=True)
+                        global_n = by_n + n_tile_base + c_offset + lane_mod_16
+
+                        # global_n_modulo = global_n % arith.constant(2 * inter_dim, index=True)
+                        n_valid = check_c_n_valid_gate(global_n_modulo)
+                        
+                        k_coord = base_k + arith.constant(ku * 64 // elem_bytes, index=True) + lane_div_16 * arith.constant(16 // elem_bytes, index=True)
+                        k_valid = check_c_k_valid_gate(k_coord)
+                        
+                        w_mask = arith.andi(n_valid, k_valid)
+                        
                         vec_elems = 16 
                         b_view = flir.TensorView(
                             arg_w,
@@ -570,6 +596,7 @@ def compile_mixed_moe_gemm1(
                             flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
                             b_view,
                             None,
+                            pred=w_mask,
                             alignment=8,
                             return_vector=True,
                             src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
@@ -1065,7 +1092,9 @@ def compile_mixed_moe_gemm1(
 
                     # Optional: CK-style CShuffle epilogue for better global store coalescing.
                     # Uses EVec=4 (buffer store "x4" of fp16 elements).
-                    _use_cshuffle_epilog = bool(use_cshuffle_epilog)
+                    _use_cshuffle_epilog = out_dtype is "fp8" or bool(use_cshuffle_epilog)
+
+                    mask_even_i32 = arith.i32(0xFFFFFFFE)
 
                     if _use_cshuffle_epilog:
                         if lds_out is None:
@@ -1093,7 +1122,7 @@ def compile_mixed_moe_gemm1(
                             if doweight_stage1:
                                 tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
 
-                            for ni in range_constexpr(num_acc_n):
+                            for ni in range_constexpr(num_acc_n_packed):
                                 col_local = col_base_local + (ni * 16)
                                 sw_gate = sw_gate_vals[ni] if (not is_f16) else None
                                 sw_up = sw_up_vals[ni] if (not is_f16) else None
@@ -1106,36 +1135,55 @@ def compile_mixed_moe_gemm1(
                                     acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                                 )
 
-                                if is_int8:
-                                    vg = arith.sitofp(f32, vg)
-                                    vu = arith.sitofp(f32, vu)
-                                if not is_f16 and not is_f4_b:
-                                    vg = vg * sx * sw_gate
-                                    vu = vu * sx * sw_up
-                                flir.print(is_fp16)
+                                if enable_bias:
+                                    gate_bias_list, up_bias_list = epilogue_pf
+                                    vg = vg + gate_bias_list[ni]
+                                    vu = vu + up_bias_list[ni]
 
-                                y = silu(vg) * vu
-                                # y = swiglu(vg, vu)
+                                # y = silu(vg) * vu
+                                y = swiglu(vg, vu)
+
                                 if doweight_stage1:
                                     y = y * tw
-                                y16 = arith.trunc_f(T.f16(), y)
+                                # y16 = arith.trunc_f(T.f16(), y)
+
+                                y_out = arith.trunc_f(_out_elem_type(), y)
 
                                 lds_idx = row_base_lds + col_local
-                                v1 = vector.from_elements(vec1_f16, [y16])
-                                vector.store(v1, lds_out, [lds_idx], alignment=2)
+                                v1 = vector.from_elements(_out_vec_type(), [y_out])
+                                vector.store(v1, lds_out, [lds_idx], alignment=1)
 
                         def precompute_row(*, row_local, row):
                             fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                            t2 = fused2 & mask24_i32
-                            s2 = fused2 >> 24
-                            return (t2 * topk_i32_v + s2) * inter_i32_local
+                            # t2 = fused2 & mask24_i32
+                            # s2 = fused2 >> 24
+                            # return (t2 * topk_i32_v + s2) * inter_i32_local
+
+                            row_i32 = arith.index_cast(i32, row)
+                            row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
+                            t = fused2 & mask24_i32
+                            s = fused2 >> 24
+                            t_ok = arith.cmpu(t, tokens_i32, "ult")
+                            s_ok = arith.cmpu(s, topk_i32_v, "ult")
+                            row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
+
+                            return (fused2, row_valid)
 
                         def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                            idx0 = row_ctx
-                            col_i32 = arith.index_cast(i32, col_g0)
-                            idx_out = idx0 + col_i32
                             # Vectorized fp16 store (EVec=4).
-                            buffer_ops.buffer_store(frag, out_rsrc, idx_out)
+                            fused = row_ctx
+                            t = fused & mask24_i32
+                            s = fused >> 24
+                            idx0 = t * model_i32
+                            ts = t * topk_i32_v + s
+                            idx0 = ts * model_i32
+
+                            col_i32 = arith.index_cast(i32, col_g0)
+                            idx_elem = idx0 + col_i32
+                            idx_elem_even = idx_elem & mask_even_i32
+
+                            buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
+
                         mfma_epilog(
                             use_cshuffle=True,
                             arith=arith,
@@ -1154,6 +1202,7 @@ def compile_mixed_moe_gemm1(
                             by_n=by_n,
                             n_tile_base=n_tile_base,
                             lds_out=lds_out,
+                            frag_elem_type=_out_elem_type(),
                             write_row_to_lds=write_row_to_lds,
                             precompute_row=precompute_row,
                             store_pair=store_pair,
@@ -1194,35 +1243,16 @@ def compile_mixed_moe_gemm1(
                                 )
                                 if enable_bias:
                                     gate_bias_list, up_bias_list = epilogue_pf
-                                    # flir.print("gate_bias_list", gate_bias_list[ni])
-                                    # if by == 23:
-                                    #     if tx == 0:
-                                    #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
-                                    #         flir.printf("vg %f, vu %f  \n", vg, vu)
                                     vg = vg + gate_bias_list[ni]
                                     vu = vu + up_bias_list[ni]
 
-                                if is_int8:
-                                    vg = arith.sitofp(f32, vg)
-                                    vu = arith.sitofp(f32, vu)
-                                if not is_f16 and not is_f4_b:
-                                    vg = vg * sx * sw_gate
-                                    vu = vu * sx * sw_up
-
                                 # y = silu(vg) * vu
                                 y = swiglu(vg, vu)
-                                # if by == 23:
-                                #     if tx == 0:
-                                #         # flir.printf("vg %f, vu %f  \n", gate_bias_list[ni], up_bias_list[ni])
-                                #         flir.printf("vg %f, vu %f y %f\n", vg, vu, y)
-                                # # flir.printf("vg %f, vu %f y %f \n", vg, vu, y)
-                                # if y > 100:
-                                #     flir.printf("y %f \n", y)
 
                                 if doweight_stage1:
                                     y = y * tw
 
-                                y = arith.trunc_f(T.bf16(), y)
+                                y = arith.trunc_f(_out_elem_type(), y)
                                 idx_out = idx0 + col_i32
                                 # flir.printf("idx_out %d \n", idx_out)
                                 buffer_ops.buffer_store(y, out_rsrc, idx_out)
@@ -1308,6 +1338,8 @@ def compile_mixed_moe_gemm2(
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
     enable_bias: bool = False
+    model_dim_pad: int = 0,
+    inter_dim_pad: int = 0,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1542,6 +1574,14 @@ def compile_mixed_moe_gemm2(
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.constant(int(a_elem_bytes), index=True)) / arith.index(64)
+
+
+            def check_c_n_valid_gate(base_n):
+                return arith.cmpu(base_n, model_dim - model_dim_pad, "ult")
+
+            def check_c_k_valid_gate(base_k):
+                return arith.cmpu(base_k, inter_dim - inter_dim_pad, "ult")
+
 
             # A&B's scale preshuffle layout
             layout_a_scale = make_preshuffle_scale_layout(
@@ -1940,6 +1980,18 @@ def compile_mixed_moe_gemm2(
                     k1 = lane_div_16
                     coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], 0)
                     idx_pack = flir.crd2idx(coord_pack, layout_b)
+                    
+                    # Calculate mask for boundary check
+                    c_offset = arith.constant(ni * 16, index=True)
+                    global_n = by_n + n_tile_base + c_offset + lane_mod_16
+                    n_valid = check_c_n_valid_gate(global_n)
+                    
+                    k_coord = k0 * arith.constant(64 // b_elem_bytes, index=True) +
+                              lane_div_16 * arith.constant(16 // b_elem_bytes, index=True))
+                    k_valid = check_c_k_valid_gate(k_coord)
+                    
+                    w_mask = arith.andi(n_valid, k_valid)
+                    
                     vec_elems = 16 
                     b_view = flir.TensorView(
                         arg_w,
@@ -1952,6 +2004,7 @@ def compile_mixed_moe_gemm2(
                         flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
                         b_view,
                         None,
+                        pred=w_mask,
                         alignment=8,
                         return_vector=True,
                         src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
