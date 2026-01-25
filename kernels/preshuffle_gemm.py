@@ -169,6 +169,7 @@ def compile_preshuffle_gemm_a8(
 
             # A is 1B/elem but we use dwordx4 (16B) buffer loads, so build a /4 layout.
             c_k_div4 = c_k / 4
+            layout_a = flir.make_layout((c_m, c_k), stride=(c_k, 1))
             layout_a_div4 = flir.make_layout((c_m, c_k_div4), stride=(c_k_div4, 1))
 
             # B preshuffle layout (shared with MoE kernels).
@@ -367,42 +368,42 @@ def compile_preshuffle_gemm_a8(
                 )
 
             # Original register-based load/store (kept for reference)
-            # def load_a_tile(base_k_div4):
-            #     parts = []
-            #     for i in range_constexpr(num_a_loads):
-            #         row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
-            #         row_a_global = bx_m + row_a_local
-            #         coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
-            #         idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-            #         a_16B = load_a_16(idx_i32)
-            #         parts.append(vector.bitcast(T.i32x4, a_16B))
-            #     return parts
+            def load_a_tile(base_k_div4):
+                parts = []
+                for i in range_constexpr(num_a_loads):
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    row_a_global = bx_m + row_a_local
+                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
+                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
+                    a_16B = load_a_16(idx_i32)
+                    parts.append(vector.bitcast(T.i32x4, a_16B))
+                return parts
 
-            # def store_a_tile_to_lds(vec_a_parts, lds_base):
-            #     for i in range_constexpr(num_a_loads):
-            #         row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
-            #         lds_store_16b_xor16(
-            #             flir,
-            #             arith,
-            #             vector,
-            #             lds_memref=lds_a,
-            #             vec16_ty=_vec16_type(),
-            #             elem_type=_elem_type(),
-            #             atom_s16=atom_a_g2r16,
-            #             layout_lds=layout_lds,
-            #             row_local=row_a_local,
-            #             col_local_i32=col_a_local_i32,
-            #             tx_c4=c4,
-            #             k_blocks16=k_blocks16,
-            #             lds_base=lds_base,
-            #             vec_part_i32x4=vec_a_parts[i],
-            #         )
+            def store_a_tile_to_lds(vec_a_parts, lds_base):
+                for i in range_constexpr(num_a_loads):
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    lds_store_16b_xor16(
+                        flir,
+                        arith,
+                        vector,
+                        lds_memref=lds_a,
+                        vec16_ty=_vec16_type(),
+                        elem_type=_elem_type(),
+                        atom_s16=atom_a_g2r16,
+                        layout_lds=layout_lds,
+                        row_local=row_a_local,
+                        col_local_i32=col_a_local_i32,
+                        tx_c4=c4,
+                        k_blocks16=k_blocks16,
+                        lds_base=lds_base,
+                        vec_part_i32x4=vec_a_parts[i],
+                    )
 
-            # def prefetch_ab_tile(base_k):
-            #     base_k_div4 = base_k / 4
-            #     a_regs = load_a_tile(base_k_div4)
-            #     b_regs = load_b_tile(base_k)
-            #     return a_regs, b_regs
+            def prefetch_ab_tile(base_k):
+                base_k_div4 = base_k / 4
+                a_regs = load_a_tile(base_k_div4)
+                b_regs = load_b_tile(base_k)
+                return a_regs, b_regs
 
             # DMA async version: direct global-to-LDS transfer
             def dma_a_tile_to_lds(base_k_div4, lds_base):
@@ -410,49 +411,55 @@ def compile_preshuffle_gemm_a8(
                 
                 # GFX942 doesn't support 16B buffer_load_lds, use 4B per operation
                 # GFX950+ (MI355) supports 16B
-                use_16b_dma = str(gpu_arch).startswith("gfx95")
+                use_16b_dma = True
                 dma_bytes = 16 if use_16b_dma else 4
-                num_dma_per_load = 1 if use_16b_dma else 4
                 
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    # if bx == 0 and by == 0 and i == 0:
+                    #     flir.printf("row_a_local = %d, col_a_local_i32 = %d, base_k_div4 = %d\n", row_a_local, col_a_local_i32, base_k_div4)
+                    col_a_local_sw = flir.swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)  # debug
                     row_a_global = bx_m + row_a_local
-                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
-                    idx_i32_base = flir.crd2idx(coord_a_g, layout_a_div4)
+                    coord_a_g = flir.make_coord(row_a_global, base_k_div4 * c4 + col_a_local_sw)
+                    global_offset = arith.index_cast(T.i32, flir.crd2idx(coord_a_g, layout_a))
+                    # if bx == 0 and by == 0 and i == 0:
+                    #     flir.printf("row_a_local = %d, col_a_local_i32 = %d, base_k_div4 = %d, col_a_local_sw = %d, idx_id32_base = %d\n",
+                    #                 row_a_local, col_a_local_i32, base_k_div4, col_a_local_sw, idx_i32_base)
                     
-                    for dma_idx in range_constexpr(num_dma_per_load):
-                        # For 4B DMA: issue 4 separate DMAs (offsets 0,1,2,3 in i32 units)
-                        i32_offset = dma_idx if not use_16b_dma else 0
-                        
-                        # Calculate LDS destination with XOR16 swizzle
-                        # col_a_local_i32 is in i32 units (dwords), need to convert to bytes for swizzle
-                        col_byte_offset = i32_offset * 4
-                        col_byte_offset_val = arith.constant(col_byte_offset, index=True)
-                        col_local_bytes = (col_a_local_i32 * c4) + col_byte_offset_val
-                        col_swz = flir.swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
-                        coord_lds = flir.make_coord(row_a_local, col_swz)
+                    if i == 0:            
+                        col_local_bytes = (col_a_local_i32 * c4)
+                        coord_lds = flir.make_coord(row_a_local, col_local_bytes)
                         idx_lds = flir.crd2idx(coord_lds, layout_lds)
                         idx_lds_total = idx_lds + lds_base
                         
                         # Get LDS pointer
-                        lds_ptr_idx = memref_dialect.extract_aligned_pointer_as_index(lds_a)
-                        lds_addr = lds_ptr_idx + idx_lds_total
-                        lds_ptr_i64 = arith.index_cast(T.i64, lds_addr)
-                        lds_ptr = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), arith.unwrap(lds_ptr_i64))
-                        
-                        # DMA from global to LDS using buffer_load_lds
-                        # Convert i32 index to byte offset (multiply by 4)
-                        i32_offset_val = arith.constant(i32_offset, index=True)
-                        global_idx_i32 = idx_i32_base + i32_offset_val
-                        global_byte_offset = global_idx_i32 * c4
-                        byte_offset_i32 = arith.index_cast(T.i32, global_byte_offset)
-                        size_i32 = arith.constant(dma_bytes, type=T.i32)
-                        soffset = arith.constant(0, type=T.i32)
-                        offset_imm = arith.constant(0, type=T.i32)
-                        aux = arith.constant(0, type=T.i32)
-                        
-                        rocdl.raw_ptr_buffer_load_lds(a_rsrc, lds_ptr, arith.unwrap(size_i32), arith.unwrap(byte_offset_i32), 
-                                                      arith.unwrap(soffset), arith.unwrap(offset_imm), arith.unwrap(aux))
+                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_a) + idx_lds_total
+                        lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr) // 1024 * 1024)
+                    else:
+                        lds_ptr_i64_lane0 += 1024 * 4
+                    lds_ptr = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), arith.unwrap(lds_ptr_i64_lane0))
+                    
+                    # DMA from global to LDS using buffer_load_lds
+                    # Convert i32 index to byte offset (multiply by 4)
+
+                    size_i32 = arith.constant(dma_bytes, type=T.i32)
+                    soffset = arith.constant(0, type=T.i32)
+                    offset_imm = arith.constant(0, type=T.i32)
+                    aux = arith.constant(1, type=T.i32)
+                    
+                    rocdl.raw_ptr_buffer_load_lds(a_rsrc, lds_ptr, arith.unwrap(size_i32), arith.unwrap(global_offset), 
+                                                arith.unwrap(soffset), arith.unwrap(offset_imm), arith.unwrap(aux))
+                    # gpu.barrier()
+                    
+                    # check lds data (correctness) convert data to float32 for printing
+                    # if bx == 0 and by == 0 and i == 0 and tx <= 64:
+                    #     loaded_val = vector.load_op(_vec16_type(), lds_a, [idx_lds_total])
+                    #     global_val = vector.load_op(_vec16_type(), arg_a, [global_byte_offset])
+                    #     for vi in range_constexpr(1):
+                    #         elem = vector.extract(loaded_val, static_position=[vi], dynamic_position=[])
+                    #         g_elem = vector.extract(global_val, static_position=[vi], dynamic_position=[])
+                    #         flir.printf("lds_base = %d, i = %d, tx = %d, vi = %d, lds_elem = %d, global_elem = %d, idx_lds_total = %d, global_byte_offset = %d, lds_ptr = %p, lds_ptr_i64_lane0 = %d\n", 
+                    #                     lds_base, i, tx, vi, elem, g_elem, idx_lds_total, global_byte_offset, lds_ptr_i64, lds_ptr_i64_lane0)
 
             def prefetch_a_to_lds(base_k, target_lds_base):
                 base_k_div4 = base_k / 4
@@ -505,7 +512,7 @@ def compile_preshuffle_gemm_a8(
                     def pack_i64x4_to_i32x8(x0, x1, x2, x3):
                         v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
                         return vector.bitcast(vec8_i32, v4)
-
+                    # flir.print(f"k_unroll = {k_unroll}\n")
                     for ku128 in range_constexpr(k_unroll // 2):
                         ku0 = ku128 * 2
                         ku1 = ku0 + 1
@@ -519,6 +526,9 @@ def compile_preshuffle_gemm_a8(
                         for mi in range_constexpr(m_repeat):
                             mi_val = arith.constant(mi * 16, index=True)
                             curr_row_a_lds = row_a_lds + mi_val
+                            
+                            # if (mi == 0) and bx == 0 and by == 0:
+                            #     flir.printf("mfma_scale_128: ku0=%d, ku1=%d, col_base0=%d, col_base1=%d\n", ku0, ku1, col_base0, col_base1)
 
                             if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
                                 a0, a1 = a0_prefetch
@@ -785,7 +795,8 @@ def compile_preshuffle_gemm_a8(
                 # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                 # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
                 mfma_group = num_acc_n
-                mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                # mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                mfma_total = 2 * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
