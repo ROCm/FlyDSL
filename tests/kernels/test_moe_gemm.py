@@ -964,6 +964,10 @@ def run_moe_stage2(
         except Exception as e:
             logging.warning(f"Skipping aiter CK moe stage2 compare (not runnable here): {e}")
 
+    # Print profile breakdown if the executor supports it
+    if hasattr(exe, 'print_profile_stats'):
+        exe.print_profile_stats()
+
     if return_outputs:
         return out, us
     return None
@@ -1118,11 +1122,16 @@ def compile_moe_gemm2_no_atomic_with_reduce(
     doweight_stage2: bool,
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
+    profile: bool = False,
 ):
     """Wrapper: compile stage2 with accumulate=False, then reduce sum over topk.
 
     This avoids atomic contention by writing per-(token, slot) results to
     [tokens*topk, model_dim], then reducing to [tokens, model_dim] outside the kernel.
+
+    Args:
+        profile: If True, collect timing stats for alloc+init, kernel, reduce phases.
+                 Call exe.print_profile_stats() after runs to see breakdown.
     """
     # Compile the underlying kernel with accumulate=False
     inner_exe = compile_moe_gemm2(
@@ -1141,20 +1150,31 @@ def compile_moe_gemm2_no_atomic_with_reduce(
 
     # Return a wrapper executor that handles the intermediate buffer and reduce
     class _ReduceWrapper:
-        def __init__(self, exe, topk, model_dim):
+        def __init__(self, exe, topk, model_dim, profile: bool = False):
             self._exe = exe
             self._topk = topk
             self._model_dim = model_dim
             self._intermediate = None
+            self._profile = profile
+            # Profiling stats (accumulated across calls)
+            self._call_count = 0
+            self._total_us = 0.0
+            self._alloc_init_us = 0.0
+            self._kernel_us = 0.0
+            self._reduce_us = 0.0
 
         def __call__(self, out, *args):
-
-            # print(f"run compile_moe_gemm2_no_atomic_with_reduce: "
-            #       f"out.shape={out.shape}, top_k={self._topk}")
-
             # args: a2, w2, scale_a2, scale_w2, sorted_ids, expert_ids, sorted_weights,
             #       num_valid_ids, tokens, model_dim, inter_dim, blocks
             tokens = args[8]  # tokens is the 9th argument (0-indexed: 8)
+
+            if self._profile:
+                torch.cuda.synchronize()
+                t0 = torch.cuda.Event(enable_timing=True)
+                t1 = torch.cuda.Event(enable_timing=True)
+                t2 = torch.cuda.Event(enable_timing=True)
+                t3 = torch.cuda.Event(enable_timing=True)
+                t0.record()
 
             # Allocate intermediate buffer [tokens*topk, model_dim] if needed
             expanded_size = tokens * self._topk * self._model_dim
@@ -1166,14 +1186,63 @@ def compile_moe_gemm2_no_atomic_with_reduce(
             intermediate = self._intermediate[:tokens * self._topk, :self._model_dim]
             intermediate.zero_()
 
+            if self._profile:
+                t1.record()
+
             # Run kernel: output to [tokens*topk, model_dim]
             self._exe(intermediate.view(-1), *args)
 
-            # OPTIMIZE this reduce sum!
+            if self._profile:
+                t2.record()
+
             # Reduce sum over topk: [tokens*topk, model_dim] -> [tokens, model_dim]
             torch.sum(intermediate.view(tokens, self._topk, self._model_dim), dim=1, out=out)
 
-    return _ReduceWrapper(inner_exe, topk, model_dim)
+            if self._profile:
+                t3.record()
+                torch.cuda.synchronize()
+
+                alloc_init_us = t0.elapsed_time(t1) * 1000  # ms -> us
+                kernel_us = t1.elapsed_time(t2) * 1000
+                reduce_us = t2.elapsed_time(t3) * 1000
+                total_us = t0.elapsed_time(t3) * 1000
+
+                self._call_count += 1
+                self._total_us += total_us
+                self._alloc_init_us += alloc_init_us
+                self._kernel_us += kernel_us
+                self._reduce_us += reduce_us
+
+        def print_profile_stats(self):
+            """Print profiling statistics."""
+            if self._call_count == 0:
+                print("[no_atomic_reduce] No profiling data collected.")
+                return
+            n = self._call_count
+            total = self._total_us / n
+            alloc = self._alloc_init_us / n
+            kernel = self._kernel_us / n
+            reduce = self._reduce_us / n
+            print(f"[no_atomic_reduce profile] calls={n}, avg total={total:.1f} us")
+            print(f"  alloc+init: {alloc:.1f} us ({100*alloc/total:.1f}%)")
+            print(f"  kernel:     {kernel:.1f} us ({100*kernel/total:.1f}%)")
+            print(f"  reduce:     {reduce:.1f} us ({100*reduce/total:.1f}%)")
+
+        def reset_profile_stats(self):
+            """Reset profiling statistics."""
+            self._call_count = 0
+            self._total_us = 0.0
+            self._alloc_init_us = 0.0
+            self._kernel_us = 0.0
+            self._reduce_us = 0.0
+
+    return _ReduceWrapper(inner_exe, topk, model_dim, profile=profile)
+
+
+def _make_no_atomic_compile_fn(profile: bool = False):
+    """Factory to create compile_fn with profile option."""
+    from functools import partial
+    return partial(compile_moe_gemm2_no_atomic_with_reduce, profile=profile)
 
 
 @pytest.mark.parametrize(
@@ -1200,12 +1269,17 @@ def test_moe_stage2_standalone(
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
+    profile_breakdown: bool = False,
 ):
     """Standalone stage2 test for optimization development.
 
     Compares:
     1. Baseline: atomic accumulation (accumulate=True)
     2. No-atomic + reduce: write expanded output then reduce (accumulate=False)
+
+    Args:
+        profile_breakdown: If True, print timing breakdown for no-atomic version
+                          (alloc+init, kernel, reduce phases).
     """
     # Common args
     common_args = dict(
@@ -1231,9 +1305,10 @@ def test_moe_stage2_standalone(
     run_moe_stage2(**common_args, kernel_name="moe_gemm2_atomic")
 
     # Run no-atomic + reduce version
+    compile_fn = _make_no_atomic_compile_fn(profile=profile_breakdown)
     run_moe_stage2(
         **common_args,
-        compile_fn=compile_moe_gemm2_no_atomic_with_reduce,
+        compile_fn=compile_fn,
         kernel_name="moe_gemm2_no_atomic_reduce",
     )
 
