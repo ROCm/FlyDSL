@@ -58,15 +58,20 @@ def compile_moe_gemm1(
     in_dtype:
       - "fp8": X/W are fp8
       - "fp16": X/W are fp16
-      - "int8": X/W are int8
+      - "int8": X/W are int8 (X is [tokens, K])
+      - "int8smooth": X/W are int8, but X is pre-expanded to [tokens*topk, K] with per-(token,slot)
+        quant scales (used to emulate MoE smoothquant behavior where each (token,slot)->expert route can
+        have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
     """
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+        raise ValueError(
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+        )
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
     if out_dtype not in ("f16", "bf16"):
@@ -83,6 +88,9 @@ def compile_moe_gemm1(
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: X is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
+    x_is_token_slot = in_dtype == "int8smooth"
+    # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
+    is_int8 = is_int8 or x_is_token_slot
 
     mfma_i32_k32 = None
     if is_int8:
@@ -277,7 +285,8 @@ def compile_moe_gemm1(
                 c_topk = arith.constant(topk, index=True)
 
                 # X: [tokens, k] bytes = tokens*k*elem_bytes
-                x_nbytes_idx = tokens_in * k_in * arith.constant(int(elem_bytes), index=True)
+                x_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
+                x_nbytes_idx = x_rows * k_in * arith.constant(int(elem_bytes), index=True)
                 x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
                 x_rsrc = buffer_ops.create_buffer_resource(
                     arg_x, max_size=False, num_records_bytes=x_nbytes_i32
@@ -299,7 +308,8 @@ def compile_moe_gemm1(
                     sw_rsrc = None
                 else:
                     # scale_x: [tokens] f32 -> bytes = tokens*4
-                    sx_nbytes_idx = tokens_in * arith.constant(4, index=True)
+                    sx_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
+                    sx_nbytes_idx = sx_rows * arith.constant(4, index=True)
                     sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
                     sx_rsrc = buffer_ops.create_buffer_resource(
                         arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
@@ -378,10 +388,21 @@ def compile_moe_gemm1(
                     sorted_row_i = bx_m + row_local
                     # NOTE: rows beyond `num_valid_ids` can contain garbage (within the allocated
                     # buffer). That's OK as long as we never use an out-of-range token id to index X.
-                    fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
+                    fused_i = buffer_ops.buffer_load(
+                        sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32
+                    )
                     t_raw = arith.andi(fused_i, mask24)
-                    t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
-                    x_row_base_div4.append(t_idx * c_k_div4)
+                    if x_is_token_slot:
+                        s_raw = arith.shrui(fused_i, arith.i32(24))
+                        # X is indexed by token-slot in **slot-major** order:
+                        #   row_ts = slot * tokens + token
+                        # This matches CK's moe_smoothquant output layout.
+                        row_ts_i32 = s_raw * tokens_i32 + t_raw
+                        row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
+                        x_row_base_div4.append(row_ts_idx * c_k_div4)
+                    else:
+                        t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
+                        x_row_base_div4.append(t_idx * c_k_div4)
     
                 vec1_i32 = I.vec(1, i32)
                 vec2_i32 = I.vec(2, i32)
@@ -898,11 +919,27 @@ def compile_moe_gemm1(
                         lds_out,
                     ):
                         # `row` is the sorted-row index (bx_m + row_in_tile).
-                        fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                        fused2 = buffer_ops.buffer_load(
+                            sorted_rsrc, row, vec_width=1, dtype=i32
+                        )
                         t2 = fused2 & mask24_i32
+                        s2 = fused2 >> arith.i32(24)
                         # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
                         # sentinel (t2 == tokens) or otherwise out-of-range.
-                        sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                        if x_is_token_slot:
+                            # slot-major: slot*tokens + token
+                            ts2 = s2 * tokens_i32_v + t2
+                            sx = (
+                                arith.f32(1.0)
+                                if is_f16
+                                else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                            )
+                        else:
+                            sx = (
+                                arith.f32(1.0)
+                                if is_f16
+                                else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                            )
     
                         # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                         if doweight_stage1:
@@ -983,7 +1020,20 @@ def compile_moe_gemm1(
                     t2 = t2_raw
                     s2 = s2_raw
 
-                    sx0 = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                    if x_is_token_slot:
+                        # slot-major: slot*tokens + token
+                        ts2 = s2 * tokens_i32_v + t2
+                        sx0 = (
+                            arith.f32(1.0)
+                            if is_f16
+                            else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                        )
+                    else:
+                        sx0 = (
+                            arith.f32(1.0)
+                            if is_f16
+                            else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                        )
                     sx = sx0
                     zero_out = arith.constant(0.0, type=out_mlir())
     
@@ -1117,8 +1167,10 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+        raise ValueError(
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+        )
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
     out_s = str(out_dtype).strip().lower()
@@ -1130,7 +1182,7 @@ def compile_moe_gemm2(
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
-    is_int8 = (in_dtype == "int8") or is_int4
+    is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
 
     mfma_i32_k32 = None
     if is_int8:
