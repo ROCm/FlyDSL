@@ -103,20 +103,28 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     x_flat = x.reshape(-1).contiguous()
 
     # -------------------------------------------------------------------------
-    # Route B (IPC): exchange HIP IPC handles for each rank's input buffer.
+    # Distributed path: use AIter backend.
+    #
+    # NOTE:
+    # - True multi-GPU allreduce needs each rank to access peer buffers (peer pointer
+    #   exchange / peer mapping). This repository intentionally does not provide that
+    #   for the FlyDSL shim.
+    # - Therefore, distributed mode defaults to the AIter backend (same control-plane /
+    #   protocol) and does not rely on any FlyDSL-side peer-mapping utilities.
     # -------------------------------------------------------------------------
-    from flydsl.runtime import ipc as fly_ipc
+    backend_env = str(os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND", "")).strip().lower()
+    if not backend_env:
+        os.environ["FLYDSL_CUSTOM_ALL_REDUCE_BACKEND"] = "aiter"
+        backend_env = "aiter"
+    if backend_env != "aiter":
+        raise RuntimeError(
+            "Distributed mode requires FLYDSL_CUSTOM_ALL_REDUCE_BACKEND=aiter "
+            "(FlyDSL backend does not support true multi-GPU allreduce across processes)."
+        )
 
-    my_ipc = fly_ipc.get_ipc_handle(x_flat)
-    gathered_ipc = [None for _ in range(world_size)]
-    dist.all_gather_object(gathered_ipc, (my_ipc.handle, int(my_ipc.offset_bytes)), group=group)
-
-    # Pack handles into CPU uint8 tensors (AIter-like shape).
-    handles = []
-    offsets = []
-    for h_bytes, off in gathered_ipc:
-        handles.append(torch.tensor(list(h_bytes), device="cpu", dtype=torch.uint8))
-        offsets.append(int(off))
+    # Dummy placeholders to satisfy the C++-shaped init signature.
+    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
+    offsets = [0 for _ in range(world_size)]
 
     # AIter-like meta/rank_data (we repurpose rank_data as the local registered buffer).
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
@@ -185,7 +193,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         torch.cuda.synchronize()
 
         # Correctness (one-shot, out of band).
-        # For perf A/B, you can disable the check (e.g. FlyDSL IPC kernel lacks ROCm signalling):
+        # For perf A/B, you can disable the check:
         #   FLYDSL_CUSTOM_ALL_REDUCE_SKIP_CHECK=1
         if os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_SKIP_CHECK", "0") != "1":
             gathered = [torch.empty_like(x_flat) for _ in range(world_size)]

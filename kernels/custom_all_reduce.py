@@ -7,8 +7,8 @@ This kernel is intentionally written in the same "ext arith" style as
 - Use `arith.as_value(...)` only at strict MLIR builder boundaries (e.g. memref.load/store)
 
 Notes vs the C++ AIter implementation you pasted:
-- That code implements **multi-GPU** collectives via IPC handles + device-side signalling.
-- FlyDSL example kernels in this repo don't have an IPC runtime; so this file provides:
+- Multi-GPU collectives are provided via the optional AIter backend.
+- This file provides:
   - A **single-process** functional subset (world_size==1), and
   - A "packed input" mode (world_size>1) where inputs are provided as a stacked tensor
     `[world_size, N]` (or a Python list of tensors that we stack), and we compute the
@@ -31,10 +31,6 @@ import _mlir.extras.types as T
 
 KERNEL_NAME_ALL_REDUCE = "custom_all_reduce_kernel"
 KERNEL_NAME_ALL_GATHER = "custom_all_gather_kernel"
-KERNEL_NAME_ALL_REDUCE_IPC = "custom_all_reduce_ipc_kernel"
-KERNEL_NAME_REDUCE_SCATTER_IPC = "custom_reduce_scatter_ipc_kernel"
-KERNEL_NAME_ALL_GATHER_IPC = "custom_all_gather_ipc_kernel"
-KERNEL_NAME_COPY_CHUNK_IPC = "custom_copy_chunk_ipc_kernel"
 
 # ---- AIter ROCm Signal layout constants (from ISA / header) ----
 # start: uint32_t start[kMaxBlocks][8]   => 80*8*4 = 2560 bytes
@@ -1658,526 +1654,6 @@ def build_custom_all_reduce_module(
     return _CustomAllReduce().module
 
 
-def build_custom_all_reduce_ipc_module(
-    N: int,
-    dtype_str: str = "f16",
-    *,
-    world_size: int,
-    BLOCK_SIZE: int = 256,
-):
-    """Build a module containing an IPC-pointer-based all-reduce kernel.
-
-    Kernel args are specialized for `world_size`:
-      (In0, In1, ..., In{world_size-1}, Out)
-
-    Each In* is a pointer to a contiguous 1D buffer of length N on that rank's GPU,
-    made accessible via HIP IPC mapping in the current process.
-    """
-    if N <= 0:
-        raise ValueError("N must be > 0")
-    if world_size <= 1 or world_size > 8:
-        raise ValueError("world_size must be in [2, 8] for IPC mode")
-    if world_size % 2 != 0:
-        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
-    if dtype_str == "bf16":
-        # BF16 lowering in this repo has proven unreliable across toolchains;
-        # keep IPC path to fp16/fp32 for now.
-        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
-        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
-
-    PACK_ELEMS = _pack_elems(dtype_str)
-    if N % PACK_ELEMS != 0:
-        raise ValueError(f"custom allreduce requires input length to be multiple of {PACK_ELEMS}")
-
-    gpu_arch = get_hip_arch()
-    VEC_ALIGN = 16
-    total_bytes = N * _elem_size_bytes(dtype_str)
-    USE_FAST_VEC = (total_bytes % 128) == 0
-
-    # One thread handles one 16B pack.
-    num_packs = N // PACK_ELEMS
-    num_blocks = (num_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
-    _state = {}
-
-    class _CustomAllReduceIPC(flir.MlirModule):
-        GPU_MODULE_NAME = f"custom_all_reduce_ipc_{dtype_str}_ws{world_size}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
-
-        def init_gpu_module(self):
-            elem_type, compute_type = _dtype_to_mlir(dtype_str)
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
-
-        @flir.kernel
-        def custom_all_reduce_ipc_kernel(
-            self: flir.T.i64,
-            In0: lambda: T.memref(N, _state["elem_type"]),
-            In1: lambda: T.memref(N, _state["elem_type"]),
-            In2: lambda: T.memref(N, _state["elem_type"]),
-            In3: lambda: T.memref(N, _state["elem_type"]),
-            In4: lambda: T.memref(N, _state["elem_type"]),
-            In5: lambda: T.memref(N, _state["elem_type"]),
-            In6: lambda: T.memref(N, _state["elem_type"]),
-            In7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            Ins = [In0, In1, In2, In3, In4, In5, In6, In7]
-            tid = flir.const_index(flir.thread_idx("x"))
-            bid = flir.const_index(flir.block_idx("x"))
-
-            c_num_packs = flir.const_index(num_packs)
-            c0_idx = flir.const_index(0)
-
-            elem_type = _state["elem_type"]
-            compute_type = _state["compute_type"]
-            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
-            vec_c_ty = ir.VectorType.get([PACK_ELEMS], compute_type)
-
-            pack_idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
-            is_valid_pack = arith.ult(pack_idx, c_num_packs)
-            pack_idx_safe = arith.select(is_valid_pack, pack_idx, c0_idx)
-            base = arith.ArithValue(pack_idx_safe) * PACK_ELEMS
-
-            if USE_FAST_VEC:
-                zero = arith.constant(0.0, type=compute_type)
-                acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
-                for r in range_constexpr(world_size):
-                    v_e = flir.vector.load(vec_e_ty, Ins[r], [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if dtype_str == "f32":
-                        v_c = v_e
-                    else:
-                        v_c = arith.extf(vec_c_ty, v_e)
-                    acc = arith.as_value(arith.ArithValue(acc) + v_c)
-
-                if is_valid_pack:
-                    out_v = acc if dtype_str == "f32" else arith.trunc_f(vec_e_ty, acc)
-                    flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
-                return
-
-            # Fallback scalar (should be rare; keep correctness).
-            if is_valid_pack:
-                for lane in range_constexpr(PACK_ELEMS):
-                    idx = arith.ArithValue(base) + lane
-                    acc = arith.constant(0.0, type=compute_type)
-                    for r in range_constexpr(world_size):
-                        x_e = flir.memref.load(Ins[r], [arith.as_value(idx)])
-                        x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
-                        acc = arith.ArithValue(acc) + x_c
-                    y_e = arith.as_value(acc) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, acc))
-                    flir.memref.store(y_e, Out, [arith.as_value(idx)])
-
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            In0: lambda: T.memref(N, _state["elem_type"]),
-            In1: lambda: T.memref(N, _state["elem_type"]),
-            In2: lambda: T.memref(N, _state["elem_type"]),
-            In3: lambda: T.memref(N, _state["elem_type"]),
-            In4: lambda: T.memref(N, _state["elem_type"]),
-            In5: lambda: T.memref(N, _state["elem_type"]),
-            In6: lambda: T.memref(N, _state["elem_type"]),
-            In7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            c1 = arith.index(1)
-            gx = arith.index(num_blocks)
-            bx = arith.index(BLOCK_SIZE)
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, KERNEL_NAME_ALL_REDUCE_IPC],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[In0, In1, In2, In3, In4, In5, In6, In7, Out],
-            )
-
-    return _CustomAllReduceIPC().module
-
-
-def build_custom_reduce_scatter_ipc_module(
-    N: int,
-    dtype_str: str = "f16",
-    *,
-    world_size: int,
-    BLOCK_SIZE: int = 256,
-):
-    """IPC reduce-scatter:
-
-    Each rank computes the sum for its own chunk only (chunk = rank), writing into Out[chunk].
-    This reduces per-rank peer traffic from ~world_size*N to ~N.
-    """
-    if N <= 0:
-        raise ValueError("N must be > 0")
-    if world_size <= 1 or world_size > 8:
-        raise ValueError("world_size must be in [2, 8] for IPC mode")
-    if world_size % 2 != 0:
-        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
-    if dtype_str == "bf16":
-        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-    if N % world_size != 0:
-        raise ValueError("reduce-scatter requires N divisible by world_size")
-    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
-        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
-
-    PACK_ELEMS = _pack_elems(dtype_str)
-    if (N // world_size) % PACK_ELEMS != 0:
-        raise ValueError(f"chunk size must be multiple of {PACK_ELEMS} elems")
-
-    gpu_arch = get_hip_arch()
-    VEC_ALIGN = 16
-    total_bytes = (N // world_size) * _elem_size_bytes(dtype_str)
-    USE_FAST_VEC = (total_bytes % 128) == 0
-
-    chunk_elems = N // world_size
-    chunk_packs = chunk_elems // PACK_ELEMS
-    num_blocks = (chunk_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
-    _state = {}
-
-    class _ReduceScatterIPC(flir.MlirModule):
-        GPU_MODULE_NAME = f"custom_reduce_scatter_ipc_{dtype_str}_ws{world_size}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
-
-        def init_gpu_module(self):
-            elem_type, compute_type = _dtype_to_mlir(dtype_str)
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
-
-        @flir.kernel
-        def custom_reduce_scatter_ipc_kernel(
-            self: flir.T.i64,
-            rank_i32: flir.T.i32,
-            In0: lambda: T.memref(N, _state["elem_type"]),
-            In1: lambda: T.memref(N, _state["elem_type"]),
-            In2: lambda: T.memref(N, _state["elem_type"]),
-            In3: lambda: T.memref(N, _state["elem_type"]),
-            In4: lambda: T.memref(N, _state["elem_type"]),
-            In5: lambda: T.memref(N, _state["elem_type"]),
-            In6: lambda: T.memref(N, _state["elem_type"]),
-            In7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            Ins = [In0, In1, In2, In3, In4, In5, In6, In7]
-            tid = flir.const_index(flir.thread_idx("x"))
-            bid = flir.const_index(flir.block_idx("x"))
-            c_chunk_packs = flir.const_index(chunk_packs)
-            c0_idx = flir.const_index(0)
-
-            elem_type = _state["elem_type"]
-            compute_type = _state["compute_type"]
-            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
-            vec_c_ty = ir.VectorType.get([PACK_ELEMS], compute_type)
-
-            pack_in_chunk = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
-            is_valid_pack = arith.ult(pack_in_chunk, c_chunk_packs)
-            pack_safe = arith.select(is_valid_pack, pack_in_chunk, c0_idx)
-
-            rank = arith.index_cast(ir.IndexType.get(), rank_i32)
-            base = arith.ArithValue(rank) * chunk_elems + arith.ArithValue(pack_safe) * PACK_ELEMS
-
-            if USE_FAST_VEC:
-                zero = arith.constant(0.0, type=compute_type)
-                acc = flir.vector.splat(vec_c_ty, arith.as_value(zero))
-                for r in range_constexpr(world_size):
-                    v_e = flir.vector.load(vec_e_ty, Ins[r], [arith.as_value(base)], alignment=VEC_ALIGN)
-                    v_c = v_e if dtype_str == "f32" else arith.extf(vec_c_ty, v_e)
-                    acc = arith.as_value(arith.ArithValue(acc) + v_c)
-                if is_valid_pack:
-                    out_v = acc if dtype_str == "f32" else arith.trunc_f(vec_e_ty, acc)
-                    flir.vector.store(arith.as_value(out_v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
-                return
-
-            if is_valid_pack:
-                for lane in range_constexpr(PACK_ELEMS):
-                    idx = arith.ArithValue(base) + lane
-                    acc = arith.constant(0.0, type=compute_type)
-                    for r in range_constexpr(world_size):
-                        x_e = flir.memref.load(Ins[r], [arith.as_value(idx)])
-                        x_c = arith.ArithValue(x_e) if dtype_str == "f32" else arith.extf(compute_type, x_e)
-                        acc = arith.ArithValue(acc) + x_c
-                    y_e = arith.as_value(acc) if dtype_str == "f32" else arith.as_value(arith.trunc_f(elem_type, acc))
-                    flir.memref.store(y_e, Out, [arith.as_value(idx)])
-
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            rank_i32: flir.T.i32,
-            In0: lambda: T.memref(N, _state["elem_type"]),
-            In1: lambda: T.memref(N, _state["elem_type"]),
-            In2: lambda: T.memref(N, _state["elem_type"]),
-            In3: lambda: T.memref(N, _state["elem_type"]),
-            In4: lambda: T.memref(N, _state["elem_type"]),
-            In5: lambda: T.memref(N, _state["elem_type"]),
-            In6: lambda: T.memref(N, _state["elem_type"]),
-            In7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            c1 = arith.index(1)
-            gx = arith.index(num_blocks)
-            bx = arith.index(BLOCK_SIZE)
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, KERNEL_NAME_REDUCE_SCATTER_IPC],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[rank_i32, In0, In1, In2, In3, In4, In5, In6, In7, Out],
-            )
-
-    return _ReduceScatterIPC().module
-
-
-def build_custom_all_gather_ipc_module(
-    N: int,
-    dtype_str: str = "f16",
-    *,
-    world_size: int,
-    BLOCK_SIZE: int = 256,
-):
-    """IPC all-gather:
-
-    After reduce-scatter, each rank has written its chunk to Out[rank*chunk : (rank+1)*chunk].
-    This kernel gathers all chunks from peer Out buffers into the local Out buffer.
-    """
-    if N <= 0:
-        raise ValueError("N must be > 0")
-    if world_size <= 1 or world_size > 8:
-        raise ValueError("world_size must be in [2, 8] for IPC mode")
-    if world_size % 2 != 0:
-        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
-    if dtype_str == "bf16":
-        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-    if N % world_size != 0:
-        raise ValueError("all-gather requires N divisible by world_size")
-    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
-        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
-
-    PACK_ELEMS = _pack_elems(dtype_str)
-    if N % PACK_ELEMS != 0:
-        raise ValueError(f"N must be multiple of {PACK_ELEMS}")
-
-    gpu_arch = get_hip_arch()
-    VEC_ALIGN = 16
-    total_bytes = N * _elem_size_bytes(dtype_str)
-    USE_FAST_VEC = (total_bytes % 128) == 0
-
-    chunk_elems = N // world_size
-    chunk_packs = chunk_elems // PACK_ELEMS
-    num_packs = N // PACK_ELEMS
-    num_blocks = (num_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
-    _state = {}
-
-    class _AllGatherIPC(flir.MlirModule):
-        GPU_MODULE_NAME = f"custom_all_gather_ipc_{dtype_str}_ws{world_size}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
-
-        def init_gpu_module(self):
-            elem_type, compute_type = _dtype_to_mlir(dtype_str)
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
-
-        @flir.kernel
-        def custom_all_gather_ipc_kernel(
-            self: flir.T.i64,
-            Src0: lambda: T.memref(N, _state["elem_type"]),
-            Src1: lambda: T.memref(N, _state["elem_type"]),
-            Src2: lambda: T.memref(N, _state["elem_type"]),
-            Src3: lambda: T.memref(N, _state["elem_type"]),
-            Src4: lambda: T.memref(N, _state["elem_type"]),
-            Src5: lambda: T.memref(N, _state["elem_type"]),
-            Src6: lambda: T.memref(N, _state["elem_type"]),
-            Src7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            Srcs = [Src0, Src1, Src2, Src3, Src4, Src5, Src6, Src7]
-            tid = flir.const_index(flir.thread_idx("x"))
-            bid = flir.const_index(flir.block_idx("x"))
-            c_num_packs = flir.const_index(num_packs)
-            c0_idx = flir.const_index(0)
-            c_chunk_packs = flir.const_index(chunk_packs)
-
-            elem_type = _state["elem_type"]
-            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
-
-            pack_idx = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
-            is_valid_pack = arith.ult(pack_idx, c_num_packs)
-            pack_safe = arith.select(is_valid_pack, pack_idx, c0_idx)
-
-            # src_rank = pack_idx / chunk_packs ; pack_in_chunk = pack_idx % chunk_packs
-            idx_i32 = arith.index_cast(T.i32(), pack_safe)
-            cp_i32 = arith.i32(chunk_packs)
-            src_r_i32 = flir.arith.DivUIOp(arith.as_value(idx_i32), arith.as_value(cp_i32)).result
-            p_i32 = flir.arith.RemUIOp(arith.as_value(idx_i32), arith.as_value(cp_i32)).result
-            src_r = arith.index_cast(ir.IndexType.get(), src_r_i32)
-            p = arith.index_cast(ir.IndexType.get(), p_i32)
-
-            base = arith.ArithValue(src_r) * chunk_elems + arith.ArithValue(p) * PACK_ELEMS
-
-            if USE_FAST_VEC:
-                if is_valid_pack:
-                    v = flir.vector.load(vec_e_ty, Src0, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 1:
-                        v = flir.vector.load(vec_e_ty, Src1, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 2:
-                        v = flir.vector.load(vec_e_ty, Src2, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 3:
-                        v = flir.vector.load(vec_e_ty, Src3, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 4:
-                        v = flir.vector.load(vec_e_ty, Src4, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 5:
-                        v = flir.vector.load(vec_e_ty, Src5, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 6:
-                        v = flir.vector.load(vec_e_ty, Src6, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    if arith.ArithValue(src_r_i32) == 7:
-                        v = flir.vector.load(vec_e_ty, Src7, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    flir.vector.store(arith.as_value(v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
-                return
-
-            if is_valid_pack:
-                for lane in range_constexpr(PACK_ELEMS):
-                    idx = arith.ArithValue(base) + lane
-                    v = flir.memref.load(Src0, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 1:
-                        v = flir.memref.load(Src1, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 2:
-                        v = flir.memref.load(Src2, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 3:
-                        v = flir.memref.load(Src3, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 4:
-                        v = flir.memref.load(Src4, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 5:
-                        v = flir.memref.load(Src5, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 6:
-                        v = flir.memref.load(Src6, [arith.as_value(idx)])
-                    if arith.ArithValue(src_r_i32) == 7:
-                        v = flir.memref.load(Src7, [arith.as_value(idx)])
-                    flir.memref.store(arith.as_value(v), Out, [arith.as_value(idx)])
-
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            Src0: lambda: T.memref(N, _state["elem_type"]),
-            Src1: lambda: T.memref(N, _state["elem_type"]),
-            Src2: lambda: T.memref(N, _state["elem_type"]),
-            Src3: lambda: T.memref(N, _state["elem_type"]),
-            Src4: lambda: T.memref(N, _state["elem_type"]),
-            Src5: lambda: T.memref(N, _state["elem_type"]),
-            Src6: lambda: T.memref(N, _state["elem_type"]),
-            Src7: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            c1 = arith.index(1)
-            gx = arith.index(num_blocks)
-            bx = arith.index(BLOCK_SIZE)
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, KERNEL_NAME_ALL_GATHER_IPC],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[Src0, Src1, Src2, Src3, Src4, Src5, Src6, Src7, Out],
-            )
-
-    return _AllGatherIPC().module
-
-
-def build_custom_copy_chunk_ipc_module(
-    N: int,
-    dtype_str: str = "f16",
-    *,
-    world_size: int,
-    BLOCK_SIZE: int = 256,
-):
-    """Copy one reduced chunk from a peer out buffer into local out buffer.
-
-    Args:
-      - src_rank_i32: which chunk to copy (0..world_size-1)
-      - Src: pointer to the peer out buffer (full length N)
-      - Out: local out buffer (full length N)
-    """
-    if N <= 0:
-        raise ValueError("N must be > 0")
-    if world_size <= 1 or world_size > 8:
-        raise ValueError("world_size must be in [2, 8] for IPC mode")
-    if world_size % 2 != 0:
-        raise ValueError("Odd num gpus is not supported for now (match aiter contract)")
-    if dtype_str == "bf16":
-        raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-    if N % world_size != 0:
-        raise ValueError("chunk copy requires N divisible by world_size")
-    if BLOCK_SIZE <= 0 or (BLOCK_SIZE & (BLOCK_SIZE - 1)) != 0:
-        raise ValueError("BLOCK_SIZE must be a power-of-two > 0 (e.g., 256)")
-
-    PACK_ELEMS = _pack_elems(dtype_str)
-    chunk_elems = N // world_size
-    if chunk_elems % PACK_ELEMS != 0:
-        raise ValueError(f"chunk size must be multiple of {PACK_ELEMS}")
-
-    gpu_arch = get_hip_arch()
-    VEC_ALIGN = 16
-    total_bytes = chunk_elems * _elem_size_bytes(dtype_str)
-    USE_FAST_VEC = (total_bytes % 128) == 0
-
-    chunk_packs = chunk_elems // PACK_ELEMS
-    num_blocks = (chunk_packs + BLOCK_SIZE - 1) // BLOCK_SIZE
-    _state = {}
-
-    class _CopyChunkIPC(flir.MlirModule):
-        GPU_MODULE_NAME = f"custom_copy_chunk_ipc_{dtype_str}_ws{world_size}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
-
-        def init_gpu_module(self):
-            elem_type, _compute_type = _dtype_to_mlir(dtype_str)
-            _state["elem_type"] = elem_type
-
-        @flir.kernel
-        def custom_copy_chunk_ipc_kernel(
-            self: flir.T.i64,
-            src_rank_i32: flir.T.i32,
-            Src: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            tid = flir.const_index(flir.thread_idx("x"))
-            bid = flir.const_index(flir.block_idx("x"))
-            c_chunk_packs = flir.const_index(chunk_packs)
-            c0_idx = flir.const_index(0)
-
-            elem_type = _state["elem_type"]
-            vec_e_ty = ir.VectorType.get([PACK_ELEMS], elem_type)
-
-            pack_in_chunk = arith.ArithValue(bid) * BLOCK_SIZE + arith.ArithValue(tid)
-            is_valid_pack = arith.ult(pack_in_chunk, c_chunk_packs)
-            pack_safe = arith.select(is_valid_pack, pack_in_chunk, c0_idx)
-
-            src_rank = arith.index_cast(ir.IndexType.get(), src_rank_i32)
-            base = arith.ArithValue(src_rank) * chunk_elems + arith.ArithValue(pack_safe) * PACK_ELEMS
-
-            if USE_FAST_VEC:
-                if is_valid_pack:
-                    v = flir.vector.load(vec_e_ty, Src, [arith.as_value(base)], alignment=VEC_ALIGN)
-                    flir.vector.store(arith.as_value(v), Out, [arith.as_value(base)], alignment=VEC_ALIGN)
-                return
-
-            if is_valid_pack:
-                for lane in range_constexpr(PACK_ELEMS):
-                    idx = arith.ArithValue(base) + lane
-                    v = flir.memref.load(Src, [arith.as_value(idx)])
-                    flir.memref.store(arith.as_value(v), Out, [arith.as_value(idx)])
-
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            src_rank_i32: flir.T.i32,
-            Src: lambda: T.memref(N, _state["elem_type"]),
-            Out: lambda: T.memref(N, _state["elem_type"]),
-        ):
-            c1 = arith.index(1)
-            gx = arith.index(num_blocks)
-            bx = arith.index(BLOCK_SIZE)
-            flir.gpu_ext.LaunchFuncOp(
-                [self.GPU_MODULE_NAME, KERNEL_NAME_COPY_CHUNK_IPC],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[src_rank_i32, Src, Out],
-            )
-
-    return _CopyChunkIPC().module
-
-
 def build_custom_all_gather_module(
     N: int,
     dtype_str: str = "f32",
@@ -2319,8 +1795,8 @@ class CustomAllReduce:
     """A small Python shim that mirrors the AIter extension API shape.
 
     Limitations:
-    - No IPC / multi-process signalling. For `world_size>1`, callers must provide
-      inputs in a packed form (list of tensors or a stacked tensor).
+    - For `world_size>1`, callers must provide inputs in a packed form
+      (list of tensors or a stacked tensor).
     """
 
     def __init__(self, *, world_size: int, rank: int, full_nvlink: bool = False):
@@ -2334,15 +1810,6 @@ class CustomAllReduce:
         self.rank = rank
         self.full_nvlink = bool(full_nvlink)
         self._exe_cache = {}
-        # IPC mapping state (route B):
-        # - `_ipc_ptrs[r]` is a device pointer (int) to rank r's buffer (base+offset)
-        # - `_ipc_bases[r]` is the IPC base pointer to close (None for self rank / unopened)
-        self._ipc_ptrs = None
-        self._ipc_bases = None
-        self._ipc_N = None
-        self._ipc_dtype_str = None
-        self._ipc_out_ptrs = None
-        self._ipc_out_bases = None
 
     def _dtype_str(self, t):
         # Avoid importing torch in kernels/ by duck-typing.
@@ -2368,14 +1835,6 @@ class CustomAllReduce:
             return exe
         if op == "all_reduce":
             m = build_custom_all_reduce_module(N, dtype_str=dtype_str, world_size=world_size)
-        elif op == "all_reduce_ipc":
-            m = build_custom_all_reduce_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
-        elif op == "reduce_scatter_ipc":
-            m = build_custom_reduce_scatter_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
-        elif op == "all_gather_ipc":
-            m = build_custom_all_gather_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
-        elif op == "copy_chunk_ipc":
-            m = build_custom_copy_chunk_ipc_module(N, dtype_str=dtype_str, world_size=world_size)
         elif op == "all_gather":
             m = build_custom_all_gather_module(N, dtype_str=dtype_str, world_size=world_size)
         else:
@@ -2388,59 +1847,6 @@ class CustomAllReduce:
         _ = open_fp8_quant  # not implemented in this FlyDSL demo
         if not _is_weak_contiguous(out):
             raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
-
-        # IPC fast path: world_size>1 and we have opened peer pointers.
-        if self.world_size > 1 and self._ipc_ptrs is not None:
-            # Expect `inp` to be the local rank buffer (for API parity); but we don't
-            # need it other than for shape/dtype validation.
-            dtype_str = self._dtype_str(out)
-            if self._ipc_dtype_str is not None and dtype_str != self._ipc_dtype_str:
-                raise ValueError("IPC buffer dtype mismatch vs registered buffer")
-            N = int(out.numel())
-            if self._ipc_N is not None and int(N) != int(self._ipc_N):
-                raise ValueError("IPC buffer length mismatch vs registered buffer")
-            if dtype_str == "bf16":
-                raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-            pack_elems = _pack_elems(dtype_str)
-            if int(N) % pack_elems != 0:
-                raise ValueError(f"custom allreduce requires input length to be multiple of {pack_elems}")
-
-            # NOTE: A true reduce-scatter + all-gather requires device-side signalling / memory
-            # ordering to make remote reads observe peer writes. Without that, correctness is not
-            # guaranteed on ROCm. Keep it behind an explicit opt-in flag.
-            use_rsag = False
-            try:
-                import os
-
-                use_rsag = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_RSAG", "0") == "1"
-            except Exception:
-                use_rsag = False
-
-            if use_rsag and self._ipc_out_ptrs is not None and (int(N) % int(self.world_size) == 0):
-                exe_rs = self._compile(op="reduce_scatter_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
-                exe_copy = self._compile(op="copy_chunk_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
-                exe_rs(int(self.rank), *self._ipc_ptrs[:8], out)
-                # IMPORTANT: synchronize across processes between phases.
-                # We do not have device-side signalling yet; use torch.distributed barrier.
-                try:
-                    import torch  # type: ignore
-                    import torch.distributed as dist  # type: ignore
-
-                    if dist.is_initialized():
-                        # Ensure RS writes are visible before any rank starts AG reads.
-                        torch.cuda.synchronize()
-                        dist.barrier()
-                        torch.cuda.synchronize()
-                except Exception:
-                    pass
-                # All-gather: copy chunk r from rank r's output buffer into local output.
-                for r in range(self.world_size):
-                    exe_copy(int(r), int(self._ipc_out_ptrs[r]), out)
-            else:
-                exe = self._compile(op="all_reduce_ipc", N=N, dtype_str=dtype_str, world_size=self.world_size)
-                # Pass peer device pointers as raw ints.
-                exe(*self._ipc_ptrs[:8], out)
-            return
 
         # Packed mode:
         # - list/tuple of rank tensors, or
@@ -2544,131 +1950,7 @@ class CustomAllReduce:
         self.all_gather_reg(reg_buffer.view_as(inp), out)
 
     def dispose(self):
-        # Close any opened IPC mappings.
-        try:
-            if self._ipc_bases is not None:
-                from flydsl.runtime import ipc as _ipc
-
-                for b in self._ipc_bases:
-                    if b is None:
-                        continue
-                    _ipc.close_ipc_handle(int(b))
-                if self._ipc_out_bases is not None:
-                    for b in self._ipc_out_bases:
-                        if b is None:
-                            continue
-                        _ipc.close_ipc_handle(int(b))
-        finally:
-            self._ipc_ptrs = None
-            self._ipc_bases = None
-            self._ipc_N = None
-            self._ipc_dtype_str = None
-            self._ipc_out_ptrs = None
-            self._ipc_out_bases = None
         self._exe_cache.clear()
-
-    # The following APIs exist in the C++ extension for IPC / graph capture integration.
-    # We keep them as explicit stubs to make the limitation clear.
-    def register_buffer(self, t, handles, offsets):
-        # Route B: open IPC handles for peer buffers and cache device pointers.
-        # `t` is the local rank's tensor buffer that peers will read from.
-        from flydsl.runtime import ipc as _ipc
-
-        if self.world_size <= 1:
-            raise ValueError("register_buffer is only meaningful for world_size>1")
-        if len(handles) != self.world_size or len(offsets) != self.world_size:
-            raise ValueError("handles/offsets length must equal world_size")
-        if not _is_weak_contiguous(t):
-            raise ValueError("registered buffer must be weak-contiguous")
-
-        dtype_str = self._dtype_str(t)
-        if dtype_str == "bf16":
-            raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-        N = int(t.numel())
-        pack_elems = _pack_elems(dtype_str)
-        if N % pack_elems != 0:
-            raise ValueError(f"custom allreduce requires input length to be multiple of {pack_elems}")
-
-        # Close any previous mappings first.
-        self.dispose()
-
-        ptrs = [None for _ in range(self.world_size)]
-        bases = [None for _ in range(self.world_size)]
-
-        # Local rank pointer.
-        ptrs[self.rank] = int(t.data_ptr())
-
-        for r in range(self.world_size):
-            if r == self.rank:
-                continue
-            h = handles[r]
-            if hasattr(h, "detach") and hasattr(h, "cpu"):
-                hb = bytes(h.detach().cpu().numpy().tobytes())
-            else:
-                hb = bytes(h)
-            base_ptr = _ipc.open_ipc_handle(hb)
-            bases[r] = int(base_ptr)
-            ptrs[r] = int(base_ptr) + int(offsets[r])
-
-        # Kernel signature is fixed to 8 ptr args (In0..In7). Pad by repeating rank0 ptr.
-        pad_ptr = int(ptrs[0])
-        ptrs8 = [pad_ptr] * 8
-        for i in range(min(self.world_size, 8)):
-            ptrs8[i] = int(ptrs[i])
-
-        self._ipc_ptrs = [int(p) for p in ptrs8]
-        self._ipc_bases = bases
-        self._ipc_N = N
-        self._ipc_dtype_str = dtype_str
-
-    def register_out_buffer(self, t_out, handles, offsets):
-        """Register peer pointers for output buffer (used as source for all-gather phase)."""
-        from flydsl.runtime import ipc as _ipc
-
-        if self.world_size <= 1:
-            raise ValueError("register_out_buffer is only meaningful for world_size>1")
-        if len(handles) != self.world_size or len(offsets) != self.world_size:
-            raise ValueError("handles/offsets length must equal world_size")
-        if not _is_weak_contiguous(t_out):
-            raise ValueError("output buffer must be weak-contiguous")
-
-        dtype_str = self._dtype_str(t_out)
-        if dtype_str == "bf16":
-            raise ValueError("bf16 IPC all-reduce is not supported/stable yet")
-        if self._ipc_dtype_str is not None and dtype_str != self._ipc_dtype_str:
-            raise ValueError("out buffer dtype mismatch vs registered input buffer")
-        N = int(t_out.numel())
-        if self._ipc_N is not None and int(N) != int(self._ipc_N):
-            raise ValueError("out buffer length mismatch vs registered input buffer")
-
-        bases = [None for _ in range(self.world_size)]
-        ptrs = [None for _ in range(self.world_size)]
-        ptrs[self.rank] = int(t_out.data_ptr())
-        for r in range(self.world_size):
-            if r == self.rank:
-                continue
-            h = handles[r]
-            if hasattr(h, "detach") and hasattr(h, "cpu"):
-                hb = bytes(h.detach().cpu().numpy().tobytes())
-            else:
-                hb = bytes(h)
-            base_ptr = _ipc.open_ipc_handle(hb)
-            bases[r] = int(base_ptr)
-            ptrs[r] = int(base_ptr) + int(offsets[r])
-
-        pad_ptr = int(ptrs[0])
-        ptrs8 = [pad_ptr] * 8
-        for i in range(min(self.world_size, 8)):
-            ptrs8[i] = int(ptrs[i])
-
-        self._ipc_out_ptrs = [int(p) for p in ptrs8]
-        self._ipc_out_bases = bases
-
-    def get_graph_buffer_ipc_meta(self):
-        raise NotImplementedError("graph buffer IPC meta is not available in FlyDSL demo")
-
-    def register_graph_buffers(self, handles, offsets):
-        raise NotImplementedError("register_graph_buffers requires IPC runtime; not available in FlyDSL demo")
 
 
 def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool):
@@ -2684,7 +1966,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
         - `"aiter"`: return AIter backend object (no new backend name)
     - `FLYDSL_AITER_IMPL` (only when backend=aiter):
         - `"aiter"` (default): run AIter kernel
-        - `"flydsl"`: run FlyDSL kernel (for perf A/B; correctness not guaranteed on ROCm w/o signalling)
+        - `"flydsl"`: run FlyDSL kernel that follows AIter signalling protocol
     """
     import os
 
@@ -2703,12 +1985,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     backend = str(os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND", "aiter")).strip().lower()
     if backend != "aiter":
         fa = CustomAllReduce(world_size=world_size, rank=rank, full_nvlink=full_nvlink)
-        # If rank_data is a CUDA tensor, treat it as the registered buffer and open IPC handles.
-        try:
-            if hasattr(rank_data, "is_cuda") and bool(rank_data.is_cuda):
-                fa.register_buffer(rank_data, handles, offsets)
-        except Exception:
-            pass
         return fa
 
     # ---- AIter backend ----
@@ -2762,8 +2038,8 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     if impl == "aiter":
         return aiter_ar
 
-    # impl == "flydsl": backend stays "aiter" (same control-plane + meta buffer),
-    # but the compute kernel is FlyDSL-generated and uses the same AIter signal protocol.
+    # impl == "flydsl": backend stays "aiter" (same control-plane group),
+    # but compute uses FlyDSL-generated kernels that follow the AIter signal protocol.
     return _AIterSignalFlyDSLAllreduce(
         group=_FLYDSL_AITER_GLOO_GROUP,  # type: ignore[name-defined]
         device=dev,
@@ -2772,20 +2048,111 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
         rank=rank,
         full_nvlink=bool(full_nvlink),
         rank_data=rank_data,
-        handles=handles,
-        offsets=offsets,
     )
 
 
 class _AIterSignalFlyDSLAllreduce:
-    """FlyDSL kernel runner that matches AIter ROCm signalling protocol.
+    """Run FlyDSL kernels that follow AIter signal protocol on ROCm.
 
-    This object:
-    - allocates AIter-style uncached meta buffer (signal + tmp)
-    - exchanges meta IPC handles over a gloo group
-    - opens peer meta + peer input buffers via HIP IPC
-    - launches a FlyDSL kernel that uses AIter's start/end/_flag protocol
+    This path needs to (a) exchange per-rank meta handles (signal/tmp) and
+    (b) map peer input buffers into the current process so the kernel can read them.
     """
+
+    # HIP IPC handle is an opaque 64-byte blob.
+    _HIP_IPC_HANDLE_BYTES = 64
+    _HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS = 0x1
+    _hip = None
+    _hipIpcMemHandle_t = None
+
+    @classmethod
+    def _load_hip(cls):
+        if cls._hip is not None:
+            return cls._hip
+        import ctypes
+
+        for name in ("libamdhip64.so", "libamdhip64.so.6", "libamdhip64.so.5"):
+            try:
+                cls._hip = ctypes.CDLL(name)
+                break
+            except OSError:
+                continue
+        if cls._hip is None:
+            raise RuntimeError("Failed to load HIP runtime library (libamdhip64.so)")
+
+        class hipIpcMemHandle_t(ctypes.Structure):
+            _fields_ = [("reserved", ctypes.c_byte * cls._HIP_IPC_HANDLE_BYTES)]
+
+        cls._hipIpcMemHandle_t = hipIpcMemHandle_t
+
+        # Bind prototypes (best-effort; HIP uses C ABI).
+        cls._hip.hipIpcGetMemHandle.restype = ctypes.c_int
+        cls._hip.hipIpcGetMemHandle.argtypes = [ctypes.POINTER(hipIpcMemHandle_t), ctypes.c_void_p]
+        cls._hip.hipIpcOpenMemHandle.restype = ctypes.c_int
+        cls._hip.hipIpcOpenMemHandle.argtypes = [ctypes.POINTER(ctypes.c_void_p), hipIpcMemHandle_t, ctypes.c_uint]
+        cls._hip.hipIpcCloseMemHandle.restype = ctypes.c_int
+        cls._hip.hipIpcCloseMemHandle.argtypes = [ctypes.c_void_p]
+        cls._hip.hipGetErrorString.restype = ctypes.c_char_p
+        cls._hip.hipGetErrorString.argtypes = [ctypes.c_int]
+        return cls._hip
+
+    @classmethod
+    def _hip_check(cls, err: int, *, what: str):
+        if int(err) == 0:
+            return
+        hip = cls._load_hip()
+        try:
+            s = hip.hipGetErrorString(int(err))
+            msg = s.decode("utf-8", errors="replace") if s else f"hipError({err})"
+        except Exception:
+            msg = f"hipError({err})"
+        raise RuntimeError(f"{what} failed: {msg}")
+
+    @classmethod
+    def _get_mem_handle_bytes(cls, base_ptr: int) -> bytes:
+        import ctypes
+
+        hip = cls._load_hip()
+        h = cls._hipIpcMemHandle_t()  # type: ignore[misc]
+        err = hip.hipIpcGetMemHandle(ctypes.byref(h), ctypes.c_void_p(int(base_ptr)))
+        cls._hip_check(err, what="hipIpcGetMemHandle")
+        return bytes(ctypes.string_at(ctypes.byref(h), cls._HIP_IPC_HANDLE_BYTES))
+
+    @classmethod
+    def _open_mem_handle(cls, handle_bytes: bytes) -> int:
+        import ctypes
+
+        if len(handle_bytes) != cls._HIP_IPC_HANDLE_BYTES:
+            raise ValueError(f"Expected {cls._HIP_IPC_HANDLE_BYTES}B handle, got {len(handle_bytes)}B")
+        hip = cls._load_hip()
+        h = cls._hipIpcMemHandle_t()  # type: ignore[misc]
+        ctypes.memmove(ctypes.byref(h), bytes(handle_bytes), cls._HIP_IPC_HANDLE_BYTES)
+        out_ptr = ctypes.c_void_p()
+        err = hip.hipIpcOpenMemHandle(ctypes.byref(out_ptr), h, ctypes.c_uint(int(cls._HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS)))
+        cls._hip_check(err, what="hipIpcOpenMemHandle")
+        return int(out_ptr.value)
+
+    @classmethod
+    def _close_mem_handle(cls, base_ptr: int) -> None:
+        import ctypes
+
+        hip = cls._load_hip()
+        err = hip.hipIpcCloseMemHandle(ctypes.c_void_p(int(base_ptr)))
+        cls._hip_check(err, what="hipIpcCloseMemHandle")
+
+    @staticmethod
+    def _gather_object_list_via_broadcast(group, shard_data):
+        """AIter-style gather that works with gloo under inference mode."""
+        import torch.distributed as dist  # type: ignore
+
+        world_size = dist.get_world_size(group=group)
+        rank = dist.get_rank(group=group)
+        all_data = [[None] for _ in range(world_size)]
+        all_data[rank][0] = shard_data
+        ranks = dist.get_process_group_ranks(group=group)
+        ranks = sorted(ranks)
+        for i, r in enumerate(ranks):
+            dist.broadcast_object_list(all_data[i], src=r, group=group, device="cpu")
+        return [all_data[i][0] for i in range(world_size)]
 
     def __init__(
         self,
@@ -2797,13 +2164,11 @@ class _AIterSignalFlyDSLAllreduce:
         rank: int,
         full_nvlink: bool,
         rank_data,
-        handles,
-        offsets,
     ):
+        import os
         import torch  # type: ignore
         import torch.distributed as dist  # type: ignore
         import aiter as aiter_ops  # type: ignore
-        from flydsl.runtime import ipc as fly_ipc
 
         self.group = group
         self.device = device
@@ -2812,85 +2177,82 @@ class _AIterSignalFlyDSLAllreduce:
         self.rank = int(rank)
         self.full_nvlink = bool(full_nvlink)
 
-        # AIter meta layout: [signal/meta (aiter_ops.meta_size bytes)] + [tmp buffer (max_size bytes)].
+        if not dist.is_initialized():
+            raise RuntimeError("FLYDSL_AITER_IMPL=flydsl requires torch.distributed to be initialized")
+        if self.world_size <= 1:
+            raise ValueError("FLYDSL_AITER_IMPL=flydsl is only meaningful for world_size>1")
+        if not hasattr(rank_data, "is_cuda") or not bool(rank_data.is_cuda):
+            raise ValueError("rank_data must be a CUDA tensor buffer for flydsl+aiter path")
+
+        # AIter meta layout: [signal/meta] + [tmp buffer].
         self.meta = aiter_ops.allocate_meta_buffer(int(aiter_ops.meta_size()) + int(self.max_size))
-        # Ensure deterministic initial flags.
         try:
             self.meta.zero_()
         except Exception:
             pass
         self._meta_size = int(aiter_ops.meta_size())
 
-        # Exchange meta IPC handles via gloo broadcast list (AIter-compatible).
-        handle = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
-        shard_data = (handle, 0)
-        all_data = [[None] for _ in range(self.world_size)]
-        all_data[self.rank][0] = shard_data
-        ranks = dist.get_process_group_ranks(group=self.group)
-        ranks = sorted(ranks)
-        for i, r in enumerate(ranks):
-            dist.broadcast_object_list(all_data[i], src=r, group=self.group, device="cpu")
-        meta_handles = [all_data[i][0][0] for i in range(self.world_size)]
-        meta_offsets = [int(all_data[i][0][1]) for i in range(self.world_size)]
+        # ---- Exchange and map meta buffers (signal/tmp) ----
+        my_meta_h = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
+        my_meta_bytes = bytes(my_meta_h.detach().cpu().numpy().tobytes())
+        all_meta = self._gather_object_list_via_broadcast(self.group, (my_meta_bytes, 0))
 
-        # Open peer meta (Signal base pointers) and derive tmp pointers.
         self._meta_bases = [None for _ in range(self.world_size)]
         self._sg_ptrs = [0 for _ in range(8)]
         self._tmp_ptrs = [0 for _ in range(8)]
         for r in range(self.world_size):
+            hb, off = all_meta[r]
             if r == self.rank:
                 base_ptr = int(self.meta.data_ptr())
             else:
-                base_ptr = int(fly_ipc.open_ipc_handle(bytes(meta_handles[r])))
+                base_ptr = int(self._open_mem_handle(bytes(hb)))
                 self._meta_bases[r] = base_ptr
-            sg_ptr = base_ptr + int(meta_offsets[r])
-            tmp_ptr = sg_ptr + self._meta_size
+            sg_ptr = int(base_ptr) + int(off)
+            tmp_ptr = int(sg_ptr) + int(self._meta_size)
             if r < 8:
                 self._sg_ptrs[r] = int(sg_ptr)
                 self._tmp_ptrs[r] = int(tmp_ptr)
-        # Pad to 8 args.
         for i in range(self.world_size, 8):
             self._sg_ptrs[i] = int(self._sg_ptrs[0])
             self._tmp_ptrs[i] = int(self._tmp_ptrs[0])
         self._self_sg = int(self._sg_ptrs[self.rank])
 
-        # Open peer input pointers from (handles, offsets). Use rank_data for local ptr.
-        if not hasattr(rank_data, "is_cuda") or not bool(rank_data.is_cuda):
-            raise ValueError("rank_data must be a CUDA tensor buffer for aiter-signal flydsl path")
+        # ---- Exchange and map input buffers ----
+        # Use raw HIP handle export (64B) to match hipIpcOpenMemHandle.
+        storage = rank_data.untyped_storage() if hasattr(rank_data, "untyped_storage") else rank_data.storage()
+        base_ptr = int(storage.data_ptr())
+        ptr = int(rank_data.data_ptr())
+        off_bytes = int(ptr - base_ptr)
+        my_in_h = self._get_mem_handle_bytes(base_ptr)
+        all_in = self._gather_object_list_via_broadcast(self.group, (my_in_h, off_bytes))
+
         self._in_bases = [None for _ in range(self.world_size)]
         self._in_ptrs = [0 for _ in range(8)]
-        self._in_ptrs[self.rank] = int(rank_data.data_ptr())
         for r in range(self.world_size):
+            hb, off = all_in[r]
             if r == self.rank:
+                self._in_ptrs[r] = int(rank_data.data_ptr())
                 continue
-            h = handles[r]
-            hb = bytes(h.detach().cpu().numpy().tobytes()) if hasattr(h, "detach") else bytes(h)
-            base_ptr = int(fly_ipc.open_ipc_handle(hb))
-            self._in_bases[r] = base_ptr
-            self._in_ptrs[r] = int(base_ptr) + int(offsets[r])
+            peer_base = int(self._open_mem_handle(bytes(hb)))
+            self._in_bases[r] = peer_base
+            self._in_ptrs[r] = int(peer_base) + int(off)
         for i in range(self.world_size, 8):
             self._in_ptrs[i] = int(self._in_ptrs[0])
 
-        # Unregistered buffer for all_reduce_unreg (AIter-like).
-        self.buffer = torch.empty(int(self.max_size), dtype=torch.uint8, device=self.device)
-
         self._exe_cache = {}
-        # Cache per (N, dtype_str, world_size) launch plans to avoid rebuilding Python objects
-        # (notably fake memref descriptors) on every call.
-        self._plan_cache = {}
+        self._threads = 256
+        self._max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
 
     def close(self):
-        from flydsl.runtime import ipc as fly_ipc
-
-        # Close opened peer meta and input mappings.
-        for b in self._meta_bases:
+        # Close mapped peer meta and input handles.
+        for b in getattr(self, "_meta_bases", []):
             if b is None:
                 continue
-            fly_ipc.close_ipc_handle(int(b))
-        for b in self._in_bases:
+            self._close_mem_handle(int(b))
+        for b in getattr(self, "_in_bases", []):
             if b is None:
                 continue
-            fly_ipc.close_ipc_handle(int(b))
+            self._close_mem_handle(int(b))
         self._meta_bases = []
         self._in_bases = []
 
@@ -2908,139 +2270,40 @@ class _AIterSignalFlyDSLAllreduce:
             return "f32"
         raise ValueError(f"unsupported dtype: {name}")
 
-    def _compile(self, *, N: int, dtype_str: str, world_size: int):
+    def _compile(self, *, N: int, dtype_str: str):
         import flydsl
         from kernels.aiter_signal_all_reduce_raw import build_aiter_signal_allreduce_raw_module
-        key = (N, dtype_str, world_size)
+
+        key = (int(N), str(dtype_str), int(self.world_size))
         exe = self._exe_cache.get(key)
         if exe is not None:
             return exe
-        import os
-        max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
-        # Use the exact meta_size from aiter to avoid debug/tmp overlap.
         m = build_aiter_signal_allreduce_raw_module(
             N=int(N),
             dtype_str=str(dtype_str),
-            world_size=int(world_size),
-            threads=256,
+            world_size=int(self.world_size),
+            threads=int(self._threads),
             meta_size_bytes=int(self._meta_size),
-            max_spin=int(max_spin),
+            max_spin=int(self._max_spin),
         )
         exe = flydsl.compile(m)
         self._exe_cache[key] = exe
         return exe
 
-    def _get_plan(self, *, N: int, dtype_str: str):
-        """Get (and cache) an execution plan for this (N, dtype, ws).
-
-        The plan caches:
-        - compiled exe and bound callables (run_1stage/run_2stage)
-        - sg_args tuple
-        - remote input memref descriptors template (self rank filled per call)
-        - tmp memref descriptors (all ranks)
-        - precomputed blocks for 1stage/2stage with fixed threads
-        """
-        key = (int(N), str(dtype_str), int(self.world_size))
-        plan = self._plan_cache.get(key)
-        if plan is not None:
-            return plan
-
-        exe = self._compile(N=int(N), dtype_str=str(dtype_str), world_size=self.world_size)
-        run1 = exe.run_1stage
-        run2 = exe.run_2stage
-        run2p = getattr(exe, "run_2stage_ptr", None)
-
-        PACK_ELEMS = int(_pack_elems(dtype_str))
-        if int(N) % PACK_ELEMS != 0:
-            raise ValueError(f"input length must be multiple of {PACK_ELEMS}")
-        size_packs = int(N) // PACK_ELEMS
-        part_packs = size_packs // int(self.world_size)
-        largest_part_packs = part_packs + (size_packs % int(self.world_size))
-
-        threads = 256
-        blocks_1 = (int(size_packs) + threads - 1) // threads
-        blocks_2 = (int(part_packs) + threads - 1) // threads
-        blocks_1 = max(1, min(int(_AITER_KMAXBLOCKS), int(blocks_1)))
-        blocks_2 = max(1, min(int(_AITER_KMAXBLOCKS), int(blocks_2)))
-
-        sg_args = tuple(int(x) for x in self._sg_ptrs[:8])
-
-        from kernels.aiter_signal_all_reduce_raw import make_fake_1d_memref as _fake1d
-
-        # Inputs: cache remote descriptors; self rank uses the real tensor each call.
-        in_template = [None for _ in range(8)]
-        for r in range(int(self.world_size)):
-            if r == int(self.rank):
-                in_template[r] = None
-            else:
-                in_template[r] = _fake1d(data_ptr=int(self._in_ptrs[r]), n_elems=int(N))
-
-        # Tmp: cache all descriptors (they point into uncached meta allocations).
-        tmp_elems = int(largest_part_packs * PACK_ELEMS)
-        tmp_args = [None for _ in range(8)]
-        for r in range(int(self.world_size)):
-            tmp_args[r] = _fake1d(
-                data_ptr=int(self._tmp_ptrs[r]),
-                n_elems=int(tmp_elems),
-                base_ptr=int(self._sg_ptrs[r]),
-            )
-        for i in range(int(self.world_size), 8):
-            tmp_args[i] = tmp_args[0]
-
-        # Rotated layout (AIter-style): index i corresponds to target=(rank+i)%ws.
-        ws = int(self.world_size)
-        rk = int(self.rank)
-        in_rot_template = [None for _ in range(8)]
-        tmp_rot_args = [None for _ in range(8)]
-        for i in range(ws):
-            in_rot_template[i] = in_template[(rk + i) % ws]
-            tmp_rot_args[i] = tmp_args[(rk + i) % ws]
-        # Pad remaining entries for ABI (8 args).
-        for i in range(ws, 8):
-            in_rot_template[i] = in_rot_template[0]
-            tmp_rot_args[i] = tmp_rot_args[0]
-
-        plan = {
-            "exe": exe,
-            "run1": run1,
-            "run2": run2,
-            "run2p": run2p,
-            "threads": int(threads),
-            "blocks_1": int(blocks_1),
-            "blocks_2": int(blocks_2),
-            "sg_args": sg_args,
-            "in_template": in_template,
-            "tmp_args": tuple(tmp_args),
-            "in_rot_template": tuple(in_rot_template),
-            "tmp_rot_args": tuple(tmp_rot_args),
-            # Rotated raw pointers (i64) for ptr-based entrypoint (index0 is self rank).
-            "in_rot_ptrs": tuple(int(self._in_ptrs[(rk + i) % ws]) for i in range(8)),
-            "tmp_rot_ptrs": tuple(int(self._tmp_ptrs[(rk + i) % ws]) for i in range(8)),
-            "PACK_ELEMS": int(PACK_ELEMS),
-            "size_packs": int(size_packs),
-            "part_packs": int(part_packs),
-            "largest_part_packs": int(largest_part_packs),
-        }
-        self._plan_cache[key] = plan
-        return plan
-
     def all_reduce_reg(self, inp, out=None, open_fp8_quant: bool = False):
         _ = open_fp8_quant
         import torch  # type: ignore
-        import os
-        import time
 
         if out is None:
             out = torch.empty_like(inp)
-        if not _is_weak_contiguous(out):
-            raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
         if int(inp.numel()) != int(out.numel()):
             raise ValueError("inp.numel must equal out.numel")
+        if not _is_weak_contiguous(out):
+            raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
         dtype_str = self._dtype_str(out)
         if dtype_str != self._dtype_str(inp):
             raise ValueError("inp/out dtype mismatch")
 
-        # AIter requires bytes % 16 == 0.
         bytes_n = int(out.numel()) * int(out.element_size())
         if bytes_n % 16 != 0:
             raise ValueError("aiter-signal flydsl allreduce requires byte size multiple of 16")
@@ -3048,96 +2311,33 @@ class _AIterSignalFlyDSLAllreduce:
             raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
 
         N = int(out.numel())
-        plan = self._get_plan(N=N, dtype_str=dtype_str)
-        PACK_ELEMS = int(plan["PACK_ELEMS"])
-        size_packs = int(plan["size_packs"])
-        part_packs = int(plan["part_packs"])
-        largest_part_packs = int(plan["largest_part_packs"])
-        tmp_bytes = int(largest_part_packs) * 16
-        if tmp_bytes > int(self.max_size):
-            raise ValueError(f"tmp bytes {tmp_bytes} exceed max_size {self.max_size}")
+        exe = self._compile(N=N, dtype_str=dtype_str)
+        pack_elems = 8 if dtype_str == "f16" else 4
+        num_packs = int(N) // int(pack_elems)
+        part_p = int(num_packs) // int(self.world_size)
+        # Use the 2-stage entrypoint unconditionally (it also covers small sizes).
+        blocks_2 = max(1, min(int(_AITER_KMAXBLOCKS), (max(1, int(part_p)) + int(self._threads) - 1) // int(self._threads)))
+        grid_x = int(blocks_2)
 
-        exe = plan["exe"]
+        # Rotated layout (AIter-style): index i corresponds to target=(rank+i)%ws.
+        ws = int(self.world_size)
+        rk = int(self.rank)
+        in_ptrs = [int(self._in_ptrs[(rk + i) % ws]) for i in range(8)]
+        tmp_ptrs = [int(self._tmp_ptrs[(rk + i) % ws]) for i in range(8)]
+        # Ensure index0 uses the current inp pointer.
+        in_ptrs[0] = int(inp.data_ptr())
+        out_ptr = int(out.data_ptr())
 
-        # Mirror AIter kernel selection (simplified to 1stage vs 2stage).
-        call_1stage = (self.world_size == 2) or (
-            self.full_nvlink
-            and ((self.world_size <= 4 and bytes_n < 160 * 1024) or (self.world_size <= 8 and bytes_n < 80 * 1024))
+        exe.run_2stage_ptr(
+            int(self.rank),
+            int(grid_x),
+            int(self._self_sg),
+            *self._sg_ptrs[:8],
+            *in_ptrs[:8],
+            *tmp_ptrs[:8],
+            int(out_ptr),
         )
-        # Build in_args from cached rotated template (index0 is always self rank).
-        in_args = list(plan["in_rot_template"])
-        in_args[0] = inp
-        fill_val = in_args[0] if in_args[0] is not None else inp
-        for i in range(int(self.world_size), 8):
-            in_args[i] = fill_val
-
-        sg_args = plan["sg_args"]
-
-        threads = int(plan["threads"])
-        blocks = int(plan["blocks_1"] if call_1stage else plan["blocks_2"])
-
-        trace = str(os.environ.get("FLYDSL_AITER_TRACE", "0")).strip() not in ("", "0", "false", "False")
-        trace_timing = str(os.environ.get("FLYDSL_AITER_TRACE_TIMING", "0")).strip() not in ("", "0", "false", "False")
-        if trace and int(self.rank) == 0:
-            stage = "1stage" if call_1stage else "2stage"
-            print(
-                "[flydsl-aiter-trace] "
-                f"stage={stage} ws={self.world_size} full_nvlink={bool(self.full_nvlink)} "
-                f"dtype={dtype_str} N={N} bytes={bytes_n} "
-                f"packs={size_packs} part_packs={part_packs} largest_part_packs={largest_part_packs} "
-                f"grid(blocks)={blocks} block(threads)={threads}",
-                flush=True,
-            )
-
-        t0 = time.perf_counter() if trace_timing else None
-        ev0 = ev1 = None
-        if trace_timing:
-            ev0 = torch.cuda.Event(enable_timing=True)
-            ev1 = torch.cuda.Event(enable_timing=True)
-            ev0.record()
-
-        if call_1stage:
-            plan["run1"](int(self.rank), int(blocks), int(self._self_sg), *sg_args, *in_args, out)
-            if trace_timing:
-                ev1.record()
-                ev1.synchronize()
-                t1 = time.perf_counter()
-                if int(self.rank) == 0:
-                    ms = float(ev0.elapsed_time(ev1))
-                    print(f"[flydsl-aiter-trace] kernel_ms={ms:.3f} host_s={t1 - t0:.6f}", flush=True)
-            return out
-
-        # Prefer ptr-based 2stage entrypoint when available to reduce memref descriptor overhead (stage2 hot path).
-        run2p = plan.get("run2p", None)
-        if run2p is not None:
-            in_ptrs = list(plan["in_rot_ptrs"])
-            tmp_ptrs = list(plan["tmp_rot_ptrs"])
-            # index0 is always self rank in rotated layout; override in0 with real inp pointer.
-            in_ptrs[0] = int(inp.data_ptr())
-            out_ptr = int(out.data_ptr())
-            run2p(int(self.rank), int(blocks), int(self._self_sg), *sg_args, *in_ptrs, *tmp_ptrs, int(out_ptr))
-        else:
-            tmp_args = plan["tmp_rot_args"]
-            plan["run2"](int(self.rank), int(blocks), int(self._self_sg), *sg_args, *in_args, *tmp_args, out)
-        if trace_timing:
-            ev1.record()
-            ev1.synchronize()
-            t1 = time.perf_counter()
-            if int(self.rank) == 0:
-                ms = float(ev0.elapsed_time(ev1))
-                print(f"[flydsl-aiter-trace] kernel_ms={ms:.3f} host_s={t1 - t0:.6f}", flush=True)
         return out
-
-    def all_reduce_unreg(self, inp, out=None):
-        import torch  # type: ignore
-
-        if out is None:
-            out = torch.empty_like(inp)
-        input_bytes = int(inp.numel()) * int(inp.element_size())
-        if input_bytes > int(self.buffer.numel()) * int(self.buffer.element_size()):
-            raise ValueError("registered buffer is too small to contain the input")
-        self.buffer.view_as(inp).copy_(inp)
-        return self.all_reduce_reg(self.buffer.view_as(inp), out)
 
 
 
