@@ -130,10 +130,15 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
     rank_data = x_flat
     fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=False)
-    backend = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND", "flydsl")
-    aiter_impl = os.environ.get("FLYDSL_AITER_IMPL", "aiter")
+    backend = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND")
+    aiter_impl = os.environ.get("FLYDSL_AITER_IMPL")
     if rank == 0:
-        print(f"[custom_all_reduce] backend={backend} aiter_impl={aiter_impl}", flush=True)
+        fa_mod = getattr(getattr(fa, "__class__", None), "__module__", None)
+        fa_name = getattr(getattr(fa, "__class__", None), "__name__", None)
+        print(
+            f"[custom_all_reduce] backend_env={backend!r} aiter_impl_env={aiter_impl!r} fa={fa_mod}.{fa_name}",
+            flush=True,
+        )
 
     # Warmup: align all ranks.
     dist.all_reduce(torch.zeros(1, device=device), group=group)
