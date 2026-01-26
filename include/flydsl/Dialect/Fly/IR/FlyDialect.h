@@ -1,5 +1,5 @@
-#ifndef FLY_DIALECT_FLY_IR_DIALECT_H
-#define FLY_DIALECT_FLY_IR_DIALECT_H
+#ifndef FLYDSL_DIALECT_FLY_IR_DIALECT_H
+#define FLYDSL_DIALECT_FLY_IR_DIALECT_H
 
 #include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Attributes.h"
@@ -33,4 +33,4 @@ namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyTypeConstraints.h.inc"
 } // namespace mlir::fly
 
-#endif // FLY_DIALECT_FLY_IR_DIALECT_H
+#endif // FLYDSL_DIALECT_FLY_IR_DIALECT_H

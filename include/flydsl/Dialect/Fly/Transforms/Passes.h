@@ -1,5 +1,5 @@
-#ifndef FLY_TRANSFORM_H
-#define FLY_TRANSFORM_H
+#ifndef FLYDSL_TRANSFORM_H
+#define FLYDSL_TRANSFORM_H
 
 #include "mlir/Pass/Pass.h"
 
