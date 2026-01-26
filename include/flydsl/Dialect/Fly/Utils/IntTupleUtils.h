@@ -1,5 +1,5 @@
-#ifndef FLY_DIALECT_UTILS_INTTUPLEUTILS_H
-#define FLY_DIALECT_UTILS_INTTUPLEUTILS_H
+#ifndef FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
+#define FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
@@ -1001,4 +1001,4 @@ BasisAttr basisCeilDiv(BasisAttr lhs, IntAttr rhs);
 
 } // namespace mlir::fly
 
-#endif // FLY_DIALECT_UTILS_INTTUPLEUTILS_H
+#endif // FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H

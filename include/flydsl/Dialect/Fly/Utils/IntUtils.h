@@ -1,5 +1,5 @@
-#ifndef FLY_DIALECT_UTILS_INTUTILS_H
-#define FLY_DIALECT_UTILS_INTUTILS_H
+#ifndef FLYDSL_DIALECT_UTILS_INTUTILS_H
+#define FLYDSL_DIALECT_UTILS_INTUTILS_H
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/Support/LogicalResult.h"
@@ -50,4 +50,4 @@ IntAttr intShapeDiv(IntAttr lhs, IntAttr rhs);
 
 } // namespace mlir::fly
 
-#endif // FLY_DIALECT_UTILS_INTUTILS_H
+#endif // FLYDSL_DIALECT_UTILS_INTUTILS_H
