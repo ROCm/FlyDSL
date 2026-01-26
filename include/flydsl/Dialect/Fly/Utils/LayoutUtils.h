@@ -1,5 +1,5 @@
-#ifndef FLY_DIALECT_UTILS_LAYOUTATTR_H
-#define FLY_DIALECT_UTILS_LAYOUTATTR_H
+#ifndef FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
+#define FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
 
 #include <algorithm>
 
@@ -768,4 +768,4 @@ Layout layoutRakedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, La
 
 } // namespace mlir::fly
 
-#endif // FLY_DIALECT_UTILS_LAYOUTATTR_H
+#endif // FLYDSL_DIALECT_UTILS_LAYOUTATTR_H

@@ -90,7 +90,7 @@ LayoutAttr makeOrderedLayoutAttr(IntTupleAttr shapeAttr, IntTupleAttr orderAttr)
 
 } // namespace
 
-#define FLY_INFER_RETURN_TYPES(OP)                                                                \
+#define FLY_INFER_RETURN_TYPES(OP)                                                                 \
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
