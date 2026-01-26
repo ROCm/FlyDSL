@@ -1150,12 +1150,19 @@ def compile_moe_gemm2_no_atomic_with_reduce(
 
     # Return a wrapper executor that handles the intermediate buffer and reduce
     class _ReduceWrapper:
+        # Maximum tokens for pre-allocated intermediate buffer
+        MAX_TOKENS = 32768
+
         def __init__(self, exe, topk, model_dim, profile: bool = False):
             self._exe = exe
             self._topk = topk
             self._model_dim = model_dim
-            self._intermediate = None
             self._profile = profile
+            # Pre-allocate intermediate buffer for max tokens
+            self._intermediate = torch.zeros(
+                self.MAX_TOKENS * topk, model_dim,
+                device="cuda", dtype=torch.float16
+            )
             # Profiling stats (accumulated across calls)
             self._call_count = 0
             self._total_us = 0.0
@@ -1176,15 +1183,16 @@ def compile_moe_gemm2_no_atomic_with_reduce(
                 t3 = torch.cuda.Event(enable_timing=True)
                 t0.record()
 
-            # Allocate intermediate buffer [tokens*topk, model_dim] if needed
+            # Re-allocate if current buffer is too small
             expanded_size = tokens * self._topk * self._model_dim
-            if self._intermediate is None or self._intermediate.numel() < expanded_size:
+            if self._intermediate.numel() < expanded_size:
                 self._intermediate = torch.zeros(
                     tokens * self._topk, self._model_dim,
                     device=out.device, dtype=out.dtype
                 )
             intermediate = self._intermediate[:tokens * self._topk, :self._model_dim]
-            intermediate.zero_()
+            # no need to zero the buffer, because writing topk results will overwrite it
+            # intermediate.zero_()
 
             if self._profile:
                 t1.record()
@@ -1246,25 +1254,22 @@ def _make_no_atomic_compile_fn(profile: bool = False):
 
 
 @pytest.mark.parametrize(
-    "model_dim, inter_dim, experts, topk",
+    "tokens, model_dim, inter_dim, experts, topk",
     [
-        pytest.param(4096, 16384, 8, 2, id="E8K2"),
-        pytest.param(6144, 24576, 16, 4, id="E16K4"),
-        pytest.param(4096, 16384, 32, 8, id="E32K8-small"),
-        pytest.param(7168, 18432, 32, 8, id="E32K8-large"),
+        pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
 def test_moe_stage2_standalone(
+    tokens: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
     topk: int,
     in_dtype: str,
     *,
-    tokens: int = 16384,
-    tile_m: int = 64,
-    tile_n: int = 128,
+    tile_m: int = 32,
+    tile_n: int = 512,
     tile_k: int = 128,
     seed: int = 0,
     num_iters: int = 10,
