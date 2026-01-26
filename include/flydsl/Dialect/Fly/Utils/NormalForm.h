@@ -1,5 +1,5 @@
-#ifndef FLY_DIALECT_UTILS_NORMALFORM_H
-#define FLY_DIALECT_UTILS_NORMALFORM_H
+#ifndef FLYDSL_DIALECT_UTILS_NORMALFORM_H
+#define FLYDSL_DIALECT_UTILS_NORMALFORM_H
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/Support/LogicalResult.h"
@@ -22,4 +22,4 @@ bool isNormalForm(TypedValue<MemRefType> value);
 
 } // namespace mlir::fly
 
-#endif // FLY_DIALECT_UTILS_NORMALFORM_H
+#endif // FLYDSL_DIALECT_UTILS_NORMALFORM_H

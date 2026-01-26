@@ -1,5 +1,5 @@
-#ifndef FLY_PASSES
-#define FLY_PASSES
+#ifndef FLYDSL_CONVERSION_PASSES
+#define FLYDSL_CONVERSION_PASSES
 
 include "mlir/Pass/PassBase.td"
 
@@ -18,4 +18,4 @@ def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
   ];
 }
 
-#endif // FLY_PASSES
+#endif // FLYDSL_CONVERSION_PASSES
