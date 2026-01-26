@@ -54,7 +54,7 @@ def compile_mixed_moe_gemm1(
     b_dtype: str = "fp4",
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
-    enable_bias: bool = False
+    enable_bias: bool = False,
     model_dim_pad: int = 0,
     inter_dim_pad: int = 0,
 ):
@@ -76,6 +76,8 @@ def compile_mixed_moe_gemm1(
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
+
+    print(out_dtype)
 
     if a_dtype not in ("fp8", "fp16", "int8", "fp4"):
         raise ValueError(f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {in_dtype!r}")
@@ -142,10 +144,11 @@ def compile_mixed_moe_gemm1(
         return I.i32
 
     def _out_elem_type():
-        return I.bf16 if out_dtype == "bf16" else I.fp8
+        # return I.bf16 if out_dtype == "bf16" else I.f8
+        return I.bf16 if out_dtype == "bf16" else I.i32
 
     def _out_vec_type():
-        return I.bf16x1 if out_dtype == "bf16" else I.fp8x1
+        return I.bf16x1 if out_dtype == "bf16" else I.f8x1
 
     # size_out = tokens * topk * inter_dim
     # size_x = tokens * model_dim
@@ -198,7 +201,7 @@ def compile_mixed_moe_gemm1(
             # - epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
             _use_cshuffle_epilog = bool(use_cshuffle_epilog)
             lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
-            lds_out_bytes = 2 * tile_m * tile_n if _use_cshuffle_epilog else 0
+            lds_out_bytes = 4 * tile_m * (tile_n // 2) if _use_cshuffle_epilog else 0
             lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
             lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
             x_lds_elem = I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
@@ -208,7 +211,7 @@ def compile_mixed_moe_gemm1(
         @flir.kernel
         def moe_gemm1(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(DYN, T.f16()),
+            arg_out: lambda: T.memref(DYN, _out_elem_type()),
             arg_x: lambda: T.memref(DYN, _x_elem_type()),
             arg_w: lambda: T.memref(DYN, _w_elem_type()),
             arg_scale_x: lambda: T.memref(DYN, _scale_elem_type()),
@@ -233,7 +236,9 @@ def compile_mixed_moe_gemm1(
             vec4_f32 = I.vec(4, f32)
             vec4_i32 = I.vec(4, i32)
             vec4_f16 = I.vec(4, f16)
+            vec4_f8 = I.vec(4, I.f8)
             vec1_f16 = I.vec(1, f16)
+            vec1_f32 = I.vec(1, f32)
             vec16_elems = 16 if a_elem_bytes == 1 else 8
             vec8_elems = 8 if a_elem_bytes == 1 else 4
             vec4_elems = 4 if a_elem_bytes == 1 else 2
@@ -295,7 +300,7 @@ def compile_mixed_moe_gemm1(
                 
             m_repeat = tile_m // 16
             k_unroll = tile_k_bytes // 128  # K64-byte micro-step
-            # flir.print("k_unroll", k_unroll)
+            # # flir.print("k_unroll", k_unroll)
 
             # A&B's scale preshuffle layout
             layout_a_scale = make_preshuffle_scale_layout(
@@ -354,8 +359,11 @@ def compile_mixed_moe_gemm1(
                 lds_x = lds_x_ptr.get()
                 # Alias LDS bytes as fp16 for optional CShuffle epilogue.
                 _use_cshuffle_epilog = bool(use_cshuffle_epilog)
+
                 lds_out = (
-                    SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f16, shape=(tile_m * tile_n,)).get()
+                    # SmemPtr(base_ptr, lds_x_ptr.byte_offset, _out_elem_type(), shape=(tile_m * tile_n,)).get()
+                    # SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f32, shape=(tile_m * tile_n,)).get()
+                    SmemPtr(base_ptr, lds_x_ptr.byte_offset, I.f32, shape=(tile_m * tile_n // 2,)).get()
                     if _use_cshuffle_epilog
                     else None
                 )
@@ -414,7 +422,7 @@ def compile_mixed_moe_gemm1(
                                 f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
                             )
                     num_x_loads = bytes_per_thread_x // x_load_bytes
-                    flir.print("num_x_loads", num_x_loads)
+                    # flir.print("num_x_loads", num_x_loads)
                     chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
 
                     # Work in dword units along K: K_dwords = (K_bytes)/4.
@@ -537,7 +545,7 @@ def compile_mixed_moe_gemm1(
                     k_unroll_packed  = k_unroll // pack_K
                     m_repeat_packed  = m_repeat // pack_M
                     num_acc_n_packed = num_acc_n // pack_N
-                    flir.print("num_acc_n", num_acc_n)
+                    # flir.print("num_acc_n", num_acc_n)
 
                     # Precompute n_blk/n_intra for gate and up rows (GEMM-style: idx2crd/get)
                     col_g_list = []
@@ -577,7 +585,7 @@ def compile_mixed_moe_gemm1(
                         global_n = by_n + n_tile_base + c_offset + lane_mod_16
 
                         # global_n_modulo = global_n % arith.constant(2 * inter_dim, index=True)
-                        n_valid = check_c_n_valid_gate(global_n_modulo)
+                        n_valid = check_c_n_valid_gate(global_n)
                         
                         k_coord = base_k + arith.constant(ku * 64 // elem_bytes, index=True) + lane_div_16 * arith.constant(16 // elem_bytes, index=True)
                         k_valid = check_c_k_valid_gate(k_coord)
@@ -596,7 +604,7 @@ def compile_mixed_moe_gemm1(
                             flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
                             b_view,
                             None,
-                            pred=w_mask,
+                            # pred=w_mask,
                             alignment=8,
                             return_vector=True,
                             src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
@@ -682,7 +690,8 @@ def compile_mixed_moe_gemm1(
                         return a_scale_tile
 
                     def prefetch_ab_scale_tile(base_k):
-                        return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
+                        # return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
+                        return [None, load_b_scale_tile(base_k)]
 
                     acc_gate = [acc_init] * (num_acc_n // 2 * m_repeat)
                     acc_up = [acc_init] * (num_acc_n // 2 * m_repeat)
@@ -731,7 +740,7 @@ def compile_mixed_moe_gemm1(
                         #         if tx == 32:
                         #             # b0 = b_packs0[mi * pack_M + imxdl]
                         #             # b1 = b_packs1[mi * pack_M + imxdl]
-                        #             # flir.print("mfma a type", a0)
+                        #             # # flir.print("mfma a type", a0)
                         #             flir.printf("tx %d: lds: %d %d, %d,%d load a0, %ld \n", tx, lds_base, curr_row_a_lds, col_base, col_base_swz, a0)
                         #             flir.printf("tx %d: lds: %d %d, %d,%d load a1, %ld \n", tx, lds_base, curr_row_a_lds, col_base, col_base_swz, a1)
                         #             # flir.printf("tx %d: %d,%d mfma a2, %ld \n", tx, curr_row_a_lds, col_base_swz, a2)
@@ -746,7 +755,7 @@ def compile_mixed_moe_gemm1(
                         #         if tx == 16:
                         #             # b0 = b_packs0[mi * pack_M + imxdl]
                         #             # b1 = b_packs1[mi * pack_M + imxdl]
-                        #             # flir.print("mfma a type", a0)
+                        #             # # flir.print("mfma a type", a0)
                         #             flir.printf("tx %d: %d mfma a0, %ld \n", tx, col_base0, a0)
                         #             flir.printf("tx %d: %d mfma a1, %ld \n", tx, col_base0, a1)
                         #             flir.printf("tx %d: %d mfma a2, %ld \n", tx, col_base0, a2)
@@ -789,7 +798,7 @@ def compile_mixed_moe_gemm1(
                                     buffer_ops.buffer_load(bias_rsrc, up_offset, vec_width=1, dtype=f32)
                                 )
                                 # flir.printf("vg %d, vu %d  \n", expert_off_idx, global_n)
-                                flir.print(ni)
+                                # flir.print(ni)
                                 # if by == 23:
                                 #     if tx == 0:
                                 #         flir.printf("bx %d tx %d [%d, %d] vg %f, vu %f  \n", bx, tx, gate_offset, up_offset, gate_bias[0], up_bias[0])
@@ -820,11 +829,11 @@ def compile_mixed_moe_gemm1(
                             return vector.bitcast(vec8_i32, v4)
 
                         for ku128 in range_constexpr(k_unroll_packed):
-                            flir.print("k_unroll_packed", k_unroll_packed)
+                            # flir.print("k_unroll_packed", k_unroll_packed)
                             for mi in range_constexpr(m_repeat_packed):
 
-                                a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
-                                a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+                                # a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
+                                # a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
                                 # a_scale_val = a_scale[ku128 * m_repeat_packed + mi]
                                 for ni in range_constexpr(num_acc_n_packed):
                                     b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
@@ -867,7 +876,7 @@ def compile_mixed_moe_gemm1(
                                             #         if tx == 16:
                                             #             b0 = b_packs0[mi * pack_M + imxdl]
                                             #             b1 = b_packs1[mi * pack_M + imxdl]
-                                            #             # flir.print("mfma a type", a0)
+                                            #             # # flir.print("mfma a type", a0)
                                             #             flir.printf("tx %d: %d mfma a0, %ld \n", tx, col_base0, a0)
                                             #             flir.printf("tx %d: %d mfma a1, %ld \n", tx, col_base0, a1)
                                             #             flir.printf("tx %d: %d mfma a2, %ld \n", tx, col_base0, a2)
@@ -971,7 +980,10 @@ def compile_mixed_moe_gemm1(
                     x_regs0 = load_x_tile(k0)
                     w_regs0 = load_b_tile(k0)
 
-                    a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
+                    a_scale_pong = None
+                    a_scale_ping = None
+                    # a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
+                    _, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
                     store_x_tile_to_lds(x_regs0, lds_base_cur)
                     gpu.barrier()
 
@@ -993,7 +1005,7 @@ def compile_mixed_moe_gemm1(
                         next_k1 = k_iv + tile_k
                         x_regs_ping = load_x_tile(next_k1)
                         w_regs_ping = load_b_tile(next_k1 // 2)
-                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
+                        _, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
 
                         acc_gate, acc_up, _ = compute_f8f6f4_tile(
                             acc_gate,
@@ -1016,7 +1028,7 @@ def compile_mixed_moe_gemm1(
                         next_k2 = k_iv + c2_tile_k
                         x_regs_pong = load_x_tile(next_k2)
                         w_regs_pong = load_b_tile(next_k2 // 2)
-                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
+                        _, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
 
                         acc_gate, acc_up, _ = compute_f8f6f4_tile(
                             acc_gate,
@@ -1040,7 +1052,7 @@ def compile_mixed_moe_gemm1(
                     x_regs_ping = load_x_tile(k_tail1)
                     w_regs_ping = load_b_tile(k_tail1 // 2)
                     # w_regs_ping = load_b_tile(0)
-                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
+                    _, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
 
                     acc_gate, acc_up, _ = compute_f8f6f4_tile(
                         acc_gate,
@@ -1092,7 +1104,7 @@ def compile_mixed_moe_gemm1(
 
                     # Optional: CK-style CShuffle epilogue for better global store coalescing.
                     # Uses EVec=4 (buffer store "x4" of fp16 elements).
-                    _use_cshuffle_epilog = out_dtype is "fp8" or bool(use_cshuffle_epilog)
+                    _use_cshuffle_epilog = (out_dtype == "fp8") or bool(use_cshuffle_epilog)
 
                     mask_even_i32 = arith.i32(0xFFFFFFFE)
 
@@ -1114,9 +1126,6 @@ def compile_mixed_moe_gemm1(
                             # `row` is the sorted-row index (bx_m + row_in_tile).
                             fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                             t2 = fused2 & mask24_i32
-                            # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
-                            # sentinel (t2 == tokens) or otherwise out-of-range.
-                            sx = None if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
 
                             # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                             if doweight_stage1:
@@ -1124,8 +1133,6 @@ def compile_mixed_moe_gemm1(
 
                             for ni in range_constexpr(num_acc_n_packed):
                                 col_local = col_base_local + (ni * 16)
-                                sw_gate = sw_gate_vals[ni] if (not is_f16) else None
-                                sw_up = sw_up_vals[ni] if (not is_f16) else None
 
                                 acc_idx = mi * num_acc_n + ni
                                 vg = vector.extract(
@@ -1147,42 +1154,60 @@ def compile_mixed_moe_gemm1(
                                     y = y * tw
                                 # y16 = arith.trunc_f(T.f16(), y)
 
-                                y_out = arith.trunc_f(_out_elem_type(), y)
+                                # # flir.print("out_dyypte", _out_elem_type())
+                                # y_out = rocdl(_out_elem_type(), y)
 
                                 lds_idx = row_base_lds + col_local
-                                v1 = vector.from_elements(_out_vec_type(), [y_out])
+                                # if bx == 0:
+                                #     if by == 0:
+                                #         if tx == 0 or tx == 64: 
+                                #             flir.printf(" tx%d, idx[%d] %f \n", tx, lds_idx, y)
+                                v1 = vector.from_elements(vec1_f32, [y])
                                 vector.store(v1, lds_out, [lds_idx], alignment=1)
 
                         def precompute_row(*, row_local, row):
                             fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                            # t2 = fused2 & mask24_i32
-                            # s2 = fused2 >> 24
-                            # return (t2 * topk_i32_v + s2) * inter_i32_local
-
-                            row_i32 = arith.index_cast(i32, row)
-                            row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
-                            t = fused2 & mask24_i32
-                            s = fused2 >> 24
-                            t_ok = arith.cmpu(t, tokens_i32, "ult")
-                            s_ok = arith.cmpu(s, topk_i32_v, "ult")
-                            row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
-
-                            return (fused2, row_valid)
+                            t2 = fused2 & mask24_i32
+                            s2 = fused2 >> 24
+                            return (t2 * topk_i32_v + s2) * inter_i32_local
 
                         def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                            # Vectorized fp16 store (EVec=4).
-                            fused = row_ctx
-                            t = fused & mask24_i32
-                            s = fused >> 24
-                            idx0 = t * model_i32
-                            ts = t * topk_i32_v + s
-                            idx0 = ts * model_i32
+                            # Guard against sentinel token ids (t == tokens) produced by aiter moe_sorting padding.
+                            # OOB buffer stores are not guaranteed to be safe on all paths, so predicate explicitly.
+                            fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                            t2 = fused2 & mask24_i32
+                            t_valid = arith.cmpu(t2, tokens_i32, "ult")
+                            _if_valid = scf.IfOp(t_valid)
+                            with _if_valid.then():
+                                frag = vector.bitcast(vec4_f32, frag)
+                                frag0 = vector.extract(frag, static_position=[0], dynamic_position=[])
+                                frag1 = vector.extract(frag, static_position=[1], dynamic_position=[])
+                                frag2 = vector.extract(frag, static_position=[2], dynamic_position=[])
+                                frag3 = vector.extract(frag, static_position=[3], dynamic_position=[])
+                                # flir.printf("%f \n ", frag1)
 
-                            col_i32 = arith.index_cast(i32, col_g0)
-                            idx_elem = idx0 + col_i32
-                            idx_elem_even = idx_elem & mask_even_i32
+                                out_fp8 = arith.i32(0)
+                                # out_fp8 = vector.from_elements(vec1_i32, [out_fp8])
+                                # rocdl.cvt_pk_f32_fp8(out_fp8, vector.bitcast(vec2_i32, frag0), 0)
+                                # rocdl.cvt_pk_fp8_f32(res=vec1_i32, src_a=frag0, src_b=frag1, old=out_fp8, word_sel=0)
+                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag0), src_b=arith._unwrap_value(frag1), old=arith._unwrap_value(out_fp8), word_sel=0, res=I.i32)
+                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag2), src_b=arith._unwrap_value(frag3), old=arith._unwrap_value(out_fp8), word_sel=1, res=I.i32)
+                                # rocdl.cvt_pk_fp8_f32(res=ir.IntegerType.get_signless(32), src_a=frag2, src_b=frag3, old=out_fp8, word_sel=1)
+                                # out = rocdl.cvt_pk_f32_fp8(I.i32, vector.bitcast(vec2_i32, frag0), 0)
+                                # rocdl.cvt_pk_f32_fp8(out_fp8, vector.bitcast(vec2_i32, frag1), 1)
 
-                            buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
+                                idx0 = row_ctx
+                                col_i32 = arith.index_cast(i32, col_g0)
+                                idx_out = idx0 + col_i32
+                                # if bx == 0:
+                                #     if by == 0:
+                                #         if row_ctx == 0:
+                                #             flir.printf(" tx%d, idx[%d] %d [%f, %f, %f, %f] \n", tx, idx_out, out_fp8, frag0, frag1, frag2, frag3)
+                                # flir.printf("%d \n ", idx_out)
+                                # Vectorized fp16 store (EVec=4).
+                                # # flir.print("frag", frag)
+                                buffer_ops.buffer_store(out_fp8, out_rsrc, idx_out // 4)
+                                # buffer_ops.buffer_store(out_fp8, out_rsrc, arith.i32(0))
 
                         mfma_epilog(
                             use_cshuffle=True,
@@ -1191,7 +1216,7 @@ def compile_mixed_moe_gemm1(
                             gpu=gpu,
                             range_constexpr=range_constexpr,
                             tile_m=tile_m,
-                            tile_n=tile_n,
+                            tile_n=tile_n // 2,
                             e_vec=4,
                             m_repeat=m_repeat,
                             num_acc_n=num_acc_n_packed,
@@ -1199,10 +1224,10 @@ def compile_mixed_moe_gemm1(
                             lane_div_16=lane_div_16,
                             lane_mod_16=lane_mod_16,
                             bx_m=bx_m,
-                            by_n=by_n,
-                            n_tile_base=n_tile_base,
+                            by_n=by_n // 2,
+                            n_tile_base=n_tile_base // 2,
                             lds_out=lds_out,
-                            frag_elem_type=_out_elem_type(),
+                            frag_elem_type=I.f32,
                             write_row_to_lds=write_row_to_lds,
                             precompute_row=precompute_row,
                             store_pair=store_pair,
@@ -1270,7 +1295,7 @@ def compile_mixed_moe_gemm1(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_out: lambda: T.memref(DYN, T.f16()),
+            arg_out: lambda: T.memref(DYN, _out_elem_type()),
             arg_x: lambda: T.memref(DYN, _x_elem_type()),
             arg_w: lambda: T.memref(DYN, _w_elem_type()),
             arg_scale_x: lambda: T.memref(DYN, _scale_elem_type()),
@@ -1337,7 +1362,7 @@ def compile_mixed_moe_gemm2(
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
-    enable_bias: bool = False
+    enable_bias: bool = False,
     model_dim_pad: int = 0,
     inter_dim_pad: int = 0,
 ):
@@ -1740,7 +1765,7 @@ def compile_mixed_moe_gemm2(
                             f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
                         )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
-                # flir.print("num_x_loads", num_x_loads)
+                # # flir.print("num_x_loads", num_x_loads)
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
                 vec4_i32 = I.vec(4, i32)
     
@@ -1837,7 +1862,7 @@ def compile_mixed_moe_gemm2(
                 def load_x_tile(base_k):
                     base_k_div4 = (base_k * arith.constant(int(a_elem_bytes), index=True)) / arith.index(4)
                     parts = []
-                    flir.print(f"{num_x_loads}")
+                    # flir.print(f"{num_x_loads}")
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                         # coord_a_g = flir.make_coord(x_row_base_div4, base_k_div4 + x_col_local_i32[i])
@@ -1986,7 +2011,7 @@ def compile_mixed_moe_gemm2(
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
                     n_valid = check_c_n_valid_gate(global_n)
                     
-                    k_coord = k0 * arith.constant(64 // b_elem_bytes, index=True) +
+                    k_coord = (k0 * arith.constant(64 // b_elem_bytes, index=True) +
                               lane_div_16 * arith.constant(16 // b_elem_bytes, index=True))
                     k_valid = check_c_k_valid_gate(k_coord)
                     
@@ -2004,7 +2029,7 @@ def compile_mixed_moe_gemm2(
                         flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
                         b_view,
                         None,
-                        pred=w_mask,
+                        # pred=w_mask,
                         alignment=8,
                         return_vector=True,
                         src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
@@ -2082,7 +2107,8 @@ def compile_mixed_moe_gemm2(
                     return a_scale_tile
 
                 def prefetch_ab_scale_tile(base_k):
-                    return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
+                    # return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
+                    return [None, load_b_scale_tile(base_k)]
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
@@ -2128,7 +2154,7 @@ def compile_mixed_moe_gemm2(
                     #         if tx == 16:
                     #             # b0 = b_packs0[mi * pack_M + imxdl]
                     #             # b1 = b_packs1[mi * pack_M + imxdl]
-                    #             # flir.print("mfma a type", a0)
+                    #             # # flir.print("mfma a type", a0)
                     #             flir.printf("tx %d: %d,%d mfma a0, %ld \n", tx, col_base, col_base_swz, a0)
                     #             flir.printf("tx %d: %d,%d mfma a1, %ld \n", tx, col_base, col_base_swz, a1)
                     #             # flir.printf("tx %d: %d,%d mfma a2, %ld \n", tx, curr_row_a_lds, col_base_swz, a2)
@@ -2147,7 +2173,7 @@ def compile_mixed_moe_gemm2(
                     bias = None
                     if prefetch_epilogue:
                         if enable_bias:
-                            flir.print("ennter")
+                            # flir.print("ennter")
                             bias = []
                             for ni in range_constexpr(num_acc_n):
                                 global_n = by_n + n_tile_base + ni * 16 + lane_mod_16
@@ -2185,8 +2211,8 @@ def compile_mixed_moe_gemm2(
                     # fp4 path
                     for ku128 in range_constexpr(k_unroll_packed):
                         for mi in range_constexpr(m_repeat_packed):
-                            a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
-                            a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+                            # a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
+                            # a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
                             for ni in range_constexpr(num_acc_n_packed):
                                 b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
                                 b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
@@ -2234,7 +2260,7 @@ def compile_mixed_moe_gemm2(
                                             #             if tx == 16:
                                             #                 # b0 = b_packs0[mi * pack_M + imxdl]
                                             #                 # b1 = b_packs1[mi * pack_M + imxdl]
-                                            #                 # flir.print("mfma a type", a0)
+                                            #                 # # flir.print("mfma a type", a0)
                                             #                 flir.printf("tx %d: %d,%d mfma a0, %ld \n", tx, curr_row_a_lds, col_base0, a0)
                                             #                 flir.printf("tx %d: %d,%d mfma a1, %ld \n", tx, curr_row_a_lds, col_base0, a1)
                                             #                 flir.printf("tx %d: %d,%d mfma a2, %ld \n", tx, curr_row_a_lds, col_base1, a2)
@@ -2359,8 +2385,8 @@ def compile_mixed_moe_gemm2(
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
                 b_cur = load_b_tile(k0)
-                a_scale_ping, b_scale_ping = None, None
-                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // pack_K // 128)
+                a_scale_ping, a_scale_pong = None, None
+                _, b_scale_pong = prefetch_ab_scale_tile(k0 // pack_K // 128)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
     
@@ -2395,7 +2421,7 @@ def compile_mixed_moe_gemm2(
                     x_regs_ping = load_x_tile(next_k1)
                     b_ping = load_b_tile(next_k1 // 2)
                     # if is_f4_b:
-                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
+                    _, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
     
                     acc, _ = compute_tile(acc, b_pong, lds_base_pong, a_scale_pong, b_scale_pong, a0_prefetch=a0_prefetch_pong)
                     # a0_prefetch_pong = None
@@ -2409,7 +2435,7 @@ def compile_mixed_moe_gemm2(
                     next_k2 = k_iv + c2_tile_k
                     x_regs_pong = load_x_tile(next_k2)
                     b_pong = load_b_tile(next_k2 // 2)
-                    a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
+                    _, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
     
                     acc, _ = compute_tile(acc, b_ping, lds_base_ping, a_scale_ping, b_scale_ping, a0_prefetch=a0_prefetch_ping)
                     # a0_prefetch_ping = None
@@ -2441,7 +2467,7 @@ def compile_mixed_moe_gemm2(
                     x_regs_ping = load_x_tile(k_tail1)
                     # x_regs_ping = load_x_tile(0)
                     b_ping = load_b_tile(k_tail1 // 2)
-                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
+                    _, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
     
                     acc, _ = compute_tile(acc, b_pong, lds_base_pong, a_scale_pong, b_scale_pong, a0_prefetch=a0_prefetch_pong)
 
@@ -2603,7 +2629,7 @@ def compile_mixed_moe_gemm2(
                     col_i32 = arith.index_cast(i32, col_g0)
                     idx_elem = idx0 + col_i32
                     idx_elem_even = idx_elem & mask_even_i32
-                    # flir.print("frag", frag)
+                    # # flir.print("frag", frag)
                     vv1 = vector.extract(frag, static_position=[0], dynamic_position=[])
                     vv2 = vector.extract(frag, static_position=[0], dynamic_position=[])
                     # flir.printf("%f, \n", arith.extf(I.f32, vv1))
