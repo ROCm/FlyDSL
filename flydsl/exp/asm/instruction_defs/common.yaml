@@ -51,6 +51,128 @@ instructions:
       - {name: src1, type: vgpr|sgpr|imm}
     latency: 1
 
+  v_sub_f32:
+    mnemonic: v_sub_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_mul_f32:
+    mnemonic: v_mul_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_max_f32:
+    mnemonic: v_max_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_rcp_f32:
+    mnemonic: v_rcp_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_exp_f32:
+    mnemonic: v_exp_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 16
+
+  v_ldexp_f32:
+    mnemonic: v_ldexp_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr}
+      - {name: src1, type: vgpr}
+    latency: 4
+
+  v_cvt_i32_f32:
+    mnemonic: v_cvt_i32_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_cvt_f32_i32:
+    mnemonic: v_cvt_f32_i32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_cndmask_b32:
+    mnemonic: v_cndmask_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+      - {name: vcc, type: special}
+    latency: 1
+
+  v_cmp_eq_u32:
+    mnemonic: v_cmp_eq_u32
+    category: valu
+    format: vopc
+    defs:
+      - {name: dst, type: special}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+    special:
+      vcc_clobber: true
+
+  v_cmp_lt_u32:
+    mnemonic: v_cmp_lt_u32
+    category: valu
+    format: vopc
+    defs:
+      - {name: dst, type: special}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+    special:
+      vcc_clobber: true
+
   v_sub_u32:
     mnemonic: v_sub_u32
     category: valu
@@ -277,9 +399,9 @@ instructions:
     category: salu
     format: sop1
     defs:
-      - {name: dst, type: sgpr_pair}
+      - {name: dst, type: sgpr_pair|special}
     uses:
-      - {name: src, type: sgpr_pair|imm}
+      - {name: src, type: sgpr_pair|imm|special}
     latency: 1
 
   s_movk_i32:
@@ -347,10 +469,10 @@ instructions:
     category: salu
     format: sop2
     defs:
-      - {name: dst, type: sgpr_pair}
+      - {name: dst, type: sgpr_pair|special}
     uses:
-      - {name: src0, type: sgpr_pair|imm}
-      - {name: src1, type: sgpr_pair|imm}
+      - {name: src0, type: sgpr_pair|imm|special}
+      - {name: src1, type: sgpr_pair|imm|special}
     latency: 1
 
   s_or_b64:
@@ -358,11 +480,25 @@ instructions:
     category: salu
     format: sop2
     defs:
-      - {name: dst, type: sgpr_pair}
+      - {name: dst, type: sgpr_pair|special}
     uses:
-      - {name: src0, type: sgpr_pair|imm}
-      - {name: src1, type: sgpr_pair|imm}
+      - {name: src0, type: sgpr_pair|imm|special}
+      - {name: src1, type: sgpr_pair|imm|special}
     latency: 1
+
+  # ===========================================================================
+  # LDS - Cross-lane (shuffle)
+  # ===========================================================================
+  ds_bpermute_b32:
+    mnemonic: ds_bpermute_b32
+    category: ds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: src, type: vgpr}
+    latency: 4
 
   # ===========================================================================
   # Scalar ALU - Shifts
@@ -605,6 +741,36 @@ instructions:
 
   buffer_store_dwordx4:
     mnemonic: buffer_store_dwordx4
+
+  buffer_load_ushort:
+    mnemonic: buffer_load_ushort
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+
+  buffer_store_short:
+    mnemonic: buffer_store_short
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: src, type: vgpr}
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
     category: vmem
     format: mtbuf
     defs: []
@@ -760,6 +926,34 @@ instructions:
 
   ds_write_b64:
     mnemonic: ds_write_b64
+
+  ds_read_u16:
+    mnemonic: ds_read_u16
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 20
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_write_b16:
+    mnemonic: ds_write_b16
+    category: lds
+    format: ds
+    defs: []
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: src, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 20
+    special:
+      memory: true
+      offset_format: space_separated
     category: lds
     format: ds
     defs: []

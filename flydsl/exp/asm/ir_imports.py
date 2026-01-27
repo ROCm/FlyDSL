@@ -58,6 +58,11 @@ from iree.compiler.dialects import (  # type: ignore
 )
 
 try:  # pragma: no cover
+    from iree.compiler.dialects import math as math_d  # type: ignore
+except Exception:  # pragma: no cover
+    math_d = None  # type: ignore[assignment]
+
+try:  # pragma: no cover
     from iree.compiler.dialects import affine as affine_d  # type: ignore
 except Exception:  # pragma: no cover
     affine_d = None  # type: ignore[assignment]

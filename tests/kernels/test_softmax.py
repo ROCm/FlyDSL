@@ -58,7 +58,8 @@ def run_test(M, N, dtype_str):
 
     try:
         m = build_softmax_module(M, N, dtype_str)
-        exe = flydsl.compile(m)
+        backend = os.environ.get("FLIR_TEST_BACKEND", "execution_engine").strip()
+        exe = flydsl.compile(m, backend=backend)
     except Exception as e:
         print(f"Compilation Failed: {e}")
         import traceback
@@ -130,6 +131,7 @@ def test_all():
     
     # Default shape sweep (override with ROCDSL_SOFTMAX_SHAPES="M,N,dtype;M,N,dtype;...")
     shapes_env = os.environ.get("ROCDSL_SOFTMAX_SHAPES", "").strip()
+    backend = os.environ.get("FLIR_TEST_BACKEND", "execution_engine").strip()
     if shapes_env:
         configs = []
         for part in shapes_env.split(";"):
@@ -139,15 +141,23 @@ def test_all():
             m_s, n_s, dt = [x.strip() for x in p.split(",")]
             configs.append((int(m_s), int(n_s), dt))
     else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+        # Default sweep is heavy; for asm backend keep it small.
+        if backend == "asm":
+            configs = [
+                (64, 256, "f32"),
+                (64, 256, "f16"),
+                (64, 256, "bf16"),
+            ]
+        else:
+            configs = [
+                # (64, 256, "f32"),     # Aligned
+                # (128, 1024, "f32"),   # Aligned
+                # (32, 128, "f16"),     # Aligned
+                # (64, 2000, "f32"),    # Unaligned (tail handling)
+                # (16, 512, "bf16"),    # BF16
+                # (1024, 8192, "bf16"), # BF16
+                (32768, 8192, "bf16"),
+            ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []

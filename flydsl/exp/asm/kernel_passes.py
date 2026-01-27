@@ -117,6 +117,13 @@ class _CompilationPasses:
         immediately reads a VGPR that was just written by a VALU instruction.
         This requires 1 wait state (s_nop 0) between them.
 
+        Additionally, for CDNA3-class targets there are "trans" vector ops
+        (exp/log/rcp/rsq/sqrt/sin/cos etc.) that may require an extra wait state
+        when followed immediately by a non-trans consumer. While hardware often
+        forwards results, ISA docs list these as software-inserted wait states.
+        We conservatively insert `s_nop 0` after a trans op if the next
+        instruction is a non-trans vector op.
+
         This implementation is precise: it only inserts s_nop when:
         1. Current instruction is a VALU that writes a VGPR
         2. Next instruction is v_readfirstlane_b32
@@ -126,12 +133,64 @@ class _CompilationPasses:
         if not instructions:
             return
 
+        # Helper: does an instruction read the special VCC register?
+        def _reads_vcc(instr: KInstr) -> bool:
+            from .kernel_ir import KSpecialReg
+
+            for u in instr.uses:
+                if isinstance(u, KSpecialReg) and u.name == "vcc":
+                    return True
+            return False
+
+        # Trans ops that may require an extra wait before a non-trans consumer.
+        # Keep this conservative and string-based to match instruction naming.
+        trans_ops = {
+            "v_exp_f32",
+            "v_log_f32",
+            "v_rcp_f32",
+            "v_rcp_iflag_f32",
+            "v_rsq_f32",
+            "v_rcp_f64",
+            "v_rsq_f64",
+            "v_sqrt_f32",
+            "v_sqrt_f64",
+            "v_sin_f32",
+            "v_cos_f32",
+            "v_rcp_f16",
+            "v_sqrt_f16",
+            "v_rsq_f16",
+            "v_log_f16",
+            "v_exp_f16",
+            "v_sin_f16",
+            "v_cos_f16",
+            "v_exp_legacy_f32",
+            "v_log_legacy_f32",
+        }
+
         # Find positions where we need to insert s_nop
         insertions = []
 
         for i in range(len(instructions) - 1):
             instr = instructions[i]
             next_instr = instructions[i + 1]
+
+            # VALU that clobbers VCC -> immediate consumer that reads VCC.
+            # On CDNA3+, ISA docs require software-inserted wait states here.
+            # Match LLVM/hipcc practice: insert s_nop 1 (2 cycles).
+            if instr.is_valu and instr.constraints.vcc_clobber and _reads_vcc(next_instr):
+                insertions.append((i + 1, 1))  # (pos, snop_count)
+                continue
+
+            # Conservatively: trans op immediately followed by non-trans vector op.
+            # Insert one wait-state (s_nop 0) to satisfy software wait rules.
+            if (
+                isinstance(instr.name, str)
+                and instr.name in trans_ops
+                and next_instr.is_valu
+                and not (isinstance(next_instr.name, str) and next_instr.name in trans_ops)
+            ):
+                insertions.append((i + 1, 0))
+                continue
 
             # Check if next instruction is v_readfirstlane_b32
             if next_instr.name != Instruction.V_READFIRSTLANE_B32:
@@ -143,13 +202,18 @@ class _CompilationPasses:
 
             # Check if the VALU writes to a register that readfirstlane reads
             if self._writes_to_readfirstlane_src(instr, next_instr):
-                insertions.append(i + 1)
+                insertions.append((i + 1, 0))
 
         # Insert s_nop instructions in reverse order to preserve indices
-        for idx in reversed(insertions):
+        for idx, snop_count in reversed(insertions):
             instructions.insert(
                 idx,
-                KInstr(Instruction.S_NOP, (), (KImm(0),), comment="hazard mitigation"),
+                KInstr(
+                    Instruction.S_NOP,
+                    (),
+                    (KImm(snop_count),),
+                    comment="hazard mitigation",
+                ),
             )
 
     def _is_valu_vgpr_write(self, instr: KInstr) -> bool:

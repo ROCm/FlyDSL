@@ -76,8 +76,8 @@ def build_softmax_module(M, N, dtype_str="f32"):
             else:
                 raise ValueError(f"Unsupported dtype: {dtype_str}")
 
-            # For bf16, do math in f32 and only convert at load/store boundaries.
-            compute_type = T.f32() if dtype_str == "bf16" else elem_type
+            # For bf16/f16, do math in f32 and only convert at load/store boundaries.
+            compute_type = T.f32() if dtype_str in ("bf16", "f16") else elem_type
             _state["elem_type"] = elem_type
             _state["compute_type"] = compute_type
 
@@ -194,7 +194,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                     )
                     vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
                     vec_val_e = vector.load(vec_type_e, frgA.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
-                    if dtype_str == "bf16":
+                    if dtype_str in ("bf16", "f16"):
                         vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
                         vec_val = flir.arith.extf(vec_type_c, arith.as_value(vec_val_e))
                     else:
@@ -214,7 +214,9 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         # Use predicated load to avoid OOB memory access.
                         idx_safe = arith.select(is_valid, idx_k, c0_idx)
                         val_e = tensor_A[(row, arith.as_value(idx_safe))]
-                        val_c = arith.extf(compute_type, val_e) if dtype_str == "bf16" else val_e
+                        val_c = (
+                            arith.extf(compute_type, val_e) if dtype_str in ("bf16", "f16") else val_e
+                        )
                         val = arith.select(is_valid, val_c, c_neg_inf)
 
                         row_buffer.append((val, is_valid))
@@ -358,13 +360,20 @@ def build_softmax_module(M, N, dtype_str="f32"):
                             alignment=VEC_ALIGN,
                         )
                     else:
-                        # Store directly in element type (no upcast)
+                        # Store directly in element type.
+                        # For f16, compute is f32, so we need truncf here.
                         tile_i = base_idx_int // tile_cols  # python int
                         blkC = gC[(row, tile_i)]
                         thrC = thr_copy_C.partition_S(blkC)
                         frgC = flir.make_fragment_like(thrC, elem_type)
                         vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-                        norm_e = norm_vec if dtype_str != "bf16" else flir.arith.truncf(vec_type_e, norm_vec)
+                        if dtype_str == "f32":
+                            norm_e = norm_vec
+                        elif dtype_str == "f16":
+                            norm_e = flir.arith.truncf(vec_type_e, norm_vec)
+                        else:
+                            # bf16 handled above.
+                            norm_e = flir.arith.truncf(vec_type_e, norm_vec)
                         vector.store(arith.as_value(norm_e), frgC.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                         flir.copy(
                             tiled_copy_C,
@@ -383,7 +392,7 @@ def build_softmax_module(M, N, dtype_str="f32"):
                         # If valid, store
                         if valid:
                             norm_val = arith.as_value(val_exp * inv_sum)
-                            if dtype_str == "bf16":
+                            if dtype_str in ("bf16", "f16"):
                                 norm_val = arith.as_value(arith.trunc_f(elem_type, norm_val))
 
                             c_k = arith.index(k)

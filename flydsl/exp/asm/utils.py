@@ -126,7 +126,11 @@ def parse_memref_type_from_obj(memref_type_obj) -> Tuple[List[int], List[int], i
         stride = 1
         for dim in reversed(shape):
             strides_elems.insert(0, stride)
-            stride *= dim
+            # Dynamic dims are encoded as -1. They do not affect row-major strides
+            # (stride for a dimension is the product of the *following* dims).
+            # Treat them as 1 for the purpose of stride propagation.
+            if isinstance(dim, int) and dim > 0:
+                stride *= dim
 
     # Extract element type bitwidth
     element_type = memref_type_obj.element_type

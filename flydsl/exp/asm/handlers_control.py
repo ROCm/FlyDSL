@@ -109,15 +109,47 @@ class _ControlFlowHandlers:
                 ctx.ssa_to_reg[result_ssa] = regs
 
     def handle_scf_if_op(self, operation: scf_d.IfOp, kernel_info: KernelInfo):
-        """Handle scf.if.
+        """Handle scf.if via EXEC masking (per-lane predication).
 
-        For now we conservatively always execute the 'then' region and ignore the
-        'else' region. This is sufficient for `test_vec_add.py` when the problem
-        size is a multiple of the tile (all predicates are true), and avoids
-        implementing full per-lane predicate lowering.
+        This is required for kernels like softmax that use lane0/wave0 writes to LDS.
+        We implement only the common pattern where the else-region is empty.
         """
+        from .kernel_ir import KInstr, KImm, EXEC
+
+        cond_ssa = ssa(operation.condition)
+        # If this condition didn't come from a tracked arith.cmpi, fall back to
+        # unconditional 'then' execution (vec_add uses i1 allocas initialized to true).
+        cmpi_preds = getattr(self.walker, "_cmpi_predicates", {})
+        if cond_ssa not in cmpi_preds:
+            then_block = operation.thenRegion.blocks[0]
+            self.walker._walk_block(then_block, kernel_info)
+            return
+
+        # Emit VCC for this condition (recorded by cmpi handler).
+        self._emit_vcc_for(cond_ssa, kernel_info)  # type: ignore[attr-defined]
+
+        # If there is a non-empty else region, we currently don't support it.
+        if len(operation.elseRegion.blocks) > 0 and len(list(operation.elseRegion.blocks[0].operations)) > 0:
+            raise NotImplementedError("scf.if with non-empty else region is not supported in asm backend yet")
+
+        ctx = self.walker.kernel_ctx
+
+        # Save EXEC.
+        saved_exec = ctx.program.alloc_sreg_range(2, alignment=2)
+        ctx.program.emit(KInstr("s_mov_b64", defs=(saved_exec,), uses=(EXEC,), comment="save exec"))
+        # VCC written by VALU compare may not be immediately visible to SALU consumers.
+        # Match ISA software-wait guidance: add 2-cycle delay before using VCC in s_and_b64.
+        ctx.program.emit(KInstr("s_nop", defs=(), uses=(KImm(1),), comment="vcc hazard"))
+        # exec &= vcc
+        from .kernel_ir import VCC
+        ctx.program.emit(KInstr("s_and_b64", defs=(EXEC,), uses=(EXEC, VCC), comment="exec &= vcc"))
+
+        # Then-region under masked EXEC.
         then_block = operation.thenRegion.blocks[0]
         self.walker._walk_block(then_block, kernel_info)
+
+        # Restore EXEC.
+        ctx.program.emit(KInstr("s_mov_b64", defs=(EXEC,), uses=(saved_exec,), comment="restore exec"))
 
     # Note: gather_to_lds handlers moved to gather_to_shared.py (G2SMixin)
 

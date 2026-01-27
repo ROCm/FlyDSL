@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover
     MMAType = None  # type: ignore
 
 from .handlers_shared import *
+from .instruction_registry import Instruction
 from .kernel_model import BindingUse, KernelInfo, MemRefInfo, VecAccess
 from .utils import (
     parse_memref_type_from_obj,
@@ -20,6 +21,36 @@ from .utils import (
 
 
 class _MemoryHandlers:
+    def handle_memref_get_global_op(self, operation, kernel_info: KernelInfo):
+        """Handle memref.get_global for workgroup/LDS globals.
+
+        Softmax uses a workgroup `memref.global` (e.g. memref<128xi8, workgroup>)
+        and then `memref.view` it as memref<4xf32, workgroup>. We need to reflect
+        this in kernel metadata so the kernel requests enough LDS.
+        """
+        try:
+            memref_ty = operation.results[0].type
+            # Only care about workgroup address space.
+            if not (hasattr(memref_ty, "memory_space") and memref_ty.memory_space is not None):
+                return
+            if "workgroup" not in str(memref_ty.memory_space).lower():
+                return
+            shape, _strides, elem_bytes = parse_memref_type_from_obj(memref_ty)
+            if not shape:
+                return
+            # Conservative size: product of static dims * elem_bytes.
+            total = 1
+            for d in shape:
+                if not isinstance(d, int) or d < 0:
+                    # Dynamic workgroup globals are unexpected; pick a safe default.
+                    total = 0
+                    break
+                total *= int(d)
+            size_bytes = (total * int(elem_bytes)) if total > 0 else 0
+            if size_bytes > 0:
+                kernel_info.lds_size_bytes = max(getattr(kernel_info, "lds_size_bytes", 0), size_bytes)
+        except Exception:
+            return
     def handle_memref_alloca_op(self, operation: memref_d.AllocaOp, kernel_info: KernelInfo):
         """Handle memref.alloca for small private scratch buffers.
 
@@ -36,13 +67,31 @@ class _MemoryHandlers:
         memref_ty = res.type
         shape, _strides, _elem_bytes = parse_memref_type_from_obj(memref_ty)
 
-        if len(shape) != 1 or shape[0] <= 0:
+        if not shape or any((not isinstance(d, int)) or d <= 0 for d in shape):
             raise NotImplementedError(
-                f"memref.alloca only supports 1D static shapes, got {memref_ty}"
+                f"memref.alloca only supports static shapes, got {memref_ty}"
             )
-
-        n = int(shape[0])
+        # Flatten N-D allocas (row-major). Softmax uses shapes like 1x8xbf16.
+        total = 1
+        for d in shape:
+            total *= int(d)
+        n = int(total)
         elem_ty = memref_ty.element_type
+
+        # Track layout for multi-dim constant indexing.
+        self.walker._alloca_layout = getattr(self.walker, "_alloca_layout", {})
+        # Row-major strides in elements.
+        strides_elems = []
+        stride = 1
+        for d in reversed(shape):
+            strides_elems.insert(0, stride)
+            stride *= int(d)
+        self.walker._alloca_layout[memref_ssa] = (list(shape), list(strides_elems))
+
+        # Track element type for packed representations.
+        self.walker._alloca_elem = getattr(self.walker, "_alloca_elem", {})
+        elem_str = str(elem_ty)
+        self.walker._alloca_elem[memref_ssa] = elem_str
 
         # Create storage.
         if isinstance(elem_ty, F32Type):
@@ -55,6 +104,19 @@ class _MemoryHandlers:
                         (r,),
                         (KImm(0),),
                         comment="alloca init f32",
+                    )
+                )
+        elif elem_str in {"f16", "bf16"}:
+            # Pack two 16-bit elements per VGPR to match vector<8x..> store/load patterns.
+            packed_n = (n + 1) // 2
+            regs = [self.walker.kernel_ctx.vreg() for _ in range(packed_n)]
+            for r in regs:
+                self.walker.kernel_ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        (r,),
+                        (KImm(0),),
+                        comment=f"alloca init {elem_str} (packed)",
                     )
                 )
         elif isinstance(elem_ty, IntegerType) and int(elem_ty.width) == 1:
@@ -78,25 +140,46 @@ class _MemoryHandlers:
         self.walker._alloca_storage = getattr(self.walker, "_alloca_storage", {})
         self.walker._alloca_storage[memref_ssa] = regs
 
+    def _alloca_linear_index(self, memref_ssa: str, indices, kernel_info: KernelInfo):
+        """Compute flattened alloca index from constant indices (row-major)."""
+        layout = getattr(self.walker, "_alloca_layout", {}).get(memref_ssa)
+        if layout is None:
+            # Legacy 1D alloca.
+            if len(indices) != 1:
+                return None
+            idx_ssa = ssa(indices[0])
+            v = kernel_info.index_env.get(idx_ssa)
+            return int(v) if isinstance(v, int) else None
+        shape, strides = layout
+        if len(indices) != len(shape):
+            return None
+        lin = 0
+        for dim, idxv in enumerate(indices):
+            idx_ssa = ssa(idxv)
+            v = kernel_info.index_env.get(idx_ssa)
+            if not isinstance(v, int):
+                return None
+            lin += int(v) * int(strides[dim])
+        return int(lin)
+
     def handle_memref_store_op(self, operation: memref_d.StoreOp, kernel_info: KernelInfo):
-        """Handle memref.store into a private alloca-backed memref."""
+        """Handle memref.store.
+
+        - Private alloca-backed stores: register-resident.
+        - Scalar f32 LDS/global stores: used by softmax reductions.
+        """
         value = operation.value
         memref_val = operation.memref
         idx_vals = list(operation.indices)
 
         memref_ssa = ssa(memref_val)
         if not hasattr(self.walker, "_alloca_storage") or memref_ssa not in self.walker._alloca_storage:
-            # Ignore non-alloca stores.
-            return
+            # Not an alloca: handle scalar LDS/global stores (softmax).
+            return self._handle_scalar_memref_store(operation, kernel_info)
 
-        if len(idx_vals) != 1:
-            raise NotImplementedError("memref.store only supports 1D alloca")
-
-        idx_ssa = ssa(idx_vals[0])
-        if idx_ssa not in kernel_info.index_env or not isinstance(kernel_info.index_env[idx_ssa], int):
-            # `test_vec_add.py` uses constant indices for stores we care about.
+        i = self._alloca_linear_index(memref_ssa, idx_vals, kernel_info)
+        if i is None:
             return
-        i = int(kernel_info.index_env[idx_ssa])
         storage = self.walker._alloca_storage[memref_ssa]
 
         # Store scalar or vector lanes into the backing regs.
@@ -116,21 +199,399 @@ class _MemoryHandlers:
         """Handle memref.load from a private alloca-backed memref."""
         memref_ssa = ssa(operation.memref)
         if not hasattr(self.walker, "_alloca_storage") or memref_ssa not in self.walker._alloca_storage:
-            return
+            # Not an alloca: handle scalar LDS/global loads (softmax).
+            return self._handle_scalar_memref_load(operation, kernel_info)
 
-        if len(operation.indices) != 1:
-            raise NotImplementedError("memref.load only supports 1D alloca")
-
-        idx_ssa = ssa(operation.indices[0])
-        if idx_ssa not in kernel_info.index_env or not isinstance(kernel_info.index_env[idx_ssa], int):
+        i = self._alloca_linear_index(memref_ssa, list(operation.indices), kernel_info)
+        if i is None:
             return
-        i = int(kernel_info.index_env[idx_ssa])
         storage = self.walker._alloca_storage[memref_ssa]
         if i >= len(storage):
             return
 
         # Bind scalar loads into SSA->reg map.
         self.walker.kernel_ctx.ssa_to_reg[ssa(operation.result)] = (storage[i],)
+
+    def _handle_scalar_memref_load(self, operation: memref_d.LoadOp, kernel_info: KernelInfo):
+        """Handle scalar memref.load for f32/f16/bf16 memrefs (LDS or global).
+
+        Policy:
+        - f32 loads: return f32 bits in a VGPR.
+        - f16 loads: return f32 value in a VGPR (we do f32 math).
+        - bf16 loads: return raw bf16 bits (u16 in low bits). MLIR typically has
+          `arith.extf` to widen bf16->f32.
+        """
+        from .kernel_ir import KInstr, KImm, KVReg
+
+        ctx = self.walker.kernel_ctx
+        memref_val = operation.memref
+        memref_ssa = ssa(memref_val)
+        memref_ty = memref_val.type
+        shape, strides, elem_bytes = parse_memref_type_from_obj(memref_ty)
+
+        elem_ty_str = str(memref_ty.element_type)
+        if elem_ty_str not in {"f32", "f16", "bf16"}:
+            return
+
+        # Indices (rank 1 or 2) as VGPRs.
+        idx_regs = []
+        for idx in operation.indices:
+            idx_ssa = ssa(idx)
+            r = ctx.ssa_to_reg.get(idx_ssa)
+            if r and len(r) == 1:
+                idx_regs.append(r[0])
+                continue
+            c = kernel_info.index_env.get(idx_ssa)
+            if isinstance(c, int):
+                rr = ctx.vreg()
+                ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(rr,), uses=(KImm(int(c)),), comment="idx const"))
+                ctx.ssa_to_reg[idx_ssa] = (rr,)
+                idx_regs.append(rr)
+                continue
+            return
+
+        # LDS (workgroup) address space -> ds_read_b32.
+        is_lds = False
+        if hasattr(memref_ty, "memory_space") and memref_ty.memory_space is not None:
+            is_lds = "workgroup" in str(memref_ty.memory_space).lower()
+
+        if is_lds:
+            # 1D LDS memref with optional view base bytes.
+            if len(idx_regs) != 1:
+                raise NotImplementedError("LDS memref.load supports only 1D indices")
+            idx = idx_regs[0]
+            # byte_offset = idx * elem_bytes (+ view base)
+            if elem_bytes == 4:
+                byte_off = ctx.v_lshlrev_b32(KImm(2), idx, comment="lds byte offset")
+            elif elem_bytes == 2:
+                byte_off = ctx.v_lshlrev_b32(KImm(1), idx, comment="lds byte offset")
+            else:
+                byte_off = ctx.v_mul_lo_u32(idx, KImm(elem_bytes), comment="lds byte offset")
+            vbase = int(self.walker._lds_view_base_bytes.get(memref_ssa, 0))
+            if vbase:
+                base_r = ctx.vreg()
+                ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(base_r,), uses=(KImm(vbase),), comment="lds base"))
+                byte_off = ctx.v_add_u32(byte_off, base_r, comment="lds base+off")
+            raw = ctx.vreg()
+            if elem_bytes == 4:
+                ctx.program.emit(KInstr("ds_read_b32", defs=(raw,), uses=(byte_off,), comment="lds load"))
+                val = raw
+            elif elem_bytes == 2:
+                ctx.program.emit(KInstr("ds_read_u16", defs=(raw,), uses=(byte_off,), comment="lds load u16"))
+                if elem_ty_str == "f16":
+                    val = ctx.v_cvt_f32_f16(raw, comment="f16->f32")
+                else:
+                    # bf16: keep raw bits; extf will widen.
+                    val = raw
+            else:
+                return
+            ctx.ssa_to_reg[ssa(operation.result)] = (val,)
+
+            # Debug: record LDS loads into output buffer (requires oversized output).
+            import os
+            if os.environ.get("FLIR_ASM_DEBUG_SOFTMAX", "0") == "1":
+                out_ssa = "%arg1"
+                if out_ssa in kernel_info.subspans:
+                    self._ensure_global_store_srd(kernel_info, out_ssa)
+                    seq = getattr(self.walker, "_dbg_lds_load_seq", 0)
+                    setattr(self.walker, "_dbg_lds_load_seq", seq + 1)
+                    # Make it deterministic: only workitem_id_x==0 writes debug.
+                    # Store to a fixed 16B slot per load site.
+                    from .kernel_ir import KRegRange, KPhysVReg, EXEC, VCC, KInstrConstraints
+
+                    saved_exec = ctx.program.alloc_sreg_range(2, alignment=2)
+                    ctx.program.emit(KInstr("s_mov_b64", defs=(saved_exec,), uses=(EXEC,), comment="dbgL save exec"))
+                    # vcc = (v0 == 0)
+                    vcc_clobber = KInstrConstraints(vcc_clobber=True)
+                    ctx.program.emit(
+                        KInstr(
+                            "v_cmp_eq_u32",
+                            defs=(VCC,),
+                            uses=(KPhysVReg(0), KImm(0)),
+                            constraints=vcc_clobber,
+                            comment="dbgL v0==0",
+                        )
+                    )
+                    ctx.program.emit(KInstr(Instruction.S_NOP, defs=(), uses=(KImm(1),), comment="dbgL vcc hazard"))
+                    ctx.program.emit(KInstr("s_and_b64", defs=(EXEC,), uses=(EXEC, VCC), comment="dbgL exec &= vcc"))
+
+                    base_bytes = 0x3000 + seq * 16  # 16B per load site
+                    off = ctx.vreg()
+                    ctx.program.emit(
+                        KInstr(Instruction.V_MOV_B32, defs=(off,), uses=(KImm(base_bytes),), comment="dbgL off")
+                    )
+
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(val, 1),), off, 0)
+                    off4 = ctx.v_add_u32(off, KImm(4), comment="dbgL +4")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(idx, 1),), off4, 0)
+                    off8 = ctx.v_add_u32(off, KImm(8), comment="dbgL +8")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(ctx.ensure_tid_x(), 1),), off8, 0)
+                    v0_copy = ctx.vreg()
+                    ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(v0_copy,), uses=(KPhysVReg(0),), comment="dbgL copy v0"))
+                    off12 = ctx.v_add_u32(off, KImm(12), comment="dbgL +12")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(v0_copy, 1),), off12, 0)
+
+                    ctx.program.emit(KInstr("s_mov_b64", defs=(EXEC,), uses=(saved_exec,), comment="dbgL restore exec"))
+            return
+
+        # Global: ensure SRD and use buffer_load_dword.
+        if memref_ssa not in kernel_info.subspans:
+            return
+        self._ensure_global_load_srd(kernel_info, memref_ssa)
+
+        # Compute byte offset = sum(idx[i] * stride[i]) * elem_bytes.
+        if len(idx_regs) != len(strides):
+            # Best-effort: only handle rank-2 common case.
+            pass
+        off = ctx.vreg()
+        ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(off,), uses=(KImm(0),), comment="byte_off=0"))
+        for dim, idx in enumerate(idx_regs):
+            stride_e = int(strides[dim]) if dim < len(strides) else 1
+            byte_stride = stride_e * elem_bytes
+            if byte_stride == 1:
+                term = idx
+            elif byte_stride & (byte_stride - 1) == 0:
+                term = ctx.v_lshlrev_b32(KImm(int(byte_stride.bit_length() - 1)), idx, comment="mul stride")
+            else:
+                # Some assemblers reject large literals for v_mul_lo_u32; materialize first.
+                c = ctx.vreg()
+                ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(c,),
+                        uses=(KImm(int(byte_stride)),),
+                        comment="mul stride const",
+                    )
+                )
+                term = ctx.v_mul_lo_u32(idx, c, comment="mul stride")
+            off = ctx.v_add_u32(off, term, comment="add stride")
+
+        if elem_bytes == 4:
+            loaded = ctx.emit_buffer_load(memref_ssa, 4, off, 0)
+            base = loaded[0].base_reg
+            ctx.ssa_to_reg[ssa(operation.result)] = (KVReg(base.id),)
+            return
+        if elem_bytes == 2:
+            from .kernel_ir import KMemOffset
+
+            srd_range = ctx.srd_ranges.get(memref_ssa)
+            if srd_range is None:
+                raise RuntimeError(f"SRD not set up for {memref_ssa}")
+            raw = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    "buffer_load_ushort",
+                    defs=(raw,),
+                    uses=(off, srd_range, KImm(0), KMemOffset(0)),
+                    comment="global load u16",
+                )
+            )
+            if elem_ty_str == "f16":
+                val = ctx.v_cvt_f32_f16(raw, comment="f16->f32")
+            else:
+                # bf16: keep raw bits; extf will widen.
+                val = raw
+            ctx.ssa_to_reg[ssa(operation.result)] = (val,)
+            return
+        return
+
+    def _handle_scalar_memref_store(self, operation: memref_d.StoreOp, kernel_info: KernelInfo):
+        """Handle scalar memref.store for f32/f16/bf16 memrefs (LDS or global).
+
+        We represent most float SSA values as f32 in VGPRs. When storing to f16/bf16
+        memrefs, we pack to 16-bit and use ds_write_b16 / buffer_store_short.
+        """
+        from .kernel_ir import KInstr, KImm, KVReg, KRegRange
+
+        ctx = self.walker.kernel_ctx
+        memref_val = operation.memref
+        memref_ssa = ssa(memref_val)
+        memref_ty = memref_val.type
+        shape, strides, elem_bytes = parse_memref_type_from_obj(memref_ty)
+        elem_ty_str = str(memref_ty.element_type)
+        if elem_ty_str not in {"f32", "f16", "bf16"}:
+            return
+
+        # Value reg.
+        v_ssa = ssa(operation.value)
+        v_regs = ctx.ssa_to_reg.get(v_ssa)
+        if not v_regs or len(v_regs) != 1:
+            return
+        vreg = v_regs[0]
+
+        idx_regs = []
+        for idx in operation.indices:
+            idx_ssa = ssa(idx)
+            r = ctx.ssa_to_reg.get(idx_ssa)
+            if r and len(r) == 1:
+                idx_regs.append(r[0])
+                continue
+            c = kernel_info.index_env.get(idx_ssa)
+            if isinstance(c, int):
+                rr = ctx.vreg()
+                ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(rr,), uses=(KImm(int(c)),), comment="idx const"))
+                ctx.ssa_to_reg[idx_ssa] = (rr,)
+                idx_regs.append(rr)
+                continue
+            return
+
+        is_lds = False
+        if hasattr(memref_ty, "memory_space") and memref_ty.memory_space is not None:
+            is_lds = "workgroup" in str(memref_ty.memory_space).lower()
+        if is_lds:
+            if len(idx_regs) != 1:
+                raise NotImplementedError("LDS memref.store supports only 1D indices")
+            idx = idx_regs[0]
+            if elem_bytes == 4:
+                byte_off = ctx.v_lshlrev_b32(KImm(2), idx, comment="lds byte offset")
+            elif elem_bytes == 2:
+                byte_off = ctx.v_lshlrev_b32(KImm(1), idx, comment="lds byte offset")
+            else:
+                byte_off = ctx.v_mul_lo_u32(idx, KImm(elem_bytes), comment="lds byte offset")
+            vbase = int(self.walker._lds_view_base_bytes.get(memref_ssa, 0))
+            if vbase:
+                base_r = ctx.vreg()
+                ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(base_r,), uses=(KImm(vbase),), comment="lds base"))
+                byte_off = ctx.v_add_u32(byte_off, base_r, comment="lds base+off")
+            if elem_bytes == 4:
+                ctx.program.emit(KInstr("ds_write_b32", defs=(), uses=(byte_off, vreg), comment="lds store"))
+            elif elem_bytes == 2:
+                if elem_ty_str == "f16":
+                    packed = ctx.v_cvt_f16_f32(vreg, comment="f32->f16")
+                else:
+                    # bf16 store expects f32 bits in vreg.
+                    hi = ctx.v_lshrrev_b32(KImm(16), vreg, comment="bf16 hi")
+                    lsb = ctx.v_and_b32(hi, KImm(1), comment="bf16 lsb")
+                    bias_c = ctx.vreg()
+                    ctx.program.emit(
+                        KInstr(
+                            Instruction.V_MOV_B32,
+                            defs=(bias_c,),
+                            uses=(KImm(0x7FFF),),
+                            comment="bf16 bias const",
+                        )
+                    )
+                    bias = ctx.v_add_u32(lsb, bias_c, comment="bf16 bias")
+                    rounded = ctx.v_add_u32(vreg, bias, comment="bf16 round")
+                    packed = ctx.v_lshrrev_b32(KImm(16), rounded, comment="bf16 pack")
+                ctx.program.emit(KInstr("ds_write_b16", defs=(), uses=(byte_off, packed), comment="lds store b16"))
+            else:
+                return
+
+            # -----------------------------------------------------------------
+            # Debug: piggyback softmax intermediate values into output buffer.
+            #
+            # Enable with: FLIR_ASM_DEBUG_SOFTMAX=1
+            # Writes are placed at output row >= 4 so they don't disturb row0.
+            # Layout: base = 4*256 floats = 4096 bytes.
+            # For each LDS store index `idx` (wave id), write:
+            #   [base + idx*16 + 0] = value (f32 bits)
+            #   [base + idx*16 + 4] = idx (u32)
+            # -----------------------------------------------------------------
+            import os
+
+            if os.environ.get("FLIR_ASM_DEBUG_SOFTMAX", "0") == "1":
+                out_ssa = "%arg1"  # softmax_kernel(%arg0=in, %arg1=out, %arg2=M)
+                if out_ssa in kernel_info.subspans:
+                    self._ensure_global_store_srd(kernel_info, out_ssa)
+                    # Use a per-store-site row so later LDS stores don't overwrite
+                    # earlier debug values.
+                    seq = getattr(self.walker, "_dbg_lds_store_seq", 0)
+                    setattr(self.walker, "_dbg_lds_store_seq", seq + 1)
+                    base_bytes = 4096 + seq * (256 * 4)  # start at row4, +1 row per store site
+                    # off = base + (idx << 4)
+                    off = ctx.v_lshlrev_b32(KImm(4), idx, comment="dbg idx*16")
+                    base_r = ctx.vreg()
+                    ctx.program.emit(
+                        KInstr(Instruction.V_MOV_B32, defs=(base_r,), uses=(KImm(base_bytes),), comment="dbg base")
+                    )
+                    off = ctx.v_add_u32(off, base_r, comment="dbg off")
+
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(vreg if isinstance(vreg, KVReg) else KVReg(vreg), 1),), off, 0)
+                    # store idx as u32 bits (same off + 4)
+                    idx_off = ctx.v_add_u32(off, KImm(4), comment="dbg off+4")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(idx if isinstance(idx, KVReg) else KVReg(idx), 1),), idx_off, 0)
+
+                    # store computed tid_x (off + 8) and physical v0 (off + 12)
+                    from .kernel_ir import KPhysVReg
+                    tid_v = ctx.ensure_tid_x()
+                    tid_off = ctx.v_add_u32(off, KImm(8), comment="dbg off+8")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(tid_v, 1),), tid_off, 0)
+                    v0_copy = ctx.vreg()
+                    ctx.program.emit(
+                        KInstr(Instruction.V_MOV_B32, defs=(v0_copy,), uses=(KPhysVReg(0),), comment="dbg copy v0")
+                    )
+                    v0_off = ctx.v_add_u32(off, KImm(12), comment="dbg off+12")
+                    ctx.emit_buffer_store(out_ssa, (KRegRange(v0_copy, 1),), v0_off, 0)
+            return
+
+        if memref_ssa not in kernel_info.subspans:
+            return
+        self._ensure_global_store_srd(kernel_info, memref_ssa)
+
+        off = ctx.vreg()
+        ctx.program.emit(KInstr(Instruction.V_MOV_B32, defs=(off,), uses=(KImm(0),), comment="byte_off=0"))
+        for dim, idx in enumerate(idx_regs):
+            stride_e = int(strides[dim]) if dim < len(strides) else 1
+            byte_stride = stride_e * elem_bytes
+            if byte_stride == 1:
+                term = idx
+            elif byte_stride & (byte_stride - 1) == 0:
+                term = ctx.v_lshlrev_b32(KImm(int(byte_stride.bit_length() - 1)), idx, comment="mul stride")
+            else:
+                c = ctx.vreg()
+                ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(c,),
+                        uses=(KImm(int(byte_stride)),),
+                        comment="mul stride const",
+                    )
+                )
+                term = ctx.v_mul_lo_u32(idx, c, comment="mul stride")
+            off = ctx.v_add_u32(off, term, comment="add stride")
+
+        if elem_bytes == 4:
+            ctx.emit_buffer_store(
+                memref_ssa,
+                (KRegRange(vreg if isinstance(vreg, KVReg) else KVReg(vreg), 1),),
+                off,
+                0,
+            )
+            return
+        if elem_bytes == 2:
+            from .kernel_ir import KMemOffset
+
+            srd_range = ctx.srd_ranges.get(memref_ssa)
+            if srd_range is None:
+                raise RuntimeError(f"SRD not set up for {memref_ssa}")
+            if elem_ty_str == "f16":
+                packed = ctx.v_cvt_f16_f32(vreg, comment="f32->f16")
+            else:
+                hi = ctx.v_lshrrev_b32(KImm(16), vreg, comment="bf16 hi")
+                lsb = ctx.v_and_b32(hi, KImm(1), comment="bf16 lsb")
+                bias_c = ctx.vreg()
+                ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(bias_c,),
+                        uses=(KImm(0x7FFF),),
+                        comment="bf16 bias const",
+                    )
+                )
+                bias = ctx.v_add_u32(lsb, bias_c, comment="bf16 bias")
+                rounded = ctx.v_add_u32(vreg, bias, comment="bf16 round")
+                packed = ctx.v_lshrrev_b32(KImm(16), rounded, comment="bf16 pack")
+            ctx.program.emit(
+                KInstr(
+                    "buffer_store_short",
+                    defs=(),
+                    uses=(packed, off, srd_range, KImm(0), KMemOffset(0)),
+                    comment="global store u16",
+                )
+            )
+            return
+        return
 
     def handle_vector_load_op(
         self, operation: vector_d.LoadOp, kernel_info: KernelInfo
@@ -144,13 +605,25 @@ class _MemoryHandlers:
 
         # Private alloca-backed load (register-resident).
         if hasattr(self.walker, "_alloca_storage") and memref_ssa in self.walker._alloca_storage:
-            if len(indices) != 1:
-                raise NotImplementedError("vector.load alloca only supports 1D indices")
-            idx_ssa = indices[0]
-            if idx_ssa not in kernel_info.index_env or not isinstance(kernel_info.index_env[idx_ssa], int):
-                raise NotImplementedError("vector.load alloca requires constant index")
-            base = int(kernel_info.index_env[idx_ssa])
+            base = self._alloca_linear_index(
+                memref_ssa,
+                list(operation.operands[1:]),
+                kernel_info,
+            )
+            if base is None:
+                raise NotImplementedError("vector.load alloca requires constant indices")
             storage = self.walker._alloca_storage[memref_ssa]
+            elem_str = getattr(self.walker, "_alloca_elem", {}).get(memref_ssa, "")
+            if elem_str in {"f16", "bf16"}:
+                packed_base = base // 2
+                packed_n = (num_elements + 1) // 2
+                if packed_base + packed_n > len(storage):
+                    raise IndexError("vector.load out of bounds for packed alloca storage")
+                # Packed representation: return dwords (each holds 2x16-bit lanes).
+                self.walker.kernel_ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(
+                    storage[packed_base : packed_base + packed_n]
+                )
+                return
             if base + num_elements > len(storage):
                 raise IndexError("vector.load out of bounds for alloca storage")
 
@@ -251,12 +724,13 @@ class _MemoryHandlers:
 
         # Private alloca-backed store (register-resident).
         if hasattr(self.walker, "_alloca_storage") and memref_ssa in self.walker._alloca_storage:
-            if len(indices) != 1:
-                raise NotImplementedError("vector.store alloca only supports 1D indices")
-            idx_ssa = indices[0]
-            if idx_ssa not in kernel_info.index_env or not isinstance(kernel_info.index_env[idx_ssa], int):
-                raise NotImplementedError("vector.store alloca requires constant index")
-            base = int(kernel_info.index_env[idx_ssa])
+            base = self._alloca_linear_index(
+                memref_ssa,
+                list(operation.operands[2:]),
+                kernel_info,
+            )
+            if base is None:
+                raise NotImplementedError("vector.store alloca requires constant indices")
             storage = self.walker._alloca_storage[memref_ssa]
 
             val_ssa = ssa(operation.operands[0])
@@ -266,9 +740,17 @@ class _MemoryHandlers:
                     f"vector.store references SSA value {val_ssa} but it's not in kernel_ctx.ssa_to_reg"
                 )
 
-            for lane, r in enumerate(regs):
-                if base + lane < len(storage):
-                    storage[base + lane] = r
+            # If this alloca packs f16/bf16, copy packed dwords.
+            elem_str = getattr(self.walker, "_alloca_elem", {}).get(memref_ssa, "")
+            if elem_str in {"f16", "bf16"}:
+                packed_base = base // 2
+                for i, r in enumerate(regs):
+                    if packed_base + i < len(storage):
+                        storage[packed_base + i] = r
+            else:
+                for lane, r in enumerate(regs):
+                    if base + lane < len(storage):
+                        storage[base + lane] = r
             return
 
         # If memref is not in subspans, it may be LDS (workgroup) memory; handle later in emit
@@ -294,6 +776,69 @@ class _MemoryHandlers:
 
         # Emit store instruction
         self._emit_store_instruction(operation, kernel_info, memref_ssa, indices)
+
+    def handle_vector_shuffle_op(self, operation, kernel_info: KernelInfo):
+        """Handle vector.shuffle by selecting lanes from concatenated inputs."""
+        ctx = self.walker.kernel_ctx
+        a = ctx.ssa_to_reg.get(ssa(operation.v1))
+        b = ctx.ssa_to_reg.get(ssa(operation.v2))
+        if a is None or b is None:
+            return
+        mask = operation.attributes["mask"] if "mask" in operation.attributes else None
+        mask_str = str(mask)
+        try:
+            if "[" in mask_str and "]" in mask_str:
+                inside = mask_str.split("[", 1)[1].split("]", 1)[0].strip()
+            elif ":" in mask_str:
+                # e.g. "array<i64: 0, 2, 4, 6>"
+                inside = mask_str.split(":", 1)[1].rsplit(">", 1)[0].strip()
+            else:
+                inside = mask_str
+            idxs = [int(x.strip()) for x in inside.split(",") if x.strip()]
+        except Exception:
+            return
+        concat = list(a) + list(b)
+        # MLIR uses -1 for undef lanes; map those to lane 0 (harmless for our uses).
+        ctx.ssa_to_reg[ssa(operation.result)] = tuple(concat[i if i >= 0 else 0] for i in idxs)
+
+    def handle_vector_bitcast_op(self, operation, kernel_info: KernelInfo):
+        """Handle vector.bitcast as a byte-preserving reinterpret."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.source))
+        if src is None:
+            return
+        ctx.ssa_to_reg[ssa(operation.result)] = tuple(src)
+
+    def handle_vector_broadcast_op(self, operation, kernel_info: KernelInfo):
+        """Broadcast scalar to vector lanes."""
+        import re
+
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.source))
+        if src is None or len(src) != 1:
+            return
+        vt = str(operation.result.type)
+        m = re.match(r"vector<(\d+)x", vt)
+        if not m:
+            return
+        n = int(m.group(1))
+        ctx.ssa_to_reg[ssa(operation.result)] = tuple(src[0] for _ in range(n))
+
+    def handle_vector_reduction_op(self, operation, kernel_info: KernelInfo):
+        """Support vector.reduction for <maxnumf> and <add> on f32 vectors."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.vector))
+        if src is None or len(src) == 0:
+            return
+        kind = str(operation.kind)
+        acc = src[0]
+        if "max" in kind:
+            for r in src[1:]:
+                acc = ctx.v_max_f32(acc, r, comment="vreduce max")
+        else:
+            for r in src[1:]:
+                acc = ctx.v_add_f32(acc, r, comment="vreduce add")
+        ctx.ssa_to_reg[ssa(operation.result)] = (acc,)
 
     def handle_stream_binding_subspan_op(
         self, operation: stream_d.BindingSubspanOp, kernel_info: KernelInfo
@@ -430,6 +975,8 @@ class _MemoryHandlers:
 
     def handle_barrier_op(self, operation: gpu_d.BarrierOp, kernel_info: KernelInfo):
         """Handle gpu.barrier operations - emit synchronization barrier."""
+        # Be conservative: make LDS ops visible before the barrier.
+        self.walker.unified.s_waitcnt(waitcnt="lgkmcnt(0)")
         self.walker.unified.s_barrier(comment="workgroup barrier")
 
     def handle_lds_barrier_op(

@@ -16,6 +16,7 @@ from .ir_imports import (
     arith_d,
     func_d,
     gpu_d,
+    math_d,
     memref_d,
     rocdl_d,
     scf_d,
@@ -142,10 +143,38 @@ class IRWalker:
             self.handlers.handle_arith_addf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.RemUIOp):
             self.handlers.handle_arith_remui_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.DivUIOp):
+            self.handlers.handle_arith_divui_op(operation, kernel_info)
         elif isinstance(operation, arith_d.MulIOp):
             self.handlers.handle_arith_muli_op(operation, kernel_info)
         elif isinstance(operation, arith_d.IndexCastOp):
             self.handlers.handle_arith_index_cast_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.CmpIOp):
+            self.handlers.handle_arith_cmpi_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.SelectOp):
+            self.handlers.handle_arith_select_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.MulFOp):
+            self.handlers.handle_arith_mulf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.SubFOp):
+            self.handlers.handle_arith_subf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.MaximumFOp):
+            self.handlers.handle_arith_maximumf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.DivFOp):
+            self.handlers.handle_arith_divf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.ExtFOp):
+            self.handlers.handle_arith_extf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.TruncFOp):
+            self.handlers.handle_arith_truncf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.BitcastOp):
+            self.handlers.handle_arith_bitcast_op(operation, kernel_info)
+        elif hasattr(arith_d, "ShRUIOp") and isinstance(operation, arith_d.ShRUIOp):
+            self.handlers.handle_arith_shrui_op(operation, kernel_info)
+        elif hasattr(arith_d, "AndIOp") and isinstance(operation, arith_d.AndIOp):
+            self.handlers.handle_arith_andi_op(operation, kernel_info)
+        elif hasattr(arith_d, "OrIOp") and isinstance(operation, arith_d.OrIOp):
+            self.handlers.handle_arith_ori_op(operation, kernel_info)
+        elif hasattr(arith_d, "ShLIOp") and isinstance(operation, arith_d.ShLIOp):
+            self.handlers.handle_arith_shli_op(operation, kernel_info)
         elif isinstance(operation, gpu_d.ThreadIdOp):
             self.handlers.handle_gpu_thread_id_op(operation, kernel_info)
         elif isinstance(operation, gpu_d.BlockIdOp):
@@ -158,14 +187,26 @@ class IRWalker:
             self.handlers.handle_vector_load_op(operation, kernel_info)
         elif isinstance(operation, vector_d.StoreOp):
             self.handlers.handle_vector_store_op(operation, kernel_info)
+        elif hasattr(vector_d, "ShuffleOp") and isinstance(operation, vector_d.ShuffleOp):
+            self.handlers.handle_vector_shuffle_op(operation, kernel_info)
+        elif hasattr(vector_d, "ReductionOp") and isinstance(operation, vector_d.ReductionOp):
+            self.handlers.handle_vector_reduction_op(operation, kernel_info)
+        elif hasattr(vector_d, "BroadcastOp") and isinstance(operation, vector_d.BroadcastOp):
+            self.handlers.handle_vector_broadcast_op(operation, kernel_info)
+        elif hasattr(vector_d, "BitCastOp") and isinstance(operation, vector_d.BitCastOp):
+            self.handlers.handle_vector_bitcast_op(operation, kernel_info)
         elif isinstance(operation, amdgpu_d.MFMAOp):
             self.handlers.handle_mfma_op(operation, kernel_info)
         elif isinstance(operation, amdgpu_d.LDSBarrierOp):
             self.handlers.handle_lds_barrier_op(operation, kernel_info)
         elif isinstance(operation, gpu_d.BarrierOp):
             self.handlers.handle_barrier_op(operation, kernel_info)
+        elif isinstance(operation, gpu_d.ShuffleOp):
+            self.handlers.handle_gpu_shuffle_op(operation, kernel_info)
         elif isinstance(operation, memref_d.ViewOp):
             self.handlers.handle_view_op(operation, kernel_info)
+        elif hasattr(memref_d, "GetGlobalOp") and isinstance(operation, memref_d.GetGlobalOp):
+            self.handlers.handle_memref_get_global_op(operation, kernel_info)
         elif isinstance(operation, memref_d.AllocOp):
             self.handlers.handle_alloc_op(operation, kernel_info)
         elif isinstance(operation, memref_d.AllocaOp):
@@ -184,6 +225,8 @@ class IRWalker:
             self.handlers.handle_scf_for_op(operation, kernel_info)
         elif isinstance(operation, scf_d.IfOp):
             self.handlers.handle_scf_if_op(operation, kernel_info)
+        elif math_d is not None and isinstance(operation, math_d.Exp2Op):
+            self.handlers.handle_math_exp2_op(operation, kernel_info)
         elif isinstance(operation, vector_d.ExtractStridedSliceOp):
             self.handlers.handle_vector_extract_strided_slice_op(operation, kernel_info)
         # Critical operations for gather_to_lds support
