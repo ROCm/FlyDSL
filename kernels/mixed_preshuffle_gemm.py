@@ -921,7 +921,7 @@ def compile_mxfp4_preshuffle_gemm(
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
             # We keep LDS laid out as (tile_m, tile_k) in element units.
-            lds_tile_elems = arith.constant(tile_m * tile_k, index=True)
+            lds_tile_elems = arith.constant(tile_m * tile_k // a_elem_vec_pack, index=True)
             lds_base0 = arith.constant(0, index=True)
             lds_base1 = lds_tile_elems
 

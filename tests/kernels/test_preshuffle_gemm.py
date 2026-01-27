@@ -451,7 +451,7 @@ def test_mfma_w4_flir_preshuffle(
     c_out_scaled = c_out_raw.to(torch.float32)
 
     verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-    import pdb;pdb.set_trace()
+    # import pdb;pdb.set_trace()
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
