@@ -12,7 +12,7 @@ Pipelines:
 """
 
 import os
-
+import functools
 import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
@@ -21,7 +21,7 @@ from flydsl.utils import SmemAllocator, SmemPtr
 
 from _mlir import ir
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
+from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl, scf
 from flydsl.lang.ir.types import T, memref
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -35,6 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
 from kernels.mfma_epilogues import mfma_epilog
 
 
+@functools.lru_cache(maxsize=1024)
 def compile_preshuffle_gemm_a8(
     *,
     M: int,
@@ -463,9 +464,13 @@ def compile_preshuffle_gemm_a8(
 
             def load_a_tile(base_k_div4):
                 parts = []
+                # Zero-fill for M-tail rows (avoid OOB loads).
+                zero_i32x4 = arith.unwrap(arith.constant_vector(0, T.i32x4))
+                c0_idx = arith.constant(0, index=True)
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     row_a_global = bx_m + row_a_local
+                    in_m = arith.ult(row_a_global, c_m)
                     coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
                     idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
                     # `idx_i32` is a dword offset. For 2B element types (fp16/bf16),
@@ -476,8 +481,11 @@ def compile_preshuffle_gemm_a8(
                         if elem_bytes == 1
                         else (idx_i32 * arith.constant(2, index=True))
                     )
-                    a_16B = load_a_16(idx_elem)
-                    parts.append(vector.bitcast(T.i32x4, a_16B))
+                    # Guard OOB: load from 0 and select zeros for invalid rows.
+                    idx_elem_safe = arith.select(in_m, idx_elem, c0_idx)
+                    a_16B = load_a_16(idx_elem_safe)
+                    a_i32x4 = vector.bitcast(T.i32x4, a_16B)
+                    parts.append(arith.select(in_m, a_i32x4, zero_i32x4))
                 return parts
 
             def store_a_tile_to_lds(vec_a_parts, lds_base):
@@ -523,13 +531,22 @@ def compile_preshuffle_gemm_a8(
                     scales_pf["s_b_vals"] = s_b_vals
                     scales_pf["s_a_vecs"] = []
                     row_off_base = lane_div_16 * 4
+                    zf = arith.constant(0.0, type=T.f32)
+                    c0_idx = arith.constant(0, index=True)
                     for mi in range_constexpr(m_repeat):
                         row_base_m = bx_m + (mi * 16)
                         row_g_base = row_base_m + row_off_base
-                        s_a_vec = buffer_ops.buffer_load(
-                            scale_a_rsrc, row_g_base, vec_width=4, dtype=T.f32
-                        )
-                        scales_pf["s_a_vecs"].append(vector.bitcast(T.f32x4, s_a_vec))
+                        # Guard M-tail: the vec4 load can straddle past c_m.
+                        s_vals = []
+                        for ii in range_constexpr(4):
+                            ii_idx = arith.constant(ii, index=True)
+                            row_g = row_g_base + ii_idx
+                            in_m = arith.ult(row_g, c_m)
+                            row_safe = arith.select(in_m, row_g, c0_idx)
+                            s = buffer_ops.buffer_load(scale_a_rsrc, row_safe, vec_width=1, dtype=T.f32)
+                            s_vals.append(arith.select(in_m, s, zf))
+                        s_a_vec4 = vector.from_elements(T.f32x4, s_vals)
+                        scales_pf["s_a_vecs"].append(s_a_vec4)
 
                 current_accs_list = list(accs_in)
 
@@ -776,33 +793,41 @@ def compile_preshuffle_gemm_a8(
                         # will scale by element bytes based on the *data type*. For f16 vectors,
                         # some backends/paths can be fragile. We explicitly bitcast to i32
                         # and pass a byte offset to keep the store well-defined.
-                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
-                        byte_off = idx_out * arith.constant(2, index=True)  # bytes
+                        row_pred = arith.ult(row, c_m)
+                        _if = scf.IfOp(row_pred)
+                        with _if.then():
+                            idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
+                            byte_off = idx_out * arith.constant(2, index=True)  # bytes
 
-                        if e_vec == 4:
-                            frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
-                            buffer_ops.buffer_store(
-                                frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
-                            )
-                        else:
-                            # e_vec == 2: pack 2xf16 -> 1xi32
-                            frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
-                            frag_i32 = vector.extract(
-                                frag_i32x1, static_position=[0], dynamic_position=[]
-                            )
-                            buffer_ops.buffer_store(
-                                frag_i32, c_rsrc, byte_off, offset_is_bytes=True
-                            )
+                            if e_vec == 4:
+                                frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
+                                buffer_ops.buffer_store(
+                                    frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True
+                                )
+                            else:
+                                # e_vec == 2: pack 2xf16 -> 1xi32
+                                frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
+                                frag_i32 = vector.extract(
+                                    frag_i32x1, static_position=[0], dynamic_position=[]
+                                )
+                                buffer_ops.buffer_store(
+                                    frag_i32, c_rsrc, byte_off, offset_is_bytes=True
+                                )
 
                     # Prefer 16B stores when possible:
                     # - EVec=4 => 4xf16 (8B) per store (and matches tile_n multiples of 128)
                     # - EVec=2 => 2xf16 (4B) per store (tile_n multiples of 64)
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
+                    def precompute_row(*, row_local, row):
+                        # Skip the entire row store loop for M-tail rows.
+                        return (None, arith.ult(row, c_m))
+
                     mfma_epilog(
                         use_cshuffle=True,
                         arith=arith,
                         vector=vector,
                         gpu=gpu,
+                        scf=scf,
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,
@@ -817,29 +842,33 @@ def compile_preshuffle_gemm_a8(
                         n_tile_base=n_tile_base,
                         lds_out=lds_out,
                         write_row_to_lds=write_row_to_lds,
+                        precompute_row=precompute_row,
                         store_pair=store_pair,
                     )
                     return
 
                 def body_row(*, mi: int, ii: int, row_in_tile, row):
-                    if not is_f16_or_bf16:
-                        s_a_vec4 = s_a_vecs[mi]
-                        s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
-                    col_base = by_n + n_tile_base + lane_mod_16
-                    idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
-                    for ni in range_constexpr(num_acc_n):
-                        acc_idx = mi * num_acc_n + ni
-                        acc = final_accs[acc_idx]
-                        val = vector.extract(acc, static_position=[ii], dynamic_position=[])
-                        if is_int8:
-                            val = arith.sitofp(T.f32, val)
-                        if is_f16_or_bf16:
-                            val_s = val
-                        else:
-                            val_s = (val * s_a) * s_b_vals[ni]
-                        val_f16 = arith.trunc_f(T.f16, val_s)
-                        idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                    row_pred = arith.ult(row, c_m)
+                    _if = scf.IfOp(row_pred)
+                    with _if.then():
+                        if not is_f16_or_bf16:
+                            s_a_vec4 = s_a_vecs[mi]
+                            s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                        col_base = by_n + n_tile_base + lane_mod_16
+                        idx_base = flir.crd2idx(flir.make_coord(row, col_base), layout_c)
+                        for ni in range_constexpr(num_acc_n):
+                            acc_idx = mi * num_acc_n + ni
+                            acc = final_accs[acc_idx]
+                            val = vector.extract(acc, static_position=[ii], dynamic_position=[])
+                            if is_int8:
+                                val = arith.sitofp(T.f32, val)
+                            if is_f16_or_bf16:
+                                val_s = val
+                            else:
+                                val_s = (val * s_a) * s_b_vals[ni]
+                            val_f16 = arith.trunc_f(T.f16, val_s)
+                            idx_out = idx_base + arith.constant(ni * 16, index=True)
+                            buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
 
                 mfma_epilog(
                     use_cshuffle=False,
