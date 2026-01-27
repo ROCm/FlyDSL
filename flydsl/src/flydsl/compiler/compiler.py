@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from pathlib import Path
@@ -280,84 +281,90 @@ def compile(
                 cache = None
                 cache_key = None
 
-        if cache is not None and (not cache_rebuild_requested()):
-            cached_asm = cache.get_module_asm()
-            if cached_asm:
-                try:
-                    cached_mod = ir.Module.parse(cached_asm, context=ctx)
-                    if dump_enabled:
-                        print(f"[flir.compile] cache hit key={cache_key}")
-                    from .executor import ExecutionEngineExecutor as Executor
-                    if shared_libs is None:
-                        shared_libs = default_shared_libs().as_list()
-                    return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
-                except Exception:
-                    # Treat cache parse failures as misses.
-                    pass
-        if dump_enabled:
-            # When dumping is enabled, run the pipeline in stages so each intermediate
-            # module state is captured to a file.
-            out = _dump_ir(
-                "00_target_overridden",
-                dump_dir=dump_dir,
-                asm=module.operation.get_asm(enable_debug_info=True),
-            )
-            print(f"[flir.compile] dump 00_target_overridden -> {out}")
-            asm_for_isa: Optional[str] = None
-            stage_frags = _pipeline_fragments(
-                chip=chip,
-                use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
-                use_bare_pointers_for_host=use_bare_pointers_for_host,
-                use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
-            )
-            # Keep dump filenames stable vs the historical numbering scheme:
-            # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
-            stage_num_base = 3
-            for stage_num, frag in enumerate(stage_frags, start=stage_num_base):
-                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})", context=ctx)
+        # Acquire a per-cache-key process lock across "check -> compile -> put".
+        # This prevents multiple processes from concurrently compiling the same key
+        # on a cache miss
+        lock_cm = cache.lock() if cache is not None else contextlib.nullcontext(None)
+        with lock_cm as lock_fd:
+            if cache is not None and (not cache_rebuild_requested()):
+                cached_asm = cache.get_module_asm()
+                if cached_asm:
+                    try:
+                        cached_mod = ir.Module.parse(cached_asm, context=ctx)
+                        if dump_enabled:
+                            print(f"[flir.compile] cache hit key={cache_key}")
+                        from .executor import ExecutionEngineExecutor as Executor
+                        if shared_libs is None:
+                            shared_libs = default_shared_libs().as_list()
+                        return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
+                    except Exception:
+                        # Treat cache parse failures as misses.
+                        pass
+            if dump_enabled:
+                # When dumping is enabled, run the pipeline in stages so each intermediate
+                # module state is captured to a file.
+                out = _dump_ir(
+                    "00_target_overridden",
+                    dump_dir=dump_dir,
+                    asm=module.operation.get_asm(enable_debug_info=True),
+                )
+                print(f"[flir.compile] dump 00_target_overridden -> {out}")
+                asm_for_isa: Optional[str] = None
+                stage_frags = _pipeline_fragments(
+                    chip=chip,
+                    use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+                    use_bare_pointers_for_host=use_bare_pointers_for_host,
+                    use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+                )
+                # Keep dump filenames stable vs the historical numbering scheme:
+                # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
+                stage_num_base = 3
+                for stage_num, frag in enumerate(stage_frags, start=stage_num_base):
+                    stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
+                    pm = PassManager.parse(f"builtin.module({frag})", context=ctx)
+                    pm.enable_verifier(bool(verify))
+                    pm.run(module.operation)
+                    stage_asm = module.operation.get_asm(enable_debug_info=True)
+                    out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                    print(f"[flir.compile] dump {stage_name} -> {out}")
+
+                    # Dump ISA from the *post-LLVM* module (right before fatbin emission).
+                    # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
+                    if frag.strip() == "reconcile-unrealized-casts":
+                        asm_for_isa = stage_asm
+
+                if asm_for_isa is not None:
+                    isa_out = _dump_isa_from_rocdl_module_asm(
+                        dump_dir=dump_dir,
+                        ctx=ctx,
+                        asm=asm_for_isa,
+                        verify=verify,
+                    )
+                    if isa_out is not None:
+                        isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
+                        print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
+            else:
+                pm = PassManager.parse(pipeline, context=ctx)
                 pm.enable_verifier(bool(verify))
                 pm.run(module.operation)
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flir.compile] dump {stage_name} -> {out}")
+            if print_final_module:
+                print(module)
 
-                # Dump ISA from the *post-LLVM* module (right before fatbin emission).
-                # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
-                if frag.strip() == "reconcile-unrealized-casts":
-                    asm_for_isa = stage_asm
-
-            if asm_for_isa is not None:
-                isa_out = _dump_isa_from_rocdl_module_asm(
-                    dump_dir=dump_dir,
-                    ctx=ctx,
-                    asm=asm_for_isa,
-                    verify=verify,
-                )
-                if isa_out is not None:
-                    isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
-                    print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
-        else:
-            pm = PassManager.parse(pipeline, context=ctx)
-            pm.enable_verifier(bool(verify))
-            pm.run(module.operation)
-        if print_final_module:
-            print(module)
-
-        # Cache store (post-pipeline, with binary embedded).
-        if cache is not None:
-            try:
-                cache.put_module_asm(
-                    module.operation.get_asm(enable_debug_info=False),
-                    meta={
-                        "chip": str(chip),
-                        "pipeline": str(pipeline),
-                    },
-                )
-                if dump_enabled:
-                    print(f"[flir.compile] cache put key={cache_key}")
-            except Exception:
-                pass
+            # Cache store (post-pipeline, with binary embedded). Reuse the same lock.
+            if cache is not None:
+                try:
+                    cache.put_module_asm(
+                        module.operation.get_asm(enable_debug_info=False),
+                        meta={
+                            "chip": str(chip),
+                            "pipeline": str(pipeline),
+                        },
+                        lock_fd=lock_fd,
+                    )
+                    if dump_enabled:
+                        print(f"[flir.compile] cache put key={cache_key}")
+                except Exception:
+                    pass
 
     from .executor import ExecutionEngineExecutor as Executor
 

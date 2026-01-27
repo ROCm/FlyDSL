@@ -97,6 +97,9 @@ def _unwrap_value(value):
 def _create_i32_constant(value: int) -> ir.Value:
     """Create i32 constant using standard MLIR arith dialect."""
     i32_type = ir.IntegerType.get_signless(32)
+    # Handle unsigned 32-bit values by wrapping to signed range
+    if value > 0x7FFFFFFF:
+        value = int(value - 2**32)
     attr = ir.IntegerAttr.get(i32_type, value)
     op = std_arith.ConstantOp(i32_type, attr)
     return _unwrap_value(op.result)
@@ -197,8 +200,8 @@ class BufferResourceDescriptor:
                 if nbytes <= 0:
                     nbytes = 0
                 # Descriptor uses i32 bytes; clamp to the max representable.
-                if nbytes > 0x7FFFFFFE:
-                    nbytes = 0x7FFFFFFE
+                if nbytes > 0xFFFFFFFF:
+                    nbytes = 0xFFFFFFFF
                 num_records = _create_i32_constant(nbytes)
             else:
                 # Value path: cast to i32 if needed.
@@ -210,16 +213,16 @@ class BufferResourceDescriptor:
         elif max_size:
             # Use max for flexibility (hardware will check actual bounds)
             # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
-            num_records = _create_i32_constant(0x7FFFFFFE)  # FALLBACK_MAX_SIZE
+            num_records = _create_i32_constant(0xFFFFFFFF)  # FALLBACK_MAX_SIZE
         else:
             # Use the logical memref size (in bytes) for hardware OOB checking.
             nbytes = _num_records_from_memref_type()
             if nbytes is None:
                 # Fall back to max-size if we can't infer statically.
-                num_records = _create_i32_constant(0x7FFFFFFE)
+                num_records = _create_i32_constant(0xFFFFFFFF)
             else:
-                if nbytes > 0x7FFFFFFE:
-                    nbytes = 0x7FFFFFFE
+                if nbytes > 0xFFFFFFFF:
+                    nbytes = 0xFFFFFFFF
                 num_records = _create_i32_constant(int(nbytes))
         
         # Create resource descriptor (returns !llvm.ptr<8>)
