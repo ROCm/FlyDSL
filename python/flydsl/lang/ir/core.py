@@ -13,6 +13,19 @@ from ..._mlir.dialects._fly_enum_gen import AddressSpace, CachePolicy
 from ..._mlir.dialects import arith
 from ..._mlir.extras import types as T
 
+from ..._mlir.dialects.fly import (
+    IntTupleType,
+    LayoutType,
+    SwizzleType,
+    PointerType,
+    MemRefType,
+    CopyAtomUniversalCopyType,
+)
+
+from ..._mlir.dialects.fly_rocdl import (
+    MmaAtomCDNA3_MFMAType,
+)
+
 
 def _binary_op(lhs, rhs, op: str) -> "ArithValue":
     op = op.capitalize()
@@ -98,35 +111,35 @@ def make_identity_layout(shape, loc=None, ip=None):
 
 @dsl_api_wrapper
 def make_shape(*shape, loc=None, ip=None):
-    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, shape)
+    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(shape)
     return _fly_ir.make_shape(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_stride(*stride, loc=None, ip=None):
-    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, stride)
+    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(stride)
     return _fly_ir.make_stride(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_coord(*coord, loc=None, ip=None):
-    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, coord)
+    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(coord)
     return _fly_ir.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_int_tuple(elems, loc=None, ip=None):
-    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, elems)
+    IntTupleTy, dyncElems = _fly_ir.infer_int_tuple_type(elems)
     return _fly_ir.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_layout(shape, stride, loc=None, ip=None):
     if not isinstance(shape, ir.Value):
-        shapeTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, shape)
+        shapeTy, dyncElems = _fly_ir.infer_int_tuple_type(shape)
         shape = _fly_ir.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
     if not isinstance(stride, ir.Value):
-        strideTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, stride)
+        strideTy, dyncElems = _fly_ir.infer_int_tuple_type(stride)
         stride = _fly_ir.make_stride(strideTy, dyncElems, loc=loc, ip=ip)
     return _fly_ir.make_layout(shape, stride=stride, loc=loc, ip=ip)
 
@@ -144,7 +157,7 @@ def get_scalar(int_tuple, loc=None, ip=None):
 @dsl_api_wrapper
 def slice(src, coord, loc=None, ip=None):
     if not isinstance(coord, ir.Value):
-        coordTy, dyncElems = _fly_ir.infer_int_tuple_type(ir.Context.current, coord)
+        coordTy, dyncElems = _fly_ir.infer_int_tuple_type(coord)
         coord = _fly_ir.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
     return _fly_ir.slice(src, coord, loc=loc, ip=ip)
 
@@ -162,9 +175,7 @@ def composition(layout, tiler, loc=None, ip=None):
 @dsl_api_wrapper
 def complement(layout, codomain_size, loc=None, ip=None):
     if not isinstance(codomain_size, ir.Value):
-        codomain_sizeTy, dyncElems = _fly_ir.infer_int_tuple_type(
-            ir.Context.current, codomain_size
-        )
+        codomain_sizeTy, dyncElems = _fly_ir.infer_int_tuple_type(codomain_size)
         codomain_size = _fly_ir.make_shape(codomain_sizeTy, dyncElems, loc=loc, ip=ip)
     return _fly_ir.complement(layout, codomain_size=codomain_size, loc=loc, ip=ip)
 
@@ -376,105 +387,3 @@ def print_op(*values, format_str="", loc=None, ip=None):
 # ==============================================================================
 # Fly Type Classes (MLIR-style API)
 # ==============================================================================
-
-
-class PointerType:
-    """
-    Fly Pointer Type with MLIR-style static get() method.
-
-    Example:
-        ptr_ty = PointerType.get(T.f32(), AddressSpace.Global)
-        ptr_ty = PointerType.get(T.f32(), AddressSpace.Register, alignment=16)
-    """
-
-    @staticmethod
-    def get(elem_ty, address_space, alignment=None):
-        """
-        Create a PointerType.
-
-        Args:
-            elem_ty: Element type (e.g., T.f32())
-            address_space: Address space (AddressSpace.Global, AddressSpace.Shared, AddressSpace.Register)
-            alignment: Optional alignment value
-
-        Returns:
-            PointerType as ir.Type
-        """
-        return _fly_ir.PointerType.get(elem_ty, int(address_space), alignment)
-
-
-class MemRefType:
-    """
-    Fly MemRef Type with MLIR-style static get() method.
-
-    Example:
-        layout_ty = LayoutType.get(ir.Context.current, 16, 1)
-        memref_ty = MemRefType.get(T.f32(), AddressSpace.Global, layout_ty)
-    """
-
-    @staticmethod
-    def get(elem_ty, address_space, layout, alignment=None):
-        """
-        Create a MemRefType.
-
-        Args:
-            elem_ty: Element type (e.g., T.f32())
-            address_space: Address space (AddressSpace.Global, AddressSpace.Shared, AddressSpace.Register)
-            layout: Layout type (LayoutType or ir.Type)
-            alignment: Optional alignment value
-
-        Returns:
-            MemRefType as ir.Type
-        """
-        # If layout is an ir.Value (from make_layout), get its type
-        if isinstance(layout, ir.Value):
-            layout = layout.type
-        return _fly_ir.MemRefType.get(elem_ty, int(address_space), layout, alignment)
-
-
-class LayoutType:
-    """
-    Fly Layout Type with MLIR-style static get() method.
-
-    Example:
-        layout_ty = LayoutType.get(ir.Context.current, 16, 1)
-        layout_ty = LayoutType.get(ir.Context.current, (4, 4), (4, 1))
-    """
-
-    @staticmethod
-    def get(context, shape, stride):
-        """
-        Create a LayoutType.
-
-        Args:
-            context: MLIR context
-            shape: Shape as int or tuple
-            stride: Stride as int or tuple
-
-        Returns:
-            LayoutType as ir.Type
-        """
-        return _fly_ir.LayoutType.get(context, shape, stride)
-
-
-class IntTupleType:
-    """
-    Fly IntTuple Type with MLIR-style static get() method.
-
-    Example:
-        int_tuple_ty = IntTupleType.get(ir.Context.current, (4, 4))
-    """
-
-    @staticmethod
-    def get(context, int_or_tuple):
-        """
-        Create an IntTupleType.
-
-        Args:
-            context: MLIR context
-            int_or_tuple: Python int or tuple
-
-        Returns:
-            Tuple of (IntTupleType as ir.Type, list of dynamic elements)
-        """
-        return _fly_ir.IntTupleType.get(context, int_or_tuple)
