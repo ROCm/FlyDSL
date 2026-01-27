@@ -11,10 +11,10 @@ using namespace mlir::fly;
 
 #include "flydsl/Dialect/Fly/IR/FlyEnums.cpp.inc"
 
-namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyAttrInterfaces.cpp.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeInterfaces.cpp.inc"
 
+namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyAttrConstraints.cpp.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeConstraints.cpp.inc"
 } // namespace mlir::fly

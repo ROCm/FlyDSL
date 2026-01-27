@@ -8,10 +8,10 @@ def Fly_NestedInterfaceMethods {
     InterfaceMethod<"", "bool", "isLeaf", (ins)>,
     InterfaceMethod<"", "int32_t", "rank", (ins)>,
     InterfaceMethod<"", "int32_t", "rank", (ins "int32_t":$idx)>,
-    InterfaceMethod<"", "int32_t", "rank", (ins "ArrayRef<int32_t>":$idxs)>,
+    InterfaceMethod<"", "int32_t", "rank", (ins "::llvm::ArrayRef<int32_t>":$idxs)>,
     InterfaceMethod<"", "int32_t", "depth", (ins)>,
     InterfaceMethod<"", "int32_t", "depth", (ins "int32_t":$idx)>,
-    InterfaceMethod<"", "int32_t", "depth", (ins "ArrayRef<int32_t>":$idxs)>
+    InterfaceMethod<"", "int32_t", "depth", (ins "::llvm::ArrayRef<int32_t>":$idxs)>
   ];
 }
 
@@ -37,19 +37,22 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
 
 
 def Fly_CopyAtomTypeInterface : TypeInterface<"CopyAtomTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "Attribute", "getThrSize", (ins)>,
-    InterfaceMethod<"", "Attribute", "getThrValLayoutSrc", (ins)>,
-    InterfaceMethod<"", "Attribute", "getThrValLayoutDst", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutSrc", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutDst", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutRef", (ins)>
   ];
 }
 
 def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "Attribute", "getThrSize", (ins)>,
-    InterfaceMethod<"", "Attribute", "getThrValLayoutA", (ins)>,
-    InterfaceMethod<"", "Attribute", "getThrValLayoutB", (ins)>,
-    InterfaceMethod<"", "Attribute", "getThrValLayoutC", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>
   ];
 }
 

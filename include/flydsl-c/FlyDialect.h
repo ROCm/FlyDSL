@@ -1,5 +1,5 @@
-#ifndef FLYDSL_C_DIALECTS_H
-#define FLYDSL_C_DIALECTS_H
+#ifndef FLYDSL_C_FLYDIALECT_H
+#define FLYDSL_C_FLYDIALECT_H
 
 #include "mlir-c/IR.h"
 
@@ -13,4 +13,4 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Fly, fly);
 }
 #endif
 
-#endif // FLYDSL_C_DIALECTS_H
+#endif // FLYDSL_C_FLYDIALECT_H
