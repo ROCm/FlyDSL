@@ -3,7 +3,9 @@ from flydsl import lang as fx
 
 M = 16
 N = 32
-memrefTy = fx.ir.Type.parse(f"!fly.memref<f32, global, (16,32):(1,16)>")
+memrefTy = fx.MemRefType.get(
+    fx.T.f32(), fx.LayoutType.get(16, 32), fx.AddressSpace.Global
+)
 
 
 class VecCopy(fx.MlirModule):
