@@ -35,6 +35,54 @@ from kernels.mfma_preshuffle_pipeline import (
 from kernels.mfma_epilogues import mfma_epilog
 
 
+def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
+    """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
+    
+    This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
+    attribute to gpu.func operations marked as kernels.
+    
+    Args:
+        mlir_module: MLIR module containing GPU kernels
+        waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
+    """
+    if waves_per_eu is None:
+        return
+    
+    w = int(waves_per_eu)
+    if w < 1:
+        raise ValueError(f"waves_per_eu must be >= 1, got {w}")
+    
+    # Create the attribute string for AMDGPU backend
+    waves_attr = ir.StringAttr.get(f"amdgpu-waves-per-eu={w},{w}")
+    
+    try:
+        # Navigate MLIR module structure: module -> gpu.module -> gpu.func
+        for op in mlir_module.body.operations:
+            # Look for gpu.module operations
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            
+            # Within gpu.module, find gpu.func operations with gpu.kernel attribute
+            for inner_op in op.body.blocks[0].operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
+                    continue
+                
+                # Only apply to kernel functions (not device functions)
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                
+                # Add or append to the 'rocdl.waves_per_eu' attribute
+                # This attribute is read by the ROCDL conversion pass
+                inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                    ir.IntegerType.get_signless(32), w
+                )
+    except Exception as e:
+        # Best-effort: if attribute injection fails, log and continue
+        # This prevents breaking existing functionality
+        import warnings
+        warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
+
+
 def compile_preshuffle_gemm_a8(
     *,
     M: int,
@@ -47,6 +95,10 @@ def compile_preshuffle_gemm_a8(
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = False,
+    # Threadblock swizzling
+    swizzle_log: int = 0,
+    # Occupancy control
+    waves_per_eu: int = None,
 ):
     """Compile the preshuffle GEMM kernel and return the compiled executable.
 
@@ -60,6 +112,18 @@ def compile_preshuffle_gemm_a8(
         lds_stage: 
           - 2: ping-pong LDS for A (2 LDS buffers), tuned schedule (original).
           - 1: single LDS buffer for A .
+        use_cshuffle_epilog: Enable cross-shuffle epilogue for better cache behavior.
+        swizzle_log: Log2 of the swizzle size for threadblock remapping.
+          - 0: No swizzling (default, linear block mapping)
+          - 1: 2x2 tile swizzle
+          - 2: 4x4 tile swizzle
+          - 3: 8x8 tile swizzle, etc.
+          Higher values improve L2 cache locality for large GEMMs.
+        waves_per_eu: Number of wavefronts per execution unit (occupancy hint).
+          - None: No hint, use default occupancy (default)
+          - 1-4: Limit occupancy to improve register/LDS availability per wave
+          Higher values increase latency hiding but reduce per-wave resources.
+          Common values: 1 (max resources), 2 (balanced), 4 (max occupancy).
     """
     if in_dtype not in ("fp8", "int8", "int4"):
         raise ValueError(f"in_dtype must be 'fp8', 'int8', or 'int4', got {in_dtype!r}")
@@ -204,6 +268,44 @@ def compile_preshuffle_gemm_a8(
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
             by = gpu.block_id("y")
+
+            # Threadblock swizzling: remap (bx, by) to improve L2 cache locality
+            # Standard pattern: divide grid into tiles of size (swizzle_size x swizzle_size)
+            # and traverse tiles in a more cache-friendly order.
+            if swizzle_log > 0:
+                swizzle_size = arith.constant(1 << swizzle_log, index=True)
+                
+                # Compute grid dimensions (needed for swizzle math)
+                tile_m_const = arith.constant(tile_m, index=True)
+                tile_n_const = arith.constant(tile_n, index=True)
+                one_idx = arith.constant(1, index=True)
+                
+                # grid_x = ceildiv(M, tile_m), grid_y = N / tile_n
+                grid_x = (c_m + tile_m_const - one_idx) / tile_m_const
+                grid_y = c_n / tile_n_const
+                
+                # Linear block ID
+                linear_blk_id = by * grid_x + bx
+                
+                # Swizzle pattern: tile the grid into (swizzle_size x swizzle_size) blocks
+                # Each "super-tile" contains swizzle_size^2 blocks arranged for better locality
+                blocks_per_tile = swizzle_size * swizzle_size
+                tile_id = linear_blk_id / blocks_per_tile
+                in_tile_id = linear_blk_id % blocks_per_tile
+                
+                # Within each tile: map linear ID to 2D using row-major order
+                tile_x = in_tile_id % swizzle_size
+                tile_y = in_tile_id / swizzle_size
+                
+                # Compute which super-tile we're in (in 2D grid of super-tiles)
+                swizzled_grid_x = (grid_x + swizzle_size - one_idx) / swizzle_size
+                super_tile_x = tile_id % swizzled_grid_x
+                super_tile_y = tile_id / swizzled_grid_x
+                
+                # Final swizzled block coordinates
+                bx = super_tile_x * swizzle_size + tile_x
+                by = super_tile_y * swizzle_size + tile_y
+
 
             base_ptr, base_ptr1 = allocator_pong.get_base(), allocator_ping.get_base()
             
@@ -1068,6 +1170,11 @@ def compile_preshuffle_gemm_a8(
             )
 
     m = _GEMM()
+    
+    # Apply waves_per_eu hint if specified (before final compilation)
+    if waves_per_eu is not None:
+        _apply_waves_per_eu_hint(m.module, waves_per_eu)
+    
     return flydsl.compile(
         m,
         use_bare_ptr_memref_call_conv=False,
