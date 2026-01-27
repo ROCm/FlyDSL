@@ -16,10 +16,8 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyEnums.h.inc"
 
-namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyAttrInterfaces.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeInterfaces.h.inc"
-} // namespace mlir::fly
 
 #define GET_ATTRDEF_CLASSES
 #include "flydsl/Dialect/Fly/IR/FlyAttrDefs.h.inc"

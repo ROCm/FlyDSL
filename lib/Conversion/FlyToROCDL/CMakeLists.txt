@@ -3,18 +3,16 @@ add_mlir_conversion_library(MLIRFlyToROCDL
 
   DEPENDS
   MLIRFlyIncGen
+  MLIRFlyROCDLIncGen
   FlyConversionPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRFlyDialect
+  MLIRFlyROCDLDialect
   
-  MLIRAffineDialect
-  MLIRAffineTransforms
-  MLIRAffineUtils
   MLIRArithDialect
   MLIRIR
   MLIRLLVMDialect
-  MLIRMemRefDialect
   MLIRPass
   MLIRSCFDialect
   MLIRTransforms

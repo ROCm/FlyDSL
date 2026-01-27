@@ -20,14 +20,14 @@ class MmaAtom(fx.MlirModule):
         B: ABMemRefTy,
         C: CMemRefTy,
     ):
-        tid = fx.arith.IndexCastOp(fx.T.i32(), fx.thread_idx.x)
+        tid = fx.arith.index_cast(fx.T.i32(), fx.thread_idx.x)
 
         rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
         rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
 
-        copyAtom = fx.make_atom(fx.ir.Type.parse("!fly.atom.universal_copy_32b"))
+        copyAtom = fx.make_atom(fx.ir.Type.parse("!fly.atom.universal_copy<32>"))
         mmaAtom = fx.make_atom(
-            fx.ir.Type.parse("!fly.atom.amdgpu.mfma.f32.16x16x4f32")
+            fx.ir.Type.parse("!fly_rocdl.atom.cdna3.mfma<16x16x16, f32 x f32 = f32>")
         )
 
         tA = fx.logical_divide(A, fx.make_layout(1, 1))
@@ -74,9 +74,9 @@ class MmaAtom(fx.MlirModule):
 MmaAtom_Module = MmaAtom()
 print(MmaAtom_Module)
 
-MmaAtom_Executor = flydsl.compile(MmaAtom_Module, print_after_all=True)
-MmaAtom_Asm = flydsl.compile(MmaAtom_Module, output_format="assembly")
-print(MmaAtom_Asm)
+MmaAtom_Executor = flydsl.compile(MmaAtom_Module, print_after_all=False)
+# MmaAtom_Asm = flydsl.compile(MmaAtom_Module, output_format="assembly")
+# print(MmaAtom_Asm)
 
 import torch
 

@@ -3,8 +3,8 @@
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 
 #include "flydsl-c/FlyDialect.h"
+#include "flydsl-c/FlyROCDLDialect.h"
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
-#include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
 
 namespace mlir {
@@ -20,6 +20,8 @@ NB_MODULE(_mlirRegisterEverything, m) {
 
     MlirDialectHandle flyHandle = mlirGetDialectHandle__fly__();
     mlirDialectHandleInsertDialect(flyHandle, registry);
+    MlirDialectHandle flyROCDLHandle = mlirGetDialectHandle__fly_rocdl__();
+    mlirDialectHandleInsertDialect(flyROCDLHandle, registry);
   });
   m.def("register_llvm_translations",
         [](MlirContext context) { mlirRegisterAllLLVMTranslations(context); });
