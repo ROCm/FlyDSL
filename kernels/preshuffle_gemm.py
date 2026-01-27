@@ -83,7 +83,8 @@ def compile_preshuffle_gemm_a8(
             )
 
     gpu_arch = get_hip_arch()
-    allocator = SmemAllocator(None, arch=gpu_arch)
+    allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_pong")
+    allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_ping")
     _state = {}
 
     # Default-on: cross-tile (tile_k) A0 LDS prefetch in the ping-pong pipeline (lds_stage=2).
@@ -148,14 +149,15 @@ def compile_preshuffle_gemm_a8(
                 # Separate ping/pong buffers for no-alias guarantee
                 # Size each buffer to fit max(A_tile, CShuffle_output) to enable reuse
                 buffer_size = max(lds_tile_bytes, lds_out_bytes)
-                _state["lds_a_pong"] = allocator.allocate_array(T.i8, buffer_size)
-                _state["lds_a_ping"] = allocator.allocate_array(T.i8, buffer_size)
+                _state["lds_a_pong"] = allocator_pong.allocate_array(T.i8, buffer_size)
+                _state["lds_a_ping"] = allocator_ping.allocate_array(T.i8, buffer_size)
             else:
                 # Single buffer for 1-stage pipeline
                 lds_total_bytes = max(lds_tile_bytes, lds_out_bytes)
-                _state["lds_a_decl"] = allocator.allocate_array(_elem_type(), lds_total_bytes)
+                _state["lds_a_decl"] = allocator_pong.allocate_array(_elem_type(), lds_total_bytes)
             
-            allocator.finalize()
+            allocator_pong.finalize()
+            allocator_ping.finalize()
 
         @flir.kernel
         def kernel_gemm(
@@ -203,19 +205,19 @@ def compile_preshuffle_gemm_a8(
             bx = gpu.block_id("x")
             by = gpu.block_id("y")
 
-            base_ptr = allocator.get_base()
+            base_ptr, base_ptr1 = allocator_pong.get_base(), allocator_ping.get_base()
             
             # Get LDS pointers based on pipeline stage
             if lds_stage == 2:
                 # Separate ping/pong buffers - compiler knows they don't alias!
                 lds_a_pong_ptr = _state["lds_a_pong"](base_ptr)
-                lds_a_ping_ptr = _state["lds_a_ping"](base_ptr)
+                lds_a_ping_ptr = _state["lds_a_ping"](base_ptr1)
                 
                 # View as fp8/int8 arrays for A tiles
                 # The buffer size is max(tile_bytes, out_bytes) but we just need tile_m*tile_k elements
                 lds_a_pong = SmemPtr(base_ptr, lds_a_pong_ptr.byte_offset, _elem_type(), 
                                      shape=(tile_m * tile_k,)).get()
-                lds_a_ping = SmemPtr(base_ptr, lds_a_ping_ptr.byte_offset, _elem_type(), 
+                lds_a_ping = SmemPtr(base_ptr1, lds_a_ping_ptr.byte_offset, _elem_type(), 
                                      shape=(tile_m * tile_k,)).get()
                 
                 # CShuffle output buffer: REUSE pong buffer (A tiles are dead after mainloop)
@@ -833,39 +835,43 @@ def compile_preshuffle_gemm_a8(
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # DS-read preload (CK default is 2).
-                rocdl.sched_dsrd(2)
-                rocdl.sched_mfma(1)
-                if tile_m == 16:
-                    rocdl.sched_vmem(1)
-                rocdl.sched_mfma(1)
-                if tile_m == 16:
-                    rocdl.sched_vmem(1)
-                if num_acc_n < 4:
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-                    if tile_m == 16:
-                        rocdl.sched_vmem(1)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(1)
-                    if tile_m == 16:
-                        rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(1)
+                # # DS-read preload (CK default is 2).
+                # rocdl.sched_dsrd(2)
+                # rocdl.sched_mfma(1)
+                # if tile_m == 16:
+                #     rocdl.sched_vmem(1)
+                # rocdl.sched_mfma(1)
+                # if tile_m == 16:
+                #     rocdl.sched_vmem(1)
+                # if num_acc_n < 4:
+                #     rocdl.sched_dsrd(1)
+                #     rocdl.sched_mfma(1)
+                #     if tile_m == 16:
+                #         rocdl.sched_vmem(1)
+                #     rocdl.sched_dsrd(1)
+                #     rocdl.sched_mfma(1)
+                #     if tile_m == 16:
+                #         rocdl.sched_vmem(1)
+                #     rocdl.sched_mfma(1)
 
-                # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                dswr_tail = num_a_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
+                # # DS-write hints near the end: match total A LDS-store micro-ops per thread.
+                # dswr_tail = num_a_loads
+                # if dswr_tail > sche_iters:
+                #     dswr_tail = sche_iters
+                # dswr_start = sche_iters - dswr_tail
 
+                # flir.print("hot_loop_scheduler: mfma_total=%d, sche_iters=%d\n", mfma_total, sche_iters)
                 for sche_i in range_constexpr(sche_iters):
                     rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
-                        rocdl.sched_dswr(1)
-
+                    # rocdl.sched_dsrd(2)
+                    for _ in range_constexpr(mfma_group):
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(1)
+                    for _ in range_constexpr(mfma_group):
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(1)
+                    # if sche_i >= dswr_start - 1:
+                    #     rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
@@ -909,7 +915,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_pong = None
 
-                        hot_loop_scheduler()
+                        # hot_loop_scheduler()
                         gpu.barrier()
 
                         # Cross-tile prefetch for the ping tile we are about to compute.
@@ -924,7 +930,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_ping = None
 
-                        hot_loop_scheduler()
+                        # hot_loop_scheduler()
                         gpu.barrier()
 
                         # Cross-tile prefetch for the next pong tile.
@@ -948,12 +954,11 @@ def compile_preshuffle_gemm_a8(
                             accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong
                         )
                         a0_prefetch_pong = None
-
-                        hot_loop_scheduler()
+                        # hot_loop_scheduler()
                         gpu.barrier()
 
                         a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
-
+                        
                         next_k2 = k_iv + tile_k * 2
                         prefetch_a_to_lds(next_k2, lds_a_pong)
                         b_tile_pong = load_b_tile(next_k2)
@@ -963,7 +968,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_ping = None
 
-                        hot_loop_scheduler()
+                        # hot_loop_scheduler()
                         gpu.barrier()
 
                         a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
