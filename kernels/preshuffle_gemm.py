@@ -52,30 +52,32 @@ def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
     if w < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {w}")
     
-    # Create the attribute string for AMDGPU backend
-    waves_attr = ir.StringAttr.get(f"amdgpu-waves-per-eu={w},{w}")
-    
     try:
-        # Navigate MLIR module structure: module -> gpu.module -> gpu.func
-        for op in mlir_module.body.operations:
-            # Look for gpu.module operations
-            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
-                continue
-            
-            # Within gpu.module, find gpu.func operations with gpu.kernel attribute
-            for inner_op in op.body.blocks[0].operations:
-                if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
+        # Get the context from the module
+        with mlir_module.context:
+            # Navigate MLIR module structure: module -> gpu.module -> gpu.func
+            for op in mlir_module.body.operations:
+                # Look for gpu.module operations
+                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
                     continue
                 
-                # Only apply to kernel functions (not device functions)
-                if "gpu.kernel" not in inner_op.attributes:
-                    continue
+                # gpu.module has a single region with a single block
+                gpu_module_region = op.regions[0]
                 
-                # Add or append to the 'rocdl.waves_per_eu' attribute
-                # This attribute is read by the ROCDL conversion pass
-                inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                    ir.IntegerType.get_signless(32), w
-                )
+                # Within gpu.module, find gpu.func operations with gpu.kernel attribute
+                for inner_op in gpu_module_region.blocks[0].operations:
+                    if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
+                        continue
+                    
+                    # Only apply to kernel functions (not device functions)
+                    if "gpu.kernel" not in inner_op.attributes:
+                        continue
+                    
+                    # Add or append to the 'rocdl.waves_per_eu' attribute
+                    # This attribute is read by the ROCDL conversion pass
+                    inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                        ir.IntegerType.get_signless(32), w
+                    )
     except Exception as e:
         # Best-effort: if attribute injection fails, log and continue
         # This prevents breaking existing functionality
