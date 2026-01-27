@@ -48,7 +48,7 @@ class KernelModuleCompiler:
         Returns:
             Complete assembly text ready for assembler
         """
-        from wave_lang.support.ir_imports import Context, Module, func_d, MemRefType
+        from .ir_imports import Context, Module, MemRefType, func_d, gpu_d, arith_d
         from .mlir_walker import IRWalker
         from .metadata_emitter import MetadataEmitter, create_metadata
         from .mlir_analysis import (
@@ -76,24 +76,80 @@ class KernelModuleCompiler:
                 return True
             return False
 
-        def _validate_kernargs_for_preloading(fn, kernel_name: str) -> None:
-            """Validate that all kernel arguments are 64-bit pointer-like types.
+        def _can_preload_kernargs(fn, kernel_name: str) -> bool:
+            """Return True if all kernel arguments are 64-bit pointer-like.
 
             Kernel argument preloading assumes all args are 64-bit pointers
-            (2 SGPRs each). Raises ValueError if any argument doesn't meet this.
+            (2 SGPRs each). GPU-dialect frontends may include scalar parameters,
+            in which case preloading must be disabled.
 
             Accepted types: MemRefType, !stream.binding
             Rejected types: scalars (i32, f32, i64, f64, etc.)
             """
-            for i, arg in enumerate(fn.entry_block.arguments):
+            entry_block = (
+                fn.entry_block
+                if hasattr(fn, "entry_block")
+                else fn.operation.regions[0].blocks[0]
+            )
+            for _i, arg in enumerate(entry_block.arguments):
                 if not _is_64bit_pointer_type(arg.type):
-                    raise ValueError(
-                        f"Kernel argument preloading requires all arguments to be "
-                        f"64-bit pointers (MemRefType or stream.binding). Argument "
-                        f"{i} of kernel '{kernel_name}' has type {arg.type}. Either "
-                        f"target a non-gfx95* architecture or ensure all arguments "
-                        f"are memory references."
-                    )
+                    return False
+            return True
+
+        def _attrs_to_dict(attrs):
+            return {a.name: a.attr for a in attrs}
+
+        def _try_eval_index_const(v) -> Optional[int]:
+            # Best-effort: resolve `arith.constant` to Python int.
+            try:
+                if v is None or v.owner is None:
+                    return None
+                opv = v.owner.opview
+                if isinstance(opv, arith_d.ConstantOp):
+                    import re
+
+                    m = re.match(r"^-?\d+", str(opv.value).strip())
+                    if m:
+                        return int(m.group(0))
+            except Exception:
+                return None
+            return None
+
+        def _infer_launch_workgroup_sizes(module_op) -> dict[tuple[str, str], tuple[int, int, int]]:
+            """Infer workgroup sizes from `gpu.launch_func` call sites.
+
+            Returns a map keyed by (gpu_module_sym_name, gpu_func_sym_name).
+            """
+            inferred: dict[tuple[str, str], tuple[int, int, int]] = {}
+            for op in walk_ops_recursively(module_op.operation):
+                if not isinstance(op, gpu_d.LaunchFuncOp):
+                    continue
+                attrs = _attrs_to_dict(op.attributes)
+                kernel_attr = attrs.get("kernel", None)
+                if kernel_attr is None:
+                    continue
+                # Printed like: @vec_kernels::@vec_add
+                kernel_ref = str(kernel_attr)
+                if "::" in kernel_ref:
+                    mod_ref, fn_ref = kernel_ref.split("::", 1)
+                else:
+                    mod_ref, fn_ref = "", kernel_ref
+                gpu_mod = mod_ref.lstrip("@")
+                gpu_fn = fn_ref.lstrip("@")
+
+                # Operand order (iree gpu.launch_func):
+                #   0..2: grid sizes (blocks in)
+                #   3..5: block sizes (threads in)
+                #   6.. : kernel operands
+                if len(op.operands) < 6:
+                    continue
+                bx = _try_eval_index_const(op.operands[3])
+                by = _try_eval_index_const(op.operands[4])
+                bz = _try_eval_index_const(op.operands[5])
+                if bx is None:
+                    continue
+                inferred[(gpu_mod, gpu_fn)] = (bx, by or 1, bz or 1)
+            return inferred
 
         all_lines: List[str] = []
 
@@ -101,21 +157,76 @@ class KernelModuleCompiler:
             ctx.allow_unregistered_dialects = True
             module = Module.parse(mlir_text)
 
+            inferred_wg_sizes = _infer_launch_workgroup_sizes(module)
+
             for fn in walk_ops_recursively(module.operation):
-                if not isinstance(fn, func_d.FuncOp):
+                is_func_kernel = isinstance(fn, func_d.FuncOp)
+                is_gpu_kernel = isinstance(fn, gpu_d.GPUFuncOp)
+                if not (is_func_kernel or is_gpu_kernel):
                     continue
 
-                kernel_name = fn.sym_name.value
+                # func.func exposes `sym_name`; gpu.func may only carry it as an
+                # attribute in some bindings.
+                if hasattr(fn, "sym_name") and hasattr(fn.sym_name, "value"):
+                    kernel_name = fn.sym_name.value
+                else:
+                    fn_attrs = _attrs_to_dict(fn.attributes)
+                    sym = fn_attrs.get("sym_name")
+                    if sym is None:
+                        kernel_name = str(fn)
+                    else:
+                        kernel_name = (
+                            sym.value if hasattr(sym, "value") else str(sym).strip('"')
+                        )
 
                 # Skip non-kernel functions (async wrappers, benchmark scaffolding)
                 if should_skip_function(fn):
                     continue
 
-                num_args = len(list(fn.entry_block.arguments))
+                # For `func.func` kernels, require translation_info (Wave/IREE pipeline).
+                # If missing, treat as a wrapper (e.g. a host stub like `__call__`).
+                if is_func_kernel:
+                    fn_attrs = _attrs_to_dict(fn.attributes)
+                    if "translation_info" not in fn_attrs:
+                        continue
 
-                # Extract kernel metadata
-                ti = extract_translation_info(fn)
-                wg_size, subgroup_size = ti.wg_size, ti.subgroup_size
+                # For GPU dialect kernels, require `gpu.kernel` marker.
+                parent_name = ""
+                if is_gpu_kernel:
+                    fn_attrs = _attrs_to_dict(fn.attributes)
+                    if "gpu.kernel" not in fn_attrs:
+                        continue
+                    parent_mod = fn.operation.parent.opview
+                    if isinstance(parent_mod, gpu_d.GPUModuleOp):
+                        parent_name = parent_mod.sym_name.value
+
+                entry_block = (
+                    fn.entry_block
+                    if hasattr(fn, "entry_block")
+                    else fn.operation.regions[0].blocks[0]
+                )
+                num_args = len(list(entry_block.arguments))
+
+                # Extract kernel metadata.
+                #
+                # - For func.func: require translation_info.
+                # - For gpu.func: infer wg_size from launch sites and default subgroup_size=64.
+                if is_gpu_kernel:
+                    wg_size = inferred_wg_sizes.get((parent_name, kernel_name))
+                    if wg_size is None:
+                        # Fallback: match by function name only.
+                        for (_mod_name, fn_name), wgs in inferred_wg_sizes.items():
+                            if fn_name == kernel_name:
+                                wg_size = wgs
+                                break
+                    if wg_size is None and len(inferred_wg_sizes) == 1:
+                        wg_size = next(iter(inferred_wg_sizes.values()))
+                    if wg_size is None:
+                        wg_size = (256, 1, 1)
+                    subgroup_size = 64
+                else:
+                    ti = extract_translation_info(fn)
+                    wg_size, subgroup_size = ti.wg_size, ti.subgroup_size
 
                 # Detect workgroup ID needs
                 needs_wgid_x, needs_wgid_y, needs_wgid_z = detect_needed_workgroup_ids(
@@ -150,10 +261,9 @@ class KernelModuleCompiler:
                 target_supports_preload = self.targetid.startswith("gfx95")
                 use_preloading = target_supports_preload and codeobj_version >= 5
 
-                # Validate that all kernel args are 64-bit pointers (MemRefType)
-                # before enabling preloading. This enforces the 2-SGPRs-per-arg assumption.
-                if use_preloading:
-                    _validate_kernargs_for_preloading(fn, kernel_name)
+                # Only enable preloading when all args are pointer-like.
+                if use_preloading and not _can_preload_kernargs(fn, kernel_name):
+                    use_preloading = False
 
                 # Maximum preloadable: 16 SGPRs = 8 pointer args (hardware limit)
                 MAX_PRELOAD_SGPRS = 16

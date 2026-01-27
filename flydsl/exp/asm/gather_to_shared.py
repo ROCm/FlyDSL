@@ -19,7 +19,7 @@ from typing import List, Optional, Any, Tuple, TYPE_CHECKING
 
 import sympy
 
-from wave_lang.support.ir_imports import amdgpu_d, MemRefType, VectorType
+from .ir_imports import amdgpu_d, MemRefType, VectorType
 
 # Instruction classes removed - using unified emitter
 from .utils import parse_vector_type_from_obj, parse_memref_type_from_obj
@@ -70,7 +70,7 @@ def analyze_g2s_region(ops: List[Any]) -> Optional[G2SSchedule]:
     first_g2s_idx = None
 
     for i, op in enumerate(ops):
-        if isinstance(op, amdgpu_d.GatherToLDSOp):
+        if hasattr(amdgpu_d, "GatherToLDSOp") and isinstance(op, amdgpu_d.GatherToLDSOp):
             if first_g2s_idx is None:
                 first_g2s_idx = i
             g2s_ops.append(op)
@@ -422,9 +422,7 @@ class G2SHandler:
     # Main handler
     # -------------------------------------------------------------------------
 
-    def handle_gather_to_lds_op(
-        self, operation: amdgpu_d.GatherToLDSOp, kernel_info: "KernelInfo"
-    ):
+    def handle_gather_to_lds_op(self, operation, kernel_info: "KernelInfo"):
         """Handle amdgpu.gather_to_lds - gather from global memory directly to LDS."""
         # Parse transfer type
         transfer_type = operation.attributes["transferType"].value

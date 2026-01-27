@@ -4,14 +4,12 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+from __future__ import annotations
+
 import operator
 
 import sympy
-from wave_lang.support.ir_imports import (
-    affine_d,
-    arith_d,
-    gpu_d,
-)
+from .ir_imports import affine_d, arith_d, gpu_d
 
 from .handlers_shared import *
 from .kernel_ir import KSReg
@@ -23,24 +21,17 @@ class _ArithAffineHandlers:
     def handle_arith_constant_op(
         self, operation: arith_d.ConstantOp, kernel_info: KernelInfo
     ):
-        """Handle arith.constant operations - extract constant values for index environment."""
-        # Extract integer constants for the index environment
-        # Skip non-integer constants (floats, vectors, etc.) without error
-        value_attribute = operation.value
-        if not hasattr(value_attribute, "value"):
-            return
+        """Handle arith.constant operations - extract constant values for index environment.
 
-        value = value_attribute.value
-        # Only store if it's an integer or can be safely converted to one
-        if isinstance(value, int):
-            kernel_info.index_env[str(operation.result)] = value
-        elif (
-            hasattr(value, "is_integer")
-            and callable(value.is_integer)
-            and value.is_integer()
-        ):
-            # Handle float-like types that represent exact integers
-            kernel_info.index_env[str(operation.result)] = int(value)
+        In some iree-compiler builds, `arith.constant` carries a generic
+        `Attribute` without typed accessors, so parse from its string form.
+        """
+        import re
+
+        m = re.match(r"^-?\d+", str(operation.value).strip())
+        if not m:
+            return
+        kernel_info.index_env[ssa(operation.result)] = int(m.group(0))
 
     def _handle_arith_binop(self, operation, kernel_info: KernelInfo, op_func):
         """Handle binary arithmetic operations (addi, muli) in index_env.
@@ -50,21 +41,26 @@ class _ArithAffineHandlers:
             kernel_info: Kernel info containing index_env
             op_func: Binary function to apply (e.g., operator.add, operator.mul)
         """
-        lhs = kernel_info.index_env.get(str(operation.operands[0]))
-        rhs = kernel_info.index_env.get(str(operation.operands[1]))
+        lhs = kernel_info.index_env.get(ssa(operation.operands[0]))
+        rhs = kernel_info.index_env.get(ssa(operation.operands[1]))
 
         # Operands not tracked - can't compute result
         if lhs is None or rhs is None:
             return
 
-        # Convert symbolic strings (tid_x, wgid_x, etc.) to SymPy symbols
+        # Convert symbolic strings (tid_x, wgid_x, etc.) and loop counters (KSReg)
+        # to SymPy symbols.
         if isinstance(lhs, str):
             lhs = sympy.Symbol(lhs)
+        if isinstance(lhs, KSReg):
+            lhs = sympy.Symbol(f"ks{lhs.id}", nonnegative=True)
         if isinstance(rhs, str):
             rhs = sympy.Symbol(rhs)
+        if isinstance(rhs, KSReg):
+            rhs = sympy.Symbol(f"ks{rhs.id}", nonnegative=True)
 
         if isinstance(lhs, (int, sympy.Expr)) and isinstance(rhs, (int, sympy.Expr)):
-            kernel_info.index_env[str(operation.result)] = op_func(lhs, rhs)
+            kernel_info.index_env[ssa(operation.result)] = op_func(lhs, rhs)
 
     def handle_arith_addi_op(self, operation: arith_d.AddIOp, kernel_info: KernelInfo):
         """Handle arith.addi - track integer addition in index_env."""
@@ -74,6 +70,31 @@ class _ArithAffineHandlers:
         """Handle arith.muli - track integer multiplication in index_env."""
         self._handle_arith_binop(operation, kernel_info, operator.mul)
 
+    def handle_arith_remui_op(
+        self, operation: arith_d.RemUIOp, kernel_info: KernelInfo
+    ):
+        """Handle arith.remui for index arithmetic."""
+        lhs = kernel_info.index_env.get(ssa(operation.operands[0]))
+        rhs = kernel_info.index_env.get(ssa(operation.operands[1]))
+        if lhs is None or rhs is None:
+            return
+
+        if isinstance(lhs, str):
+            lhs = sympy.Symbol(lhs, nonnegative=True)
+        if isinstance(lhs, KSReg):
+            lhs = sympy.Symbol(f"ks{lhs.id}", nonnegative=True)
+        if isinstance(rhs, str):
+            rhs = sympy.Symbol(rhs, nonnegative=True)
+        if isinstance(rhs, KSReg):
+            rhs = sympy.Symbol(f"ks{rhs.id}", nonnegative=True)
+
+        if isinstance(rhs, int):
+            kernel_info.index_env[ssa(operation.result)] = sympy.Mod(
+                lhs, sympy.Integer(rhs)
+            )
+        else:
+            kernel_info.index_env[ssa(operation.result)] = sympy.Mod(lhs, rhs)
+
     def handle_arith_index_cast_op(
         self, operation: arith_d.IndexCastOp, kernel_info: KernelInfo
     ):
@@ -81,8 +102,8 @@ class _ArithAffineHandlers:
 
         Propagates integers, SymPy expressions, and symbolic strings (tid_x, etc.).
         """
-        result_ssa = str(operation.result)
-        src_ssa = str(operation.operands[0])
+        result_ssa = ssa(operation.result)
+        src_ssa = ssa(operation.operands[0])
 
         src_val = kernel_info.index_env.get(src_ssa)
         if src_val is None:
@@ -102,17 +123,17 @@ class _ArithAffineHandlers:
         # Extract dimension from MLIR attribute string like "#gpu<dim x>"
         dimension_string = str(dimension)
         if "dim x" in dimension_string:
-            kernel_info.index_env[str(operation.result)] = "tid_x"
+            kernel_info.index_env[ssa(operation.result)] = "tid_x"
             if upper_bound is not None:
                 kernel_info.tid_ub_x = upper_bound
         elif "dim y" in dimension_string:
-            kernel_info.index_env[str(operation.result)] = "tid_y"
+            kernel_info.index_env[ssa(operation.result)] = "tid_y"
             if upper_bound is not None:
                 kernel_info.tid_ub_y = upper_bound
         elif "dim z" in dimension_string:
             if upper_bound is not None:
                 kernel_info.tid_ub_z = upper_bound
-            kernel_info.index_env[str(operation.result)] = "tid_z"
+            kernel_info.index_env[ssa(operation.result)] = "tid_z"
 
     def handle_gpu_block_id_op(
         self, operation: gpu_d.BlockIdOp, kernel_info: KernelInfo
@@ -129,15 +150,47 @@ class _ArithAffineHandlers:
         dimension_string = str(dimension)
 
         if "dim x" in dimension_string:
-            kernel_info.index_env[str(operation.result)] = "wgid_x"
+            kernel_info.index_env[ssa(operation.result)] = "wgid_x"
         elif "dim y" in dimension_string:
-            kernel_info.index_env[str(operation.result)] = "wgid_y"
+            kernel_info.index_env[ssa(operation.result)] = "wgid_y"
         elif "dim z" in dimension_string:
-            kernel_info.index_env[str(operation.result)] = "wgid_z"
+            kernel_info.index_env[ssa(operation.result)] = "wgid_z"
 
-    def handle_subgroup_broadcast_op(
-        self, operation: gpu_d.SubgroupBroadcastOp, kernel_info: KernelInfo
+    def handle_gpu_block_dim_op(
+        self, operation: gpu_d.BlockDimOp, kernel_info: KernelInfo
     ):
+        """Handle gpu.block_dim by materializing workgroup size constants."""
+        dimension_string = str(operation.dimension)
+        wg_size = getattr(kernel_info, "wg_size", None) or (1, 1, 1)
+        if "dim x" in dimension_string:
+            kernel_info.index_env[ssa(operation.result)] = int(wg_size[0])
+        elif "dim y" in dimension_string:
+            kernel_info.index_env[ssa(operation.result)] = int(wg_size[1])
+        elif "dim z" in dimension_string:
+            kernel_info.index_env[ssa(operation.result)] = int(wg_size[2])
+
+    def handle_arith_addf_op(self, operation: arith_d.AddFOp, kernel_info: KernelInfo):
+        """Handle arith.addf for register-backed values (vector lanes)."""
+        ctx = self.walker.kernel_ctx
+        lhs_ssa = ssa(operation.operands[0])
+        rhs_ssa = ssa(operation.operands[1])
+        lhs_regs = ctx.ssa_to_reg.get(lhs_ssa)
+        rhs_regs = ctx.ssa_to_reg.get(rhs_ssa)
+
+        if lhs_regs is None or rhs_regs is None:
+            return
+        if len(lhs_regs) != len(rhs_regs):
+            raise ValueError(
+                f"arith.addf operand register arity mismatch: lhs={len(lhs_regs)} rhs={len(rhs_regs)} "
+                f"(lhs_ssa={lhs_ssa}, rhs_ssa={rhs_ssa})"
+            )
+
+        out_regs = []
+        for a, b in zip(lhs_regs, rhs_regs):
+            out_regs.append(ctx.v_add_f32(a, b, comment="fadd"))
+        ctx.ssa_to_reg[ssa(operation.result)] = tuple(out_regs)
+
+    def handle_subgroup_broadcast_op(self, operation, kernel_info: KernelInfo):
         """Handle gpu.subgroup_broadcast - propagate value for uniform broadcast.
 
         The expression is preserved as-is (not evaluated) because each wavefront

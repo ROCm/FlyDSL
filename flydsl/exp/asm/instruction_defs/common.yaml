@@ -40,6 +40,17 @@ instructions:
       - {name: src1, type: vgpr|sgpr|imm}
     latency: 1
 
+  v_add_f32:
+    mnemonic: v_add_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
   v_sub_u32:
     mnemonic: v_sub_u32
     category: valu

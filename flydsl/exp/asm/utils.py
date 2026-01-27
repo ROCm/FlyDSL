@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import sympy
 
-from wave_lang.support.ir_imports import (
+from .ir_imports import (
     gpu_d,
     VectorType,
     MemRefType,

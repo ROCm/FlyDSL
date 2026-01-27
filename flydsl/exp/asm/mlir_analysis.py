@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Tuple
 
-from wave_lang.support.ir_imports import Operation, func_d, gpu_d, OpAttributeMap
+from .ir_imports import Operation, func_d, gpu_d, OpAttributeMap
 
 from .utils import parse_wg_and_subgroup
 
@@ -51,7 +51,7 @@ _SKIP_FUNCTION_PREFIXES = ("isolated_benchmark",)
 _SKIP_FUNCTION_SUFFIXES = ("$async",)
 
 
-def should_skip_function(fn: func_d.FuncOp) -> bool:
+def should_skip_function(fn) -> bool:
     """
     Return True if this function should not be treated as a kernel.
 
@@ -69,7 +69,21 @@ def should_skip_function(fn: func_d.FuncOp) -> bool:
         If this returns True for your actual kernel function, you will get
         "named symbol not found" or "no kernel image" runtime errors.
     """
-    name = fn.sym_name.value
+    # func.func exposes `sym_name`; gpu.func may not, but still has a `sym_name`
+    # attribute. Be robust across bindings.
+    if hasattr(fn, "sym_name") and hasattr(fn.sym_name, "value"):
+        name = fn.sym_name.value
+    else:
+        attrs = (
+            {a.name: a.attr for a in fn.attributes}
+            if isinstance(getattr(fn, "attributes", None), OpAttributeMap)
+            else {}
+        )
+        sym = attrs.get("sym_name")
+        if sym is None:
+            name = str(fn)
+        else:
+            name = sym.value if hasattr(sym, "value") else str(sym).strip('"')
 
     for prefix in _SKIP_FUNCTION_PREFIXES:
         if name.startswith(prefix):
@@ -133,7 +147,9 @@ def extract_translation_info(
         ValueError: If require_translation_info=True and the attribute is missing.
     """
     function_attributes = (
-        dict(fn.attributes) if isinstance(fn.attributes, OpAttributeMap) else {}
+        {a.name: a.attr for a in fn.attributes}
+        if isinstance(fn.attributes, OpAttributeMap)
+        else {}
     )
     translation_info = function_attributes.get("translation_info")
 

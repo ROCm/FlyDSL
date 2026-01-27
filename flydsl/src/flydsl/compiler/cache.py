@@ -111,6 +111,10 @@ class CachePaths:
     def meta_json(self) -> Path:
         return self.dir / "meta.json"
 
+    @property
+    def hsaco(self) -> Path:
+        return self.dir / "kernel.hsaco"
+
 
 class FileCache:
     def __init__(self, *, key: str):
@@ -165,6 +169,15 @@ class FileCache:
         except Exception:
             return None
 
+    def get_hsaco_bytes(self) -> Optional[bytes]:
+        p = self.paths.hsaco
+        if not p.exists():
+            return None
+        try:
+            return p.read_bytes()
+        except Exception:
+            return None
+
     def put_module_asm(self, asm: str, *, meta: Optional[dict] = None, lock_fd=None) -> None:
         # Atomic write pattern from Triton cache: write to temp dir then replace.
         fd = lock_fd if lock_fd is not None else self._lock_fd()
@@ -176,6 +189,30 @@ class FileCache:
             tmp_mlir = tmp_dir / "module.mlir"
             tmp_mlir.write_text(asm, encoding="utf-8")
             os.replace(str(tmp_mlir), str(self.paths.module_mlir))
+            try:
+                tmp_dir.rmdir()
+            except Exception:
+                pass
+
+            if meta is not None:
+                tmp_meta = tmp_dir / "meta.json"
+                tmp_meta.write_text(json.dumps(meta, sort_keys=True, indent=2), encoding="utf-8")
+                os.replace(str(tmp_meta), str(self.paths.meta_json))
+        finally:
+            if lock_fd is None:
+                self._unlock_fd(fd)
+
+    def put_hsaco_bytes(self, hsaco: bytes, *, meta: Optional[dict] = None, lock_fd=None) -> None:
+        # Atomic write pattern from Triton cache: write to temp dir then replace.
+        fd = lock_fd if lock_fd is not None else self._lock_fd()
+        try:
+            rnd_id = str(uuid.uuid4())
+            pid = os.getpid()
+            tmp_dir = self.paths.dir / f"tmp.pid_{pid}_{rnd_id}"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_hsaco = tmp_dir / "kernel.hsaco"
+            tmp_hsaco.write_bytes(hsaco)
+            os.replace(str(tmp_hsaco), str(self.paths.hsaco))
             try:
                 tmp_dir.rmdir()
             except Exception:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Optional, Sequence, Union
@@ -16,10 +18,16 @@ from flydsl.compiler.context import ensure_flir_python_extensions
 from flydsl.runtime.device import get_rocm_arch
 
 from .executor import default_shared_libs
-from .cache import FileCache, cache_enabled, cache_rebuild_requested, default_key_payload, make_cache_key
+from .cache import (
+    FileCache,
+    cache_enabled,
+    cache_rebuild_requested,
+    default_key_payload,
+    make_cache_key,
+)
 
 if TYPE_CHECKING:
-    from .executor import ExecutionEngineExecutor as Executor
+    from typing import Any as Executor
 
 
 @dataclass(frozen=True)
@@ -28,7 +36,7 @@ class CompileOptions:
     print_final_module: bool = False
     opt_level: int = 3
     shared_libs: Optional[Sequence[str]] = None
-    backend: Literal["execution_engine"] = "execution_engine"
+    backend: Literal["execution_engine", "asm"] = "execution_engine"
 
 
 def _pipeline_fragments(
@@ -199,14 +207,18 @@ def compile(
     print_final_module: bool = False,
     opt_level: int = 3,
     shared_libs: Optional[Sequence[str]] = None,
-    backend: Literal["execution_engine"] = "execution_engine",
+    backend: Literal["execution_engine", "asm"] = "execution_engine",
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
 ) -> Executor:
     """Compile a FLIR module to an Executor.
 
-    Returns an MLIR ExecutionEngine-backed executor.
+    Returns an MLIR ExecutionEngine-backed executor by default.
+
+    Experimental:
+      backend="asm" compiles `gpu.func` kernels via `flydsl.exp.asm` and launches
+      them directly via HIP module APIs (bypassing MLIR ExecutionEngine).
     """
 
     # Accept `flir.lang.MlirModule` instances.
@@ -253,12 +265,16 @@ def compile(
 
     chip = get_rocm_arch()
 
-    pipeline = _build_pipeline_str(
-        chip=chip,
-        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
-        use_bare_pointers_for_host=use_bare_pointers_for_host,
-        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
-    )
+    if backend == "asm":
+        # Minimal pipeline suitable for the ASM backend (keeps gpu.launch_func + gpu.func).
+        pipeline = "builtin.module(flir-to-standard,trivial-dce,canonicalize,cse)"
+    else:
+        pipeline = _build_pipeline_str(
+            chip=chip,
+            use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+            use_bare_pointers_for_host=use_bare_pointers_for_host,
+            use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+        )
 
     with ctx:
         _override_gpu_module_targets(module, chip=chip)
@@ -275,6 +291,7 @@ def compile(
                     pipeline=str(pipeline),
                     input_asm=module.operation.get_asm(enable_debug_info=False),
                 )
+                key_payload["backend"] = str(backend)
                 cache_key = make_cache_key(key_payload)
                 cache = FileCache(key=cache_key)
             except Exception:
@@ -291,12 +308,21 @@ def compile(
                 if cached_asm:
                     try:
                         cached_mod = ir.Module.parse(cached_asm, context=ctx)
-                        if dump_enabled:
-                            print(f"[flir.compile] cache hit key={cache_key}")
-                        from .executor import ExecutionEngineExecutor as Executor
-                        if shared_libs is None:
-                            shared_libs = default_shared_libs().as_list()
-                        return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
+                        if backend == "asm":
+                            hsaco = cache.get_hsaco_bytes()
+                            if hsaco:
+                                from .asm_executor import AsmHipExecutor, build_launch_plan_from_module
+                                if dump_enabled:
+                                    print(f"[flir.compile] asm cache hit key={cache_key}")
+                                plan = build_launch_plan_from_module(cached_mod)
+                                return AsmHipExecutor(hsaco_bytes=hsaco, launch_plan=plan)
+                        else:
+                            if dump_enabled:
+                                print(f"[flir.compile] cache hit key={cache_key}")
+                            from .executor import ExecutionEngineExecutor as Executor
+                            if shared_libs is None:
+                                shared_libs = default_shared_libs().as_list()
+                            return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
                     except Exception:
                         # Treat cache parse failures as misses.
                         pass
@@ -349,6 +375,59 @@ def compile(
                 pm.run(module.operation)
             if print_final_module:
                 print(module)
+
+            # ASM backend: compile to HSACO and return a HIP-launching executor.
+            if backend == "asm":
+                from flydsl.exp.asm import KernelModuleCompiler as _AsmCompiler
+                from .asm_executor import AsmHipExecutor, build_launch_plan_from_module
+
+                out_asm = module.operation.get_asm(enable_debug_info=False)
+                asm_text = _AsmCompiler(targetid=str(chip), codeobj="5").compile_mlir_string(out_asm)
+
+                with tempfile.TemporaryDirectory() as td:
+                    s_path = Path(td) / "kernel.s"
+                    o_path = Path(td) / "kernel.o"
+                    hsaco_path = Path(td) / "kernel.hsaco"
+                    s_path.write_text(asm_text, encoding="utf-8")
+                    subprocess.check_call(
+                        [
+                            "amdclang++",
+                            "-x",
+                            "assembler",
+                            "-target",
+                            "amdgcn-amd-amdhsa",
+                            f"-mcpu={chip}",
+                            "-c",
+                            str(s_path),
+                            "-o",
+                            str(o_path),
+                        ]
+                    )
+                    subprocess.check_call(
+                        [
+                            "amdclang++",
+                            "-target",
+                            "amdgcn-amd-amdhsa",
+                            f"-mcpu={chip}",
+                            str(o_path),
+                            "-o",
+                            str(hsaco_path),
+                        ]
+                    )
+                    hsaco_bytes = hsaco_path.read_bytes()
+
+                # Cache store: keep the post-pipeline MLIR + HSACO.
+                if cache is not None:
+                    try:
+                        cache.put_module_asm(out_asm, meta=key_payload, lock_fd=lock_fd)
+                        cache.put_hsaco_bytes(hsaco_bytes, meta=key_payload, lock_fd=lock_fd)
+                        if dump_enabled:
+                            print(f"[flir.compile] asm cache put key={cache_key}")
+                    except Exception:
+                        pass
+
+                plan = build_launch_plan_from_module(module)
+                return AsmHipExecutor(hsaco_bytes=hsaco_bytes, launch_plan=plan)
 
             # Cache store (post-pipeline, with binary embedded). Reuse the same lock.
             if cache is not None:
