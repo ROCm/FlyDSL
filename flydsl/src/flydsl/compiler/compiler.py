@@ -56,7 +56,7 @@ def _pipeline_fragments(
         "cse",
         "gpu-kernel-outlining{data-layout-str=}",
         "gpu.module(convert-scf-to-cf)",
-        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown "
+        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=HIP "
         + f"use-bare-ptr-memref-call-conv={rocdl_bare_ptr_opt}"
         + "})",
         "gpu.module(reconcile-unrealized-casts)",
