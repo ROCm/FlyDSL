@@ -75,4 +75,18 @@ CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
   return CoordTensorType::get(getContext(), getBase().at(idxs), getLayout().at(idxs));
 }
 
+#include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
+
+Attribute CopyAtomUniversalCopyType::getThrSize() const { return FxC(1); }
+
+Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+Attribute CopyAtomUniversalCopyType::getThrValLayoutDst() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+Attribute CopyAtomUniversalCopyType::getThrValLayoutRef() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+
 } // namespace mlir::fly

@@ -1,5 +1,4 @@
 
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -16,11 +15,9 @@
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-
-#include <mlir/IR/Attributes.h>
-#include <mlir/IR/PatternMatch.h>
-#include <mlir/IR/Value.h>
-#include <mlir/Support/LLVM.h>
+#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
+#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
@@ -31,17 +28,6 @@ using namespace mlir;
 using namespace mlir::fly;
 
 namespace {
-
-// Helper to get the flattened size from an IntTupleAttr (product of all elements)
-static int64_t getFlattenedSize(IntTupleAttr attr) {
-  IntTupleBuilder<IntTupleAttr> builder(attr.getContext());
-  IntAttr product = intTupleProduct(builder, attr).getLeafAsInt();
-  if (product.isStatic())
-    return product.getValue();
-  return 1;
-}
-
-static int64_t getFlattenedSize(LayoutAttr attr) { return getFlattenedSize(attr.getShape()); }
 
 static unsigned mapAddressSpace(AddressSpace space) {
   // - Global   -> 1 (global)
@@ -88,7 +74,10 @@ public:
     LayoutAttr layoutAttr = flyMemRefTy.getLayout();
     auto elemTy = flyMemRefTy.getElemTy();
 
-    int64_t totalSize = getFlattenedSize(layoutAttr);
+    LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
+    IntTupleAttr totalSize = layoutCosize(builder, layoutAttr);
+
+    assert(totalSize.isStatic() && totalSize.isLeaf());
 
     auto convertedPtrTy =
         dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyMemRefTy));
@@ -98,7 +87,9 @@ public:
     auto loc = op.getLoc();
 
     // Alloca array size is i64.
-    Value nElems = arith::ConstantIntOp::create(rewriter, loc, totalSize, /*width=*/64).getResult();
+    Value nElems = arith::ConstantIntOp::create(rewriter, loc, totalSize.getLeafAsInt().getValue(),
+                                                /*width=*/64)
+                       .getResult();
 
     // `llvm.alloca` takes element type and array size. Keep alignment unspecified.
     Value ptr = LLVM::AllocaOp::create(rewriter, loc, convertedPtrTy, elemTy, nElems,
@@ -345,8 +336,8 @@ public:
   LogicalResult matchAndRewrite(CopyAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     // Only handle the universal memref-to-memref copy atom here.
-    if (!isa<CopyAtomUniversalCopy32bType>(adaptor.getCopyAtom().getType()))
-      return rewriter.notifyMatchFailure(op, "unsupported copy atom (expected universal_copy_32b)");
+    if (!isa<CopyAtomUniversalCopyType>(adaptor.getCopyAtom().getType()))
+      return rewriter.notifyMatchFailure(op, "unsupported copy atom (expected universal_copy)");
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
@@ -366,8 +357,10 @@ public:
     if (srcFlyTy.getElemTy() != dstFlyTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
-    int64_t nElems = getFlattenedSize(srcFlyTy.getLayout());
-    if (nElems != getFlattenedSize(dstFlyTy.getLayout()))
+    LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
+    IntTupleAttr totalSize = layoutCosize(builder, srcFlyTy.getLayout());
+
+    if (totalSize != layoutCosize(builder, dstFlyTy.getLayout()))
       return rewriter.notifyMatchFailure(op, "src/dst shapes mismatch");
 
     // Lower to LLVM memcpy intrinsic to keep GPU kernel fully in LLVM dialect
@@ -384,7 +377,7 @@ public:
     if (elemBytes <= 0)
       return rewriter.notifyMatchFailure(op, "invalid element byte width");
 
-    int64_t totalBytes = nElems * elemBytes;
+    int64_t totalBytes = totalSize.getLeafAsInt().getValue() * elemBytes;
     Value len = arith::ConstantIntOp::create(rewriter, loc, totalBytes, /*width=*/64).getResult();
 
     // llvm.intr.memcpy(dst, src, len, isVolatile=false)
@@ -402,8 +395,9 @@ public:
   LogicalResult matchAndRewrite(MmaAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     // Only handle MFMA F32 16x16x4 F32 atom for now.
-    if (!isa<MmaAtomMFMA_F32_16x16x4F32Type>(adaptor.getMmaAtom().getType()))
-      return rewriter.notifyMatchFailure(op, "unsupported mma atom (expected mfma.f32.16x16x4f32)");
+
+    auto mmaAtomTy = dyn_cast<fly::MmaAtomTypeInterface>(adaptor.getMmaAtom().getType());
+    assert(mmaAtomTy);
 
     Location loc = op.getLoc();
 

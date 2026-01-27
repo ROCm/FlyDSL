@@ -189,7 +189,7 @@ typename LayoutBuilder<Layout>::IntTuple layoutCosize(LayoutBuilder<Layout> &bui
   ArithValue one = builder.materializeConstantArith(1);
   ArithValue s = builder.getArithValue(flatShapeLeaves[0]);
   ArithValue d = builder.getArithValue(flatStrideLeaves[0]);
-  ArithValue cosize = builder.mul(builder.sub(s, one), d);
+  ArithValue cosize = builder.add(one, builder.mul(builder.sub(s, one), d));
 
   for (size_t i = 1; i < flatShapeLeaves.size(); ++i) {
     ArithValue s = builder.getArithValue(flatShapeLeaves[i]);
