@@ -16,8 +16,10 @@ class VecCopy(fx.MlirModule):
         A: memrefTy,
         B: memrefTy,
     ):
-        tid = fx.arith.IndexCastOp(fx.T.i32(), fx.thread_idx.x)
-        bid = fx.arith.IndexCastOp(fx.T.i32(), fx.block_idx.x)
+        tid = fx.arith.index_cast(fx.T.i32(), fx.thread_idx.x)
+        bid = fx.arith.index_cast(fx.T.i32(), fx.block_idx.x)
+
+        print(type(tid), tid)
 
         l16 = fx.make_layout(16, 1)
         tile = fx.make_tile([l16, l16])

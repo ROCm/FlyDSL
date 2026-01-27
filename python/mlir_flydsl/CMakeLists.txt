@@ -15,6 +15,15 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
 )
 
+declare_mlir_dialect_python_bindings(
+  ADD_TO_PARENT FlyPythonSources
+  ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/"
+  TD_FILE dialects/FlyROCDL.td
+  SOURCES
+    dialects/fly_rocdl.py
+  DIALECT_NAME fly_rocdl
+  GEN_ENUM_BINDINGS
+)
 
 declare_mlir_python_extension(FlyPythonSources.Core
   MODULE_NAME _fly
@@ -44,6 +53,7 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
     MLIRCPIFly
+    MLIRCPIFlyROCDL
     MLIRCAPIArith
     MLIRCAPIGPU
     MLIRCAPILLVM

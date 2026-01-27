@@ -1,0 +1,61 @@
+// clang-format off
+#define FxVA_NARGS_IMPL(_1, _2, _3, _4, _5, _6, _7, _8, N, ...) N
+#define FxVA_NARGS(...) FxVA_NARGS_IMPL(__VA_ARGS__, 8, 7, 6, 5, 4, 3, 2, 1)
+
+#define FxVA_DISPATCH(MACRO, ...) FxVA_DISPATCH_IMPL(MACRO, FxVA_NARGS(__VA_ARGS__))(__VA_ARGS__)
+#define FxVA_DISPATCH_IMPL(MACRO, N) FxVA_DISPATCH_CONCAT(MACRO, N)
+#define FxVA_DISPATCH_CONCAT(MACRO, N) MACRO##N
+
+#define FxC(val) IntTupleAttr::getLeafStatic(getContext(), val)
+#define FxT_1(a) IntTupleAttr::get(ArrayAttr::get(getContext(), {a}))
+#define FxT_2(a, b) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b}))
+#define FxT_3(a, b, c) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c}))
+#define FxT_4(a, b, c, d) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d}))
+#define FxT_5(a, b, c, d, e) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e}))
+#define FxT_6(a, b, c, d, e, f) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f}))
+#define FxT_7(a, b, c, d, e, f, g) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f, g}))
+#define FxT_8(a, b, c, d, e, f, g, h) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f, g, h}))
+#define FxT(...) FxVA_DISPATCH(FxT_, __VA_ARGS__)
+
+#define FxThr1(a) FxT_1(FxC(a))
+#define FxThr2(a, b) FxT_2(FxC(a), FxC(b))
+#define FxThr3(a, b, c) FxT_3(FxC(a), FxC(b), FxC(c))
+#define FxThr4(a, b, c, d) FxT_4(FxC(a), FxC(b), FxC(c), FxC(d))
+#define FxThr5(a, b, c, d, e) FxT_5(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e))
+#define FxThr6(a, b, c, d, e, f) FxT_6(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f))
+#define FxThr7(a, b, c, d, e, f, g) FxT_7(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f), FxC(g))
+#define FxThr8(a, b, c, d, e, f, g, h) FxT_8(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f), FxC(g), FxC(h))
+#define FxThr(...) FxVA_DISPATCH(FxThr, __VA_ARGS__)
+
+#define FxVal1(a) FxT_1(FxC(a))
+#define FxVal2(a, b) FxT_2(FxC(a), FxC(b))
+#define FxVal3(a, b, c) FxT_3(FxC(a), FxC(b), FxC(c))
+#define FxVal4(a, b, c, d) FxT_4(FxC(a), FxC(b), FxC(c), FxC(d))
+#define FxVal5(a, b, c, d, e) FxT_5(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e))
+#define FxVal6(a, b, c, d, e, f) FxT_6(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f))
+#define FxVal7(a, b, c, d, e, f, g) FxT_7(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f), FxC(g))
+#define FxVal8(a, b, c, d, e, f, g, h) FxT_8(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f), FxC(g), FxC(h))
+#define FxVal(...) FxVA_DISPATCH(FxVal, __VA_ARGS__)
+
+#define FxShape1(a) FxC(a)
+#define FxShape2(a, b) FxT_2(a, b)
+#define FxShape3(a, b, c) FxT_3(a, b, c)
+#define FxShape4(a, b, c, d) FxT_4(a, b, c, d)
+#define FxShape5(a, b, c, d, e) FxT_5(a, b, c, d, e)
+#define FxShape6(a, b, c, d, e, f) FxT_6(a, b, c, d, e, f)
+#define FxShape7(a, b, c, d, e, f, g) FxT_7(a, b, c, d, e, f, g)
+#define FxShape8(a, b, c, d, e, f, g, h) FxT_8(a, b, c, d, e, f, g, h)
+#define FxShape(...) FxVA_DISPATCH(FxShape, __VA_ARGS__)
+
+#define FxStride1(a) FxC(a)
+#define FxStride2(a, b) FxT_2(a, b)
+#define FxStride3(a, b, c) FxT_3(a, b, c)
+#define FxStride4(a, b, c, d) FxT_4(a, b, c, d)
+#define FxStride5(a, b, c, d, e) FxT_5(a, b, c, d, e)
+#define FxStride6(a, b, c, d, e, f) FxT_6(a, b, c, d, e, f)
+#define FxStride7(a, b, c, d, e, f, g) FxT_7(a, b, c, d, e, f, g)
+#define FxStride8(a, b, c, d, e, f, g, h) FxT_8(a, b, c, d, e, f, g, h)
+#define FxStride(...) FxVA_DISPATCH(FxStride, __VA_ARGS__)
+
+#define FxLayout(shape, stride) LayoutAttr::get(shape, stride)
+// clang-format on

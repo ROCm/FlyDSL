@@ -187,10 +187,14 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
   let assemblyFormat = "`<` $mmaAtom `,` $atomLayout `,` $permutation `>`";
 }
 
+def Fly_CopyAtomUniversalCopy : Fly_Type<"CopyAtomUniversalCopy", "atom.universal_copy", [
+  DeclareTypeInterfaceMethods<Fly_CopyAtomTypeInterface>
+]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+}
 
-def Fly_CopyAtomGlobalLoad4B : Fly_Type<"CopyAtomGlobalLoad4B", "atom.global_load_4B", []> {}
-def Fly_CopyAtomUniversalCopy32b : Fly_Type<"CopyAtomUniversalCopy32b", "atom.universal_copy_32b", []> {}
-
-def Fly_MmaAtomMFMA_F32_16x16x4F32 : Fly_Type<"MmaAtomMFMA_F32_16x16x4F32", "atom.amdgpu.mfma.f32.16x16x4f32", []> {}
 
 #endif // FLY_TYPEDEFS
