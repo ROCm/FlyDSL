@@ -1489,9 +1489,18 @@ def compile_moe_gemm2_no_atomic_with_reduce(
                 torch.cuda.synchronize()
             reduce_us = self._get_cuda_time_from_profiler(prof) / num_iters
             
+            # Calculate reduce bandwidth
+            # Read: X [tokens, topk, model_dim] in f16
+            # Write: Y [tokens, model_dim] in f16
+            elem_bytes = X.element_size()  # 2 for f16
+            read_bytes = tokens * self._topk * self._model_dim * elem_bytes
+            write_bytes = tokens * self._model_dim * elem_bytes
+            total_bytes = read_bytes + write_bytes
+            reduce_bw_tb_s = (total_bytes / 2**40) / (reduce_us / 1e6)  # TB/s
+            
             print(f"[no_atomic_reduce profile] iters={num_iters}, warmup={num_warmup}")
             print(f"  kernel:  {kernel_us:.1f} us ({100*kernel_us/total_us:.1f}%)")
-            print(f"  reduce:  {reduce_us:.1f} us ({100*reduce_us/total_us:.1f}%)")
+            print(f"  reduce:  {reduce_us:.1f} us ({100*reduce_us/total_us:.1f}%), {reduce_bw_tb_s:.2f} TB/s")
             print(f"  total:   {total_us:.1f} us")
 
         def reset_profile_stats(self):
