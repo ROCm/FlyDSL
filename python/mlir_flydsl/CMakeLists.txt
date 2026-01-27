@@ -25,21 +25,29 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
 )
 
-declare_mlir_python_extension(FlyPythonSources.Core
+declare_mlir_python_extension(FlyPythonSources.Core.fly
   MODULE_NAME _fly
   ADD_TO_PARENT FlyPythonSources
   ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
-    MainModules.cpp
+    FlyExtension.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
     MLIRFlyDialect
-  EMBED_CAPI_LINK_LIBS
-    MLIRCAPIIR
 )
 
-
+declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
+  MODULE_NAME _fly_rocdl
+  ADD_TO_PARENT FlyPythonSources
+  ROOT_DIR "${PROJECT_SOURCE_DIR}/lib/Bindings/Python"
+  PYTHON_BINDINGS_LIBRARY nanobind
+  SOURCES
+    FlyROCDLExtension.cpp
+  PRIVATE_LINK_LIBS
+    LLVMSupport
+    MLIRFlyROCDLDialect
+)
 
 declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   MODULE_NAME _mlirRegisterEverything
@@ -92,33 +100,9 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
 
 set(FlyPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
-# set(_core_type_stub_sources
-#   _mlir/__init__.pyi
-#   _mlir/ir.pyi
-#   _mlir/passmanager.pyi
-#   _mlir/rewrite.pyi
-# )
-# get_target_property(_core_extension_srcs MLIRPythonExtension.Core INTERFACE_SOURCES)
-# mlir_generate_type_stubs(
-#   MODULE_NAME _mlir
-#   DEPENDS_TARGETS FlyPythonModules.extension._mlir.dso
-#   OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs/_mlir_libs"
-#   OUTPUTS "${_core_type_stub_sources}"
-#   DEPENDS_TARGET_SRC_DEPS "${_core_extension_srcs}"
-#   IMPORT_PATHS "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs"
-#   VERBOSE
-# )
-# set(_mlir_typestub_gen_target "${NB_STUBGEN_CUSTOM_TARGET}")
-
-# list(TRANSFORM _core_type_stub_sources PREPEND "_mlir_libs/")
-# declare_mlir_python_sources(
-#   FlyPythonExtension.Core.type_stub_gen
-#   ROOT_DIR "${CMAKE_CURRENT_BINARY_DIR}/type_stubs"
-#   ADD_TO_PARENT FlyPythonSources
-#   SOURCES "${_core_type_stub_sources}"
-# )
-
-
+################################################################################
+# Python Modules
+################################################################################
 
 add_mlir_python_modules(FlyPythonModules
   ROOT_PREFIX "${FlyPythonModules_ROOT_PREFIX}"
@@ -126,6 +110,37 @@ add_mlir_python_modules(FlyPythonModules
   DECLARED_SOURCES "${MLIRFlyDSLSources}"
   COMMON_CAPI_LINK_LIBS
     FlyPythonCAPI
+)
+
+################################################################################
+# Type Stubs Generation
+################################################################################
+
+set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
+set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
+set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
+
+add_custom_command(
+  OUTPUT "${_STUB_MARKER_FILE}"
+  COMMAND ${CMAKE_COMMAND} -E env
+    "PYTHONPATH=${_FLYDSL_PYTHON_PACKAGES_DIR}"
+    ${Python3_EXECUTABLE} -m nanobind.stubgen
+    -q
+    -r
+    -m flydsl._mlir._mlir_libs._mlir
+    -m flydsl._mlir._mlir_libs._fly
+    -m flydsl._mlir._mlir_libs._fly_rocdl
+    -m flydsl._mlir._mlir_libs._mlirDialectsGPU
+    -m flydsl._mlir._mlir_libs._mlirDialectsLLVM
+    -O "${_MLIR_LIBS_DIR}"
+  COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
+  DEPENDS CopyFlyPythonSources
+  COMMENT "Generating Python stub files for all extension modules"
+  VERBATIM
+)
+
+add_custom_target(FlyPythonStubs ALL
+  DEPENDS "${_STUB_MARKER_FILE}"
 )
 
 add_custom_target(CopyFlyPythonSources ALL
