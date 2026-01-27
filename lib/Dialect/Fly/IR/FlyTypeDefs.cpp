@@ -363,4 +363,18 @@ void MmaAtomUniversalFMAType::print(AsmPrinter &printer) const {
   printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
 }
 
+#include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
+
+Attribute CopyAtomUniversalCopyType::getThrSize() const { return FxC(1); }
+
+Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+Attribute CopyAtomUniversalCopyType::getThrValLayoutDst() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+Attribute CopyAtomUniversalCopyType::getThrValLayoutRef() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+}
+
 } // namespace mlir::fly
