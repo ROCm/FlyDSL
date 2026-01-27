@@ -3,10 +3,12 @@ from flydsl import lang as fx
 
 MN = 16
 K = 4
-ABMemRefTy = fx.ir.Type.parse(f"!fly.memref<f32, global, ({MN},{K}):({K},1)>")
-CMemRefTy = fx.ir.Type.parse(f"!fly.memref<f32, global, ({MN},{MN}):(1,{MN})>")
-RABMemRefTy = fx.ir.Type.parse(f"!fly.memref<f32, register, 1:1>")
-RCMemRefTy = fx.ir.Type.parse(f"!fly.memref<f32, register, 4:1>")
+ABMemRefTy = fx.MemRefType.get(
+    fx.T.f32(), fx.LayoutType.get((MN, K), (K, 1)), fx.AddressSpace.Global
+)
+CMemRefTy = fx.MemRefType.get(
+    fx.T.f32(), fx.LayoutType.get((MN, MN), (1, MN)), fx.AddressSpace.Global
+)
 
 
 class MmaAtom(fx.MlirModule):
@@ -22,12 +24,18 @@ class MmaAtom(fx.MlirModule):
     ):
         tid = fx.arith.index_cast(fx.T.i32(), fx.thread_idx.x)
 
-        rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
-        rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
+        rA = fx.memref_alloca(
+            fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1)),
+            fx.make_layout(1, 1),
+        )
+        rB = fx.memref_alloca(
+            fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1)),
+            fx.make_layout(1, 1),
+        )
 
-        copyAtom = fx.make_atom(fx.ir.Type.parse("!fly.atom.universal_copy<32>"))
+        copyAtom = fx.make_atom(fx.CopyAtomUniversalCopyType.get(32))
         mmaAtom = fx.make_atom(
-            fx.ir.Type.parse("!fly_rocdl.atom.cdna3.mfma<16x16x16, f32 x f32 = f32>")
+            fx.MmaAtomCDNA3_MFMAType.get(16, 16, 16, fx.T.f32(), fx.T.f32(), fx.T.f32())
         )
 
         tA = fx.logical_divide(A, fx.make_layout(1, 1))
@@ -35,7 +43,9 @@ class MmaAtom(fx.MlirModule):
         fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
         fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
 
-        rAcc = fx.memref_alloca(RCMemRefTy, fx.make_layout(4, 1))
+        rAcc = fx.memref_alloca(
+            fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(4, 1)), fx.make_layout(4, 1)
+        )
         f0 = fx.arith.constant(fx.T.f32(), 0.0)
         fx.memref_store(f0, rAcc, 0)
         fx.memref_store(f0, rAcc, 1)
