@@ -653,11 +653,17 @@ def compile_preshuffle_gemm_a8(
                     )
 
             def prefetch_ab_tile(base_k):
+                a_regs = prefetch_a_tile(base_k)
+                b_regs = prefetch_b_tile(base_k)
+                return a_regs, b_regs
+
+            def prefetch_a_tile(base_k):
                 base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
                 base_k_div4 = base_k_bytes / 4
-                a_regs = load_a_tile(base_k_div4)
-                b_regs = load_b_tile(base_k)
-                return a_regs, b_regs
+                return load_a_tile(base_k_div4)
+
+            def prefetch_b_tile(base_k):
+                return load_b_tile(base_k)
 
             # DMA async version: direct global-to-LDS transfer
             def dma_a_tile_to_lds(base_k_div4, lds_buffer):
@@ -1136,12 +1142,11 @@ def compile_preshuffle_gemm_a8(
 
                 # Prologue: tile-0
                 k0 = arith.constant(0, index=True)
+                b_tile_pong = prefetch_b_tile(k0)
                 if use_async_copy:
                     prefetch_a_to_lds(k0, lds_a_pong)  # Load into pong buffer
-                    b_tile_pong = load_b_tile(k0)
                 else:
-                    a_tile_0, b_tile_pong = prefetch_ab_tile(k0)
-                    store_a_tile_to_lds(a_tile_0, lds_a_pong)
+                    store_a_tile_to_lds(prefetch_a_tile(k0), lds_a_pong)
                 gpu.barrier()
                 accs = [acc_init] * (num_acc_n * m_repeat)
 
@@ -1151,70 +1156,60 @@ def compile_preshuffle_gemm_a8(
                 a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
 
                 num_tiles = K // tile_k
-                if False:
-                    pass
-                    # b_tile_ping = None
-                    # for k_iv in range(0, c_k_main, tile_k * 2):
-                    #     next_k1 = k_iv + tile_k
-                    #     if use_async_copy:
-                    #         prefetch_a_to_lds(next_k1, lds_a_ping)  # Load into ping buffer
-                    #         b_tile_ping = load_b_tile(next_k1)
-                    #     else:
-                    #         a_tile_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                    #         store_a_tile_to_lds(a_tile_ping, lds_a_ping)
+                if (num_tiles % 2) == 1:
+                    for k_iv in range(0, c_k_main, tile_k * 2):
+                        next_k1 = k_iv + tile_k
+                        b_tile_ping = prefetch_b_tile(next_k1)
+                        if use_async_copy:
+                            prefetch_a_to_lds(next_k1, lds_a_ping)
+                        else:
+                            store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
 
-                    #     accs, _ = compute_tile(
-                    #         accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong
-                    #     )
-                    #     a0_prefetch_pong = None
+                        accs, _ = compute_tile(
+                            accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong
+                        )
+                        a0_prefetch_pong = None
 
-                    #     # hot_loop_scheduler()
-                    #     gpu.barrier()
+                        # hot_loop_scheduler()
+                        gpu.barrier()
 
-                    #     # Cross-tile prefetch for the ping tile we are about to compute.
-                    #     a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+                        # Cross-tile prefetch for the ping tile we are about to compute.
+                        a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
-                    #     next_k2 = k_iv + tile_k * 2
-                    #     if use_async_copy:
-                    #         prefetch_a_to_lds(next_k2, lds_a_pong)  # Load into pong buffer
-                    #         b_tile_pong = load_b_tile(next_k2)
-                    #     else:
-                    #         a_tile_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                    #         store_a_tile_to_lds(a_tile_pong, lds_a_pong)
+                        next_k2 = k_iv + tile_k * 2
+                        b_tile_pong = prefetch_b_tile(next_k2)
+                        if use_async_copy:
+                            prefetch_a_to_lds(next_k2, lds_a_pong)
+                        else:
+                            store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
 
-                    #     accs, _ = compute_tile(
-                    #         accs, b_tile_ping, lds_a_ping, a0_prefetch=a0_prefetch_ping
-                    #     )
-                    #     a0_prefetch_ping = None
+                        accs, _ = compute_tile(
+                            accs, b_tile_ping, lds_a_ping, a0_prefetch=a0_prefetch_ping
+                        )
+                        a0_prefetch_ping = None
 
-                    #     # hot_loop_scheduler()
-                    #     gpu.barrier()
+                        # hot_loop_scheduler()
+                        gpu.barrier()
 
-                    #     # Cross-tile prefetch for the next pong tile.
-                    #     a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
+                        # Cross-tile prefetch for the next pong tile.
+                        a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
 
-                    # final_accs, scales = compute_tile(
-                    #     accs,
-                    #     b_tile_pong,
-                    #     lds_a_pong,
-                    #     is_last_tile=True,
-                    #     a0_prefetch=a0_prefetch_pong,
-                    # )
+                    final_accs, scales = compute_tile(
+                        accs,
+                        b_tile_pong,
+                        lds_a_pong,
+                        is_last_tile=True,
+                        a0_prefetch=a0_prefetch_pong,
+                    )
                 else:
-                    flir.print("tag0")
                     c_k_stop = c_k - (tile_k * 3)
                     for k_iv in range(0, c_k_stop, tile_k * 2):
                         next_k1 = k_iv + tile_k
-                        prefetch_a_to_lds(next_k1, lds_a_ping)
-                        b_tile_ping = load_b_tile(next_k1)
-                        flir.print(f"use_async_copy: {use_async_copy}")
-                        # if use_async_copy:
-                        #     prefetch_a_to_lds(next_k1, lds_a_ping)
-                        #     b_tile_ping = load_b_tile(next_k1)
-                        # else:
-                        #     a_tile_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                        #     store_a_tile_to_lds(a_tile_ping, lds_a_ping)
-                        # flir.print(b_tile_ping)
+                        b_tile_ping = prefetch_b_tile(next_k1)
+                        if use_async_copy:
+                            prefetch_a_to_lds(next_k1, lds_a_ping)
+                        else:
+                            store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
                         accs, _ = compute_tile(
                             accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong
                         )
@@ -1225,15 +1220,11 @@ def compile_preshuffle_gemm_a8(
                         a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
                         
                         next_k2 = k_iv + tile_k * 2
-                        prefetch_a_to_lds(next_k2, lds_a_pong)
-                        b_tile_pong = load_b_tile(next_k2)
-                        # if use_async_copy:
-                        #     prefetch_a_to_lds(next_k2, lds_a_pong)
-                        #     b_tile_pong = load_b_tile(next_k2)
-                        # else:
-                        #     a_tile_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                        #     store_a_tile_to_lds(a_tile_pong, lds_a_pong)
-
+                        b_tile_pong = prefetch_b_tile(next_k2)
+                        if use_async_copy:
+                            prefetch_a_to_lds(next_k2, lds_a_pong)
+                        else:
+                            store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
                         accs, _ = compute_tile(
                             accs, b_tile_ping, lds_a_ping, a0_prefetch=a0_prefetch_ping
                         )
@@ -1243,16 +1234,12 @@ def compile_preshuffle_gemm_a8(
                         gpu.barrier()
 
                         a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
-                    flir.print("tag2")
                     last_k = c_k - tile_k
+                    b_tile_ping = prefetch_b_tile(last_k)
                     if use_async_copy:
                         prefetch_a_to_lds(last_k, lds_a_ping)
-                        b_tile_ping = load_b_tile(last_k)
                     else:
-                        a_tile_ping, b_tile_ping = prefetch_ab_tile(last_k)
-                        store_a_tile_to_lds(a_tile_ping, lds_a_ping)
-                        
-                    flir.print(b_tile_ping)
+                        store_a_tile_to_lds(prefetch_a_tile(last_k), lds_a_ping)
 
                     accs, _ = compute_tile(
                         accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong

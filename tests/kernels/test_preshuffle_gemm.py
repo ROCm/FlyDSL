@@ -226,7 +226,7 @@ def test_mfma_a8_flir_preshuffle(
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
-    # assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
