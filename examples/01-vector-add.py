@@ -2,7 +2,9 @@ import flydsl
 from flydsl import lang as fx
 
 N = 64
-memrefTy = fx.ir.Type.parse(f"!fly.memref<f32, global, 64:1>")
+memrefTy = fx.MemRefType.get(
+    fx.T.f32(), fx.LayoutType.get(64, 1), fx.AddressSpace.Global
+)
 
 
 class VecAdd(fx.MlirModule):
@@ -16,8 +18,8 @@ class VecAdd(fx.MlirModule):
         B: memrefTy,
         C: memrefTy,
     ):
-        tid = fx.arith.IndexCastOp(fx.T.i32(), fx.thread_idx.x)
-        bid = fx.arith.IndexCastOp(fx.T.i32(), fx.block_idx.x)
+        tid = fx.arith.index_cast(fx.T.i32(), fx.thread_idx.x)
+        bid = fx.arith.index_cast(fx.T.i32(), fx.block_idx.x)
 
         tA = fx.logical_divide(A, fx.make_layout(16, 1))
         tB = fx.logical_divide(B, fx.make_layout(16, 1))
@@ -30,8 +32,10 @@ class VecAdd(fx.MlirModule):
         tB = fx.logical_divide(tB, fx.make_layout(1, 1))
         tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
-        RABMemRefTy = fx.ir.Type.parse(f"!fly.memref<f32, register, 1:1>")
-        copyAtom = fx.make_atom(fx.ir.Type.parse("!fly.atom.universal_copy_32b"))
+        RABMemRefTy = fx.MemRefType.get(
+            fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register
+        )
+        copyAtom = fx.make_atom(fx.CopyAtomUniversalCopyType.get(32))
         rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
         rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
         rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
@@ -75,7 +79,7 @@ VecAdd_Module = VecAdd()
 print(VecAdd_Module)
 
 
-VecAdd_Executor = flydsl.compile(VecAdd_Module, print_after_all=True)
+VecAdd_Executor = flydsl.compile(VecAdd_Module, print_after_all=False)
 # VecAdd_Asm = flydsl.compile(VecAdd_Module, output_format="assembly")
 # print(VecAdd_Asm)
 

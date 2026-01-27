@@ -124,14 +124,12 @@ static std::optional<LLVM::LLVMStructType> getLayoutStructType(LayoutAttr layout
 
 static unsigned mapAddressSpace(AddressSpace space) {
   switch (space) {
-  case AddressSpace::Flat:
-    return 0;
   case AddressSpace::Global:
-    return 1;
+    return 0;
   case AddressSpace::Shared:
-    return 3;
+    return 1;
   case AddressSpace::Register:
-    return 5;
+    return 2;
   }
   return 0;
 }

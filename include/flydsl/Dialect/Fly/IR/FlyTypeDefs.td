@@ -65,6 +65,12 @@ def Fly_Layout : Fly_Type<"Layout", "layout", [
 def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", []> {
   let parameters = (ins Fly_SwizzleAttr:$attr);
   let assemblyFormat = "`<` $attr `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "SwizzleAttr":$attr), [{
+      return $_get(attr.getContext(), attr);
+    }]>
+  ];
 }
 
 def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
@@ -119,6 +125,13 @@ def Fly_Pointer : Fly_Type<"Pointer", "ptr", []> {
       return $_get(elemTy.getContext(), elemTy, addressSpace,
                    AlignAttr::getTrivialAlignment(elemTy.getContext()),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "AlignAttr":$alignment), [{
+      return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, 
+                  SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
+      return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, swizzle);
     }]>
   ];
   let extraClassDeclaration = [{}];
@@ -154,13 +167,25 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let assemblyFormat = "`<` $elemTy `,` `` $addressSpace `,` $layout (`,` $alignment^)? (`,` $swizzle^)? `>`";
 
   let builders = [
-    AttrBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "LayoutAttr":$layout), [{
+      // default address space is Global
+      return $_get(elemTy.getContext(), elemTy, AddressSpaceAttr::get(elemTy.getContext(), static_cast<::mlir::fly::AddressSpace>(0)), layout,
+                   AlignAttr::getTrivialAlignment(elemTy.getContext()),
+                   SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout,
                    AlignAttr::getTrivialAlignment(elemTy.getContext()),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout, "AlignAttr":$alignment), [{
+      return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment,
+                   SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
+      return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment, swizzle);
     }]>
   ];
-  let extraClassDeclaration = [{}];
 }
 
 def IteratorLikeType : AnyTypeOf<[Fly_IntTuple, Fly_Pointer]>;
