@@ -1,0 +1,1185 @@
+# Common AMDGCN instructions shared across architectures
+# This file defines the instruction set used by the Wave ASM backend.
+#
+# Format:
+#   instruction_name:
+#     mnemonic: string              # Assembly mnemonic
+#     category: string              # Instruction category (valu, salu, vmem, smem, lds, mfma, etc.)
+#     format: string                # Encoding format (vop1, vop2, vop3, sop1, sop2, ds, etc.)
+#     defs: list                    # Destination operands
+#     uses: list                    # Source operands
+#     latency: int                  # Approximate latency in cycles
+#     constraints: dict             # Register allocation constraints
+#     special: dict                 # Special handling flags
+
+instructions:
+  # ===========================================================================
+  # Vector ALU - Moves
+  # ===========================================================================
+  v_mov_b32:
+    mnemonic: v_mov_b32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Vector ALU - Arithmetic
+  # ===========================================================================
+  v_add_u32:
+    mnemonic: v_add_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_sub_u32:
+    mnemonic: v_sub_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_mul_lo_u32:
+    mnemonic: v_mul_lo_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_mul_hi_u32:
+    mnemonic: v_mul_hi_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+
+  # ===========================================================================
+  # Vector ALU - Bitwise
+  # ===========================================================================
+  v_and_b32:
+    mnemonic: v_and_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_or_b32:
+    mnemonic: v_or_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_xor_b32:
+    mnemonic: v_xor_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Vector ALU - Shifts
+  # ===========================================================================
+  v_lshlrev_b32:
+    mnemonic: v_lshlrev_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: shift, type: vgpr|sgpr|imm}
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_lshrrev_b32:
+    mnemonic: v_lshrrev_b32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: shift, type: vgpr|sgpr|imm}
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_ashrrev_i32:
+    mnemonic: v_ashrrev_i32
+    category: valu
+    format: vop2
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: shift, type: vgpr|sgpr|imm}
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Vector ALU - Bit Field
+  # ===========================================================================
+  v_bfe_u32:
+    mnemonic: v_bfe_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+      - {name: offset, type: vgpr|sgpr|imm}
+      - {name: width, type: vgpr|sgpr|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Vector ALU - Fused Operations
+  # ===========================================================================
+  v_lshl_add_u32:
+    mnemonic: v_lshl_add_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+      - {name: shift, type: vgpr|sgpr|imm}
+      - {name: addend, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_lshl_or_b32:
+    mnemonic: v_lshl_or_b32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+      - {name: shift, type: vgpr|sgpr|imm}
+      - {name: orend, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_add_lshl_u32:
+    mnemonic: v_add_lshl_u32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+      - {name: shift, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_or3_b32:
+    mnemonic: v_or3_b32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+      - {name: src2, type: vgpr|sgpr|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Vector ALU - Lane Operations
+  # ===========================================================================
+  v_mbcnt_lo_u32_b32:
+    mnemonic: v_mbcnt_lo_u32_b32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 2
+
+  v_mbcnt_hi_u32_b32:
+    mnemonic: v_mbcnt_hi_u32_b32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 2
+
+  v_readfirstlane_b32:
+    mnemonic: v_readfirstlane_b32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src, type: vgpr}
+    latency: 4
+    special:
+      crosses_register_class: true
+
+  # ===========================================================================
+  # Scalar ALU - Moves
+  # ===========================================================================
+  s_mov_b32:
+    mnemonic: s_mov_b32
+    category: salu
+    format: sop1
+    defs:
+      - {name: dst, type: sgpr|special}
+    uses:
+      - {name: src, type: sgpr|imm|vgpr|special}
+    latency: 1
+
+  s_mov_b64:
+    mnemonic: s_mov_b64
+    category: salu
+    format: sop1
+    defs:
+      - {name: dst, type: sgpr_pair}
+    uses:
+      - {name: src, type: sgpr_pair|imm}
+    latency: 1
+
+  s_movk_i32:
+    mnemonic: s_movk_i32
+    category: salu
+    format: sopk
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: imm16, type: imm16}
+    latency: 1
+
+  # ===========================================================================
+  # Scalar ALU - Arithmetic
+  # ===========================================================================
+  s_add_u32:
+    mnemonic: s_add_u32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+
+  s_mul_i32:
+    mnemonic: s_mul_i32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 4
+
+  # ===========================================================================
+  # Scalar ALU - Bitwise
+  # ===========================================================================
+  s_and_b32:
+    mnemonic: s_and_b32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+
+  s_or_b32:
+    mnemonic: s_or_b32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+
+  s_and_b64:
+    mnemonic: s_and_b64
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr_pair}
+    uses:
+      - {name: src0, type: sgpr_pair|imm}
+      - {name: src1, type: sgpr_pair|imm}
+    latency: 1
+
+  s_or_b64:
+    mnemonic: s_or_b64
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr_pair}
+    uses:
+      - {name: src0, type: sgpr_pair|imm}
+      - {name: src1, type: sgpr_pair|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Scalar ALU - Shifts
+  # ===========================================================================
+  s_lshl_b32:
+    mnemonic: s_lshl_b32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src, type: sgpr|imm}
+      - {name: shift, type: sgpr|imm}
+    latency: 1
+
+  s_lshr_b32:
+    mnemonic: s_lshr_b32
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: src, type: sgpr|imm}
+      - {name: shift, type: sgpr|imm}
+    latency: 1
+
+  s_lshl_b64:
+    mnemonic: s_lshl_b64
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr_pair}
+    uses:
+      - {name: src, type: sgpr_pair|imm}
+      - {name: shift, type: sgpr|imm}
+    latency: 1
+
+  s_add_u64:
+    mnemonic: s_add_u64
+    category: salu
+    format: sop2
+    defs:
+      - {name: dst, type: sgpr_pair}
+    uses:
+      - {name: src0, type: sgpr_pair|imm}
+      - {name: src1, type: sgpr_pair|imm}
+    latency: 1
+
+  # ===========================================================================
+  # Scalar ALU - Comparisons
+  # ===========================================================================
+  s_cmp_lt_u32:
+    mnemonic: s_cmp_lt_u32
+    category: salu
+    format: sopc
+    defs: []  # Sets SCC implicitly
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+    special:
+      sets_scc: true
+
+  s_cmp_le_u32:
+    mnemonic: s_cmp_le_u32
+    category: salu
+    format: sopc
+    defs: []
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+    special:
+      sets_scc: true
+
+  s_cmp_eq_u32:
+    mnemonic: s_cmp_eq_u32
+    category: salu
+    format: sopc
+    defs: []
+    uses:
+      - {name: src0, type: sgpr|imm}
+      - {name: src1, type: sgpr|imm}
+    latency: 1
+    special:
+      sets_scc: true
+
+  # ===========================================================================
+  # Scalar Memory
+  # ===========================================================================
+  s_load_dword:
+    mnemonic: s_load_dword
+    category: smem
+    format: smem
+    defs:
+      - {name: dst, type: sgpr}
+    uses:
+      - {name: base, type: sgpr_pair}
+      - {name: offset, type: imm|sgpr}
+    latency: 200
+    special:
+      memory: true
+
+  s_load_dwordx2:
+    mnemonic: s_load_dwordx2
+    category: smem
+    format: smem
+    defs:
+      - {name: dst, type: sgpr_pair, alignment: 2}
+    uses:
+      - {name: base, type: sgpr_pair}
+      - {name: offset, type: imm|sgpr}
+    latency: 200
+    special:
+      memory: true
+
+  s_load_dwordx4:
+    mnemonic: s_load_dwordx4
+    category: smem
+    format: smem
+    defs:
+      - {name: dst, type: sgpr_quad, alignment: 4}
+    uses:
+      - {name: base, type: sgpr_pair}
+      - {name: offset, type: imm|sgpr}
+    latency: 200
+    special:
+      memory: true
+
+  # ===========================================================================
+  # Buffer Memory - Loads
+  # ===========================================================================
+  buffer_load_dword:
+    mnemonic: buffer_load_dword
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+
+  buffer_load_dwordx2:
+    mnemonic: buffer_load_dwordx2
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr_pair, alignment: 2}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+
+  buffer_load_dwordx4:
+    mnemonic: buffer_load_dwordx4
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+
+  buffer_load_dword_lds:
+    mnemonic: buffer_load_dword
+    category: vmem
+    format: mtbuf
+    defs: []  # Writes to LDS via m0
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+      lds_modifier: true
+
+  buffer_load_dwordx4_lds:
+    mnemonic: buffer_load_dwordx4
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 200
+    special:
+      memory: true
+      lds_modifier: true
+
+  # ===========================================================================
+  # Buffer Memory - Stores
+  # ===========================================================================
+  buffer_store_dword:
+    mnemonic: buffer_store_dword
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: src, type: vgpr}
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+
+  buffer_store_dwordx2:
+    mnemonic: buffer_store_dwordx2
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: src, type: vgpr_pair}
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+
+  buffer_store_dwordx4:
+    mnemonic: buffer_store_dwordx4
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: src, type: vgpr_quad}
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+
+  # ===========================================================================
+  # Global Memory
+  # ===========================================================================
+  global_load_dword:
+    mnemonic: global_load_dword
+    category: vmem
+    format: flat_global
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: soffset, type: sgpr|off}
+    latency: 200
+    special:
+      memory: true
+
+  global_load_dwordx2:
+    mnemonic: global_load_dwordx2
+    category: vmem
+    format: flat_global
+    defs:
+      - {name: dst, type: vgpr_pair, alignment: 2}
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: soffset, type: sgpr|off}
+    latency: 200
+    special:
+      memory: true
+
+  global_load_dwordx4:
+    mnemonic: global_load_dwordx4
+    category: vmem
+    format: flat_global
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: soffset, type: sgpr|off}
+    latency: 200
+    special:
+      memory: true
+
+  global_store_dword:
+    mnemonic: global_store_dword
+    category: vmem
+    format: flat_global
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: src, type: vgpr}
+      - {name: soffset, type: sgpr|off}
+    latency: 1
+    special:
+      memory: true
+
+  global_store_dwordx2:
+    mnemonic: global_store_dwordx2
+    category: vmem
+    format: flat_global
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: src, type: vgpr_pair}
+      - {name: soffset, type: sgpr|off}
+    latency: 1
+    special:
+      memory: true
+
+  global_store_dwordx4:
+    mnemonic: global_store_dwordx4
+    category: vmem
+    format: flat_global
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr_pair}
+      - {name: src, type: vgpr_quad}
+      - {name: soffset, type: sgpr|off}
+    latency: 1
+    special:
+      memory: true
+
+  # ===========================================================================
+  # LDS Operations
+  # ===========================================================================
+  ds_read_b32:
+    mnemonic: ds_read_b32
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 20
+    special:
+      memory: true
+      offset_format: space_separated  # offset:N instead of , offset:N
+
+  ds_read_b64:
+    mnemonic: ds_read_b64
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr_pair, alignment: 2}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 20
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_read_b128:
+    mnemonic: ds_read_b128
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 20
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_write_b32:
+    mnemonic: ds_write_b32
+    category: lds
+    format: ds
+    defs: []
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: src, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_write_b64:
+    mnemonic: ds_write_b64
+    category: lds
+    format: ds
+    defs: []
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: src, type: vgpr_pair}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_write_b128:
+    mnemonic: ds_write_b128
+    category: lds
+    format: ds
+    defs: []
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: src, type: vgpr_quad}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
+      offset_format: space_separated
+
+  # ===========================================================================
+  # MFMA Instructions
+  # ===========================================================================
+  v_mfma_f32_16x16x16_f16:
+    mnemonic: v_mfma_f32_16x16x16_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 64
+    special:
+      accumulator: true
+
+  v_mfma_f32_16x16x32_f16:
+    mnemonic: v_mfma_f32_16x16x32_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    special:
+      accumulator: true
+
+  v_mfma_f32_32x32x8_f16:
+    mnemonic: v_mfma_f32_32x32x8_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 64
+    special:
+      accumulator: true
+
+  v_mfma_f16_16x16x16_f16:
+    mnemonic: v_mfma_f16_16x16x16_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 64
+    special:
+      accumulator: true
+
+  v_mfma_f16_32x32x8_f16:
+    mnemonic: v_mfma_f16_32x32x8_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 64
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # Conversion Instructions
+  # ===========================================================================
+  v_cvt_f32_f16:
+    mnemonic: v_cvt_f32_f16
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_cvt_f16_f32:
+    mnemonic: v_cvt_f16_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_pack_b32_f16:
+    mnemonic: v_pack_b32_f16
+    category: valu
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_cvt_pk_fp8_f32:
+    mnemonic: v_cvt_pk_fp8_f32
+    category: valu
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+
+  # ===========================================================================
+  # Control Flow / Synchronization
+  # ===========================================================================
+  s_waitcnt:
+    mnemonic: s_waitcnt
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: waitcnt, type: waitcnt}
+    latency: 0
+    special:
+      sync: true
+
+  s_barrier:
+    mnemonic: s_barrier
+    category: control
+    format: sopp
+    defs: []
+    uses: []
+    latency: 0
+    special:
+      sync: true
+      barrier: true
+
+  s_nop:
+    mnemonic: s_nop
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: count, type: imm}
+    latency: 0
+
+  s_endpgm:
+    mnemonic: s_endpgm
+    category: control
+    format: sopp
+    defs: []
+    uses: []
+    latency: 0
+    special:
+      terminator: true
+
+  # ===========================================================================
+  # Branch Instructions
+  # ===========================================================================
+  s_cbranch_scc1:
+    mnemonic: s_cbranch_scc1
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_scc: true
+
+  s_cbranch_scc0:
+    mnemonic: s_cbranch_scc0
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_scc: true
+
+  s_branch:
+    mnemonic: s_branch
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+
+  s_cbranch_vccz:
+    mnemonic: s_cbranch_vccz
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_vcc: true
+
+  s_cbranch_vccnz:
+    mnemonic: s_cbranch_vccnz
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_vcc: true
+
+  s_cbranch_execz:
+    mnemonic: s_cbranch_execz
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_exec: true
+
+  s_cbranch_execnz:
+    mnemonic: s_cbranch_execnz
+    category: control
+    format: sopp
+    defs: []
+    uses:
+      - {name: label, type: label}
+    latency: 0
+    special:
+      branch: true
+      conditional: true
+      reads_exec: true
+
+  # ===========================================================================
+  # Pseudo-ops (not real instructions)
+  # ===========================================================================
+  _comment:
+    mnemonic: "//"
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses:
+      - {name: text, type: string}
+    latency: 0
+
+  _label:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses:
+      - {name: name, type: string}
+    latency: 0
+    special:
+      label_def: true
+
+  _raw_asm:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses:
+      - {name: line, type: string}
+    latency: 0
+    special:
+      raw: true
+
+  # Internal pseudo-ops for code generation
+  _srd_define:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs:
+      - {name: srd, type: sgpr_quad}
+    uses: []
+    latency: 0
+
+  _srd_copy_define:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs:
+      - {name: srd, type: sgpr_quad}
+    uses: []
+    latency: 0
+
+  _g2s_srd_copy:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _srd_load_base:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _srd_copy_base:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _srd_fill_size:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _srd_fill_stride:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _loop_inc:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs:
+      - {name: counter, type: sgpr}
+    uses:
+      - {name: counter, type: sgpr}
+      - {name: step, type: imm}
+    latency: 0
+
+  _mfma_acc:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _mfma_acc_16x16x32:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _loop_begin:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _loop_end:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _init_acc_quad:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  # Kernel argument preloading entry point pattern (s_branch to aligned label)
+  _preload_branch:
+    mnemonic: "s_branch"
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+    special:
+      branch: true

@@ -1,0 +1,614 @@
+# GFX950 (CDNA4 / MI350) specific instructions and overrides
+#
+# This file extends common.yaml with instructions specific to GFX950.
+# GFX950 builds on GFX942 with additional features.
+#
+# GFX950 (CDNA4) features:
+# - All GFX942 features plus:
+# - Enhanced FP8/BF8 support with higher K dimensions
+# - New FP4/FP6 mixed precision (F8F6F4) instructions
+# - Improved gather-to-LDS operations
+# - Higher memory bandwidth
+#
+# Latencies sourced from: CDNA4 Instruction Set Architecture, Table 28 "MFMA VALU Opcodes"
+
+instructions:
+  # ===========================================================================
+  # GFX950-specific MFMA Instructions
+  # ===========================================================================
+
+  # FP8 Matrix Multiply-Add
+  # Per ISA Table 28: V_MFMA_F32_{*}_FP8_FP8 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_fp8_fp8:
+    mnemonic: v_mfma_f32_16x16x32_fp8_fp8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_FP8_FP8 32x32x16 = 32 cycles
+  v_mfma_f32_32x32x16_fp8_fp8:
+    mnemonic: v_mfma_f32_32x32x16_fp8_fp8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF8_BF8 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_bf8_bf8:
+    mnemonic: v_mfma_f32_16x16x32_bf8_bf8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF8_BF8 32x32x16 = 32 cycles
+  v_mfma_f32_32x32x16_bf8_bf8:
+    mnemonic: v_mfma_f32_32x32x16_bf8_bf8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Mixed precision MFMA (FP8/BF8)
+  # Per ISA Table 28: V_MFMA_F32_{*}_FP8_BF8 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_fp8_bf8:
+    mnemonic: v_mfma_f32_16x16x32_fp8_bf8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF8_FP8 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_bf8_fp8:
+    mnemonic: v_mfma_f32_16x16x32_bf8_fp8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950 Standard MFMA (F16)
+  # ===========================================================================
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_F16 16x16x16 = 16 cycles
+  v_mfma_f32_16x16x16_f16:
+    mnemonic: v_mfma_f32_16x16x16_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_F16 32x32x8 = 32 cycles
+  v_mfma_f32_32x32x8_f16:
+    mnemonic: v_mfma_f32_32x32x8_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # CDNA4-specific: Higher K dimension F16 variants
+  # Per ISA Table 28: V_MFMA_F32_{*}_F16 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_f16:
+    mnemonic: v_mfma_f32_16x16x32_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_F16 32x32x16 = 32 cycles
+  v_mfma_f32_32x32x16_f16:
+    mnemonic: v_mfma_f32_32x32x16_f16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950 Standard MFMA (BF16)
+  # ===========================================================================
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF16 16x16x16 = 16 cycles
+  v_mfma_f32_16x16x16_bf16:
+    mnemonic: v_mfma_f32_16x16x16_bf16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF16 32x32x8 = 32 cycles
+  v_mfma_f32_32x32x8_bf16:
+    mnemonic: v_mfma_f32_32x32x8_bf16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # CDNA4-specific: Higher K dimension BF16 variants
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF16 16x16x32 = 16 cycles
+  v_mfma_f32_16x16x32_bf16:
+    mnemonic: v_mfma_f32_16x16x32_bf16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_{*}_BF16 32x32x16 = 32 cycles
+  v_mfma_f32_32x32x16_bf16:
+    mnemonic: v_mfma_f32_32x32x16_bf16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950 Integer MFMA (I8)
+  # ===========================================================================
+
+  # Per ISA Table 28: V_MFMA_I32_{*}_I8 16x16x32 = 16 cycles
+  v_mfma_i32_16x16x32_i8:
+    mnemonic: v_mfma_i32_16x16x32_i8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_I32_{*}_I8 32x32x16 = 32 cycles
+  v_mfma_i32_32x32x16_i8:
+    mnemonic: v_mfma_i32_32x32x16_i8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # CDNA4-specific: Higher K dimension I8 variants
+  # Per ISA Table 28: V_MFMA_I32_16X16X64_I8 = 16 cycles
+  v_mfma_i32_16x16x64_i8:
+    mnemonic: v_mfma_i32_16x16x64_i8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_I32_32X32X32_I8 = 32 cycles
+  v_mfma_i32_32x32x32_i8:
+    mnemonic: v_mfma_i32_32x32x32_i8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_quad}
+      - {name: b, type: vgpr_quad}
+      - {name: c, type: vgpr_16}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950 F64 MFMA
+  # ===========================================================================
+
+  # Per ISA Table 28: V_MFMA_F64_{*}_F64 16x16x4 = 64 cycles
+  v_mfma_f64_16x16x4_f64:
+    mnemonic: v_mfma_f64_16x16x4_f64
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_8, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_8}
+    latency: 64
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F64_{*}_F64 4x4x4_4B = 32 cycles
+  v_mfma_f64_4x4x4_4b_f64:
+    mnemonic: v_mfma_f64_4x4x4_4b_f64
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_pair, alignment: 2}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_pair}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950 Mixed Precision (F8F6F4) MFMA - CDNA4 specific
+  # These support FP4, FP6, or FP8 independently for A and B matrices
+  # ===========================================================================
+
+  # Per ISA Table 28: V_MFMA_F32_16x16x128_F8F6F4 = 16 cycles (FP4/FP6) or 32 cycles (FP8)
+  v_mfma_f32_16x16x128_f8f6f4:
+    mnemonic: v_mfma_f32_16x16x128_f8f6f4
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_8}  # F8: 8 VGPRs, F6: 6 VGPRs, F4: 4 VGPRs
+      - {name: b, type: vgpr_8}
+      - {name: c, type: vgpr_quad}
+    latency: 32  # Conservative: 16 for FP4/FP6, 32 for FP8
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_F32_32x32x64_F8F6F4 = 32 cycles (FP4/FP6) or 64 cycles (FP8)
+  v_mfma_f32_32x32x64_f8f6f4:
+    mnemonic: v_mfma_f32_32x32x64_f8f6f4
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_8}
+      - {name: b, type: vgpr_8}
+      - {name: c, type: vgpr_16}
+    latency: 64  # Conservative: 32 for FP4/FP6, 64 for FP8
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Scaled variants with block scaling
+  # Per ISA Table 28: V_MFMA_SCALE_F32_16X16X128_F8F6F4 = 16 or 32 cycles
+  v_mfma_scale_f32_16x16x128_f8f6f4:
+    mnemonic: v_mfma_scale_f32_16x16x128_f8f6f4
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_8}
+      - {name: b, type: vgpr_8}
+      - {name: c, type: vgpr_quad}
+    latency: 32
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # Per ISA Table 28: V_MFMA_SCALE_F32_32X32X64_F8F6F4 = 32 or 64 cycles
+  v_mfma_scale_f32_32x32x64_f8f6f4:
+    mnemonic: v_mfma_scale_f32_32x32x64_f8f6f4
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_16, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_8}
+      - {name: b, type: vgpr_8}
+      - {name: c, type: vgpr_16}
+    latency: 64
+    architectures: [gfx950]
+    special:
+      accumulator: true
+
+  # ===========================================================================
+  # GFX950-specific Conversion Instructions
+  # ===========================================================================
+
+  v_cvt_pk_fp8_f32:
+    mnemonic: v_cvt_pk_fp8_f32
+    category: valu
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+    architectures: [gfx950]
+
+  v_cvt_pk_bf8_f32:
+    mnemonic: v_cvt_pk_bf8_f32
+    category: valu
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 4
+    architectures: [gfx950]
+
+  v_cvt_f32_fp8:
+    mnemonic: v_cvt_f32_fp8
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+    architectures: [gfx950]
+
+  v_cvt_f32_bf8:
+    mnemonic: v_cvt_f32_bf8
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+    architectures: [gfx950]
+
+  # ===========================================================================
+  # GFX950 Memory Operations
+  # ===========================================================================
+
+  buffer_load_dword:
+    mnemonic: buffer_load_dword
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 120
+    architectures: [gfx950]
+    special:
+      memory: true
+
+  buffer_load_dwordx4:
+    mnemonic: buffer_load_dwordx4
+    category: vmem
+    format: mtbuf
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 120
+    architectures: [gfx950]
+    special:
+      memory: true
+
+  # Buffer load with LDS - critical for gather-to-shared
+  buffer_load_dword_lds:
+    mnemonic: buffer_load_dword
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 120
+    architectures: [gfx950]
+    special:
+      memory: true
+      lds_modifier: true
+
+  buffer_load_dwordx4_lds:
+    mnemonic: buffer_load_dwordx4
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 120
+    architectures: [gfx950]
+    special:
+      memory: true
+      lds_modifier: true
+
+  # ===========================================================================
+  # GFX950 Scalar Memory
+  # ===========================================================================
+
+  s_load_dwordx2:
+    mnemonic: s_load_dwordx2
+    category: smem
+    format: smem
+    defs:
+      - {name: dst, type: sgpr_pair, alignment: 2}
+    uses:
+      - {name: base, type: sgpr_pair}
+      - {name: offset, type: imm|sgpr}
+    latency: 80
+    architectures: [gfx950]
+    special:
+      memory: true
+
+  s_load_dwordx4:
+    mnemonic: s_load_dwordx4
+    category: smem
+    format: smem
+    defs:
+      - {name: dst, type: sgpr_quad, alignment: 4}
+    uses:
+      - {name: base, type: sgpr_pair}
+      - {name: offset, type: imm|sgpr}
+    latency: 80
+    architectures: [gfx950]
+    special:
+      memory: true
+
+  # ===========================================================================
+  # GFX950 LDS Operations
+  # ===========================================================================
+
+  ds_read_b64:
+    mnemonic: ds_read_b64
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr_pair, alignment: 2}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 12
+    architectures: [gfx950]
+    special:
+      memory: true
+      offset_format: space_separated
+
+  ds_read_b128:
+    mnemonic: ds_read_b128
+    category: lds
+    format: ds
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: addr, type: vgpr}
+      - {name: offset, type: offset, optional: true}
+    latency: 12
+    architectures: [gfx950]
+    special:
+      memory: true
+      offset_format: space_separated
