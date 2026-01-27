@@ -99,6 +99,7 @@ def test_mfma_a8_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    use_async_copy: bool = False,
 ):
     print("=" * 80)
     print(
@@ -121,8 +122,9 @@ def test_mfma_a8_flir_preshuffle(
         in_dtype=in_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage})")
+    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
 
     size_c = M * N
     size_a = M * K
@@ -318,6 +320,13 @@ if __name__ == "__main__":
         default=False,
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
+    parser.add_argument(
+        "--use_async_copy",
+        action="store_true",
+        dest="use_async_copy",
+        default=False,
+        help="Enable async DMA for A tile prefetch (global-to-LDS). Default: on.",
+    )
     
     args = parser.parse_args()
     
@@ -335,5 +344,6 @@ if __name__ == "__main__":
         bench_warmup=args.num_warmup,
         run_aiter_bench=bool(args.run_aiter_bench),
         use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+        use_async_copy=bool(args.use_async_copy),
     )
 
