@@ -1110,6 +1110,202 @@ def test_moe_gemm_2stage(
     )
 
 
+
+from _mlir import ir
+import flydsl
+from flydsl.dialects.ext import flir, arith, scf
+from _mlir.dialects import vector
+from flydsl.dialects.ext.python_control_flow import range_constexpr
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+import _mlir.extras.types as T
+
+
+def build_moe_reduction_module(topk: int, model_dim: int, dtype_str: str = "f16"):
+    gpu_arch = get_hip_arch()
+    DYN = ir.ShapedType.get_dynamic_size()
+
+    # Kernel Config
+    BLOCK_SIZE = 256
+    VEC_WIDTH = 8
+    USE_NONTEMPORAL = True
+    VEC_ALIGN = 16
+
+    USE_HW_CVT_PK_BF16_F32 = (gpu_arch == "gfx950") or gpu_arch.startswith("gfx95")
+
+    _state = {}
+    
+    class _MoeReduction(flir.MlirModule):
+        GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+        def init_gpu_module(self):
+            if dtype_str == "f32":
+                elem_type = T.f32()
+            elif dtype_str == "f16":
+                elem_type = T.f16()
+            elif dtype_str == "bf16":
+                elem_type = ir.BF16Type.get()
+            else:
+                raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+            compute_type = T.f32() # if dtype_str == "bf16" else elem_type
+            _state["elem_type"] = elem_type
+            _state["compute_type"] = compute_type
+
+        @flir.kernel
+        def moe_reduction_kernel(
+            self: flir.T.i64,
+            X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+            Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+            m_tokens: lambda: T.index(),
+        ):
+            token_idx = flir.const_index(flir.block_idx("x"))
+            tid = flir.const_index(flir.thread_idx("x"))
+
+            elem_type = _state["elem_type"]
+            compute_type = _state["compute_type"]
+
+            tensor_X = flir.make_tensor(X, shape=(m_tokens, topk, model_dim), strides=(topk * model_dim, model_dim, 1))
+            tensor_Y = flir.make_tensor(Y, shape=(m_tokens, model_dim), strides=(model_dim, 1))
+
+            c0_idx = flir.const_index(0)
+            tile_cols = BLOCK_SIZE * VEC_WIDTH
+            gX = flir.zipped_divide(tensor_X, (1, 1, tile_cols))
+            gY = flir.zipped_divide(tensor_Y, (1, tile_cols))
+
+            copy_atom_load = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+            copy_atom_store = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+            tiled_copy_X = flir.make_tiled_copy_tv(
+                copy_atom_load,
+                flir.make_ordered_layout((1, 1, BLOCK_SIZE), order=(2, 1, 0)),
+                flir.make_ordered_layout((1, 1, VEC_WIDTH), order=(2, 1, 0)),
+                thr_shape=(1, 1, BLOCK_SIZE),
+                val_shape=(1, 1, VEC_WIDTH),
+            )
+            tiled_copy_Y = flir.make_tiled_copy_tv(
+                copy_atom_store,
+                flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0)),
+                flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0)),
+                thr_shape=(1, BLOCK_SIZE),
+                val_shape=(1, VEC_WIDTH),
+            )
+
+            thr_copy_X = tiled_copy_X.get_slice(tid)
+            thr_copy_Y = tiled_copy_Y.get_slice(tid)
+
+            step = BLOCK_SIZE * VEC_WIDTH
+            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+
+            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+            vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
+
+            c_model_dim = arith.index(model_dim).value
+
+            for base_idx_int in range_constexpr(0, model_dim, step):
+                c_base = arith.index(base_idx_int)
+                curr_idx = (c_base + thread_offset_base).value
+
+                # Bounds check
+                c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+                in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
+
+                tile_i = base_idx_int // tile_cols
+
+                _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
+                with _if_in_bounds.then():
+                    c_zero_f32 = arith.constant(0.0, type=compute_type)
+                    acc = vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
+
+                    for k in range_constexpr(topk):
+                        blkX = gX[(token_idx, k, tile_i)]
+                        thrX = thr_copy_X.partition_S(blkX)
+                        frgX = flir.make_fragment_like(thrX, elem_type)
+                        flir.copy(
+                            tiled_copy_X,
+                            thrX,
+                            frgX,
+                            nontemporal=USE_NONTEMPORAL,
+                            alignment=VEC_ALIGN,
+                        )
+                        vec_val_e = vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+                        if dtype_str in ("f16", "bf16"):
+                            vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
+                            vec_val = flir.arith.extf(vec_type_c, arith.as_value(vec_val_e))
+                        else:
+                            vec_val = vec_val_e
+                        acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+
+                    if dtype_str in ("f16", "bf16"):
+                        if USE_HW_CVT_PK_BF16_F32:
+                            # gfx95x: rely on f32->bf16 vector truncation lowering, which should
+                            # map to hardware v_cvt_pk_bf16_f32 on these targets.
+                            out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
+                        else:
+                            # === BF16 fast-pack store path (manual pack, toolchain-safe) ===
+                            vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
+                            vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
+                            vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
+
+                            c16_i32 = arith.constant(16, type=T.i32())
+                            c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
+                            c1_i32 = arith.constant(1, type=T.i32())
+
+                            c16_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c16_i32))
+                            c7fff_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
+                            c1_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
+
+                            u = flir.arith.bitcast(vec_i32_ty, acc)
+                            hi = arith.as_value(arith.shrui(u, c16_i32_v))
+                            lsb = arith.as_value(arith.andi(hi, c1_i32_v))
+                            bias = arith.as_value(c7fff_i32_v + lsb)
+                            u_round = arith.as_value(u + bias)
+                            bf16_bits = arith.as_value(arith.shrui(u_round, c16_i32_v))
+
+                            even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
+                            odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
+                            odd_sh = arith.as_value(arith.shli(odd, flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
+                            packed = arith.as_value(arith.ori(even, odd_sh))
+                            out_vec = flir.vector.bitcast(vec_bf16_ty, packed)
+                    else:
+                        out_vec = acc
+                    
+                    blkY = gY[(token_idx, tile_i)]
+                    thrY = thr_copy_Y.partition_S(blkY)
+                    frgY = flir.make_fragment_like(thrY, elem_type)
+                    vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                    flir.copy(
+                        tiled_copy_Y,
+                        frgY,
+                        thrY,
+                        nontemporal=USE_NONTEMPORAL,
+                        alignment=VEC_ALIGN,
+                    )
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+            Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+            m_tokens: lambda: T.index(),
+        ):
+            c1 = arith.as_value(flir.arith_ext.index(1))
+            gx = arith.as_value(m_tokens)
+            bx = arith.as_value(flir.arith_ext.index(BLOCK_SIZE))
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, "moe_reduction_kernel"],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[X, Y, m_tokens],
+            )
+    
+    return _MoeReduction()
+
+
+def compile_reduce_sum_topk(topk: int, model_dim: int, dtype_str: str = "f16"):
+    m = build_moe_reduction_module(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
+    return flydsl.compile(m)
+
+
 def compile_moe_gemm2_no_atomic_with_reduce(
     *,
     model_dim: int,
@@ -1123,6 +1319,7 @@ def compile_moe_gemm2_no_atomic_with_reduce(
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
     profile: bool = False,
+    use_flydsl_reduce: bool = False,
 ):
     """Wrapper: compile stage2 with accumulate=False, then reduce sum over topk.
 
@@ -1132,6 +1329,7 @@ def compile_moe_gemm2_no_atomic_with_reduce(
     Args:
         profile: If True, collect timing stats for alloc+init, kernel, reduce phases.
                  Call exe.print_profile_stats() after runs to see breakdown.
+        use_flydsl_reduce: If True, use FlyDSL-compiled reduce kernel instead of torch.sum.
     """
     # Compile the underlying kernel with accumulate=False
     inner_exe = compile_moe_gemm2(
@@ -1148,40 +1346,35 @@ def compile_moe_gemm2_no_atomic_with_reduce(
         accumulate=False,  # No atomics, output [tokens*topk, model_dim]
     )
 
+    # Optionally compile FlyDSL reduce kernel
+    reduce_exe = None
+    if use_flydsl_reduce:
+        reduce_exe = compile_reduce_sum_topk(topk=topk, model_dim=model_dim, dtype_str="f16")
+
     # Return a wrapper executor that handles the intermediate buffer and reduce
     class _ReduceWrapper:
         # Maximum tokens for pre-allocated intermediate buffer
         MAX_TOKENS = 32768
 
-        def __init__(self, exe, topk, model_dim, profile: bool = False):
+        def __init__(self, exe, topk, model_dim, profile: bool = False, reduce_exe=None):
             self._exe = exe
             self._topk = topk
             self._model_dim = model_dim
             self._profile = profile
+            self._reduce_exe = reduce_exe
             # Pre-allocate intermediate buffer for max tokens
             self._intermediate = torch.zeros(
                 self.MAX_TOKENS * topk, model_dim,
                 device="cuda", dtype=torch.float16
             )
-            # Profiling stats (accumulated across calls)
-            self._call_count = 0
-            self._total_us = 0.0
-            self._alloc_init_us = 0.0
-            self._kernel_us = 0.0
-            self._reduce_us = 0.0
+            # Cache last call args for profiling
+            self._last_out = None
+            self._last_args = None
 
         def __call__(self, out, *args):
             # args: a2, w2, scale_a2, scale_w2, sorted_ids, expert_ids, sorted_weights,
             #       num_valid_ids, tokens, model_dim, inter_dim, blocks
             tokens = args[8]  # tokens is the 9th argument (0-indexed: 8)
-
-            if self._profile:
-                torch.cuda.synchronize()
-                t0 = torch.cuda.Event(enable_timing=True)
-                t1 = torch.cuda.Event(enable_timing=True)
-                t2 = torch.cuda.Event(enable_timing=True)
-                t3 = torch.cuda.Event(enable_timing=True)
-                t0.record()
 
             # Re-allocate if current buffer is too small
             expanded_size = tokens * self._topk * self._model_dim
@@ -1191,66 +1384,128 @@ def compile_moe_gemm2_no_atomic_with_reduce(
                     device=out.device, dtype=out.dtype
                 )
             intermediate = self._intermediate[:tokens * self._topk, :self._model_dim]
-            # no need to zero the buffer, because writing topk results will overwrite it
-            # intermediate.zero_()
-
-            if self._profile:
-                t1.record()
 
             # Run kernel: output to [tokens*topk, model_dim]
             self._exe(intermediate.view(-1), *args)
 
+            if self._reduce_exe is not None:
+                X = intermediate.view(tokens, self._topk, self._model_dim)
+                Y = out.view(tokens, self._model_dim)
+                self._reduce_exe(X, Y, tokens)
+            else:
+                torch.sum(intermediate.view(tokens, self._topk, self._model_dim), dim=1, out=out)
+
+            # Cache for profiling
             if self._profile:
-                t2.record()
+                self._last_out = out
+                self._last_args = args
 
-            # Reduce sum over topk: [tokens*topk, model_dim] -> [tokens, model_dim]
-            torch.sum(intermediate.view(tokens, self._topk, self._model_dim), dim=1, out=out)
+        def _get_cuda_time_from_profiler(self, prof):
+            """Extract total CUDA kernel time from profiler events (in us)."""
+            total_cuda_us = 0.0
+            for evt in prof.events():
+                device_type = str(getattr(evt, 'device_type', '')).split('.')[-1]
+                if device_type == 'CUDA':
+                    total_cuda_us += getattr(evt, 'self_device_time_total', 0)
+            return total_cuda_us
 
-            if self._profile:
-                t3.record()
-                torch.cuda.synchronize()
-
-                alloc_init_us = t0.elapsed_time(t1) * 1000  # ms -> us
-                kernel_us = t1.elapsed_time(t2) * 1000
-                reduce_us = t2.elapsed_time(t3) * 1000
-                total_us = t0.elapsed_time(t3) * 1000
-
-                self._call_count += 1
-                self._total_us += total_us
-                self._alloc_init_us += alloc_init_us
-                self._kernel_us += kernel_us
-                self._reduce_us += reduce_us
-
-        def print_profile_stats(self):
-            """Print profiling statistics."""
-            if self._call_count == 0:
-                print("[no_atomic_reduce] No profiling data collected.")
+        def print_profile_stats(self, num_iters: int = 1, num_warmup: int = 0):
+            """Profile kernel and reduce phases using torch.profiler (ROCTracer).
+            
+            This method runs separate measurements for kernel and reduce phases,
+            using torch.profiler to get accurate GPU kernel times.
+            """
+            if not self._profile:
                 return
-            n = self._call_count
-            total = self._total_us / n
-            alloc = self._alloc_init_us / n
-            kernel = self._kernel_us / n
-            reduce = self._reduce_us / n
-            print(f"[no_atomic_reduce profile] calls={n}, avg total={total:.1f} us")
-            print(f"  alloc+init: {alloc:.1f} us ({100*alloc/total:.1f}%)")
-            print(f"  kernel:     {kernel:.1f} us ({100*kernel/total:.1f}%)")
-            print(f"  reduce:     {reduce:.1f} us ({100*reduce/total:.1f}%)")
+
+            import torch.profiler as tpf
+            
+            if self._last_args is None:
+                print("[no_atomic_reduce] No cached args. Run __call__ first.")
+                return
+            
+            out = self._last_out
+            args = self._last_args
+            tokens = args[8]
+            
+            intermediate = self._intermediate[:tokens * self._topk, :self._model_dim]
+            X = intermediate.view(tokens, self._topk, self._model_dim)
+            Y = out.view(tokens, self._model_dim)
+            
+            # --- Measure total ---
+            def run_total():
+                self(out, *args)
+            
+            for _ in range(num_warmup):
+                run_total()
+            torch.cuda.synchronize()
+            
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+            ) as prof:
+                for _ in range(num_iters):
+                    run_total()
+                torch.cuda.synchronize()
+            total_us = self._get_cuda_time_from_profiler(prof) / num_iters
+            
+            # --- Measure kernel phase only ---
+            def run_kernel():
+                self._exe(intermediate.view(-1), *args)
+            
+            for _ in range(num_warmup):
+                run_kernel()
+            torch.cuda.synchronize()
+            
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+            ) as prof:
+                for _ in range(num_iters):
+                    run_kernel()
+                torch.cuda.synchronize()
+            kernel_us = self._get_cuda_time_from_profiler(prof) / num_iters
+            
+            # --- Measure reduce phase only ---
+            def run_reduce():
+                if self._reduce_exe is not None:
+                    self._reduce_exe(X, Y, tokens)
+                else:
+                    torch.sum(X, dim=1, out=Y.view(tokens, self._model_dim))
+            
+            for _ in range(num_warmup):
+                run_reduce()
+            torch.cuda.synchronize()
+            
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+            ) as prof:
+                for _ in range(num_iters):
+                    run_reduce()
+                torch.cuda.synchronize()
+            reduce_us = self._get_cuda_time_from_profiler(prof) / num_iters
+            
+            print(f"[no_atomic_reduce profile] iters={num_iters}, warmup={num_warmup}")
+            print(f"  kernel:  {kernel_us:.1f} us ({100*kernel_us/total_us:.1f}%)")
+            print(f"  reduce:  {reduce_us:.1f} us ({100*reduce_us/total_us:.1f}%)")
+            print(f"  total:   {total_us:.1f} us")
 
         def reset_profile_stats(self):
-            """Reset profiling statistics."""
-            self._call_count = 0
-            self._total_us = 0.0
-            self._alloc_init_us = 0.0
-            self._kernel_us = 0.0
-            self._reduce_us = 0.0
+            """Reset cached args."""
+            self._last_out = None
+            self._last_args = None
 
-    return _ReduceWrapper(inner_exe, topk, model_dim, profile=profile)
+    return _ReduceWrapper(inner_exe, topk, model_dim, profile=profile, reduce_exe=reduce_exe)
 
 
-def _make_no_atomic_compile_fn(profile: bool = False):
-    """Factory to create compile_fn with profile option."""
+def _make_no_atomic_compile_fn(profile: bool = False, use_flydsl_reduce: bool = False):
+    """Factory to create compile_fn with profile and reduce options."""
     from functools import partial
-    return partial(compile_moe_gemm2_no_atomic_with_reduce, profile=profile)
+    return partial(compile_moe_gemm2_no_atomic_with_reduce, profile=profile, use_flydsl_reduce=use_flydsl_reduce)
 
 
 @pytest.mark.parametrize(
@@ -1309,12 +1564,20 @@ def test_moe_stage2_standalone(
     # Run baseline stage2 (atomic accumulation)
     run_moe_stage2(**common_args, kernel_name="moe_gemm2_atomic")
 
-    # Run no-atomic + reduce version
-    compile_fn = _make_no_atomic_compile_fn(profile=profile_breakdown)
+    # Run no-atomic + torch.sum reduce version
+    compile_fn_torch = _make_no_atomic_compile_fn(profile=profile_breakdown, use_flydsl_reduce=False)
     run_moe_stage2(
         **common_args,
-        compile_fn=compile_fn,
-        kernel_name="moe_gemm2_no_atomic_reduce",
+        compile_fn=compile_fn_torch,
+        kernel_name="moe_gemm2_no_atomic_torch_reduce",
+    )
+
+    # Run no-atomic + FlyDSL reduce version
+    compile_fn_flydsl = _make_no_atomic_compile_fn(profile=profile_breakdown, use_flydsl_reduce=True)
+    run_moe_stage2(
+        **common_args,
+        compile_fn=compile_fn_flydsl,
+        kernel_name="moe_gemm2_no_atomic_flydsl_reduce",
     )
 
 
