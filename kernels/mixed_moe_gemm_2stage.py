@@ -520,7 +520,10 @@ def compile_mixed_moe_gemm1(
                         for i in range_constexpr(num_x_loads):
                             idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
 
-                            x_vec = load_x(idx_i32)
+                            x_valid = arith.cmpu(idx_i32, tokens_in * model_dim, "ult")
+
+                            idx_shift = arith.select(x_valid, arith.i32(0), arith.i32(0x80000000))
+                            x_vec = load_x(arith.index_cast(i32, idx_i32) + arith.index_cast(i32, idx_shift))
                             parts.append(vector.bitcast(vec4_i32, x_vec))
 
                             # m_valid = arith.cmpu(x_row_base_div4[i] // c_k_div4, tokens_in, "ult")
