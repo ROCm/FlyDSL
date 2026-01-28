@@ -61,6 +61,7 @@ def compile_moe_gemm1(
       - "int8": X/W are int8
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
     """
+
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
@@ -133,6 +134,7 @@ def compile_moe_gemm1(
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
+        f"_abi3"  # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
     ).replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -381,7 +383,11 @@ def compile_moe_gemm1(
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_raw = arith.andi(fused_i, mask24)
                     t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
-                    x_row_base_div4.append(t_idx * c_k_div4)
+                    # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
+                    # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
+                    t_valid_i32 = arith.cmpu(t_raw, tokens_i32, "ult")
+                    t_safe = arith.select(t_valid_i32, t_idx, arith.index(0))
+                    x_row_base_div4.append(t_safe * c_k_div4)
     
                 vec1_i32 = I.vec(1, i32)
                 vec2_i32 = I.vec(2, i32)
@@ -900,9 +906,18 @@ def compile_moe_gemm1(
                         # `row` is the sorted-row index (bx_m + row_in_tile).
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
-                        # No explicit mask: rely on buffer descriptor OOB to zero-fill when t2 is the
-                        # sentinel (t2 == tokens) or otherwise out-of-range.
-                        sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                        # aiter moe_sorting uses sentinel token_id == tokens for padding.
+                        # Do NOT rely on buffer OOB semantics for scale loads; explicitly mask.
+                        t_valid = arith.cmpu(t2, tokens_i32_v, "ult")
+                        sx = (
+                            arith.f32(1.0)
+                            if is_f16
+                            else arith.select(
+                                t_valid,
+                                buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
+                                arith.f32(0.0),
+                            )
+                        )
     
                         # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                         if doweight_stage1:
@@ -912,7 +927,7 @@ def compile_moe_gemm1(
                             col_local = col_base_local + (ni * 16)
                             sw_gate = sw_gate_vals[ni]
                             sw_up = sw_up_vals[ni]
-    
+
                             acc_idx = mi * num_acc_n + ni
                             vg = vector.extract(
                                 acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
@@ -920,13 +935,13 @@ def compile_moe_gemm1(
                             vu = vector.extract(
                                 acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                             )
-    
+
                             if is_int8:
                                 vg = arith.sitofp(f32, vg)
                                 vu = arith.sitofp(f32, vu)
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
-    
+
                             y = silu(vg) * vu
                             if doweight_stage1:
                                 y = y * tw
@@ -943,11 +958,18 @@ def compile_moe_gemm1(
                         return (t2 * topk_i32_v + s2) * inter_i32_local
     
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                        idx0 = row_ctx
-                        col_i32 = arith.index_cast(i32, col_g0)
-                        idx_out = idx0 + col_i32
-                        # Vectorized fp16 store (EVec=4).
-                        buffer_ops.buffer_store(frag, out_rsrc, idx_out)
+                        # Guard against sentinel token ids (t == tokens) produced by aiter moe_sorting padding.
+                        # OOB buffer stores are not guaranteed to be safe on all paths, so predicate explicitly.
+                        fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
+                        t2 = fused2 & mask24_i32
+                        t_valid = arith.cmpu(t2, tokens_i32_v, "ult")
+                        _if_valid = scf.IfOp(t_valid)
+                        with _if_valid.then():
+                            idx0 = row_ctx
+                            col_i32 = arith.index_cast(i32, col_g0)
+                            idx_out = idx0 + col_i32
+                            # Vectorized fp16 store (EVec=4).
+                            buffer_ops.buffer_store(frag, out_rsrc, idx_out)
                     mfma_epilog(
                         use_cshuffle=True,
                         arith=arith,
@@ -982,8 +1004,18 @@ def compile_moe_gemm1(
                     s2_raw = fused2 >> 24
                     t2 = t2_raw
                     s2 = s2_raw
+                    t_valid = arith.cmpu(t2, tokens_i32_v, "ult")
 
-                    sx0 = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32)
+                    # Do NOT rely on buffer OOB semantics for scale loads; explicitly mask.
+                    sx0 = (
+                        arith.f32(1.0)
+                        if is_f16
+                        else arith.select(
+                            t_valid,
+                            buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
+                            arith.f32(0.0),
+                        )
+                    )
                     sx = sx0
                     zero_out = arith.constant(0.0, type=out_mlir())
     
@@ -994,31 +1026,33 @@ def compile_moe_gemm1(
                     if doweight_stage1:
                         tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
     
-                    for ni in range_constexpr(num_acc_n):
-                        col_i32 = col_i32_list[ni]
-                        sw_gate = sw_gate_vals[ni]
-                        sw_up = sw_up_vals[ni]
-    
-                        acc_idx = mi * num_acc_n + ni
-                        vg = vector.extract(
-                            acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
-                        )
-                        vu = vector.extract(
-                            acc_up[acc_idx], static_position=[ii], dynamic_position=[]
-                        )
-    
-                        if is_int8:
-                            vg = arith.sitofp(f32, vg)
-                            vu = arith.sitofp(f32, vu)
-                        vg = vg * sx * sw_gate
-                        vu = vu * sx * sw_up
-    
-                        y = silu(vg) * vu
-                        if doweight_stage1:
-                            y = y * tw
-                        y = arith.trunc_f(out_mlir(), y)
-                        idx_out0 = idx0 + col_i32
-                        buffer_ops.buffer_store(y, out_rsrc, idx_out0)
+                    _if_valid = scf.IfOp(t_valid)
+                    with _if_valid.then():
+                        for ni in range_constexpr(num_acc_n):
+                            col_i32 = col_i32_list[ni]
+                            sw_gate = sw_gate_vals[ni]
+                            sw_up = sw_up_vals[ni]
+        
+                            acc_idx = mi * num_acc_n + ni
+                            vg = vector.extract(
+                                acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
+                            )
+                            vu = vector.extract(
+                                acc_up[acc_idx], static_position=[ii], dynamic_position=[]
+                            )
+        
+                            if is_int8:
+                                vg = arith.sitofp(f32, vg)
+                                vu = arith.sitofp(f32, vu)
+                            vg = vg * sx * sw_gate
+                            vu = vu * sx * sw_up
+        
+                            y = silu(vg) * vu
+                            if doweight_stage1:
+                                y = y * tw
+                            y = arith.trunc_f(out_mlir(), y)
+                            idx_out0 = idx0 + col_i32
+                            buffer_ops.buffer_store(y, out_rsrc, idx_out0)
     
                 mfma_epilog(
     
@@ -1207,6 +1241,7 @@ def compile_moe_gemm2(
     module_name = (
         f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
+        f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
     ).replace("-", "_")
 
     class _MOE2(flir.MlirModule):
@@ -1501,8 +1536,14 @@ def compile_moe_gemm2(
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_i32 = arith.andi(fused_i, mask24)
                     s_i32 = arith.shrui(fused_i, arith.i32(24))
-                    # Keep `blk_valid` only; remove per-row token validity checks.
-                    row_ts_i32 = t_i32 * topk_i32 + s_i32
+                    # aiter moe_sorting uses sentinel token_id == tokens for padding.
+                    # Do NOT rely on buffer OOB semantics for A2/scale loads; explicitly mask.
+                    t_valid = arith.cmpu(t_i32, tokens_i32, "ult")
+                    s_valid = arith.cmpu(s_i32, topk_i32, "ult")
+                    ts_valid = arith.andi(t_valid, s_valid)
+                    t_safe = arith.select(ts_valid, t_i32, arith.i32(0))
+                    s_safe = arith.select(ts_valid, s_i32, arith.i32(0))
+                    row_ts_i32 = t_safe * topk_i32 + s_safe
                     row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
                     # Base row offset in dword units: row_ts_idx * (k_in/4)
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
@@ -2048,12 +2089,25 @@ def compile_moe_gemm2(
                         num_acc_n: int,
                         lds_out,
                     ):
-                        # Match origin/dev_a16w4: rely on sentinel padded rows + hardware OOB behavior.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
-                        ts2 = t2 * topk_i32_v + s2
-                        sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                        # Explicitly mask sentinel token/slot to avoid OOB scale_x loads.
+                        t_ok = arith.cmpu(t2, tokens_i32, "ult")
+                        s_ok = arith.cmpu(s2, topk_i32_v, "ult")
+                        ts_ok = arith.andi(t_ok, s_ok)
+                        t2_safe = arith.select(ts_ok, t2, arith.i32(0))
+                        s2_safe = arith.select(ts_ok, s2, arith.i32(0))
+                        ts2 = t2_safe * topk_i32_v + s2_safe
+                        sx = (
+                            arith.f32(1.0)
+                            if is_f16
+                            else arith.select(
+                                ts_ok,
+                                buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
+                                arith.f32(0.0),
+                            )
+                        )
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
@@ -2087,7 +2141,12 @@ def compile_moe_gemm2(
                         # for invalid tail rows (CK-style), avoiding per-store branching.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         row_i32 = arith.index_cast(i32, row)
-                        row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
+                        row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
+                        t = fused2 & mask24_i32
+                        s = fused2 >> 24
+                        t_ok = arith.cmpu(t, tokens_i32, "ult")
+                        s_ok = arith.cmpu(s, topk_i32_v, "ult")
+                        row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
                         return (fused2, row_valid)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
