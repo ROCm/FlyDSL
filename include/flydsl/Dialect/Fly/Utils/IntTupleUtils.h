@@ -118,6 +118,13 @@ public:
   ArithValue materializeConstantArith(int32_t value) const {
     return IntAttr::getStatic(ctx, value);
   }
+  ArithValue materializeConstantArith(int64_t value) const;
+
+  ArithValue materializeConstantArith(IntAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    return value;
+  }
+
   IntTupleAttr materializeConstantTuple(IntTupleAttr attr) const {
     assert(attr.isStatic() && "Tuple must be static");
     return attr;
@@ -229,6 +236,15 @@ public:
     return ArithValue{arith::ConstantIntOp::create(builder, loc, value, 32).getResult(),
                       attrBuilder.materializeConstantArith(value)};
   }
+  ArithValue materializeConstantArith(int64_t value) const;
+
+  ArithValue materializeConstantArith(IntAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    return ArithValue{
+        arith::ConstantIntOp::create(builder, loc, value.getValue(), value.getWidth()).getResult(),
+        value};
+  }
+
   IntTupleValueAdaptor materializeConstantTuple(IntTupleAttr attr) const {
     assert(attr.isStatic() && "Tuple must be static");
     if (attr.isLeaf()) {

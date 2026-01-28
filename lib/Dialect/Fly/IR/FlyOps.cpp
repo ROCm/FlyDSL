@@ -1220,6 +1220,7 @@ FLY_INFER_RETURN_TYPES(AddOffsetOp) {
   // Offset must be a scalar (leaf) int_tuple
   if (!offsetTy.getAttr().isLeaf())
     return failure();
+  // todo: alignment of the return pointer should be the gcd(offset, original alignment)
   inferredReturnTypes.assign({ptrTy});
   return success();
 }

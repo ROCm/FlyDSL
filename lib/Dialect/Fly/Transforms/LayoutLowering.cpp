@@ -7,6 +7,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -432,9 +433,11 @@ static void lowerGpuLaunchFuncIntTupleOperands(gpu::LaunchFuncOp op) {
   op.getKernelOperandsMutable().assign(newKernelOperands);
 }
 
-static bool lowerGpuFuncIntTupleArgs(gpu::GPUFuncOp op) {
-  auto funcType = op.getFunctionType();
-  SmallVector<Type> oldInputs(funcType.getInputs().begin(), funcType.getInputs().end());
+/// Lower function arguments: IntTupleType, LayoutType, and MemRefType arguments are lowered
+/// to LLVM structs. Works with any operation implementing FunctionOpInterface.
+static bool lowerFuncIntTupleArgs(FunctionOpInterface op) {
+  ArrayRef<Type> argTypes = op.getArgumentTypes();
+  SmallVector<Type> oldInputs(argTypes.begin(), argTypes.end());
 
   // First pass: compute new argument types
   SmallVector<Type> newInputs;
@@ -481,10 +484,14 @@ static bool lowerGpuFuncIntTupleArgs(gpu::GPUFuncOp op) {
     return false;
 
   // Update function type
-  auto newFuncType = FunctionType::get(op.getContext(), newInputs, funcType.getResults());
+  auto newFuncType = FunctionType::get(op.getContext(), newInputs, op.getResultTypes());
   op.setType(newFuncType);
 
-  Block &entry = op.getBody().front();
+  // Handle empty function (declaration only)
+  if (op.getFunctionBody().empty())
+    return true;
+
+  Block &entry = op.getFunctionBody().front();
   Location loc = op.getLoc();
 
   // Transform block arguments: work backwards to handle index shifts from MemRef expansion
@@ -553,7 +560,7 @@ static bool lowerGpuFuncIntTupleArgs(gpu::GPUFuncOp op) {
       SmallVector<IntAttr> dynamicLeaves;
       collectDynamicLeaves(tupleTy.getAttr(), dynamicLeaves);
       if (dynamicLeaves.empty()) {
-        Value tuple = StaticOp::create(builder, loc, tupleTy);
+        Value tuple = MakeIntTupleOp::create(builder, loc, tupleTy, {});
         arg.replaceAllUsesWith(tuple);
         newArgIdx++;
         continue;
@@ -589,7 +596,11 @@ static bool lowerGpuFuncIntTupleArgs(gpu::GPUFuncOp op) {
       collectDynamicLeaves(layoutAttr.getShape(), shapeLeaves);
       collectDynamicLeaves(layoutAttr.getStride(), strideLeaves);
       if (shapeLeaves.empty() && strideLeaves.empty()) {
-        Value layout = StaticOp::create(builder, loc, layoutTy);
+        Value Shape =
+            MakeIntTupleOp::create(builder, loc, IntTupleType::get(layoutAttr.getShape()), {});
+        Value Stride =
+            MakeIntTupleOp::create(builder, loc, IntTupleType::get(layoutAttr.getStride()), {});
+        Value layout = MakeLayoutOp::create(builder, loc, layoutTy, Shape, Stride);
         arg.replaceAllUsesWith(layout);
         newArgIdx++;
         continue;
@@ -721,290 +732,6 @@ static bool lowerGpuFuncIntTupleArgs(gpu::GPUFuncOp op) {
       ptrArg.replaceAllUsesExcept(view, except);
 
       newArgIdx += 2; // Dynamic MemRef uses 2 args
-      continue;
-    }
-  }
-
-  return true;
-}
-
-/// Lower func::FuncOp arguments: IntTupleType, LayoutType, and MemRefType arguments are lowered
-/// to LLVM structs, similar to lowerGpuFuncIntTupleArgs but for func.func operations.
-static bool lowerFuncOpIntTupleArgs(func::FuncOp op) {
-  auto funcType = op.getFunctionType();
-  SmallVector<Type> oldInputs(funcType.getInputs().begin(), funcType.getInputs().end());
-
-  // First pass: compute new argument types
-  SmallVector<Type> newInputs;
-  enum class ArgKind { None, IntTuple, Layout, MemRefStatic, MemRefDynamic };
-  SmallVector<ArgKind> argKinds;
-
-  bool changed = false;
-  for (Type oldType : oldInputs) {
-    if (auto tupleTy = dyn_cast<IntTupleType>(oldType)) {
-      auto structTy = getIntTupleStructTypeOrEmpty(tupleTy.getAttr(), op.getContext());
-      newInputs.push_back(structTy);
-      argKinds.push_back(ArgKind::IntTuple);
-      changed = true;
-      continue;
-    }
-    if (auto layoutTy = dyn_cast<LayoutType>(oldType)) {
-      auto structTy = getLayoutStructTypeOrEmpty(layoutTy.getAttr(), op.getContext());
-      newInputs.push_back(structTy);
-      argKinds.push_back(ArgKind::Layout);
-      changed = true;
-      continue;
-    }
-    if (auto memrefTy = dyn_cast<fly::MemRefType>(oldType)) {
-      auto ptrTy = getMemRefPtrType(memrefTy);
-      newInputs.push_back(ptrTy);
-      if (memrefHasDynamicLayout(memrefTy)) {
-        auto layoutStructTy = *getMemRefLayoutStructType(memrefTy);
-        newInputs.push_back(layoutStructTy);
-        argKinds.push_back(ArgKind::MemRefDynamic);
-      } else {
-        argKinds.push_back(ArgKind::MemRefStatic);
-      }
-      changed = true;
-      continue;
-    }
-    newInputs.push_back(oldType);
-    argKinds.push_back(ArgKind::None);
-  }
-
-  if (!changed)
-    return false;
-
-  // Update function type
-  auto newFuncType = FunctionType::get(op.getContext(), newInputs, funcType.getResults());
-  op.setType(newFuncType);
-
-  // Handle empty function (declaration only)
-  if (op.getBody().empty())
-    return true;
-
-  Block &entry = op.getBody().front();
-  Location loc = op.getLoc();
-
-  // Transform block arguments: work backwards to handle index shifts from MemRef expansion
-  for (int i = oldInputs.size() - 1; i >= 0; --i) {
-    BlockArgument oldArg = entry.getArgument(i);
-
-    if (argKinds[i] == ArgKind::None) {
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::IntTuple || argKinds[i] == ArgKind::Layout) {
-      size_t newIdx = 0;
-      for (int j = 0; j < i; ++j) {
-        newIdx++;
-        if (argKinds[j] == ArgKind::MemRefDynamic)
-          newIdx++;
-      }
-      oldArg.setType(newInputs[newIdx]);
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::MemRefStatic) {
-      size_t newIdx = 0;
-      for (int j = 0; j < i; ++j) {
-        newIdx++;
-        if (argKinds[j] == ArgKind::MemRefDynamic)
-          newIdx++;
-      }
-      oldArg.setType(newInputs[newIdx]);
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::MemRefDynamic) {
-      size_t newIdx = 0;
-      for (int j = 0; j < i; ++j) {
-        newIdx++;
-        if (argKinds[j] == ArgKind::MemRefDynamic)
-          newIdx++;
-      }
-      oldArg.setType(newInputs[newIdx]);
-      entry.insertArgument(i + 1, newInputs[newIdx + 1], loc);
-    }
-  }
-
-  // Reconstruct fly values from the new arguments
-  OpBuilder builder(&entry, entry.begin());
-
-  size_t newArgIdx = 0;
-  for (size_t i = 0; i < oldInputs.size(); ++i) {
-    if (argKinds[i] == ArgKind::None) {
-      newArgIdx++;
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::IntTuple) {
-      auto tupleTy = cast<IntTupleType>(oldInputs[i]);
-      auto structTy = cast<LLVM::LLVMStructType>(newInputs[newArgIdx]);
-      BlockArgument arg = entry.getArgument(newArgIdx);
-
-      SmallVector<IntAttr> dynamicLeaves;
-      collectDynamicLeaves(tupleTy.getAttr(), dynamicLeaves);
-      if (dynamicLeaves.empty()) {
-        Value tuple = StaticOp::create(builder, loc, tupleTy);
-        arg.replaceAllUsesWith(tuple);
-        newArgIdx++;
-        continue;
-      }
-
-      SmallVector<Value> dyncElems;
-      SmallVector<Operation *> extractOps;
-      dyncElems.reserve(dynamicLeaves.size());
-
-      for (size_t j = 0; j < dynamicLeaves.size(); ++j) {
-        Type fieldTy = structTy.getBody()[j];
-        Value val = LLVM::ExtractValueOp::create(builder, loc, fieldTy, arg,
-                                                 llvm::ArrayRef<int64_t>{static_cast<int64_t>(j)});
-        dyncElems.push_back(val);
-        extractOps.push_back(val.getDefiningOp());
-      }
-
-      Value tuple = MakeIntTupleOp::create(builder, loc, tupleTy, dyncElems);
-      llvm::SmallPtrSet<Operation *, 8> except(extractOps.begin(), extractOps.end());
-      arg.replaceAllUsesExcept(tuple, except);
-      newArgIdx++;
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::Layout) {
-      auto layoutTy = cast<LayoutType>(oldInputs[i]);
-      auto structTy = cast<LLVM::LLVMStructType>(newInputs[newArgIdx]);
-      BlockArgument arg = entry.getArgument(newArgIdx);
-      LayoutAttr layoutAttr = layoutTy.getAttr();
-
-      SmallVector<IntAttr> shapeLeaves;
-      SmallVector<IntAttr> strideLeaves;
-      collectDynamicLeaves(layoutAttr.getShape(), shapeLeaves);
-      collectDynamicLeaves(layoutAttr.getStride(), strideLeaves);
-      if (shapeLeaves.empty() && strideLeaves.empty()) {
-        Value layout = StaticOp::create(builder, loc, layoutTy);
-        arg.replaceAllUsesWith(layout);
-        newArgIdx++;
-        continue;
-      }
-
-      SmallVector<Value> shapeElems;
-      SmallVector<Value> strideElems;
-      SmallVector<Operation *> extractOps;
-
-      auto shapeStructTy = cast<LLVM::LLVMStructType>(structTy.getBody()[0]);
-      auto strideStructTy = cast<LLVM::LLVMStructType>(structTy.getBody()[1]);
-      Value shapeStruct = LLVM::ExtractValueOp::create(builder, loc, shapeStructTy, arg,
-                                                       llvm::ArrayRef<int64_t>{0});
-      Value strideStruct = LLVM::ExtractValueOp::create(builder, loc, strideStructTy, arg,
-                                                        llvm::ArrayRef<int64_t>{1});
-      extractOps.push_back(shapeStruct.getDefiningOp());
-      extractOps.push_back(strideStruct.getDefiningOp());
-
-      for (size_t j = 0; j < shapeLeaves.size(); ++j) {
-        Type fieldTy = shapeStructTy.getBody()[j];
-        Value val = LLVM::ExtractValueOp::create(builder, loc, fieldTy, shapeStruct,
-                                                 llvm::ArrayRef<int64_t>{static_cast<int64_t>(j)});
-        shapeElems.push_back(val);
-        extractOps.push_back(val.getDefiningOp());
-      }
-      for (size_t j = 0; j < strideLeaves.size(); ++j) {
-        Type fieldTy = strideStructTy.getBody()[j];
-        Value val = LLVM::ExtractValueOp::create(builder, loc, fieldTy, strideStruct,
-                                                 llvm::ArrayRef<int64_t>{static_cast<int64_t>(j)});
-        strideElems.push_back(val);
-        extractOps.push_back(val.getDefiningOp());
-      }
-
-      IntTupleType shapeTy = IntTupleType::get(op.getContext(), layoutAttr.getShape());
-      IntTupleType strideTy = IntTupleType::get(op.getContext(), layoutAttr.getStride());
-      Value shape = MakeIntTupleOp::create(builder, loc, shapeTy, shapeElems);
-      Value stride = MakeIntTupleOp::create(builder, loc, strideTy, strideElems);
-      Value layout = MakeLayoutOp::create(builder, loc, layoutTy, shape, stride);
-      llvm::SmallPtrSet<Operation *, 8> except(extractOps.begin(), extractOps.end());
-      arg.replaceAllUsesExcept(layout, except);
-      newArgIdx++;
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::MemRefStatic) {
-      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
-      LayoutAttr layoutAttr = memrefTy.getLayout();
-
-      BlockArgument ptrArg = entry.getArgument(newArgIdx);
-
-      IntTupleType shapeTy = IntTupleType::get(op.getContext(), layoutAttr.getShape());
-      IntTupleType strideTy = IntTupleType::get(op.getContext(), layoutAttr.getStride());
-      Value shape = MakeIntTupleOp::create(builder, loc, shapeTy, ValueRange{});
-      Value stride = MakeIntTupleOp::create(builder, loc, strideTy, ValueRange{});
-      auto layoutTy = LayoutType::get(op.getContext(), layoutAttr);
-      Value layout = MakeLayoutOp::create(builder, loc, layoutTy, shape, stride);
-
-      Value view = MakeViewOp::create(builder, loc, memrefTy, ptrArg, layout);
-
-      llvm::SmallPtrSet<Operation *, 8> except;
-      except.insert(view.getDefiningOp());
-      ptrArg.replaceAllUsesExcept(view, except);
-
-      newArgIdx++;
-      continue;
-    }
-
-    if (argKinds[i] == ArgKind::MemRefDynamic) {
-      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
-      LayoutAttr layoutAttr = memrefTy.getLayout();
-
-      BlockArgument ptrArg = entry.getArgument(newArgIdx);
-      BlockArgument layoutStructArg = entry.getArgument(newArgIdx + 1);
-      auto layoutStructTy = cast<LLVM::LLVMStructType>(layoutStructArg.getType());
-
-      SmallVector<IntAttr> shapeLeaves;
-      SmallVector<IntAttr> strideLeaves;
-      collectDynamicLeaves(layoutAttr.getShape(), shapeLeaves);
-      collectDynamicLeaves(layoutAttr.getStride(), strideLeaves);
-
-      SmallVector<Value> shapeElems;
-      SmallVector<Value> strideElems;
-      SmallVector<Operation *> extractOps;
-
-      auto shapeStructTy = cast<LLVM::LLVMStructType>(layoutStructTy.getBody()[0]);
-      auto strideStructTy = cast<LLVM::LLVMStructType>(layoutStructTy.getBody()[1]);
-      Value shapeStruct = LLVM::ExtractValueOp::create(builder, loc, shapeStructTy, layoutStructArg,
-                                                       llvm::ArrayRef<int64_t>{0});
-      Value strideStruct = LLVM::ExtractValueOp::create(
-          builder, loc, strideStructTy, layoutStructArg, llvm::ArrayRef<int64_t>{1});
-      extractOps.push_back(shapeStruct.getDefiningOp());
-      extractOps.push_back(strideStruct.getDefiningOp());
-
-      for (size_t j = 0; j < shapeLeaves.size(); ++j) {
-        Type fieldTy = shapeStructTy.getBody()[j];
-        Value val = LLVM::ExtractValueOp::create(builder, loc, fieldTy, shapeStruct,
-                                                 llvm::ArrayRef<int64_t>{static_cast<int64_t>(j)});
-        shapeElems.push_back(val);
-        extractOps.push_back(val.getDefiningOp());
-      }
-      for (size_t j = 0; j < strideLeaves.size(); ++j) {
-        Type fieldTy = strideStructTy.getBody()[j];
-        Value val = LLVM::ExtractValueOp::create(builder, loc, fieldTy, strideStruct,
-                                                 llvm::ArrayRef<int64_t>{static_cast<int64_t>(j)});
-        strideElems.push_back(val);
-        extractOps.push_back(val.getDefiningOp());
-      }
-
-      IntTupleType shapeTy = IntTupleType::get(op.getContext(), layoutAttr.getShape());
-      IntTupleType strideTy = IntTupleType::get(op.getContext(), layoutAttr.getStride());
-      Value shape = MakeIntTupleOp::create(builder, loc, shapeTy, shapeElems);
-      Value stride = MakeIntTupleOp::create(builder, loc, strideTy, strideElems);
-      auto layoutTy = LayoutType::get(op.getContext(), layoutAttr);
-      Value layout = MakeLayoutOp::create(builder, loc, layoutTy, shape, stride);
-
-      Value view = MakeViewOp::create(builder, loc, memrefTy, ptrArg, layout);
-
-      llvm::SmallPtrSet<Operation *, 8> except(extractOps.begin(), extractOps.end());
-      except.insert(view.getDefiningOp());
-      ptrArg.replaceAllUsesExcept(view, except);
-
-      newArgIdx += 2;
       continue;
     }
   }
@@ -1571,8 +1298,7 @@ public:
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
-    getOperation()->walk([&](gpu::GPUFuncOp gpuFunc) { lowerGpuFuncIntTupleArgs(gpuFunc); });
-    getOperation()->walk([&](func::FuncOp funcOp) { lowerFuncOpIntTupleArgs(funcOp); });
+    getOperation()->walk([&](FunctionOpInterface funcOp) { lowerFuncIntTupleArgs(funcOp); });
     getOperation()->walk(
         [&](gpu::LaunchFuncOp launchOp) { lowerGpuLaunchFuncIntTupleOperands(launchOp); });
 

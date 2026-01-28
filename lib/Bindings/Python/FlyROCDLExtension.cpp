@@ -25,6 +25,10 @@ using namespace mlir::python::nanobind_adaptors;
 NB_MODULE(_fly_rocdl, m) {
   m.doc() = "MLIR Python FlyROCDL Extension";
 
+  //===--------------------------------------------------------------------===//
+  // MmaAtomCDNA3_MFMAType
+  //===--------------------------------------------------------------------===//
+
   mlir_type_subclass(m, "MmaAtomCDNA3_MFMAType", mlirTypeIsAFlyROCDLMmaAtomCDNA3_MFMAType,
                      mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID)
       .def_classmethod(
@@ -39,5 +43,24 @@ NB_MODULE(_fly_rocdl, m) {
           // clang-format off
           nb::sig("def get(cls, m: int, n: int, k: int, elem_ty_a: " MAKE_MLIR_PYTHON_QUALNAME("ir.Type") ", elem_ty_b: " MAKE_MLIR_PYTHON_QUALNAME("ir.Type") ", elem_ty_acc: " MAKE_MLIR_PYTHON_QUALNAME("ir.Type") ", context: " MAKE_MLIR_PYTHON_QUALNAME("ir.Context") " | None = None) -> MmaAtomCDNA3_MFMAType"),
           // clang-format on
-          "Create a MmaAtomCDNA3_MFMAType with m, n, k dimensions and element types");
+          "Create a MmaAtomCDNA3_MFMAType with m, n, k dimensions and element types")
+      .def_property_readonly(
+          "m", [](MlirType self) { return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(self); })
+      .def_property_readonly(
+          "n", [](MlirType self) { return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetN(self); })
+      .def_property_readonly(
+          "k", [](MlirType self) { return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetK(self); })
+      .def_property_readonly(
+          "elem_ty_a",
+          [](MlirType self) { return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyA(self); })
+      .def_property_readonly(
+          "elem_ty_b",
+          [](MlirType self) { return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(self); })
+      .def_property_readonly("elem_ty_acc", [](MlirType self) {
+        return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(self);
+      });
+
+  //===--------------------------------------------------------------------===//
+  // CopyAtom_CDNA3_BufferLSAType
+  //===--------------------------------------------------------------------===//
 }

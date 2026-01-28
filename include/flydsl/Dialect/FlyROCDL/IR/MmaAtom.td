@@ -16,7 +16,7 @@ def FlyROCDL_MmaAtomCDNA3_MFMA : FlyxROCL_MmaAtom<"MmaAtomCDNA3_MFMA", "atom.cdn
     "Type":$elemTyB,
     "Type":$elemTyAcc
   );
-  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` $elemTyA `x` $elemTyB `=` $elemTyAcc `>`";
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `>`";
 
   let builders = [
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
