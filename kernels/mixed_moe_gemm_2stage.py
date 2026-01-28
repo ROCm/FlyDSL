@@ -377,7 +377,8 @@ def compile_mixed_moe_gemm1(
                 # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
                 # used directly (CK-style). This allows us to avoid `select`-based masking for
                 # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
-                x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
+                # x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False)
+                x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=tokens_in*model_dim)
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
                 out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False)
                 # fp16 path ignores scales completely (implicit scale=1.0).
@@ -520,10 +521,12 @@ def compile_mixed_moe_gemm1(
                         for i in range_constexpr(num_x_loads):
                             idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
 
-                            x_valid = arith.cmpu(idx_i32, tokens_in * model_dim, "ult")
+                            # x_valid = arith.cmpu(idx_i32, tokens_in * model_dim // 4, "ult")
 
-                            idx_shift = arith.select(x_valid, arith.i32(0), arith.i32(0x80000000))
-                            x_vec = load_x(arith.index_cast(i32, idx_i32) + arith.index_cast(i32, idx_shift))
+                            # idx_shift = arith.select(x_valid, arith.i32(0), arith.i32(0x80000000))
+                            # # idx_shift = arith.i32(0x8000000)
+                            # x_vec = load_x(arith.index_cast(i32, idx_i32) + arith.index_cast(i32, idx_shift))
+                            x_vec = load_x(idx_i32)
                             parts.append(vector.bitcast(vec4_i32, x_vec))
 
                             # m_valid = arith.cmpu(x_row_base_div4[i] // c_k_div4, tokens_in, "ult")
