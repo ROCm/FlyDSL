@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+import argparse
 import logging
+import math
 import os
 import sys
 from typing import Tuple, Optional, List
 
 import pytest
 import torch
-import argparse
 
 # -----------------------------------------------------------------------------
 # Ensure we use the repo-local `flydsl` when running this file directly.
@@ -611,7 +612,6 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
-    import math
 
     # Parameter sanity checks with actionable hints (avoid bare AssertionError).
     if model_dim % tile_n != 0:
@@ -1017,8 +1017,6 @@ def test_moe_gemm_2stage(
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
 
-    import math
-
     # Keep inputs tame by default; fp16 paths are less robust to overflow.
     # (Callers can still override via pytest param / direct invocation.)
     if init_scale == 1.0:
@@ -1184,20 +1182,38 @@ class _TorchReduceWrapper:
         self._model_dim = model_dim
         self._intermediate = None
 
-    def __call__(self, out, *args):
-        tokens = args[8]  # tokens is the 9th argument
-
+    def __call__(
+        self,
+        arg_out,
+        arg_x,
+        arg_w,
+        arg_scale_x,
+        arg_scale_w,
+        arg_sorted_token_ids,
+        arg_expert_ids,
+        arg_sorted_weights,
+        arg_num_valid_ids,
+        tokens_in,
+        n_in,
+        k_in,
+        size_expert_ids_in,
+    ):
         # Lazy allocate intermediate buffer
-        needed = tokens * self._topk * self._model_dim
+        needed = tokens_in * self._topk * self._model_dim
         if self._intermediate is None or self._intermediate.numel() < needed:
             self._intermediate = torch.empty(
-                tokens * self._topk, self._model_dim,
-                device=out.device, dtype=out.dtype
+                tokens_in * self._topk, self._model_dim,
+                device=arg_out.device, dtype=arg_out.dtype
             )
 
-        intermediate = self._intermediate[:tokens * self._topk, :]
-        self._exe(intermediate.view(-1), *args)
-        torch.sum(intermediate.view(tokens, self._topk, self._model_dim), dim=1, out=out)
+        intermediate = self._intermediate[:tokens_in * self._topk, :]
+        self._exe(
+            intermediate.view(-1),
+            arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
+            arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+        )
+        torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
 
 # Reduce Kernel Performance Profiling

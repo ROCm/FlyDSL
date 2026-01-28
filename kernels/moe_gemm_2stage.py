@@ -2473,25 +2473,39 @@ class _MoeGemm2ReduceWrapper:
             self._intermediate_capacity = required_size
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
-    def __call__(self, out, *args):
+    def __call__(
+        self,
+        arg_out,
+        arg_x,
+        arg_w,
+        arg_scale_x,
+        arg_scale_w,
+        arg_sorted_token_ids,
+        arg_expert_ids,
+        arg_sorted_weights,
+        arg_num_valid_ids,
+        tokens_in,
+        n_in,
+        k_in,
+        size_expert_ids_in,
+    ):
         """Execute GEMM2 + reduce.
 
-        Args:
-            out: Output tensor [tokens, model_dim]
-            *args: Same arguments as moe_gemm2:
-                a2, w2, scale_a2, scale_w2, sorted_ids, expert_ids, sorted_weights,
-                num_valid_ids, tokens, model_dim, inter_dim, blocks
+        Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
         """
-        # Extract tokens from args (9th argument, 0-indexed: 8)
-        tokens = args[8]
         # Allocate/reuse intermediate buffer
-        intermediate = self._ensure_intermediate_buffer(tokens, out.device)
+        intermediate = self._ensure_intermediate_buffer(tokens_in, arg_out.device)
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
-        self._gemm2_exe(intermediate.view(-1), *args)
+        self._gemm2_exe(
+            intermediate.view(-1),
+            arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
+            arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+        )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
-        X = intermediate.view(tokens, self._topk, self._model_dim)
-        Y = out.view(tokens, self._model_dim)
-        self._reduce_exe(X, Y, tokens)
+        X = intermediate.view(tokens_in, self._topk, self._model_dim)
+        Y = arg_out.view(tokens_in, self._model_dim)
+        self._reduce_exe(X, Y, tokens_in)
 
     @property
     def mode(self) -> str:
@@ -2541,7 +2555,7 @@ def compile_moe_gemm2_ex(
     # Determine actual mode
     actual_mode = mode
     if mode == MoeGemm2Mode.AUTO:
-        # FUTURE: Autotuning-based kernel selection
+        # TODO: Autotuning-based kernel selection
         # The current implementation uses static rule matching to select between
         # atomic and reduce modes. A more robust approach would be to perform
         # runtime autotuning during compilation.
