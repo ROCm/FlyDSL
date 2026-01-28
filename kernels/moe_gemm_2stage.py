@@ -131,8 +131,6 @@ def compile_moe_gemm1(
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
-    # NOTE: module name participates in FlyDSL's compile cache key.
-    # Keep an explicit ABI tag so semantic changes don't accidentally reuse an old binary.
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
