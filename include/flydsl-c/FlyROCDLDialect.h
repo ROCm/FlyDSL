@@ -17,6 +17,23 @@ MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl);
 MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyROCDLMmaAtomCDNA3_MFMAType(MlirType type);
 MLIR_CAPI_EXPORTED MlirTypeID mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID(void);
 
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k,
+                                                                 MlirType elemTyA, MlirType elemTyB,
+                                                                 MlirType elemTyAcc);
+
+// Accessors
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetN(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyA(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// CopyAtom_CDNA3_BufferLSAType
+//===----------------------------------------------------------------------===//
+
 #ifdef __cplusplus
 }
 #endif

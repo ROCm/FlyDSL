@@ -1,3 +1,5 @@
+#include "mlir/IR/DialectImplementation.h"
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 
 namespace mlir::fly {
@@ -80,13 +82,57 @@ CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
 Attribute CopyAtomUniversalCopyType::getThrSize() const { return FxC(1); }
 
 Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyAtomUniversalCopyType::getThrValLayoutDst() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyAtomUniversalCopyType::getThrValLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(0), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+}
+
+Attribute MmaAtomUniversalFMAType::getThrSize() const { return FxC(1); }
+
+Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+}
+Attribute MmaAtomUniversalFMAType::getThrValLayoutB() const {
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+}
+Attribute MmaAtomUniversalFMAType::getThrValLayoutC() const {
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+}
+
+Type MmaAtomUniversalFMAType::parse(AsmParser &parser) {
+  Type elemTyA, elemTyB, elemTyC;
+  if (parser.parseLess())
+    return {};
+  int32_t m, n, k;
+  if (parseMNKDimensionList(parser, m, n, k))
+    return {};
+  if (m != 1 || n != 1 || k != 1) {
+    parser.emitError(parser.getCurrentLocation())
+        << "expected 1x1x1 dimensions for universal FMA, got " << m << "x" << n << "x" << k;
+    return {};
+  }
+  // Parse ", (elemTy, elemTy) -> elemTy>"
+  if (parser.parseComma() || parser.parseLParen() || parser.parseType(elemTyA) ||
+      parser.parseComma() || parser.parseType(elemTyB) || parser.parseRParen() ||
+      parser.parseArrow() || parser.parseType(elemTyC) || parser.parseGreater())
+    return {};
+  // For universal FMA, all element types should be the same
+  if (elemTyA != elemTyB || elemTyB != elemTyC) {
+    parser.emitError(parser.getCurrentLocation())
+        << "expected all element types to be the same for universal FMA";
+    return {};
+  }
+  return get(parser.getContext(), elemTyA);
+}
+
+void MmaAtomUniversalFMAType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printMNKDimensionList(printer, 1, 1, 1);
+  printer << ", (" << getElemTy() << ", " << getElemTy() << ") -> " << getElemTy() << ">";
 }
 
 } // namespace mlir::fly
