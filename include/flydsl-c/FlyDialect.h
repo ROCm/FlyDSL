@@ -171,6 +171,19 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type);
 /// Register all Fly dialect passes (fly-canonicalize, fly-layout-lowering).
 MLIR_CAPI_EXPORTED void mlirRegisterFlyPasses(void);
 
+//===----------------------------------------------------------------------===//
+// MmaAtomUniversalFMAType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyMmaAtomUniversalFMAType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyMmaAtomUniversalFMATypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
+
 #ifdef __cplusplus
 }
 #endif
