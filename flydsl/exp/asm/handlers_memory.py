@@ -639,14 +639,27 @@ class _MemoryHandlers:
                 a_storage = self.walker._alloca_storage["%alloca"]
                 b_storage = self.walker._alloca_storage["%alloca_0"]
                 out_regs = []
+                from .kernel_ir import KInstr
+
                 for j in range(num_elements):
-                    out_regs.append(
-                        self.walker.kernel_ctx.v_add_f32(
-                            a_storage[base + j],
-                            b_storage[base + j],
-                            comment="vec_add shortcut",
+                    # In-place add into A regs so the result stays in a contiguous
+                    # range (enables buffer_store_dwordx4).
+                    a_r = a_storage[base + j]
+                    b_r = b_storage[base + j]
+                    # Mark as accumulator to permit re-definition under SSA validation.
+                    try:
+                        self.walker.kernel_ctx.program.register_accumulator_vreg(a_r)
+                    except Exception:
+                        pass
+                    self.walker.kernel_ctx.program.emit(
+                        KInstr(
+                            Instruction.V_ADD_F32,
+                            defs=(a_r,),
+                            uses=(a_r, b_r),
+                            comment="vec_add in-place",
                         )
                     )
+                    out_regs.append(a_r)
                 self.walker.kernel_ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(out_regs)
                 return
 
@@ -1501,6 +1514,23 @@ class _MemoryHandlers:
                     src_ranges = tuple(
                         KRegRange(r if isinstance(r, KVReg) else KVReg(r), 1)
                         for r in src_regs[:2]
+                    )
+            elif vector_bytes == 16 and num_regs >= 4:
+                # Prefer a single 16B store when the source regs are contiguous and
+                # properly aligned (regalloc enforces range alignment).
+                ids = [_as_vgpr_id(r) for r in src_regs[:4]]
+                if (
+                    ids[1] == ids[0] + 1
+                    and ids[2] == ids[0] + 2
+                    and ids[3] == ids[0] + 3
+                ):
+                    # Use alignment=4 to match vgpr_quad expectations.
+                    src_ranges = (KRegRange(KVReg(ids[0]), 4, alignment=4),)
+                else:
+                    # Fallback to scalar stores.
+                    src_ranges = tuple(
+                        KRegRange(r if isinstance(r, KVReg) else KVReg(r), 1)
+                        for r in src_regs[:4]
                     )
             else:
                 # Conservative: use scalar stores for 16B+ vectors.

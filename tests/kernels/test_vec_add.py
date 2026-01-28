@@ -8,9 +8,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import flydsl
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
-from flydsl.dialects.ext import flir, arith
+from flydsl.dialects.ext import flir, arith, scf
 from flydsl.runtime.device import get_rocm_arch
 from _mlir import ir
+from _mlir.dialects import vector
 from _mlir.ir import F32Type, IntegerType
 import _mlir.extras.types as T
 import numpy as np
@@ -174,6 +175,85 @@ def create_vec_add_kernel(
     return _VecAdd().module
 
 
+def create_vec_add_kernel_x4(
+    size: int,
+    *,
+    dtype=F32Type,
+    vec_width: int = 4,
+    threads_per_block: int = 256,
+):
+    """Create a minimal vec_add kernel that operates on explicit vector<4xf32>.
+
+    This is intentionally closer to what LLVM can optimize into wide loads/stores:
+    - Each thread handles one contiguous vector of VEC_WIDTH elements.
+    - Main path: vector.load + vector add + vector.store (aligned).
+
+    NOTE: The asm backend currently does not support `scf.if` with a non-empty
+    else region. For performance benchmarking we assume `n` is a multiple of
+    (THREADS_PER_BLOCK * VEC_WIDTH) so no tail handling is required.
+    """
+    if vec_width != 4:
+        raise ValueError("create_vec_add_kernel_x4 currently requires vec_width=4")
+
+    VEC_WIDTH = vec_width
+    THREADS_PER_BLOCK = threads_per_block
+    TILE_ELEMS = THREADS_PER_BLOCK * VEC_WIDTH
+
+    gpu_arch = get_rocm_arch()
+    S = ir.ShapedType.get_dynamic_size()
+
+    class _VecAddX4(flir.MlirModule):
+        GPU_MODULE_NAME = "vec_kernels"
+        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = \"{gpu_arch}\">']
+
+        @flir.kernel
+        def vec_add(
+            self: flir.T.i64,
+            A: lambda: T.memref(S, dtype.get()),
+            B: lambda: T.memref(S, dtype.get()),
+            C: lambda: T.memref(S, dtype.get()),
+            n: lambda: T.index(),
+        ):
+            tid_x = flir.thread_idx("x")
+            bid_x = flir.block_idx("x")
+            bdim_x = flir.block_dim("x")
+
+            # linear thread id within grid
+            tid_linear = bid_x * bdim_x + tid_x
+
+            c_vecw = arith.constant(VEC_WIDTH, index=True)
+            base = tid_linear * c_vecw
+            vec_ty = ir.VectorType.get([VEC_WIDTH], dtype.get())
+
+            a_v = vector.load(vec_ty, A, [arith.as_value(base)], alignment=16)
+            b_v = vector.load(vec_ty, B, [arith.as_value(base)], alignment=16)
+            c_v = (arith.ArithValue(arith.as_value(a_v)) + arith.as_value(b_v)).value
+            vector.store(arith.as_value(c_v), C, [arith.as_value(base)], alignment=16)
+
+        @flir.jit
+        def __call__(
+            self: flir.T.i64,
+            A: lambda: T.memref(S, dtype.get()),
+            B: lambda: T.memref(S, dtype.get()),
+            C: lambda: T.memref(S, dtype.get()),
+            n: lambda: T.index(),
+        ):
+            c1 = arith.index(1)
+            c_tile_elems = arith.index(TILE_ELEMS)
+            # Benchmark-mode assumption: n is divisible by TILE_ELEMS.
+            gx = n // c_tile_elems
+            bx = arith.index(THREADS_PER_BLOCK)
+            flir.gpu_ext.LaunchFuncOp(
+                [self.GPU_MODULE_NAME, "vec_add"],
+                grid_size=(gx, c1, c1),
+                block_size=(bx, c1, c1),
+                kernel_operands=[A, B, C, n],
+            )
+
+    # Return module for further pipeline/compile.
+    return _VecAddX4().module
+
+
 def benchmark_pytorch_add(size: int):
     """Measure torch.add performance for the same problem size."""
     if torch is None:
@@ -235,7 +315,8 @@ def benchmark_vector_add(tile_size: int = 4):
     print(f"Memory Traffic: 3 × {SIZE} × 4 bytes = {3*SIZE*4/1e9:.2f} GB per kernel")
     print("="*80)
     
-    module = create_vec_add_kernel(SIZE, tile_size=TILE_SIZE, dtype=F32Type)
+    # Use a kernel shape that is already explicit vector<4xf32> and contiguous.
+    module = create_vec_add_kernel_x4(SIZE, dtype=F32Type, vec_width=VEC_WIDTH, threads_per_block=THREADS_PER_BLOCK)
     print("  Running canonicalize + CSE pipeline...")
     optimized = run_pipeline(module, Pipeline().canonicalize().cse())
     exe = flydsl.compile(optimized)

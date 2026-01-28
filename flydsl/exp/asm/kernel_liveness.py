@@ -526,10 +526,20 @@ def compute_liveness(program: KernelProgram, use_cfg: bool = True) -> LivenessIn
                             component = reg_class(base_reg.id + i)
                             range_membership[component] = base_reg
             elif is_virtual(d):
-                if d not in info.def_points:
-                    info.def_points[d] = idx
-                    reg_size[d] = 1
-                    reg_alignment[d] = 1
+                # If this is a component of a known range, attribute the def to the base.
+                if d in range_membership:
+                    base_reg = range_membership[d]
+                    # Base may be defined multiple times (e.g., accumulator-style updates).
+                    # Only record the first def point, but keep alignment/size from the range.
+                    if base_reg not in info.def_points:
+                        info.def_points[base_reg] = idx
+                        reg_size.setdefault(base_reg, 1)
+                        reg_alignment.setdefault(base_reg, 1)
+                else:
+                    if d not in info.def_points:
+                        info.def_points[d] = idx
+                        reg_size[d] = 1
+                        reg_alignment[d] = 1
 
         # Process uses
         for u in instr.uses:
@@ -756,6 +766,9 @@ def validate_ssa(program: KernelProgram) -> List[str]:
             else:
                 reg = d
                 if is_virtual(reg):
+                    # If this is a component of a known range, treat as def of the base.
+                    if reg in range_membership:
+                        reg = range_membership[reg]
                     # Allow redefinition for loop control regs and accumulators
                     if reg in defs and defs[reg] != idx and not allow_redefinition(reg):
                         errors.append(
@@ -773,6 +786,8 @@ def validate_ssa(program: KernelProgram) -> List[str]:
                 continue
 
             if is_virtual(reg):
+                if reg in range_membership:
+                    reg = range_membership[reg]
                 if reg not in defs:
                     errors.append(
                         f"Use of undefined register {reg} at instruction {idx}"

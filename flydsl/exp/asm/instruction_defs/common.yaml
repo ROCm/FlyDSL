@@ -741,6 +741,18 @@ instructions:
 
   buffer_store_dwordx4:
     mnemonic: buffer_store_dwordx4
+    category: vmem
+    format: mtbuf
+    defs: []
+    uses:
+      - {name: src, type: vgpr_quad}
+      - {name: vaddr, type: vgpr}
+      - {name: srd, type: sgpr_quad}
+      - {name: soffset, type: sgpr|imm}
+      - {name: offset, type: offset, optional: true}
+    latency: 1
+    special:
+      memory: true
 
   buffer_load_ushort:
     mnemonic: buffer_load_ushort
