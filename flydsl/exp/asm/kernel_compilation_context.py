@@ -950,6 +950,19 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
         """
         prologue_instrs = []
 
+        # Optional raw-asm prologue hook (for debugging mode bits like ACCVGPR/FP8).
+        import os
+        raw_mode = os.environ.get("FLIR_ASM_RAW_PROLOGUE", "").strip()
+        if raw_mode:
+            prologue_instrs.append(
+                KInstr(
+                    Instruction._RAW_ASM,
+                    (),
+                    (),
+                    comment=raw_mode,
+                )
+            )
+
         # First, emit ABI prologue (tid_x, tid_y, wgid_x, etc.)
         # These must come first since they define values used throughout
         if self._pending_abi_prologue:
@@ -1054,24 +1067,17 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
                 # Without preloading, load directly into SRD ranges
                 for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
                     kernarg_offset = arg_idx * 8
-
-                    # Define the full SRD range
+                    # Load base address into SRD[0:1] and fill SRD[2:3] directly.
+                    # This matches rocdl.make.buffer.rsrc defaults used by GEMM:
+                    # - word2 = 0xffffffff (num_records = -1)
+                    # - word3 = 0x27000 (flags)
+                    base_pair = KRegRange(srd_range.base_reg, 2, alignment=2)
                     prologue_instrs.append(
                         KInstr(
-                            "_srd_define",
-                            (srd_range,),
-                            (),
-                            comment=f"Define SRD range for arg{arg_idx}",
-                        )
-                    )
-
-                    # Load base address into first 2 regs of the range
-                    prologue_instrs.append(
-                        KInstr(
-                            "_srd_load_base",
-                            (),
-                            (srd_range, kernarg_pair, KImm(kernarg_offset)),
-                            comment=f"Load base addr for arg{arg_idx}",
+                            "s_load_dwordx2",
+                            defs=(base_pair,),
+                            uses=(kernarg_pair, KImm(kernarg_offset)),
+                            comment=f"Load SRD base for arg{arg_idx}",
                         )
                     )
 
@@ -1085,24 +1091,48 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
                     )
                 )
 
-            # Fill SRD[2] and SRD[3] for each (same for both preload and non-preload)
-            for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
-                prologue_instrs.append(
-                    KInstr(
-                        "_srd_fill_size",
-                        (),
-                        (srd_range, KImm(limit_bytes)),
-                        comment=f"SRD size for arg{arg_idx}",
+            # Fill SRD[2] and SRD[3].
+            if self.use_kernarg_preloading:
+                # Preloading path: SRD[0:1] come from preloaded base; fill the rest here.
+                for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
+                    prologue_instrs.append(
+                        KInstr(
+                            "_srd_fill_size",
+                            (),
+                            (srd_range, KImm(limit_bytes)),
+                            comment=f"SRD size for arg{arg_idx}",
+                        )
                     )
-                )
-                prologue_instrs.append(
-                    KInstr(
-                        "_srd_fill_stride",
-                        (),
-                        (srd_range, KImm(0x20000)),
-                        comment=f"SRD stride for arg{arg_idx}",
+                    prologue_instrs.append(
+                        KInstr(
+                            "_srd_fill_stride",
+                            (),
+                            (srd_range, KImm(0x20000)),
+                            comment=f"SRD stride for arg{arg_idx}",
+                        )
                     )
-                )
+            else:
+                # Non-preloading path: use rocdl-like defaults for GEMM correctness.
+                from .kernel_ir import KSReg
+                for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
+                    base = srd_range.base_reg
+                    if isinstance(base, KSReg):
+                        prologue_instrs.append(
+                            KInstr(
+                                "s_mov_b32",
+                                defs=(KSReg(base.id + 2),),
+                                uses=(KImm(0x7FFFFFFE),),
+                                comment=f"SRD word2 (num_records=-1) for arg{arg_idx}",
+                            )
+                        )
+                        prologue_instrs.append(
+                            KInstr(
+                                "s_mov_b32",
+                                defs=(KSReg(base.id + 3),),
+                                uses=(KImm(0x27000),),
+                                comment=f"SRD word3 (flags) for arg{arg_idx}",
+                            )
+                        )
 
             # Clear the pending list
             self._pending_srd_setups = []

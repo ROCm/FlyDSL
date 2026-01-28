@@ -233,6 +233,9 @@ class KernelGenerator:
             "_srd_define": self._handle_srd_define,
             "_srd_copy_define": self._handle_srd_copy_define,
             "_g2s_srd_copy": self._handle_g2s_srd_copy,
+            "_srd_from_ptr": self._handle_srd_from_ptr,
+            "_pack_vgpr_pair": self._handle_pack_vgpr_pair,
+            "_pack_vgpr_quad": self._handle_pack_vgpr_quad,
             "_srd_load_base": self._handle_srd_load_base,
             "_srd_copy_base": self._handle_srd_copy_base,
             "_srd_fill_size": self._handle_srd_fill_size,
@@ -325,6 +328,103 @@ class KernelGenerator:
             )
         )
 
+        return lines
+
+    def _handle_srd_from_ptr(self, instr: KInstr) -> List[str]:
+        """SRD from 64-bit pointer.
+
+        Important: SRD word1 packs base_hi in low 16 bits; upper bits are flags.
+        LLVM masks the loaded pointer high dword with 0xffff before OR-ing any
+        cache swizzle bits. If we don't mask, buffer_* ops will read/write the
+        wrong address and GEMM will produce NaNs.
+        """
+        if len(instr.defs) < 1 or len(instr.uses) < 3:
+            return []
+        new_range = instr.defs[0]
+        ptr_range = instr.uses[0]
+        num_records = instr.uses[1]
+        flags = instr.uses[2]
+
+        new_base = self._resolve_reg_range(new_range)
+        ptr_base = self._resolve_reg_range(ptr_range)
+
+        new_start = int(new_base.split("[")[1].split(":")[0])
+        ptr_start = int(ptr_base.split("[")[1].split(":")[0])
+
+        lines = []
+        lines.append(
+            self._formatter.format(
+                "s_mov_b32",
+                defs=[f"s{new_start}"],
+                uses=[f"s{ptr_start}"],
+                comment="SRD word0",
+            )
+        )
+        lines.append(
+            self._formatter.format(
+                "s_and_b32",
+                defs=[f"s{new_start + 1}"],
+                uses=[f"s{ptr_start + 1}", "0xffff"],
+                comment="SRD word1",
+            )
+        )
+        lines.append(
+            self._formatter.format(
+                "s_mov_b32",
+                defs=[f"s{new_start + 2}"],
+                uses=[self._resolve_operand(num_records)],
+                comment="SRD word2",
+            )
+        )
+        lines.append(
+            self._formatter.format(
+                "s_mov_b32",
+                defs=[f"s{new_start + 3}"],
+                uses=[self._resolve_operand(flags)],
+                comment=instr.comment or "SRD word3",
+            )
+        )
+        return lines
+
+    def _handle_pack_vgpr_pair(self, instr: KInstr) -> List[str]:
+        """Pack two dwords into an aligned vgpr_pair."""
+        if len(instr.defs) < 1 or len(instr.uses) < 2:
+            return []
+        dst = instr.defs[0]
+        dst_base = self._resolve_reg_range(dst)
+        dst_start = int(dst_base.split("[")[1].split(":")[0])
+        src0 = self._resolve_operand(instr.uses[0])
+        src1 = self._resolve_operand(instr.uses[1])
+        lines = []
+        lines.append(self._formatter.format("v_mov_b32", defs=[f"v{dst_start}"], uses=[src0]))
+        lines.append(
+            self._formatter.format(
+                "v_mov_b32",
+                defs=[f"v{dst_start + 1}"],
+                uses=[src1],
+                comment=instr.comment,
+            )
+        )
+        return lines
+
+    def _handle_pack_vgpr_quad(self, instr: KInstr) -> List[str]:
+        """Pack four dwords into an aligned vgpr_quad."""
+        if len(instr.defs) < 1 or len(instr.uses) < 4:
+            return []
+        dst = instr.defs[0]
+        dst_base = self._resolve_reg_range(dst)
+        dst_start = int(dst_base.split("[")[1].split(":")[0])
+        srcs = [self._resolve_operand(u) for u in instr.uses[:4]]
+        lines = []
+        for i in range(4):
+            lines.append(
+                self._formatter.format(
+                    "v_mov_b32",
+                    defs=[f"v{dst_start + i}"],
+                    uses=[srcs[i]],
+                    comment=(instr.comment if i == 3 else None),
+                )
+            )
         return lines
 
     def _handle_srd_load_base(self, instr: KInstr) -> str:

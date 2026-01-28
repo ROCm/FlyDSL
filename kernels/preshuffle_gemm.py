@@ -48,6 +48,9 @@ def compile_preshuffle_gemm_a8(
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = False,
+    # Compilation options
+    backend: str = "execution_engine",
+    return_module: bool = False,
 ):
     """Compile the preshuffle GEMM kernel and return the compiled executable.
 
@@ -202,6 +205,12 @@ def compile_preshuffle_gemm_a8(
                 if is_int8
                 else arith.constant_vector(0.0, T.f32x4)
             )
+
+            # Specialize problem sizes (M/N/K) as compile-time constants.
+            # This makes loop bounds static for the ASM backend lowering.
+            c_m = arith.index(int(M))
+            c_n = arith.index(int(N))
+            c_k = arith.index(int(K))
 
             # Layouts
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
@@ -1124,11 +1133,14 @@ def compile_preshuffle_gemm_a8(
             )
 
     m = _GEMM()
+    if return_module:
+        return m.module
     return flydsl.compile(
         m,
         use_bare_ptr_memref_call_conv=False,
         use_bare_pointers_for_host=False,
         use_bare_pointers_for_kernels=False,
+        backend=backend,
     )
 
 

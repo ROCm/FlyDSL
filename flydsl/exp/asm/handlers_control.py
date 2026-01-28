@@ -11,6 +11,55 @@ from .kernel_model import KernelInfo
 
 
 class _ControlFlowHandlers:
+    def _alloc_loop_carried_regs(self, ty_str: str):
+        """Allocate in-place updated regs for scf.for iter_args.
+
+        Loop-carried values are updated each iteration, so we mark them as
+        accumulator regs to exempt SSA single-def validation.
+        """
+        from .kernel_ir import KVReg, KRegRange
+
+        ctx = self.walker.kernel_ctx
+
+        if ty_str == "i64" or ty_str.endswith(" i64"):
+            rng = ctx.vreg_pair()
+            ctx.program.register_accumulator_vreg_range(rng)
+            regs = (KVReg(rng.base_reg.id), KVReg(rng.base_reg.id + 1))
+            return regs
+
+        if ty_str.startswith("vector<4x") or "vector<4xf32" in ty_str or "vector<4xi32" in ty_str:
+            rng = ctx.vreg_quad()
+            ctx.program.register_accumulator_vreg_range(rng)
+            regs = tuple(KVReg(rng.base_reg.id + i) for i in range(4))
+            return regs
+
+        # Scalar index/i32: use single VGPR.
+        rng = ctx.vreg()
+        if isinstance(rng, KVReg):
+            ctx.program.register_accumulator_vreg(rng)
+            return (rng,)
+        return (rng,)
+
+    def _copy_regs(self, dst_regs, src_regs, comment: str):
+        """Emit v_mov copies from src_regs into dst_regs."""
+        from .kernel_ir import KInstr
+        from .instruction_registry import Instruction
+
+        ctx = self.walker.kernel_ctx
+        if src_regs is None:
+            return
+        if len(dst_regs) != len(src_regs):
+            return
+        for d, s in zip(dst_regs, src_regs):
+            ctx.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(d,),
+                    uses=(s,),
+                    comment=comment,
+                )
+            )
+
     def handle_scf_for_op(self, operation: scf_d.ForOp, kernel_info: KernelInfo):
         """
         Handle scf.for operations - emit loop assembly code.
@@ -72,25 +121,55 @@ class _ControlFlowHandlers:
         kernel_info.index_env[induction_var_ssa] = counter_sreg
         loop_ctx["induction_var_ssa"] = induction_var_ssa
 
-        # Allocate and initialize VGPRs for iter_args (accumulators)
-        num_iter_args = len(loop_body.arguments) - 1  # Exclude induction var
-        iter_arg_ranges = ctx.alloc_accumulators(num_iter_args)
+        # Also materialize the induction var into a VGPR each iteration, since most
+        # downstream address arithmetic is emitted as VALU ops.
+        from .kernel_ir import KInstr, KVReg
+        from .instruction_registry import Instruction
 
-        # Track in SSA->reg map
-        for i, arg in enumerate(loop_body.arguments[1:]):
-            arg_ssa = ssa(arg)
-            quad = iter_arg_ranges[i]
-            # Store as tuple of individual regs for compatibility
-            regs = tuple(KVReg(quad.base_reg.id + j) for j in range(4))
-            ctx.ssa_to_reg[arg_ssa] = regs
+        induction_v = ctx.vreg()
+        if isinstance(induction_v, KVReg):
+            ctx.program.register_accumulator_vreg(induction_v)
+        loop_ctx["induction_vreg"] = induction_v
 
-        loop_ctx["iter_arg_ranges"] = iter_arg_ranges
+        # Allocate and initialize regs for iter_args (loop-carried values).
+        init_args = list(getattr(operation, "initArgs", []))
+        iter_block_args = list(loop_body.arguments[1:])  # exclude induction var
+        if len(init_args) != len(iter_block_args):
+            init_args = []
+
+        iter_arg_regs = []
+        for i, barg in enumerate(iter_block_args):
+            barg_ssa = ssa(barg)
+            ty_str = str(barg.type)
+            regs = self._alloc_loop_carried_regs(ty_str)
+            ctx.ssa_to_reg[barg_ssa] = regs
+            iter_arg_regs.append(regs)
+
+            # Copy init into carried regs.
+            if init_args:
+                init_ssa = ssa(init_args[i])
+                init_regs = ctx.ssa_to_reg.get(init_ssa)
+                self._copy_regs(regs, init_regs, comment=f"scf.for init arg{i}")
+
+        loop_ctx["iter_arg_regs"] = iter_arg_regs
+        # Expose current loop regs for scf.yield.
+        self.walker._active_loop_ctx = loop_ctx
 
         # Emit loop header
         ctx.emit_loop_header(loop_ctx)
 
         # Walk loop body (mark as inside loop to prevent duplicate M0/SRD setup)
         self.walker._inside_loop = True
+        # Refresh induction VGPR for this iteration.
+        ctx.program.emit(
+            KInstr(
+                Instruction.V_MOV_B32,
+                defs=(induction_v,),
+                uses=(counter_sreg,),
+                comment="scf.for iv",
+            )
+        )
+        ctx.ssa_to_reg[induction_var_ssa] = (induction_v,)
         self.walker._walk_block(loop_body, kernel_info)
         self.walker._inside_loop = False
 
@@ -99,14 +178,32 @@ class _ControlFlowHandlers:
 
         # End loop
         ctx.end_loop()
+        # Clear active loop ctx
+        self.walker._active_loop_ctx = None
 
         # Map scf.for results to final values of iter_args
         for i, result in enumerate(operation.results):
             result_ssa = ssa(result)
-            if i < len(iter_arg_ranges):
-                quad = iter_arg_ranges[i]
-                regs = tuple(KVReg(quad.base_reg.id + j) for j in range(4))
-                ctx.ssa_to_reg[result_ssa] = regs
+            if i < len(iter_arg_regs):
+                ctx.ssa_to_reg[result_ssa] = iter_arg_regs[i]
+
+    def handle_scf_yield_op(self, operation: scf_d.YieldOp, kernel_info: KernelInfo):
+        """Handle scf.yield by updating loop-carried regs in-place."""
+        loop_ctx = getattr(self.walker, "_active_loop_ctx", None)
+        if not loop_ctx:
+            return
+        iter_arg_regs = loop_ctx.get("iter_arg_regs", [])
+        if not iter_arg_regs:
+            return
+
+        yielded = list(operation.operands)
+        if len(yielded) != len(iter_arg_regs):
+            return
+
+        ctx = self.walker.kernel_ctx
+        for i, opnd in enumerate(yielded):
+            src = ctx.ssa_to_reg.get(ssa(opnd))
+            self._copy_regs(iter_arg_regs[i], src, comment=f"scf.yield arg{i}")
 
     def handle_scf_if_op(self, operation: scf_d.IfOp, kernel_info: KernelInfo):
         """Handle scf.if via EXEC masking (per-lane predication).

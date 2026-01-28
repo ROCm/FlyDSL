@@ -822,6 +822,392 @@ class _MemoryHandlers:
             return
         ctx.ssa_to_reg[ssa(operation.result)] = tuple(src)
 
+    def handle_vector_extract_op(self, operation, kernel_info: KernelInfo):
+        """Handle vector.extract for common GEMM patterns.
+
+        GEMM lowers FP8 payloads as:
+          vector<4xi32> -> vector.bitcast -> vector<2xi64>
+          then vector.extract [0/1] producing i64 scalars.
+
+        We represent i64 as a VGPR pair (lo, hi).
+        """
+        ctx = self.walker.kernel_ctx
+        vec_ssa = ssa(operation.vector)
+        src = ctx.ssa_to_reg.get(vec_ssa)
+        if src is None:
+            return
+
+        # Extract static position from attribute `static_position=array<i64: N>`.
+        idx = None
+        try:
+            attr = operation.attributes["static_position"]
+            s = str(attr)
+            # e.g. "array<i64: 0>" or "array<i64: 1>"
+            if ":" in s:
+                inside = s.split(":", 1)[1].rsplit(">", 1)[0].strip()
+            else:
+                inside = s
+            idx = int(inside.split(",")[0].strip())
+        except Exception:
+            idx = None
+
+        if idx is None:
+            return
+
+        res_ty = str(operation.result.type)
+        vec_ty = str(operation.vector.type)
+
+        # i64 scalar extracts (GEMM FP8 payloads): represent as VGPR pair.
+        # Source is typically vector<2xi64> bitcasted from 4 dwords.
+        if "i64" in res_ty:
+            if len(src) == 4:
+                if idx == 0:
+                    ctx.ssa_to_reg[ssa(operation.result)] = (src[0], src[1])
+                    return
+                if idx == 1:
+                    ctx.ssa_to_reg[ssa(operation.result)] = (src[2], src[3])
+                    return
+            if len(src) == 2 and idx == 0:
+                ctx.ssa_to_reg[ssa(operation.result)] = tuple(src)
+                return
+
+        # Packed 2-lane 16-bit vectors stored in one dword VGPR.
+        # Common in cshuffle epilog: vector<2xi16>/vector<2xf16> represented as a
+        # single b32 holding two u16 lanes.
+        if ("i16" in res_ty or "f16" in res_ty) and len(src) == 1 and (
+            "vector<2xi16" in vec_ty or "vector<2xf16" in vec_ty
+        ):
+            from .kernel_ir import KImm, KInstr
+
+            mask = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(mask,),
+                    uses=(KImm(0xFFFF),),
+                    comment="extract 16-bit mask",
+                )
+            )
+            if idx == 0:
+                lo = ctx.v_and_b32(src[0], mask, comment="extract lo16")
+                ctx.ssa_to_reg[ssa(operation.result)] = (lo,)
+                return
+            if idx == 1:
+                hi = ctx.v_lshrrev_b32(KImm(16), src[0], comment="extract hi16>>16")
+                hi = ctx.v_and_b32(hi, mask, comment="extract hi16")
+                ctx.ssa_to_reg[ssa(operation.result)] = (hi,)
+                return
+
+        # Scalar extract from 1-lane vectors.
+        if len(src) == 1 and idx == 0:
+            # If this is a 16-bit element, keep only low bits.
+            if "i16" in res_ty or "f16" in res_ty:
+                from .kernel_ir import KImm, KInstr
+
+                mask = ctx.vreg()
+                ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(mask,),
+                        uses=(KImm(0xFFFF),),
+                        comment="extract 16-bit mask",
+                    )
+                )
+                lo = ctx.v_and_b32(src[0], mask, comment="extract lo16")
+                ctx.ssa_to_reg[ssa(operation.result)] = (lo,)
+                return
+            ctx.ssa_to_reg[ssa(operation.result)] = (src[0],)
+            return
+
+        # Extract a single lane from a tuple-backed vector.
+        if 0 <= idx < len(src):
+            ctx.ssa_to_reg[ssa(operation.result)] = (src[idx],)
+            return
+
+        return
+
+    def handle_vector_from_elements_op(self, operation, kernel_info: KernelInfo):
+        """Handle vector.from_elements for small vectors (GEMM cshuffle epilog).
+
+        We currently support packing vector<2x{f16,i16}> into a single dword VGPR,
+        compatible with LDS `vector.store` (4B).
+        """
+        from .kernel_ir import KImm
+
+        ctx = self.walker.kernel_ctx
+        res_ssa = ssa(operation.result)
+        ty = str(operation.result.type)
+        elems = list(operation.operands)
+
+        if len(elems) != 2:
+            return
+
+        a_ssa = ssa(elems[0])
+        b_ssa = ssa(elems[1])
+        a = ctx.ssa_to_reg.get(a_ssa)
+        b = ctx.ssa_to_reg.get(b_ssa)
+        if not a or not b or len(a) != 1 or len(b) != 1:
+            return
+
+        # Pack two 16-bit lanes (assumed in low 16 bits of each reg).
+        if "vector<2xf16" in ty or "vector<2xi16" in ty:
+            from .kernel_ir import KInstr
+
+            lo = a[0]
+            hi = b[0]
+            # Mask to avoid upper 16-bit garbage (v_cvt_f16_f32 leaves upper bits undefined).
+            mask = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(mask,),
+                    uses=(KImm(0xFFFF),),
+                    comment="pack 16-bit mask",
+                )
+            )
+            lo16 = ctx.v_and_b32(lo, mask, comment="lo&0xFFFF")
+            hi16 = ctx.v_and_b32(hi, mask, comment="hi&0xFFFF")
+            hi_sh = ctx.v_lshlrev_b32(KImm(16), hi16, comment="pack hi16")
+            packed = ctx.v_or_b32(lo16, hi_sh, comment="pack 2x16")
+            ctx.ssa_to_reg[res_ssa] = (packed,)
+            return
+
+    # -------------------------------------------------------------------------
+    # ROCDL raw pointer buffer ops (preshuffle_gemm)
+    # -------------------------------------------------------------------------
+
+    def handle_memref_extract_aligned_pointer_as_index_op(self, operation, kernel_info: KernelInfo):
+        """Handle memref.extract_aligned_pointer_as_index.
+
+        For the ASM backend, we treat kernel arguments as 64-bit values loaded by
+        `emit_kernargs`. For memref-like arguments in GEMM lowerings, this is a
+        64-bit base pointer. We forward the SGPR pair for that argument.
+        """
+        from .kernel_ir import KSReg
+
+        ctx = self.walker.kernel_ctx
+        memref_ssa = ssa(operation.source)
+
+        arg_order = getattr(kernel_info, "arg_ssa_order", [])
+        try:
+            arg_idx = arg_order.index(memref_ssa)
+        except Exception:
+            return
+
+        pair = ctx.get_kernarg_pair(int(arg_idx))
+        if pair is None or not isinstance(pair.base_reg, KSReg):
+            return
+
+        base = pair.base_reg.id
+        ctx.ssa_to_reg[ssa(operation.result)] = (KSReg(base), KSReg(base + 1))
+
+    def handle_llvm_inttoptr_op(self, operation, kernel_info: KernelInfo):
+        """Handle llvm.inttoptr as a pass-through for pointer materialization."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if src is None:
+            return
+        ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(src)
+
+    def handle_rocdl_make_buffer_rsrc_op(self, operation, kernel_info: KernelInfo):
+        """Lower rocdl.make.buffer.rsrc by materializing an SRD in SGPRs."""
+        from .kernel_ir import KInstr, KImm, KSReg, KRegRange
+
+        ctx = self.walker.kernel_ctx
+
+        base_ptr = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if base_ptr is None or len(base_ptr) != 2 or not isinstance(base_ptr[0], KSReg):
+            return
+
+        # Allocate a 4-SGPR SRD range (aligned).
+        srd = ctx.program.alloc_sreg_range(4, alignment=4)
+
+        # Word2/3: num_records + flags (typically constants).
+        num_records = kernel_info.index_env.get(ssa(operation.operands[2]))
+        flags = kernel_info.index_env.get(ssa(operation.operands[3]))
+        if not isinstance(num_records, int):
+            num_records = -1
+        if not isinstance(flags, int):
+            flags = 159744
+
+        # Match LLVM: use 0x7ffffffe for "unbounded" SRD size.
+        # Using 0xffffffff here can lead to invalid buffer addressing on some GPUs.
+        if int(num_records) == -1:
+            num_records = 0x7FFFFFFE
+
+        base_range = KRegRange(base_ptr[0], 2, alignment=2)
+        ctx.program.emit(
+            KInstr(
+                "_srd_from_ptr",
+                defs=(srd,),
+                uses=(
+                    base_range,
+                    KImm(int(num_records) & 0xFFFFFFFF),
+                    KImm(int(flags) & 0xFFFFFFFF),
+                ),
+                comment="rocdl.make.buffer.rsrc",
+            )
+        )
+
+        srd_ssa = ssa(operation.results[0])
+        ctx.srd_ranges[srd_ssa] = srd
+        # Convenience tuple mapping (not used for codegen decisions).
+        s0 = srd.base_reg
+        if isinstance(s0, KSReg):
+            ctx.ssa_to_reg[srd_ssa] = (
+                KSReg(s0.id),
+                KSReg(s0.id + 1),
+                KSReg(s0.id + 2),
+                KSReg(s0.id + 3),
+            )
+
+    def handle_rocdl_raw_ptr_buffer_load_op(self, operation, kernel_info: KernelInfo):
+        """Lower rocdl.raw.ptr.buffer.load to buffer_load_* using the SRD."""
+        from .kernel_ir import KVReg, KInstr, KImm, KMemOffset, KRegRange
+
+        ctx = self.walker.kernel_ctx
+        srd_ssa = ssa(operation.operands[0])
+        voffset_r = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
+        if voffset_r is None or len(voffset_r) != 1:
+            return
+
+        # Determine load width in bytes from the result type.
+        vector_bytes = None
+        try:
+            num_elems, elem_bytes, _ = parse_vector_type_from_obj(operation.results[0].type)
+            vector_bytes = int(num_elems) * int(elem_bytes)
+        except Exception:
+            pass
+
+        if vector_bytes is None:
+            ty = str(operation.results[0].type).strip()
+            if ty in ("f32", "i32", "index"):
+                vector_bytes = 4
+            elif ty in ("f16", "bf16", "i16"):
+                vector_bytes = 2
+            elif ty in ("i64",):
+                vector_bytes = 8
+            else:
+                # Conservative fallback: dword load.
+                vector_bytes = 4
+
+        # Scalar 16-bit loads: use buffer_load_ushort and optionally convert.
+        ty = str(operation.results[0].type).strip()
+        if vector_bytes == 2 and ty in ("f16", "bf16", "i16"):
+            srd_range = ctx.srd_ranges.get(srd_ssa)
+            if srd_range is None:
+                return
+            raw = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    "buffer_load_ushort",
+                    defs=(raw,),
+                    uses=(voffset_r[0], srd_range, KImm(0), KMemOffset(0)),
+                    comment="raw.ptr.buffer.load u16",
+                )
+            )
+            # f16: keep raw 16-bit in low bits (matches our bitcast/extract patterns).
+            ctx.ssa_to_reg[ssa(operation.results[0])] = (raw,)
+            return
+
+        loaded_ranges = ctx.emit_buffer_load(srd_ssa, vector_bytes, voffset_r[0], 0)
+        regs = []
+        for rng in loaded_ranges:
+            base = rng.base_reg
+            for i in range(rng.count):
+                regs.append(KVReg(base.id + i))
+        ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(regs)
+
+    def handle_rocdl_raw_ptr_buffer_store_op(self, operation, kernel_info: KernelInfo):
+        """Lower rocdl.raw.ptr.buffer.store to buffer_store_* using the SRD."""
+        from .kernel_ir import KVReg, KRegRange, KInstr, KImm, KMemOffset
+
+        ctx = self.walker.kernel_ctx
+        val_ssa = ssa(operation.operands[0])
+        vregs = ctx.ssa_to_reg.get(val_ssa)
+        if not vregs or len(vregs) < 1:
+            return
+        srd_ssa = ssa(operation.operands[1])
+        voffset_r = ctx.ssa_to_reg.get(ssa(operation.operands[2]))
+        if voffset_r is None or len(voffset_r) != 1:
+            return
+        # Scalar f16 store uses buffer_store_short (2 bytes).
+        ty = str(operation.operands[0].type).strip()
+        if ty == "f16":
+            srd_range = ctx.srd_ranges.get(srd_ssa)
+            if srd_range is None:
+                return
+            src0 = vregs[0] if isinstance(vregs[0], KVReg) else KVReg(vregs[0])
+            ctx.program.emit(
+                KInstr(
+                    "buffer_store_short",
+                    defs=(),
+                    uses=(src0, voffset_r[0], srd_range, KImm(0), KMemOffset(0)),
+                    comment="raw.ptr.buffer.store f16",
+                )
+            )
+            return
+
+        # Default: store dwords via generic path.
+        src_ranges = tuple(
+            KRegRange(r if isinstance(r, KVReg) else KVReg(r), 1) for r in vregs
+        )
+        ctx.emit_buffer_store(srd_ssa, src_ranges, voffset_r[0], 0)
+
+    def handle_rocdl_ds_bpermute_op(self, operation, kernel_info: KernelInfo):
+        """Lower rocdl.ds_bpermute (cross-lane permute) to ds_bpermute_b32."""
+        from .kernel_ir import KInstr
+
+        ctx = self.walker.kernel_ctx
+        # operands: index, src
+        idx = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
+        if not idx or not src or len(idx) != 1 or len(src) != 1:
+            return
+        dst = ctx.vreg()
+        ctx.program.emit(
+            KInstr(
+                "ds_bpermute_b32",
+                defs=(dst,),
+                uses=(idx[0], src[0]),
+                comment="ds_bpermute",
+            )
+        )
+        # ds_bpermute is an LDS operation; wait for lgkm.
+        self.walker.unified.s_waitcnt(waitcnt="lgkmcnt(0)")
+        ctx.ssa_to_reg[ssa(operation.results[0])] = (dst,)
+
+    def handle_rocdl_mfma_op(self, operation, kernel_info: KernelInfo):
+        """Lower rocdl.mfma.* to the corresponding MFMA instruction(s)."""
+        import os
+
+        ctx = self.walker.kernel_ctx
+        name = str(operation.operation.name)
+        if len(operation.operands) < 3:
+            return
+
+        a = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        b = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
+        c = ctx.ssa_to_reg.get(ssa(operation.operands[2]))
+        if a is None or b is None:
+            return
+
+        if "16x16x32.fp8.fp8" in name:
+            # Debug knob: bypass MFMA to isolate correctness issues.
+            if os.environ.get("FLIR_ASM_DISABLE_MFMA", "0") == "1":
+                if c is not None:
+                    ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(c)
+                return
+            res = ctx.emit_mfma_f32_16x16x32_fp8_fp8(tuple(a), tuple(b), tuple(c) if c else None)
+            ctx.ssa_to_reg[ssa(operation.results[0])] = res
+            return
+
+        raise NotImplementedError(f"Unsupported ROCDL MFMA op: {name}")
+
+    def handle_rocdl_sched_barrier_op(self, operation, kernel_info: KernelInfo):
+        """Ignore ROCDL scheduler barrier hints."""
+        return
+
     def handle_vector_broadcast_op(self, operation, kernel_info: KernelInfo):
         """Broadcast scalar to vector lanes."""
         import re
@@ -1070,6 +1456,57 @@ class _MemoryHandlers:
         vbase_val = self.walker._lds_view_base_bytes.get(memref_ssa, 0)
         original_byte_offset_expr = byte_offset_expr  # Save for debug
 
+        # Kernel IR mode: emit LDS load with virtual registers
+        from .kernel_ir import KInstr, KImm, KVReg
+
+        ctx = self.walker.kernel_ctx
+
+        # Runtime indexing: byte_offset_expr may already be a VGPR byte offset.
+        if isinstance(byte_offset_expr, KVReg):
+            addr_vreg = byte_offset_expr
+            if vbase_val:
+                addr_vreg = ctx.v_add_u32(
+                    addr_vreg,
+                    ctx.v_mov_b32(int(vbase_val), comment="lds view base"),
+                    comment="lds base add",
+                )
+
+            num_elements, element_bytes, _ = parse_vector_type_from_obj(
+                operation.results[0].type
+            )
+            total_bytes = num_elements * element_bytes
+
+            if total_bytes == 16:
+                dst_range = ctx.vreg_quad()
+                ctx.emit_lds_read_b128(dst_range, addr_vreg, 0)
+                result_regs = tuple(KVReg(dst_range.base_reg.id + i) for i in range(4))
+            elif total_bytes == 8:
+                dst_range = ctx.vreg_pair()
+                ctx.emit_lds_read_b64(dst_range, addr_vreg, 0)
+                result_regs = (
+                    KVReg(dst_range.base_reg.id),
+                    KVReg(dst_range.base_reg.id + 1),
+                )
+            elif total_bytes == 4:
+                dst = ctx.vreg()
+                ctx.program.emit(
+                    KInstr("ds_read_b32", defs=(dst,), uses=(addr_vreg,), comment="lds read b32")
+                )
+                result_regs = (dst,)
+            elif total_bytes == 2:
+                dst = ctx.vreg()
+                ctx.program.emit(
+                    KInstr("ds_read_u16", defs=(dst,), uses=(addr_vreg,), comment="lds read u16")
+                )
+                result_regs = (dst,)
+            else:
+                raise NotImplementedError(
+                    f"LDS load of {total_bytes} bytes not supported in runtime-index path."
+                )
+
+            ctx.ssa_to_reg[ssa(operation.results[0])] = result_regs
+            return
+
         # Use MLIR-derived expression for all cases (single-wave, multi-wave, g2s, non-g2s)
         # The MLIR index expression already contains the correct addressing formula
         if vbase_val:
@@ -1105,11 +1542,6 @@ class _MemoryHandlers:
             print(
                 f"[DS_OFFSET_DEBUG]   const_offset={const_offset}, base_expr={base_expr}"
             )
-
-        # Kernel IR mode: emit LDS load with virtual registers
-        from .kernel_ir import KInstr, KImm, KVReg
-
-        ctx = self.walker.kernel_ctx
 
         # Determine if we can use the offset field
         has_dynamic_base = len(base_expr.free_symbols) > 0
@@ -1285,17 +1717,39 @@ class _MemoryHandlers:
         """Emit load instruction for a vector.load operation derived purely from indices."""
         from .utils import build_memref_byte_offset_expr
 
-        # Parse memref info and build byte offset expression
+        # Parse memref info
         memref_info = self._parse_load_memref_info(operation)
-        byte_offset_expr = build_memref_byte_offset_expr(
-            indices, kernel_info, memref_info
-        )
 
         # Check address space to determine LDS vs global
         if self._is_lds_memref(operation):
             # LDS load path (workgroup address space)
-            self._emit_lds_load(operation, kernel_info, memref_ssa, byte_offset_expr)
+            try:
+                byte_offset_expr = build_memref_byte_offset_expr(
+                    indices, kernel_info, memref_info
+                )
+                self._emit_lds_load(operation, kernel_info, memref_ssa, byte_offset_expr)
+            except Exception:
+                # Runtime indexing fallback (common in GEMM LDS swizzles).
+                if len(indices) != 1:
+                    raise
+                idx_ssa = indices[0]
+                idx_r = self.walker.kernel_ctx.ssa_to_reg.get(idx_ssa)
+                if idx_r is None or len(idx_r) != 1:
+                    raise
+                addr_vreg = idx_r[0]
+                if int(memref_info.elem_bytes) != 1:
+                    addr_vreg = self.walker.kernel_ctx.v_mul_lo_u32(
+                        addr_vreg,
+                        self.walker.kernel_ctx.v_mov_b32(int(memref_info.elem_bytes), comment="lds elem_bytes"),
+                        comment="lds byte offset",
+                    )
+                self._emit_lds_load(operation, kernel_info, memref_ssa, addr_vreg)
             return
+
+        # Global memref: build byte offset expression (requires index_env availability)
+        byte_offset_expr = build_memref_byte_offset_expr(
+            indices, kernel_info, memref_info
+        )
 
         # Global buffer load path
         self._emit_global_load(operation, kernel_info, memref_ssa, byte_offset_expr)
@@ -1339,14 +1793,37 @@ class _MemoryHandlers:
         ctx = self.walker.kernel_ctx
 
         # Compute LDS address, adding view base offset if present
-        byte_offset_expr = build_memref_byte_offset_expr(
-            indices, kernel_info, memref_info
-        )
-        # Add view base offset for this specific memref (each matrix has different base)
         vbase_val = self.walker._lds_view_base_bytes.get(memref_ssa, 0)
-        if vbase_val:
-            byte_offset_expr = byte_offset_expr + sympy.Integer(vbase_val)
-        addr_vreg = ctx.expr_emitter.get_or_emit(byte_offset_expr)
+        try:
+            byte_offset_expr = build_memref_byte_offset_expr(
+                indices, kernel_info, memref_info
+            )
+            if vbase_val:
+                byte_offset_expr = byte_offset_expr + sympy.Integer(vbase_val)
+            addr_vreg = ctx.expr_emitter.get_or_emit(byte_offset_expr)
+        except Exception:
+            # Runtime indexing fallback (common in GEMM LDS swizzles):
+            # Support 1-D LDS memrefs with a single dynamic index.
+            if len(indices) != 1:
+                raise
+            idx_ssa = indices[0]
+            idx_r = ctx.ssa_to_reg.get(idx_ssa)
+            if idx_r is None or len(idx_r) != 1:
+                raise
+            addr_vreg = idx_r[0]
+            # Scale by element size to bytes.
+            if int(memref_info.elem_bytes) != 1:
+                addr_vreg = ctx.v_mul_lo_u32(
+                    addr_vreg,
+                    ctx.v_mov_b32(int(memref_info.elem_bytes), comment="lds elem_bytes"),
+                    comment="lds byte offset",
+                )
+            if vbase_val:
+                addr_vreg = ctx.v_add_u32(
+                    addr_vreg,
+                    ctx.v_mov_b32(int(vbase_val), comment="lds view base"),
+                    comment="lds base add",
+                )
 
         # Wait for any pending VMEM loads
         ctx.program.emit(
@@ -1384,17 +1861,20 @@ class _MemoryHandlers:
                 )
             ctx.emit_lds_write_b64(addr_vreg, src_range)
         elif vector_bytes == 16:
-            # Register quad (must be 128-bit aligned)
-            if isinstance(src_regs, (tuple, list)) and len(src_regs) >= 4:
-                base_id = (
-                    src_regs[0].id if isinstance(src_regs[0], KVReg) else src_regs[0]
+            # Register quad (must be aligned). Pack to an aligned temp quad to
+            # satisfy assembler tuple alignment requirements.
+            if not (isinstance(src_regs, (tuple, list)) and len(src_regs) >= 4):
+                raise ValueError(f"Expected 4 registers for ds_write_b128, got {src_regs}")
+            tmp = ctx.vreg_quad()
+            ctx.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    defs=(tmp,),
+                    uses=(src_regs[0], src_regs[1], src_regs[2], src_regs[3]),
+                    comment="pack lds quad",
                 )
-                src_range = KRegRange(KVReg(base_id), 4, alignment=4)
-            else:
-                raise ValueError(
-                    f"Expected 4 registers for ds_write_b128, got {src_regs}"
-                )
-            ctx.emit_lds_write_b128(addr_vreg, src_range)
+            )
+            ctx.emit_lds_write_b128(addr_vreg, tmp)
         else:
             raise NotImplementedError(
                 f"LDS stores of {vector_bytes} bytes not supported"

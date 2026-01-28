@@ -160,6 +160,19 @@ instructions:
     special:
       vcc_clobber: true
 
+  v_cmp_ne_u32:
+    mnemonic: v_cmp_ne_u32
+    category: valu
+    format: vopc
+    defs:
+      - {name: dst, type: special}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+    special:
+      vcc_clobber: true
+
   v_cmp_lt_u32:
     mnemonic: v_cmp_lt_u32
     category: valu
@@ -1023,6 +1036,22 @@ instructions:
     special:
       accumulator: true
 
+  # FP8 MFMA (architecture-specific; definition lives in gfx942/gfx950 too).
+  # Keep a common entry so generic passes (hazards/ticketing) can categorize it.
+  v_mfma_f32_16x16x32_fp8_fp8:
+    mnemonic: v_mfma_f32_16x16x32_fp8_fp8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    special:
+      accumulator: true
+
   v_mfma_f32_32x32x8_f16:
     mnemonic: v_mfma_f32_32x32x8_f16
     category: mfma
@@ -1316,6 +1345,30 @@ instructions:
     latency: 0
 
   _srd_copy_base:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _srd_from_ptr:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _pack_vgpr_pair:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  _pack_vgpr_quad:
     mnemonic: ""
     category: pseudo
     format: pseudo

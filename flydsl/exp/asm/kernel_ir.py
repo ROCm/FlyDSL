@@ -481,6 +481,10 @@ class KernelProgram:
     # We model this as a read-modify-write at the KernelProgram level, which
     # requires permitting re-definition of these VGPRs for SSA validation.
     _accumulator_vregs: Set[int] = field(default_factory=set, repr=False)
+    # Track virtual register ranges allocated via alloc_*reg_range.
+    # Maps base virtual id -> count (for quick identification of real ranges).
+    _vreg_range_bases: dict[int, int] = field(default_factory=dict, repr=False)
+    _sreg_range_bases: dict[int, int] = field(default_factory=dict, repr=False)
 
     def alloc_vreg(self) -> KVReg:
         """Allocate a new virtual VGPR."""
@@ -494,6 +498,7 @@ class KernelProgram:
         # Reserve additional IDs for the range
         for _ in range(count - 1):
             self.alloc_vreg()
+        self._vreg_range_bases[base.id] = int(count)
         return KRegRange(base, count, alignment)
 
     def alloc_sreg(self) -> KSReg:
@@ -508,6 +513,7 @@ class KernelProgram:
         # Reserve additional IDs for the range
         for _ in range(count - 1):
             self.alloc_sreg()
+        self._sreg_range_bases[base.id] = int(count)
         return KRegRange(base, count, alignment)
 
     def emit(self, instr: KInstr):

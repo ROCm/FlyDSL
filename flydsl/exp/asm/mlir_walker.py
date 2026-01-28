@@ -73,6 +73,32 @@ class IRWalker:
 
         kernel_info.arg_ssa_order = [ssa(arg) for arg in entry_block.arguments]
 
+        # Map kernel arguments to runtime registers.
+        #
+        # The ASM backend prologue loads each kernarg as a 64-bit quantity into an
+        # SGPR pair. Most index arithmetic in kernels operates on the low 32 bits,
+        # so we materialize a VGPR copy of the low dword for general use.
+        try:
+            from .kernel_ir import KInstr, KSReg
+            from .instruction_registry import Instruction
+
+            for arg_idx, arg in enumerate(entry_block.arguments):
+                pair = self.kernel_ctx.get_kernarg_pair(int(arg_idx))
+                if pair is None or not isinstance(pair.base_reg, KSReg):
+                    continue
+                v = self.kernel_ctx.vreg()
+                self.kernel_ctx.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(v,),
+                        uses=(pair.base_reg,),
+                        comment=f"kernarg{arg_idx} lo",
+                    )
+                )
+                self.kernel_ctx.ssa_to_reg[ssa(arg)] = (v,)
+        except Exception:
+            pass
+
         # Direct memref argument mapping (GPU dialect compatibility).
         for arg_idx, arg in enumerate(entry_block.arguments):
             if isinstance(arg.type, MemRefType):
@@ -153,7 +179,7 @@ class IRWalker:
             self.handlers.handle_arith_cmpi_op(operation, kernel_info)
         elif isinstance(operation, arith_d.SelectOp):
             self.handlers.handle_arith_select_op(operation, kernel_info)
-        elif isinstance(operation, arith_d.MulFOp):
+        elif isinstance(operation, arith_d.MulFOp) or str(operation.operation.name) == "arith.mulf" or str(getattr(operation, "name", "")) == "arith.mulf":
             self.handlers.handle_arith_mulf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.SubFOp):
             self.handlers.handle_arith_subf_op(operation, kernel_info)
@@ -161,12 +187,18 @@ class IRWalker:
             self.handlers.handle_arith_maximumf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.DivFOp):
             self.handlers.handle_arith_divf_op(operation, kernel_info)
-        elif isinstance(operation, arith_d.ExtFOp):
+        elif hasattr(arith_d, "DivSIOp") and isinstance(operation, arith_d.DivSIOp):
+            self.handlers.handle_arith_divsi_op(operation, kernel_info)
+        elif hasattr(arith_d, "RemSIOp") and isinstance(operation, arith_d.RemSIOp):
+            self.handlers.handle_arith_remsi_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.ExtFOp) or str(operation.operation.name) == "arith.extf" or str(getattr(operation, "name", "")) == "arith.extf":
             self.handlers.handle_arith_extf_op(operation, kernel_info)
-        elif isinstance(operation, arith_d.TruncFOp):
+        elif isinstance(operation, arith_d.TruncFOp) or str(operation.operation.name) == "arith.truncf" or str(getattr(operation, "name", "")) == "arith.truncf":
             self.handlers.handle_arith_truncf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.BitcastOp):
             self.handlers.handle_arith_bitcast_op(operation, kernel_info)
+        elif hasattr(arith_d, "XOrIOp") and isinstance(operation, arith_d.XOrIOp):
+            self.handlers.handle_arith_xori_op(operation, kernel_info)
         elif hasattr(arith_d, "ShRUIOp") and isinstance(operation, arith_d.ShRUIOp):
             self.handlers.handle_arith_shrui_op(operation, kernel_info)
         elif hasattr(arith_d, "AndIOp") and isinstance(operation, arith_d.AndIOp):
@@ -191,10 +223,50 @@ class IRWalker:
             self.handlers.handle_vector_shuffle_op(operation, kernel_info)
         elif hasattr(vector_d, "ReductionOp") and isinstance(operation, vector_d.ReductionOp):
             self.handlers.handle_vector_reduction_op(operation, kernel_info)
-        elif hasattr(vector_d, "BroadcastOp") and isinstance(operation, vector_d.BroadcastOp):
+        elif (
+            (hasattr(vector_d, "BroadcastOp") and isinstance(operation, vector_d.BroadcastOp))
+            or str(operation.operation.name) == "vector.broadcast"
+        ):
             self.handlers.handle_vector_broadcast_op(operation, kernel_info)
-        elif hasattr(vector_d, "BitCastOp") and isinstance(operation, vector_d.BitCastOp):
+        elif (
+            (hasattr(vector_d, "BitCastOp") and isinstance(operation, vector_d.BitCastOp))
+            or (hasattr(vector_d, "BitcastOp") and isinstance(operation, vector_d.BitcastOp))
+            or str(operation.operation.name) == "vector.bitcast"
+        ):
             self.handlers.handle_vector_bitcast_op(operation, kernel_info)
+        elif (
+            (hasattr(vector_d, "ExtractOp") and isinstance(operation, vector_d.ExtractOp))
+            or str(operation.operation.name) == "vector.extract"
+        ):
+            self.handlers.handle_vector_extract_op(operation, kernel_info)
+        elif (
+            (hasattr(vector_d, "FromElementsOp") and isinstance(operation, vector_d.FromElementsOp))
+            or str(operation.operation.name) == "vector.from_elements"
+        ):
+            self.handlers.handle_vector_from_elements_op(operation, kernel_info)
+        elif (
+            hasattr(memref_d, "ExtractAlignedPointerAsIndexOp")
+            and isinstance(operation, memref_d.ExtractAlignedPointerAsIndexOp)
+        ):
+            self.handlers.handle_memref_extract_aligned_pointer_as_index_op(
+                operation, kernel_info
+            )
+        elif str(operation.operation.name) == "llvm.inttoptr":
+            self.handlers.handle_llvm_inttoptr_op(operation, kernel_info)
+        elif str(operation.operation.name) == "rocdl.make.buffer.rsrc":
+            self.handlers.handle_rocdl_make_buffer_rsrc_op(operation, kernel_info)
+        elif str(operation.operation.name) == "rocdl.raw.ptr.buffer.load":
+            self.handlers.handle_rocdl_raw_ptr_buffer_load_op(operation, kernel_info)
+        elif str(operation.operation.name) == "rocdl.raw.ptr.buffer.store":
+            self.handlers.handle_rocdl_raw_ptr_buffer_store_op(operation, kernel_info)
+        elif str(operation.operation.name) == "rocdl.ds_bpermute":
+            self.handlers.handle_rocdl_ds_bpermute_op(operation, kernel_info)
+        elif str(operation.operation.name).startswith("rocdl.mfma."):
+            self.handlers.handle_rocdl_mfma_op(operation, kernel_info)
+        elif str(operation.operation.name) in ("rocdl.sched.barrier", "rocdl.sched.group.barrier"):
+            self.handlers.handle_rocdl_sched_barrier_op(operation, kernel_info)
+        elif isinstance(operation, scf_d.YieldOp):
+            self.handlers.handle_scf_yield_op(operation, kernel_info)
         elif isinstance(operation, amdgpu_d.MFMAOp):
             self.handlers.handle_mfma_op(operation, kernel_info)
         elif isinstance(operation, amdgpu_d.LDSBarrierOp):

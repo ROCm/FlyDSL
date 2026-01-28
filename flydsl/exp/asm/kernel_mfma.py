@@ -139,3 +139,96 @@ class _MFMASupport:
             )
 
         return result_regs
+
+    def emit_mfma_f32_16x16x32_fp8_fp8(
+        self,
+        a_regs: Tuple[KReg, ...],
+        b_regs: Tuple[KReg, ...],
+        acc_regs: Optional[Tuple[KReg, ...]] = None,
+    ) -> Tuple[KReg, ...]:
+        """
+        Emit MFMA FP8xFP8 -> FP32 (16x16x32) with virtual register tracking.
+
+        Per ISA defs (gfx942+): a = vgpr_pair, b = vgpr_pair, c/dst = vgpr_quad.
+        """
+        # Operand ranges: fp8 path uses 2 VGPRs per operand.
+        # Hardware requires 64-bit aligned vgpr_pair operands, so pack into
+        # aligned temporaries to satisfy assembler constraints.
+        if len(a_regs) < 2 or len(b_regs) < 2:
+            raise ValueError("FP8 MFMA expects 2 VGPRs per operand (vgpr_pair).")
+
+        a_tmp = self.vreg_pair()
+        b_tmp = self.vreg_pair()
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (a_tmp,),
+                (a_regs[0], a_regs[1]),
+                comment="pack mfma a",
+            )
+        )
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (b_tmp,),
+                (b_regs[0], b_regs[1]),
+                comment="pack mfma b",
+            )
+        )
+        a_range = a_tmp
+        b_range = b_tmp
+
+        # Prefer reusing an existing contiguous accumulator quad (keeps VGPR
+        # pressure low). If the incoming accumulator is not a true quad (e.g.
+        # came from a vector constant), pack it into a fresh aligned quad once.
+        acc_range = None
+        if acc_regs is not None and len(acc_regs) == 4 and all(isinstance(r, KVReg) for r in acc_regs):
+            base_id = acc_regs[0].id
+            # Only reuse if these regs were already treated as an accumulator quad
+            # (i.e., came from a prior MFMA range allocation). Plain scalar regs
+            # (like constant vectors) may be consecutive but are NOT a real quad.
+            if (
+                self.program._vreg_range_bases.get(base_id) == 4
+                and all(self.program.is_accumulator_vreg(r) for r in acc_regs)
+                and all(
+                    acc_regs[i].id == base_id + i for i in range(4)
+                )
+            ):
+                acc_range = KRegRange(acc_regs[0], 4, alignment=4)
+                self.program.register_accumulator_vreg_range(acc_range)
+                result_regs = tuple(acc_regs)  # already the quad lanes
+        if acc_range is None:
+            acc_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(acc_range)
+            result_regs = tuple(KVReg(acc_range.base_reg.id + i) for i in range(4))
+
+            if acc_regs is not None and len(acc_regs) == 4:
+                self.program.emit(
+                    KInstr(
+                        "_pack_vgpr_quad",
+                        (acc_range,),
+                        (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                        comment="pack mfma acc",
+                    )
+                )
+            else:
+                self.program.emit(
+                    KInstr(
+                        "_init_acc_quad",
+                        (acc_range,),
+                        (),
+                        comment="init fp8 mfma acc",
+                    )
+                )
+
+        # In-place update.
+        self.program.emit(
+            KInstr(
+                "v_mfma_f32_16x16x32_fp8_fp8",
+                (acc_range,),
+                (a_range, b_range, acc_range),
+                comment="MFMA FP8 16x16x32",
+            )
+        )
+
+        return result_regs

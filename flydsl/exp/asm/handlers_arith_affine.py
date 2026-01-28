@@ -161,13 +161,23 @@ class _ArithAffineHandlers:
             return
 
     def handle_arith_mulf_op(self, operation: arith_d.MulFOp, kernel_info: KernelInfo):
+        """Lower arith.mulf for scalar/vector f32 (opview or generic op)."""
         ctx = self.walker.kernel_ctx
-        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
-        rhs = ctx.ssa_to_reg.get(ssa(operation.rhs))
+        try:
+            lhs_ssa = ssa(operation.lhs)  # type: ignore[attr-defined]
+            rhs_ssa = ssa(operation.rhs)  # type: ignore[attr-defined]
+            res_ssa = ssa(operation.result)  # type: ignore[attr-defined]
+        except Exception:
+            lhs_ssa = ssa(operation.operands[0])
+            rhs_ssa = ssa(operation.operands[1])
+            res_ssa = ssa(operation.results[0])
+
+        lhs = ctx.ssa_to_reg.get(lhs_ssa)
+        rhs = ctx.ssa_to_reg.get(rhs_ssa)
         if not lhs or not rhs or len(lhs) != len(rhs):
             return
         out = tuple(ctx.v_mul_f32(a, b, comment="mulf") for a, b in zip(lhs, rhs))
-        ctx.ssa_to_reg[ssa(operation.result)] = out
+        ctx.ssa_to_reg[res_ssa] = out
 
     def handle_arith_subf_op(self, operation: arith_d.SubFOp, kernel_info: KernelInfo):
         ctx = self.walker.kernel_ctx
@@ -276,6 +286,53 @@ class _ArithAffineHandlers:
             out = ctx.v_lshrrev_b32(KImm(shift), lhs[0], comment=f"divui /{rhs_const}")
             ctx.ssa_to_reg[ssa(operation.result)] = (out,)
 
+    def handle_arith_divsi_op(self, operation: arith_d.DivSIOp, kernel_info: KernelInfo):
+        """Handle arith.divsi for simple power-of-two divisors (VGPR runtime).
+
+        NOTE: For our current kernels (thread/block indices), values are non-negative,
+        so an unsigned shift is sufficient.
+        """
+        ctx = self.walker.kernel_ctx
+        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
+        rhs_ssa = ssa(operation.rhs)
+        rhs_const = kernel_info.index_env.get(rhs_ssa)
+        if lhs is None or len(lhs) != 1:
+            return
+        if isinstance(rhs_const, int) and rhs_const > 0 and (rhs_const & (rhs_const - 1)) == 0:
+            shift = int(rhs_const.bit_length() - 1)
+            out = ctx.v_lshrrev_b32(KImm(shift), lhs[0], comment=f"divsi /{rhs_const}")
+            ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+
+    def handle_arith_remsi_op(self, operation: arith_d.RemSIOp, kernel_info: KernelInfo):
+        """Handle arith.remsi for simple power-of-two divisors (VGPR runtime)."""
+        # Reuse the same mask trick as remui; for non-negative values this matches.
+        ctx = self.walker.kernel_ctx
+        lhs_r = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        rhs_ssa = ssa(operation.operands[1])
+        rhs_c = kernel_info.index_env.get(rhs_ssa)
+        if lhs_r and len(lhs_r) == 1 and isinstance(rhs_c, int) and rhs_c > 0 and (rhs_c & (rhs_c - 1)) == 0:
+            mask = rhs_c - 1
+            mask_r = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(mask_r,),
+                    uses=(KImm(int(mask)),),
+                    comment=f"remsi mask {mask:#x}",
+                )
+            )
+            out = ctx.v_and_b32(lhs_r[0], mask_r, comment=f"remsi %{rhs_c}")
+            ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+
+    def handle_arith_xori_op(self, operation: arith_d.XOrIOp, kernel_info: KernelInfo):
+        """Handle arith.xori (VGPR runtime)."""
+        ctx = self.walker.kernel_ctx
+        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
+        rhs = ctx.ssa_to_reg.get(ssa(operation.rhs))
+        if lhs and rhs and len(lhs) == 1 and len(rhs) == 1:
+            out = ctx.v_xor_b32(lhs[0], rhs[0], comment="xori")
+            ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+
     def handle_arith_remui_op(
         self, operation: arith_d.RemUIOp, kernel_info: KernelInfo
     ):
@@ -331,10 +388,10 @@ class _ArithAffineHandlers:
         result_ssa = ssa(operation.result)
         src_ssa = ssa(operation.operands[0])
 
-        # Runtime: treat index/i32 casts as no-op on the underlying 32-bit VGPR.
+        # Runtime: treat index/i32 casts as no-op on the underlying registers.
         ctx = self.walker.kernel_ctx
         src_r = ctx.ssa_to_reg.get(src_ssa)
-        if src_r and len(src_r) == 1:
+        if src_r and len(src_r) in (1, 2):
             ctx.ssa_to_reg[result_ssa] = src_r
 
         src_val = kernel_info.index_env.get(src_ssa)
@@ -551,10 +608,19 @@ class _ArithAffineHandlers:
           producing 4 VGPRs for vector<8xf16>.
         """
         ctx = self.walker.kernel_ctx
-        src = ctx.ssa_to_reg.get(ssa(operation.in_))
+        # Support both opview and generic Operation shapes.
+        try:
+            src_ssa = ssa(operation.in_)  # type: ignore[attr-defined]
+            dst_ssa = ssa(operation.out)  # type: ignore[attr-defined]
+            dst_ty = str(operation.out.type)  # type: ignore[attr-defined]
+        except Exception:
+            src_ssa = ssa(operation.operands[0])
+            dst_ssa = ssa(operation.results[0])
+            dst_ty = str(operation.results[0].type)
+
+        src = ctx.ssa_to_reg.get(src_ssa)
         if not src:
             return
-        dst_ty = str(operation.out.type)
 
         # Vector f16 path: pack into dwords (2x16-bit per VGPR).
         if dst_ty.startswith("vector<") and "xf16" in dst_ty:
@@ -588,9 +654,24 @@ class _ArithAffineHandlers:
             ctx.ssa_to_reg[ssa(operation.out)] = tuple(packed)
             return
 
-        # Scalar fallback: forward (store will convert if needed).
+        # Scalar f16/bf16: convert now (needed for bitcasts/packing).
+        if len(src) == 1 and (dst_ty == "f16" or dst_ty.endswith(" f16")):
+            from .kernel_ir import KInstr
+            out = ctx.vreg()
+            ctx.program.emit(
+                KInstr(
+                    "v_cvt_f16_f32",
+                    defs=(out,),
+                    uses=(src[0],),
+                    comment="truncf f32->f16",
+                )
+            )
+            ctx.ssa_to_reg[dst_ssa] = (out,)
+            return
+
+        # Scalar fallback: forward.
         if len(src) == 1:
-            ctx.ssa_to_reg[ssa(operation.out)] = src
+            ctx.ssa_to_reg[dst_ssa] = src
             return
 
     # -------------------------------------------------------------------------
@@ -783,6 +864,16 @@ class _ArithAffineHandlers:
                     comment="cmp eq",
                 )
             )
+        elif "ne" in pred:
+            ctx.program.emit(
+                KInstr(
+                    "v_cmp_ne_u32",
+                    defs=(VCC,),
+                    uses=(lhs, rhs),
+                    constraints=vcc_clobber,
+                    comment="cmp ne",
+                )
+            )
         elif "ult" in pred:
             ctx.program.emit(
                 KInstr(
@@ -804,12 +895,12 @@ class _ArithAffineHandlers:
 
         t = ctx.ssa_to_reg.get(ssa(operation.true_value))
         f = ctx.ssa_to_reg.get(ssa(operation.false_value))
-        if not t or not f or len(t) != 1 or len(f) != 1:
+        if not t or not f or len(t) != len(f):
             return
 
         # v_cndmask selects src0 when VCC=0, else src1.
-        out = ctx.v_cndmask_b32(f[0], t[0], VCC, comment="select")
-        ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+        out = tuple(ctx.v_cndmask_b32(fv, tv, VCC, comment="select") for fv, tv in zip(f, t))
+        ctx.ssa_to_reg[ssa(operation.result)] = out
 
     # -------------------------------------------------------------------------
     # math + gpu shuffle (softmax)

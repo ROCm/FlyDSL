@@ -515,16 +515,22 @@ def compute_liveness(program: KernelProgram, use_cfg: bool = True) -> LivenessIn
             if isinstance(d, KRegRange):
                 base_reg = d.base_reg
                 if is_virtual(base_reg):
+                    # Record the first def point, but ALWAYS preserve the fact
+                    # that this virtual reg is a range (size/alignment). This is
+                    # critical for cases where scalar ops touch components before
+                    # we see a full-range def (e.g., loop-carried copies).
                     if base_reg not in info.def_points:
                         info.def_points[base_reg] = idx
-                        reg_size[base_reg] = d.count
-                        reg_alignment[base_reg] = d.alignment
+                    reg_size[base_reg] = max(reg_size.get(base_reg, 1), d.count)
+                    reg_alignment[base_reg] = max(
+                        reg_alignment.get(base_reg, 1), d.alignment
+                    )
 
-                        # Track all component registers as aliases to the base
-                        reg_class = type(base_reg)
-                        for i in range(d.count):
-                            component = reg_class(base_reg.id + i)
-                            range_membership[component] = base_reg
+                    # Track all component registers as aliases to the base
+                    reg_class = type(base_reg)
+                    for i in range(d.count):
+                        component = reg_class(base_reg.id + i)
+                        range_membership[component] = base_reg
             elif is_virtual(d):
                 # If this is a component of a known range, attribute the def to the base.
                 if d in range_membership:
