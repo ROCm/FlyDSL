@@ -22,12 +22,4 @@
 #define GET_TYPEDEF_CLASSES
 #include "flydsl/Dialect/FlyROCDL/IR/Atom.h.inc"
 
-namespace mlir::fly_rocdl {
-
-ParseResult parseMNKDimensionList(AsmParser &parser, int32_t &m, int32_t &n, int32_t &k);
-
-void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k);
-
-} // namespace mlir::fly_rocdl
-
 #endif // FLYDSL_DIALECT_FLYROCDL_IR_DIALECT_H

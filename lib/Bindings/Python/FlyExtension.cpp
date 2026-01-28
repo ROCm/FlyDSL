@@ -334,4 +334,19 @@ NB_MODULE(_fly, m) {
       .def_property_readonly("bit_size", [](MlirType self) {
         return mlirFlyCopyAtomUniversalCopyTypeGetBitSize(self);
       });
+
+  mlir_type_subclass(m, "MmaAtomUniversalFMAType", mlirTypeIsAFlyMmaAtomUniversalFMAType,
+                     mlirFlyMmaAtomUniversalFMATypeGetTypeID)
+      .def_classmethod(
+          "get",
+          [](const nb::object &cls, MlirType elemTy, MlirContext context) {
+            return cls(wrap(MmaAtomUniversalFMAType::get(unwrap(elemTy))));
+          },
+          "cls"_a, "elem_ty"_a, "context"_a = nb::none(),
+          // clang-format off
+          nb::sig("def get(cls, elem_ty: " MAKE_MLIR_PYTHON_QUALNAME("ir.Type") ", context: " MAKE_MLIR_PYTHON_QUALNAME("ir.Context") " | None = None) -> MmaAtomUniversalFMAType"),
+          // clang-format on
+          "Create a MmaAtomUniversalFMAType with element type")
+      .def_property_readonly(
+          "elem_ty", [](MlirType self) { return mlirFlyMmaAtomUniversalFMATypeGetElemTy(self); });
 }

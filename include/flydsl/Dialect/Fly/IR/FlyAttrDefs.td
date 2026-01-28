@@ -56,19 +56,10 @@ def Fly_IntAttr : Fly_Attr<"Int", "int", [
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
   let parameters = (ins 
-    "int32_t":$value, 
+    "int32_t":$value, // needs to be int64_t to support large integers in the future
     DefaultValuedParameter<"int32_t", "32">:$width, 
     DefaultValuedParameter<"int32_t", "1">:$divisibility);
   let hasCustomAssemblyFormat = 1;
-
-  let builders = [
-    AttrBuilder<(ins "int32_t":$value), [{
-      return $_get($_ctxt, value, 32, 1);
-    }]>,
-    AttrBuilder<(ins "int32_t":$width, "int32_t":$divisibility), [{
-      return $_get($_ctxt, std::numeric_limits<int32_t>::min(), width, divisibility);
-    }]>
-  ];
 
   let extraClassDeclaration = [{
     bool isNone() const;
@@ -90,10 +81,10 @@ def Fly_IntAttr : Fly_Attr<"Int", "int", [
       return get(ctx, 0, 0, 0);
     }
     IntAttr $cppClass::getStatic(MLIRContext *ctx, int32_t value) {
-      return get(ctx, value);
+      return get(ctx, value, 32, value == 0 ? 1 : value);
     }
     IntAttr $cppClass::getDynamic(MLIRContext *ctx, int32_t width, int32_t divisibility) {
-      return get(ctx, width, divisibility);
+      return get(ctx, std::numeric_limits<int32_t>::min(), width, divisibility);
     }
   }];
 }
@@ -150,7 +141,7 @@ def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
 
   let builders = [
     AttrBuilder<(ins "int32_t":$value), [{
-      return $_get($_ctxt, IntAttr::get($_ctxt, value));
+      return $_get($_ctxt, IntAttr::getStatic($_ctxt, value));
     }]>,
     AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
       return $_get(value.getContext(), value);

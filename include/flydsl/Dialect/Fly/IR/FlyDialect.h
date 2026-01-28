@@ -29,6 +29,10 @@
 namespace mlir::fly {
 #include "flydsl/Dialect/Fly/IR/FlyAttrConstraints.h.inc"
 #include "flydsl/Dialect/Fly/IR/FlyTypeConstraints.h.inc"
+
+ParseResult parseMNKDimensionList(AsmParser &parser, int32_t &m, int32_t &n, int32_t &k);
+void printMNKDimensionList(AsmPrinter &printer, int32_t m, int32_t n, int32_t k);
+
 } // namespace mlir::fly
 
 #endif // FLYDSL_DIALECT_FLY_IR_DIALECT_H
