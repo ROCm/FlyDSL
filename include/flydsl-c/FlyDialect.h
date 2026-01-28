@@ -107,6 +107,19 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomUniversalCopyTypeGet(MlirContext ctx,
 // Accessors
 MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomUniversalCopyTypeGetBitSize(MlirType type);
 
+//===----------------------------------------------------------------------===//
+// MmaAtomUniversalFMAType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyMmaAtomUniversalFMAType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyMmaAtomUniversalFMATypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
+
 #ifdef __cplusplus
 }
 #endif

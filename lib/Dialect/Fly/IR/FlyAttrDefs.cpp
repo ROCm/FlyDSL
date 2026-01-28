@@ -271,12 +271,12 @@ void prettyPrintIntAttr(::mlir::AsmPrinter &odsPrinter, IntAttr attr) {
       if (odsParser.parseRBrace())
         return {};
     }
-    return IntAttr::get(ctx, width, divisibility);
+    return IntAttr::getDynamic(ctx, width, divisibility);
   }
   int32_t value;
   if (odsParser.parseDecimalInteger(value))
     return {};
-  return IntAttr::get(ctx, value);
+  return IntAttr::getStatic(ctx, value);
 }
 
 void IntAttr::print(::mlir::AsmPrinter &odsPrinter) const { prettyPrintIntAttr(odsPrinter, *this); }
@@ -303,12 +303,12 @@ void IntAttr::print(::mlir::AsmPrinter &odsPrinter) const { prettyPrintIntAttr(o
       if (odsParser.parseRBrace())
         return {};
     }
-    valueAttr = IntAttr::get(ctx, width, divisibility);
+    valueAttr = IntAttr::getDynamic(ctx, width, divisibility);
   } else {
     int32_t value;
     if (odsParser.parseDecimalInteger(value))
       return {};
-    valueAttr = IntAttr::get(ctx, value);
+    valueAttr = IntAttr::getStatic(ctx, value);
   }
 
   SmallString<16> strModes;

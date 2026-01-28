@@ -192,3 +192,23 @@ MlirType mlirFlyCopyAtomUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize) {
 int32_t mlirFlyCopyAtomUniversalCopyTypeGetBitSize(MlirType type) {
   return cast<CopyAtomUniversalCopyType>(unwrap(type)).getBitSize();
 }
+
+//===----------------------------------------------------------------------===//
+// MmaAtomUniversalFMAType
+//===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyMmaAtomUniversalFMAType(MlirType type) {
+  return isa<MmaAtomUniversalFMAType>(unwrap(type));
+}
+
+MlirTypeID mlirFlyMmaAtomUniversalFMATypeGetTypeID(void) {
+  return wrap(MmaAtomUniversalFMAType::getTypeID());
+}
+
+MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy) {
+  return wrap(MmaAtomUniversalFMAType::get(unwrap(ctx), unwrap(elemTy)));
+}
+
+MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type) {
+  return wrap(cast<MmaAtomUniversalFMAType>(unwrap(type)).getElemTy());
+}

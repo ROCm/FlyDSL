@@ -221,5 +221,17 @@ def Fly_CopyAtomUniversalCopy : Fly_Type<"CopyAtomUniversalCopy", "atom.universa
   let assemblyFormat = "`<` $bitSize `>`";
 }
 
+def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "atom.universal_fma", [
+  DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
+]> {
+  let parameters = (ins "Type":$elemTy);
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy), [{
+      return $_get(elemTy.getContext(), elemTy);
+    }]>
+  ];
+  let hasCustomAssemblyFormat = 1;
+}
 
 #endif // FLY_TYPEDEFS

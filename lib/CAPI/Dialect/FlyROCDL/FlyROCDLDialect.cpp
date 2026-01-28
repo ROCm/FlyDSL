@@ -20,3 +20,37 @@ bool mlirTypeIsAFlyROCDLMmaAtomCDNA3_MFMAType(MlirType type) {
 MlirTypeID mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID(void) {
   return wrap(MmaAtomCDNA3_MFMAType::getTypeID());
 }
+
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k, MlirType elemTyA,
+                                              MlirType elemTyB, MlirType elemTyAcc) {
+  return wrap(
+      MmaAtomCDNA3_MFMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB), unwrap(elemTyAcc)));
+}
+
+int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(MlirType type) {
+  return cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getM();
+}
+
+int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetN(MlirType type) {
+  return cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getN();
+}
+
+int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetK(MlirType type) {
+  return cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getK();
+}
+
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyA(MlirType type) {
+  return wrap(cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getElemTyA());
+}
+
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(MlirType type) {
+  return wrap(cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getElemTyB());
+}
+
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type) {
+  return wrap(cast<MmaAtomCDNA3_MFMAType>(unwrap(type)).getElemTyAcc());
+}
+
+//===----------------------------------------------------------------------===//
+// CopyAtom_CDNA3_BufferLSAType
+//===----------------------------------------------------------------------===//
