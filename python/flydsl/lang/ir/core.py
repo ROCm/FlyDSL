@@ -20,6 +20,7 @@ from ..._mlir.dialects.fly import (
     PointerType,
     MemRefType,
     CopyAtomUniversalCopyType,
+    MmaAtomUniversalFMAType,
 )
 
 from ..._mlir.dialects.fly_rocdl import (
