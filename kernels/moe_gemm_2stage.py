@@ -2227,8 +2227,6 @@ def compile_moe_reduction(
     USE_NONTEMPORAL = True
     VEC_ALIGN = 16
 
-    USE_HW_CVT_PK_BF16_F32 = (gpu_arch == "gfx950") or gpu_arch.startswith("gfx95")
-
     _state = {}
 
     class _MoeReduction(flir.MlirModule):
@@ -2334,34 +2332,7 @@ def compile_moe_reduction(
                         acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
 
                     if dtype_str in ("f16", "bf16"):
-                        if USE_HW_CVT_PK_BF16_F32:
-                            out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
-                        else:
-                            # BF16 fast-pack store path (manual pack, toolchain-safe)
-                            vec_i32_ty = ir.VectorType.get([VEC_WIDTH], T.i32())
-                            vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
-                            vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
-
-                            c16_i32 = arith.constant(16, type=T.i32())
-                            c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
-                            c1_i32 = arith.constant(1, type=T.i32())
-
-                            c16_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c16_i32))
-                            c7fff_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
-                            c1_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
-
-                            u = flir.arith.bitcast(vec_i32_ty, acc)
-                            hi = arith.as_value(arith.shrui(u, c16_i32_v))
-                            lsb = arith.as_value(arith.andi(hi, c1_i32_v))
-                            bias = arith.as_value(c7fff_i32_v + lsb)
-                            u_round = arith.as_value(u + bias)
-                            bf16_bits = arith.as_value(arith.shrui(u_round, c16_i32_v))
-
-                            even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
-                            odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = arith.as_value(arith.shli(odd, flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
-                            packed = arith.as_value(arith.ori(even, odd_sh))
-                            out_vec = flir.vector.bitcast(vec_bf16_ty, packed)
+                        out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
                     else:
                         out_vec = acc
 
