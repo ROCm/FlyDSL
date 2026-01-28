@@ -322,26 +322,45 @@ def _ensure_python_embedded_mlir_package() -> None:
             f"Original error: {e}"
         ) from e
 
-
 if not IS_WHEEL_BUILD:
     _ensure_python_embedded_mlir_package()
     # Editable/dev installs: single-root under `flydsl/src/` (includes `_mlir` via symlink).
-    all_packages = sorted(
-        set(find_packages(where=str(PY_SRC_REL)))
-        | set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))
-    )
+    # Also include `kernels` from project root as `flydsl.kernels`.
+    flydsl_packages = set(find_packages(where=str(PY_SRC_REL)))
+    mlir_packages = set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))
+    # Find kernels packages and rename them to be under flydsl namespace
+    kernels_packages = find_packages(where=".", include=["kernels", "kernels.*"])
+    # Remap kernels.* to flydsl.kernels.*
+    kernels_packages_remapped = set()
+    for pkg in kernels_packages:
+        if pkg == "kernels":
+            kernels_packages_remapped.add("flydsl.kernels")
+        elif pkg.startswith("kernels."):
+            kernels_packages_remapped.add(pkg.replace("kernels.", "flydsl.kernels.", 1))
+    all_packages = sorted(flydsl_packages | mlir_packages | kernels_packages_remapped)
     package_dir = {
         "": str(PY_SRC_REL),
+        "flydsl.kernels": "kernels",
     }
 else:
     # Wheel/sdist builds: take `_mlir` from the embedded build output directly,
     # so the wheel can include the CPython extension modules.
+    # Also include `kernels` from project root as `flydsl.kernels`.
     py_packages = find_packages(where=str(PY_SRC_REL))
     embedded_packages = find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["_mlir*"])
-    all_packages = sorted(set(py_packages + embedded_packages))
+    # Find kernels packages and rename them to be under flydsl namespace
+    kernels_packages = find_packages(where=".", include=["kernels", "kernels.*"])
+    kernels_packages_remapped = []
+    for pkg in kernels_packages:
+        if pkg == "kernels":
+            kernels_packages_remapped.append("flydsl.kernels")
+        elif pkg.startswith("kernels."):
+            kernels_packages_remapped.append(pkg.replace("kernels.", "flydsl.kernels.", 1))
+    all_packages = sorted(set(py_packages + embedded_packages + kernels_packages_remapped))
     package_dir = {
         "": str(PY_SRC_REL),
         "_mlir": str(EMBEDDED__MLIR_REL),
+        "flydsl.kernels": "kernels",
     }
 
 setup(
@@ -369,10 +388,12 @@ setup(
             "_mlir_libs/lib/*.so.*",
             "*.pyi",
         ],
+        "flydsl.kernels": ["*.py"],
     },
     install_requires=_load_requirements(),
     cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),
     distclass=BinaryDistribution,
 )
+
 
 

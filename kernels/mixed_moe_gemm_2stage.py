@@ -24,7 +24,7 @@ from flydsl.lang.ir.types import T as I
 # from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
@@ -35,7 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 import functools
 
 @functools.lru_cache(maxsize=2048)
@@ -294,7 +294,7 @@ def compile_mixed_moe_gemm1(
             layout_b = b_layout.layout_b
 
             def check_c_n_valid_gate(base_n):
-                return arith.cmpu(base_n, 2 * (inter_dim - inter_dim_pad), "ult")
+                return arith.cmpu(base_n, 2 * inter_dim - inter_dim_pad, "ult")
             def check_c_k_valid_gate(base_k):
                 return arith.cmpu(base_k, model_dim - model_dim_pad, "ult")
                 
@@ -327,6 +327,8 @@ def compile_mixed_moe_gemm1(
             # Block validity: compute as early as possible so invalid blocks skip all buffer-resource
             # setup, LDS pointer math, and gmem prefetch work.
             bx_m = bx * arith.constant(tile_m, index=True)
+            by_n = by * arith.constant(tile_n, index=True)
+
             maxids_rsrc = buffer_ops.create_buffer_resource(
                 arg_max_token_ids, max_size=False, num_records_bytes=arith.i32(4)
             )
@@ -339,6 +341,10 @@ def compile_mixed_moe_gemm1(
             )
 
             bx_m_i32 = arith.index_cast(i32, bx_m)
+            by_n_i32 = arith.index_cast(i32, by_n)
+            # blk_valid2 = arith.cmpu(bx_m_i32, 10, "ult")
+            # blk_valid1 = arith.cmpu(by_n_i32, 10, "ult")
+            # blk_valid = arith.andi(blk_valid2, blk_valid1)
             blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
             # Common constants/atoms (hoisted): keep IR small like GEMM.
             # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
@@ -464,6 +470,7 @@ def compile_mixed_moe_gemm1(
                         t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
                         x_row_base_div4.append(t_idx * c_k_div4)
                         # x_row_base_div4.append(t_idx)
+                        # x_row_base_div4.append(0)
 
                     vec1_i32 = I.vec(1, i32)
                     vec2_i32 = I.vec(2, i32)
@@ -481,6 +488,7 @@ def compile_mixed_moe_gemm1(
                                 flir,
                                 arg=arg_x,
                                 elem_type=x_elem,
+                                # idx_i32=idx_elem + 0x80000000,
                                 idx_i32=idx_elem,
                                 atom_g2r16=atom_x_g2r16,
                                 rsrc=x_rsrc,
@@ -512,11 +520,22 @@ def compile_mixed_moe_gemm1(
                         for i in range_constexpr(num_x_loads):
                             idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
 
-                            # coord_a_g = flir.make_coord(x_row_base_div4[i], base_k_div4 + x_col_local_i32[i])
-                            # idx_i32 = flir.crd2idx(coord_a_g, layout_x_div4)
-                            # x_vec = load_x(idx_i32)
                             x_vec = load_x(idx_i32)
                             parts.append(vector.bitcast(vec4_i32, x_vec))
+
+                            # m_valid = arith.cmpu(x_row_base_div4[i] // c_k_div4, tokens_in, "ult")
+                            # _if_valid = scf.IfOp(m_valid, [vec4_i32], hasElse=True)
+
+                            # with _if_valid.then():
+                            #     x_vec = load_x(idx_i32)
+                            #     scf.yield_([arith._unwrap_value(vector.bitcast(vec4_i32, x_vec))])
+
+                            # with _if_valid.else_():
+                            #     scf.yield_([arith._unwrap_value(vector.from_elements(vec4_i32, [0, 0, 0, 0]))])
+
+                            # 
+                            # parts.append(_if_valid.results[0])
+
                         return parts
 
                     # tx -> wave/lane (GEMM-style decomposition).
@@ -533,7 +552,6 @@ def compile_mixed_moe_gemm1(
                     col_offset_base = lane_div_16 * arith.constant(16, index=True)
 
                     # Dynamic N tiling within block (same as existing kernels)
-                    by_n = by * arith.constant(tile_n, index=True)
                     num_waves = 4
                     n_per_wave = tile_n // num_waves
                     num_acc_n = n_per_wave // 16
@@ -616,6 +634,62 @@ def compile_mixed_moe_gemm1(
                         b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
                         return b0_i64, b1_i64
 
+
+
+                        # global_n = n_blk_list[ni] * 16 + n_intra_list[ni]
+                        # global_n_modulo = global_n % arith.constant(2 * inter_dim, index=True)
+                        # n_valid = check_c_n_valid_gate(global_n_modulo)
+                        # # n_valid = check_c_n_valid_gate(0)
+
+                        # k_coord = k0 * arith.constant(64 // elem_bytes, index=True) + lane_div_16 * arith.constant(16 // elem_bytes, index=True)
+                        # k_valid = check_c_k_valid_gate(k_coord)
+                        # # k_valid = check_c_k_valid_gate(0)
+
+                        # w_mask = arith.andi(n_valid, k_valid)
+                        # _if_valid = scf.IfOp(w_mask, [I.i64, I.i64], hasElse=True)
+
+                        # # b0_i64, b1_i64 = arith.i64(0), arith.i64(0)
+
+                        # with _if_valid.then():
+                        #     # if by == 0:
+                        #     #     if bx == 0:
+                        #     #         if tx == 0:
+                        #     #             flir.printf("%d gloable_n \n", global_n)
+                        #     vec_elems = 16
+                        #     b_view = flir.TensorView(
+                        #         arg_w,
+                        #         (vec_elems,),
+                        #         strides=(1,),
+                        #         base_indices=(idx_pack,),
+                        #         element_type=_w_elem_type(),
+                        #     )
+                        #     b16 = flir.copy(
+                        #         flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
+                        #         b_view,
+                        #         None,
+                        #         # pred=w_mask,
+                        #         alignment=8,
+                        #         return_vector=True,
+                        #         src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
+                        #         src_buffer_offset_in_bytes=(elem_bytes == 1),
+                        #     )
+                        #     # Split 16B pack into two 8B halves.
+                        #     b_i64x2 = vector.bitcast(I.i64x2, b16)
+                        #     # Split 16B pack into two 8B halves.
+                        #     b_i64x2 = vector.bitcast(I.i64x2, b16)
+                        #     b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
+                        #     b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
+                        #     scf.yield_([arith._unwrap_value(b0_i64), arith._unwrap_value(b1_i64)])
+
+                        # with _if_valid.else_():
+                        #     b0_i64 = arith.i64(0)
+                        #     b1_i64 = arith.i64(0)
+                        #     scf.yield_([arith._unwrap_value(b0_i64), arith._unwrap_value(b1_i64)])
+
+                        # b0_i64 = _if_valid.results[0]
+                        # b1_i64 = _if_valid.results[1]
+                        # return b0_i64, b1_i64
+
                     def load_b_tile(base_k):
                         # b_tile[ku] = (packs_half0[ni], packs_half1[ni])
                         b_tile = []
@@ -632,11 +706,11 @@ def compile_mixed_moe_gemm1(
                     def load_scale(arg_scale, rsrc, layout, ku, mni):
                         k_lane = lane_div_16
                         n_lane = lane_mod_16
+                        # coord_pack = flir.make_coord(mni, ku, k_lane, n_lane)
                         coord_pack = flir.make_coord(mni, ku, k_lane, n_lane)
                         idx_pack = flir.crd2idx(coord_pack, layout)
                         # vec_elems = 1
                         # return buffer_ops.buffer_load(rsrc, idx_pack, vec_width=1, dtype=I.i32)
-                        # flir.printf("idx_pack%d", idx_pack)
                         scale_view = flir.TensorView(
                             arg_scale,
                             (1,),
@@ -655,6 +729,44 @@ def compile_mixed_moe_gemm1(
                         )
                         # Split 16B pack into two 8B halves.
                         return scale
+                        # global_n_modulo = (mni * 16 + n_lane) % arith.constant(inter_dim, index=True)
+                        # n_valid = arith.cmpu(global_n_modulo, inter_dim - inter_dim_pad // 2, "ult")
+                        # k_valid = arith.cmpu((ku * 4 + k_lane), (model_dim - model_dim_pad) // 64, "ult")
+                        # # n_valid = arith.cmpu(0, inter_dim - inter_dim_pad, "ult")
+                        # # k_valid = arith.cmpu(0, (model_dim - model_dim_pad) // 32 // 2, "ult")
+
+                        # w_mask = arith.andi(n_valid, k_valid)
+
+                        # _if_valid = scf.IfOp(w_mask, [vec1_i32], hasElse=True)
+
+                        # with _if_valid.then():
+                        #     scale_view = flir.TensorView(
+                        #         arg_scale,
+                        #         (1,),
+                        #         strides=(1,),
+                        #         base_indices=(idx_pack,),
+                        #         element_type=_scale_elem_type(),
+                        #     )
+                        #     scale = flir.copy(
+                        #         flir.make_copy_atom(_scale_elem_type(), vector_size=1),
+                        #         scale_view,
+                        #         None,
+                        #         # pred=w_mask,
+                        #         # None,
+                        #         alignment=1,
+                        #         return_vector=True,
+                        #         src_buffer_resource=rsrc,
+                        #         src_buffer_offset_in_bytes=False,
+                        #     )
+                        #     # Split 16B pack into two 8B halves.
+                        #     scf.yield_([arith._unwrap_value(scale)])
+
+                        # with _if_valid.else_():
+                        #     scale = arith.i32(9114861777597660798)
+                        #     scf.yield_([arith._unwrap_value(vector.from_elements(vec1_i32, [scale]))])
+
+                        # scale = _if_valid.results[0]
+                        # return scale
 
 
                     def load_b_scale_tile(base_k):
