@@ -60,10 +60,6 @@ try:
 except Exception:
     HAS_AITER = False
 
-# Kernel implementations live under `kernels/`; this test file is the harness.
-from kernels.moe_gemm_2stage import compile_moe_gemm1, compile_moe_gemm2
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
-
 logging.basicConfig(level=logging.INFO)
 
 # Reduce noisy aiter log spam (e.g. "type hints mismatch, override to --> ...") so test output
@@ -437,6 +433,11 @@ def run_moe_stage1(
     else:
         extra_stage1_args["in_dtype"] = "fp8"
 
+    if w_fp4_kernel:
+        from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1 as compile_moe_gemm1
+    else:
+        from kernels.moe_gemm_2stage import compile_moe_gemm1
+
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -449,9 +450,7 @@ def run_moe_stage1(
         use_cshuffle_epilog=False,
         **extra_stage1_args,
     )
-    extra_stage1_exe_args = {}
-    if w_fp4_kernel:
-        extra_stage1_exe_args["arg_bias"] = torch.empty([0], device=device)
+
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         if not w_fp4_kernel:
             exe(
@@ -514,14 +513,10 @@ def run_moe_stage1(
 
     if not bool(skip_ref):
         ref = torch_moe_gemm1(
-            x_fp32,
-            w1_fp32,
-            None,
-            None,
-            # x_q,
-            # w1_q_flat,
-            # scale_x,
-            # scale_w1_flat,
+            x_q,
+            w1_q_flat,
+            scale_x,
+            scale_w1_flat,
             topk_ids.to(torch.int64),
             topk_weights,
             inter_dim=inter_dim,
@@ -880,7 +875,12 @@ def run_moe_stage2(
     else:
         extra_stage2_args["in_dtype"] = "fp8"
 
-    exe = compile_moe_gemm1(
+    if w_fp4_kernel:
+        from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1 as compile_moe_gemm2
+    else:
+        from kernels.moe_gemm_2stage import compile_moe_gemm2
+
+    exe = compile_moe_gemm2(
         model_dim=model_dim,
         inter_dim=inter_dim,
         experts=experts,
@@ -945,14 +945,10 @@ def run_moe_stage2(
 
     if not bool(skip_ref):
         ref2 = torch_moe_gemm2(
-            # a2_q,
-            # w2_q,
-            # a2_scale,
-            # scale_w2,
-            a2_fp8_in,
-            w2_fp32,
-            None,
-            None,
+            a2_q,
+            w2_q,
+            a2_scale,
+            scale_w2,
             topk_ids.to(torch.int64),
             topk_weights,
             model_dim=model_dim,

@@ -1018,7 +1018,7 @@ def compile_mixed_moe_gemm1(
                                     vg = vg + gate_bias_list[ni]
                                     vu = vu + up_bias_list[ni]
 
-                                if act == "swiglu:":
+                                if act == "swiglu":
                                     y = swiglu(vg, vu)
                                 else:
                                     y = silu(vg) * vu
@@ -1187,6 +1187,7 @@ def compile_mixed_moe_gemm1(
     m = _MOE1()
     exe = flydsl.compile(m)
     return exe
+
 
 @functools.lru_cache(maxsize=None)
 def compile_mixed_moe_gemm2(
