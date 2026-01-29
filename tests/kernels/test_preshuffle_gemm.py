@@ -448,11 +448,11 @@ if __name__ == "__main__":
         default="fp8",
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
                         help="Input dtype")
-    parser.add_argument("-M", type=int, default=32, help="M dimension")
-    parser.add_argument("-N", type=int, default=128, help="N dimension")
-    parser.add_argument("-K", type=int, default=256, help="K dimension")
+    parser.add_argument("-M", type=int, default=16, help="M dimension")
+    parser.add_argument("-N", type=int, default=10240, help="N dimension")
+    parser.add_argument("-K", type=int, default=8192, help="K dimension")
     parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
-    parser.add_argument("--tile_n", type=int, default=128, help="Tile N")
+    parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
     parser.add_argument("--tile_k", type=int, default=256, help="Tile K")
     # Explicit CLI knobs (no env vars).
     parser.add_argument(
