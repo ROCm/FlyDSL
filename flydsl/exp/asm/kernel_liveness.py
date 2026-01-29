@@ -321,8 +321,13 @@ def _add_edge(from_block: BasicBlock, to_block: BasicBlock):
 
 
 def _get_regs_from_operand(op: KOperand) -> Set[KReg]:
-    """Extract virtual registers from an operand."""
-    regs = set()
+    """Extract virtual registers from an operand.
+    
+    For KRegRange, returns the base register only. The register allocator
+    treats ranges as units - it allocates the base register with the
+    appropriate size/alignment, ensuring all components are consecutive.
+    """
+    regs: Set[KReg] = set()
     if isinstance(op, KRegRange):
         if is_virtual(op.base_reg):
             regs.add(op.base_reg)

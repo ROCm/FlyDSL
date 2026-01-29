@@ -16,20 +16,33 @@ class _ControlFlowHandlers:
 
         Loop-carried values are updated each iteration, so we mark them as
         accumulator regs to exempt SSA single-def validation.
+        
+        For multi-register types (pairs, quads), we emit a pseudo-instruction
+        that defines the full range. This ensures liveness analysis knows these
+        registers are part of a contiguous range, even when individual MOVs
+        are emitted later for init copies.
         """
-        from .kernel_ir import KVReg, KRegRange
+        from .kernel_ir import KVReg, KRegRange, KInstr
 
         ctx = self.walker.kernel_ctx
 
         if ty_str == "i64" or ty_str.endswith(" i64"):
             rng = ctx.vreg_pair()
             ctx.program.register_accumulator_vreg_range(rng)
+            # Emit pseudo-instruction to define the range for liveness tracking
+            ctx.program.emit(
+                KInstr("_range_def", defs=(rng,), uses=(), comment="loop-carried pair")
+            )
             regs = (KVReg(rng.base_reg.id), KVReg(rng.base_reg.id + 1))
             return regs
 
         if ty_str.startswith("vector<4x") or "vector<4xf32" in ty_str or "vector<4xi32" in ty_str:
             rng = ctx.vreg_quad()
             ctx.program.register_accumulator_vreg_range(rng)
+            # Emit pseudo-instruction to define the range for liveness tracking
+            ctx.program.emit(
+                KInstr("_range_def", defs=(rng,), uses=(), comment="loop-carried quad")
+            )
             regs = tuple(KVReg(rng.base_reg.id + i) for i in range(4))
             return regs
 

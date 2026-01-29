@@ -1272,29 +1272,31 @@ class _MemoryHandlers:
                     c = None
                 else:
                     c = ctx.ssa_to_reg.get(ssa(acc_val))
-                if os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1":
-                    print(f"[asm.mfma] acc constant vs={vs!r} -> c_is_none={c is None}")
             else:
                 c = ctx.ssa_to_reg.get(ssa(acc_val))
-                if os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1":
-                    print(f"[asm.mfma] non-constant acc_val={acc_val} -> c={c}")
         except Exception:
             c = ctx.ssa_to_reg.get(ssa(operation.operands[2]))
         if a is None or b is None:
             return
 
+        # Dispatch based on MFMA instruction type
         if "16x16x32.fp8.fp8" in name:
-            # Debug knob: bypass MFMA to isolate correctness issues.
-            if os.environ.get("FLIR_ASM_DISABLE_MFMA", "0") == "1":
-                if c is not None:
-                    ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(c)
-                return
-            # Ultra-conservative correctness mode: drain memory queues before MFMA.
-            # If this fixes NaNs, we can refine to ticketing-driven waits later.
-            if os.environ.get("FLIR_ASM_MFMA_FULL_WAIT", "0") == "1":
-                self.walker.unified.s_waitcnt(waitcnt="vmcnt(0)")
-                self.walker.unified.s_waitcnt(waitcnt="lgkmcnt(0)")
             res = ctx.emit_mfma_f32_16x16x32_fp8_fp8(tuple(a), tuple(b), tuple(c) if c else None)
+            ctx.ssa_to_reg[ssa(operation.results[0])] = res
+            return
+
+        if "16x16x16.bf16" in name or "16x16x16bf16" in name:
+            res = ctx.emit_mfma_f32_16x16x16_bf16(tuple(a), tuple(b), tuple(c) if c else None)
+            ctx.ssa_to_reg[ssa(operation.results[0])] = res
+            return
+
+        if "16x16x32.i8" in name or "i32.16x16x32.i8" in name:
+            res = ctx.emit_mfma_i32_16x16x32_i8(tuple(a), tuple(b), tuple(c) if c else None)
+            ctx.ssa_to_reg[ssa(operation.results[0])] = res
+            return
+
+        if "16x16x16f16" in name or "16x16x16.f16" in name:
+            res = ctx.emit_mfma_f32_16x16x16_f16(tuple(a), tuple(b), tuple(c) if c else None)
             ctx.ssa_to_reg[ssa(operation.results[0])] = res
             return
 
@@ -1310,14 +1312,33 @@ class _MemoryHandlers:
 
         ctx = self.walker.kernel_ctx
         src = ctx.ssa_to_reg.get(ssa(operation.source))
-        if src is None or len(src) != 1:
+        if src is None:
             return
+
+        src_ty = str(operation.source.type)
         vt = str(operation.result.type)
         m = re.match(r"vector<(\d+)x", vt)
         if not m:
             return
         n = int(m.group(1))
-        ctx.ssa_to_reg[ssa(operation.result)] = tuple(src[0] for _ in range(n))
+
+        # Handle scalar -> vector<N> broadcast
+        if len(src) == 1:
+            # Simple scalar (f32, i32, etc.)
+            ctx.ssa_to_reg[ssa(operation.result)] = tuple(src[0] for _ in range(n))
+        elif len(src) == 2 and ("i64" in src_ty or "f64" in src_ty):
+            # i64/f64 scalar represented as VGPR pair
+            # broadcast to vector<N x i64/f64> -> N pairs
+            result_regs = []
+            for _ in range(n):
+                result_regs.extend(src)
+            ctx.ssa_to_reg[ssa(operation.result)] = tuple(result_regs)
+        else:
+            # Multi-element source: replicate the whole tuple N times
+            result_regs = []
+            for _ in range(n):
+                result_regs.extend(src)
+            ctx.ssa_to_reg[ssa(operation.result)] = tuple(result_regs)
 
     def handle_vector_reduction_op(self, operation, kernel_info: KernelInfo):
         """Support vector.reduction for <maxnumf> and <add> on f32 vectors."""
@@ -1763,22 +1784,33 @@ class _MemoryHandlers:
 
     def _emit_global_load(self, operation, kernel_info, memref_ssa, byte_offset_expr):
         """Emit a global buffer load operation."""
+        from .kernel_ir import KVReg
+
         self._ensure_global_load_srd(kernel_info, memref_ssa)
 
-        # Split constant/dynamic and materialize dynamic part via cached emitter (CSE)
-        const_offset, dynamic_expr = split_const_dynamic(byte_offset_expr)
+        # Check if byte_offset_expr is already a VGPR (runtime-computed index)
+        if isinstance(byte_offset_expr, KVReg):
+            # Runtime indexing: use the VGPR directly as voffset
+            voffset_v = byte_offset_expr
+            const_offset = 0
+            dynamic_expr = None  # Mark as handled
+        else:
+            # Split constant/dynamic and materialize dynamic part via cached emitter (CSE)
+            const_offset, dynamic_expr = split_const_dynamic(byte_offset_expr)
 
         # Kernel IR mode: allocate virtual registers
         from .kernel_ir import KInstr, KImm
         from .instruction_registry import Instruction
 
         # Compute voffset in kernel IR
-        voffset_v = self.walker.kernel_ctx.vreg()
-
-        if dynamic_expr == 0 or (
+        if dynamic_expr is None:
+            # Runtime indexing path: voffset_v is already set, const_offset is 0
+            instoffset = const_offset
+        elif dynamic_expr == 0 or (
             hasattr(dynamic_expr, "is_zero") and dynamic_expr.is_zero
         ):
             # No dynamic part: set voffset to 0
+            voffset_v = self.walker.kernel_ctx.vreg()
             self.walker.kernel_ctx.program.emit(
                 KInstr(
                     Instruction.V_MOV_B32,
@@ -1848,9 +1880,28 @@ class _MemoryHandlers:
             return
 
         # Global memref: build byte offset expression (requires index_env availability)
-        byte_offset_expr = build_memref_byte_offset_expr(
-            indices, kernel_info, memref_info
-        )
+        # Fall back to runtime indexing if any index is not in index_env but has a VGPR
+        try:
+            byte_offset_expr = build_memref_byte_offset_expr(
+                indices, kernel_info, memref_info
+            )
+        except ValueError as e:
+            # Check if we can use runtime indexing (index in VGPR)
+            if len(indices) == 1:
+                idx_ssa = indices[0]
+                idx_r = self.walker.kernel_ctx.ssa_to_reg.get(idx_ssa)
+                if idx_r is not None and len(idx_r) == 1:
+                    # Use VGPR-based addressing for runtime-computed indices (e.g., arith.select)
+                    addr_vreg = idx_r[0]
+                    if int(memref_info.elem_bytes) != 1:
+                        addr_vreg = self.walker.kernel_ctx.v_mul_lo_u32(
+                            addr_vreg,
+                            self.walker.kernel_ctx.v_mov_b32(int(memref_info.elem_bytes), comment="elem_bytes"),
+                            comment="byte offset",
+                        )
+                    self._emit_global_load(operation, kernel_info, memref_ssa, addr_vreg)
+                    return
+            raise
 
         # Global buffer load path
         self._emit_global_load(operation, kernel_info, memref_ssa, byte_offset_expr)

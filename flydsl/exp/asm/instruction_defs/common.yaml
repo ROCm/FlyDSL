@@ -1083,6 +1083,36 @@ instructions:
     special:
       accumulator: true
 
+  # BF16 MFMA (16x16x16) - per ISA Table 28: a = vgpr_pair (4 bf16s), b = vgpr_pair
+  v_mfma_f32_16x16x16_bf16:
+    mnemonic: v_mfma_f32_16x16x16_bf16
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    special:
+      accumulator: true
+
+  # INT8 MFMA (16x16x32)
+  v_mfma_i32_16x16x32_i8:
+    mnemonic: v_mfma_i32_16x16x32_i8
+    category: mfma
+    format: vop3p
+    defs:
+      - {name: dst, type: vgpr_quad, alignment: 4}
+    uses:
+      - {name: a, type: vgpr_pair}
+      - {name: b, type: vgpr_pair}
+      - {name: c, type: vgpr_quad}
+    latency: 16
+    special:
+      accumulator: true
+
   v_mfma_f32_32x32x8_f16:
     mnemonic: v_mfma_f32_32x32x8_f16
     category: mfma
@@ -1467,6 +1497,15 @@ instructions:
     latency: 0
 
   _init_acc_quad:
+    mnemonic: ""
+    category: pseudo
+    format: pseudo
+    defs: []
+    uses: []
+    latency: 0
+
+  # Loop-carried range definition (for liveness tracking)
+  _range_def:
     mnemonic: ""
     category: pseudo
     format: pseudo

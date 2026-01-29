@@ -278,6 +278,138 @@ class TestLDSSwizzle:
 
 
 # =============================================================================
+# Test: MFMA Data Types (INT8, FP16, BF16, FP8)
+# =============================================================================
+
+class TestMFMADataTypes:
+    """Test MFMA with different data types."""
+    
+    def test_mfma_i8(self):
+        """Test INT8 MFMA (mfma_i32_16x16x32_i8)."""
+        from kernels.debug_mfma_dtypes import compile_mfma_i8_test
+        
+        compile_mfma_i8_test.cache_clear()
+        
+        # Input: 8 bytes of i8 value 1
+        a_bytes = bytes([1] * 8)
+        a_dwords = [int.from_bytes(a_bytes[i:i+4], 'little') for i in range(0, 8, 4)]
+        a_in = torch.tensor(a_dwords, device='cuda', dtype=torch.int32)
+        
+        try:
+            ee = compile_mfma_i8_test(backend='execution_engine')
+            compile_mfma_i8_test.cache_clear()
+            asm = compile_mfma_i8_test(backend='asm')
+            
+            out_ee = torch.zeros(4, device='cuda', dtype=torch.int32)
+            out_asm = torch.zeros(4, device='cuda', dtype=torch.int32)
+            
+            ee(a_in, out_ee)
+            asm(a_in, out_asm)
+            torch.cuda.synchronize()
+            
+            match = compare_i32_outputs(out_ee, out_asm, "mfma_i8")
+            assert match, "MFMA INT8: result mismatch"
+            
+            print("  mfma_i8: PASS")
+        except Exception as e:
+            pytest.fail(f"mfma_i8 failed: {e}")
+    
+    def test_mfma_f16(self):
+        """Test FP16 MFMA (mfma_f32_16x16x16f16)."""
+        from kernels.debug_mfma_dtypes import compile_mfma_f16_test
+        
+        compile_mfma_f16_test.cache_clear()
+        
+        # Input: 4 fp16 values of 1.0 (0x3c00)
+        a_bytes = bytes([0x00, 0x3c] * 4)  # fp16 1.0 = 0x3c00 (little endian)
+        a_dwords = [int.from_bytes(a_bytes[i:i+4], 'little') for i in range(0, 8, 4)]
+        a_in = torch.tensor(a_dwords, device='cuda', dtype=torch.int32)
+        
+        try:
+            ee = compile_mfma_f16_test(backend='execution_engine')
+            compile_mfma_f16_test.cache_clear()
+            asm = compile_mfma_f16_test(backend='asm')
+            
+            out_ee = torch.zeros(4, device='cuda', dtype=torch.int32)
+            out_asm = torch.zeros(4, device='cuda', dtype=torch.int32)
+            
+            ee(a_in, out_ee)
+            asm(a_in, out_asm)
+            torch.cuda.synchronize()
+            
+            match = compare_i32_outputs(out_ee, out_asm, "mfma_f16", tolerance=1e-5)
+            assert match, "MFMA FP16: result mismatch"
+            
+            print("  mfma_f16: PASS")
+        except Exception as e:
+            pytest.fail(f"mfma_f16 failed: {e}")
+    
+    def test_mfma_bf16(self):
+        """Test BF16 MFMA (mfma_f32_16x16x16bf16_1k)."""
+        from kernels.debug_mfma_dtypes import compile_mfma_bf16_test
+        
+        compile_mfma_bf16_test.cache_clear()
+        
+        # Input: 4 bf16 values of 1.0 (0x3f80)
+        a_bytes = bytes([0x80, 0x3f] * 4)  # bf16 1.0 = 0x3f80 (little endian)
+        a_dwords = [int.from_bytes(a_bytes[i:i+4], 'little') for i in range(0, 8, 4)]
+        a_in = torch.tensor(a_dwords, device='cuda', dtype=torch.int32)
+        
+        try:
+            ee = compile_mfma_bf16_test(backend='execution_engine')
+            compile_mfma_bf16_test.cache_clear()
+            asm = compile_mfma_bf16_test(backend='asm')
+            
+            out_ee = torch.zeros(4, device='cuda', dtype=torch.int32)
+            out_asm = torch.zeros(4, device='cuda', dtype=torch.int32)
+            
+            ee(a_in, out_ee)
+            asm(a_in, out_asm)
+            torch.cuda.synchronize()
+            
+            match = compare_i32_outputs(out_ee, out_asm, "mfma_bf16", tolerance=1e-5)
+            assert match, "MFMA BF16: result mismatch"
+            
+            print("  mfma_bf16: PASS")
+        except AttributeError as e:
+            if "mfma_f32_16x16x16bf16_1k" in str(e):
+                pytest.skip("BF16 MFMA not available on this target")
+            raise
+        except Exception as e:
+            pytest.fail(f"mfma_bf16 failed: {e}")
+    
+    def test_mfma_fp8(self):
+        """Test FP8 MFMA (mfma_f32_16x16x32_fp8_fp8)."""
+        from kernels.debug_mfma_dtypes import compile_mfma_fp8_test
+        
+        compile_mfma_fp8_test.cache_clear()
+        
+        # Input: 8 fp8 values of ~1.0 (0x3c)
+        a_bytes = bytes([0x3c] * 8)
+        a_dwords = [int.from_bytes(a_bytes[i:i+4], 'little') for i in range(0, 8, 4)]
+        a_in = torch.tensor(a_dwords, device='cuda', dtype=torch.int32)
+        
+        try:
+            ee = compile_mfma_fp8_test(backend='execution_engine')
+            compile_mfma_fp8_test.cache_clear()
+            asm = compile_mfma_fp8_test(backend='asm')
+            
+            out_ee = torch.zeros(4, device='cuda', dtype=torch.int32)
+            out_asm = torch.zeros(4, device='cuda', dtype=torch.int32)
+            
+            ee(a_in, out_ee)
+            asm(a_in, out_asm)
+            torch.cuda.synchronize()
+            
+            match = compare_i32_outputs(out_ee, out_asm, "mfma_fp8", tolerance=1e-5)
+            assert match, "MFMA FP8: result mismatch"
+            
+            print("  mfma_fp8: PASS")
+        except Exception as e:
+            pytest.fail(f"mfma_fp8 failed: {e}")
+
+
+# =============================================================================
 # Test: FP8 MFMA Unit Test
 # =============================================================================
 

@@ -188,8 +188,6 @@ class _MFMASupport:
         #
         # We still treat MFMA result quads as "accumulator vregs" for SSA validation
         # purposes (they may be redefined across a chain), but we do not force in-place.
-        import os
-        DEBUG_MFMA = os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1"
         
         acc_range = None
         if (
@@ -201,16 +199,10 @@ class _MFMASupport:
             check1 = self.program._vreg_range_bases.get(base_id) == 4
             check2 = all(self.program.is_accumulator_vreg(r) for r in acc_regs)
             check3 = all(acc_regs[i].id == base_id + i for i in range(4))
-            if DEBUG_MFMA:
-                print(f"[asm.mfma emit] acc_regs base_id={base_id}, check1={check1}, check2={check2}, check3={check3}")
             if check1 and check2 and check3:
                 acc_range = KRegRange(acc_regs[0], 4, alignment=4)
                 self.program.register_accumulator_vreg_range(acc_range)
-                if DEBUG_MFMA:
-                    print(f"[asm.mfma emit] Using existing aligned acc_range={acc_range}")
         if acc_range is None and acc_regs is not None and len(acc_regs) == 4:
-            if DEBUG_MFMA:
-                print(f"[asm.mfma emit] Packing acc into fresh quad")
             # Pack any 4-lane accumulator (e.g. constant vectors) into a fresh quad.
             acc_range = self.vreg_quad()
             self.program.register_accumulator_vreg_range(acc_range)
@@ -251,6 +243,180 @@ class _MFMASupport:
                     (result_range,),
                     (a_range, b_range, acc_range),
                     comment="MFMA FP8 16x16x32",
+                )
+            )
+
+        return result_regs
+
+    def emit_mfma_f32_16x16x16_bf16(
+        self,
+        a_regs: Tuple[KReg, ...],
+        b_regs: Tuple[KReg, ...],
+        acc_regs: Optional[Tuple[KReg, ...]] = None,
+    ) -> Tuple[KReg, ...]:
+        """
+        Emit MFMA BF16xBF16 -> FP32 (16x16x16) with virtual register tracking.
+
+        Per ISA defs (gfx942+): a = vgpr_pair (4 bf16s), b = vgpr_pair, c/dst = vgpr_quad.
+        """
+        if len(a_regs) < 2 or len(b_regs) < 2:
+            raise ValueError("BF16 MFMA 16x16x16 expects 2 VGPRs per operand (vgpr_pair, 4 bf16s).")
+
+        # Pack operands into aligned pairs
+        a_tmp = self.vreg_pair()
+        b_tmp = self.vreg_pair()
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (a_tmp,),
+                (a_regs[0], a_regs[1]),
+                comment="pack mfma a",
+            )
+        )
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (b_tmp,),
+                (b_regs[0], b_regs[1]),
+                comment="pack mfma b",
+            )
+        )
+        a_range = a_tmp
+        b_range = b_tmp
+
+        acc_range = None
+        if (
+            acc_regs is not None
+            and len(acc_regs) == 4
+            and all(isinstance(r, KVReg) for r in acc_regs)
+        ):
+            base_id = acc_regs[0].id
+            check1 = self.program._vreg_range_bases.get(base_id) == 4
+            check2 = all(self.program.is_accumulator_vreg(r) for r in acc_regs)
+            check3 = all(acc_regs[i].id == base_id + i for i in range(4))
+            if check1 and check2 and check3:
+                acc_range = KRegRange(acc_regs[0], 4, alignment=4)
+                self.program.register_accumulator_vreg_range(acc_range)
+        if acc_range is None and acc_regs is not None and len(acc_regs) == 4:
+            acc_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(acc_range)
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (acc_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc",
+                )
+            )
+
+        result_range = self.vreg_quad()
+        self.program.register_accumulator_vreg_range(result_range)
+        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+        if acc_regs is None:
+            from .kernel_ir import KImm
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x16_bf16",
+                    (result_range,),
+                    (a_range, b_range, KImm(0)),
+                    comment="MFMA BF16 16x16x16 (c=0)",
+                )
+            )
+        else:
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x16_bf16",
+                    (result_range,),
+                    (a_range, b_range, acc_range),
+                    comment="MFMA BF16 16x16x16",
+                )
+            )
+
+        return result_regs
+
+    def emit_mfma_i32_16x16x32_i8(
+        self,
+        a_regs: Tuple[KReg, ...],
+        b_regs: Tuple[KReg, ...],
+        acc_regs: Optional[Tuple[KReg, ...]] = None,
+    ) -> Tuple[KReg, ...]:
+        """
+        Emit MFMA INT8xINT8 -> INT32 (16x16x32) with virtual register tracking.
+
+        Per ISA defs (gfx942+): a = vgpr_pair, b = vgpr_pair, c/dst = vgpr_quad.
+        """
+        if len(a_regs) < 2 or len(b_regs) < 2:
+            raise ValueError("INT8 MFMA 16x16x32 expects 2 VGPRs per operand (vgpr_pair).")
+
+        # Pack operands into aligned pairs
+        a_tmp = self.vreg_pair()
+        b_tmp = self.vreg_pair()
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (a_tmp,),
+                (a_regs[0], a_regs[1]),
+                comment="pack mfma a",
+            )
+        )
+        self.program.emit(
+            KInstr(
+                "_pack_vgpr_pair",
+                (b_tmp,),
+                (b_regs[0], b_regs[1]),
+                comment="pack mfma b",
+            )
+        )
+        a_range = a_tmp
+        b_range = b_tmp
+
+        acc_range = None
+        if (
+            acc_regs is not None
+            and len(acc_regs) == 4
+            and all(isinstance(r, KVReg) for r in acc_regs)
+        ):
+            base_id = acc_regs[0].id
+            check1 = self.program._vreg_range_bases.get(base_id) == 4
+            check2 = all(self.program.is_accumulator_vreg(r) for r in acc_regs)
+            check3 = all(acc_regs[i].id == base_id + i for i in range(4))
+            if check1 and check2 and check3:
+                acc_range = KRegRange(acc_regs[0], 4, alignment=4)
+                self.program.register_accumulator_vreg_range(acc_range)
+        if acc_range is None and acc_regs is not None and len(acc_regs) == 4:
+            acc_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(acc_range)
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (acc_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc",
+                )
+            )
+
+        result_range = self.vreg_quad()
+        self.program.register_accumulator_vreg_range(result_range)
+        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+        if acc_regs is None:
+            from .kernel_ir import KImm
+            self.program.emit(
+                KInstr(
+                    "v_mfma_i32_16x16x32_i8",
+                    (result_range,),
+                    (a_range, b_range, KImm(0)),
+                    comment="MFMA INT8 16x16x32 (c=0)",
+                )
+            )
+        else:
+            self.program.emit(
+                KInstr(
+                    "v_mfma_i32_16x16x32_i8",
+                    (result_range,),
+                    (a_range, b_range, acc_range),
+                    comment="MFMA INT8 16x16x32",
                 )
             )
 

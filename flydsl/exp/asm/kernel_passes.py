@@ -282,16 +282,59 @@ class _CompilationPasses:
                     insertions.append((i + 1, 1))  # s_nop 1 = 2 wait states
                     continue
 
-            # Conservatively: trans op immediately followed by non-trans vector op.
-            # Insert one wait-state (s_nop 0) to satisfy software wait rules.
+            # Trans op -> non-trans VALU: only insert NOP if there's a real dependency.
+            # Per Table 12: valu_trans_to_non_trans (1 wait state)
+            # Optimized: only when non-trans VALU reads the result of trans op.
             if (
                 isinstance(instr.name, str)
                 and instr.name in trans_ops
                 and next_instr.is_valu
                 and not (isinstance(next_instr.name, str) and next_instr.name in trans_ops)
             ):
-                insertions.append((i + 1, 0))
+                written = _written_vgprs(instr)
+                if written and _reads_any_vgpr(next_instr, written):
+                    insertions.append((i + 1, 0))
+                    continue
+
+            instr_name_str = instr.name if isinstance(instr.name, str) else str(instr.name)
+            next_name_str = next_instr.name if isinstance(next_instr.name, str) else str(next_instr.name)
+
+            # V_CMPX* writes EXEC -> V_MFMA* requires 4 wait states.
+            # Per Table 37: No exec mask forwarding for XDL/DGEMM.
+            # This is always required since MFMA execution is masked by EXEC.
+            if instr_name_str.startswith("v_cmpx") and next_instr.is_mfma:
+                insertions.append((i + 1, 3))  # s_nop 3 = 4 wait states
                 continue
+
+            # VALU writes VGPR -> VALU DPP reads that VGPR requires 2 wait states.
+            # Per Table 11: valu_vgpr_to_dpp
+            # Optimized: only when DPP reads the VGPR that VALU just wrote.
+            if instr.is_valu and "_dpp" in next_name_str.lower():
+                written = _written_vgprs(instr)
+                if written and _reads_any_vgpr(next_instr, written):
+                    insertions.append((i + 1, 1))  # s_nop 1 = 2 wait states
+                    continue
+
+            # VALU writes SGPR/VCC -> V_{READ,WRITE}LANE using that as lane select.
+            # Per Table 11: valu_sgpr_vcc_to_lane_select (4 wait states)
+            # Optimized: only when readlane/writelane uses the SGPR that was just written.
+            if instr.is_valu and getattr(instr.constraints, 'writes_sgpr', False):
+                if next_name_str in ("v_readlane_b32", "v_writelane_b32"):
+                    # Check if next instruction uses an SGPR that instr wrote
+                    written_sgprs = self._get_written_sgprs(instr)
+                    read_sgprs = self._get_read_sgprs(next_instr)
+                    if written_sgprs & read_sgprs:
+                        insertions.append((i + 1, 3))  # s_nop 3 = 4 wait states
+                        continue
+
+            # VALU writes VGPRn -> v_readlane vsrc0 reads VGPRn requires 1 wait state.
+            # Per Table 11: valu_vgpr_to_readlane_vsrc0
+            # Already optimized: checks register dependency.
+            if instr.is_valu and next_name_str == "v_readlane_b32":
+                written = _written_vgprs(instr)
+                if written and _reads_any_vgpr(next_instr, written):
+                    insertions.append((i + 1, 0))  # s_nop 0 = 1 wait state
+                    continue
 
             # Check if next instruction is v_readfirstlane_b32
             if next_instr.name != Instruction.V_READFIRSTLANE_B32:
@@ -358,6 +401,32 @@ class _CompilationPasses:
                     return True
 
         return False
+
+    def _get_written_sgprs(self, instr: KInstr) -> set:
+        """Get the set of SGPR ids written by an instruction."""
+        from .kernel_ir import KSReg
+
+        written = set()
+        for d in instr.defs:
+            if isinstance(d, KSReg):
+                written.add(d.id)
+            elif isinstance(d, KRegRange) and isinstance(d.base_reg, KSReg):
+                for k in range(d.count):
+                    written.add(d.base_reg.id + k)
+        return written
+
+    def _get_read_sgprs(self, instr: KInstr) -> set:
+        """Get the set of SGPR ids read by an instruction."""
+        from .kernel_ir import KSReg
+
+        read = set()
+        for u in instr.uses:
+            if isinstance(u, KSReg):
+                read.add(u.id)
+            elif isinstance(u, KRegRange) and isinstance(u.base_reg, KSReg):
+                for k in range(u.count):
+                    read.add(u.base_reg.id + k)
+        return read
 
     def _apply_peephole_optimizations(self):
         """
