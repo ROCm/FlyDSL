@@ -84,6 +84,37 @@ instructions:
       - {name: src1, type: vgpr|sgpr|imm}
     latency: 1
 
+  v_min_f32:
+    mnemonic: v_min_f32
+    category: valu
+    format: vop3
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src0, type: vgpr|sgpr|imm}
+      - {name: src1, type: vgpr|sgpr|imm}
+    latency: 1
+
+  v_sqrt_f32:
+    mnemonic: v_sqrt_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
+  v_rsq_f32:
+    mnemonic: v_rsq_f32
+    category: valu
+    format: vop1
+    defs:
+      - {name: dst, type: vgpr}
+    uses:
+      - {name: src, type: vgpr|sgpr|imm}
+    latency: 4
+
   v_rcp_f32:
     mnemonic: v_rcp_f32
     category: valu

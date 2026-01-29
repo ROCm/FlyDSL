@@ -185,6 +185,8 @@ class IRWalker:
             self.handlers.handle_arith_subf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.MaximumFOp):
             self.handlers.handle_arith_maximumf_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.MinimumFOp):
+            self.handlers.handle_arith_minimumf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.DivFOp):
             self.handlers.handle_arith_divf_op(operation, kernel_info)
         elif hasattr(arith_d, "DivSIOp") and isinstance(operation, arith_d.DivSIOp):
@@ -299,6 +301,18 @@ class IRWalker:
             self.handlers.handle_scf_if_op(operation, kernel_info)
         elif math_d is not None and isinstance(operation, math_d.Exp2Op):
             self.handlers.handle_math_exp2_op(operation, kernel_info)
+        elif math_d is not None and isinstance(operation, math_d.SqrtOp):
+            self.handlers.handle_math_sqrt_op(operation, kernel_info)
+        elif math_d is not None and isinstance(operation, math_d.RsqrtOp):
+            self.handlers.handle_math_rsqrt_op(operation, kernel_info)
+        elif math_d is not None and isinstance(operation, math_d.AbsFOp):
+            self.handlers.handle_math_absf_op(operation, kernel_info)
+        elif math_d is not None and isinstance(operation, math_d.CopySignOp):
+            self.handlers.handle_math_copysign_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.FPToSIOp):
+            self.handlers.handle_arith_fptosi_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.SIToFPOp):
+            self.handlers.handle_arith_sitofp_op(operation, kernel_info)
         elif isinstance(operation, vector_d.ExtractStridedSliceOp):
             self.handlers.handle_vector_extract_strided_slice_op(operation, kernel_info)
         # Critical operations for gather_to_lds support

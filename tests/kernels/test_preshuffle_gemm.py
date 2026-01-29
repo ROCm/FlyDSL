@@ -120,8 +120,11 @@ def test_mfma_a8_flir_preshuffle(
         bench_iters = min(int(bench_iters), 5)
         bench_warmup = min(int(bench_warmup), 1)
         run_aiter_bench = False
-        if in_dtype == "fp8":
-            pytest.xfail("Known issue: FP8 preshuffle GEMM produces inf on asm backend (gfx942) - needs more debugging.")
+        # FP8 ASM backend works for small K (1-4 tiles), but fails for larger K (5+ tiles)
+        # due to an issue with the scf.for loop handling in the ASM backend.
+        num_k_tiles = K // tile_k
+        if in_dtype == "fp8" and num_k_tiles >= 5:
+            pytest.xfail(f"Known issue: FP8 preshuffle GEMM with {num_k_tiles} K-tiles produces inf on asm backend - loop handling bug.")
 
     exe = compile_preshuffle_gemm_a8(
         M=M,

@@ -197,6 +197,15 @@ class _ArithAffineHandlers:
         out = tuple(ctx.v_max_f32(a, b, comment="maxf") for a, b in zip(lhs, rhs))
         ctx.ssa_to_reg[ssa(operation.result)] = out
 
+    def handle_arith_minimumf_op(self, operation: arith_d.MinimumFOp, kernel_info: KernelInfo):
+        ctx = self.walker.kernel_ctx
+        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
+        rhs = ctx.ssa_to_reg.get(ssa(operation.rhs))
+        if not lhs or not rhs or len(lhs) != len(rhs):
+            return
+        out = tuple(ctx.v_min_f32(a, b, comment="minf") for a, b in zip(lhs, rhs))
+        ctx.ssa_to_reg[ssa(operation.result)] = out
+
     def handle_math_exp2_op(self, operation, kernel_info: KernelInfo):
         """Lower math.exp2 for scalar or vector f32 values."""
         ctx = self.walker.kernel_ctx
@@ -218,6 +227,73 @@ class _ArithAffineHandlers:
 
         # math.exp2 has one result.
         ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(outs)
+
+    def handle_math_sqrt_op(self, operation, kernel_info: KernelInfo):
+        """Lower math.sqrt for f32 values."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if not src:
+            return
+        out = tuple(ctx.v_sqrt_f32(x, comment="sqrt") for x in src)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = out
+
+    def handle_math_rsqrt_op(self, operation, kernel_info: KernelInfo):
+        """Lower math.rsqrt for f32 values."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if not src:
+            return
+        out = tuple(ctx.v_rsq_f32(x, comment="rsqrt") for x in src)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = out
+
+    def handle_math_absf_op(self, operation, kernel_info: KernelInfo):
+        """Lower math.absf for f32 values using v_and_b32 to clear sign bit."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if not src:
+            return
+        # Clear sign bit: abs(x) = x & 0x7FFFFFFF
+        # Load mask to SGPR first (v_and_b32 can use SGPR as src1)
+        mask_reg = ctx.sreg()
+        ctx.program.emit(KInstr("s_mov_b32", (mask_reg,), (KImm(0x7FFFFFFF),), comment="absf mask"))
+        out = tuple(ctx.v_and_b32(x, mask_reg, comment="absf") for x in src)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = out
+
+    def handle_math_copysign_op(self, operation, kernel_info: KernelInfo):
+        """Lower math.copysign(mag, sign) for f32 values."""
+        ctx = self.walker.kernel_ctx
+        mag = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        sign = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
+        if not mag or not sign or len(mag) != len(sign):
+            return
+        # copysign(mag, sign) = (mag & 0x7FFFFFFF) | (sign & 0x80000000)
+        mag_mask = 0x7FFFFFFF
+        sign_mask = 0x80000000
+        outs = []
+        for m, s in zip(mag, sign):
+            abs_m = ctx.v_and_b32(m, mag_mask, comment="copysign abs")
+            sign_bit = ctx.v_and_b32(s, sign_mask, comment="copysign sign")
+            out = ctx.v_or_b32(abs_m, sign_bit, comment="copysign combine")
+            outs.append(out)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(outs)
+
+    def handle_arith_fptosi_op(self, operation, kernel_info: KernelInfo):
+        """Lower arith.fptosi (f32 -> i32)."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if not src:
+            return
+        out = tuple(ctx.v_cvt_i32_f32(x, comment="fptosi") for x in src)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = out
+
+    def handle_arith_sitofp_op(self, operation, kernel_info: KernelInfo):
+        """Lower arith.sitofp (i32 -> f32)."""
+        ctx = self.walker.kernel_ctx
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if not src:
+            return
+        out = tuple(ctx.v_cvt_f32_i32(x, comment="sitofp") for x in src)
+        ctx.ssa_to_reg[ssa(operation.results[0])] = out
 
     def _handle_arith_binop(self, operation, kernel_info: KernelInfo, op_func):
         """Handle binary arithmetic operations (addi, muli) in index_env.
@@ -334,6 +410,8 @@ class _ArithAffineHandlers:
         # XOR is used in LDS swizzle patterns: col ^ ((row % k) * 16)
         lhs_idx = kernel_info.index_env.get(lhs_ssa)
         rhs_idx = kernel_info.index_env.get(rhs_ssa)
+        lhs_r = ctx.ssa_to_reg.get(lhs_ssa)
+        rhs_r = ctx.ssa_to_reg.get(rhs_ssa)
         if lhs_idx is not None or rhs_idx is not None:
             # At least one operand is in index_env - we need VGPR computation.
             # Get or materialize VGPRs for both operands.
@@ -552,6 +630,15 @@ class _ArithAffineHandlers:
         if not lhs or not rhs or len(lhs) != len(rhs):
             return
         out = tuple(ctx.v_max_f32(a, b, comment="maxf") for a, b in zip(lhs, rhs))
+        ctx.ssa_to_reg[ssa(operation.result)] = out
+
+    def handle_arith_minimumf_op(self, operation: arith_d.MinimumFOp, kernel_info: KernelInfo):
+        ctx = self.walker.kernel_ctx
+        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
+        rhs = ctx.ssa_to_reg.get(ssa(operation.rhs))
+        if not lhs or not rhs or len(lhs) != len(rhs):
+            return
+        out = tuple(ctx.v_min_f32(a, b, comment="minf") for a, b in zip(lhs, rhs))
         ctx.ssa_to_reg[ssa(operation.result)] = out
 
     def handle_arith_divf_op(self, operation: arith_d.DivFOp, kernel_info: KernelInfo):
