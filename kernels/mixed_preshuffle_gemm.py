@@ -103,8 +103,7 @@ def compile_mxfp4_preshuffle_gemm(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
 
-    # gpu_arch = get_hip_arch()
-    gpu_arch = "gfx950"
+    gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -498,15 +497,10 @@ def compile_mxfp4_preshuffle_gemm(
                     )
                     a_16B = load_a_16(idx_elem)
                     
-                    debug_a = vector.bitcast(T.i64x2, a_16B)
-                    a0 = vector.extract(debug_a, static_position=[0], dynamic_position=[])
-                    a1 = vector.extract(debug_a, static_position=[1], dynamic_position=[])
-
                     parts.append(vector.bitcast(T.i32x4, a_16B))
                 return parts
 
             def store_a_tile_to_lds(vec_a_parts, lds_base):
-                flir.print("num_a_loads", num_a_loads)
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     lds_store_16b_xor16(
@@ -873,18 +867,6 @@ def compile_mxfp4_preshuffle_gemm(
                 a_regs0, b_tile0 = prefetch_ab_tile(k0)
                 a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
 
-
-                """
-                ####=========== debug start =============###
-                # a load error!
-                v0 = arith.constant(1, type=T.i32)
-                a0 = vector.from_elements(vec4_i32, [v0, v0, v0, v0])
-                a_regs0 = [a0, a0]
-                flir.print("a_regs0", a_regs0)
-                ####=========== debug end =============###
-                """
-
-
                 store_a_tile_to_lds(a_regs0, lds_base0)
                 gpu.barrier()
                 accs = [acc_init] * (num_acc_n * m_repeat)
@@ -898,21 +880,12 @@ def compile_mxfp4_preshuffle_gemm(
                 a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
 
-                """
-                ####=========== debug start =============###
-                accs, _ = compute_tile(
-                    accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong
-                )
-                ####=========== debug end =============###
-                """
-                
                 num_tiles = K // tile_k
                 if (num_tiles % 2) == 1:
                     for k_iv in range(0, c_k_main, tile_k * 2):
                         next_k1 = k_iv + tile_k
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
                         a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // 256)
-                        # a_scale_ping, b_scale_ping = a_scale_pong, b_scale_pong
                 
                         accs, _ = compute_tile(
                             accs,
