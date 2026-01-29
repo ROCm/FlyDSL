@@ -1124,9 +1124,7 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
-        w_fp4_kernel=w_fp4_kernel,
     )
-
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
