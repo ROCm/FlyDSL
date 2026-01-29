@@ -33,6 +33,14 @@
 
 thread_local static int32_t defaultDevice = 0;
 
+static inline bool mgpuStreamIsCapturing(hipStream_t stream) {
+  hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+  hipError_t err = hipStreamIsCapturing(stream, &status);
+  if (err != hipSuccess)
+    return false;
+  return status != hipStreamCaptureStatusNone;
+}
+
 extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
   hipModule_t module = nullptr;
   HIP_REPORT_IF_ERROR(hipModuleLoadData(&module, data));
@@ -71,17 +79,35 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
+  // In HIP graph capture, stream creation is not permitted. Use per-thread
+  // default stream when the current thread is capturing.
+  if (mgpuStreamIsCapturing(hipStreamPerThread))
+    return hipStreamPerThread;
+
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
   return stream;
 }
 
 extern "C" void mgpuStreamDestroy(hipStream_t stream) {
+  // Never destroy implicit streams.
+  if (stream == nullptr || stream == hipStreamPerThread || stream == hipStreamLegacy)
+    return;
+  // Don't destroy streams while capturing.
+  if (mgpuStreamIsCapturing(stream))
+    return;
   HIP_REPORT_IF_ERROR(hipStreamDestroy(stream));
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
-  HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
+  // IMPORTANT: `hipStreamSynchronize` is not permitted during HIP graph capture
+  // and may return hipErrorStreamCaptureUnsupported due to thread-scoped capture
+  // state (even if `stream` is not the capturing stream).
+  //
+  // This wrapper is only used by generated/JIT code for convenience; higher
+  // layers (e.g., PyTorch) should manage synchronization when needed.
+  (void)stream;
+  return;
 }
 
 extern "C" void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
@@ -99,6 +125,10 @@ extern "C" void mgpuEventDestroy(hipEvent_t event) {
 }
 
 extern "C" void mgpuEventSynchronize(hipEvent_t event) {
+  // Event synchronization is not permitted during HIP graph capture.
+  // Use the current per-thread stream capture state as a conservative proxy.
+  if (mgpuStreamIsCapturing(hipStreamPerThread))
+    return;
   HIP_REPORT_IF_ERROR(hipEventSynchronize(event));
 }
 
