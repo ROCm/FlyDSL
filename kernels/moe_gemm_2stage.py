@@ -52,6 +52,7 @@ def compile_moe_gemm1(
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    backend: str = "asm",
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -1075,7 +1076,7 @@ def compile_moe_gemm1(
             )
 
     m = _MOE1()
-    exe = flydsl.compile(m)
+    exe = flydsl.compile(m, backend=backend)
     return exe
 
 
@@ -1097,6 +1098,7 @@ def compile_moe_gemm2(
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
+    backend: str = "asm",
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -2198,6 +2200,6 @@ def compile_moe_gemm2(
             )
 
     m = _MOE2()
-    exe = flydsl.compile(m)
+    exe = flydsl.compile(m, backend=backend)
     return exe
 

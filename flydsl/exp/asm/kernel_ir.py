@@ -471,6 +471,7 @@ class KernelProgram:
     # Virtual register counters
     _next_vreg_id: int = field(default=0, repr=False)
     _next_sreg_id: int = field(default=0, repr=False)
+    _next_label_id_counter: int = field(default=0, repr=False)
 
     # Loop control registers - these are exempt from SSA validation because
     # loop counters are naturally re-defined in the latch. The allocator
@@ -485,6 +486,12 @@ class KernelProgram:
     # Maps base virtual id -> count (for quick identification of real ranges).
     _vreg_range_bases: dict[int, int] = field(default_factory=dict, repr=False)
     _sreg_range_bases: dict[int, int] = field(default_factory=dict, repr=False)
+
+    def next_label_id(self) -> int:
+        """Get next unique label ID for branch targets."""
+        label_id = self._next_label_id_counter
+        self._next_label_id_counter += 1
+        return label_id
 
     def alloc_vreg(self) -> KVReg:
         """Allocate a new virtual VGPR."""

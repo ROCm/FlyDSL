@@ -5,9 +5,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 from __future__ import annotations
-from typing import List
+from typing import List, Union
 
 from .kernel_pipeline_shared import KRegRange, KInstr, KImm
+from .kernel_ir import KSReg
 from .instruction_registry import Instruction
 
 
@@ -16,7 +17,12 @@ class _LoopSupport:
     # Loop Support
     # =========================================================================
 
-    def begin_loop(self, lower_bound: int, upper_bound: int, step: int) -> dict:
+    def begin_loop(
+        self,
+        lower_bound: Union[int, KSReg],
+        upper_bound: Union[int, KSReg],
+        step: Union[int, KSReg],
+    ) -> dict:
         """
         Begin a loop structure with virtual registers for loop control.
 
@@ -24,6 +30,11 @@ class _LoopSupport:
         that are marked as loop control registers. This allows them to:
         - Be allocated by the register allocator (no hardcoded register numbers)
         - Be exempt from SSA validation (loop counters are re-defined in latch)
+
+        Args:
+            lower_bound: Loop start value (int constant or KSReg for dynamic)
+            upper_bound: Loop end value (int constant or KSReg for dynamic)
+            step: Loop step value (int constant or KSReg for dynamic)
 
         Returns a loop context dict for use with emit_loop_header/latch/end.
         """
@@ -43,39 +54,61 @@ class _LoopSupport:
 
         # Initialize loop counter and bounds using virtual registers
         self.comment(f"Initialize loop {loop_id}")
-        self.program.emit(
-            KInstr(
-                "s_mov_b32",
-                (counter_vreg,),
-                (KImm(lower_bound),),
-                comment=f"loop {loop_id} counter = {lower_bound}",
-            )
-        )
-        self.program.emit(
-            KInstr(
-                "s_mov_b32",
-                (step_vreg,),
-                (KImm(step),),
-                comment=f"loop {loop_id} step = {step}",
-            )
-        )
-        self.program.emit(
-            KInstr(
-                "s_mov_b32",
-                (upper_bound_vreg,),
-                (KImm(upper_bound),),
-                comment=f"loop {loop_id} upper = {upper_bound}",
-            )
-        )
+
+        # Helper to emit mov from either immediate or register
+        from .kernel_ir import KVReg
+        def emit_mov(dst, src, name, val_str):
+            if isinstance(src, KSReg):
+                # SGPR to SGPR copy
+                self.program.emit(
+                    KInstr(
+                        "s_mov_b32",
+                        (dst,),
+                        (src,),
+                        comment=f"loop {loop_id} {name} = dynamic (sgpr)",
+                    )
+                )
+            elif isinstance(src, KVReg):
+                # VGPR to SGPR: use v_readfirstlane_b32
+                self.program.emit(
+                    KInstr(
+                        "v_readfirstlane_b32",
+                        (dst,),
+                        (src,),
+                        comment=f"loop {loop_id} {name} = dynamic (vgpr)",
+                    )
+                )
+            elif isinstance(src, int):
+                # Static integer immediate
+                self.program.emit(
+                    KInstr(
+                        "s_mov_b32",
+                        (dst,),
+                        (KImm(src),),
+                        comment=f"loop {loop_id} {name} = {val_str}",
+                    )
+                )
+            else:
+                raise ValueError(f"Unsupported loop bound type: {type(src)}")
+
+        emit_mov(counter_vreg, lower_bound, "counter", str(lower_bound))
+        emit_mov(step_vreg, step, "step", str(step))
+        emit_mov(upper_bound_vreg, upper_bound, "upper", str(upper_bound))
+
+        # Store numeric values for static bounds, None for dynamic
+        lower_val = lower_bound if isinstance(lower_bound, int) else None
+        upper_val = upper_bound if isinstance(upper_bound, int) else None
+        step_val = step if isinstance(step, int) else None
 
         loop_ctx = {
             "loop_id": loop_id,
             "counter_sreg": counter_vreg,
             "step_sreg": step_vreg,
             "upper_bound_sreg": upper_bound_vreg,
-            "lower_bound": lower_bound,
-            "upper_bound": upper_bound,
-            "step": step,
+            "lower_bound": lower_val,
+            "upper_bound": upper_val,
+            "step": step_val,
+            "is_dynamic": not all(isinstance(x, int) for x in [lower_bound, upper_bound, step]),
         }
 
         self._loop_stack.append(loop_ctx)

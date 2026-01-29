@@ -1062,6 +1062,59 @@ class _MemoryHandlers:
             return
         ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(src)
 
+    def handle_llvm_call_intrinsic_op(self, operation, kernel_info: KernelInfo):
+        """Handle llvm.call_intrinsic for AMDGCN intrinsics (exp2, rcp, etc.)."""
+        from .kernel_ir import KInstr
+
+        ctx = self.walker.kernel_ctx
+
+        # Get intrinsic name from attributes
+        try:
+            intrin_attr = operation.operation.attributes["intrin"]
+        except (KeyError, IndexError):
+            return
+        intrin_name = str(intrin_attr).strip('"')
+
+        # Get source operand
+        if len(operation.operands) < 1:
+            return
+        src = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        if src is None or len(src) == 0:
+            return
+
+        # Handle specific intrinsics
+        if intrin_name == "llvm.amdgcn.exp2.f32":
+            # 2^x: v_exp_f32
+            out = ctx.vreg()
+            ctx.program.emit(
+                KInstr("v_exp_f32", defs=(out,), uses=(src[0],), comment="exp2(x)")
+            )
+            ctx.ssa_to_reg[ssa(operation.results[0])] = (out,)
+        elif intrin_name == "llvm.amdgcn.rcp.f32":
+            # 1/x: v_rcp_f32
+            out = ctx.vreg()
+            ctx.program.emit(
+                KInstr("v_rcp_f32", defs=(out,), uses=(src[0],), comment="rcp(x)")
+            )
+            ctx.ssa_to_reg[ssa(operation.results[0])] = (out,)
+        elif intrin_name == "llvm.amdgcn.log.f32":
+            # log2(x): v_log_f32
+            out = ctx.vreg()
+            ctx.program.emit(
+                KInstr("v_log_f32", defs=(out,), uses=(src[0],), comment="log2(x)")
+            )
+            ctx.ssa_to_reg[ssa(operation.results[0])] = (out,)
+        elif intrin_name == "llvm.amdgcn.rsq.f32":
+            # 1/sqrt(x): v_rsq_f32
+            out = ctx.vreg()
+            ctx.program.emit(
+                KInstr("v_rsq_f32", defs=(out,), uses=(src[0],), comment="rsqrt(x)")
+            )
+            ctx.ssa_to_reg[ssa(operation.results[0])] = (out,)
+        else:
+            # Unsupported intrinsic - just pass through if possible
+            ctx.ssa_to_reg[ssa(operation.results[0])] = src
+
     def handle_rocdl_make_buffer_rsrc_op(self, operation, kernel_info: KernelInfo):
         """Lower rocdl.make.buffer.rsrc by materializing an SRD in SGPRs."""
         from .kernel_ir import KInstr, KImm, KSReg, KRegRange
@@ -1988,7 +2041,18 @@ class _MemoryHandlers:
         src_regs = self._current_store_regs
 
         # Build a properly aligned KRegRange for the source
-        if vector_bytes == 4:
+        if vector_bytes == 2:
+            # Single 16-bit value (f16/i16) - use ds_write_b16
+            src_vreg = src_regs[0] if isinstance(src_regs, (tuple, list)) else src_regs
+            ctx.program.emit(
+                KInstr(
+                    "ds_write_b16",
+                    (),
+                    (addr_vreg, src_vreg),
+                    comment=f"LDS store 2B to {memref_ssa}",
+                )
+            )
+        elif vector_bytes == 4:
             # Single register
             src_vreg = src_regs[0] if isinstance(src_regs, (tuple, list)) else src_regs
             ctx.program.emit(

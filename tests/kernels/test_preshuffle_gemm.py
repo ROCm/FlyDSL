@@ -75,7 +75,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16", "fp16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
@@ -120,9 +120,11 @@ def test_mfma_a8_flir_preshuffle(
         bench_iters = min(int(bench_iters), 5)
         bench_warmup = min(int(bench_warmup), 1)
         run_aiter_bench = False
-        # BF16 has different MLIR lowering and needs separate investigation
-        if in_dtype == "bf16":
-            pytest.xfail("ASM backend: BF16 needs investigation.")
+
+    # FP16/BF16 use 2B elements (vs 1B for fp8/int8), so tile_k should be halved
+    # to keep the same tile_k_bytes. The kernel expects this adjustment.
+    if in_dtype in ("bf16", "fp16"):
+        tile_k = tile_k // 2
 
     exe = compile_preshuffle_gemm_a8(
         M=M,
@@ -343,7 +345,7 @@ if __name__ == "__main__":
         K=args.K, 
         tile_m=args.tile_m, 
         tile_n=args.tile_n, 
-        tile_k=args.tile_k,
+        tile_k_bytes=args.tile_k * 2 if args.in_dtype == "bf16" else args.tile_k,
         lds_stage=args.lds_stage,
         bench_iters=args.num_iters,
         bench_warmup=args.num_warmup,

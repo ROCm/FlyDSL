@@ -36,7 +36,8 @@ class _ControlFlowHandlers:
             regs = (KVReg(rng.base_reg.id), KVReg(rng.base_reg.id + 1))
             return regs
 
-        if ty_str.startswith("vector<4x") or "vector<4xf32" in ty_str or "vector<4xi32" in ty_str:
+        # vector<4xf32> or vector<4xi32> = 4 * 4 bytes = 16 bytes = 4 VGPRs (quad)
+        if "vector<4xf32" in ty_str or "vector<4xi32" in ty_str:
             rng = ctx.vreg_quad()
             ctx.program.register_accumulator_vreg_range(rng)
             # Emit pseudo-instruction to define the range for liveness tracking
@@ -44,6 +45,16 @@ class _ControlFlowHandlers:
                 KInstr("_range_def", defs=(rng,), uses=(), comment="loop-carried quad")
             )
             regs = tuple(KVReg(rng.base_reg.id + i) for i in range(4))
+            return regs
+
+        # vector<4xi16> or vector<4xf16> = 4 * 2 bytes = 8 bytes = 2 VGPRs (pair)
+        if "vector<4xi16" in ty_str or "vector<4xf16" in ty_str:
+            rng = ctx.vreg_pair()
+            ctx.program.register_accumulator_vreg_range(rng)
+            ctx.program.emit(
+                KInstr("_range_def", defs=(rng,), uses=(), comment="loop-carried pair (4xi16/4xf16)")
+            )
+            regs = (KVReg(rng.base_reg.id), KVReg(rng.base_reg.id + 1))
             return regs
 
         # Scalar index/i32: use single VGPR.
@@ -86,20 +97,30 @@ class _ControlFlowHandlers:
         upper_bound_ssa = ssa(operation.upperBound)
         step_ssa = ssa(operation.step)
 
-        # Get bounds from index_env (should be constants)
-        if lower_bound_ssa not in kernel_info.index_env:
+        ctx = self.walker.kernel_ctx
+
+        # Helper to get bound value (static from index_env, or dynamic from ssa_to_reg)
+        def get_bound_value(bound_ssa, name):
+            # First check index_env for static constants
+            if bound_ssa in kernel_info.index_env:
+                val = kernel_info.index_env[bound_ssa]
+                if isinstance(val, int):
+                    return val
+                # If it's a KSReg in index_env, return it directly
+                from .kernel_ir import KSReg
+                if isinstance(val, KSReg):
+                    return val
+            # Check ssa_to_reg for dynamic values
+            regs = ctx.ssa_to_reg.get(bound_ssa)
+            if regs is not None and len(regs) > 0:
+                return regs[0]  # Return the register (should be KSReg for indices)
             raise ValueError(
-                f"Loop lower bound {lower_bound_ssa} not found in index_env"
+                f"Loop {name} {bound_ssa} not found in index_env or ssa_to_reg"
             )
-        if upper_bound_ssa not in kernel_info.index_env:
-            raise ValueError(
-                f"Loop upper bound {upper_bound_ssa} not found in index_env"
-            )
-        if step_ssa not in kernel_info.index_env:
-            raise ValueError(f"Loop step {step_ssa} not found in index_env")
-        lower_bound = kernel_info.index_env[lower_bound_ssa]
-        upper_bound = kernel_info.index_env[upper_bound_ssa]
-        step = kernel_info.index_env[step_ssa]
+
+        lower_bound = get_bound_value(lower_bound_ssa, "lower bound")
+        upper_bound = get_bound_value(upper_bound_ssa, "upper bound")
+        step = get_bound_value(step_ssa, "step")
 
         # Pre-create G2S SRDs BEFORE the loop starts
         # This is critical for correctness: if G2S operations are in the loop body,
@@ -118,9 +139,7 @@ class _ControlFlowHandlers:
         # Kernel IR mode: use virtual registers
         from .kernel_ir import KVReg
 
-        ctx = self.walker.kernel_ctx
-
-        # Begin loop structure with virtual registers
+        # Begin loop structure with virtual registers (ctx was defined earlier for get_bound_value)
         loop_ctx = ctx.begin_loop(lower_bound, upper_bound, step)
 
         # Get induction variable and map it to the loop counter SGPR
@@ -219,12 +238,13 @@ class _ControlFlowHandlers:
             self._copy_regs(iter_arg_regs[i], src, comment=f"scf.yield arg{i}")
 
     def handle_scf_if_op(self, operation: scf_d.IfOp, kernel_info: KernelInfo):
-        """Handle scf.if via EXEC masking (per-lane predication).
+        """Handle scf.if via scalar branch (for uniform conditions) or EXEC masking.
 
-        This is required for kernels like softmax that use lane0/wave0 writes to LDS.
-        We implement only the common pattern where the else-region is empty.
+        For workgroup-uniform conditions (e.g., block_id comparisons), we use
+        scalar branches to skip the entire then-block. For divergent conditions,
+        we use EXEC masking.
         """
-        from .kernel_ir import KInstr, KImm, EXEC
+        from .kernel_ir import KInstr, KImm, EXEC, KSReg
 
         cond_ssa = ssa(operation.condition)
         # If this condition didn't come from a tracked arith.cmpi, fall back to
@@ -235,14 +255,89 @@ class _ControlFlowHandlers:
             self.walker._walk_block(then_block, kernel_info)
             return
 
-        # Emit VCC for this condition (recorded by cmpi handler).
-        self._emit_vcc_for(cond_ssa, kernel_info)  # type: ignore[attr-defined]
-
         # If there is a non-empty else region, we currently don't support it.
         if len(operation.elseRegion.blocks) > 0 and len(list(operation.elseRegion.blocks[0].operations)) > 0:
             raise NotImplementedError("scf.if with non-empty else region is not supported in asm backend yet")
 
         ctx = self.walker.kernel_ctx
+        pred, lhs_ssa, rhs_ssa = cmpi_preds[cond_ssa]
+        
+        # For MOE GEMM and similar kernels, the scf.if condition is typically a
+        # workgroup-uniform check (e.g., block_id < num_valid). All lanes in a
+        # workgroup have the same block_id, so the condition is uniform.
+        # Use scalar branch instead of EXEC masking to avoid uninitialized registers.
+        self._handle_scf_if_uniform(operation, kernel_info, pred, lhs_ssa, rhs_ssa)
+    
+    def _handle_scf_if_uniform(self, operation, kernel_info, pred, lhs_ssa, rhs_ssa):
+        """Handle scf.if with uniform condition using scalar branch."""
+        from .kernel_ir import KInstr, KImm, KSReg
+        
+        ctx = self.walker.kernel_ctx
+        
+        # Get operands (prefer SGPRs, fall back to VGPR readfirstlane)
+        def get_scalar_operand(ssa_name):
+            regs = ctx.ssa_to_reg.get(ssa_name)
+            if regs and len(regs) == 1:
+                if isinstance(regs[0], KSReg):
+                    return regs[0]
+                else:
+                    # Read from VGPR to SGPR
+                    s = ctx.sreg()
+                    ctx.program.emit(KInstr("v_readfirstlane_b32", defs=(s,), uses=(regs[0],), comment="uniform cond"))
+                    return s
+            # Try constant
+            val = kernel_info.index_env.get(ssa_name)
+            if isinstance(val, int):
+                return KImm(val)
+            return None
+        
+        lhs = get_scalar_operand(lhs_ssa)
+        rhs = get_scalar_operand(rhs_ssa)
+        
+        if lhs is None or rhs is None:
+            # Fall back to divergent path
+            self._handle_scf_if_divergent(operation, kernel_info, ssa(operation.condition))
+            return
+        
+        # Emit scalar comparison
+        if "ult" in pred:
+            ctx.program.emit(KInstr("s_cmp_lt_u32", defs=(), uses=(lhs, rhs), comment=f"scf.if {pred}"))
+        elif "eq" in pred:
+            ctx.program.emit(KInstr("s_cmp_eq_u32", defs=(), uses=(lhs, rhs), comment=f"scf.if {pred}"))
+        elif "ne" in pred:
+            ctx.program.emit(KInstr("s_cmp_lg_u32", defs=(), uses=(lhs, rhs), comment=f"scf.if {pred}"))
+        elif "slt" in pred:
+            ctx.program.emit(KInstr("s_cmp_lt_i32", defs=(), uses=(lhs, rhs), comment=f"scf.if {pred}"))
+        elif "sgt" in pred:
+            ctx.program.emit(KInstr("s_cmp_gt_i32", defs=(), uses=(lhs, rhs), comment=f"scf.if {pred}"))
+        else:
+            # Unsupported predicate, fall back
+            self._handle_scf_if_divergent(operation, kernel_info, ssa(operation.condition))
+            return
+        
+        # Create end label
+        end_label = f"scf_if_end_{ctx.program.next_label_id()}"
+        
+        # Branch to end if condition is FALSE (SCC=0)
+        branch_instr = KInstr("s_cbranch_scc0", defs=(), uses=(), comment=f"skip if false")
+        branch_instr.target = end_label
+        ctx.program.emit(branch_instr)
+        
+        # Then-region
+        then_block = operation.thenRegion.blocks[0]
+        self.walker._walk_block(then_block, kernel_info)
+        
+        # End label
+        ctx.program.emit(KInstr("_label", defs=(), uses=(), comment=end_label))
+    
+    def _handle_scf_if_divergent(self, operation, kernel_info, cond_ssa):
+        """Handle scf.if with divergent condition using EXEC masking."""
+        from .kernel_ir import KInstr, KImm, EXEC, VCC
+        
+        ctx = self.walker.kernel_ctx
+        
+        # Emit VCC for this condition (recorded by cmpi handler).
+        self._emit_vcc_for(cond_ssa, kernel_info)  # type: ignore[attr-defined]
 
         # Save EXEC.
         saved_exec = ctx.program.alloc_sreg_range(2, alignment=2)
@@ -251,7 +346,6 @@ class _ControlFlowHandlers:
         # Match ISA software-wait guidance: add 2-cycle delay before using VCC in s_and_b64.
         ctx.program.emit(KInstr("s_nop", defs=(), uses=(KImm(1),), comment="vcc hazard"))
         # exec &= vcc
-        from .kernel_ir import VCC
         ctx.program.emit(KInstr("s_and_b64", defs=(EXEC,), uses=(EXEC, VCC), comment="exec &= vcc"))
 
         # Then-region under masked EXEC.

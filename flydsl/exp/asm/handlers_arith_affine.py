@@ -339,6 +339,21 @@ class _ArithAffineHandlers:
                 out = tuple(ctx.v_add_u32(a, b, comment="addi") for a, b in zip(lhs, rhs))
                 ctx.ssa_to_reg[ssa(operation.result)] = out
 
+    def handle_arith_subi_op(self, operation: arith_d.SubIOp, kernel_info: KernelInfo):
+        """Handle arith.subi - track integer subtraction in index_env."""
+        self._handle_arith_binop(operation, kernel_info, operator.sub)
+        # Runtime (VGPR/SGPR) sub for index/i32 values.
+        ctx = self.walker.kernel_ctx
+        lhs = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
+        rhs = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
+        if lhs and rhs:
+            if len(lhs) == 1 and len(rhs) == 1:
+                out = ctx.v_sub_u32(lhs[0], rhs[0], comment="subi")
+                ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+            elif len(lhs) == len(rhs) and len(lhs) > 1:
+                out = tuple(ctx.v_sub_u32(a, b, comment="subi") for a, b in zip(lhs, rhs))
+                ctx.ssa_to_reg[ssa(operation.result)] = out
+
     def handle_arith_muli_op(self, operation: arith_d.MulIOp, kernel_info: KernelInfo):
         """Handle arith.muli - track integer multiplication in index_env."""
         self._handle_arith_binop(operation, kernel_info, operator.mul)

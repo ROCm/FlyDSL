@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 
 from .kernel_pipeline_shared import (
     KVReg,
+    KSReg,
     KPhysVReg,
     KInstr,
     KImm,
@@ -85,6 +86,9 @@ class _CompilationPasses:
 
         # Apply hazard mitigation pass
         self._apply_hazard_mitigation()
+
+        # Apply rematerialization pass to reduce register pressure
+        self._apply_rematerialization()
 
         # Get reserved registers from ABI
         reserved_vgprs = self.program.abi.get_reserved_vgprs()
@@ -427,6 +431,217 @@ class _CompilationPasses:
                 for k in range(u.count):
                     read.add(u.base_reg.id + k)
         return read
+
+    def _apply_rematerialization(self):
+        """
+        Apply rematerialization to reduce register pressure.
+
+        For registers defined by cheap instructions (MOV, ADD, MUL with immediates)
+        that have very long live ranges, we can recompute them near their use points
+        instead of keeping them alive across the entire function.
+
+        This is critical for reducing VGPR pressure in GEMM kernels where:
+        - Address computation constants are loaded at the start
+        - Used only in the epilogue (after the main loop)
+        - Creating 2000+ instruction live ranges
+
+        Strategy:
+        1. Identify "rematerializable" instructions (cheap ops with immediate/SGPR operands)
+        2. Find registers with very long live ranges (>1000 instructions)
+        3. For uses that occur much later than the def, insert a rematerialization
+           before the use and update the use to reference the new register
+        """
+        from .kernel_liveness import compute_liveness, build_cfg, has_loops
+
+        instructions = self.program.instructions
+        if not instructions:
+            return
+
+        # Compute initial liveness
+        liveness = compute_liveness(self.program, use_cfg=True)
+
+        # Build CFG to identify loop regions
+        cfg = build_cfg(self.program)
+        loop_blocks = set()
+        if has_loops(cfg):
+            for block in cfg.blocks:
+                for succ in block.successors:
+                    if succ.id <= block.id:
+                        # Back-edge: mark all blocks in loop
+                        for b in cfg.blocks:
+                            if succ.id <= b.id <= block.id:
+                                loop_blocks.add(b.id)
+
+        # Map instruction index to block
+        idx_to_block = {}
+        for block in cfg.blocks:
+            for idx in range(block.start_idx, block.end_idx + 1):
+                idx_to_block[idx] = block
+
+        # Identify rematerializable instructions
+        # These are cheap ops that can be recomputed without side effects
+        REMAT_OPS = {
+            'Instruction.V_MOV_B32', 'v_mov_b32',
+            'v_add_u32', 'v_sub_u32',
+            'v_mul_lo_u32', 'v_mul_hi_u32',
+            'v_lshlrev_b32', 'v_lshrrev_b32', 'v_ashrrev_i32',
+            'v_and_b32', 'v_or_b32', 'v_xor_b32',
+        }
+
+        def is_rematerializable(instr):
+            """Check if instruction can be rematerialized."""
+            if instr.name not in REMAT_OPS:
+                return False
+            # All operands must be immediates or SGPRs (not VGPRs that might change)
+            for u in instr.uses:
+                if isinstance(u, KVReg):
+                    return False  # Depends on VGPR, can't remat safely
+                if isinstance(u, KRegRange) and isinstance(u.base_reg, KVReg):
+                    return False
+            return True
+
+        def get_single_def(instr):
+            """Get the single VGPR defined by an instruction, or None."""
+            if len(instr.defs) != 1:
+                return None
+            d = instr.defs[0]
+            if isinstance(d, KVReg):
+                return d
+            if isinstance(d, KRegRange) and d.count == 1 and isinstance(d.base_reg, KVReg):
+                return d.base_reg
+            return None
+
+        # Find candidates for rematerialization
+        # Strategy: For registers defined before the loop with uses after the loop,
+        # rematerialize ALL uses that are in the epilogue (outside the loop).
+        # This maximally reduces the live range of the original register.
+        REMAT_THRESHOLD = 500  # Minimum live range length to consider
+        remat_candidates = {}  # vreg -> (def_idx, instruction, uses_outside_loop)
+
+        # Find the end of the loop (max end_idx of loop blocks)
+        loop_end_idx = 0
+        for block in cfg.blocks:
+            if block.id in loop_blocks:
+                loop_end_idx = max(loop_end_idx, block.end_idx)
+
+        for lr in liveness.vreg_ranges:
+            if lr.size != 1:
+                continue  # Only single VGPRs for now
+            if (lr.end - lr.start) < REMAT_THRESHOLD:
+                continue
+
+            def_idx = lr.start
+            if def_idx >= len(instructions):
+                continue
+
+            instr = instructions[def_idx]
+            if not is_rematerializable(instr):
+                continue
+
+            vreg = get_single_def(instr)
+            if vreg is None or vreg.id != lr.reg.id:
+                continue
+
+            # Check if def is before loop
+            def_block = idx_to_block.get(def_idx)
+            if def_block is None:
+                continue
+
+            def_in_loop = def_block.id in loop_blocks
+            if def_in_loop:
+                continue  # Only remat values defined outside the loop
+
+            # Find ALL uses that are in the epilogue (outside the loop, after loop_end)
+            uses = liveness.use_points.get(lr.reg, [])
+            uses_to_remat = []
+            for use_idx in uses:
+                use_block = idx_to_block.get(use_idx)
+                if use_block and use_block.id not in loop_blocks and use_idx > loop_end_idx:
+                    uses_to_remat.append(use_idx)
+
+            if uses_to_remat:
+                remat_candidates[vreg] = (def_idx, instr, sorted(uses_to_remat))
+
+        if not remat_candidates:
+            return
+
+        # Apply rematerialization: insert copies of cheap instructions before late uses
+        # We need to be careful to update uses properly
+
+        # Group uses by their earliest occurrence for batch insertion
+        insertions = []  # (insert_before_idx, new_instr, old_vreg, new_vreg)
+
+        for old_vreg, (def_idx, orig_instr, use_indices) in remat_candidates.items():
+            # Create one rematerialization point for all late uses
+            # Insert just before the first late use
+            insert_idx = min(use_indices)
+
+            # Allocate a new virtual register for the rematerialized value
+            new_vreg = self.program.alloc_vreg()
+
+            # Create a copy of the instruction with the new destination
+            new_defs = (new_vreg,)
+            new_instr = KInstr(
+                orig_instr.name,
+                new_defs,
+                orig_instr.uses,
+                comment=f"remat from {old_vreg}",
+            )
+
+            insertions.append((insert_idx, new_instr, old_vreg, new_vreg, use_indices))
+
+        if not insertions:
+            return
+
+        # Sort by insertion point (descending) so we can insert without affecting
+        # the indices of later insertions
+        insertions.sort(key=lambda x: -x[0])
+
+        # Apply insertions and update uses
+        # Since we process in descending order, each insertion doesn't affect
+        # earlier (higher) insertion points
+        for insert_idx, new_instr, old_vreg, new_vreg, use_indices in insertions:
+            # Insert the rematerialization instruction
+            self.program.instructions.insert(insert_idx, new_instr)
+
+            # Update ALL uses of old_vreg from insert_idx+1 onwards to new_vreg
+            # This is safe because:
+            # 1. The remat instruction is at insert_idx
+            # 2. All uses after it should use the rematerialized value
+            # 3. Uses before insert_idx (in the loop or prologue) keep using old_vreg
+            for i in range(insert_idx + 1, len(self.program.instructions)):
+                instr = self.program.instructions[i]
+
+                # Check if this instruction uses old_vreg
+                has_old_vreg = False
+                for u in instr.uses:
+                    if u == old_vreg:
+                        has_old_vreg = True
+                        break
+                    if isinstance(u, KRegRange) and u.base_reg == old_vreg:
+                        has_old_vreg = True
+                        break
+
+                if not has_old_vreg:
+                    continue
+
+                # Replace uses of old_vreg with new_vreg
+                new_uses = []
+                for u in instr.uses:
+                    if u == old_vreg:
+                        new_uses.append(new_vreg)
+                    elif isinstance(u, KRegRange) and u.base_reg == old_vreg:
+                        new_uses.append(KRegRange(new_vreg, u.count, u.alignment))
+                    else:
+                        new_uses.append(u)
+
+                # Create updated instruction
+                self.program.instructions[i] = KInstr(
+                    instr.name,
+                    instr.defs,
+                    tuple(new_uses),
+                    comment=instr.comment,
+                )
 
     def _apply_peephole_optimizations(self):
         """

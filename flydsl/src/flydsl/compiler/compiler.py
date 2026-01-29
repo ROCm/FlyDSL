@@ -266,7 +266,9 @@ def compile(
     chip = get_rocm_arch()
 
     if backend == "asm":
-        # Minimal pipeline suitable for the ASM backend (keeps gpu.launch_func + gpu.func).
+        # Use the same frontend passes as LLVM backend up to CSE, then stop before
+        # gpu-kernel-outlining (which converts gpu.func to llvm).
+        # This ensures MOE GEMM and other kernels have the same IR structure.
         pipeline = "builtin.module(flir-to-standard,trivial-dce,canonicalize,cse)"
     else:
         pipeline = _build_pipeline_str(
@@ -336,12 +338,17 @@ def compile(
                 )
                 print(f"[flir.compile] dump 00_target_overridden -> {out}")
                 asm_for_isa: Optional[str] = None
-                stage_frags = _pipeline_fragments(
-                    chip=chip,
-                    use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
-                    use_bare_pointers_for_host=use_bare_pointers_for_host,
-                    use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
-                )
+                
+                if backend == "asm":
+                    # For ASM backend, only run the minimal pipeline (same as non-dump mode)
+                    stage_frags = ["flir-to-standard", "trivial-dce", "canonicalize", "cse"]
+                else:
+                    stage_frags = _pipeline_fragments(
+                        chip=chip,
+                        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+                        use_bare_pointers_for_host=use_bare_pointers_for_host,
+                        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+                    )
                 # Keep dump filenames stable vs the historical numbering scheme:
                 # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
                 stage_num_base = 3

@@ -242,9 +242,14 @@ class KernelGenerator:
             "_srd_fill_size": self._handle_srd_fill_size,
             "_srd_fill_stride": self._handle_srd_fill_stride,
             "_label": self._handle_label,
+            "s_cbranch_scc0": self._handle_branch,
             "s_cbranch_scc1": self._handle_branch,
             "s_branch": self._handle_branch,
             "s_cmp_lt_u32": self._handle_compare,
+            "s_cmp_eq_u32": self._handle_compare,
+            "s_cmp_lg_u32": self._handle_compare,
+            "s_cmp_lt_i32": self._handle_compare,
+            "s_cmp_gt_i32": self._handle_compare,
             "_loop_inc": self._handle_loop_inc,
             "_loop_begin": self._handle_noop,
             "_loop_end": self._handle_noop,
@@ -536,7 +541,7 @@ class KernelGenerator:
             op0 = self._resolve_operand(instr.uses[0])
             op1 = self._resolve_operand(instr.uses[1])
             return self._formatter.format(
-                "s_cmp_lt_u32", uses=[op0, op1], comment=instr.comment
+                instr.name, uses=[op0, op1], comment=instr.comment
             )
         return None
 

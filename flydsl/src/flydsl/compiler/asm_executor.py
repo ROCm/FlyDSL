@@ -79,6 +79,14 @@ class AsmHipExecutor:
             ctypes.POINTER(ctypes.c_void_p),
         ]
         hip.hipModuleLaunchKernel.restype = ctypes.c_int
+        
+        # Register hipStreamSynchronize for proper synchronization with other HIP modules
+        hip.hipStreamSynchronize.argtypes = [ctypes.c_void_p]
+        hip.hipStreamSynchronize.restype = ctypes.c_int
+        
+        # Register hipDeviceSynchronize for full device sync
+        hip.hipDeviceSynchronize.argtypes = []
+        hip.hipDeviceSynchronize.restype = ctypes.c_int
 
         rc = hip.hipInit(0)
         if rc != 0:
@@ -190,6 +198,12 @@ class AsmHipExecutor:
         )
         if rc != 0:
             raise RuntimeError(f"hipModuleLaunchKernel failed: {rc}")
+        
+        # Synchronize to ensure this kernel completes before any subsequent kernel
+        # (including LLVM-compiled kernels) starts. This prevents shared memory conflicts.
+        rc = self._hip.hipStreamSynchronize(stream_h)
+        if rc != 0:
+            raise RuntimeError(f"hipStreamSynchronize failed: {rc}")
 
 
 def build_launch_plan_from_module(module) -> _LaunchPlan:

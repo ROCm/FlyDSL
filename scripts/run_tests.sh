@@ -172,8 +172,90 @@ fi
 
 
 #=============================================================================
+# Part 5: ASM Backend Tests (Custom ASM backend vs execution_engine)
+#=============================================================================
+echo ""
+echo "========================================================================"
+echo "Part 5: ASM Backend Tests (Compare ASM backend with execution_engine)"
+echo "========================================================================"
+echo ""
+
+if command -v rocm-smi &> /dev/null; then
+    ASM_TEST_COUNT=0
+    ASM_PASS_COUNT=0
+    
+    # Backend correctness tests
+    echo "Running: test_backend_correctness"
+    python3 -m pytest tests/kernels/test_backend_correctness.py -v --tb=short > /tmp/test_backend_correctness_asm.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        ASM_PASS_COUNT=$((ASM_PASS_COUNT + 1))
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/test_backend_correctness_asm.log"
+    fi
+    ASM_TEST_COUNT=$((ASM_TEST_COUNT + 1))
+    
+    # MFMA and LDS tests
+    echo "Running: test_backend_mfma_lds"
+    python3 -m pytest tests/kernels/test_backend_mfma_lds.py -v --tb=short > /tmp/test_backend_mfma_lds.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        ASM_PASS_COUNT=$((ASM_PASS_COUNT + 1))
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/test_backend_mfma_lds.log"
+    fi
+    ASM_TEST_COUNT=$((ASM_TEST_COUNT + 1))
+    
+    # Vec add test with ASM backend
+    echo "Running: test_vec_add (ASM backend)"
+    FLIR_TEST_BACKEND=asm python3 -m pytest tests/kernels/test_vec_add.py -v --tb=short > /tmp/test_vec_add_asm.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        ASM_PASS_COUNT=$((ASM_PASS_COUNT + 1))
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/test_vec_add_asm.log"
+    fi
+    ASM_TEST_COUNT=$((ASM_TEST_COUNT + 1))
+    
+    # Softmax test with ASM backend
+    echo "Running: test_softmax (ASM backend)"
+    FLIR_TEST_BACKEND=asm python3 -m pytest tests/kernels/test_softmax.py -v --tb=short > /tmp/test_softmax_asm.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        ASM_PASS_COUNT=$((ASM_PASS_COUNT + 1))
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/test_softmax_asm.log"
+    fi
+    ASM_TEST_COUNT=$((ASM_TEST_COUNT + 1))
+    
+    # Preshuffle GEMM test with ASM backend
+    echo "Running: test_preshuffle_gemm (ASM backend)"
+    FLIR_TEST_BACKEND=asm python3 -m pytest tests/kernels/test_preshuffle_gemm.py -v --tb=short > /tmp/test_preshuffle_gemm_asm.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        ASM_PASS_COUNT=$((ASM_PASS_COUNT + 1))
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/test_preshuffle_gemm_asm.log"
+    fi
+    ASM_TEST_COUNT=$((ASM_TEST_COUNT + 1))
+    
+    echo ""
+    echo "ASM Backend Tests: $ASM_PASS_COUNT/$ASM_TEST_COUNT passed"
+else
+    ASM_TEST_COUNT=0
+    ASM_PASS_COUNT=0
+    echo "Skipped (no GPU)"
+fi
+
+#=============================================================================
 # Final Summary
 #=============================================================================
+echo ""
 echo "========================================================================"
 echo "Test Summary"
 echo "========================================================================"
@@ -183,16 +265,24 @@ echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 
 if command -v rocm-smi >/dev/null 2>&1; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
+    echo "ASM Backend Tests:               $ASM_PASS_COUNT/$ASM_TEST_COUNT passed"
 else
     echo "GPU Execution Tests:             Skipped (no GPU)"
+    echo "ASM Backend Tests:               Skipped (no GPU)"
 fi
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
-    echo ""
+TOTAL_PASS=$((MLIR_PASS_COUNT + IR_PASS_COUNT + GPU_PASS_COUNT + ASM_PASS_COUNT))
+TOTAL_TESTS=$((MLIR_TEST_COUNT + IR_TEST_COUNT + GPU_TEST_COUNT + ASM_TEST_COUNT))
+
+echo ""
+echo "Total: $TOTAL_PASS/$TOTAL_TESTS passed"
+
+if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ] && [ $ASM_PASS_COUNT -eq $ASM_TEST_COUNT ]; then
     echo ""
     echo "Verified Capabilities:"
     echo "  * Flir IR generation and lowering"
     echo "  * GPU kernel compilation and execution (MLIR → HSACO)"
+    echo "  * ASM backend correctness (vs execution_engine)"
     echo ""
     exit 0
 else
@@ -200,6 +290,9 @@ else
         echo ""
         if [ $GPU_PASS_COUNT -ne $GPU_TEST_COUNT ]; then
             echo "Some GPU tests failed"
+        fi
+        if [ $ASM_PASS_COUNT -ne $ASM_TEST_COUNT ]; then
+            echo "Some ASM backend tests failed"
         fi
         exit 1
     else

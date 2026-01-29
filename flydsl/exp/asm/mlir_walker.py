@@ -76,13 +76,24 @@ class IRWalker:
         # Map kernel arguments to runtime registers.
         #
         # The ASM backend prologue loads each kernarg as a 64-bit quantity into an
-        # SGPR pair. Most index arithmetic in kernels operates on the low 32 bits,
-        # so we materialize a VGPR copy of the low dword for general use.
+        # SGPR pair. For scalar (non-ptr/non-memref) arguments that need the low
+        # 32 bits for index arithmetic, we materialize a VGPR copy.
+        #
+        # IMPORTANT: Skip memref and pointer types - these are handled by
+        # handlers_memory.py (handle_llvm_ptr_op, etc.) which directly uses the
+        # SGPR pair for buffer resource descriptors.
         try:
             from .kernel_ir import KInstr, KSReg
             from .instruction_registry import Instruction
 
             for arg_idx, arg in enumerate(entry_block.arguments):
+                # Skip memref and pointer types - handled by handlers_memory.py
+                if isinstance(arg.type, MemRefType):
+                    continue
+                type_str = str(arg.type)
+                if "ptr" in type_str or "memref" in type_str.lower():
+                    continue
+                    
                 pair = self.kernel_ctx.get_kernarg_pair(int(arg_idx))
                 if pair is None or not isinstance(pair.base_reg, KSReg):
                     continue
@@ -165,6 +176,8 @@ class IRWalker:
             self.handlers.handle_arith_constant_op(operation, kernel_info)
         elif isinstance(operation, arith_d.AddIOp):
             self.handlers.handle_arith_addi_op(operation, kernel_info)
+        elif isinstance(operation, arith_d.SubIOp):
+            self.handlers.handle_arith_subi_op(operation, kernel_info)
         elif isinstance(operation, arith_d.AddFOp):
             self.handlers.handle_arith_addf_op(operation, kernel_info)
         elif isinstance(operation, arith_d.RemUIOp):
@@ -255,6 +268,8 @@ class IRWalker:
             )
         elif str(operation.operation.name) == "llvm.inttoptr":
             self.handlers.handle_llvm_inttoptr_op(operation, kernel_info)
+        elif str(operation.operation.name) == "llvm.call_intrinsic":
+            self.handlers.handle_llvm_call_intrinsic_op(operation, kernel_info)
         elif str(operation.operation.name) == "rocdl.make.buffer.rsrc":
             self.handlers.handle_rocdl_make_buffer_rsrc_op(operation, kernel_info)
         elif str(operation.operation.name) == "rocdl.raw.ptr.buffer.load":

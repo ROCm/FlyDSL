@@ -570,6 +570,33 @@ def compute_liveness(program: KernelProgram, use_cfg: bool = True) -> LivenessIn
                 elif is_virtual(u):
                     info.use_points[u].append(idx)
 
+    # Handle s_load asynchronous memory operations:
+    # s_load_dword* defines registers that are only available after s_waitcnt lgkmcnt().
+    # We must extend the live range of any s_load target register to at least the next
+    # s_waitcnt lgkmcnt instruction to prevent premature reuse.
+    sload_defs: Dict[KReg, int] = {}  # reg -> def_point
+    
+    for idx, instr in enumerate(program.instructions):
+        instr_name = instr.name if hasattr(instr, 'name') else str(instr)
+        if isinstance(instr_name, str) and instr_name.startswith("s_load"):
+            # Track all defs from s_load instructions
+            for d in instr.defs:
+                if isinstance(d, KRegRange):
+                    base_reg = d.base_reg
+                    if is_virtual(base_reg):
+                        sload_defs[base_reg] = idx
+                elif is_virtual(d):
+                    sload_defs[d] = idx
+        elif isinstance(instr_name, str) and instr_name == "s_waitcnt":
+            # Check if this is lgkmcnt wait
+            for u in instr.uses:
+                if isinstance(u, str) and "lgkmcnt" in u:
+                    # Extend all pending s_load defs to this point
+                    for reg in sload_defs:
+                        info.use_points[reg].append(idx)
+                    sload_defs.clear()
+                    break
+
     # Build initial live ranges (basic def-to-last-use)
     for reg, def_point in info.def_points.items():
         uses = info.use_points.get(reg, [])
