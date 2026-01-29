@@ -1061,6 +1061,8 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
+    compile_fn=None,
+    gemm2_mode: Optional[str] = None,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1097,6 +1099,16 @@ def test_moe_gemm_2stage(
         moe_sort_mode = "torch"
     if compare_aiter_ck is None:
         compare_aiter_ck = False
+
+    # Handle gemm2_mode selection
+    if compile_fn is None and gemm2_mode is not None:
+        mode_str = str(gemm2_mode).strip().lower()
+        if mode_str == "atomic":
+            compile_fn = None
+        elif mode_str == "reduce":
+            compile_fn = lambda **kw: compile_moe_gemm2_ex(**kw, mode=MoeGemm2Mode.REDUCE)
+        else:
+            raise ValueError(f"Invalid gemm2_mode={gemm2_mode!r}, expected 'atomic' or 'reduce'")
 
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
@@ -1167,6 +1179,7 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
+        compile_fn=compile_fn,
     )
 
 
@@ -1522,6 +1535,7 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
+    parser.add_argument("--gemm2_mode", type=str, default=None, choices=["atomic", "reduce"], help="Stage2 mode: 'atomic' (default) or 'reduce' (GEMM+reduce kernel).")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
@@ -1556,6 +1570,7 @@ if __name__ == "__main__":
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
+            gemm2_mode=args.gemm2_mode,
         )
 
 
