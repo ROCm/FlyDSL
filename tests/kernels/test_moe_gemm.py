@@ -480,7 +480,7 @@ def run_moe_stage1(
                 eids,
                 sw_sorted,
                 num_valid_ids,
-                torch.empty([1], device=device)
+                torch.empty([1], device=device),
                 tokens,
                 model_dim,
                 inter_dim,
@@ -922,7 +922,7 @@ def run_moe_stage2(
                 eids,
                 sw_sorted,
                 num_valid_ids,
-                torch.empty([1], device=device)
+                torch.empty([1], device=device),
                 tokens,
                 model_dim,
                 inter_dim,
