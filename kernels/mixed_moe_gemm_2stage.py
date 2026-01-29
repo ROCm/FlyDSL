@@ -37,7 +37,7 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 import functools
 
-@functools.lru_cache(maxsize=2048)
+@functools.lru_cache(maxsize=None)
 def compile_mixed_moe_gemm1(
     *,
     model_dim: int,
@@ -52,6 +52,7 @@ def compile_mixed_moe_gemm1(
     a_dtype: str = "fp8",
     b_dtype: str = "fp4",
     out_dtype: str = "f16",
+    act: str = "swiglu",
     use_cshuffle_epilog: bool | None = None,
     enable_bias: bool = False,
     model_dim_pad: int = 0,
@@ -75,8 +76,6 @@ def compile_mixed_moe_gemm1(
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
-
-    print(out_dtype)
 
     if a_dtype not in ("fp8", "fp16", "int8", "fp4"):
         raise ValueError(f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {in_dtype!r}")
@@ -296,7 +295,6 @@ def compile_mixed_moe_gemm1(
 
             m_repeat = tile_m // 16
             k_unroll = tile_k_bytes // 128  # K64-byte micro-step
-            # # flir.print("k_unroll", k_unroll)
 
             # A&B's scale preshuffle layout
             layout_a_scale = make_preshuffle_scale_layout(
@@ -332,9 +330,7 @@ def compile_mixed_moe_gemm1(
                 maxids_rsrc, arith.constant(0, index=True), vec_width=1, dtype=i32
             )
 
-            bias_rsrc = buffer_ops.create_buffer_resource(
-                arg_bias, max_size=False
-            )
+            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False) if enable_bias else None
 
             bx_m_i32 = arith.index_cast(i32, bx_m)
             by_n_i32 = arith.index_cast(i32, by_n)
@@ -1022,21 +1018,15 @@ def compile_mixed_moe_gemm1(
                                     vg = vg + gate_bias_list[ni]
                                     vu = vu + up_bias_list[ni]
 
-                                # y = silu(vg) * vu
-                                y = swiglu(vg, vu)
+                                if act == "swiglu:":
+                                    y = swiglu(vg, vu)
+                                else:
+                                    y = silu(vg) * vu
 
                                 if doweight_stage1:
                                     y = y * tw
-                                # y16 = arith.trunc_f(T.f16(), y)
-
-                                # # flir.print("out_dyypte", _out_elem_type())
-                                # y_out = rocdl(_out_elem_type(), y)
 
                                 lds_idx = row_base_lds + col_local
-                                # if bx == 0:
-                                #     if by == 0:
-                                #         if tx == 0 or tx == 64: 
-                                #             flir.printf(" tx%d, idx[%d] %f \n", tx, lds_idx, y)
                                 v1 = vector.from_elements(vec1_f32, [y])
                                 vector.store(v1, lds_out, [lds_idx], alignment=1)
 
@@ -1059,30 +1049,15 @@ def compile_mixed_moe_gemm1(
                                 frag1 = vector.extract(frag, static_position=[1], dynamic_position=[])
                                 frag2 = vector.extract(frag, static_position=[2], dynamic_position=[])
                                 frag3 = vector.extract(frag, static_position=[3], dynamic_position=[])
-                                # flir.printf("%f \n ", frag1)
 
                                 out_fp8 = arith.i32(0)
-                                # out_fp8 = vector.from_elements(vec1_i32, [out_fp8])
-                                # rocdl.cvt_pk_f32_fp8(out_fp8, vector.bitcast(vec2_i32, frag0), 0)
-                                # rocdl.cvt_pk_fp8_f32(res=vec1_i32, src_a=frag0, src_b=frag1, old=out_fp8, word_sel=0)
                                 out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag0), src_b=arith._unwrap_value(frag1), old=arith._unwrap_value(out_fp8), word_sel=0, res=I.i32)
                                 out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag2), src_b=arith._unwrap_value(frag3), old=arith._unwrap_value(out_fp8), word_sel=1, res=I.i32)
-                                # rocdl.cvt_pk_fp8_f32(res=ir.IntegerType.get_signless(32), src_a=frag2, src_b=frag3, old=out_fp8, word_sel=1)
-                                # out = rocdl.cvt_pk_f32_fp8(I.i32, vector.bitcast(vec2_i32, frag0), 0)
-                                # rocdl.cvt_pk_f32_fp8(out_fp8, vector.bitcast(vec2_i32, frag1), 1)
 
                                 idx0 = row_ctx
                                 col_i32 = arith.index_cast(i32, col_g0)
                                 idx_out = idx0 + col_i32
-                                # if bx == 0:
-                                #     if by == 0:
-                                #         if row_ctx == 0:
-                                #             flir.printf(" tx%d, idx[%d] %d [%f, %f, %f, %f] \n", tx, idx_out, out_fp8, frag0, frag1, frag2, frag3)
-                                # flir.printf("%d \n ", idx_out)
-                                # Vectorized fp16 store (EVec=4).
-                                # # flir.print("frag", frag)
                                 buffer_ops.buffer_store(out_fp8, out_rsrc, idx_out // 4)
-                                # buffer_ops.buffer_store(out_fp8, out_rsrc, arith.i32(0))
 
                         mfma_epilog(
                             use_cshuffle=True,
@@ -1142,8 +1117,10 @@ def compile_mixed_moe_gemm1(
                                     vg = vg + gate_bias_list[ni]
                                     vu = vu + up_bias_list[ni]
 
-                                # y = silu(vg) * vu
-                                y = swiglu(vg, vu)
+                                if act == "swiglu:":
+                                    y = swiglu(vg, vu)
+                                else:
+                                    y = silu(vg) * vu
 
                                 if doweight_stage1:
                                     y = y * tw
@@ -1211,7 +1188,7 @@ def compile_mixed_moe_gemm1(
     exe = flydsl.compile(m)
     return exe
 
-@functools.lru_cache(maxsize=2048)
+@functools.lru_cache(maxsize=None)
 def compile_mixed_moe_gemm2(
     *,
     model_dim: int,
@@ -1599,9 +1576,7 @@ def compile_mixed_moe_gemm2(
             bx_m_i32 = arith.index_cast(i32, bx_m)
             blk_valid = arith.cmpu(bx_m_i32, num_valid_i32, "ult")
 
-            bias_rsrc = buffer_ops.create_buffer_resource(
-                arg_bias, max_size=False,
-            )
+            bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False) if enable_bias else None
 
             expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=i32)
             expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
@@ -2015,6 +1990,7 @@ def compile_mixed_moe_gemm2(
                                             b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                                             acc_idx = mi_idx * num_acc_n + ni_idx
+                                            rocdl.sched_barrier(0)
                                             acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                                 mfma_res_ty,
                                                 [
@@ -2039,7 +2015,6 @@ def compile_mixed_moe_gemm2(
                 lds_base_nxt = lds_tile_elems
     
                 rocdl.sched_barrier(0)
-    
     
                 def hot_loop_scheduler():
                     # - MFMA group size per "slot": num_acc_n
@@ -2184,7 +2159,6 @@ def compile_mixed_moe_gemm2(
                 if epilogue_pf is not None:
                     sw_pf, tw_pf, bias_pf = epilogue_pf
 
-                # epilogue_pf = None
                 expert_off = expert_off_idx
                 mask24_i32 = arith.i32(0xFFFFFF)
                 model_i32 = arith.i32(model_dim)
@@ -2231,7 +2205,6 @@ def compile_mixed_moe_gemm2(
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                     t2 = fused2 & mask24_i32
                     s2 = fused2 >> 24
-                    # ts2 = t2 * topk_i32_v + s2
 
                     t_ok = arith.cmpu(t2, tokens_i32, "ult")
                     s_ok = arith.cmpu(s2, topk_i32_v, "ult")
@@ -2239,8 +2212,6 @@ def compile_mixed_moe_gemm2(
                     t2_safe = arith.select(ts_ok, t2, arith.i32(0))
                     s2_safe = arith.select(ts_ok, s2, arith.i32(0))
                     ts2 = t2_safe * topk_i32_v + s2_safe
-
-                    # sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                     if doweight_stage2:
                         tw_idx = (mi * 4) + ii
