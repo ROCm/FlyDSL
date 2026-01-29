@@ -57,6 +57,8 @@ class AllocationStats:
 
     peak_vgprs: int = 0
     peak_sgprs: int = 0
+    # Peak accvgprs (AGPRs) used by MFMA accumulators (gfx90a+/gfx94x+).
+    peak_agprs: int = 0
     total_vregs: int = 0
     total_sregs: int = 0
     ranges_allocated: int = 0
@@ -386,6 +388,18 @@ class KernelRegAlloc:
 
         self._stats.total_vregs = len(vreg_map)
         self._stats.total_sregs = len(sreg_map)
+
+        # Best-effort AGPR usage tracking: count accumulator quads.
+        try:
+            acc_quads = 0
+            for base_id, count in self.program._vreg_range_bases.items():
+                if count != 4:
+                    continue
+                if all(self.program.is_accumulator_vreg(KVReg(base_id + i)) for i in range(4)):
+                    acc_quads += 1
+            self._stats.peak_agprs = acc_quads * 4
+        except Exception:
+            self._stats.peak_agprs = 0
 
         return PhysicalMapping(vreg_map, sreg_map, vreg_ranges, sreg_ranges)
 

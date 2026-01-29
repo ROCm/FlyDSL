@@ -325,12 +325,41 @@ class _ArithAffineHandlers:
             ctx.ssa_to_reg[ssa(operation.result)] = (out,)
 
     def handle_arith_xori_op(self, operation: arith_d.XOrIOp, kernel_info: KernelInfo):
-        """Handle arith.xori (VGPR runtime)."""
+        """Handle arith.xori (both index_env and VGPR runtime)."""
         ctx = self.walker.kernel_ctx
-        lhs = ctx.ssa_to_reg.get(ssa(operation.lhs))
-        rhs = ctx.ssa_to_reg.get(ssa(operation.rhs))
-        if lhs and rhs and len(lhs) == 1 and len(rhs) == 1:
-            out = ctx.v_xor_b32(lhs[0], rhs[0], comment="xori")
+        lhs_ssa = ssa(operation.lhs)
+        rhs_ssa = ssa(operation.rhs)
+
+        # First handle symbolic/index_env case for address computation.
+        # XOR is used in LDS swizzle patterns: col ^ ((row % k) * 16)
+        lhs_idx = kernel_info.index_env.get(lhs_ssa)
+        rhs_idx = kernel_info.index_env.get(rhs_ssa)
+        if lhs_idx is not None or rhs_idx is not None:
+            # At least one operand is in index_env - we need VGPR computation.
+            # Get or materialize VGPRs for both operands.
+            lhs_r = ctx.ssa_to_reg.get(lhs_ssa)
+            rhs_r = ctx.ssa_to_reg.get(rhs_ssa)
+
+            # Materialize from index_env if not in ssa_to_reg
+            if lhs_r is None and lhs_idx is not None:
+                lhs_r = (ctx.materialize_index_to_vreg(lhs_ssa, lhs_idx, kernel_info),)
+            if rhs_r is None and rhs_idx is not None:
+                rhs_r = (ctx.materialize_index_to_vreg(rhs_ssa, rhs_idx, kernel_info),)
+
+            if lhs_r and rhs_r and len(lhs_r) == 1 and len(rhs_r) == 1:
+                out = ctx.v_xor_b32(lhs_r[0], rhs_r[0], comment="xori (swizzle)")
+                ctx.ssa_to_reg[ssa(operation.result)] = (out,)
+                # Also register in index_env as symbolic (for downstream index arithmetic)
+                import sympy
+                if isinstance(lhs_idx, (int, sympy.Integer)) and isinstance(rhs_idx, (int, sympy.Integer)):
+                    kernel_info.index_env[ssa(operation.result)] = int(lhs_idx) ^ int(rhs_idx)
+            return
+
+        # Fall back to pure VGPR case
+        lhs_r = ctx.ssa_to_reg.get(lhs_ssa)
+        rhs_r = ctx.ssa_to_reg.get(rhs_ssa)
+        if lhs_r and rhs_r and len(lhs_r) == 1 and len(rhs_r) == 1:
+            out = ctx.v_xor_b32(lhs_r[0], rhs_r[0], comment="xori")
             ctx.ssa_to_reg[ssa(operation.result)] = (out,)
 
     def handle_arith_remui_op(
@@ -667,6 +696,12 @@ class _ArithAffineHandlers:
                 )
             )
             ctx.ssa_to_reg[dst_ssa] = (out,)
+            # Track that this SSA is represented as packed f16 bits (low 16 bits of VGPR).
+            packed = getattr(ctx, "_packed16_ssa", None)
+            if packed is None:
+                packed = set()
+                setattr(ctx, "_packed16_ssa", packed)
+            packed.add(dst_ssa)
             return
 
         # Scalar fallback: forward.

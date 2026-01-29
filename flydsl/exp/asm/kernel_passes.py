@@ -168,11 +168,100 @@ class _CompilationPasses:
         }
 
         # Find positions where we need to insert s_nop
-        insertions = []
+        insertions: List[Tuple[int, int]] = []
+
+        def _written_vgprs(instr: KInstr) -> set[int]:
+            """Best-effort set of virtual VGPR ids written by this instruction."""
+            written = set()
+            for d in instr.defs:
+                if isinstance(d, KVReg):
+                    written.add(d.id)
+                elif isinstance(d, KRegRange) and isinstance(d.base_reg, KVReg):
+                    for k in range(d.count):
+                        written.add(d.base_reg.id + k)
+            return written
+
+        def _reads_any_vgpr(instr: KInstr, vgprs: set[int]) -> bool:
+            """Return True if instr uses any of the given virtual VGPR ids."""
+            if not vgprs:
+                return False
+            for u in instr.uses:
+                if isinstance(u, KVReg) and u.id in vgprs:
+                    return True
+                if isinstance(u, KRegRange) and isinstance(u.base_reg, KVReg):
+                    for k in range(u.count):
+                        if (u.base_reg.id + k) in vgprs:
+                            return True
+            return False
+
+        def _writes_any_vgpr(instr: KInstr, vgprs: set[int]) -> bool:
+            """Return True if instr defines any of the given virtual VGPR ids."""
+            if not vgprs:
+                return False
+            for d in instr.defs:
+                if isinstance(d, KVReg) and d.id in vgprs:
+                    return True
+                if isinstance(d, KRegRange) and isinstance(d.base_reg, KVReg):
+                    for k in range(d.count):
+                        if (d.base_reg.id + k) in vgprs:
+                            return True
+            return False
+
+        # MFMA result hazard (non-local):
+        # LLVM often inserts `s_nop 6` between an MFMA chain and the first consumer
+        # that reads the accumulator VGPRs (e.g. a store). This consumer is not
+        # necessarily the immediate next instruction (exec-mask control flow,
+        # epilogue packing, etc. can be in between).
+        #
+        # We conservatively scan forward from each MFMA to the first non-MFMA
+        # consumer of its written VGPRs, and insert `s_nop 6` right before it.
+        # This is still "precise enough" for our IR because accumulator defs are
+        # explicit and most kernels consume them shortly after the MFMA chain.
+        mfma_insertions: List[Tuple[int, int]] = []
+        for i, instr in enumerate(instructions):
+            if not instr.is_mfma:
+                continue
+            written = _written_vgprs(instr)
+            if not written:
+                continue
+            # Find first subsequent non-MFMA read of these defs.
+            for j in range(i + 1, len(instructions)):
+                nxt = instructions[j]
+                # Skip no-op pseudos.
+                if nxt.is_comment or nxt.is_label:
+                    continue
+                # Stop if accumulator is overwritten before any read (unlikely).
+                if _writes_any_vgpr(nxt, written) and not _reads_any_vgpr(nxt, written):
+                    break
+                # Insert the wait right before the first consumer, including an MFMA
+                # that consumes the accumulator written by the previous MFMA (RAW).
+                if _reads_any_vgpr(nxt, written):
+                    mfma_insertions.append((j, 6))
+                    break
+
+        if mfma_insertions:
+            # De-dupe (same position may be discovered from multiple MFMA in a chain).
+            seen = set()
+            for pos, n in mfma_insertions:
+                if (pos, n) in seen:
+                    continue
+                seen.add((pos, n))
+                insertions.append((pos, n))
 
         for i in range(len(instructions) - 1):
             instr = instructions[i]
             next_instr = instructions[i + 1]
+
+            # MFMA->MFMA accumulator RAW hazard:
+            # Some targets require a software wait state between an MFMA that writes
+            # an accumulator quad and the next MFMA that immediately consumes it.
+            # LLVM sometimes relies on the backend/hardware scheduling; for our
+            # assembler backend we insert a conservative wait.
+            if instr.is_mfma and next_instr.is_mfma:
+                written = _written_vgprs(instr)
+                if _reads_any_vgpr(next_instr, written):
+                    insertions.append((i + 1, 6))
+                    continue
 
             # VALU that clobbers VCC -> immediate consumer that reads VCC.
             # On CDNA3+, ISA docs require software-inserted wait states here.
@@ -180,6 +269,18 @@ class _CompilationPasses:
             if instr.is_valu and instr.constraints.vcc_clobber and _reads_vcc(next_instr):
                 insertions.append((i + 1, 1))  # (pos, snop_count)
                 continue
+
+            # Non-DLops VALU Write VGPR -> V_MFMA* read VGPR hazard.
+            # Per AMD ISA Table 37, requires 2 wait states (s_nop 1).
+            # This applies when a VALU instruction (like v_mov_b32) writes
+            # a VGPR that is immediately read by an MFMA instruction.
+            # Also applies to _pack_vgpr_pair pseudo which generates v_mov instructions.
+            is_valu_like = instr.is_valu or instr.name in ("_pack_vgpr_pair", "_pack_vgpr_quad")
+            if is_valu_like and next_instr.is_mfma:
+                written = _written_vgprs(instr)
+                if written and _reads_any_vgpr(next_instr, written):
+                    insertions.append((i + 1, 1))  # s_nop 1 = 2 wait states
+                    continue
 
             # Conservatively: trans op immediately followed by non-trans vector op.
             # Insert one wait-state (s_nop 0) to satisfy software wait rules.

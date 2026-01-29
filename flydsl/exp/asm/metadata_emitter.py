@@ -280,8 +280,22 @@ amdhsa.kernels:
             (sgprs_used + sgpr_granularity - 1) // sgpr_granularity
         ) * sgpr_granularity
 
-        # Compute accum_offset
-        accum_offset = max(4, vgprs_used)
+        # Compute accum_offset.
+        #
+        # NOTE: Some toolchains/ISAs interpret MFMA accumulator VGPR numbering
+        # relative to `amdhsa_accum_offset`. For debugging parity with LLVM,
+        # allow forcing this via env var.
+        import os
+        force_accum = os.environ.get("FLIR_ASM_FORCE_ACCUM_OFFSET", "").strip()
+        if force_accum:
+            try:
+                accum_offset = int(force_accum)
+            except Exception:
+                # Fall back to aligned vgpr usage.
+                accum_offset = max(4, ((vgprs_used + 3) // 4) * 4)
+        else:
+            # Match LLVM convention: accum_offset is vgpr usage rounded up to 4.
+            accum_offset = max(4, ((vgprs_used + 3) // 4) * 4)
 
         # Handle AGPRs
         if agprs_used > 0:

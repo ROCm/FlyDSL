@@ -418,6 +418,9 @@ class _MemoryHandlers:
         if not v_regs or len(v_regs) != 1:
             return
         vreg = v_regs[0]
+        # Note: we generally represent float SSA values as f32 in VGPRs, even when
+        # the MLIR SSA type is f16/bf16, and convert at store boundaries.
+        val_ty_str = str(operation.value.type).strip()
 
         idx_regs = []
         for idx in operation.indices:
@@ -860,15 +863,28 @@ class _MemoryHandlers:
         # i64 scalar extracts (GEMM FP8 payloads): represent as VGPR pair.
         # Source is typically vector<2xi64> bitcasted from 4 dwords.
         if "i64" in res_ty:
+            import os
+            swap_i64 = os.environ.get("FLIR_ASM_SWAP_I64_DWORDS", "0") == "1"
             if len(src) == 4:
                 if idx == 0:
-                    ctx.ssa_to_reg[ssa(operation.result)] = (src[0], src[1])
+                    ctx.ssa_to_reg[ssa(operation.result)] = (src[1], src[0]) if swap_i64 else (src[0], src[1])
                     return
                 if idx == 1:
-                    ctx.ssa_to_reg[ssa(operation.result)] = (src[2], src[3])
+                    ctx.ssa_to_reg[ssa(operation.result)] = (src[3], src[2]) if swap_i64 else (src[2], src[3])
                     return
             if len(src) == 2 and idx == 0:
-                ctx.ssa_to_reg[ssa(operation.result)] = tuple(src)
+                # Some lowerings materialize i64 as a raw vgpr_pair (lo, hi) already
+                # (e.g. vector<2xi32> -> bitcast -> vector<1xi64> -> extract).
+                # Allow swapping for endianness/debug parity with the 4-dword path.
+                ctx.ssa_to_reg[ssa(operation.result)] = (src[1], src[0]) if swap_i64 else tuple(src)
+                return
+
+        # i32 scalar extracts from common patterns:
+        # - vector<4xi32> -> extract dword lanes (B pack splitting)
+        # - vector<2xi32> -> extract lanes (store helpers)
+        if res_ty == "i32":
+            if 0 <= idx < len(src):
+                ctx.ssa_to_reg[ssa(operation.result)] = (src[idx],)
                 return
 
         # Packed 2-lane 16-bit vectors stored in one dword VGPR.
@@ -938,6 +954,43 @@ class _MemoryHandlers:
         res_ssa = ssa(operation.result)
         ty = str(operation.result.type)
         elems = list(operation.operands)
+
+        # Generic, SSA-friendly support for common integer packing patterns used by
+        # preshuffle GEMM B-pack lowering:
+        #
+        #   vector<2xi32>(d0, d1)  -> represent as two VGPRs (d0, d1)
+        #   vector<4xi32>(d0..d3)  -> represent as four VGPRs (d0, d1, d2, d3)
+        #   vector<1xi64>(i64pair) -> represent as the same two VGPRs (lo, hi)
+        if "vector<2xi32" in ty:
+            if len(elems) != 2:
+                return
+            a = ctx.ssa_to_reg.get(ssa(elems[0]))
+            b = ctx.ssa_to_reg.get(ssa(elems[1]))
+            if not a or not b or len(a) != 1 or len(b) != 1:
+                return
+            ctx.ssa_to_reg[res_ssa] = (a[0], b[0])
+            return
+
+        if "vector<4xi32" in ty:
+            if len(elems) != 4:
+                return
+            regs = []
+            for e in elems:
+                r = ctx.ssa_to_reg.get(ssa(e))
+                if not r or len(r) != 1:
+                    return
+                regs.append(r[0])
+            ctx.ssa_to_reg[res_ssa] = tuple(regs)
+            return
+
+        if "vector<1xi64" in ty:
+            if len(elems) != 1:
+                return
+            v = ctx.ssa_to_reg.get(ssa(elems[0]))
+            if not v or len(v) != 2:
+                return
+            ctx.ssa_to_reg[res_ssa] = tuple(v)
+            return
 
         if len(elems) != 2:
             return
@@ -1028,7 +1081,10 @@ class _MemoryHandlers:
         if not isinstance(num_records, int):
             num_records = -1
         if not isinstance(flags, int):
-            flags = 159744
+            # Default SRD word3 for gfx9xx-style global buffers is data_format=4 => 0x20000.
+            # NOTE: 0x27000 is LDS mode used by buffer_load_*_lds paths and is NOT valid
+            # for general global loads; using it will make buffer_load read from the wrong space.
+            flags = 0x20000
 
         # Match LLVM: use 0x7ffffffe for "unbounded" SRD size.
         # Using 0xffffffff here can lead to invalid buffer addressing on some GPUs.
@@ -1180,6 +1236,7 @@ class _MemoryHandlers:
     def handle_rocdl_mfma_op(self, operation, kernel_info: KernelInfo):
         """Lower rocdl.mfma.* to the corresponding MFMA instruction(s)."""
         import os
+        from _mlir.dialects import arith as arith_d  # type: ignore
 
         ctx = self.walker.kernel_ctx
         name = str(operation.operation.name)
@@ -1188,7 +1245,41 @@ class _MemoryHandlers:
 
         a = ctx.ssa_to_reg.get(ssa(operation.operands[0]))
         b = ctx.ssa_to_reg.get(ssa(operation.operands[1]))
-        c = ctx.ssa_to_reg.get(ssa(operation.operands[2]))
+        # Detect the common "zero accumulator" pattern:
+        #   %acc0 = arith.constant dense<0.0> : vector<4xf32>
+        # LLVM lowers FP8 MFMA with `c = 0` for the first op. This avoids relying
+        # on explicit v_mov-based zero-init which may not correctly initialize the
+        # dedicated MFMA accumulator file on some targets.
+        c = None
+        try:
+            acc_val = operation.operands[2]
+            acc_owner = getattr(acc_val, "owner", None)
+            acc_op = getattr(acc_owner, "opview", None)
+            # Check if accumulator is an arith.constant (by name, not type - avoids MLIR module mismatch)
+            is_arith_constant = False
+            if acc_op is not None:
+                try:
+                    op_name = str(acc_op.operation.name) if hasattr(acc_op, 'operation') else ""
+                    is_arith_constant = op_name == "arith.constant"
+                except Exception:
+                    pass
+            if acc_op is not None and is_arith_constant:
+                # OpAttributeMap does not always implement `.get()`; use mapping ops.
+                attrs = acc_op.operation.attributes
+                vattr = attrs["value"] if ("value" in attrs) else None
+                vs = str(vattr) if vattr is not None else ""
+                if "dense<0" in vs or "0.000000e+00" in vs:
+                    c = None
+                else:
+                    c = ctx.ssa_to_reg.get(ssa(acc_val))
+                if os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1":
+                    print(f"[asm.mfma] acc constant vs={vs!r} -> c_is_none={c is None}")
+            else:
+                c = ctx.ssa_to_reg.get(ssa(acc_val))
+                if os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1":
+                    print(f"[asm.mfma] non-constant acc_val={acc_val} -> c={c}")
+        except Exception:
+            c = ctx.ssa_to_reg.get(ssa(operation.operands[2]))
         if a is None or b is None:
             return
 
@@ -1198,6 +1289,11 @@ class _MemoryHandlers:
                 if c is not None:
                     ctx.ssa_to_reg[ssa(operation.results[0])] = tuple(c)
                 return
+            # Ultra-conservative correctness mode: drain memory queues before MFMA.
+            # If this fixes NaNs, we can refine to ticketing-driven waits later.
+            if os.environ.get("FLIR_ASM_MFMA_FULL_WAIT", "0") == "1":
+                self.walker.unified.s_waitcnt(waitcnt="vmcnt(0)")
+                self.walker.unified.s_waitcnt(waitcnt="lgkmcnt(0)")
             res = ctx.emit_mfma_f32_16x16x32_fp8_fp8(tuple(a), tuple(b), tuple(c) if c else None)
             ctx.ssa_to_reg[ssa(operation.results[0])] = res
             return
@@ -1524,6 +1620,11 @@ class _MemoryHandlers:
         # materialization for LDS addresses in the 4096+ range.
         # Testing shows 8192 works correctly for GEMM kernels.
         DS_MAX_OFFSET = 8192  # Increased to cover typical LDS offset ranges
+        # Debug / safety knob: disable using the ds_read offset field entirely.
+        # This is useful to bisect correctness issues around large LDS base offsets
+        # (e.g. ping-pong LDS buffers near the 8KB boundary).
+        if os.environ.get("FLIR_ASM_DISABLE_DSREAD_OFFSET", "0") == "1":
+            DS_MAX_OFFSET = 0
 
         # Determine load size from operation result type
         num_elements, element_bytes, _ = parse_vector_type_from_obj(
@@ -1916,7 +2017,8 @@ class _MemoryHandlers:
 
         # Get expression emitter - loop-invariant expressions are cached globally,
         # loop-varying expressions are never cached, so no cache clearing needed.
-        expr_emitter = self.walker.kernel_ctx.expr_emitter
+        ctx = self.walker.kernel_ctx
+        expr_emitter = ctx.expr_emitter
 
         # Compute address - allocate virtual voffset
         byte_exprs = build_element_byte_offset_exprs(
@@ -1925,12 +2027,12 @@ class _MemoryHandlers:
         const_offset, dynamic_expr = split_const_dynamic(byte_exprs[0])
 
         # Compute voffset in kernel IR (store path)
-        voffset_v = self.walker.kernel_ctx.vreg()
+        voffset_v = ctx.vreg()
 
         if dynamic_expr == 0 or (
             hasattr(dynamic_expr, "is_zero") and dynamic_expr.is_zero
         ):
-            self.walker.kernel_ctx.program.emit(
+            ctx.program.emit(
                 KInstr(
                     Instruction.V_MOV_B32,
                     (voffset_v,),
@@ -1947,12 +2049,12 @@ class _MemoryHandlers:
         # IMPORTANT: Wait for pending loads BEFORE setting up store SRD
         # Otherwise we overwrite the load SRD while loads are still in flight.
         # Use ticketing to emit only once per store phase, not per-store.
-        ticketing = self.walker.kernel_ctx.ticketing
+        ticketing = ctx.ticketing
         if ticketing._vmem_last_ticket >= 0:
             # Only emit wait if we haven't already waited for all VMEM
             threshold = ticketing.compute_vmem_wait(0)  # Wait for all pending
             if threshold is not None:
-                self.walker.kernel_ctx.program.emit(
+                ctx.program.emit(
                     KInstr(
                         Instruction.S_WAITCNT,
                         (),
@@ -1996,29 +2098,31 @@ class _MemoryHandlers:
                         for r in src_regs[:2]
                     )
             elif vector_bytes == 16 and num_regs >= 4:
-                # Prefer a single 16B store when the source regs are contiguous and
-                # properly aligned (regalloc enforces range alignment).
-                ids = [_as_vgpr_id(r) for r in src_regs[:4]]
-                if (
-                    ids[1] == ids[0] + 1
-                    and ids[2] == ids[0] + 2
-                    and ids[3] == ids[0] + 3
-                ):
-                    # Use alignment=4 to match vgpr_quad expectations.
-                    src_ranges = (KRegRange(KVReg(ids[0]), 4, alignment=4),)
-                else:
-                    # Fallback to scalar stores.
-                    src_ranges = tuple(
-                        KRegRange(r if isinstance(r, KVReg) else KVReg(r), 1)
-                        for r in src_regs[:4]
+                # `buffer_store_dwordx4` requires the source VGPR tuple to be
+                # contiguous AND suitably aligned (assembler enforces tuple alignment).
+                #
+                # Even if the *virtual* registers look consecutive, whole-program
+                # regalloc may map them to non-consecutive or misaligned physical
+                # registers unless they were allocated as a true quad range.
+                #
+                # Be conservative: pack into an explicitly allocated aligned quad.
+                tmp = ctx.vreg_quad()
+                ctx.program.emit(
+                    KInstr(
+                        "_pack_vgpr_quad",
+                        defs=(tmp,),
+                        uses=(src_regs[0], src_regs[1], src_regs[2], src_regs[3]),
+                        comment="pack global store quad",
                     )
+                )
+                src_ranges = (tmp,)
             else:
                 # Conservative: use scalar stores for 16B+ vectors.
                 src_ranges = tuple(
                     KRegRange(r if isinstance(r, KVReg) else KVReg(r), 1) for r in src_regs
                 )
 
-            self.walker.kernel_ctx.emit_buffer_store(
+            ctx.emit_buffer_store(
                 memref_ssa, src_ranges, voffset_v, instoffset
             )
 

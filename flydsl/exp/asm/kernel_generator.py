@@ -102,6 +102,7 @@ class KernelGenerator:
         self.program = program
         self.mapping = mapping
         self._formatter = get_formatter(architecture)
+        # (accvgpr mapping not modeled here; MFMA uses VGPR syntax like LLVM.)
 
     def generate(self) -> List[str]:
         """Generate the entire program as assembly lines."""

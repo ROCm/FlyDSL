@@ -553,6 +553,11 @@ def compute_liveness(program: KernelProgram, use_cfg: bool = True) -> LivenessIn
                 base_reg = u.base_reg
                 if is_virtual(base_reg):
                     info.use_points[base_reg].append(idx)
+                    # Also update size and alignment from uses (important for MFMA accumulator operands)
+                    reg_size[base_reg] = max(reg_size.get(base_reg, 1), u.count)
+                    reg_alignment[base_reg] = max(
+                        reg_alignment.get(base_reg, 1), u.alignment
+                    )
             elif isinstance(u, (KVReg, KSReg)):
                 if u in range_membership:
                     base_reg = range_membership[u]

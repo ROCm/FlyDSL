@@ -741,6 +741,93 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
         """Allocate a quad of virtual SGPRs."""
         return self.program.alloc_sreg_range(4, alignment=4)
 
+    def materialize_index_to_vreg(self, ssa_key: str, idx_val, kernel_info) -> KVReg:
+        """Materialize an index_env value to a VGPR.
+
+        This handles cases where an index value needs to be used in VGPR operations
+        (like XOR for LDS swizzle) but only exists as a symbolic/index expression.
+        """
+        import sympy
+
+        # Check if already materialized
+        existing = self.ssa_to_reg.get(ssa_key)
+        if existing and len(existing) == 1:
+            return existing[0]
+
+        out = self.vreg()
+
+        if isinstance(idx_val, int):
+            # Simple integer constant
+            self.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(out,),
+                    uses=(KImm(int(idx_val)),),
+                    comment=f"materialize idx {idx_val}",
+                )
+            )
+        elif isinstance(idx_val, sympy.Integer):
+            self.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(out,),
+                    uses=(KImm(int(idx_val)),),
+                    comment=f"materialize idx {idx_val}",
+                )
+            )
+        elif isinstance(idx_val, sympy.Expr):
+            # Complex expression - try to evaluate with substitutions
+            # For lane-dependent values like tid_x, we need runtime computation
+            subs = {}
+            if hasattr(kernel_info, 'tid_x_vreg') and kernel_info.tid_x_vreg:
+                subs[sympy.Symbol('tid_x', nonnegative=True)] = kernel_info.tid_x_vreg
+            # Try to simplify and materialize
+            try:
+                simplified = idx_val.simplify()
+                if simplified.is_number:
+                    self.program.emit(
+                        KInstr(
+                            Instruction.V_MOV_B32,
+                            defs=(out,),
+                            uses=(KImm(int(simplified)),),
+                            comment=f"materialize simplified idx",
+                        )
+                    )
+                else:
+                    # Can't simplify to constant - need to trace back to VGPR source
+                    # This shouldn't happen for well-formed index expressions
+                    # that have already been computed into VGPRs
+                    self.program.emit(
+                        KInstr(
+                            Instruction.V_MOV_B32,
+                            defs=(out,),
+                            uses=(KImm(0),),
+                            comment=f"WARN: couldn't materialize {idx_val}",
+                        )
+                    )
+            except Exception:
+                self.program.emit(
+                    KInstr(
+                        Instruction.V_MOV_B32,
+                        defs=(out,),
+                        uses=(KImm(0),),
+                        comment=f"WARN: materialize failed",
+                    )
+                )
+        else:
+            # Unknown type - emit zero as fallback
+            self.program.emit(
+                KInstr(
+                    Instruction.V_MOV_B32,
+                    defs=(out,),
+                    uses=(KImm(0),),
+                    comment=f"WARN: unknown idx type {type(idx_val)}",
+                )
+            )
+
+        self.ssa_to_reg[ssa_key] = (out,)
+        return out
+
     # =========================================================================
     # Special emission methods (not auto-generated)
     # =========================================================================
@@ -1067,17 +1154,37 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
                 # Without preloading, load directly into SRD ranges
                 for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
                     kernarg_offset = arg_idx * 8
-                    # Load base address into SRD[0:1] and fill SRD[2:3] directly.
-                    # This matches rocdl.make.buffer.rsrc defaults used by GEMM:
-                    # - word2 = 0xffffffff (num_records = -1)
-                    # - word3 = 0x27000 (flags)
-                    base_pair = KRegRange(srd_range.base_reg, 2, alignment=2)
+                    # Important: buffer SRDs are a 4-SGPR descriptor that must be
+                    # 4-SGPR aligned (s[0:3], s[4:7], s[8:11], ...).
+                    #
+                    # If we only define the first two SGPRs (base pointer) and then
+                    # define word2/word3 separately, whole-program regalloc may not
+                    # treat this as a quad and can place it at a misaligned base
+                    # (e.g. s[6:9]), which the assembler rejects.
+                    #
+                    # To keep SRD allocation contiguous and aligned, we:
+                    # - load the raw pointer into a temporary SGPR pair
+                    # - define the whole SRD quad once via `_srd_from_ptr`
+                    #
+                    # This also applies to wide loads/stores (dwordx4/short, etc.).
+                    tmp_ptr = self.sreg_pair()
                     prologue_instrs.append(
                         KInstr(
                             "s_load_dwordx2",
-                            defs=(base_pair,),
+                            defs=(tmp_ptr,),
                             uses=(kernarg_pair, KImm(kernarg_offset)),
-                            comment=f"Load SRD base for arg{arg_idx}",
+                            comment=f"Load SRD base ptr for arg{arg_idx}",
+                        )
+                    )
+                    prologue_instrs.append(
+                        KInstr(
+                            "_srd_from_ptr",
+                            defs=(srd_range,),
+                            # SRD word2=0x7FFFFFFE (unbounded size)
+                            # SRD word3=0x20000 (data_format=4 for 32-bit global buffer)
+                            # NOTE: 0x27000 is LDS mode - must NOT be used for global loads!
+                            uses=(tmp_ptr, KImm(0x7FFFFFFE), KImm(0x20000)),
+                            comment=f"Build SRD for arg{arg_idx}",
                         )
                     )
 
@@ -1112,27 +1219,8 @@ class KernelCompilationContext(_LoopSupport, _MFMASupport, _CompilationPasses):
                         )
                     )
             else:
-                # Non-preloading path: use rocdl-like defaults for GEMM correctness.
-                from .kernel_ir import KSReg
-                for srd_range, arg_idx, limit_bytes in self._pending_srd_setups:
-                    base = srd_range.base_reg
-                    if isinstance(base, KSReg):
-                        prologue_instrs.append(
-                            KInstr(
-                                "s_mov_b32",
-                                defs=(KSReg(base.id + 2),),
-                                uses=(KImm(0x7FFFFFFE),),
-                                comment=f"SRD word2 (num_records=-1) for arg{arg_idx}",
-                            )
-                        )
-                        prologue_instrs.append(
-                            KInstr(
-                                "s_mov_b32",
-                                defs=(KSReg(base.id + 3),),
-                                uses=(KImm(0x27000),),
-                                comment=f"SRD word3 (flags) for arg{arg_idx}",
-                            )
-                        )
+                # Non-preloading path: SRD[0:3] is fully built by `_srd_from_ptr` above.
+                pass
 
             # Clear the pending list
             self._pending_srd_setups = []

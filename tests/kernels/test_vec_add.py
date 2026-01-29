@@ -319,7 +319,7 @@ def benchmark_vector_add(tile_size: int = 4):
     module = create_vec_add_kernel_x4(SIZE, dtype=F32Type, vec_width=VEC_WIDTH, threads_per_block=THREADS_PER_BLOCK)
     print("  Running canonicalize + CSE pipeline...")
     optimized = run_pipeline(module, Pipeline().canonicalize().cse())
-    exe = flydsl.compile(optimized)
+    exe = flydsl.compile(optimized, backend="asm")
     
     threads_per_block = THREADS_PER_BLOCK
     num_blocks = (SIZE + TILE_ELEMS - 1) // TILE_ELEMS

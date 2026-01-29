@@ -178,57 +178,80 @@ class _MFMASupport:
         a_range = a_tmp
         b_range = b_tmp
 
-        # Prefer reusing an existing contiguous accumulator quad (keeps VGPR
-        # pressure low). If the incoming accumulator is not a true quad (e.g.
-        # came from a vector constant), pack it into a fresh aligned quad once.
+        # Model MFMA as SSA-correct by default:
+        # - The result is a NEW quad (defs)
+        # - The accumulator operand (c) is a separate quad (uses)
+        #
+        # This matches LLVM's common lowering for gfx94x (dst != c), and avoids
+        # incorrect behavior when the incoming accumulator value is still needed
+        # after the MFMA (which is common in debugging and some schedules).
+        #
+        # We still treat MFMA result quads as "accumulator vregs" for SSA validation
+        # purposes (they may be redefined across a chain), but we do not force in-place.
+        import os
+        DEBUG_MFMA = os.environ.get("FLIR_ASM_DEBUG_MFMA_C0", "0") == "1"
+        
         acc_range = None
-        if acc_regs is not None and len(acc_regs) == 4 and all(isinstance(r, KVReg) for r in acc_regs):
+        if (
+            acc_regs is not None
+            and len(acc_regs) == 4
+            and all(isinstance(r, KVReg) for r in acc_regs)
+        ):
             base_id = acc_regs[0].id
-            # Only reuse if these regs were already treated as an accumulator quad
-            # (i.e., came from a prior MFMA range allocation). Plain scalar regs
-            # (like constant vectors) may be consecutive but are NOT a real quad.
-            if (
-                self.program._vreg_range_bases.get(base_id) == 4
-                and all(self.program.is_accumulator_vreg(r) for r in acc_regs)
-                and all(
-                    acc_regs[i].id == base_id + i for i in range(4)
-                )
-            ):
+            check1 = self.program._vreg_range_bases.get(base_id) == 4
+            check2 = all(self.program.is_accumulator_vreg(r) for r in acc_regs)
+            check3 = all(acc_regs[i].id == base_id + i for i in range(4))
+            if DEBUG_MFMA:
+                print(f"[asm.mfma emit] acc_regs base_id={base_id}, check1={check1}, check2={check2}, check3={check3}")
+            if check1 and check2 and check3:
                 acc_range = KRegRange(acc_regs[0], 4, alignment=4)
                 self.program.register_accumulator_vreg_range(acc_range)
-                result_regs = tuple(acc_regs)  # already the quad lanes
-        if acc_range is None:
+                if DEBUG_MFMA:
+                    print(f"[asm.mfma emit] Using existing aligned acc_range={acc_range}")
+        if acc_range is None and acc_regs is not None and len(acc_regs) == 4:
+            if DEBUG_MFMA:
+                print(f"[asm.mfma emit] Packing acc into fresh quad")
+            # Pack any 4-lane accumulator (e.g. constant vectors) into a fresh quad.
             acc_range = self.vreg_quad()
             self.program.register_accumulator_vreg_range(acc_range)
-            result_regs = tuple(KVReg(acc_range.base_reg.id + i) for i in range(4))
-
-            if acc_regs is not None and len(acc_regs) == 4:
-                self.program.emit(
-                    KInstr(
-                        "_pack_vgpr_quad",
-                        (acc_range,),
-                        (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
-                        comment="pack mfma acc",
-                    )
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (acc_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc",
                 )
-            else:
-                self.program.emit(
-                    KInstr(
-                        "_init_acc_quad",
-                        (acc_range,),
-                        (),
-                        comment="init fp8 mfma acc",
-                    )
-                )
-
-        # In-place update.
-        self.program.emit(
-            KInstr(
-                "v_mfma_f32_16x16x32_fp8_fp8",
-                (acc_range,),
-                (a_range, b_range, acc_range),
-                comment="MFMA FP8 16x16x32",
             )
-        )
+
+        # Emit the MFMA.
+        #
+        # If this is the first MFMA in a chain (no incoming accumulator regs),
+        # use `c = 0` (matches LLVM lowering and avoids relying on explicit
+        # v_mov-based zero-init for accumulator registers).
+        result_range = self.vreg_quad()
+        self.program.register_accumulator_vreg_range(result_range)
+        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+        if acc_regs is None:
+            from .kernel_ir import KImm
+
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x32_fp8_fp8",
+                    (result_range,),
+                    (a_range, b_range, KImm(0)),
+                    comment="MFMA FP8 16x16x32 (c=0)",
+                )
+            )
+        else:
+            # SSA-correct: dst != c (but can be the same physically if allocator chooses).
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x32_fp8_fp8",
+                    (result_range,),
+                    (a_range, b_range, acc_range),
+                    comment="MFMA FP8 16x16x32",
+                )
+            )
 
         return result_regs

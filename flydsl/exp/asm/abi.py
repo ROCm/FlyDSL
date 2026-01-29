@@ -26,8 +26,13 @@ def system_vgpr_workitem_id_from_wg_size(wg_size: Tuple[int, int, int]) -> int:
     """Return the .amdhsa_system_vgpr_workitem_id value to request.
 
     Current policy (matches existing working behavior in tests):
-    - single-wave workgroup (y==1 and z==1): request 0
-    - multi-wave workgroup (y>1 or z>1): request 1 (flat workitem id in v0)
+    - single-wave workgroup (total threads <= 64): request 0
+    - multi-wave workgroup (total threads > 64): request 1 (flat workitem id in v0)
+
+    NOTE:
+    A workgroup can be multi-wave even when (y,z)==(1,1), e.g. wg_size=(256,1,1).
+    Those kernels require the flat workitem id to correctly distinguish waves.
     """
     wg_x, wg_y, wg_z = normalize_wg_size(wg_size)
-    return 1 if (wg_y > 1 or wg_z > 1) else 0
+    total_threads = int(wg_x) * int(wg_y) * int(wg_z)
+    return 1 if total_threads > 64 else 0
