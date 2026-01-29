@@ -123,11 +123,6 @@ def test_mfma_a8_flir_preshuffle(
         # BF16 has different MLIR lowering and needs separate investigation
         if in_dtype == "bf16":
             pytest.xfail("ASM backend: BF16 needs investigation.")
-        # Large output tiles (tile_m * tile_n > 1024) require too many accumulators,
-        # causing register pressure (250+ VGPRs out of 256 max).
-        # This needs register spilling support.
-        if tile_m * tile_n > 1024:
-            pytest.xfail(f"ASM backend: tile {tile_m}x{tile_n} output too large, needs register spilling.")
 
     exe = compile_preshuffle_gemm_a8(
         M=M,

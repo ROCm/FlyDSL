@@ -55,6 +55,10 @@ class Ticketing:
         self._vmem_last_wait_threshold = None
         return self._vmem_last_ticket
 
+    # Hardware limits for waitcnt fields
+    MAX_VMCNT = 63  # 6-bit field on GFX9+
+    MAX_LGKMCNT = 15  # 4-bit field
+
     def compute_vmem_wait(self, min_required_ticket: int) -> Optional[int]:
         """
         Compute minimal vmcnt(N) threshold to ensure ticket is ready.
@@ -79,6 +83,12 @@ class Ticketing:
         """
         # Compute threshold: allow (last_ticket - min_required_ticket) newer operations
         threshold = max(0, self._vmem_last_ticket - min_required_ticket)
+
+        # Clamp to hardware limit - if threshold exceeds MAX_VMCNT, we can only wait
+        # for the most recent MAX_VMCNT operations. This may cause unnecessary waiting
+        # for very deep pipelines, but is correct (we might wait for more than needed).
+        if threshold > self.MAX_VMCNT:
+            threshold = self.MAX_VMCNT
 
         # Coalesce: only return threshold if stricter than last wait (or first wait)
         if (
@@ -128,6 +138,10 @@ class Ticketing:
         """
         # Compute threshold: allow (last_ticket - min_required_ticket) newer operations
         threshold = max(0, self._lgkm_last_ticket - min_required_ticket)
+
+        # Clamp to hardware limit
+        if threshold > self.MAX_LGKMCNT:
+            threshold = self.MAX_LGKMCNT
 
         # Coalesce: only return threshold if stricter than last wait (or first wait)
         if (

@@ -217,15 +217,21 @@ class _MFMASupport:
 
         # Emit the MFMA.
         #
-        # If this is the first MFMA in a chain (no incoming accumulator regs),
-        # use `c = 0` (matches LLVM lowering and avoids relying on explicit
-        # v_mov-based zero-init for accumulator registers).
-        result_range = self.vreg_quad()
-        self.program.register_accumulator_vreg_range(result_range)
-        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+        # MFMA is a read-modify-write operation that updates the accumulator in place.
+        # When we have a valid accumulator (acc_range), we should REUSE it as the result
+        # to avoid allocating new registers for each MFMA in a chain.
+        #
+        # This is critical for register pressure: a 64x256 tile has 64 MFMA tiles,
+        # each needing 4 VGPRs. Without in-place accumulation, we'd need 256 VGPRs
+        # just for accumulators in ONE k-iteration, let alone pipelined stages.
 
         if acc_regs is None:
+            # First MFMA in chain: allocate new accumulator, use c=0
             from .kernel_ir import KImm
+
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
 
             self.program.emit(
                 KInstr(
@@ -235,13 +241,40 @@ class _MFMASupport:
                     comment="MFMA FP8 16x16x32 (c=0)",
                 )
             )
+        elif acc_range is not None:
+            # Accumulating MFMA: REUSE the accumulator as both input and output.
+            # This is the correct hardware behavior - MFMA updates accumulator in-place.
+            result_range = acc_range
+            result_regs = tuple(KVReg(acc_range.base_reg.id + i) for i in range(4))
+
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x32_fp8_fp8",
+                    (result_range,),  # def: same as accumulator
+                    (a_range, b_range, acc_range),  # use: accumulator
+                    comment="MFMA FP8 16x16x32 (in-place)",
+                )
+            )
         else:
-            # SSA-correct: dst != c (but can be the same physically if allocator chooses).
+            # Accumulator was provided but wasn't a proper range - allocate new
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+            # Need to copy acc_regs to result_range first
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (result_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc (unaligned input)",
+                )
+            )
             self.program.emit(
                 KInstr(
                     "v_mfma_f32_16x16x32_fp8_fp8",
                     (result_range,),
-                    (a_range, b_range, acc_range),
+                    (a_range, b_range, result_range),
                     comment="MFMA FP8 16x16x32",
                 )
             )
@@ -309,12 +342,15 @@ class _MFMASupport:
                 )
             )
 
-        result_range = self.vreg_quad()
-        self.program.register_accumulator_vreg_range(result_range)
-        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
-
+        # MFMA updates accumulator in-place. Reuse acc_range when available.
         if acc_regs is None:
+            # First MFMA in chain: allocate new accumulator, use c=0
             from .kernel_ir import KImm
+
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
             self.program.emit(
                 KInstr(
                     "v_mfma_f32_16x16x16_bf16",
@@ -323,12 +359,38 @@ class _MFMASupport:
                     comment="MFMA BF16 16x16x16 (c=0)",
                 )
             )
-        else:
+        elif acc_range is not None:
+            # Accumulating MFMA: reuse accumulator in-place
+            result_range = acc_range
+            result_regs = tuple(KVReg(acc_range.base_reg.id + i) for i in range(4))
+
             self.program.emit(
                 KInstr(
                     "v_mfma_f32_16x16x16_bf16",
                     (result_range,),
                     (a_range, b_range, acc_range),
+                    comment="MFMA BF16 16x16x16 (in-place)",
+                )
+            )
+        else:
+            # Accumulator provided but not a proper range
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (result_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc (unaligned input)",
+                )
+            )
+            self.program.emit(
+                KInstr(
+                    "v_mfma_f32_16x16x16_bf16",
+                    (result_range,),
+                    (a_range, b_range, result_range),
                     comment="MFMA BF16 16x16x16",
                 )
             )
@@ -396,12 +458,15 @@ class _MFMASupport:
                 )
             )
 
-        result_range = self.vreg_quad()
-        self.program.register_accumulator_vreg_range(result_range)
-        result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
-
+        # MFMA updates accumulator in-place. Reuse acc_range when available.
         if acc_regs is None:
+            # First MFMA in chain: allocate new accumulator, use c=0
             from .kernel_ir import KImm
+
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
             self.program.emit(
                 KInstr(
                     "v_mfma_i32_16x16x32_i8",
@@ -410,12 +475,38 @@ class _MFMASupport:
                     comment="MFMA INT8 16x16x32 (c=0)",
                 )
             )
-        else:
+        elif acc_range is not None:
+            # Accumulating MFMA: reuse accumulator in-place
+            result_range = acc_range
+            result_regs = tuple(KVReg(acc_range.base_reg.id + i) for i in range(4))
+
             self.program.emit(
                 KInstr(
                     "v_mfma_i32_16x16x32_i8",
                     (result_range,),
                     (a_range, b_range, acc_range),
+                    comment="MFMA INT8 16x16x32 (in-place)",
+                )
+            )
+        else:
+            # Accumulator provided but not a proper range
+            result_range = self.vreg_quad()
+            self.program.register_accumulator_vreg_range(result_range)
+            result_regs = tuple(KVReg(result_range.base_reg.id + i) for i in range(4))
+
+            self.program.emit(
+                KInstr(
+                    "_pack_vgpr_quad",
+                    (result_range,),
+                    (acc_regs[0], acc_regs[1], acc_regs[2], acc_regs[3]),
+                    comment="pack mfma acc (unaligned input)",
+                )
+            )
+            self.program.emit(
+                KInstr(
+                    "v_mfma_i32_16x16x32_i8",
+                    (result_range,),
+                    (a_range, b_range, result_range),
                     comment="MFMA INT8 16x16x32",
                 )
             )

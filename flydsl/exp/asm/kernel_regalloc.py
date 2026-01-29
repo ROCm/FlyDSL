@@ -307,7 +307,7 @@ class KernelRegAlloc:
                 else:
                     phys = self._vgpr_pool.alloc_range(lr.size, lr.alignment)
             except AllocationError as e:
-                self._report_allocation_failure(lr, liveness, "VGPR")
+                self._report_allocation_failure(lr, liveness, "VGPR", program)
                 raise
 
             vreg_map[lr.reg.id] = phys
@@ -339,7 +339,7 @@ class KernelRegAlloc:
                 else:
                     phys = self._sgpr_pool.alloc_range(lr.size, lr.alignment)
             except AllocationError as e:
-                self._report_allocation_failure(lr, liveness, "SGPR")
+                self._report_allocation_failure(lr, liveness, "SGPR", program)
                 raise
 
             sreg_map[lr.reg.id] = phys
@@ -425,7 +425,11 @@ class KernelRegAlloc:
         return still_active
 
     def _report_allocation_failure(
-        self, failed_range: LiveRange, liveness: LivenessInfo, reg_class: str
+        self,
+        failed_range: LiveRange,
+        liveness: LivenessInfo,
+        reg_class: str,
+        program: "KernelProgram",
     ) -> None:
         """Print diagnostic information when allocation fails."""
         print(f"\n{'='*60}")
@@ -448,7 +452,24 @@ class KernelRegAlloc:
         print(f"Total overlapping: {len(overlapping)}")
         print(f"Top contributors (by range length):")
         for i, r in enumerate(overlapping[:10]):
-            print(f"  {i+1}. {r}")
+            # Show the defining instruction
+            def_instr = ""
+            if r.start < len(program.instructions):
+                instr = program.instructions[r.start]
+                uses_info = ", ".join(str(u) for u in instr.uses[:2]) if instr.uses else ""
+                def_instr = f" <- {instr.name}"
+                if uses_info:
+                    def_instr += f" [{uses_info}]"
+            print(f"  {i+1}. {r}{def_instr}")
+
+        # Show instruction breakdown
+        print(f"\nInstructions around the problem area:")
+        for idx in range(max(0, failed_range.start - 5), min(len(program.instructions), failed_range.start + 15)):
+            instr = program.instructions[idx]
+            defs_str = ", ".join(str(d) for d in instr.defs[:2])
+            uses_str = ", ".join(str(u) for u in instr.uses[:2])
+            marker = ">>>" if idx == failed_range.start else "   "
+            print(f"{marker} {idx:4d}: {instr.name:25s} def=[{defs_str}] use=[{uses_str}]")
 
         print(f"{'='*60}\n")
 
