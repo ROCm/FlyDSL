@@ -4,7 +4,7 @@ from flydsl import lang as fx
 M = 16
 N = 32
 memrefTy = fx.MemRefType.get(
-    fx.T.f32(), fx.LayoutType.get(16, 32), fx.AddressSpace.Global
+    fx.T.f32(), fx.LayoutType.get((M, N), (N, 1)), fx.AddressSpace.Global
 )
 
 
