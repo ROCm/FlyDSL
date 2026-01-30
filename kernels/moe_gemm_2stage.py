@@ -1941,6 +1941,16 @@ def compile_moe_gemm2(
                 zero_i32 = arith.i32(0)
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
+
+                e_vec = 2 if bool(accumulate) else 8
+                if not bool(accumulate):
+                    cshuffle_nlane = 32
+                    cshuffle_stride = cshuffle_nlane * e_vec
+                    if (int(tile_n) % cshuffle_stride) != 0:
+                        raise ValueError(
+                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
+                        )
+
     
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(
@@ -2120,7 +2130,7 @@ def compile_moe_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x2 directly via buffer store.
+                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
                             byte_off = idx_elem_even * c2_i32
@@ -2137,7 +2147,7 @@ def compile_moe_gemm2(
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,
-                        e_vec=2,
+                        e_vec=e_vec,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,

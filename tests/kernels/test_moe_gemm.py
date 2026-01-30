@@ -1309,9 +1309,13 @@ def print_reduce_profile(results: dict):
 @pytest.mark.parametrize(
     "tokens, topk, model_dim",
     [
-        pytest.param(256, 8, 7168, id="DS-TP8-decode"),
         pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
         pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
+        pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
+        pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
+        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
+        pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
+        pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
     ],
 )
 def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
@@ -1346,9 +1350,13 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk",
     [
-        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode"),
         pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
         pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
+        pytest.param(64, 7168, 256, 256, 8, id="DS-TP8-decode-S"),
+        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode-L"),
+        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
+        pytest.param(64, 5120, 1536, 64, 6, id="EP-K6-decode-S"),
+        pytest.param(256, 5120, 1536, 64, 6, id="EP-K6-decode-L"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1360,8 +1368,8 @@ def test_moe_stage2_standalone(
     topk: int,
     in_dtype: str,
     *,
-    tile_m: int = 32,
-    tile_n: int = 512,
+    tile_m: int = 64,
+    tile_n: int = 256,
     tile_k: int = 128,
     seed: int = 0,
     num_iters: int = 10,
