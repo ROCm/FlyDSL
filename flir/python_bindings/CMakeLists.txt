@@ -151,13 +151,6 @@ if(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   endif()
 endif()
 
-# Copy the pure Python sources (flydsl package) to the build directory
-add_custom_target(CopyFlirPythonSources ALL
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${FLIR_REPO_ROOT}/flydsl/src/flydsl"
-    "${MLIR_BINARY_DIR}/python_packages/flydsl/flydsl"
-  COMMENT "Copying flydsl/src/flydsl sources to build/python_packages/flydsl/flydsl"
-  DEPENDS FlirPythonModules
-)
-
-add_dependencies(CopyFlirPythonSources FlirPythonModules)
+# NOTE: Pure Python sources (flydsl package) are NOT copied to the build directory.
+# Use `pip install -e .` which reads flydsl directly from flydsl/src/ and
+# _mlir from the build output (python_packages/flydsl/_mlir).

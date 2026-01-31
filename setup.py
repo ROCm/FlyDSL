@@ -291,7 +291,46 @@ def _ensure_python_embedded_mlir_package() -> None:
     dst = PY_SRC / "_mlir"
     # `Path.exists()` follows symlinks; for a broken symlink it returns False.
     # We want to repair broken/outdated symlinks automatically.
-    target = Path("..") / EMBEDDED__MLIR_REL
+    target = Path("..") / Path("..") / EMBEDDED__MLIR_REL
+
+    if dst.is_symlink():
+        try:
+            current_target = Path(os.readlink(dst))
+        except Exception:
+            current_target = None
+        # If it's already correct and resolves, keep it.
+        if current_target == target and dst.exists():
+            return
+        # Otherwise replace it (covers broken links and moved build dirs).
+        dst.unlink()
+
+    if dst.exists():
+        # A real directory/file exists here; don't overwrite silently.
+        return
+
+    if os.path.lexists(dst):
+        # Path exists but is neither a working directory nor a symlink we can manage.
+        raise RuntimeError(f"{dst} exists but is not a usable symlink/directory; please remove it and retry.")
+    # Prefer a relative symlink so the repo remains relocatable.
+    try:
+        dst.symlink_to(target, target_is_directory=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to create symlink {dst} -> {target}.\n"
+            "Either create it manually, or install with PYTHONPATH pointing at "
+            "`build/python_packages/flydsl`.\n"
+            f"Original error: {e}"
+        ) from e
+
+
+def _ensure_kernels_package() -> None:
+    """Make `flydsl.kernels` importable for editable installs as _ensure_python_embedded_mlir_package
+    """
+
+    dst = PY_SRC / "flydsl" / "kernels"
+    # `Path.exists()` follows symlinks; for a broken symlink it returns False.
+    # We want to repair broken/outdated symlinks automatically.
+    target = Path("..") / Path("..") / Path("..") / "kernels"
 
     if dst.is_symlink():
         try:
@@ -325,11 +364,22 @@ def _ensure_python_embedded_mlir_package() -> None:
 
 if not IS_WHEEL_BUILD:
     _ensure_python_embedded_mlir_package()
+    _ensure_kernels_package()
     # Editable/dev installs: single-root under `flydsl/src/` (includes `_mlir` via symlink).
-    all_packages = sorted(
-        set(find_packages(where=str(PY_SRC_REL)))
-        | set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))
-    )
+
+    flydsl_packages = set(find_namespace_packages(where=str(PY_SRC_REL), include=["flydsl*"]))
+    mlir_packages = set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))
+    kernels_packages = find_packages(where=str(PY_SRC_REL), include=["kernels", "kernels.*"])
+
+    # Remap kernels.* to flydsl.kernels.*
+    kernels_packages_remapped = set()
+    for pkg in kernels_packages:
+        if pkg == "kernels":
+            kernels_packages_remapped.add("flydsl.kernels")
+        elif pkg.startswith("kernels."):
+            kernels_packages_remapped.add(pkg.replace("kernels.", "flydsl.kernels.", 1))
+    all_packages = sorted(flydsl_packages | mlir_packages | kernels_packages_remapped)
+
     package_dir = {
         "": str(PY_SRC_REL),
     }
@@ -369,10 +419,9 @@ setup(
             "_mlir_libs/lib/*.so.*",
             "*.pyi",
         ],
+        "flydsl.kernels": ["*.py"],
     },
     install_requires=_load_requirements(),
     cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),
     distclass=BinaryDistribution,
 )
-
-

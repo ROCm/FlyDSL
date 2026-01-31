@@ -23,6 +23,7 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
+from tests.kernels.utils import fp4_utils
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -300,6 +301,7 @@ def run_moe_stage1(
     routing_in: Optional[RoutingBuffers] = None,
     return_outputs: bool = False,
     skip_ref: bool = False,
+    w_fp4_kernel: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -444,6 +446,7 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
+    from kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -1062,22 +1065,26 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     compile_fn=None,
+    w_fp4_kernel: bool = False,
     gemm2_mode: Optional[str] = None,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
-    torch.manual_seed(int(seed))
+    # torch.manual_seed(int(seed))
 
     # Keep inputs tame by default; fp16 paths are less robust to overflow.
     # (Callers can still override via pytest param / direct invocation.)
     if init_scale == 1.0:
         init_scale = 0.2
     s = float(init_scale)
-    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    # x_fp32 = torch.ones((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
-    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s #* (s / math.sqrt(model_dim))
+    # w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * 0.2
+    # w1_fp32 = torch.ones((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = inter_dim for W2: [E, model, inter]
-    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
     score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
@@ -1134,9 +1141,15 @@ def test_moe_gemm_2stage(
         routing_in=routing,
         return_outputs=True,
         skip_ref=bool(skip_ref),
+        w_fp4_kernel=w_fp4_kernel,
     )
 
-    if in_dtype == "fp8":
+    if w_fp4_kernel:
+        a2_q = out1_fp16.to(torch.float32)
+        # a2_q = torch.ones_like(out1_fp16, dtype=torch.float32) / 5
+        # w2_fp32 = torch.ones_like(w2_fp32, dtype=torch.float32) / 10
+        a2_scale = None
+    elif in_dtype == "fp8":
         out1_fp32 = out1_fp16.to(torch.float32)
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
@@ -1181,7 +1194,6 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         compile_fn=compile_fn,
     )
-
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
@@ -1519,15 +1531,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
-    parser.add_argument("-t", "--tokenNum", type=int, default=2048, help="Number of tokens (e.g. -t 1024)")
+    parser.add_argument("-t", "--tokenNum", type=int, default=32, help="Number of tokens (e.g. -t 1024)")
     parser.add_argument("-e", "--expert", type=int, default=8, help="Number of experts (e.g. -e 8)")
     parser.add_argument("-k", "--topk", type=int, default=2, help="Top-k (e.g. -k 2)")
     parser.add_argument("-s", "--doweight_stage1", type=_str2bool, nargs="?", const=True, default=False, help="Whether to multiply routed weight in stage1 (t/f).")
 
     # Stage1-specific kernel tiling knobs
-    parser.add_argument("--tile_m", type=int, default=64, help="Tile M / block_m (routing block size).")
+    parser.add_argument("--tile_m", type=int, default=32, help="Tile M / block_m (routing block size).")
     parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
-    parser.add_argument("--tile_k", type=int, default=128, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_k", type=int, default=256, help="Tile K (model dim tile).")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
@@ -1539,8 +1551,16 @@ if __name__ == "__main__":
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
+    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
+
+    # w fp4 moe kernel
+    parser.add_argument(
+        "--wfp4",
+        action="store_true",
+        default=False,
+        help="Use weight fp4 gemm.",
+    )
 
     args = parser.parse_args()
 
@@ -1570,6 +1590,7 @@ if __name__ == "__main__":
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
+            w_fp4_kernel=args.wfp4,
             gemm2_mode=args.gemm2_mode,
         )
 
