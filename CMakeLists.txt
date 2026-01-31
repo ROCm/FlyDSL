@@ -31,6 +31,9 @@ include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
 include_directories(${PROJECT_SOURCE_DIR}/include)
 include_directories(${PROJECT_BINARY_DIR}/include)
 
+include_directories(${PROJECT_SOURCE_DIR}/thirdparty/dlpack/include)
+include_directories(${PROJECT_SOURCE_DIR}/thirdparty/tvm-ffi/include)
+
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 

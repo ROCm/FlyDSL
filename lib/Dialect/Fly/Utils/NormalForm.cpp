@@ -23,8 +23,7 @@ bool isNormalForm(TypedValue<BasisType> value) {
 bool isNormalForm(TypedValue<IntTupleType> value) {
   Operation *defOp = value.getDefiningOp();
   if (!defOp) {
-    auto tupleTy = value.getType();
-    return tupleTy.getAttr().isStatic();
+    return false;
   }
   // if (isa<StaticOp>(defOp)) {
   //   return true;
@@ -41,8 +40,7 @@ bool isNormalForm(TypedValue<IntTupleType> value) {
 bool isNormalForm(TypedValue<LayoutType> value) {
   Operation *defOp = value.getDefiningOp();
   if (!defOp) {
-    auto layoutTy = value.getType();
-    return layoutTy.getAttr().isStatic();
+    return false;
   }
   // NormalLayout ::= (StaticOp)
   // if (isa<StaticOp>(defOp)) {

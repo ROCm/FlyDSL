@@ -31,7 +31,7 @@ def : Pat<(Fly_SliceOp Fly_MemRef:$memref, Fly_IntTuple:$coord),
 def : Pat<(Fly_SizeOp Fly_Layout:$layout), 
           (Fly_SizeOp (Fly_GetShapeOp $layout))>;
 def : Pat<(Fly_SizeOp Fly_MemRef:$memref), 
-          (Fly_SizeOp (Fly_GetLayoutOp $memref))>;
+          (Fly_SizeOp (Fly_GetShapeOp (Fly_GetLayoutOp $memref)))>;
 
 def : Pat<(Fly_SelectOp Fly_Layout:$layout, DenseI32ArrayAttr:$indices),
           (Fly_MakeLayoutOp

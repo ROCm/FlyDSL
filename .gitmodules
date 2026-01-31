@@ -1,0 +1,6 @@
+[submodule "thirdparty/dlpack"]
+	path = thirdparty/dlpack
+	url = https://github.com/dmlc/dlpack.git
+[submodule "thirdparty/tvm-ffi"]
+	path = thirdparty/tvm-ffi
+	url = https://github.com/apache/tvm-ffi.git
