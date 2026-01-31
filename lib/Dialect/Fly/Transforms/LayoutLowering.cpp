@@ -1259,6 +1259,87 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+// GetLeafOp Lowering
+//===----------------------------------------------------------------------===//
+
+class GetLeafOpLowering : public OpRewritePattern<GetLeafOp> {
+public:
+  using OpRewritePattern<GetLeafOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GetLeafOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value tuple = op.getTuple();
+    int32_t leafIdx = op.getLeafIdx();
+
+    // Handle IntTuple case
+    if (auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType())) {
+      if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
+        return failure();
+
+      auto defOp = tuple.getDefiningOp<MakeIntTupleOp>();
+      if (!defOp)
+        return failure();
+
+      IntTupleAttr profile = intTupleTy.getAttr();
+      IntTupleAttr leafProfile = profile.at(leafIdx);
+      IntTupleType leafTy = IntTupleType::get(leafProfile);
+
+      // Calculate the dynamic element offset for this leaf
+      int32_t dyncOffset = 0;
+      for (int32_t i = 0; i < leafIdx; ++i) {
+        dyncOffset += profile.at(i).dyncLeafCount();
+      }
+      int32_t leafDyncCount = leafProfile.dyncLeafCount();
+
+      // Extract the dynamic elements for this leaf
+      SmallVector<Value> leafDyncElems;
+      for (int32_t i = 0; i < leafDyncCount; ++i) {
+        leafDyncElems.push_back(defOp.getDyncElems()[dyncOffset + i]);
+      }
+
+      Value newTuple = MakeIntTupleOp::create(rewriter, loc, leafTy, leafDyncElems);
+      rewriter.replaceOp(op, newTuple);
+      return success();
+    }
+
+    // Handle Layout case
+    if (auto layoutTy = dyn_cast<LayoutType>(tuple.getType())) {
+      if (!isNormalForm(cast<TypedValue<LayoutType>>(tuple)))
+        return failure();
+
+      auto defOp = tuple.getDefiningOp<MakeLayoutOp>();
+      if (!defOp)
+        return failure();
+
+      LayoutAttr profile = layoutTy.getAttr();
+      LayoutAttr leafProfile = profile.at(leafIdx);
+      LayoutType leafTy = LayoutType::get(op.getContext(), leafProfile);
+
+      // Get shape and stride from the defining MakeLayoutOp
+      Value shape = defOp.getShape();
+      Value stride = defOp.getStride();
+
+      auto shapeTy = cast<IntTupleType>(shape.getType());
+      auto strideTy = cast<IntTupleType>(stride.getType());
+
+      // Extract leaf from shape
+      IntTupleAttr shapeLeafProfile = shapeTy.getAttr().at(leafIdx);
+      Value shapeLeaf = GetLeafOp::create(rewriter, loc, shape, leafIdx);
+
+      // Extract leaf from stride
+      IntTupleAttr strideLeafProfile = strideTy.getAttr().at(leafIdx);
+      Value strideLeaf = GetLeafOp::create(rewriter, loc, stride, leafIdx);
+
+      Value newLayout = MakeLayoutOp::create(rewriter, loc, leafTy, shapeLeaf, strideLeaf);
+      rewriter.replaceOp(op, newLayout);
+      return success();
+    }
+
+    return failure();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // GetScalarOp Lowering
 //===----------------------------------------------------------------------===//
 
