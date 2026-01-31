@@ -1951,7 +1951,6 @@ def compile_moe_gemm2(
                             f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
                         )
 
-    
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(
                         val_f16x2,
@@ -1961,7 +1960,6 @@ def compile_moe_gemm2(
                         zero_i32,
                     )
 
-    
                 sw_pf = None
                 tw_pf = None
                 if epilogue_pf is not None:

@@ -1368,9 +1368,9 @@ def test_moe_stage2_standalone(
     topk: int,
     in_dtype: str,
     *,
-    tile_m: int = 64,
-    tile_n: int = 256,
-    tile_k: int = 128,
+    tile_m: int = 64,   # Common block size for M
+    tile_n: int = 256,  # Common block size for N2
+    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
