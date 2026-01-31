@@ -8,6 +8,7 @@
 #include "mlir/CAPI/Wrap.h"
 
 #include <mlir/IR/BuiltinAttributes.h>
+#include <mlir/IR/BuiltinTypes.h>
 #include <mlir/IR/MLIRContext.h>
 #include <mlir/IR/Value.h>
 
@@ -15,8 +16,14 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
+#include "DLTensorAdaptor.h"
+
+#include <cstdint>
+#include <vector>
+
 namespace nb = nanobind;
 using namespace nb::literals;
+
 using namespace mlir;
 using namespace mlir::fly;
 using namespace mlir::python::nanobind_adaptors;
@@ -125,6 +132,28 @@ int32_t depth(MlirValue int_or_tuple) {
 
 NB_MODULE(_fly, m) {
   m.doc() = "MLIR Python FlyDSL Extension";
+
+  using DLTensorAdaptor = utils::DLTensorAdaptor;
+
+  nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
+      .def(nb::init<nb::object, int32_t, bool, MlirContext>(), "dlpack_capsule"_a,
+           "alignment"_a = 1, "use_32bit_stride"_a = false, "context"_a,
+           "Create a DLTensorAdaptor from a DLPack capsule")
+      .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
+      .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
+      .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
+      .def_prop_ro("address_space", &DLTensorAdaptor::getAddressSpace,
+                   "Get address space (0=host, 1=device)")
+      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes")
+      .def("build_memref_desc", &DLTensorAdaptor::buildMemRefDesc,
+           "Build memref descriptor based on current dynamic marks")
+      .def("get_memref_type", &DLTensorAdaptor::getMemRefType,
+           "Get fly.memref MLIR type based on current dynamic marks")
+      .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
+      .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
+           "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
+      .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
+           "Decide whether to use 32-bit stride");
 
   m.def(
       "infer_int_tuple_type",

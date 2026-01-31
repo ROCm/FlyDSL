@@ -741,10 +741,10 @@ static bool lowerFuncIntTupleArgs(FunctionOpInterface op) {
 
 static void collectLeafValues(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                               const IntTupleValueAdaptor &tuple, SmallVectorImpl<Value> &out) {
-  // if (tuple.isLeaf()) {
-  //   out.push_back(tuple.intTupleValue);
-  //   return;
-  // }
+  if (tuple.isLeaf()) {
+    out.push_back(builder.getArithValue(tuple).value);
+    return;
+  }
   for (int i = 0; i < tuple.rank(); ++i) {
     collectLeafValues(builder, builder.at(tuple, i), out);
   }
@@ -811,6 +811,13 @@ static bool appendScalarPrintfArg(PatternRewriter &rewriter, Location loc, Value
 static bool appendIntTuplePrintf(PatternRewriter &rewriter, Location loc,
                                  const IntTupleValueAdaptor &tuple, std::string &format,
                                  SmallVectorImpl<Value> &args) {
+  // For single leaf values, don't add parentheses
+  if (tuple.isLeaf()) {
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    Value leafValue = builder.getArithValue(tuple).value;
+    return appendScalarPrintfArg(rewriter, loc, leafValue, format, args);
+  }
+
   SmallVector<Value> leaves;
   IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
   collectLeafValues(builder, tuple, leaves);
@@ -828,6 +835,16 @@ static bool appendIntTuplePrintf(PatternRewriter &rewriter, Location loc,
 }
 
 static bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
+  // For single leaf values, don't add parentheses
+  if (attr.isLeaf()) {
+    if (attr.getLeafAsInt().isStatic()) {
+      format += std::to_string(attr.getLeafAsInt().getValue());
+    } else {
+      format += "?";
+    }
+    return true;
+  }
+
   SmallVector<IntAttr> leaves;
   collectLeafAttrs(attr, leaves);
   format += "(";
@@ -941,6 +958,8 @@ public:
   LogicalResult matchAndRewrite(GetShapeOp op, PatternRewriter &rewriter) const override {
     auto layout = op.getLayout();
 
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layout)))
+      return failure();
     if (auto defOp = layout.getDefiningOp<MakeLayoutOp>()) {
       rewriter.replaceOp(op, defOp.getShape());
       return success();
@@ -956,6 +975,8 @@ public:
   LogicalResult matchAndRewrite(GetStrideOp op, PatternRewriter &rewriter) const override {
     auto layout = op.getLayout();
 
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layout)))
+      return failure();
     if (auto defOp = layout.getDefiningOp<MakeLayoutOp>()) {
       rewriter.replaceOp(op, defOp.getStride());
       return success();
@@ -975,6 +996,87 @@ public:
       rewriter.replaceOp(op, makeViewOp.getLayout());
       return success();
     }
+    return failure();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// GetLeafOp Lowering
+//===----------------------------------------------------------------------===//
+
+class GetLeafOpLowering : public OpRewritePattern<GetLeafOp> {
+public:
+  using OpRewritePattern<GetLeafOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GetLeafOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value tuple = op.getTuple();
+    int32_t leafIdx = op.getLeafIdx();
+
+    // Handle IntTuple case
+    if (auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType())) {
+      if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
+        return failure();
+
+      auto defOp = tuple.getDefiningOp<MakeIntTupleOp>();
+      if (!defOp)
+        return failure();
+
+      IntTupleAttr profile = intTupleTy.getAttr();
+      IntTupleAttr leafProfile = profile.at(leafIdx);
+      IntTupleType leafTy = IntTupleType::get(leafProfile);
+
+      // Calculate the dynamic element offset for this leaf
+      int32_t dyncOffset = 0;
+      for (int32_t i = 0; i < leafIdx; ++i) {
+        dyncOffset += profile.at(i).dyncLeafCount();
+      }
+      int32_t leafDyncCount = leafProfile.dyncLeafCount();
+
+      // Extract the dynamic elements for this leaf
+      SmallVector<Value> leafDyncElems;
+      for (int32_t i = 0; i < leafDyncCount; ++i) {
+        leafDyncElems.push_back(defOp.getDyncElems()[dyncOffset + i]);
+      }
+
+      Value newTuple = MakeIntTupleOp::create(rewriter, loc, leafTy, leafDyncElems);
+      rewriter.replaceOp(op, newTuple);
+      return success();
+    }
+
+    // Handle Layout case
+    if (auto layoutTy = dyn_cast<LayoutType>(tuple.getType())) {
+      if (!isNormalForm(cast<TypedValue<LayoutType>>(tuple)))
+        return failure();
+
+      auto defOp = tuple.getDefiningOp<MakeLayoutOp>();
+      if (!defOp)
+        return failure();
+
+      LayoutAttr profile = layoutTy.getAttr();
+      LayoutAttr leafProfile = profile.at(leafIdx);
+      LayoutType leafTy = LayoutType::get(op.getContext(), leafProfile);
+
+      // Get shape and stride from the defining MakeLayoutOp
+      Value shape = defOp.getShape();
+      Value stride = defOp.getStride();
+
+      auto shapeTy = cast<IntTupleType>(shape.getType());
+      auto strideTy = cast<IntTupleType>(stride.getType());
+
+      // Extract leaf from shape
+      IntTupleAttr shapeLeafProfile = shapeTy.getAttr().at(leafIdx);
+      Value shapeLeaf = GetLeafOp::create(rewriter, loc, shape, leafIdx);
+
+      // Extract leaf from stride
+      IntTupleAttr strideLeafProfile = strideTy.getAttr().at(leafIdx);
+      Value strideLeaf = GetLeafOp::create(rewriter, loc, stride, leafIdx);
+
+      Value newLayout = MakeLayoutOp::create(rewriter, loc, leafTy, shapeLeaf, strideLeaf);
+      rewriter.replaceOp(op, newLayout);
+      return success();
+    }
+
     return failure();
   }
 };
@@ -1029,27 +1131,53 @@ public:
 
   LogicalResult matchAndRewrite(SizeOp op, PatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    Value intTuple = op.getIntTuple();
+    Value input = op.getIntTuple();
 
-    auto intTupleTy = dyn_cast<IntTupleType>(intTuple.getType());
-    if (!intTupleTy)
-      return failure();
-    if (!isNormalForm(dyn_cast<TypedValue<IntTupleType>>(intTuple))) {
-      return failure();
+    if (auto intTupleTy = dyn_cast<IntTupleType>(input.getType())) {
+      if (!isNormalForm(dyn_cast<TypedValue<IntTupleType>>(input))) {
+        return failure();
+      }
+
+      auto resultTy = dyn_cast<IntTupleType>(op.getResult().getType());
+      if (!resultTy)
+        return failure();
+
+      // Use intTupleProduct to compute the size
+      IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+      IntTupleValueAdaptor inputAdaptor =
+          IntTupleValueAdaptor::create(builder, input, intTupleTy.getAttr());
+      IntTupleValueAdaptor productAdaptor = intTupleProduct(builder, inputAdaptor);
+
+      rewriter.replaceOp(op, builder.finalize(productAdaptor));
+      return success();
     }
 
-    auto resultTy = dyn_cast<IntTupleType>(op.getResult().getType());
-    if (!resultTy)
-      return failure();
+    if (auto layoutTy = dyn_cast<LayoutType>(input.getType())) {
+      Value shape = nullptr;
+      if (auto layoutVal = dyn_cast<TypedValue<LayoutType>>(input)) {
+        if (isNormalForm(layoutVal)) {
+          if (auto layoutOp = input.getDefiningOp<MakeLayoutOp>()) {
+            shape = layoutOp.getShape();
+          }
+        }
+      }
+      if (!shape) {
+        shape = GetShapeOp::create(rewriter, loc, input);
+      }
+      Value size = SizeOp::create(rewriter, loc, shape);
+      rewriter.replaceOp(op, size);
+      return success();
+    }
 
-    // Use intTupleProduct to compute the size
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
-    IntTupleValueAdaptor inputAdaptor =
-        IntTupleValueAdaptor::create(builder, intTuple, intTupleTy.getAttr());
-    IntTupleValueAdaptor productAdaptor = intTupleProduct(builder, inputAdaptor);
+    if (auto memrefTy = dyn_cast<fly::MemRefType>(input.getType())) {
+      Value layout = GetLayoutOp::create(rewriter, loc, input);
+      Value shape = GetShapeOp::create(rewriter, loc, layout);
+      Value size = SizeOp::create(rewriter, loc, shape);
+      rewriter.replaceOp(op, size);
+      return success();
+    }
 
-    rewriter.replaceOp(op, builder.finalize(productAdaptor));
-    return success();
+    return failure();
   }
 };
 
@@ -1201,11 +1329,8 @@ public:
   using OpRewritePattern<PrintOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(PrintOp op, PatternRewriter &rewriter) const override {
-    if (!op->getParentOfType<gpu::GPUFuncOp>()) {
-      return failure();
-    }
+    bool isGpuContext = op->getParentOfType<gpu::GPUFuncOp>() != nullptr;
 
-    // check all values are in normal form
     for (Value val : op.getValues()) {
       if (auto intTupleVal = dyn_cast<TypedValue<IntTupleType>>(val)) {
         if (!isNormalForm(intTupleVal)) {
@@ -1216,65 +1341,137 @@ public:
           return failure();
         }
       } else {
-        // TODO: handle other types
         continue;
       }
     }
 
     auto loc = op.getLoc();
+    std::string userFormat = op.getFormat().str();
     std::string format;
     SmallVector<Value> args;
-    bool first = true;
 
-    auto appendSeparator = [&]() {
-      if (!first) {
-        format += " ";
-      }
-      first = false;
-    };
-
-    for (Value val : op.getValues()) {
-      appendSeparator();
+    auto formatValueToString = [&](Value val) -> std::string {
+      std::string valFormat;
       if (auto tupleTy = dyn_cast<IntTupleType>(val.getType())) {
         if (tupleTy.getAttr().isStatic()) {
-          if (!appendIntTuplePrintfStatic(tupleTy.getAttr(), format)) {
-            return failure();
-          }
-          continue;
+          appendIntTuplePrintfStatic(tupleTy.getAttr(), valFormat);
+        } else {
+          IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+          IntTupleValueAdaptor tuple =
+              IntTupleValueAdaptor::create(builder, val, tupleTy.getAttr());
+          appendIntTuplePrintf(rewriter, loc, tuple, valFormat, args);
         }
-        IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
-        IntTupleValueAdaptor tuple = IntTupleValueAdaptor::create(builder, val, tupleTy.getAttr());
-        if (!appendIntTuplePrintf(rewriter, loc, tuple, format, args))
-          return failure();
       } else if (auto layoutTy = dyn_cast<LayoutType>(val.getType())) {
-        format += "";
         if (layoutTy.getAttr().isStatic()) {
-          if (!appendIntTuplePrintfStatic(layoutTy.getAttr().getShape(), format)) {
-            return failure();
-          }
-          format += ":";
-          if (!appendIntTuplePrintfStatic(layoutTy.getAttr().getStride(), format)) {
-            return failure();
-          }
-          continue;
+          appendIntTuplePrintfStatic(layoutTy.getAttr().getShape(), valFormat);
+          valFormat += ":";
+          appendIntTuplePrintfStatic(layoutTy.getAttr().getStride(), valFormat);
+        } else {
+          LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+          LayoutValueAdaptor layout(val, layoutTy.getAttr());
+          appendIntTuplePrintf(rewriter, loc, layoutBuilder.getShape(layout), valFormat, args);
+          valFormat += ":";
+          appendIntTuplePrintf(rewriter, loc, layoutBuilder.getStride(layout), valFormat, args);
         }
-        LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
-        LayoutValueAdaptor layout(val, layoutTy.getAttr());
-        if (!appendIntTuplePrintf(rewriter, loc, layoutBuilder.getShape(layout), format, args)) {
-          return failure();
-        }
-        format += ":";
-        if (!appendIntTuplePrintf(rewriter, loc, layoutBuilder.getStride(layout), format, args)) {
-          return failure();
-        }
-        continue;
       } else {
-        return failure();
+        appendScalarPrintfArg(rewriter, loc, val, valFormat, args);
+      }
+      return valFormat;
+    };
+
+    // For CPU context, we need to interleave text and values
+    // Collect text segments and argument indices
+    struct PrintSegment {
+      std::string text;
+      int argIndex = -1; // -1 means text only
+    };
+    SmallVector<PrintSegment> segments;
+
+    if (!userFormat.empty()) {
+      size_t valueIdx = 0;
+      size_t argIdx = 0;
+      size_t pos = 0;
+      while (pos < userFormat.size()) {
+        size_t placeholderPos = userFormat.find("{}", pos);
+        if (placeholderPos == std::string::npos) {
+          segments.push_back({userFormat.substr(pos), -1});
+          break;
+        }
+        if (placeholderPos > pos) {
+          segments.push_back({userFormat.substr(pos, placeholderPos - pos), -1});
+        }
+        if (valueIdx < op.getValues().size()) {
+          size_t argStartIdx = args.size();
+          std::string staticFormat = formatValueToString(op.getValues()[valueIdx]);
+          size_t numArgsAdded = args.size() - argStartIdx;
+          if (numArgsAdded == 0 && !staticFormat.empty()) {
+            // Static value: add as text segment
+            segments.push_back({staticFormat, -1});
+          } else {
+            for (size_t i = 0; i < numArgsAdded; ++i) {
+              if (i > 0) {
+                segments.push_back({", ", -1});
+              }
+              segments.push_back({"", static_cast<int>(argStartIdx + i)});
+            }
+          }
+          valueIdx++;
+        }
+        pos = placeholderPos + 2;
+      }
+    } else {
+      bool first = true;
+      for (Value val : op.getValues()) {
+        if (!first) {
+          segments.push_back({" ", -1});
+        }
+        first = false;
+        size_t argStartIdx = args.size();
+        std::string staticFormat = formatValueToString(val);
+        size_t numArgsAdded = args.size() - argStartIdx;
+        if (numArgsAdded == 0 && !staticFormat.empty()) {
+          // Static value: add as text segment
+          segments.push_back({staticFormat, -1});
+        } else {
+          for (size_t i = 0; i < numArgsAdded; ++i) {
+            if (i > 0) {
+              segments.push_back({", ", -1});
+            }
+            segments.push_back({"", static_cast<int>(argStartIdx + i)});
+          }
+        }
       }
     }
 
-    format += "\n";
-    gpu::PrintfOp::create(rewriter, loc, rewriter.getStringAttr(format), args);
+    if (isGpuContext) {
+      // For GPU, build printf format string
+      for (const auto &seg : segments) {
+        if (seg.argIndex >= 0) {
+          castPrintfArg(rewriter, loc, args[seg.argIndex], format);
+        } else {
+          format += seg.text;
+        }
+      }
+      format += "\n";
+      gpu::PrintfOp::create(rewriter, loc, rewriter.getStringAttr(format), args);
+    } else {
+      // For CPU, print segments in order
+      for (size_t i = 0; i < segments.size(); ++i) {
+        const auto &seg = segments[i];
+        if (seg.argIndex >= 0) {
+          bool isLast = (i == segments.size() - 1);
+          auto punctuation =
+              isLast ? vector::PrintPunctuation::NewLine : vector::PrintPunctuation::NoPunctuation;
+          vector::PrintOp::create(rewriter, loc, args[seg.argIndex], punctuation);
+        } else if (!seg.text.empty()) {
+          vector::PrintOp::create(rewriter, loc, seg.text);
+        }
+      }
+      if (segments.empty() || segments.back().argIndex < 0) {
+        vector::PrintOp::create(rewriter, loc, vector::PrintPunctuation::NewLine);
+      }
+    }
+
     rewriter.eraseOp(op);
     return success();
   }
@@ -1305,7 +1502,7 @@ public:
     RewritePatternSet patterns(context);
 
     patterns.add<GetShapeLowering, GetStrideLowering, GetLayoutLowering>(context);
-    patterns.add<GetScalarLowering, SizeOpLowering>(context);
+    patterns.add<GetLeafOpLowering, GetScalarLowering, SizeOpLowering>(context);
     patterns.add<SliceLowering, Crd2IdxLowering>(context);
     patterns.add<IntTupleAddOpLowering, IntTupleSubOpLowering, IntTupleMulOpLowering,
                  IntTupleDivOpLowering>(context);
