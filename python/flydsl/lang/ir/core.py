@@ -21,6 +21,7 @@ from ..._mlir.dialects.fly import (
     MemRefType,
     CopyAtomUniversalCopyType,
     MmaAtomUniversalFMAType,
+    DLTensorAdaptor,
 )
 
 from ..._mlir.dialects.fly_rocdl import (
@@ -371,18 +372,13 @@ def cooperative_copy(tiled_copy, partition_idx, src, dst, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def print_op(*values, format_str="", loc=None, ip=None):
-    """
-    Print operation for debugging. Supports IntTuple and other value types.
-    Lowers to printf for host code or gpu.printf for device code.
-
-    Example:
-        fx.print_op(int_tuple)
-        fx.print_op(layout)
-        fx.print_op(value1, value2, value3)
-        fx.print_op(value1, format_str="v1=%d\n")
-    """
-    return _fly_ir.print_(format_str, list(values), loc=loc, ip=ip)
+def print_op(*args, format_str="", loc=None, ip=None):
+    if len(args) > 0 and isinstance(args[0], str):
+        format_str = args[0]
+        values = list(args[1:])
+    else:
+        values = list(args)
+    return _fly_ir.print_(format_str, values, loc=loc, ip=ip)
 
 
 # ==============================================================================
