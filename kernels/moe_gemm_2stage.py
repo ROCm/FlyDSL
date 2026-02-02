@@ -2578,12 +2578,15 @@ class _MoeGemm2ReduceWrapper:
         import torch
         required_size = tokens * self._topk * self._model_dim
         if self._intermediate is None or self._intermediate_capacity < required_size:
-            self._intermediate = torch.empty(
+            self._intermediate = torch.zeros(
                 tokens * self._topk, self._model_dim,
                 device=device,
                 dtype=self._get_torch_dtype()
             )
             self._intermediate_capacity = required_size
+        else:
+            # Zero out the portion we're about to use when reusing buffer
+            self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
     def __call__(
