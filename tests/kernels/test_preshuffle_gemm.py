@@ -378,7 +378,6 @@ def test_mfma_w4_flir_preshuffle(
     if a_dtype == "fp4":
         c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
     else:
-        # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
         c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # Keep tensors contiguous for predictable buffer descriptor shapes.
@@ -388,22 +387,6 @@ def test_mfma_w4_flir_preshuffle(
     # Preshuffle B to CK/aiter layout.
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
-
-    # Reference (dequant + matmul).
-    # c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
-
-    """
-    # test with quant date
-    c_ref = run_torch(a_convert.reshape([-1, K]), b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
-    """
-    c_ref = run_torch(a_convert.reshape([-1, K])[:M], b_convert.reshape([-1, K])[:N], 1, 1, bias=None, dtype=torch.float32)
-    # c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
-
-    # c_ref = run_torch(a_fp32, b_convert.reshape([-1, K]), 1, 1, bias=None, dtype=torch.float32)
-    # b_dequant = b_convert.reshape(N * K // 32, -1)
-    # b_scale = scale_b.reshape(N * K // 32, -1)
-    # b_dequant  = b_dequant * b_scale.to(torch.float)
-    # c_ref = run_torch(a_fp32, b_dequant.reshape(N, K), 1, 1, bias=None, dtype=torch.float32)
 
     # Run kernel (f16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
@@ -439,35 +422,6 @@ def test_mfma_w4_flir_preshuffle(
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
-
-    # if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
-    #     print("-" * 40)
-    #     print("Running Aiter Benchmark...")
-    #     try:
-    #         def launch_aiter(a, b, sa, sb):
-    #             return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
-    #
-    #         c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b)
-    #         verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
-    #
-    #         tflops_aiter = flops / (us1 / 1e6) / 1e12
-    #         bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
-    #         print(
-    #             f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
-    #         )
-    #         print(
-    #             f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
-    #         )
-    #         print("-" * 40)
-    #     except Exception as e:
-    #         # Best-effort only: aiter can be importable but fail to load its JIT .so deps.
-    #         msg = str(e).splitlines()[0] if str(e) else repr(e)
-    #         print(f"Skipping Aiter benchmark (not runnable here): {msg}")
-    #         print("-" * 40)
-    # elif HAS_AITER and (not bool(run_aiter_bench)):
-    #     print("-" * 40)
-    #     print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
-    #     print("-" * 40)
 
 
 if __name__ == "__main__":
