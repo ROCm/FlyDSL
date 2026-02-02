@@ -446,6 +446,25 @@ def index_cast(target_type: Type, value: Union["ArithValue", Value, int], *, loc
     result = _arith.IndexCastOp(target_type, val, loc=loc).result
     return ArithValue(result)
 
+def index_cast_ui(target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+    """Cast between index and unsigned integer types.
+
+    Args:
+        target_type: Target type (index or unsigned integer type)
+        value: Value to cast
+        loc: Optional source location
+
+    Returns:
+        ArithValue wrapping the cast result
+    """
+    loc = maybe_default_loc(loc)
+    if isinstance(value, int):
+        value = constant(value, loc=loc)
+    val = _unwrap_value(value)
+    result = _arith.IndexCastUIOp(target_type, val, loc=loc).result
+    return ArithValue(result)
+
+
 def trunc_f(target_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
     """Truncate floating point value to narrower type (e.g., f32 -> f16).
     
@@ -886,7 +905,7 @@ from _mlir.dialects.arith import (
 __all__ = [
     "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
     "maximum", "minimum", "select", "extf", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
-    "andi", "ori", "xori", "shrui", "shli", "index_cast", "trunc_f",
+    "andi", "ori", "xori", "shrui", "shli", "index_cast", "index_cast_ui", "trunc_f",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
     "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",
