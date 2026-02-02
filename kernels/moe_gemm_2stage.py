@@ -37,6 +37,8 @@ from kernels.mfma_preshuffle_pipeline import (
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 
 
+
+
 @functools.lru_cache(maxsize=1024)
 def compile_moe_gemm1(
     *,
@@ -2322,13 +2324,16 @@ def compile_moe_reduction(
     topk: int,
     model_dim: int,
     dtype_str: str = "f16",
+    use_mask: bool = False,
 ):
     """Compile a reduction kernel that sums over the topk dimension.
 
     Input:  X [tokens, topk, model_dim]
+            valid_mask [tokens, topk] (optional, if use_mask=True)
     Output: Y [tokens, model_dim]
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
+    When use_mask=True, only sums slots where valid_mask[t,k]=1.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
     """
     gpu_arch = get_hip_arch()
@@ -2342,142 +2347,301 @@ def compile_moe_reduction(
 
     _state = {}
 
-    class _MoeReduction(flir.MlirModule):
-        GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}"
-        GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+    if not use_mask:
+        # Non-masked version (original behavior)
+        class _MoeReduction(flir.MlirModule):
+            GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}"
+            GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
-        def init_gpu_module(self):
-            if dtype_str == "f32":
-                elem_type = T.f32()
-            elif dtype_str == "f16":
-                elem_type = T.f16()
-            elif dtype_str == "bf16":
-                elem_type = ir.BF16Type.get()
-            else:
-                raise ValueError(f"Unsupported dtype: {dtype_str}")
+            def init_gpu_module(self):
+                if dtype_str == "f32":
+                    elem_type = T.f32()
+                elif dtype_str == "f16":
+                    elem_type = T.f16()
+                elif dtype_str == "bf16":
+                    elem_type = ir.BF16Type.get()
+                else:
+                    raise ValueError(f"Unsupported dtype: {dtype_str}")
 
-            compute_type = T.f32()
-            _state["elem_type"] = elem_type
-            _state["compute_type"] = compute_type
+                compute_type = T.f32()
+                _state["elem_type"] = elem_type
+                _state["compute_type"] = compute_type
 
-        @flir.kernel
-        def moe_reduction_kernel(
-            self: flir.T.i64,
-            X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
-            Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
-            m_tokens: lambda: T.index(),
-        ):
-            from _mlir.dialects import vector as mlir_vector
+            @flir.kernel
+            def moe_reduction_kernel(
+                self: flir.T.i64,
+                X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+                Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+                m_tokens: lambda: T.index(),
+            ):
+                from _mlir.dialects import vector as mlir_vector
 
-            token_idx = flir.const_index(flir.block_idx("x"))
-            tid = flir.const_index(flir.thread_idx("x"))
+                token_idx = flir.const_index(flir.block_idx("x"))
+                tid = flir.const_index(flir.thread_idx("x"))
 
-            elem_type = _state["elem_type"]
-            compute_type = _state["compute_type"]
+                elem_type = _state["elem_type"]
+                compute_type = _state["compute_type"]
 
-            tensor_X = flir.make_tensor(X, shape=(m_tokens, topk, model_dim), strides=(topk * model_dim, model_dim, 1))
-            tensor_Y = flir.make_tensor(Y, shape=(m_tokens, model_dim), strides=(model_dim, 1))
+                tensor_X = flir.make_tensor(X, shape=(m_tokens, topk, model_dim), strides=(topk * model_dim, model_dim, 1))
+                tensor_Y = flir.make_tensor(Y, shape=(m_tokens, model_dim), strides=(model_dim, 1))
 
-            c0_idx = flir.const_index(0)
-            tile_cols = BLOCK_SIZE * VEC_WIDTH
-            gX = flir.zipped_divide(tensor_X, (1, 1, tile_cols))
-            gY = flir.zipped_divide(tensor_Y, (1, tile_cols))
+                c0_idx = flir.const_index(0)
+                tile_cols = BLOCK_SIZE * VEC_WIDTH
+                gX = flir.zipped_divide(tensor_X, (1, 1, tile_cols))
+                gY = flir.zipped_divide(tensor_Y, (1, tile_cols))
 
-            copy_atom_load = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
-            copy_atom_store = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
-            tiled_copy_X = flir.make_tiled_copy_tv(
-                copy_atom_load,
-                flir.make_ordered_layout((1, 1, BLOCK_SIZE), order=(2, 1, 0)),
-                flir.make_ordered_layout((1, 1, VEC_WIDTH), order=(2, 1, 0)),
-                thr_shape=(1, 1, BLOCK_SIZE),
-                val_shape=(1, 1, VEC_WIDTH),
-            )
-            tiled_copy_Y = flir.make_tiled_copy_tv(
-                copy_atom_store,
-                flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0)),
-                flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0)),
-                thr_shape=(1, BLOCK_SIZE),
-                val_shape=(1, VEC_WIDTH),
-            )
+                copy_atom_load = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+                copy_atom_store = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+                tiled_copy_X = flir.make_tiled_copy_tv(
+                    copy_atom_load,
+                    flir.make_ordered_layout((1, 1, BLOCK_SIZE), order=(2, 1, 0)),
+                    flir.make_ordered_layout((1, 1, VEC_WIDTH), order=(2, 1, 0)),
+                    thr_shape=(1, 1, BLOCK_SIZE),
+                    val_shape=(1, 1, VEC_WIDTH),
+                )
+                tiled_copy_Y = flir.make_tiled_copy_tv(
+                    copy_atom_store,
+                    flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0)),
+                    flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0)),
+                    thr_shape=(1, BLOCK_SIZE),
+                    val_shape=(1, VEC_WIDTH),
+                )
 
-            thr_copy_X = tiled_copy_X.get_slice(tid)
-            thr_copy_Y = tiled_copy_Y.get_slice(tid)
+                thr_copy_X = tiled_copy_X.get_slice(tid)
+                thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-            step = BLOCK_SIZE * VEC_WIDTH
-            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+                step = BLOCK_SIZE * VEC_WIDTH
+                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
 
-            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-            vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
+                vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+                vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
 
-            c_model_dim = arith.index(model_dim).value
+                c_model_dim = arith.index(model_dim).value
 
-            for base_idx_int in range_constexpr(0, model_dim, step):
-                c_base = arith.index(base_idx_int)
-                curr_idx = (c_base + thread_offset_base).value
+                for base_idx_int in range_constexpr(0, model_dim, step):
+                    c_base = arith.index(base_idx_int)
+                    curr_idx = (c_base + thread_offset_base).value
 
-                # Bounds check
-                c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
-                in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
+                    # Bounds check
+                    c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+                    in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
 
-                tile_i = base_idx_int // tile_cols
+                    tile_i = base_idx_int // tile_cols
 
-                _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
-                with _if_in_bounds.then():
-                    c_zero_f32 = arith.constant(0.0, type=compute_type)
-                    acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
+                    _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
+                    with _if_in_bounds.then():
+                        c_zero_f32 = arith.constant(0.0, type=compute_type)
+                        acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
 
-                    for k in range_constexpr(topk):
-                        blkX = gX[(token_idx, k, tile_i)]
-                        thrX = thr_copy_X.partition_S(blkX)
-                        frgX = flir.make_fragment_like(thrX, elem_type)
+                        for k in range_constexpr(topk):
+                            blkX = gX[(token_idx, k, tile_i)]
+                            thrX = thr_copy_X.partition_S(blkX)
+                            frgX = flir.make_fragment_like(thrX, elem_type)
+                            flir.copy(
+                                tiled_copy_X,
+                                thrX,
+                                frgX,
+                                nontemporal=USE_NONTEMPORAL,
+                                alignment=VEC_ALIGN,
+                            )
+                            vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+                            if dtype_str in ("f16", "bf16"):
+                                vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
+                            else:
+                                vec_val = vec_val_e
+                            acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+
+                        if dtype_str in ("f16", "bf16"):
+                            out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
+                        else:
+                            out_vec = acc
+
+                        blkY = gY[(token_idx, tile_i)]
+                        thrY = thr_copy_Y.partition_S(blkY)
+                        frgY = flir.make_fragment_like(thrY, elem_type)
+                        mlir_vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
                         flir.copy(
-                            tiled_copy_X,
-                            thrX,
-                            frgX,
+                            tiled_copy_Y,
+                            frgY,
+                            thrY,
                             nontemporal=USE_NONTEMPORAL,
                             alignment=VEC_ALIGN,
                         )
-                        vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+
+            @flir.jit
+            def __call__(
+                self: flir.T.i64,
+                X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+                Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+                m_tokens: lambda: T.index(),
+            ):
+                from flydsl.dialects.ext import arith as arith_ext
+                c1 = arith.as_value(arith_ext.index(1))
+                gx = arith.as_value(m_tokens)
+                bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
+                
+                flir.gpu_ext.LaunchFuncOp(
+                    [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
+                    grid_size=(gx, c1, c1),
+                    block_size=(bx, c1, c1),
+                    kernel_operands=[X, Y, m_tokens],
+                )
+
+    else:
+        # Masked version
+        class _MoeReduction(flir.MlirModule):
+            GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}_masked"
+            GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
+
+            def init_gpu_module(self):
+                if dtype_str == "f32":
+                    elem_type = T.f32()
+                elif dtype_str == "f16":
+                    elem_type = T.f16()
+                elif dtype_str == "bf16":
+                    elem_type = ir.BF16Type.get()
+                else:
+                    raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+                compute_type = T.f32()
+                _state["elem_type"] = elem_type
+                _state["compute_type"] = compute_type
+
+            @flir.kernel
+            def moe_reduction_kernel(
+                self: flir.T.i64,
+                X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+                Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+                valid_mask: lambda: T.memref(DYN, topk, T.i8()),
+                m_tokens: lambda: T.index(),
+            ):
+                from _mlir.dialects import vector as mlir_vector
+
+                token_idx = flir.const_index(flir.block_idx("x"))
+                tid = flir.const_index(flir.thread_idx("x"))
+
+                elem_type = _state["elem_type"]
+                compute_type = _state["compute_type"]
+
+                tensor_X = flir.make_tensor(X, shape=(m_tokens, topk, model_dim), strides=(topk * model_dim, model_dim, 1))
+                tensor_Y = flir.make_tensor(Y, shape=(m_tokens, model_dim), strides=(model_dim, 1))
+
+                c0_idx = flir.const_index(0)
+                tile_cols = BLOCK_SIZE * VEC_WIDTH
+                gX = flir.zipped_divide(tensor_X, (1, 1, tile_cols))
+                gY = flir.zipped_divide(tensor_Y, (1, tile_cols))
+
+                copy_atom_load = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+                copy_atom_store = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
+                tiled_copy_X = flir.make_tiled_copy_tv(
+                    copy_atom_load,
+                    flir.make_ordered_layout((1, 1, BLOCK_SIZE), order=(2, 1, 0)),
+                    flir.make_ordered_layout((1, 1, VEC_WIDTH), order=(2, 1, 0)),
+                    thr_shape=(1, 1, BLOCK_SIZE),
+                    val_shape=(1, 1, VEC_WIDTH),
+                )
+                tiled_copy_Y = flir.make_tiled_copy_tv(
+                    copy_atom_store,
+                    flir.make_ordered_layout((1, BLOCK_SIZE), order=(1, 0)),
+                    flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0)),
+                    thr_shape=(1, BLOCK_SIZE),
+                    val_shape=(1, VEC_WIDTH),
+                )
+
+                thr_copy_X = tiled_copy_X.get_slice(tid)
+                thr_copy_Y = tiled_copy_Y.get_slice(tid)
+
+                step = BLOCK_SIZE * VEC_WIDTH
+                thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+
+                vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
+                vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
+
+                c_model_dim = arith.index(model_dim).value
+                i8 = T.i8()  # For mask comparison
+
+                for base_idx_int in range_constexpr(0, model_dim, step):
+                    c_base = arith.index(base_idx_int)
+                    curr_idx = (c_base + thread_offset_base).value
+
+                    # Bounds check
+                    c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+                    in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
+
+                    tile_i = base_idx_int // tile_cols
+
+                    _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
+                    with _if_in_bounds.then():
+                        c_zero_f32 = arith.constant(0.0, type=compute_type)
+                        acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
+
+                        for k in range_constexpr(topk):
+                            # Load mask value (1 = valid, 0 = invalid)
+                            k_idx = arith.constant(k, index=True)
+                            mask_val_i8 = flir.memref.load(valid_mask, [token_idx, arith.as_value(k_idx)])
+                            
+                            # Convert mask to f32 (0.0 or 1.0)
+                            mask_f32 = flir.arith.sitofp(compute_type, arith.as_value(mask_val_i8))
+                            mask_splat = mlir_vector.splat(vec_type_f32, arith.as_value(mask_f32))
+                            
+                            # Load data (always)
+                            blkX = gX[(token_idx, k, tile_i)]
+                            thrX = thr_copy_X.partition_S(blkX)
+                            frgX = flir.make_fragment_like(thrX, elem_type)
+                            flir.copy(
+                                tiled_copy_X,
+                                thrX,
+                                frgX,
+                                nontemporal=USE_NONTEMPORAL,
+                                alignment=VEC_ALIGN,
+                            )
+                            vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+                            if dtype_str in ("f16", "bf16"):
+                                vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
+                            else:
+                                vec_val = vec_val_e
+                            
+                            # Multiply by mask (zeros out invalid slots)
+                            masked_val = (arith.ArithValue(vec_val) * arith.ArithValue(mask_splat)).value
+                            acc = (arith.ArithValue(acc) + arith.ArithValue(masked_val)).value
+
                         if dtype_str in ("f16", "bf16"):
-                            vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
+                            out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
                         else:
-                            vec_val = vec_val_e
-                        acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+                            out_vec = acc
 
-                    if dtype_str in ("f16", "bf16"):
-                        out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
-                    else:
-                        out_vec = acc
+                        blkY = gY[(token_idx, tile_i)]
+                        thrY = thr_copy_Y.partition_S(blkY)
+                        frgY = flir.make_fragment_like(thrY, elem_type)
+                        mlir_vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                        flir.copy(
+                            tiled_copy_Y,
+                            frgY,
+                            thrY,
+                            nontemporal=USE_NONTEMPORAL,
+                            alignment=VEC_ALIGN,
+                        )
 
-                    blkY = gY[(token_idx, tile_i)]
-                    thrY = thr_copy_Y.partition_S(blkY)
-                    frgY = flir.make_fragment_like(thrY, elem_type)
-                    mlir_vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
-                    flir.copy(
-                        tiled_copy_Y,
-                        frgY,
-                        thrY,
-                        nontemporal=USE_NONTEMPORAL,
-                        alignment=VEC_ALIGN,
-                    )
+            @flir.jit
+            def __call__(
+                self: flir.T.i64,
+                X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
+                Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+                valid_mask: lambda: T.memref(DYN, topk, T.i8()),
+                m_tokens: lambda: T.index(),
+            ):
+                from flydsl.dialects.ext import arith as arith_ext
+                c1 = arith.as_value(arith_ext.index(1))
+                gx = arith.as_value(m_tokens)
+                bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
+                
+                flir.gpu_ext.LaunchFuncOp(
+                    [f"moe_reduction_{topk}_{model_dim}_{dtype_str}_masked", "moe_reduction_kernel"],
+                    grid_size=(gx, c1, c1),
+                    block_size=(bx, c1, c1),
+                    kernel_operands=[X, Y, valid_mask, m_tokens],
+                )
 
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
-            Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
-            m_tokens: lambda: T.index(),
-        ):
-            from flydsl.dialects.ext import arith as arith_ext
-            c1 = arith.as_value(arith_ext.index(1))
-            gx = arith.as_value(m_tokens)
-            bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
-            flir.gpu_ext.LaunchFuncOp(
-                [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
-                grid_size=(gx, c1, c1),
-                block_size=(bx, c1, c1),
-                kernel_operands=[X, Y, m_tokens],
-            )
 
     m = _MoeReduction()
     exe = flydsl.compile(m)
@@ -2551,12 +2715,16 @@ class _MoeGemm2ReduceWrapper:
         topk: int,
         model_dim: int,
         out_dtype_str: str = "f16",
+        use_mask: bool = False,
+        valid_mask = None,
     ):
         self._gemm2_exe = gemm2_exe
         self._reduce_exe = reduce_exe
         self._topk = topk
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
+        self._use_mask = use_mask
+        self._valid_mask = valid_mask
         
         # Lazy-allocated intermediate buffer
         self._intermediate = None
@@ -2578,15 +2746,18 @@ class _MoeGemm2ReduceWrapper:
         import torch
         required_size = tokens * self._topk * self._model_dim
         if self._intermediate is None or self._intermediate_capacity < required_size:
-            self._intermediate = torch.zeros(
+            # Use torch.empty instead of torch.zeros for better performance
+            # GEMM2 will overwrite all values, so initialization not needed
+            self._intermediate = torch.empty(
                 tokens * self._topk, self._model_dim,
                 device=device,
                 dtype=self._get_torch_dtype()
             )
             self._intermediate_capacity = required_size
-        else:
-            # Zero out the portion we're about to use when reusing buffer
-            self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
+        # else:
+        #     # Zero out the portion we're about to use when reusing buffer
+        #     # Commented out: GEMM2 overwrites all values, zeroing not needed
+        #     self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
     def __call__(
@@ -2621,7 +2792,13 @@ class _MoeGemm2ReduceWrapper:
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        self._reduce_exe(X, Y, tokens_in)
+        
+        if self._use_mask:
+            # Masked reduction for EP mode
+            self._reduce_exe(X, Y, self._valid_mask, tokens_in)
+        else:
+            # Non-masked reduction
+            self._reduce_exe(X, Y, tokens_in)
 
     @property
     def mode(self) -> str:
@@ -2646,6 +2823,7 @@ def compile_moe_gemm2_ex(
     mode: str = MoeGemm2Mode.AUTO,
     tokens_hint: int | None = None,
     reduce_rules: list | None = None,
+    valid_mask = None,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -2684,6 +2862,9 @@ def compile_moe_gemm2_ex(
 
     # Compile based on mode
     if actual_mode == MoeGemm2Mode.REDUCE:
+        # Determine if we need masked reduction
+        use_mask = valid_mask is not None
+        
         # Compile GEMM2 with accumulate=False
         gemm2_exe = compile_moe_gemm2(
             model_dim=model_dim,
@@ -2699,7 +2880,7 @@ def compile_moe_gemm2_ex(
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
         )
-        # Compile reduction kernel
+        # Compile reduction kernel with masking support
         out_s = str(out_dtype).strip().lower()
         if out_s in ("f16", "fp16", "half"):
             dtype_str = "f16"
@@ -2711,6 +2892,7 @@ def compile_moe_gemm2_ex(
             topk=topk,
             model_dim=model_dim,
             dtype_str=dtype_str,
+            use_mask=use_mask,
         )
         return _MoeGemm2ReduceWrapper(
             gemm2_exe=gemm2_exe,
@@ -2718,6 +2900,8 @@ def compile_moe_gemm2_ex(
             topk=topk,
             model_dim=model_dim,
             out_dtype_str=dtype_str,
+            use_mask=use_mask,
+            valid_mask=valid_mask,
         )
     else:
         # Compile GEMM2 with accumulate=True (atomic mode)
