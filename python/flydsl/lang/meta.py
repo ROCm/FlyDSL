@@ -11,10 +11,17 @@ def dsl_api_wrapper(op):
         if loc is None:
             frame = inspect.currentframe().f_back
             frameInfo = inspect.getframeinfo(frame)
+            # Compatible with different Python versions: positions attribute is available in Python 3.11+
+            if hasattr(frameInfo, 'positions') and frameInfo.positions:
+                lineno = frameInfo.positions.lineno
+                col_offset = frameInfo.positions.col_offset
+            else:
+                lineno = frameInfo.lineno
+                col_offset = 0  # Older versions don't provide column offset information
             file_loc = ir.Location.file(
                 frameInfo.filename,
-                frameInfo.positions.lineno,
-                frameInfo.positions.col_offset,
+                lineno,
+                col_offset,
             )
             loc = ir.Location.name(
                 (
