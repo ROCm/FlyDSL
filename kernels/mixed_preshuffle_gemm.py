@@ -611,13 +611,12 @@ def compile_mxfp4_preshuffle_gemm(
                                                 # op_sel_a + scale_a (1.0f as i32 bits)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
-                                                # 
+                                                #
                                                 # op_sel_b + scale_b (1.0f as i32 bits)
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],
                                         )
-
                 return current_accs_list, None
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
@@ -848,7 +847,7 @@ def compile_mxfp4_preshuffle_gemm(
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
             # We keep LDS laid out as (tile_m, tile_k) in element units.
-            lds_tile_elems = arith.constant(tile_m * tile_k, index=True)
+            lds_tile_elems = arith.constant(tile_m * tile_k // a_elem_vec_pack, index=True)
             lds_base0 = arith.constant(0, index=True)
             lds_base1 = lds_tile_elems
 

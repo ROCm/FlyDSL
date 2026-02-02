@@ -823,7 +823,7 @@ def run_moe_stage2(
             inter_dim,
             int(blocks),
         )
-
+ 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
