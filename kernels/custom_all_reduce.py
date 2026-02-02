@@ -2024,7 +2024,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     # Max size (bytes) for AIter.
     max_size = int(os.environ.get("FLYDSL_AITER_MAX_SIZE_BYTES", str(64 * 1024 * 1024)))
 
-    from aiter.dist.custom_all_reduce import CustomAllreduce as _AIterCustomAllreduce  # type: ignore
+    from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as _AIterCustomAllreduce  # type: ignore
 
     aiter_ar = _AIterCustomAllreduce(_FLYDSL_AITER_GLOO_GROUP, dev, max_size=max_size)  # type: ignore[arg-type,name-defined]
 

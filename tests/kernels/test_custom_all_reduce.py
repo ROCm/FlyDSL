@@ -165,7 +165,11 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
             )
 
         # Compile/warmup once (not included in steady-state timings).
-        fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+        if hasattr(fa, 'all_reduce_reg'):
+            fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+        else:
+            # aiter implementation uses all_reduce with registered=True
+            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
         torch.cuda.synchronize()
 
         kernel_ms_list = []
@@ -173,7 +177,10 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         if profile:
             # Extra warmup iterations (excluded).
             for _ in range(warmup):
-                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+                if hasattr(fa, 'all_reduce_reg'):
+                    fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+                else:
+                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
             torch.cuda.synchronize()
 
             start_evt = torch.cuda.Event(enable_timing=True)
@@ -183,7 +190,10 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
                 t0 = time.perf_counter()
 
                 start_evt.record()
-                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+                if hasattr(fa, 'all_reduce_reg'):
+                    fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+                else:
+                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
                 end_evt.record()
                 torch.cuda.synchronize()
 
@@ -192,7 +202,10 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
                 e2e_ms_list.append(float((t1 - t0) * 1e3))
         else:
             # Non-profiling path: run once (keep correctness coverage without spending time).
-            fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+            if hasattr(fa, 'all_reduce_reg'):
+                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+            else:
+                fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
             torch.cuda.synchronize()
 
         torch.cuda.synchronize()
@@ -282,7 +295,10 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     if world_size == 1:
         x = torch.randn((N,), device="cuda", dtype=dtype).contiguous()
         y = torch.empty((N,), device="cuda", dtype=dtype)
-        fa.all_reduce_reg(x, y, open_fp8_quant=False)
+        if hasattr(fa, 'all_reduce_reg'):
+            fa.all_reduce_reg(x, y, open_fp8_quant=False)
+        else:
+            fa.all_reduce(x, out=y, open_fp8_quant=False, registered=True)
         torch.cuda.synchronize()
         max_err = (y.to(torch.float32) - x.to(torch.float32)).abs().max().item()
         assert max_err < atol, f"max_err={max_err:.3e} >= atol={atol}"
@@ -296,7 +312,10 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     else:
         xs = [torch.randn((N,), device="cuda", dtype=dtype).contiguous() for _ in range(world_size)]
         y = torch.empty((N,), device="cuda", dtype=dtype)
-        fa.all_reduce_reg(xs, y, open_fp8_quant=False)
+        if hasattr(fa, 'all_reduce_reg'):
+            fa.all_reduce_reg(xs, y, open_fp8_quant=False)
+        else:
+            fa.all_reduce(xs, out=y, open_fp8_quant=False, registered=True)
         torch.cuda.synchronize()
         expected = torch.stack(xs, dim=0).to(torch.float32).sum(dim=0)
         max_err = (y.to(torch.float32) - expected).abs().max().item()
