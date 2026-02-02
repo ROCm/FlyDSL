@@ -730,7 +730,6 @@ def run_moe_stage2(
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
-
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
     if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype == "fp16"):
         a2_q = a2_fp8_in
@@ -790,8 +789,7 @@ def run_moe_stage2(
     out_s = str(out_dtype).strip().lower()
     if out_s not in ("f16", "fp16", "half"):
         raise ValueError(f"out_dtype must be 'f16' (stage2 f32 path removed), got {out_dtype!r}")
-    # out_torch_dtype = torch.float16
-    out_torch_dtype = torch.bfloat16
+    out_torch_dtype = torch.float16
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -825,7 +823,7 @@ def run_moe_stage2(
             inter_dim,
             int(blocks),
         )
-    
+ 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
