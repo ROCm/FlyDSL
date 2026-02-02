@@ -996,6 +996,7 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
+@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1008,8 +1009,9 @@ def test_moe_gemm_2stage(
     tile_n2: int,
     tile_k2: int,
     doweight_stage1: bool,
-    *,
     in_dtype: str,
+    use_reduce: bool,
+    *,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -1017,7 +1019,6 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
-    use_reduce: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
