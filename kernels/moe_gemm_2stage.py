@@ -2559,6 +2559,16 @@ def compile_moe_reduction(
 
                 c_model_dim = arith.index(model_dim).value
                 i8 = T.i8()  # For mask comparison
+                c_zero_i8 = arith.constant(0, type=T.i8())
+                
+                # OPTIMIZATION: Load all masks once before model_dim loop
+                # Masks don't depend on model_dim, so we can hoist them out
+                mask_values = []
+                for k in range_constexpr(topk):
+                    k_idx = arith.constant(k, index=True)
+                    mask_val_i8 = flir.memref.load(valid_mask, [token_idx, arith.as_value(k_idx)])
+                    is_valid = arith.cmpu(mask_val_i8, c_zero_i8, "ne")
+                    mask_values.append(is_valid)
 
                 for base_idx_int in range_constexpr(0, model_dim, step):
                     c_base = arith.index(base_idx_int)
@@ -2574,36 +2584,43 @@ def compile_moe_reduction(
                     with _if_in_bounds.then():
                         c_zero_f32 = arith.constant(0.0, type=compute_type)
                         acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
-
+                        
+                        # Use pre-loaded masks (no redundant loads!)
                         for k in range_constexpr(topk):
-                            # Load mask value (1 = valid, 0 = invalid)
-                            k_idx = arith.constant(k, index=True)
-                            mask_val_i8 = flir.memref.load(valid_mask, [token_idx, arith.as_value(k_idx)])
+                            is_valid = mask_values[k]  # ✓ Reuse loaded mask
                             
-                            # Convert mask to f32 (0.0 or 1.0)
-                            mask_f32 = flir.arith.sitofp(compute_type, arith.as_value(mask_val_i8))
-                            mask_splat = mlir_vector.splat(vec_type_f32, arith.as_value(mask_f32))
+                            # Use IfOp with results to conditionally update accumulator
+                            if_op = scf.IfOp(arith.as_value(is_valid), [vec_type_f32], hasElse=True)
                             
-                            # Load data (always)
-                            blkX = gX[(token_idx, k, tile_i)]
-                            thrX = thr_copy_X.partition_S(blkX)
-                            frgX = flir.make_fragment_like(thrX, elem_type)
-                            flir.copy(
-                                tiled_copy_X,
-                                thrX,
-                                frgX,
-                                nontemporal=USE_NONTEMPORAL,
-                                alignment=VEC_ALIGN,
-                            )
-                            vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
-                            if dtype_str in ("f16", "bf16"):
-                                vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
-                            else:
-                                vec_val = vec_val_e
+                            # Then block: valid slot - load and accumulate
+                            with ir.InsertionPoint(if_op.then_block):
+                                # Load data only for valid slots
+                                blkX = gX[(token_idx, k, tile_i)]
+                                thrX = thr_copy_X.partition_S(blkX)
+                                frgX = flir.make_fragment_like(thrX, elem_type)
+                                flir.copy(
+                                    tiled_copy_X,
+                                    thrX,
+                                    frgX,
+                                    nontemporal=USE_NONTEMPORAL,
+                                    alignment=VEC_ALIGN,
+                                )
+                                vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+                                if dtype_str in ("f16", "bf16"):
+                                    vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
+                                else:
+                                    vec_val = vec_val_e
+                                
+                                # Accumulate valid data
+                                acc_new = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+                                scf.YieldOp([arith.as_value(acc_new)])
                             
-                            # Multiply by mask (zeros out invalid slots)
-                            masked_val = (arith.ArithValue(vec_val) * arith.ArithValue(mask_splat)).value
-                            acc = (arith.ArithValue(acc) + arith.ArithValue(masked_val)).value
+                            # Else block: invalid slot - pass through accumulator unchanged
+                            with ir.InsertionPoint(if_op.else_block):
+                                scf.YieldOp([arith.as_value(acc)])
+                            
+                            # Update accumulator with result from IfOp
+                            acc = if_op.results[0]
 
                         if dtype_str in ("f16", "bf16"):
                             out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
