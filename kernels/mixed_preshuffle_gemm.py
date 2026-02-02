@@ -103,8 +103,7 @@ def compile_mxfp4_preshuffle_gemm(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
 
-    # gpu_arch = get_hip_arch()
-    gpu_arch = "gfx950"
+    gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
