@@ -605,11 +605,14 @@ def compile_mxfp4_preshuffle_gemm(
                                                 a128,
                                                 b128,
                                                 current_accs_list[acc_idx],
-                                                # cbsz, abid, blgp: 0
+                                                # cbsz, abid, blgp
                                                 cbsz,
                                                 blgp,
+                                                # op_sel_a + scale_a (1.0f as i32 bits)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
+                                                #
+                                                # op_sel_b + scale_b (1.0f as i32 bits)
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],

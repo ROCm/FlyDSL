@@ -350,11 +350,6 @@ def test_mfma_w4_flir_preshuffle(
     N_align_32 = (N + 31) // 32 * 32
 
     a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    # a_fp32 = torch.ones(M, K, device=device, dtype=torch.float32)
-    # for i in range(M):
-    #     a_fp32[i] = a_fp32[i] * (i + 1)
-        # if i % 4 != 0:
-        #     a_fp32[i] = a_fp32[i] * (i + 1)
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
@@ -436,11 +431,11 @@ if __name__ == "__main__":
         default="fp8",
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
                         help="Input dtype")
-    parser.add_argument("-M", type=int, default=32, help="M dimension")
-    parser.add_argument("-N", type=int, default=128, help="N dimension")
-    parser.add_argument("-K", type=int, default=256, help="K dimension")
+    parser.add_argument("-M", type=int, default=16, help="M dimension")
+    parser.add_argument("-N", type=int, default=10240, help="N dimension")
+    parser.add_argument("-K", type=int, default=8192, help="K dimension")
     parser.add_argument("--tile_m", type=int, default=16, help="Tile M")
-    parser.add_argument("--tile_n", type=int, default=128, help="Tile N")
+    parser.add_argument("--tile_n", type=int, default=64, help="Tile N")
     parser.add_argument("--tile_k", type=int, default=256, help="Tile K")
     # Explicit CLI knobs (no env vars).
     parser.add_argument(
