@@ -12,9 +12,246 @@ Key primitives:
 
 from __future__ import annotations
 from dataclasses import dataclass
+from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
+from flydsl.lang.ir.types import T, memref
+
 from _mlir import ir
 
-@dataclass(frozen=True)
+from enum import Enum
+
+class MfmaPipeline(Enum):
+    F8F4_MXFP4_PIPELINE = "F8F4_MXFP4_PIPELINE"
+    F8F8_MXFP4_PIPELINE = "F8F8_MXFP4_PIPELINE"
+    F16F16_16x16_PIPELINE = "F16F16_16x16_PIPELINE"
+    BF16BF16_16x16_PIPELINE = "BF16BF16_16x16_PIPELINE"
+    I8I8_16x16_PIPELINE = "I8I8_16x16_PIPELINE"
+    I8I4_16x16_PIPELINE = "I8I4_16x16_PIPELINE"
+
+class EpilogPipeline(Enum):
+    CSHUFFLE_F16 = "CSHUFFLE_F16"
+    CSHUFFLE_BF16 = "CSHUFFLE_BF16"
+    CSHUFFLE_F32 = "CSHUFFLE_F32"
+    DIRECT_F16 = "DIRECT_F16"
+    DIRECT_BF16 = "DIRECT_BF16"
+    DIRECT_F32 = "DIRECT_F32"
+
+a_elem_type_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f8,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i8,
+}
+
+b_elem_type_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f8,
+}
+
+scale_elem_type_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.i32,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.i32,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.f32,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f32,
+    # bf16 scale placeholder
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f32,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.f32,
+}
+
+out_elem_type_dict = {
+    EpilogPipeline.CSHUFFLE_F16: lambda: T.f16,
+    EpilogPipeline.CSHUFFLE_BF16: lambda: T.bf16,
+    EpilogPipeline.CSHUFFLE_F32: lambda: T.f32,
+    EpilogPipeline.DIRECT_F16: lambda: T.f16,
+    EpilogPipeline.DIRECT_BF16: lambda: T.bf16,
+    EpilogPipeline.DIRECT_F32: lambda: T.f32,
+}
+
+a_vec16_type_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f8x16,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda:T.f8x16,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda:T.f16x8,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda:T.bf16x8,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda:T.i8x16,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda:T.i8x16,
+}
+
+b_vec16_type_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8x16,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8x16,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16x8,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16x8,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8x16,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f8x16,
+}
+
+mfma_input_pack_ty_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.i64,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.i64,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16x4,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.i16x4,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i32x4,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i32x4,
+}
+
+mfma_output_pack_ty_dict = {
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f32x4,
+    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f32x4,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f32x4,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.f32x4,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i32x4,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i32x4,
+}
+
+def get_mfma_i32_k32():
+    mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(
+        rocdl, "mfma_i32_16x16x32_i8", None
+    )
+    if mfma_i32_k32 is None:
+        raise AttributeError(
+            "INT8 K32 MFMA op not found: expected `rocdl.mfma_i32_16x16x32i8` "
+            "(or `rocdl.mfma_i32_16x16x32_i8`)."
+        )
+    return mfma_i32_k32
+
+class PreshufflePipelineManager:
+    def __init__(
+        self,
+        a_dtype: str,
+        b_dtype: str,
+        out_dtype: str,
+        use_cshuffle_epilog: bool = False,
+        a_packed: bool = False,
+        b_packed: bool = False,
+        block_size: int = 256,
+    ):
+        self.a_dtype = a_dtype
+        self.b_dtype = b_dtype
+        self.out_dtype = out_dtype
+        self.use_cshuffle_epilog = use_cshuffle_epilog
+        self.a_packed = self.a_dtype in ["fp4"]
+        self.b_packed = self.b_dtype in ["fp4", "int4"]
+        self.a_elem_pack = 2 if self.a_packed else 1
+        self.b_elem_pack = 2 if self.b_packed else 1
+        self.mfma_pipeline = self.get_mfma_pipeline()
+        self.epilog_pipeline = self.get_epilog_pipeline()
+        self.a_elem_bytes = self.get_a_elem_bytes()
+        self.b_elem_bytes = self.get_b_elem_bytes()
+        self.out_elem_bytes = self.get_out_elem_bytes()
+        self.block_size = block_size
+    
+    def refine_dtype(self):
+
+    
+    def check_type_valid(self):
+        if self.a_dtype not in ["fp8", "int8", "int4", "fp16", "bf16"]:
+            raise ValueError(f"Invalid a_dtype: {self.a_dtype}")
+        if self.b_dtype not in ["fp8", "int8", "int4", "fp16", "bf16"]:
+            raise ValueError(f"Invalid b_dtype: {self.b_dtype}")
+        if self.out_dtype not in ["fp16", "bf16", "f32"]:
+            raise ValueError(f"Invalid out_dtype: {self.out_dtype}")
+
+    def get_mfma_pipeline(self):
+        if self.a_dtype == "fp4" and self.b_dtype == "fp4":
+            return MfmaPipeline.F4F4_MXFP4_PIPELINE
+        elif self.a_dtype == "fp8" and self.b_dtype == "fp4":
+            return MfmaPipeline.F8F4_MXFP4_PIPELINE
+        elif self.a_dtype == "fp8" and self.b_dtype == "fp8":
+            return MfmaPipeline.F8F8_MXFP4_PIPELINE
+        elif self.a_dtype == "fp16" and self.b_dtype == "fp16":
+            return MfmaPipeline.F16F16_16x16_PIPELINE
+        elif self.a_dtype == "bf16" and self.b_dtype == "bf16":
+            return MfmaPipeline.BF16BF16_16x16_PIPELINE
+        elif self.a_dtype == "int8" and self.b_dtype == "int8":
+            return MfmaPipeline.I8I8_16x16_PIPELINE
+        elif self.a_dtype == "int8" and self.b_dtype == "int4":
+            return MfmaPipeline.I8I4_16x16_PIPELINE
+        else:
+            raise ValueError(f"Invalid preshuffle pipeline: {self.a_dtype}_{self.b_dtype}_{self.out_dtype}")
+    
+    def get_epilog_pipeline(self):
+        if self.use_cshuffle_epilog and self.out_dtype == "fp16":
+            return EpilogPipeline.CSHUFFLE_F16
+        elif self.use_cshuffle_epilog and self.out_dtype == "bf16":
+            return EpilogPipeline.CSHUFFLE_BF16
+        elif self.use_cshuffle_epilog and self.out_dtype == "f32":
+            return EpilogPipeline.CSHUFFLE_F32
+        elif not self.use_cshuffle_epilog and self.out_dtype == "f32":
+            return EpilogPipeline.DIRECT_F32
+        elif not self.use_cshuffle_epilog and self.out_dtype == "f16":
+            return EpilogPipeline.DIRECT_F16
+        elif not self.use_cshuffle_epilog and self.out_dtype == "bf16":
+            return EpilogPipeline.DIRECT_BF16
+        else:
+            raise ValueError(f"Invalid epilog pipeline: {self.out_dtype}")
+
+    def get_b_elem_bytes(self):
+        if self.b_dtype in ["fp8", "int8", "int4"]:
+            return 1
+        elif self.b_dtype in ["fp16", "bf16"]:
+            return 2
+        else:
+            raise ValueError(f"Invalid b_dtype: {self.b_dtype}")
+    
+    def get_a_elem_bytes(self):
+        if self.a_dtype in ["fp8", "int8", "int4"]:
+            return 1
+        elif self.a_dtype in ["fp16", "bf16"]:
+            return 2
+        else:
+            raise ValueError(f"Invalid a_dtype: {self.a_dtype}")
+
+    def get_out_elem_bytes(self):
+        if self.out_dtype in ["fp16", "bf16"]:
+            return 2
+        elif self.out_dtype == "f32":
+            return 4
+        else:
+            raise ValueError(f"Invalid out_dtype: {self.out_dtype}")
+    
+    def get_mfma_fn(self):
+        if self.mfma_pipeline == MfmaPipeline.F8F6F4_PIPELINE:
+            return rocdl.mfma_f32_16x16x16f16
+        elif self.mfma_pipeline == MfmaPipeline.BF16BF16_16x16_PIPELINE:
+            return rocdl.mfma_f32_16x16x16bf16_1k
+        elif self.mfma_pipeline == MfmaPipeline.F16F16_16x16_PIPELINE:
+            return rocdl.mfma_f32_16x16x16f16
+        elif self.mfma_pipeline == MfmaPipeline.I8I8_16x16_PIPELINE:
+            return get_mfma_i32_k32()
+        elif self.mfma_pipeline == MfmaPipeline.I8I4_16x16_PIPELINE:
+            return get_mfma_i32_k32()
+        else:
+            raise ValueError(f"Invalid mfma pipeline: {self.mfma_pipeline}")
+    
+    def get_a_bytes_per_thread(
+        self,
+        tile_m: int,
+        tile_k: int,
+    ):
+        a_bytes_per_tile = int(tile_m) * int(tile_k) * int(self.a_elem_bytes)
+        if a_bytes_per_tile % self.block_size != 0:
+            raise ValueError(
+                "tile_m*tile_k*elem_bytes must be divisible by "
+                f"{self.block_size}: tile_m={tile_m}, tile_k={tile_k}, a_elem_bytes={self.a_elem_bytes}"
+            )
+        a_bytes_per_thread = a_bytes_per_tile // self.block_size
+
+        # Assume A loads are always 16B-aligned and use fixed dwordx4 (16B) buffer loads.
+        a_load_bytes = 16
+        if a_bytes_per_thread % a_load_bytes != 0:
+            raise ValueError(
+                f"a_bytes_per_thread ({a_bytes_per_thread}) must be divisible by {a_load_bytes}"
+            )
+
+        return a_bytes_per_thread
+
+
+
 class PreshuffleBLayout:
     """Container returned by `make_preshuffle_b_layout`."""
 
@@ -509,9 +746,230 @@ def lds_load_pack_k32(
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])
 
+def block_mfma_block_scale_f8f6f4(
+    accs_in,
+    b_tile_in,
+    a_scale,
+    b_scale,
+    lds_base,
+    lds_load_packs_k64,
+    col_offset_base_bytes,
+    row_a_lds,
+    *,
+    mfma_fn,
+    mfma_res_ty,
+    cbsz,
+    blgp,
+    a_elem_vec_pack,
+    k_unroll,
+    m_repeat,
+    num_acc,
+    pack_K,
+    pack_M,
+    pack_N,
+    a0_prefetch=None,
+):
+    current_accs_list = list(accs_in)
+
+    k_unroll_packed = k_unroll // pack_K
+    m_repeat_packed = m_repeat // pack_M
+    num_acc_n_packed = num_acc // pack_N
+
+    mfma_res_ty = T.f32x4
+    vec4_i64 = T.vec(4, T.i64)
+    vec8_i32 = T.vec(8, T.i32)
+    c0_i64 = arith.constant(0, type=T.i64)
+
+    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+        return vector.bitcast(vec8_i32, v4)
+
+    for ku128 in range_constexpr(k_unroll_packed):
+        for mi in range_constexpr(m_repeat_packed):
+            a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
+            a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+            for ni in range_constexpr(num_acc_n_packed):
+                b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
+                b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
+                for ikxdl in range_constexpr(pack_K):
+                    k_idx = ku128 * pack_K + ikxdl
+
+                    b_packs0, b_packs1 = b_tile_in[k_idx]
+
+                    col_base = col_offset_base_bytes + (k_idx * 128) // a_elem_vec_pack
+                    for imxdl in range_constexpr(pack_M):
+                        col_base0 = col_base
+                        mi_idx = mi * pack_M + imxdl
+                        mi_val = arith.constant(mi_idx * 16, index=True)
+                        curr_row_a_lds = row_a_lds + mi_val
+
+                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
+                            a0, a1 = a0_prefetch
+                        else:
+                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+
+                        col_base1 = col_base + 64
+                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+
+                        for inxdl in range_constexpr(pack_N):
+                            ni_idx = ni * pack_N + inxdl
+
+                            b0 = b_packs0[ni_idx]
+                            b1 = b_packs1[ni_idx]
+                            b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+
+                            acc_idx = mi_idx * num_acc_n + ni_idx
+                            current_accs_list[acc_idx] = mfma_fn(
+                                mfma_res_ty,
+                                [
+                                    a128,
+                                    b128,
+                                    current_accs_list[acc_idx],
+                                    # cbsz, abid, blgp
+                                    cbsz,
+                                    blgp,
+                                    # op_sel_a + scale_a (1.0f as i32 bits)
+                                    ikxdl * pack_M + imxdl,
+                                    a_scale_val,
+                                    #
+                                    # op_sel_b + scale_b (1.0f as i32 bits)
+                                    ikxdl * pack_N + inxdl,
+                                    b_scale_val,
+                                ],
+                            )
+    return current_accs_list, None
+
+# ---------------- gfx95 fast path (K128 MFMA scale) ----------------
+# This is the key optimization from `zhimding/develop_0107` for FP8:
+# use mfma.scale 16x16x128 to reduce instruction count in the hot loop.
+#
+# Notes:
+# - Only valid for fp8 path (not int8/int4) and gfx95+
+# - Requires tile_k divisible by 128
+# - mfma.scale takes 9 operands: 3 vectors + 6 i32 flags/scales.
+def block_mfma_PTPC_f8f6f4(
+    accs_in,
+    b_tile_in,
+    lds_base,
+    col_offset_base_bytes,
+    row_a_lds,
+    lds_load_packs_k64,
+    *,
+    mfma_res_ty,
+    mfma_fn,
+    k_unroll=16,
+    num_acc_n=16,
+    m_repeat=16,
+    a0_prefetch=None,
+):
+
+    vec4_i64 = T.vec(4, T.i64)
+    vec8_i32 = T.vec(8, T.i32)
+
+    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+        return vector.bitcast(vec8_i32, v4)
+
+    for ku128 in range_constexpr(k_unroll // 2):
+        ku0 = ku128 * 2
+        ku1 = ku0 + 1
+
+        b0_packs0, b0_packs1 = b_tile_in[ku0]
+        b1_packs0, b1_packs1 = b_tile_in[ku1]
+
+        col_base0 = col_offset_base_bytes + (ku0 * 64)
+        col_base1 = col_offset_base_bytes + (ku1 * 64)
+
+        for mi in range_constexpr(m_repeat):
+            mi_val = arith.constant(mi * 16, index=True)
+            curr_row_a_lds = row_a_lds + mi_val
+
+            if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
+                a0, a1 = a0_prefetch
+            else:
+                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+
+            for ni in range_constexpr(num_acc_n):
+                b0 = b0_packs0[ni]
+                b1 = b0_packs1[ni]
+                b2 = b1_packs0[ni]
+                b3 = b1_packs1[ni]
+                b128 = pack_i64x4_to_i32x8(b0, b1, b2, b3)
+
+                acc_idx = mi * num_acc_n + ni
+                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                    mfma_res_ty,
+                    [
+                        a128,
+                        b128,
+                        current_accs_list[acc_idx],
+                        # cbsz, abid, blgp: 0
+                        0,
+                        0,
+                        0,
+                        # op_sel_a + scale_a (1.0f as i32 bits)
+                        0x3F800000,
+                        # op_sel_b + scale_b (1.0f as i32 bits)
+                        0,
+                        0x3F800000,
+                    ],
+                )
+    return current_accs_list, scales_pf
+
+
+def block_mfma_16x16(
+    accs_in,
+    b_tile_in,
+    lds_base,
+    col_offset_base_bytes,
+    row_a_lds,
+    lds_load_packs_k64,
+    mfma_fn,
+    *,
+    mfma_res_ty,
+    k_unroll,
+    num_acc_n,
+    m_repeat,
+    a0_prefetch=None,
+):
+    def mfma_step(acc_in, a, b):
+        return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+
+    # "K64-byte wrapper": two back-to-back MFMA/WMMA ops using the two 8B halves.
+    def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+        acc_mid = mfma_step(acc_in, a0, b0)
+        return mfma_step(acc_mid, a1, b1)
+
+    for ku in range_constexpr(k_unroll):
+        b_packs0, b_packs1 = b_tile_in[ku]
+        # Byte-addressed K stepping (64B per ku).
+        ki64 = ku * 64
+        col_base = col_offset_base_bytes + ki64
+        for mi in range_constexpr(m_repeat):
+            mi_val = arith.constant(mi * 16, index=True)
+            curr_row_a_lds = row_a_lds + mi_val
+            if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                a0, a1 = a0_prefetch
+            else:
+                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+            for ni in range_constexpr(num_acc_n):
+                acc_idx = mi * num_acc_n + ni
+                current_accs_list[acc_idx] = mfma_k64_bytes(
+                    current_accs_list[acc_idx],
+                    a0,
+                    a1,
+                    b_packs0[ni],
+                    b_packs1[ni],
+                )
 
 __all__ = [
     "PreshuffleBLayout",
+    "MfmaPipeline",
+    "EpilogPipeline",
+    "PreshufflePipelineManager",
     "buffer_copy_gmem16_dwordx4",
     "lds_load_pack_k32",
     "lds_store_4b_xor16",
@@ -521,5 +979,8 @@ __all__ = [
     "make_preshuffle_scale_layout",
     "load_b_pack_k32",
     "tile_chunk_coord_i32",
+    "block_mfma_block_scale_f8f6f4",
+    "block_mfma_PTPC_f8f6f4",
+    "block_mfma_16x16",
 ]
 

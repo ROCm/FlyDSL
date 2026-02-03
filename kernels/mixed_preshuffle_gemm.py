@@ -82,11 +82,6 @@ def compile_mxfp4_preshuffle_gemm(
     pack_N = 2
     pack_K = 2
 
-    quant_block_size_a = 32
-    quant_block_size_b = 32
-
-
-
     cbsz = 0 if is_fp8_a else 4
     blgp = 4
 
@@ -528,96 +523,6 @@ def compile_mxfp4_preshuffle_gemm(
                 b_regs = load_b_tile(base_k // 2)
                 return a_regs, b_regs
 
-            def compute_tile(
-                    accs_in,
-                    b_tile_in,
-                    lds_base,
-                    *,
-                    a0_prefetch=None,
-                    a_scale=None,
-                    b_scale=None,
-                ):
-                current_accs_list = list(accs_in)
-
-                # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
-                # This is the key optimization from `zhimding/develop_0107` for FP8:
-                # use mfma.scale 16x16x128 to reduce instruction count in the hot loop.
-                #
-                # Notes:
-                # - Only valid for fp8 path (not int8/int4) and gfx95+
-                # - Requires tile_k divisible by 128
-                # - mfma.scale takes 9 operands: 3 vectors + 6 i32 flags/scales.
-                if (int(tile_k) % 128) != 0:
-                    raise ValueError(
-                        f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
-                    )
-
-                mfma_res_ty = T.f32x4
-                vec4_i64 = T.vec(4, T.i64)
-                vec8_i32 = T.vec(8, T.i32)
-                c0_i64 = arith.constant(0, type=T.i64)
-
-                def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                    v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                    return vector.bitcast(vec8_i32, v4)
-
-                for ku128 in range_constexpr(k_unroll_packed):
-                    for mi in range_constexpr(m_repeat_packed):
-
-                        a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
-                        a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
-                        for ni in range_constexpr(num_acc_n_packed):
-                            b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
-                            b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
-                            for ikxdl in range_constexpr(pack_K):
-                                k_idx = ku128 * pack_K + ikxdl
-
-                                b_packs0, b_packs1 = b_tile_in[k_idx]
-
-                                col_base = col_offset_base_bytes + (k_idx * 128) // a_elem_vec_pack
-                                for imxdl in range_constexpr(pack_M):
-                                    col_base0 = col_base
-                                    mi_idx = mi * pack_M + imxdl
-                                    mi_val = arith.constant(mi_idx * 16, index=True)
-                                    curr_row_a_lds = row_a_lds + mi_val
-
-                                    if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
-                                        a0, a1 = a0_prefetch
-                                    else:
-                                        a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
-
-                                    col_base1 = col_base + 64
-                                    a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                    a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
-
-                                    for inxdl in range_constexpr(pack_N):
-                                        ni_idx = ni * pack_N + inxdl
-
-                                        b0 = b_packs0[ni_idx]
-                                        b1 = b_packs1[ni_idx]
-                                        b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-
-                                        acc_idx = mi_idx * num_acc_n + ni_idx
-                                        rocdl.sched_barrier(0)
-                                        current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                            mfma_res_ty,
-                                            [
-                                                a128,
-                                                b128,
-                                                current_accs_list[acc_idx],
-                                                # cbsz, abid, blgp
-                                                cbsz,
-                                                blgp,
-                                                # op_sel_a + scale_a (1.0f as i32 bits)
-                                                ikxdl * pack_M + imxdl,
-                                                a_scale_val,
-                                                #
-                                                # op_sel_b + scale_b (1.0f as i32 bits)
-                                                ikxdl * pack_N + inxdl,
-                                                b_scale_val,
-                                            ],
-                                        )
-                return current_accs_list, None
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
             vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())

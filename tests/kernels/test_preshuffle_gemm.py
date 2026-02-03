@@ -28,7 +28,7 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm
 from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
@@ -130,14 +130,16 @@ def test_mfma_a8_flir_preshuffle(
         raise ValueError(
             f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
-    exe = compile_preshuffle_gemm_a8(
+    exe = compile_preshuffle_gemm(
         M=M,
         N=N,
         K=K,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        in_dtype=in_dtype,
+        a_dtype=in_dtype,
+        b_dtype=in_dtype,
+        out_dtype="f16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
     )
