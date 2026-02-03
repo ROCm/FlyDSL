@@ -1910,24 +1910,26 @@ def compile_moe_gemm2(
                 e_vec = 2 if bool(atomic_add) else 8 if tile_n % 8 == 0 else 4
                 if (tile_n % e_vec) != 0:
                     raise ValueError(f"tile_n={tile_n} must be divisible by e_vec={e_vec}")
-                # Dynamic cshuffle_nlane: pick smallest valid value
-                # Constraints:
-                #   1. tile_n % (cshuffle_nlane * e_vec) == 0
-                #   2. cshuffle_nlane >= total_threads / tile_m (for CShuffleMLane to be integer)
-                min_nlane = max(1, total_threads // tile_m)
-                # Find smallest nlane >= min_nlane that divides tile_n / e_vec
-                max_nlane = tile_n // e_vec
-                cshuffle_nlane = min_nlane
-                while cshuffle_nlane <= max_nlane and (tile_n % (cshuffle_nlane * e_vec)) != 0:
-                    cshuffle_nlane += 1
-                if cshuffle_nlane > max_nlane:
-                    cshuffle_nlane = max_nlane  # fallback
+                # cshuffle_nlane: use default for atomic, dynamic for reduce
                 if not bool(atomic_add):
+                    # Dynamic cshuffle_nlane: pick smallest valid value
+                    # Constraints:
+                    #   1. tile_n % (cshuffle_nlane * e_vec) == 0
+                    #   2. cshuffle_nlane >= total_threads / tile_m (for CShuffleMLane to be integer)
+                    min_nlane = max(1, total_threads // tile_m)
+                    max_nlane = tile_n // e_vec
+                    cshuffle_nlane = min_nlane
+                    while cshuffle_nlane <= max_nlane and (tile_n % (cshuffle_nlane * e_vec)) != 0:
+                        cshuffle_nlane += 1
+                    if cshuffle_nlane > max_nlane:
+                        cshuffle_nlane = max_nlane  # fallback
                     cshuffle_stride = cshuffle_nlane * e_vec
                     if (int(tile_n) % cshuffle_stride) != 0:
                         raise ValueError(
                             f"tile_n={tile_n} must be divisible by {cshuffle_stride} when atomic_add=False"
                         )
+                else:
+                    cshuffle_nlane = 32  # default for atomic mode
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(

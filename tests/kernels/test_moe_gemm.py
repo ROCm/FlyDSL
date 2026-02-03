@@ -610,8 +610,8 @@ def run_moe_stage2(
     compile_fn=None,
     # Kernel name for logging (default: "moe_gemm2").
     kernel_name: str = "moe_gemm2",
-    # Use reduce mode (accumulate=False) instead of atomic mode.
-    use_reduce: bool = False,
+    # Use atomic mode (atomic_add=True) or reduce mode (atomic_add=False).
+    atomic_add: bool = True,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -645,7 +645,7 @@ def run_moe_stage2(
 
     # Default compile function.
     if compile_fn is None:
-        if use_reduce:
+        if not atomic_add:
             compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True)
         else:
             compile_fn = compile_moe_gemm2
@@ -996,7 +996,7 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
-@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
+@pytest.mark.parametrize("atomic_add", [True, False], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1010,7 +1010,7 @@ def test_moe_gemm_2stage(
     tile_k2: int,
     doweight_stage1: bool,
     in_dtype: str,
-    use_reduce: bool,
+    atomic_add: bool,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -1021,8 +1021,8 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
-    # reduce mode requires tile_n2 to be divisible by (cshuffle_nlane * e_vec) = 32 * 8 = 256
-    if use_reduce and (tile_n2 % 256) != 0:
+    # reduce mode (atomic_add=False) requires tile_n2 to be divisible by (cshuffle_nlane * e_vec) = 32 * 8 = 256
+    if (not atomic_add) and (tile_n2 % 256) != 0:
         pytest.skip(f"reduce mode requires tile_n2 divisible by 256, got tile_n2={tile_n2}")
 
     device = torch.device("cuda")
@@ -1122,7 +1122,7 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
-        use_reduce=bool(use_reduce),
+        atomic_add=bool(atomic_add),
     )
 
 
@@ -1176,14 +1176,14 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
                 out_dtype=out_dtype,
-                accumulate=False,
+                atomic_add=False,
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile
 
 
 class _TorchReduceWrapper:
-    """Wrapper for GEMM2 (accumulate=False) with torch.sum reduction.
+    """Wrapper for GEMM2 (atomic_add=False) with torch.sum reduction.
     
     For baseline comparison only. Production code should use compile_moe_gemm2_ex.
     """
@@ -1485,7 +1485,7 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
-    parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
+    parser.add_argument("--atomic_add", type=_str2bool, nargs="?", const=True, default=True, help="Use atomic mode (True) or reduce mode (False).")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
@@ -1520,7 +1520,7 @@ if __name__ == "__main__":
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
-            use_reduce=bool(args.reduce),
+            atomic_add=bool(args.atomic_add),
         )
 
 
