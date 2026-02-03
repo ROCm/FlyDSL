@@ -29,7 +29,6 @@ if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
 from kernels.preshuffle_gemm import compile_preshuffle_gemm
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
@@ -94,7 +93,8 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     return out.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("a_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("b_dtype", ["fp8", "int8", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
@@ -105,7 +105,8 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     ]
 )
 def test_mfma_a8_flir_preshuffle(
-    in_dtype,
+    a_dtype,
+    b_dtype,
     M,
     N,
     K,
@@ -121,7 +122,7 @@ def test_mfma_a8_flir_preshuffle(
 ):
     print("=" * 80)
     print(
-        f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
+        f"MFMA {a_dtype.upper()}/{b_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
     )
     print("=" * 80)
 
@@ -137,8 +138,8 @@ def test_mfma_a8_flir_preshuffle(
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
-        a_dtype=in_dtype,
-        b_dtype=in_dtype,
+        a_dtype=a_dtype,
+        b_dtype=b_dtype,
         out_dtype="f16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
@@ -148,10 +149,10 @@ def test_mfma_a8_flir_preshuffle(
     size_c = M * N
     size_a = M * K
     # B is packed int4 for W4A8: 2 values per byte.
-    if in_dtype == "int4":
+    if b_dtype == "int4":
         size_b = (N * K) // 2
         elem_bytes = 1
-    elif in_dtype in ("fp16", "bf16"):
+    elif b_dtype in ("fp16", "bf16"):
         size_b = (N * K) * 2
         elem_bytes = 2
     else:
@@ -164,12 +165,12 @@ def test_mfma_a8_flir_preshuffle(
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
 
-    is_int4 = in_dtype == "int4"
+    is_int4 = b_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
-    is_int8 = (in_dtype == "int8") or is_int4
+    is_int8 = (a_dtype == "int8") or is_int4
 
-    if in_dtype in ("fp16", "bf16"):
-        torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
+    if a_dtype in ("fp16", "bf16") or b_dtype in ("fp16", "bf16"):
+        torch_dtype = torch.float16 if a_dtype == "fp16" else torch.bfloat16
         a_q = a_fp32.to(torch_dtype)
         b_q = b_fp32_t.to(torch_dtype)
         # Scale is semantically optional for fp16/bf16 (no dequant). Let callers pass None;
@@ -253,7 +254,7 @@ def test_mfma_a8_flir_preshuffle(
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
-    if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
+    if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (a_dtype in ("fp8", "int8") and a_dtype == b_dtype):
         print("-" * 40)
         print("Running Aiter Benchmark...")
         try:
@@ -321,7 +322,7 @@ def test_mfma_w4_flir_preshuffle(
         raise ValueError(
             f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
-    exe = compile_mxfp4_preshuffle_gemm(
+    exe = compile_preshuffle_gemm(
         M=M,
         N=N,
         K=K,
@@ -330,6 +331,7 @@ def test_mfma_w4_flir_preshuffle(
         tile_k=tile_k,
         a_dtype=a_dtype,
         b_dtype=b_dtype,
+        out_dtype="f16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
     )
@@ -428,11 +430,19 @@ if __name__ == "__main__":
         description="Preshuffle GEMM benchmark"
     )
     parser.add_argument(
-        "--in_dtype",
+        "--a_dtype",
         type=str,
         default="fp8",
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
-                        help="Input dtype")
+        help="Input dtype"
+    )
+    parser.add_argument(
+        "--b_dtype",
+        type=str,
+        default="fp8",
+        choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
+        help="Input dtype"
+    )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
     parser.add_argument("-K", type=int, default=8192, help="K dimension")
@@ -489,7 +499,8 @@ if __name__ == "__main__":
     torch.set_default_device("cuda")
     if not args.wfp4:
         test_mfma_a8_flir_preshuffle(
-            args.in_dtype, 
+            args.a_dtype, 
+            args.b_dtype,
             M=args.M, 
             N=args.N, 
             K=args.K, 

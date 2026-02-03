@@ -12,6 +12,8 @@ Key primitives:
 
 from __future__ import annotations
 from dataclasses import dataclass
+import re
+from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
 
@@ -20,8 +22,9 @@ from _mlir import ir
 from enum import Enum
 
 class MfmaPipeline(Enum):
+    F4F4_MXFP4_PIPELINE = "F4F4_MXFP4_PIPELINE"
     F8F4_MXFP4_PIPELINE = "F8F4_MXFP4_PIPELINE"
-    F8F8_MXFP4_PIPELINE = "F8F8_MXFP4_PIPELINE"
+    F8F8_16x16_PIPELINE = "F8F8_16x16_PIPELINE"
     F16F16_16x16_PIPELINE = "F16F16_16x16_PIPELINE"
     BF16BF16_16x16_PIPELINE = "BF16BF16_16x16_PIPELINE"
     I8I8_16x16_PIPELINE = "I8I8_16x16_PIPELINE"
@@ -36,8 +39,9 @@ class EpilogPipeline(Enum):
     DIRECT_F32 = "DIRECT_F32"
 
 a_elem_type_dict = {
-    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f8,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8,
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.ui8,
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f8,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8,
@@ -45,17 +49,19 @@ a_elem_type_dict = {
 }
 
 b_elem_type_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.ui8,
     MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f8,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8,
-    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f8,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i8,
 }
 
 scale_elem_type_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.i32,
     MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.i32,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.i32,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f32,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.f32,
     MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f32,
     # bf16 scale placeholder
@@ -73,26 +79,29 @@ out_elem_type_dict = {
 }
 
 a_vec16_type_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.ui8x16,
     MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f8x16,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda:T.f8x16,
-    MfmaPipeline.F16F16_16x16_PIPELINE: lambda:T.f16x8,
-    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda:T.bf16x8,
-    MfmaPipeline.I8I8_16x16_PIPELINE: lambda:T.i8x16,
-    MfmaPipeline.I8I4_16x16_PIPELINE: lambda:T.i8x16,
-}
-
-b_vec16_type_dict = {
-    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8x16,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f8x16,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f8x16,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16x8,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16x8,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8x16,
-    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.f8x16,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i8x16,
+}
+
+b_vec16_type_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.ui8x16,
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8x16,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f8x16,
+    MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16x8,
+    MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16x8,
+    MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i8x16,
+    MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i8x16,
 }
 
 mfma_input_pack_ty_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.i64,
     MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.i64,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.i64,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.i64,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16x4,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.i16x4,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i32x4,
@@ -100,12 +109,24 @@ mfma_input_pack_ty_dict = {
 }
 
 mfma_output_pack_ty_dict = {
+    MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.f32x4,
     MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f32x4,
-    MfmaPipeline.F8F8_MXFP4_PIPELINE: lambda: T.f32x4,
+    MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f32x4,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f32x4,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.f32x4,
     MfmaPipeline.I8I8_16x16_PIPELINE: lambda: T.i32x4,
     MfmaPipeline.I8I4_16x16_PIPELINE: lambda: T.i32x4,
+}
+
+mfma_pipeline_dicts = {
+    "a_elem_type": a_elem_type_dict,
+    "b_elem_type": b_elem_type_dict,
+    "scale_elem_type": scale_elem_type_dict,
+    "out_elem_type": out_elem_type_dict,
+    "a_vec16_type": a_vec16_type_dict,
+    "b_vec16_type": b_vec16_type_dict,
+    "mfma_input_pack_ty": mfma_input_pack_ty_dict,
+    "mfma_output_pack_ty": mfma_output_pack_ty_dict,
 }
 
 def get_mfma_i32_k32():
@@ -133,6 +154,9 @@ class PreshufflePipelineManager:
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.out_dtype = out_dtype
+        self.refine_dtype()
+        self.check_type_valid()
+
         self.use_cshuffle_epilog = use_cshuffle_epilog
         self.a_packed = self.a_dtype in ["fp4"]
         self.b_packed = self.b_dtype in ["fp4", "int4"]
@@ -146,12 +170,30 @@ class PreshufflePipelineManager:
         self.block_size = block_size
     
     def refine_dtype(self):
+        def _normalize_dtype(value: str) -> str:
+            s = str(value).strip().lower()
+            s = re.sub(r"^(f16|float16|half)$", "fp16", s)
+            s = re.sub(r"^(bf16|bfloat16)$", "bf16", s)
+            s = re.sub(r"^(f32|fp32|float|float32)$", "f32", s)
+            s = re.sub(r"^(fp8|f8)$", "fp8", s)
+            s = re.sub(r"^(fp4|f4)$", "fp4", s)
+            s = re.sub(r"^(int8|i8)$", "int8", s)
+            s = re.sub(r"^(int4|i4)$", "int4", s)
+            return s
 
+        self.a_dtype = _normalize_dtype(self.a_dtype)
+        self.b_dtype = _normalize_dtype(self.b_dtype)
+        self.out_dtype = _normalize_dtype(self.out_dtype)
+
+        if self.out_dtype not in ("fp16", "bf16", "f32"):
+            raise ValueError(
+                f"out_dtype must be 'f16', 'bf16', or 'f32', got {self.out_dtype!r}"
+            )
     
     def check_type_valid(self):
-        if self.a_dtype not in ["fp8", "int8", "int4", "fp16", "bf16"]:
+        if self.a_dtype not in ["fp8", "fp4", "int8", "fp16", "bf16"]:
             raise ValueError(f"Invalid a_dtype: {self.a_dtype}")
-        if self.b_dtype not in ["fp8", "int8", "int4", "fp16", "bf16"]:
+        if self.b_dtype not in ["fp8", "fp4", "int8", "int4", "fp16", "bf16"]:
             raise ValueError(f"Invalid b_dtype: {self.b_dtype}")
         if self.out_dtype not in ["fp16", "bf16", "f32"]:
             raise ValueError(f"Invalid out_dtype: {self.out_dtype}")
@@ -162,7 +204,7 @@ class PreshufflePipelineManager:
         elif self.a_dtype == "fp8" and self.b_dtype == "fp4":
             return MfmaPipeline.F8F4_MXFP4_PIPELINE
         elif self.a_dtype == "fp8" and self.b_dtype == "fp8":
-            return MfmaPipeline.F8F8_MXFP4_PIPELINE
+            return MfmaPipeline.F8F8_16x16_PIPELINE
         elif self.a_dtype == "fp16" and self.b_dtype == "fp16":
             return MfmaPipeline.F16F16_16x16_PIPELINE
         elif self.a_dtype == "bf16" and self.b_dtype == "bf16":
@@ -183,7 +225,7 @@ class PreshufflePipelineManager:
             return EpilogPipeline.CSHUFFLE_F32
         elif not self.use_cshuffle_epilog and self.out_dtype == "f32":
             return EpilogPipeline.DIRECT_F32
-        elif not self.use_cshuffle_epilog and self.out_dtype == "f16":
+        elif not self.use_cshuffle_epilog and self.out_dtype == "fp16":
             return EpilogPipeline.DIRECT_F16
         elif not self.use_cshuffle_epilog and self.out_dtype == "bf16":
             return EpilogPipeline.DIRECT_BF16
@@ -191,7 +233,7 @@ class PreshufflePipelineManager:
             raise ValueError(f"Invalid epilog pipeline: {self.out_dtype}")
 
     def get_b_elem_bytes(self):
-        if self.b_dtype in ["fp8", "int8", "int4"]:
+        if self.b_dtype in ["fp8", "int8", "int4", "fp4"]:
             return 1
         elif self.b_dtype in ["fp16", "bf16"]:
             return 2
@@ -199,7 +241,7 @@ class PreshufflePipelineManager:
             raise ValueError(f"Invalid b_dtype: {self.b_dtype}")
     
     def get_a_elem_bytes(self):
-        if self.a_dtype in ["fp8", "int8", "int4"]:
+        if self.a_dtype in ["fp8", "int8", "int4", "fp4"]:
             return 1
         elif self.a_dtype in ["fp16", "bf16"]:
             return 2
@@ -215,8 +257,8 @@ class PreshufflePipelineManager:
             raise ValueError(f"Invalid out_dtype: {self.out_dtype}")
     
     def get_mfma_fn(self):
-        if self.mfma_pipeline == MfmaPipeline.F8F6F4_PIPELINE:
-            return rocdl.mfma_f32_16x16x16f16
+        if self.mfma_pipeline == MfmaPipeline.F8F8_16x16_PIPELINE:
+            return rocdl.mfma_f32_16x16x32_fp8_fp8
         elif self.mfma_pipeline == MfmaPipeline.BF16BF16_16x16_PIPELINE:
             return rocdl.mfma_f32_16x16x16bf16_1k
         elif self.mfma_pipeline == MfmaPipeline.F16F16_16x16_PIPELINE:
@@ -252,6 +294,7 @@ class PreshufflePipelineManager:
 
 
 
+@dataclass
 class PreshuffleBLayout:
     """Container returned by `make_preshuffle_b_layout`."""
 
@@ -900,12 +943,12 @@ def block_mfma_PTPC_f8f6f4(
                 b128 = pack_i64x4_to_i32x8(b0, b1, b2, b3)
 
                 acc_idx = mi * num_acc_n + ni
-                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                accs_in[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                     mfma_res_ty,
                     [
                         a128,
                         b128,
-                        current_accs_list[acc_idx],
+                        accs_in[acc_idx],
                         # cbsz, abid, blgp: 0
                         0,
                         0,
@@ -917,7 +960,7 @@ def block_mfma_PTPC_f8f6f4(
                         0x3F800000,
                     ],
                 )
-    return current_accs_list, scales_pf
+    return accs_in
 
 
 def block_mfma_16x16(
@@ -927,8 +970,8 @@ def block_mfma_16x16(
     col_offset_base_bytes,
     row_a_lds,
     lds_load_packs_k64,
-    mfma_fn,
     *,
+    mfma_fn,
     mfma_res_ty,
     k_unroll,
     num_acc_n,
@@ -957,18 +1000,20 @@ def block_mfma_16x16(
                 a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
             for ni in range_constexpr(num_acc_n):
                 acc_idx = mi * num_acc_n + ni
-                current_accs_list[acc_idx] = mfma_k64_bytes(
-                    current_accs_list[acc_idx],
+                accs_in[acc_idx] = mfma_k64_bytes(
+                    accs_in[acc_idx],
                     a0,
                     a1,
                     b_packs0[ni],
                     b_packs1[ni],
                 )
+    return accs_in
 
 __all__ = [
     "PreshuffleBLayout",
     "MfmaPipeline",
     "EpilogPipeline",
+    "mfma_pipeline_dicts",
     "PreshufflePipelineManager",
     "buffer_copy_gmem16_dwordx4",
     "lds_load_pack_k32",

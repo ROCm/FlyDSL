@@ -25,6 +25,8 @@ from flydsl.lang.ir.types import T as I
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
 from kernels.mfma_preshuffle_pipeline import (
+    MfmaPipeline,
+    EpilogPipeline,
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
