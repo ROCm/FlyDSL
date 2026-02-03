@@ -70,6 +70,9 @@ add_mlir_python_common_capi_library(FlirPythonCAPI
 # Set the root prefix for Python modules
 set(FlirPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
+# TODO: Avoid nanobind NB_DOMAIN empty-string warnings.
+set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "flir")
+
 # Add MLIR Python modules
 add_mlir_python_modules(FlirPythonModules
   ROOT_PREFIX "${FlirPythonModules_ROOT_PREFIX}"
@@ -102,6 +105,10 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
       ${MLIR_INCLUDE_DIRS}
     )
 
+    target_compile_features(FlirJitRuntime PRIVATE cxx_std_17)
+    target_compile_definitions(FlirJitRuntime PRIVATE USE_ROCM)
+    target_link_libraries(FlirJitRuntime PRIVATE hip::host hip::amdhip64)
+
     if(Torch_FOUND)
       target_include_directories(FlirJitRuntime PRIVATE
         ${TORCH_INCLUDE_DIRS}
@@ -109,21 +116,61 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
       target_link_libraries(FlirJitRuntime PRIVATE Torch::Torch)
     else()
       find_package(Python3 REQUIRED COMPONENTS Interpreter)
+      
+      # Try to get PyTorch paths from current Python environment
       execute_process(
-        COMMAND "python3" "-c"
+        COMMAND "${Python3_EXECUTABLE}" "-c"
                 "import torch; from torch.utils.cpp_extension import include_paths; print(';'.join(include_paths()))"
         OUTPUT_VARIABLE _flir_torch_includes
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
       )
       execute_process(
-        COMMAND "python3" "-c"
+        COMMAND "${Python3_EXECUTABLE}" "-c"
                 "import torch; from torch.utils.cpp_extension import library_paths; print(';'.join(library_paths()))"
         OUTPUT_VARIABLE _flir_torch_libdirs
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
       )
+      
+      # Fallback: try system venv Python if pip's isolated environment doesn't have torch
+      # Use env -i to clear pip's isolated environment variables that might interfere
+      if(NOT _flir_torch_includes AND EXISTS "/opt/venv/bin/python3")
+        message(STATUS "Trying /opt/venv/bin/python3 to locate PyTorch...")
+        execute_process(
+          COMMAND "env" "-i" "PATH=/opt/venv/bin:/usr/bin:/bin" "/opt/venv/bin/python3" "-c"
+                  "import torch; import os; print(os.path.dirname(torch.__file__))"
+          OUTPUT_VARIABLE _flir_torch_root
+          OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET
+        )
+        if(_flir_torch_root)
+          message(STATUS "Found PyTorch at: ${_flir_torch_root}")
+          set(_flir_torch_includes
+            "${_flir_torch_root}/include"
+            "${_flir_torch_root}/include/torch/csrc/api/include"
+          )
+          set(_flir_torch_libdirs "${_flir_torch_root}/lib")
+        endif()
+      endif()
+      
+      # Fallback: use TORCH_ROOT environment variable if still not found
+      if(NOT _flir_torch_includes AND DEFINED ENV{TORCH_ROOT})
+        set(_flir_torch_root "$ENV{TORCH_ROOT}")
+        message(STATUS "Using TORCH_ROOT from environment: ${_flir_torch_root}")
+        set(_flir_torch_includes
+          "${_flir_torch_root}/include"
+          "${_flir_torch_root}/include/torch/csrc/api/include"
+        )
+        set(_flir_torch_libdirs "${_flir_torch_root}/lib")
+      endif()
+      
       if(NOT _flir_torch_includes)
         message(FATAL_ERROR
-          \"PyTorch headers not found. Install a ROCm-enabled torch or set CMAKE_PREFIX_PATH to its libtorch.\"
+          "PyTorch headers not found. Either:\n"
+          "  1. Install PyTorch in the current Python environment, or\n"
+          "  2. Set TORCH_ROOT environment variable to PyTorch installation path\n"
+          "     (e.g., TORCH_ROOT=/path/to/site-packages/torch pip install -e .)"
         )
       endif()
       target_include_directories(FlirJitRuntime PRIVATE
@@ -133,10 +180,11 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
         target_link_directories(FlirJitRuntime PRIVATE
           ${_flir_torch_libdirs}
         )
-        find_library(_flir_torch_lib NAMES torch PATHS ${_flir_torch_libdirs})
-        find_library(_flir_torch_hip_lib NAMES torch_hip PATHS ${_flir_torch_libdirs})
-        find_library(_flir_c10_lib NAMES c10 PATHS ${_flir_torch_libdirs})
-        find_library(_flir_c10_hip_lib NAMES c10_hip PATHS ${_flir_torch_libdirs})
+        find_library(_flir_torch_lib NAMES torch PATHS ${_flir_torch_libdirs} NO_DEFAULT_PATH)
+        find_library(_flir_torch_hip_lib NAMES torch_hip PATHS ${_flir_torch_libdirs} NO_DEFAULT_PATH)
+        find_library(_flir_c10_lib NAMES c10 PATHS ${_flir_torch_libdirs} NO_DEFAULT_PATH)
+        find_library(_flir_c10_hip_lib NAMES c10_hip PATHS ${_flir_torch_libdirs} NO_DEFAULT_PATH)
+        find_library(_flir_torch_python_lib NAMES torch_python PATHS ${_flir_torch_libdirs} NO_DEFAULT_PATH)
         if(_flir_torch_lib)
           target_link_libraries(FlirJitRuntime PRIVATE ${_flir_torch_lib})
         endif()
@@ -149,12 +197,11 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
         if(_flir_c10_hip_lib)
           target_link_libraries(FlirJitRuntime PRIVATE ${_flir_c10_hip_lib})
         endif()
+        if(_flir_torch_python_lib)
+          target_link_libraries(FlirJitRuntime PRIVATE ${_flir_torch_python_lib})
+        endif()
       endif()
     endif()
-
-    target_compile_features(FlirJitRuntime PRIVATE cxx_std_17)
-    target_compile_definitions(FlirJitRuntime PRIVATE USE_ROCM)
-    target_link_libraries(FlirJitRuntime PRIVATE hip::host hip::amdhip64)
 
     set_target_properties(FlirJitRuntime PROPERTIES
       OUTPUT_NAME "flir_jit_runtime"
