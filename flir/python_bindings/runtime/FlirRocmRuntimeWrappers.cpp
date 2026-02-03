@@ -95,7 +95,11 @@ extern "C" hipStream_t mgpuStreamCreate() {
 
 extern "C" void mgpuStreamDestroy(hipStream_t stream) {
   // Never destroy implicit streams.
-  if (stream == nullptr || stream == hipStreamPerThread || stream == hipStreamLegacy)
+  hipStream_t cur_stream = at::hip::getCurrentHIPStream();
+  if (stream == nullptr ||
+      stream == hipStreamPerThread ||
+      stream == hipStreamLegacy ||
+      stream == cur_stream)
     return;
   // Don't destroy streams while capturing.
   if (mgpuStreamIsCapturing(stream))
