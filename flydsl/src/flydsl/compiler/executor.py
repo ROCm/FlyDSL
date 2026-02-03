@@ -96,6 +96,31 @@ class ExecutionEngineExecutor:
         self.engine = ExecutionEngine(jit_module, opt_level=opt_level, shared_libs=list(shared_libs))
         self.engine.initialize()
 
+        # Optional integration hook: if the ROCm runtime exports mgpuSetExternalStream,
+        # we can force all HIP work onto the framework's current stream (e.g. PyTorch).
+        self._rt_set_stream = None
+        self._rt_clear_stream = None
+        try:
+            # Prefer the first shared lib as it is expected to contain the mgpu* wrappers.
+            rt_path = list(shared_libs)[0] if shared_libs else None
+            if rt_path:
+                rt = ctypes.CDLL(rt_path)
+                set_fn = getattr(rt, "mgpuSetExternalStream", None)
+                clr_fn = getattr(rt, "mgpuClearExternalStream", None)
+                if set_fn is not None and clr_fn is not None:
+                    # void mgpuSetExternalStream(intptr_t);
+                    set_fn.argtypes = [ctypes.c_int64]
+                    set_fn.restype = None
+                    # void mgpuClearExternalStream();
+                    clr_fn.argtypes = []
+                    clr_fn.restype = None
+                    self._rt_set_stream = set_fn
+                    self._rt_clear_stream = clr_fn
+        except Exception:
+            # Best-effort: if unavailable, we just don't force streams.
+            self._rt_set_stream = None
+            self._rt_clear_stream = None
+
     @staticmethod
     def _extract_llvm_func_sigs(jit_module) -> Dict[str, List[str]]:
         """Parse `llvm.func` argument type strings from the lowered module."""
@@ -163,12 +188,33 @@ class ExecutionEngineExecutor:
         func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
 
         def wrapper(*args):
+            # If available, force FlyDSL runtime to use PyTorch's current stream.
+            # This is important for graph capture and correctness in frameworks
+            # that track work on their "current" stream.
+            if self._rt_set_stream is not None and self._rt_clear_stream is not None:
+                try:
+                    import torch  # type: ignore
+
+                    if torch.cuda.is_available():
+                        # torch.cuda.Stream.cuda_stream is an integer handle.
+                        stream_handle = int(torch.cuda.current_stream().cuda_stream)
+                        self._rt_set_stream(stream_handle)
+                except Exception:
+                    pass
+
             llvm_arg_tys = self._llvm_sigs.get(sig_name) or self._llvm_sigs.get(name) or []
             if len(args) != len(llvm_arg_tys):
                 # Best-effort for 0-arg functions when signature couldn't be parsed.
                 if len(args) == 0 and len(llvm_arg_tys) == 0:
                     empty = (ctypes.c_void_p * 0)()
-                    return func_exe(empty)
+                    try:
+                        return func_exe(empty)
+                    finally:
+                        if self._rt_clear_stream is not None:
+                            try:
+                                self._rt_clear_stream()
+                            except Exception:
+                                pass
                 # Fallback: try to expand tensor-like args into flattened ranked memref ABI.
                 def _is_tensor_like(x) -> bool:
                     return (
@@ -393,7 +439,14 @@ class ExecutionEngineExecutor:
 
             c_args = (ctypes.c_void_p * len(arg_ptrs))(*arg_ptrs)
             owned.append(c_args)
-            return func_exe(c_args)
+            try:
+                return func_exe(c_args)
+            finally:
+                if self._rt_clear_stream is not None:
+                    try:
+                        self._rt_clear_stream()
+                    except Exception:
+                        pass
 
         return wrapper
 
