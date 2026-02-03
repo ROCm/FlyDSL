@@ -2202,18 +2202,8 @@ def compile_mixed_moe_gemm2(
                     num_acc_n: int,
                     lds_out,
                 ):
-                    # Match origin/dev_a16w4: rely on sentinel padded rows + hardware OOB behavior.
-                    fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                    t2 = fused2 & mask24_i32
-                    s2 = fused2 >> 24
-
-                    t_ok = arith.cmpu(t2, tokens_i32, "ult")
-                    s_ok = arith.cmpu(s2, topk_i32_v, "ult")
-                    ts_ok = arith.andi(t_ok, s_ok)
-                    t2_safe = arith.select(ts_ok, t2, arith.i32(0))
-                    s2_safe = arith.select(ts_ok, s2, arith.i32(0))
-                    ts2 = t2_safe * topk_i32_v + s2_safe
-
+                    # Mixed FP4/FP8 path: scale is applied in mfma_scale, no sx load needed in epilogue.
+                    # Just load tw (token weight) if doweight_stage2 is enabled.
                     if doweight_stage2:
                         tw_idx = (mi * 4) + ii
                         if tw_pf is not None:

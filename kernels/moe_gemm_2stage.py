@@ -1808,42 +1808,7 @@ def compile_moe_gemm2(
                 lds_base_nxt = lds_tile_elems
     
                 rocdl.sched_barrier(0)
-    
-                # def hot_loop_scheduler():
-                #     mfma_group = num_acc_n
-                #     # K64 micro-step: 2x K32 MFMA per accumulator update.
-                #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                #     mfma_per_iter = 2 * mfma_group
-                #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                #     rocdl.sched_dsrd(2)
-                #     rocdl.sched_mfma(1)
-                #     rocdl.sched_mfma(1)
-                #     if num_acc_n < 4:
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_vmem(1)
-    
-                #     dswr_tail = num_x_loads
-                #     if dswr_tail > sche_iters:
-                #         dswr_tail = sche_iters
-                #     dswr_start = sche_iters - dswr_tail
-                #     for sche_i in range_constexpr(sche_iters):
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(mfma_group)
-                #         if sche_i >= dswr_start - 1:
-                #             rocdl.sched_dswr(1)
-                #     rocdl.sched_barrier(0)
+
     
                 def hot_loop_scheduler():
                     # - MFMA group size per "slot": num_acc_n
@@ -1986,9 +1951,11 @@ def compile_moe_gemm2(
                 e_vec = 2 if bool(accumulate) else 8 if tile_n % 8 == 0 else 4
                 if (tile_n % e_vec) != 0:
                     raise ValueError(f"tile_n={tile_n} must be divisible by e_vec={e_vec}")
-                # cshuffle_nlane: use default for atomic, dynamic for reduce
-                if not bool(accumulate):
-                    # Dynamic cshuffle_nlane: pick smallest valid value
+                # cshuffle_nlane: use 32 for atomic mode, dynamic for reduce mode
+                if bool(accumulate):
+                    cshuffle_nlane = 32  # Fixed for atomic mode (better for atomics)
+                else:
+                    # Dynamic cshuffle_nlane for reduce mode: pick smallest valid value
                     # Constraints:
                     #   1. tile_n % (cshuffle_nlane * e_vec) == 0
                     #   2. cshuffle_nlane >= total_threads / tile_m (for CShuffleMLane to be integer)
@@ -2113,13 +2080,18 @@ def compile_moe_gemm2(
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
-                        # Explicitly mask sentinel token/slot to avoid OOB scale_x loads.
-                        t_ok = arith.cmpu(t2, tokens_i32, "ult")
-                        s_ok = arith.cmpu(s2, topk_i32_v, "ult")
-                        ts_ok = arith.andi(t_ok, s_ok)
-                        t2_safe = arith.select(ts_ok, t2, arith.i32(0))
-                        s2_safe = arith.select(ts_ok, s2, arith.i32(0))
-                        ts2 = t2_safe * topk_i32_v + s2_safe
+                        # Compute ts2 for scale indexing. For invalid rows (t2 >= tokens),
+                        # we need to either clamp or zero out sx to avoid NaN propagation.
+                        ts2 = t2 * topk_i32_v + s2
+                        ts_ok = arith.cmpu(t2, tokens_i32, "ult")
+                        if bool(accumulate):
+                            # Atomic mode: full clamping to avoid cache misses from garbage addresses.
+                            s_ok = arith.cmpu(s2, topk_i32_v, "ult")
+                            ts_ok = arith.andi(ts_ok, s_ok)
+                            t2_safe = arith.select(ts_ok, t2, arith.i32(0))
+                            s2_safe = arith.select(ts_ok, s2, arith.i32(0))
+                            ts2 = t2_safe * topk_i32_v + s2_safe
+                        # Both modes: select 0.0 for invalid rows to prevent NaN from garbage scale values.
                         sx = (
                             arith.f32(1.0)
                             if is_f16
@@ -2218,7 +2190,7 @@ def compile_moe_gemm2(
                         tile_m=tile_m,
                         tile_n=tile_n,
                         e_vec=e_vec,
-                        cshuffle_nlane=cshuffle_nlane if not bool(accumulate) else 32,
+                        cshuffle_nlane=cshuffle_nlane,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,
