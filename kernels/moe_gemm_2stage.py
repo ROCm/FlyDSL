@@ -2305,8 +2305,8 @@ def compile_moe_reduction(
 
             c_model_dim = arith.index(model_dim).value
 
-            tile_n_idx = flir.const_index(flir.block_idx("y"))
-            c_base = arith.ArithValue(tile_n_idx) * BLOCK_SIZE * VEC_WIDTH
+            tile_n_idx = arith.ArithValue(flir.block_idx("y"))
+            c_base = tile_n_idx * BLOCK_SIZE * VEC_WIDTH
             curr_idx = (c_base + thread_offset_base).value
 
             # Bounds check
@@ -2363,7 +2363,8 @@ def compile_moe_reduction(
             from flydsl.dialects.ext import arith as arith_ext
             c1 = arith.as_value(arith_ext.index(1))
             gx = arith.as_value(m_tokens)
-            gy = arith.as_value(arith_ext.index((model_dim + BLOCK_SIZE * VEC_WIDTH - 1) // (BLOCK_SIZE * VEC_WIDTH)))
+            tile_size = BLOCK_SIZE * VEC_WIDTH
+            gy = arith.as_value(arith_ext.index((model_dim + tile_size - 1) // tile_size))
             bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
             flir.gpu_ext.LaunchFuncOp(
                 [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
