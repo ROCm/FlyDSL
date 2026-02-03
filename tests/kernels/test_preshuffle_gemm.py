@@ -56,24 +56,6 @@ def run_torch_w4(x, w, x_scales, w_scales, dtype):
     w_f32 = w_f32 * w_scales_f32
     return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
 
-def run_torch_w4(x, w, x_scales, w_scales, dtype):
-    m, k = x.shape
-    n, k = w.shape
-    # First convert the x and w inputs to f32.
-    x_f32 = fp4_utils.mxfp4_to_f32(x)
-    w_f32 = fp4_utils.mxfp4_to_f32(w)
-    # Next convert the e8m0 scales to f32.
-    x_scales = x_scales[:m]
-    x_scales = x_scales.repeat_interleave(32, dim=1)
-    x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales)
-    x_f32 = x_f32 * x_scales_f32
-    w_scales = w_scales[:n]
-    w_scales = w_scales.repeat_interleave(32, dim=1)
-    w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales)
-    w_f32 = w_f32 * w_scales_f32
-    return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
-
-
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
@@ -177,8 +159,8 @@ def test_mfma_a8_flir_preshuffle(
     device = torch.device("cuda")
 
     # torch.manual_seed(42)
-    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
+    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
@@ -363,8 +345,9 @@ def test_mfma_w4_flir_preshuffle(
 
     device = torch.device("cuda")
 
-    M_align_32 = (M + 31 // 32) * 32
-    N_align_32 = (N + 31 // 32) * 32
+    # torch.manual_seed(42)
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
 
     a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
