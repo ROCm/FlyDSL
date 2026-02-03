@@ -1096,7 +1096,7 @@ def compile_moe_gemm2(
     # Optional experiment: write per-(token,slot) output (no atomics) into an output shaped
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
-    accumulate: bool = True,
+    atomic_add: bool = True,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1126,8 +1126,8 @@ def compile_moe_gemm2(
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
     out_is_f32 = out_s in ("f32", "fp32", "float")
     out_is_bf16 = out_s in ("bf16", "bfloat16")
-    if (not bool(accumulate)) and out_is_f32:
-        raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
+    if (not bool(atomic_add)) and out_is_f32:
+        raise ValueError("compile_moe_gemm2(atomic_add=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
@@ -1341,7 +1341,7 @@ def compile_moe_gemm2(
             # OUT: [tokens, model_dim] -> clamp to descriptor max (i32 bytes) to avoid overflow on huge tokens.
             out_elem_bytes = 4 if out_is_f32 else 2
             out_nbytes_idx = tokens_in * n_in * arith.constant(out_elem_bytes, index=True)
-            if not bool(accumulate):
+            if not bool(atomic_add):
                 out_nbytes_idx = (
                     tokens_in
                     * arith.index(topk)
@@ -1767,42 +1767,7 @@ def compile_moe_gemm2(
                 lds_base_nxt = lds_tile_elems
     
                 rocdl.sched_barrier(0)
-    
-                # def hot_loop_scheduler():
-                #     mfma_group = num_acc_n
-                #     # K64 micro-step: 2x K32 MFMA per accumulator update.
-                #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                #     mfma_per_iter = 2 * mfma_group
-                #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                #     rocdl.sched_dsrd(2)
-                #     rocdl.sched_mfma(1)
-                #     rocdl.sched_mfma(1)
-                #     if num_acc_n < 4:
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(1)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(2)
-                #         rocdl.sched_vmem(1)
-    
-                #     dswr_tail = num_x_loads
-                #     if dswr_tail > sche_iters:
-                #         dswr_tail = sche_iters
-                #     dswr_start = sche_iters - dswr_tail
-                #     for sche_i in range_constexpr(sche_iters):
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_dsrd(1)
-                #         rocdl.sched_mfma(mfma_group // 2)
-                #         rocdl.sched_vmem(1)
-                #         rocdl.sched_mfma(mfma_group)
-                #         if sche_i >= dswr_start - 1:
-                #             rocdl.sched_dswr(1)
-                #     rocdl.sched_barrier(0)
+
     
                 def hot_loop_scheduler():
                     # - MFMA group size per "slot": num_acc_n
@@ -1942,13 +1907,26 @@ def compile_moe_gemm2(
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
 
-                e_vec = 2 if bool(accumulate) else 8
-                if not bool(accumulate):
-                    cshuffle_nlane = 32
+                e_vec = 2 if bool(atomic_add) else 8 if tile_n % 8 == 0 else 4
+                if (tile_n % e_vec) != 0:
+                    raise ValueError(f"tile_n={tile_n} must be divisible by e_vec={e_vec}")
+                # Dynamic cshuffle_nlane: pick smallest valid value
+                # Constraints:
+                #   1. tile_n % (cshuffle_nlane * e_vec) == 0
+                #   2. cshuffle_nlane >= total_threads / tile_m (for CShuffleMLane to be integer)
+                min_nlane = max(1, total_threads // tile_m)
+                # Find smallest nlane >= min_nlane that divides tile_n / e_vec
+                max_nlane = tile_n // e_vec
+                cshuffle_nlane = min_nlane
+                while cshuffle_nlane <= max_nlane and (tile_n % (cshuffle_nlane * e_vec)) != 0:
+                    cshuffle_nlane += 1
+                if cshuffle_nlane > max_nlane:
+                    cshuffle_nlane = max_nlane  # fallback
+                if not bool(atomic_add):
                     cshuffle_stride = cshuffle_nlane * e_vec
                     if (int(tile_n) % cshuffle_stride) != 0:
                         raise ValueError(
-                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
+                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when atomic_add=False"
                         )
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
@@ -2091,26 +2069,34 @@ def compile_moe_gemm2(
 
                     def precompute_row(*, row_local, row):
                         # Precompute row context for cshuffle stores.
-                        # Return (fused_i32, row_valid_i1) so the epilogue can skip the entire row
-                        # for invalid tail rows (CK-style), avoiding per-store branching.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
-                        row_i32 = arith.index_cast(i32, row)
-                        row_valid = arith.cmpu(row_i32, num_valid_i32, "ult")
-                        return (fused2, row_valid)
+                        if bool(atomic_add):
+                            # Atomic path (llvm.AtomicRMWOp) has no OOB protection, need validity check
+                            row_i32 = arith.index_cast(i32, row)
+                            row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
+                            t = fused2 & mask24_i32
+                            s = fused2 >> 24
+                            t_ok = arith.cmpu(t, tokens_i32, "ult")
+                            s_ok = arith.cmpu(s, topk_i32_v, "ult")
+                            row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
+                            return (fused2, row_valid)
+                        else:
+                            # buffer_store has OOB protection, no validity check needed
+                            return fused2
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         fused = row_ctx
                         t = fused & mask24_i32
                         s = fused >> 24
                         idx0 = t * model_i32
-                        if not bool(accumulate):
+                        if not bool(atomic_add):
                             ts = t * topk_i32_v + s
                             idx0 = ts * model_i32
                         col_i32 = arith.index_cast(i32, col_g0)
                         idx_elem = idx0 + col_i32
                         idx_elem_even = idx_elem & mask_even_i32
                         if out_is_bf16:
-                            if bool(accumulate):
+                            if bool(atomic_add):
                                 # Use global atomicrmw fadd on <2 x bf16> (CK path).
                                 # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
@@ -2132,7 +2118,7 @@ def compile_moe_gemm2(
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
                             byte_off = idx_elem_even * c2_i32
-                            if bool(accumulate):
+                            if bool(atomic_add):
                                 atomic_add_f16x2(frag, byte_off)
                             else:
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
@@ -2146,6 +2132,7 @@ def compile_moe_gemm2(
                         tile_m=tile_m,
                         tile_n=tile_n,
                         e_vec=e_vec,
+                        cshuffle_nlane=cshuffle_nlane,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,
@@ -2224,7 +2211,7 @@ def compile_moe_reduction(
     Output: Y [tokens, model_dim]
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
-    Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
+    Used in conjunction with compile_moe_gemm2(atomic_add=False) to avoid atomic contention.
     """
     gpu_arch = get_hip_arch()
     DYN = ir.ShapedType.get_dynamic_size()
@@ -2576,7 +2563,7 @@ def compile_moe_gemm2_ex(
 
     # Compile based on mode
     if actual_mode == MoeGemm2Mode.REDUCE:
-        # Compile GEMM2 with accumulate=False
+        # Compile GEMM2 with atomic_add=False
         gemm2_exe = compile_moe_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -2589,7 +2576,7 @@ def compile_moe_gemm2_ex(
             in_dtype=in_dtype,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=False,
+            atomic_add=False,
         )
         # Compile reduction kernel
         out_s = str(out_dtype).strip().lower()
@@ -2612,7 +2599,7 @@ def compile_moe_gemm2_ex(
             out_dtype_str=dtype_str,
         )
     else:
-        # Compile GEMM2 with accumulate=True (atomic mode)
+        # Compile GEMM2 with atomic_add=True (atomic mode)
         return compile_moe_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -2625,5 +2612,5 @@ def compile_moe_gemm2_ex(
             in_dtype=in_dtype,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=True,
+            atomic_add=True,
         )

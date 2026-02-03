@@ -493,10 +493,10 @@ def run_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"FLIR MoE stage1[{in_dtype}]: "
-        f"{us:.1f} us, "
-        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
-        f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
+        f"FLIR MoE stage1 [{in_dtype}] | "
+        f"M_eff={tokens*topk} | "
+        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s "
+        f"(doweight={doweight_stage1})"
     )
     # Compare + benchmark vs aiter CK stage1 (optional; enabled by default when aiter is runnable).
     if compare_aiter_ck is None:
@@ -1021,6 +1021,10 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    # reduce mode requires tile_n2 to be divisible by (cshuffle_nlane * e_vec) = 32 * 8 = 256
+    if use_reduce and (tile_n2 % 256) != 0:
+        pytest.skip(f"reduce mode requires tile_n2 divisible by 256, got tile_n2={tile_n2}")
+
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
 
