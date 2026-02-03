@@ -35,7 +35,7 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from flydsl.kernels.kernels_common import get_torch_stream_as_async_token
+from kernels.kernels_common import stream_ptr_to_async_token
 
 import functools
 
@@ -1158,6 +1158,7 @@ def compile_mixed_moe_gemm1(
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = 2 * inter_in / arith.index(tile_n)
@@ -1165,7 +1166,7 @@ def compile_mixed_moe_gemm1(
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
 
-            stream_token = get_torch_stream_as_async_token()
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -2351,10 +2352,12 @@ def compile_mixed_moe_gemm2(
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -2375,7 +2378,7 @@ def compile_mixed_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
-                async_object=get_torch_stream_as_mlir_value(),
+                async_dependencies=[stream_token],
             )
 
     m = _MOE2()

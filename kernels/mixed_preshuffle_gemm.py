@@ -34,7 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import mfma_epilog
-from kernels.kernels_common import get_torch_stream_as_async_token
+from kernels.kernels_common import stream_ptr_to_async_token
 
 
 def compile_mxfp4_preshuffle_gemm(
@@ -1051,6 +1051,7 @@ def compile_mxfp4_preshuffle_gemm(
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
+            stream_ptr: lambda: T.i64,  # PyTorch stream pointer
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
@@ -1060,7 +1061,7 @@ def compile_mxfp4_preshuffle_gemm(
             gx = (c_m + tm - one) / tm
             gy = c_n / tn
 
-            stream_token = get_torch_stream_as_async_token()
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),

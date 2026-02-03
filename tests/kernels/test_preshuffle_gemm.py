@@ -226,7 +226,9 @@ def test_mfma_a8_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
@@ -395,7 +397,9 @@ def test_mfma_w4_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))

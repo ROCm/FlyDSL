@@ -1,16 +1,9 @@
-from _mlir import ir
-from _mlir.dialects import arith as _arith, llvm as _llvm, builtin, gpu as _gpu
-from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl, llvm
-from flydsl.lang.ir.types import T, memref
-import torch
+from _mlir.dialects import builtin, gpu as _gpu
+from flydsl.dialects.ext import buffer_ops
 
 
-def get_torch_stream_as_async_token(loc=None, ip=None):
-    stream = torch.cuda.current_stream()
-    stream_ptr = stream.cuda_stream
-    
-    ptr_const = arith.i64(stream_ptr, loc=loc, ip=ip)
-    stream_llvm_ptr = buffer_ops.create_llvm_ptr(ptr_const)
+def stream_ptr_to_async_token(stream_ptr_value, loc=None, ip=None):
+    stream_llvm_ptr = buffer_ops.create_llvm_ptr(stream_ptr_value)
     
     async_token_type = _gpu.AsyncTokenType.get()
     cast_op = builtin.UnrealizedConversionCastOp(

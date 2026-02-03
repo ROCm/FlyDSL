@@ -23,7 +23,7 @@ from _mlir import ir
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
-from kernels.kernels_common import get_torch_stream_as_async_token
+from kernels.kernels_common import stream_ptr_to_async_token
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -34,8 +34,6 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import mfma_epilog
-
-from flydsl.kernels.kernels_common import get_torch_stream_as_mlir_value
 
 
 def compile_preshuffle_gemm_a8(
@@ -1073,6 +1071,7 @@ def compile_preshuffle_gemm_a8(
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
+            stream_ptr: lambda: T.i64,  # PyTorch stream pointer passed at runtime
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
@@ -1081,7 +1080,8 @@ def compile_preshuffle_gemm_a8(
             one = arith.constant(1, index=True)
             gx = (c_m + tm - one) / tm
             gy = c_n / tn
-            stream_token = get_torch_stream_as_async_token()
+            # Convert runtime stream_ptr (i64) to async_token for gpu.launch_func
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),
