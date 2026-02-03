@@ -1021,6 +1021,9 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    # reduce mode (atomic_add=False) requires tile_n2 to be divisible by (cshuffle_nlane * e_vec) = 32 * 8 = 256
+    if (not atomic_add) and (tile_n2 % 256) != 0:
+        pytest.skip(f"reduce mode requires tile_n2 divisible by 256, got tile_n2={tile_n2}")
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
