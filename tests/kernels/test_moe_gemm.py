@@ -433,6 +433,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -447,6 +448,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
+            stream_ptr,
         )
 
     _, us = run_perftest(
@@ -820,6 +822,7 @@ def run_moe_stage2(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -834,6 +837,7 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
+            stream_ptr,
         )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -1224,6 +1228,7 @@ class _TorchReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        stream_ptr,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1239,6 +1244,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
@@ -1289,15 +1295,16 @@ def profile_reduce_kernel(
         return total
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
+    stream_ptr = torch.cuda.current_stream().cuda_stream
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens)
+        reduce_exe(X, Y, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens)
+            reduce_exe(X, Y, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1358,7 +1365,8 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
 
     # Run kernels
-    reduce_exe(X, Y_flydsl, tokens)
+    stream_ptr = torch.cuda.current_stream().cuda_stream
+    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
