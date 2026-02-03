@@ -70,9 +70,6 @@ add_mlir_python_common_capi_library(FlirPythonCAPI
 # Set the root prefix for Python modules
 set(FlirPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
-# TODO: Avoid nanobind NB_DOMAIN empty-string warnings.
-set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "flir")
-
 # Add MLIR Python modules
 add_mlir_python_modules(FlirPythonModules
   ROOT_PREFIX "${FlirPythonModules_ROOT_PREFIX}"
@@ -113,13 +110,13 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
     else()
       find_package(Python3 REQUIRED COMPONENTS Interpreter)
       execute_process(
-        COMMAND "${Python3_EXECUTABLE}" "-c"
+        COMMAND "python3" "-c"
                 "import torch; from torch.utils.cpp_extension import include_paths; print(';'.join(include_paths()))"
         OUTPUT_VARIABLE _flir_torch_includes
         OUTPUT_STRIP_TRAILING_WHITESPACE
       )
       execute_process(
-        COMMAND "${Python3_EXECUTABLE}" "-c"
+        COMMAND "python3" "-c"
                 "import torch; from torch.utils.cpp_extension import library_paths; print(';'.join(library_paths()))"
         OUTPUT_VARIABLE _flir_torch_libdirs
         OUTPUT_STRIP_TRAILING_WHITESPACE
