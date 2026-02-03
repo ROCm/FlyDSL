@@ -613,6 +613,8 @@ def run_moe_stage2(
     compile_fn=None,
     # Kernel name for logging (default: "moe_gemm2").
     kernel_name: str = "moe_gemm2",
+    # Use reduce mode (accumulate=False) instead of atomic mode.
+    use_reduce: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -646,7 +648,10 @@ def run_moe_stage2(
 
     # Default compile function.
     if compile_fn is None:
-        compile_fn = compile_moe_gemm2
+        if use_reduce:
+            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True)
+        else:
+            compile_fn = compile_moe_gemm2
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
@@ -826,7 +831,7 @@ def run_moe_stage2(
             inter_dim,
             int(blocks),
         )
-
+ 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
@@ -994,6 +999,7 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
+@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1006,8 +1012,9 @@ def test_moe_gemm_2stage(
     tile_n2: int,
     tile_k2: int,
     doweight_stage1: bool,
-    *,
     in_dtype: str,
+    use_reduce: bool,
+    *,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -1124,6 +1131,7 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
+        use_reduce=bool(use_reduce),
     )
 
 
@@ -1321,9 +1329,13 @@ def print_reduce_profile(results: dict):
 @pytest.mark.parametrize(
     "tokens, topk, model_dim",
     [
-        pytest.param(256, 8, 7168, id="DS-TP8-decode"),
         pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
         pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
+        pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
+        pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
+        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
+        pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
+        pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
     ],
 )
 def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
@@ -1358,9 +1370,13 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk",
     [
-        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode"),
         pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
         pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
+        pytest.param(64, 7168, 256, 256, 8, id="DS-TP8-decode-S"),
+        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode-L"),
+        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
+        pytest.param(64, 5120, 1536, 64, 6, id="EP-K6-decode-S"),
+        pytest.param(256, 5120, 1536, 64, 6, id="EP-K6-decode-L"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1372,9 +1388,9 @@ def test_moe_stage2_standalone(
     topk: int,
     in_dtype: str,
     *,
-    tile_m: int = 32,
-    tile_n: int = 512,
-    tile_k: int = 128,
+    tile_m: int = 64,   # Common block size for M
+    tile_n: int = 256,  # Common block size for N2
+    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
@@ -1477,6 +1493,7 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
+    parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
@@ -1519,8 +1536,5 @@ if __name__ == "__main__":
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
-            w_fp4_kernel=args.wfp4,
+            use_reduce=bool(args.reduce),
         )
-
-
-

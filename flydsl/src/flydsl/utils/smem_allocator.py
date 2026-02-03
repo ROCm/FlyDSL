@@ -16,7 +16,11 @@ def get_mlir_type_size(mlir_type: ir.Type) -> int:
     """Returns the size in bytes of an MLIR type."""
     if mlir_type == T.f32() or mlir_type == T.i32(): return 4
     if mlir_type == T.f16() or mlir_type == T.bf16() or mlir_type == T.i16(): return 2
-    if mlir_type == T.i8(): return 1
+    # 1 byte
+    if (mlir_type == T.i8() or 
+        mlir_type == ir.IntegerType.get_unsigned(8) or 
+        mlir_type == ir.IntegerType.get_signed(8)): 
+        return 1
     # FP8 types
     if isinstance(
         mlir_type,
