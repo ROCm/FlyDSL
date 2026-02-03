@@ -70,6 +70,9 @@ add_mlir_python_common_capi_library(FlirPythonCAPI
 # Set the root prefix for Python modules
 set(FlirPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
+# TODO: Avoid nanobind NB_DOMAIN empty-string warnings.
+set(MLIR_BINDINGS_PYTHON_NB_DOMAIN "flir")
+
 # Add MLIR Python modules
 add_mlir_python_modules(FlirPythonModules
   ROOT_PREFIX "${FlirPythonModules_ROOT_PREFIX}"
@@ -95,11 +98,65 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
     add_library(FlirJitRuntime SHARED
       runtime/FlirRocmRuntimeWrappers.cpp
     )
+
+    find_package(Torch QUIET)
     target_include_directories(FlirJitRuntime PRIVATE
       ${LLVM_INCLUDE_DIRS}
       ${MLIR_INCLUDE_DIRS}
     )
+
+    if(Torch_FOUND)
+      target_include_directories(FlirJitRuntime PRIVATE
+        ${TORCH_INCLUDE_DIRS}
+      )
+      target_link_libraries(FlirJitRuntime PRIVATE Torch::Torch)
+    else()
+      find_package(Python3 REQUIRED COMPONENTS Interpreter)
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "-c"
+                "import torch; from torch.utils.cpp_extension import include_paths; print(';'.join(include_paths()))"
+        OUTPUT_VARIABLE _flir_torch_includes
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "-c"
+                "import torch; from torch.utils.cpp_extension import library_paths; print(';'.join(library_paths()))"
+        OUTPUT_VARIABLE _flir_torch_libdirs
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+      if(NOT _flir_torch_includes)
+        message(FATAL_ERROR
+          \"PyTorch headers not found. Install a ROCm-enabled torch or set CMAKE_PREFIX_PATH to its libtorch.\"
+        )
+      endif()
+      target_include_directories(FlirJitRuntime PRIVATE
+        ${_flir_torch_includes}
+      )
+      if(_flir_torch_libdirs)
+        target_link_directories(FlirJitRuntime PRIVATE
+          ${_flir_torch_libdirs}
+        )
+        find_library(_flir_torch_lib NAMES torch PATHS ${_flir_torch_libdirs})
+        find_library(_flir_torch_hip_lib NAMES torch_hip PATHS ${_flir_torch_libdirs})
+        find_library(_flir_c10_lib NAMES c10 PATHS ${_flir_torch_libdirs})
+        find_library(_flir_c10_hip_lib NAMES c10_hip PATHS ${_flir_torch_libdirs})
+        if(_flir_torch_lib)
+          target_link_libraries(FlirJitRuntime PRIVATE ${_flir_torch_lib})
+        endif()
+        if(_flir_torch_hip_lib)
+          target_link_libraries(FlirJitRuntime PRIVATE ${_flir_torch_hip_lib})
+        endif()
+        if(_flir_c10_lib)
+          target_link_libraries(FlirJitRuntime PRIVATE ${_flir_c10_lib})
+        endif()
+        if(_flir_c10_hip_lib)
+          target_link_libraries(FlirJitRuntime PRIVATE ${_flir_c10_hip_lib})
+        endif()
+      endif()
+    endif()
+
     target_compile_features(FlirJitRuntime PRIVATE cxx_std_17)
+    target_compile_definitions(FlirJitRuntime PRIVATE USE_ROCM)
     target_link_libraries(FlirJitRuntime PRIVATE hip::host hip::amdhip64)
 
     set_target_properties(FlirJitRuntime PROPERTIES

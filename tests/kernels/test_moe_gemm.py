@@ -460,6 +460,7 @@ def run_moe_stage1(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -560,6 +561,7 @@ def run_moe_stage1(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Correctness: flir vs CK
@@ -847,6 +849,7 @@ def run_moe_stage2(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -948,6 +951,7 @@ def run_moe_stage2(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
@@ -1500,6 +1504,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
 
+    # graph mode test
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
+
     # w fp4 moe kernel
     parser.add_argument(
         "--wfp4",
@@ -1537,4 +1550,5 @@ if __name__ == "__main__":
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
             use_reduce=bool(args.reduce),
+            test_graph=bool(args.test_graph),
         )
