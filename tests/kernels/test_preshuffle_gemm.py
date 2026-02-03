@@ -118,6 +118,7 @@ def test_mfma_a8_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
@@ -239,6 +240,7 @@ def test_mfma_a8_flir_preshuffle(
         scale_b,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -258,7 +260,7 @@ def test_mfma_a8_flir_preshuffle(
             def launch_aiter(a, b, sa, sb):
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
             verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
             tflops_aiter = flops / (us1 / 1e6) / 1e12
@@ -307,6 +309,7 @@ def test_mfma_w4_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
@@ -406,6 +409,7 @@ def test_mfma_w4_flir_preshuffle(
         scale_b_shuffled,
         num_iters=2,
         num_warmup=1,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -476,6 +480,13 @@ if __name__ == "__main__":
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
     parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
+    parser.add_argument(
         "--wfp4",
         action="store_true",
         default=False,
@@ -499,6 +510,7 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            test_graph=bool(args.test_graph),
         )
     else:
         pack_M = 2
@@ -516,5 +528,6 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            test_graph=bool(args.test_graph),
         )
 

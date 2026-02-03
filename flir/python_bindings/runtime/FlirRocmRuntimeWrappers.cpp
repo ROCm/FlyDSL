@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
+#include <ATen/hip/HIPContext.h>
 
 #include "hip/hip_runtime.h"
 
@@ -32,36 +33,14 @@
   }(expr)
 
 thread_local static int32_t defaultDevice = 0;
+
 // When set (from the Python host), force all runtime ops to use this stream.
 // This allows integrating with frameworks like PyTorch/vLLM that require all GPU
 // work to be enqueued onto the framework's "current" stream (including during
 // HIP graph capture).
-thread_local static bool externalStreamEnabled = false;
-thread_local static hipStream_t externalStream = nullptr;
-
-static inline hipStream_t mgpuResolveStream(hipStream_t stream) {
-  return externalStreamEnabled ? externalStream : stream;
-}
-
-extern "C" void mgpuSetExternalStream(intptr_t stream) {
-  externalStream = reinterpret_cast<hipStream_t>(stream);
-  externalStreamEnabled = true;
-}
-
-extern "C" void mgpuClearExternalStream() {
-  externalStreamEnabled = false;
-  externalStream = nullptr;
-}
-
-extern "C" intptr_t mgpuGetExternalStream() {
-  return reinterpret_cast<intptr_t>(externalStream);
-}
-
 static inline bool mgpuStreamIsCapturing(hipStream_t stream) {
   hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
-  hipError_t err = hipStreamIsCapturing(stream, &status);
-  if (err != hipSuccess)
-    return false;
+  HIP_REPORT_IF_ERROR(hipStreamIsCapturing(stream, &status));
   return status != hipStreamCaptureStatusNone;
 }
 
@@ -97,34 +76,19 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                  intptr_t blockZ, int32_t smem,
                                  hipStream_t stream, void **params,
                                  void **extra, size_t /*paramsCount*/) {
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX,
                                             blockY, blockZ, smem, stream, params,
                                             extra));
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
-  // If the host provided an external stream, always use it.
-  if (externalStreamEnabled)
-    return externalStream;
+  // In HIP graph capture, stream creation is not permitted. Use default stream
+  // with hip getCurrentHIPStream.
+  hipStream_t stream = at::hip::getCurrentHIPStream();
 
-  // In HIP graph capture, stream creation is not permitted. Use per-thread
-  // default stream when the current thread is capturing.
-  if (mgpuStreamIsCapturing(hipStreamPerThread))
-    return hipStreamPerThread;
-
-  hipStream_t stream = nullptr;
-  hipError_t result = hipStreamCreate(&stream);
-  if (result != hipSuccess) {
-    // If failed due to capture, return per-thread stream as fallback.
-    if (result == hipErrorStreamCaptureUnsupported ||
-        result == hipErrorStreamCaptureInvalidated) {
-      return hipStreamPerThread;
-    }
-    const char *name = hipGetErrorName(result);
-    if (!name) name = "<unknown>";
-    fprintf(stderr, "'hipStreamCreate' failed with '%s'\n", name);
-    return hipStreamPerThread;  // Fallback to per-thread stream.
+  if (stream == nullptr)
+  {
+    HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
   }
   return stream;
 }
@@ -133,24 +97,13 @@ extern "C" void mgpuStreamDestroy(hipStream_t stream) {
   // Never destroy implicit streams.
   if (stream == nullptr || stream == hipStreamPerThread || stream == hipStreamLegacy)
     return;
-  // Never destroy externally owned stream.
-  if (externalStreamEnabled && stream == externalStream)
-    return;
   // Don't destroy streams while capturing.
   if (mgpuStreamIsCapturing(stream))
     return;
-  hipError_t result = hipStreamDestroy(stream);
-  if (result != hipSuccess &&
-      result != hipErrorStreamCaptureUnsupported &&
-      result != hipErrorStreamCaptureInvalidated) {
-    const char *name = hipGetErrorName(result);
-    if (!name) name = "<unknown>";
-    fprintf(stderr, "'hipStreamDestroy' failed with '%s'\n", name);
-  }
+  HIP_REPORT_IF_ERROR(hipStreamDestroy(stream));
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
-  stream = mgpuResolveStream(stream);
   // Stream synchronization is not permitted during HIP graph capture.
   // Try to detect capture state first, but also handle errors gracefully.
   if (mgpuStreamIsCapturing(hipStreamPerThread) || mgpuStreamIsCapturing(stream))
@@ -158,116 +111,65 @@ extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
   
   // Even if capture detection fails (e.g., capture stream not checked),
   // try the sync and silently ignore capture-related errors.
-  hipError_t result = hipStreamSynchronize(stream);
-  if (result != hipSuccess && 
-      result != hipErrorStreamCaptureUnsupported &&
-      result != hipErrorStreamCaptureInvalidated) {
-    const char *name = hipGetErrorName(result);
-    if (!name) name = "<unknown>";
-    fprintf(stderr, "'hipStreamSynchronize(stream)' failed with '%s'\n", name);
-  }
+  HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
 }
 
 extern "C" void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(hipStreamWaitEvent(stream, event, /*flags=*/0));
 }
 
 extern "C" hipEvent_t mgpuEventCreate() {
-  // Event creation is not permitted during HIP graph capture.
-  if (mgpuStreamIsCapturing(hipStreamPerThread))
-    return nullptr;
-
   hipEvent_t event = nullptr;
   HIP_REPORT_IF_ERROR(hipEventCreateWithFlags(&event, hipEventDisableTiming));
   return event;
 }
 
 extern "C" void mgpuEventDestroy(hipEvent_t event) {
-  // Event destruction is not permitted during HIP graph capture.
-  if (event == nullptr || mgpuStreamIsCapturing(hipStreamPerThread))
-    return;
   HIP_REPORT_IF_ERROR(hipEventDestroy(event));
 }
 
 extern "C" void mgpuEventSynchronize(hipEvent_t event) {
+  hipStream_t stream = at::hip::getCurrentHIPStream();
+
   // Skip if event is null (e.g., created during capture) or if capturing.
-  if (event == nullptr || mgpuStreamIsCapturing(hipStreamPerThread))
+  if (event == nullptr || mgpuStreamIsCapturing(stream))
     return;
   
-  // Try the sync and silently ignore capture-related errors.
-  hipError_t result = hipEventSynchronize(event);
-  if (result != hipSuccess && 
-      result != hipErrorStreamCaptureUnsupported &&
-      result != hipErrorStreamCaptureInvalidated) {
-    const char *name = hipGetErrorName(result);
-    if (!name) name = "<unknown>";
-    fprintf(stderr, "'hipEventSynchronize(event)' failed with '%s'\n", name);
-  }
+  HIP_REPORT_IF_ERROR(hipEventSynchronize(event));
 }
 
 extern "C" void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
   // Skip if event is null (e.g., created during capture).
   if (event == nullptr)
     return;
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(hipEventRecord(event, stream));
 }
 
 extern "C" void *mgpuMemAlloc(uint64_t sizeBytes, hipStream_t /*stream*/,
                               bool /*isHostShared*/) {
-  // hipMalloc is not permitted during HIP graph capture.
-  // Skip allocation entirely if capturing to avoid invalidating the graph.
-  if (mgpuStreamIsCapturing(hipStreamPerThread))
-    return nullptr;
-
   void *ptr = nullptr;
-  hipError_t result = hipMalloc(&ptr, sizeBytes);
-  if (result != hipSuccess) {
-    if (result != hipErrorStreamCaptureUnsupported &&
-        result != hipErrorStreamCaptureInvalidated) {
-      const char *name = hipGetErrorName(result);
-      if (!name) name = "<unknown>";
-      fprintf(stderr, "'hipMalloc' failed with '%s'\n", name);
-    }
-    return nullptr;
-  }
+  HIP_REPORT_IF_ERROR(hipMalloc(&ptr, sizeBytes));
   return ptr;
 }
 
 extern "C" void mgpuMemFree(void *ptr, hipStream_t /*stream*/) {
-  // hipFree is not permitted during HIP graph capture.
-  // Skip free entirely if capturing to avoid invalidating the graph.
-  if (mgpuStreamIsCapturing(hipStreamPerThread))
-    return;
-
-  hipError_t result = hipFree(ptr);
-  if (result != hipSuccess &&
-      result != hipErrorStreamCaptureUnsupported &&
-      result != hipErrorStreamCaptureInvalidated) {
-    const char *name = hipGetErrorName(result);
-    if (!name) name = "<unknown>";
-    fprintf(stderr, "'hipFree' failed with '%s'\n", name);
-  }
+  HIP_REPORT_IF_ERROR(hipFree(ptr));
 }
 
 extern "C" void mgpuMemcpy(void *dst, void *src, size_t sizeBytes,
                            hipStream_t stream) {
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(
       hipMemcpyAsync(dst, src, sizeBytes, hipMemcpyDefault, stream));
 }
 
 extern "C" void mgpuMemset32(void *dst, int value, size_t count,
                              hipStream_t stream) {
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(hipMemsetD32Async(reinterpret_cast<hipDeviceptr_t>(dst),
                                         value, count, stream));
 }
 
 extern "C" void mgpuMemset16(void *dst, int shortValue, size_t count,
                              hipStream_t stream) {
-  stream = mgpuResolveStream(stream);
   HIP_REPORT_IF_ERROR(
       hipMemsetD16Async(reinterpret_cast<hipDeviceptr_t>(dst), shortValue, count,
                         stream));
