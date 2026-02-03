@@ -1372,11 +1372,11 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     [
         pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
         pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
-        pytest.param(64, 7168, 256, 256, 8, id="DS-TP8-decode-S"),
-        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode-L"),
+        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
         pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
-        pytest.param(64, 5120, 1536, 64, 6, id="EP-K6-decode-S"),
-        pytest.param(256, 5120, 1536, 64, 6, id="EP-K6-decode-L"),
+        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
