@@ -34,6 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import mfma_epilog
+from kernels.kernels_common import get_torch_stream_as_mlir_value
 
 
 def compile_mxfp4_preshuffle_gemm(
@@ -1073,6 +1074,7 @@ def compile_mxfp4_preshuffle_gemm(
                     c_n,
                     c_k,
                 ],
+                async_object=get_torch_stream_as_mlir_value(),
             )
 
     m = _GEMM()

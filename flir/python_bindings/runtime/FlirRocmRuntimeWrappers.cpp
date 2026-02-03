@@ -18,7 +18,6 @@
 #include <vector>
 
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
-#include <ATen/hip/HIPContext.h>
 
 #include "hip/hip_runtime.h"
 
@@ -34,13 +33,11 @@
 
 thread_local static int32_t defaultDevice = 0;
 
-// When set (from the Python host), force all runtime ops to use this stream.
-// This allows integrating with frameworks like PyTorch/vLLM that require all GPU
-// work to be enqueued onto the framework's "current" stream (including during
-// HIP graph capture).
 static inline bool mgpuStreamIsCapturing(hipStream_t stream) {
   hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
-  HIP_REPORT_IF_ERROR(hipStreamIsCapturing(stream, &status));
+  hipError_t err = hipStreamIsCapturing(stream, &status);
+  if (err != hipSuccess)
+    return false;
   return status != hipStreamCaptureStatusNone;
 }
 
@@ -82,24 +79,19 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
-  // In HIP graph capture, stream creation is not permitted. Use default stream
-  // with hip getCurrentHIPStream.
-  hipStream_t stream = at::hip::getCurrentHIPStream();
+  // In HIP graph capture, stream creation is not permitted. Use per-thread
+  // default stream when the current thread is capturing.
+  if (mgpuStreamIsCapturing(hipStreamPerThread))
+    return hipStreamPerThread;
 
-  if (stream == nullptr)
-  {
-    HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
-  }
+  hipStream_t stream = nullptr;
+  HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
   return stream;
 }
 
 extern "C" void mgpuStreamDestroy(hipStream_t stream) {
   // Never destroy implicit streams.
-  hipStream_t cur_stream = at::hip::getCurrentHIPStream();
-  if (stream == nullptr ||
-      stream == hipStreamPerThread ||
-      stream == hipStreamLegacy ||
-      stream == cur_stream)
+  if (stream == nullptr || stream == hipStreamPerThread || stream == hipStreamLegacy)
     return;
   // Don't destroy streams while capturing.
   if (mgpuStreamIsCapturing(stream))
@@ -108,14 +100,14 @@ extern "C" void mgpuStreamDestroy(hipStream_t stream) {
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
-  // Stream synchronization is not permitted during HIP graph capture.
-  // Try to detect capture state first, but also handle errors gracefully.
-  if (mgpuStreamIsCapturing(hipStreamPerThread) || mgpuStreamIsCapturing(stream))
-    return;
-  
-  // Even if capture detection fails (e.g., capture stream not checked),
-  // try the sync and silently ignore capture-related errors.
-  HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
+  // IMPORTANT: `hipStreamSynchronize` is not permitted during HIP graph capture
+  // and may return hipErrorStreamCaptureUnsupported due to thread-scoped capture
+  // state (even if `stream` is not the capturing stream).
+  //
+  // This wrapper is only used by generated/JIT code for convenience; higher
+  // layers (e.g., PyTorch) should manage synchronization when needed.
+  (void)stream;
+  return;
 }
 
 extern "C" void mgpuStreamWaitEvent(hipStream_t stream, hipEvent_t event) {
@@ -133,19 +125,14 @@ extern "C" void mgpuEventDestroy(hipEvent_t event) {
 }
 
 extern "C" void mgpuEventSynchronize(hipEvent_t event) {
-  hipStream_t stream = at::hip::getCurrentHIPStream();
-
-  // Skip if event is null (e.g., created during capture) or if capturing.
-  if (event == nullptr || mgpuStreamIsCapturing(stream))
+  // Event synchronization is not permitted during HIP graph capture.
+  // Use the current per-thread stream capture state as a conservative proxy.
+  if (mgpuStreamIsCapturing(hipStreamPerThread))
     return;
-  
   HIP_REPORT_IF_ERROR(hipEventSynchronize(event));
 }
 
 extern "C" void mgpuEventRecord(hipEvent_t event, hipStream_t stream) {
-  // Skip if event is null (e.g., created during capture).
-  if (event == nullptr)
-    return;
   HIP_REPORT_IF_ERROR(hipEventRecord(event, stream));
 }
 
@@ -262,4 +249,3 @@ extern "C" void mgpuSetDefaultDevice(int32_t device) {
   defaultDevice = device;
   HIP_REPORT_IF_ERROR(hipSetDevice(device));
 }
-

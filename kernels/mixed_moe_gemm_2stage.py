@@ -10,6 +10,7 @@ It is extracted from `tests/kernels/test_moe_gemm.py` so that:
 """
 
 import os
+import functools
 
 import flydsl
 from flydsl.dialects.ext import flir
@@ -35,7 +36,8 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-import functools
+from flydsl.kernels.kernels_common import get_torch_stream_as_mlir_value
+
 
 @functools.lru_cache(maxsize=None)
 def compile_mixed_moe_gemm1(
@@ -1182,6 +1184,7 @@ def compile_mixed_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_object=get_torch_stream_as_mlir_value(),
             )
 
     m = _MOE1()
@@ -2370,6 +2373,7 @@ def compile_mixed_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_object=get_torch_stream_as_mlir_value(),
             )
 
     m = _MOE2()
