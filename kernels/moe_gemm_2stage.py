@@ -1983,9 +1983,22 @@ def compile_moe_gemm2(
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
 
-                e_vec = 2 if bool(accumulate) else 8
+                e_vec = 2 if bool(accumulate) else 8 if tile_n % 8 == 0 else 4
+                if (tile_n % e_vec) != 0:
+                    raise ValueError(f"tile_n={tile_n} must be divisible by e_vec={e_vec}")
+                # cshuffle_nlane: use default for atomic, dynamic for reduce
                 if not bool(accumulate):
-                    cshuffle_nlane = 32
+                    # Dynamic cshuffle_nlane: pick smallest valid value
+                    # Constraints:
+                    #   1. tile_n % (cshuffle_nlane * e_vec) == 0
+                    #   2. cshuffle_nlane >= total_threads / tile_m (for CShuffleMLane to be integer)
+                    min_nlane = max(1, total_threads // tile_m)
+                    max_nlane = tile_n // e_vec
+                    cshuffle_nlane = min_nlane
+                    while cshuffle_nlane <= max_nlane and (tile_n % (cshuffle_nlane * e_vec)) != 0:
+                        cshuffle_nlane += 1
+                    if cshuffle_nlane > max_nlane:
+                        cshuffle_nlane = max_nlane  # fallback
                     cshuffle_stride = cshuffle_nlane * e_vec
                     if (int(tile_n) % cshuffle_stride) != 0:
                         raise ValueError(
@@ -2205,6 +2218,7 @@ def compile_moe_gemm2(
                         tile_m=tile_m,
                         tile_n=tile_n,
                         e_vec=e_vec,
+                        cshuffle_nlane=cshuffle_nlane if not bool(accumulate) else 32,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,
