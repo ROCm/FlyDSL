@@ -35,6 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.kernels_common import get_torch_stream_as_async_token
 
 
 @functools.lru_cache(maxsize=1024)
@@ -1087,6 +1088,8 @@ def compile_moe_gemm1(
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
+
+            stream_token = get_torch_stream_as_async_token()
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1106,6 +1109,7 @@ def compile_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
@@ -2243,6 +2247,8 @@ def compile_moe_gemm2(
             bdx = 256
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
+
+            stream_token = get_torch_stream_as_async_token()
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -2262,6 +2268,7 @@ def compile_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE2()
@@ -2426,11 +2433,14 @@ def compile_moe_reduction(
             c1 = arith.as_value(arith_ext.index(1))
             gx = arith.as_value(m_tokens)
             bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
+
+            stream_token = get_torch_stream_as_async_token()
             flir.gpu_ext.LaunchFuncOp(
                 [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
                 kernel_operands=[X, Y, m_tokens],
+                async_dependencies=[stream_token],
             )
 
     m = _MoeReduction()

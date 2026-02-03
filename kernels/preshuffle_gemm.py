@@ -23,6 +23,7 @@ from _mlir import ir
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
+from kernels.kernels_common import get_torch_stream_as_async_token
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -1080,6 +1081,7 @@ def compile_preshuffle_gemm_a8(
             one = arith.constant(1, index=True)
             gx = (c_m + tm - one) / tm
             gy = c_n / tn
+            stream_token = get_torch_stream_as_async_token()
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),
@@ -1094,7 +1096,7 @@ def compile_preshuffle_gemm_a8(
                     c_n,
                     c_k,
                 ],
-                async_object=get_torch_stream_as_mlir_value(),
+                async_dependencies=[stream_token],
             )
 
     m = _GEMM()

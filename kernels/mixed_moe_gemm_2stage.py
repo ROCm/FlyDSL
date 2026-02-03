@@ -35,7 +35,7 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from flydsl.kernels.kernels_common import get_torch_stream_as_mlir_value
+from flydsl.kernels.kernels_common import get_torch_stream_as_async_token
 
 import functools
 
@@ -1164,6 +1164,8 @@ def compile_mixed_moe_gemm1(
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
+
+            stream_token = get_torch_stream_as_async_token()
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1184,7 +1186,7 @@ def compile_mixed_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
-                async_object=get_torch_stream_as_mlir_value(),
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
