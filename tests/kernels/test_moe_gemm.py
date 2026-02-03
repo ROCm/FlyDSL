@@ -302,6 +302,7 @@ def run_moe_stage1(
     return_outputs: bool = False,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    test_graph: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -617,6 +618,7 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
     # Use reduce mode (accumulate=False) instead of atomic mode.
     use_reduce: bool = False,
+    test_graph: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -1027,6 +1029,7 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
