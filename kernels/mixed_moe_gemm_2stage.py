@@ -35,7 +35,7 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
 
 import functools
 
