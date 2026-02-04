@@ -40,6 +40,25 @@ __all__ = [
     'i32_select',
 ]
 
+# =============================================================================
+# Constants for Hardware OOB (Out-of-Bounds) Handling
+# =============================================================================
+# These values are chosen to match Triton's implementation for reliable hardware
+# OOB detection in AMD buffer load/store operations.
+#
+# Reference: triton/third_party/amd/lib/TritonAMDGPUToLLVM/BufferOpsEmitter.cpp
+#   - OOB_OFFSET = static_cast<int>(std::numeric_limits<int>::max() + int64_t(1))
+#   - numRecordsByte = std::numeric_limits<int>::max() - 1
+#
+# How it works:
+#   - When mask=False, offset is replaced with OOB_OFFSET (0x80000000)
+#   - Hardware compares: if (offset >= num_records) -> return 0 (load) or ignore (store)
+#   - 0x80000000 (as unsigned) = 2147483648 > 0x7FFFFFFE = 2147483646
+#   - This guarantees hardware OOB detection triggers for masked-out elements
+# =============================================================================
+OOB_OFFSET = 0x80000000        # -2147483648 as signed i32, 2147483648 as unsigned
+MAX_NUM_RECORDS = 0x7FFFFFFE   # 2147483646 (std::numeric_limits<int>::max() - 1)
+
 
 def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     """Convert an index value to LLVM pointer.
@@ -195,34 +214,41 @@ class BufferResourceDescriptor:
 
         if num_records_bytes is not None:
             # Caller-provided size in BYTES (preferred for exact hardware OOB behavior).
+            # NOTE: When using masks, num_records should not exceed MAX_NUM_RECORDS
+            # to ensure OOB_OFFSET always triggers hardware OOB detection.
             if isinstance(num_records_bytes, int):
                 nbytes = int(num_records_bytes)
                 if nbytes <= 0:
                     nbytes = 0
-                # Descriptor uses i32 bytes; clamp to the max representable.
-                if nbytes > 0xFFFFFFFF:
-                    nbytes = 0xFFFFFFFF
+                # Clamp to MAX_NUM_RECORDS to ensure OOB_OFFSET works correctly.
+                if nbytes > MAX_NUM_RECORDS:
+                    nbytes = MAX_NUM_RECORDS
                 num_records = _create_i32_constant(nbytes)
             else:
                 # Value path: cast to i32 if needed.
+                # Note: For dynamic values, we trust the caller to provide valid sizes.
+                # If the buffer is larger than MAX_NUM_RECORDS, OOB detection may not
+                # work correctly for masked loads/stores.
                 v = _unwrap_value(num_records_bytes)
                 if not isinstance(v.type, ir.IntegerType) or v.type.width != 32:
                     op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), v)
                     v = _unwrap_value(op.result)
                 num_records = v
         elif max_size:
-            # Use max for flexibility (hardware will check actual bounds)
-            # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
-            num_records = _create_i32_constant(0xFFFFFFFF)  # FALLBACK_MAX_SIZE
+            # Use MAX_NUM_RECORDS for flexibility with proper OOB handling.
+            # This value (0x7FFFFFFE) ensures that OOB_OFFSET (0x80000000) will
+            # always trigger hardware OOB detection.
+            num_records = _create_i32_constant(MAX_NUM_RECORDS)
         else:
             # Use the logical memref size (in bytes) for hardware OOB checking.
             nbytes = _num_records_from_memref_type()
             if nbytes is None:
-                # Fall back to max-size if we can't infer statically.
-                num_records = _create_i32_constant(0xFFFFFFFF)
+                # Fall back to MAX_NUM_RECORDS if we can't infer statically.
+                num_records = _create_i32_constant(MAX_NUM_RECORDS)
             else:
-                if nbytes > 0xFFFFFFFF:
-                    nbytes = 0xFFFFFFFF
+                # Clamp to MAX_NUM_RECORDS for proper OOB handling with masks.
+                if nbytes > MAX_NUM_RECORDS:
+                    nbytes = MAX_NUM_RECORDS
                 num_records = _create_i32_constant(int(nbytes))
         
         # Create resource descriptor (returns !llvm.ptr<8>)
@@ -312,11 +338,13 @@ def buffer_load(rsrc: ir.Value,
     op = std_arith.MulIOp(offset, bytes_const)
     offset = _unwrap_value(op.result)
     
-    # Apply mask by setting invalid offsets to max
+    # Apply mask by setting invalid offsets to OOB_OFFSET
+    # When mask=False, offset becomes OOB_OFFSET (0x80000000), which is always
+    # >= MAX_NUM_RECORDS (0x7FFFFFFE), triggering hardware OOB (returns 0).
     if mask is not None:
         mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
+        oob_offset = _create_i32_constant(OOB_OFFSET)
+        op = std_arith.SelectOp(mask, offset, oob_offset)
         offset = _unwrap_value(op.result)
     
     # Create vector type
@@ -400,11 +428,13 @@ def buffer_store(data: ir.Value,
         op = std_arith.MulIOp(offset, bytes_const)
         offset = _unwrap_value(op.result)
     
-    # Apply mask by setting invalid offsets to max
+    # Apply mask by setting invalid offsets to OOB_OFFSET
+    # When mask=False, offset becomes OOB_OFFSET (0x80000000), which is always
+    # >= MAX_NUM_RECORDS (0x7FFFFFFE), triggering hardware OOB (store ignored).
     if mask is not None:
         mask = _unwrap_value(mask)
-        max_offset = _create_i32_constant(0x7FFFFFFF)
-        op = std_arith.SelectOp(mask, offset, max_offset)
+        oob_offset = _create_i32_constant(OOB_OFFSET)
+        op = std_arith.SelectOp(mask, offset, oob_offset)
         offset = _unwrap_value(op.result)
     
     # Create instruction offset (soffset) and aux flags

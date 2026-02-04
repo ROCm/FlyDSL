@@ -34,7 +34,8 @@ function run_flydsl_op {
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
     python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
-    # python tests/kernels/test_simple_gemm.py --size NA4
+    python tests/kernels/test_simple_gemm.py --size NA4
+    python tests/kernels/test_simple_gemm.py --size all --dtype all
 }
 
 

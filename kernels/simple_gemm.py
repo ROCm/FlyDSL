@@ -240,7 +240,6 @@ def compile_simple_gemm(
             )
 
             c4 = arith.constant(4, index=True)
-            c8 = arith.constant(8, index=True)
             tx_i32_base = tx * c4
 
             atom_a_lds = flir.make_copy_atom(_elem_type(), vector_size=8)
@@ -272,14 +271,11 @@ def compile_simple_gemm(
                     offset_dword = offset_elem / arith.constant(2, index=True)
                     offset_i32 = arith.index_cast(i32, offset_dword)
 
-                    # Mask: row_global < M and (k_global + 7) < K
+                    # Mask: row_global < M (K is guaranteed to be padded to tile_k)
                     row_valid = arith.cmpu(row_global, c_m, "ult")
-                    k_end = k_global + c8
-                    k_valid = arith.cmpu(k_end, c_k + arith.constant(1, index=True), "ult")
-                    mask = arith.andi(row_valid, k_valid)
 
                     # Load 4 dwords (16 bytes = 8 bf16 elements) with mask
-                    a_i32x4 = buffer_ops.buffer_load(a_rsrc, offset_i32, vec_width=4, dtype=i32, mask=mask)
+                    a_i32x4 = buffer_ops.buffer_load(a_rsrc, offset_i32, vec_width=4, dtype=i32, mask=row_valid)
                     parts.append(a_i32x4)
                 return parts
 
@@ -326,14 +322,11 @@ def compile_simple_gemm(
                 offset_dword = offset_elem / arith.constant(2, index=True)
                 offset_i32 = arith.index_cast(i32, offset_dword)
 
-                # Mask: n_global < N and (k_global + 7) < K
+                # Mask: n_global < N (K is guaranteed to be padded to tile_k)
                 n_valid = arith.cmpu(n_global, c_n, "ult")
-                k_end = k_global + c8
-                k_valid = arith.cmpu(k_end, c_k + arith.constant(1, index=True), "ult")
-                mask = arith.andi(n_valid, k_valid)
 
                 # Load 4 dwords (16 bytes = 8 bf16 elements) with mask
-                b_i32x4 = buffer_ops.buffer_load(b_rsrc, offset_i32, vec_width=4, dtype=i32, mask=mask)
+                b_i32x4 = buffer_ops.buffer_load(b_rsrc, offset_i32, vec_width=4, dtype=i32, mask=n_valid)
                 
                 # Convert to vec8 bf16/fp16, then split into two i64 halves
                 b_vec = vector.bitcast(vec8_elem, b_i32x4)
