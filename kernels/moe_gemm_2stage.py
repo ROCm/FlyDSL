@@ -2761,16 +2761,16 @@ class _MoeGemm2ReduceWrapper:
     def _ensure_intermediate_buffer(self, tokens: int, device):
         """Ensure intermediate buffer is large enough."""
         import torch
-        required_size = tokens * self._topk * self._model_dim
-        if self._intermediate is None or self._intermediate_capacity < required_size:
+        max_token = 1024
+        if self._intermediate is None:
             # Use torch.empty instead of torch.zeros for better performance
             # GEMM2 will overwrite all values, so initialization not needed
             self._intermediate = torch.empty(
-                tokens * self._topk, self._model_dim,
+                max_token * self._topk, self._model_dim,
                 device=device,
                 dtype=self._get_torch_dtype()
             )
-            self._intermediate_capacity = required_size
+            # self._intermediate_capacity = required_size
         # else:
         #     # Zero out the portion we're about to use when reusing buffer
         #     # Commented out: GEMM2 overwrites all values, zeroing not needed
