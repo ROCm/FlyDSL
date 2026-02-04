@@ -6,29 +6,34 @@ from functools import wraps
 from typing import Any, List, Optional, Tuple, Union, Callable
 from typing import Optional, List, Union, TypeVar
 
-from ..._mlir.dialects._func_ops_gen import FuncOp
-from ..._mlir.extras import types as T
-from ..._mlir.extras.meta import region_op, op_region_builder
+# Import from flydsl._mlir for types
+from flydsl._mlir import ir as flydsl_ir
+from flydsl._mlir.extras import types as T
+from flydsl._mlir.interop import to_upstream, to_upstream_types
+
+# Import from upstream MLIR for dialect operations (still needed)
+from mlir.dialects._func_ops_gen import FuncOp
+from mlir.extras.meta import region_op, op_region_builder
 
 
-from ..._mlir.dialects._ods_common import (
+from mlir.dialects._ods_common import (
     _cext,
     get_default_loc_context,
     get_op_result_or_op_results,
 )
-from ..._mlir.dialects._gpu_ops_gen import _Dialect
-from ..._mlir.dialects._gpu_ops_gen import *
-from ..._mlir.dialects._gpu_enum_gen import *
+from mlir.dialects._gpu_ops_gen import _Dialect
+from mlir.dialects._gpu_ops_gen import *
+from mlir.dialects._gpu_enum_gen import *
 
 
-from ..._mlir.ir import (
+from mlir.ir import (
     ArrayAttr,
     AttrBuilder,
     Attribute,
     Context,
     InsertionPoint,
     ShapedType,
-    Type,
+    Type as UpstreamType,
     UnitAttr,
     Value,
     FlatSymbolRefAttr,
@@ -37,11 +42,12 @@ from ..._mlir.ir import (
     OpView,
     Operation,
     OpResultList,
-    Type,
     TypeAttr,
-    Value,
     register_attribute_builder,
 )
+
+# Also import flydsl Type for type checking
+from flydsl._mlir import Type as FlyDSLType
 
 _block_id = block_id
 _thread_id = thread_id
@@ -236,7 +242,7 @@ def prep_func_types(sig, return_types):
         return_types = [return_types]
     return_types = list(return_types)
     assert all(
-        isinstance(r, (str, Type, TypeVar)) or isalambda(r) for r in return_types
+        isinstance(r, (str, UpstreamType, FlyDSLType, TypeVar)) or isalambda(r) for r in return_types
     ), f"all return types must be ..._mlir types or strings or TypeVars or lambdas {return_types=}"
 
     input_types = [
@@ -244,9 +250,26 @@ def prep_func_types(sig, return_types):
         for p in sig.parameters.values()
         if not p.annotation is inspect.Signature.empty
     ]
+    
+    def is_valid_type(t):
+        """Check if t is a valid type annotation for GPU functions."""
+        # Direct type instances
+        if isinstance(t, (str, UpstreamType, FlyDSLType, TypeVar)):
+            return True
+        # Lambda functions
+        if isalambda(t):
+            return True
+        # Type factory functions (like T.i32, T.f16)
+        if callable(t) and hasattr(t, '__name__'):
+            return True
+        # Classes that are types
+        if isinstance(t, type):
+            return True
+        return False
+    
     assert all(
-        isinstance(r, (str, Type, TypeVar)) or isalambda(r) for r in input_types
-    ), f"all input types must be ..._mlir types or strings or TypeVars or lambdas {input_types=}"
+        is_valid_type(r) for r in input_types
+    ), f"all input types must be ..._mlir types or strings or TypeVars or lambdas or callables {input_types=}"
     user_loc = None
     # If ir.Context is none (like for deferred func emit)
     if user_loc is None:
@@ -277,6 +300,17 @@ class LaunchFuncOp(LaunchFuncOp):
         async_token = None
         grid_size_x, grid_size_y, grid_size_z = grid_size
         block_size_x, block_size_y, block_size_z = block_size
+        
+        # CRITICAL: Convert flydsl types to upstream types
+        kernel = to_upstream(kernel)
+        grid_size_x = to_upstream(grid_size_x)
+        grid_size_y = to_upstream(grid_size_y)
+        grid_size_z = to_upstream(grid_size_z)
+        block_size_x = to_upstream(block_size_x)
+        block_size_y = to_upstream(block_size_y)
+        block_size_z = to_upstream(block_size_z)
+        if kernel_operands:
+            kernel_operands = [to_upstream(op) for op in kernel_operands]
 
         super().__init__(
             async_token,
@@ -372,10 +406,13 @@ class GPUFunc:
                 else:
                     input_types = [a.type for a in call_args]
 
+                # CRITICAL: Convert flydsl types to upstream types for FunctionType
+                upstream_input_types = to_upstream_types(input_types)
+                upstream_return_types = to_upstream_types(self.return_types)
                 function_type = TypeAttr.get(
                     FunctionType.get(
-                        inputs=input_types,
-                        results=self.return_types,
+                        inputs=upstream_input_types,
+                        results=upstream_return_types,
                     )
                 )
             else:
@@ -396,7 +433,9 @@ class GPUFunc:
             for k, v in self.func_attrs.items():
                 self._func_op.attributes[k] = v
 
-            self._func_op.regions[0].blocks.append(*input_types, arg_locs=self.arg_locs)
+            # CRITICAL: Convert flydsl types to upstream types for blocks.append
+            append_input_types = to_upstream_types(input_types)
+            self._func_op.regions[0].blocks.append(*append_input_types, arg_locs=self.arg_locs)
             builder_wrapper = op_region_builder(
                 self._func_op, self._func_op.regions[0], terminator=self.return_op_ctor
             )
@@ -414,8 +453,11 @@ class GPUFunc:
 
             if self.function_type is None:
                 builder_wrapper(grab_results)
+                # CRITICAL: Convert flydsl types to upstream types for FunctionType
+                upstream_input_types2 = to_upstream_types(input_types)
+                upstream_return_types2 = to_upstream_types(return_types)
                 function_type = FunctionType.get(
-                    inputs=input_types, results=return_types
+                    inputs=upstream_input_types2, results=upstream_return_types2
                 )
                 self._func_op.attributes["function_type"] = TypeAttr.get(function_type)
             else:

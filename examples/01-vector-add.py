@@ -59,7 +59,6 @@ class VecAdd(fx.MlirModule):
 
         size = fx.get_scalar(size)
 
-        x = fx.arith.constant(fx.T.i64(), 16)
         c1 = fx.arith.constant(fx.T.index(), 1)
         c16 = fx.arith.constant(fx.T.index(), 16)
 
@@ -71,36 +70,38 @@ class VecAdd(fx.MlirModule):
             kernel_sym,
             grid_size=[gN, c1, c1],
             block_size=[c16, c1, c1],
-            kernel_operands=[x, A, B, C],
+            kernel_operands=[A, B, C],  # kernel's self is skipped
         )
 
 
+import sys
+
+print("Creating VecAdd module...", flush=True)
 VecAdd_Module = VecAdd()
 print(VecAdd_Module)
 
 
 VecAdd_Executor = flydsl.compile(VecAdd_Module, print_after_all=False)
-# VecAdd_Asm = flydsl.compile(VecAdd_Module, output_format="assembly")
-# print(VecAdd_Asm)
+
 
 import torch
 
 tA = torch.randint(0, 10, (N,), dtype=torch.float32, device="cuda")
-
 tB = torch.randint(0, 10, (N,), dtype=torch.float32, device="cuda")
-tC = torch.randint(0, 10, (N,), dtype=torch.float32, device="cuda")
+tC = torch.zeros((N,), dtype=torch.float32, device="cuda")
 
-tAmk = torch.randint(0, 10, (N, N), dtype=torch.float32, device="cuda")
-
+print("Running kernel...")
 VecAdd_Executor(tA, tB, tC)
+
+print("Kernel complete!")
+torch.cuda.synchronize()
+
 is_closed = torch.allclose(tC, tA + tB)
 print("Result correct:", is_closed)
-
 
 if not is_closed:
     print("tA:", tA[:32])
     print("tB:", tB[:32])
     print("tC:", tC[:32])
-
 
 print("Hello, Fly!")

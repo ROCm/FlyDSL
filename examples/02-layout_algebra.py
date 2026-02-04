@@ -44,7 +44,6 @@ class VecCopy(fx.MlirModule):
         A: memrefTy,
         B: memrefTy,
     ):
-        x = fx.arith.constant(fx.T.i64(), 16)
         c1 = fx.arith.constant(fx.T.index(), 1)
         c256 = fx.arith.constant(fx.T.index(), 256)
         gN = fx.arith.constant(fx.T.index(), N // 16)
@@ -54,7 +53,7 @@ class VecCopy(fx.MlirModule):
             kernel_sym,
             grid_size=[gN, c1, c1],
             block_size=[c256, c1, c1],
-            kernel_operands=[x, A, B],
+            kernel_operands=[A, B],  # Only pass A, B (kernel's self is skipped)
         )
 
 

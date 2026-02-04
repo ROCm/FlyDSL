@@ -6,25 +6,37 @@ from flydsl.lang.meta import dsl_api_wrapper
 
 from .module import _global_ctx
 
-from ..._mlir import ir
-from ..._mlir.dialects import fly as _fly_ir
-from ..._mlir.dialects._fly_enum_gen import AddressSpace, CachePolicy
+# CRITICAL: Use flydsl's own _mlir package following NV Cutlass pattern
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly as _fly_ir
+from flydsl._mlir.extras import types as T  # ✅ Use flydsl's own types!
+from flydsl._mlir.dialects import arith  # ✅ Use flydsl's arith wrapper!
 
-from ..._mlir.dialects import arith
-from ..._mlir.extras import types as T
-
-from ..._mlir.dialects.fly import (
+# Import all Fly types directly from fly dialect module
+from flydsl._mlir.dialects.fly import (
     IntTupleType,
     LayoutType,
     SwizzleType,
     PointerType,
-    MemRefType,
     CopyAtomUniversalCopyType,
     MmaAtomUniversalFMAType,
     DLTensorAdaptor,
 )
 
-from ..._mlir.dialects.fly_rocdl import (
+# Use the generated enum from _fly_enum_gen.py which has correct values
+# C++ enum: Global=0, Shared=1, Register=2
+from flydsl._mlir.dialects._fly_enum_gen import AddressSpace
+
+class CachePolicy:
+    always = 0
+    evict_first = 1
+    evict_last = 2
+
+# Use flydsl's MemRefType
+from flydsl._mlir import MemRefType
+
+# Import FlyROCDL types
+from flydsl._mlir.dialects.fly_rocdl import (
     MmaAtomCDNA3_MFMAType,
 )
 
@@ -264,7 +276,9 @@ def raked_product(layout, tiler, loc=None, ip=None):
 
 @dsl_api_wrapper
 def make_atom(atom_type, loc=None, ip=None):
-    return _fly_ir.make_atom(atom_type, loc=loc, ip=ip)
+    from flydsl._mlir.interop import to_upstream
+    upstream_atom_type = to_upstream(atom_type)
+    return _fly_ir.make_atom(upstream_atom_type, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -289,7 +303,11 @@ def make_tiled_copy(copy_atom, layout_tv, tile_mn, loc=None, ip=None):
 
 @dsl_api_wrapper
 def memref_alloca(memref_type, layout, loc=None, ip=None):
-    return _fly_ir.memref_alloca(memref_type, layout, loc=loc, ip=ip)
+    # Convert flydsl types to upstream types for generated ops
+    from flydsl._mlir.interop import to_upstream
+    upstream_memref_type = to_upstream(memref_type)
+    upstream_layout = to_upstream(layout)
+    return _fly_ir.memref_alloca(upstream_memref_type, upstream_layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper

@@ -1,4 +1,3 @@
-#include "mlir-c/RegisterEverything.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 
@@ -13,23 +12,19 @@ namespace mlir {
 } // namespace mlir
 
 NB_MODULE(_mlirRegisterEverything, m) {
-  m.doc() = "MLIR All Upstream Dialects, Translations and Passes Registration";
+  m.doc() = "Fly Dialect Registration";
 
   m.def("register_dialects", [](MlirDialectRegistry registry) {
-    mlirRegisterAllDialects(registry);
-
+    // Only register Fly dialects
+    // Upstream dialects are already registered by upstream MLIR
+    
     MlirDialectHandle flyHandle = mlirGetDialectHandle__fly__();
     mlirDialectHandleInsertDialect(flyHandle, registry);
     MlirDialectHandle flyROCDLHandle = mlirGetDialectHandle__fly_rocdl__();
     mlirDialectHandleInsertDialect(flyROCDLHandle, registry);
   });
-  m.def("register_llvm_translations",
-        [](MlirContext context) { mlirRegisterAllLLVMTranslations(context); });
 
-  // Register all passes on load.
-  mlirRegisterAllPasses();
-
+  // Register ONLY Fly's passes (not all upstream passes)
   mlir::fly::registerFlyPasses();
-  // Register Fly to ROCDL conversion pass
   mlir::registerFlyToROCDLConversionPass();
 }

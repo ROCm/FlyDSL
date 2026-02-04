@@ -1,7 +1,8 @@
 import inspect
 from functools import wraps
 
-from .._mlir import ir
+# Import from upstream MLIR (not flydsl._mlir)
+from mlir import ir
 
 
 def dsl_api_wrapper(op):

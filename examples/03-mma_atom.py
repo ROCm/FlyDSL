@@ -68,7 +68,6 @@ class MmaAtom(fx.MlirModule):
         B: ABMemRefTy,
         C: CMemRefTy,
     ):
-        x = fx.arith.constant(fx.T.i64(), 16)
         c1 = fx.arith.constant(fx.T.index(), 1)
         c64 = fx.arith.constant(fx.T.index(), 64)
 
@@ -77,7 +76,7 @@ class MmaAtom(fx.MlirModule):
             kernel_sym,
             grid_size=[c1, c1, c1],
             block_size=[c64, c1, c1],
-            kernel_operands=[x, A, B, C],
+            kernel_operands=[A, B, C],  # kernel's self is skipped
         )
 
 

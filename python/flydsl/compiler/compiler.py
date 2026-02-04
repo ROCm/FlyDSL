@@ -1,9 +1,11 @@
 from contextlib import ExitStack
 
-from .._mlir.passmanager import PassManager
+from mlir import ir as upstream_ir
+from mlir.passmanager import PassManager
 
 from ..lang import MlirModule
 from .executor import Executor
+from .._mlir.interop import to_upstream
 
 
 def _decode_mlir_escaped_bytes(s: str) -> str:
@@ -117,11 +119,32 @@ def compile(
         ")"
     )
     mlir_module = fx_module.module
-    module = mlir_module.parse(mlir_module.operation.get_asm(enable_debug_info=True))
-
+    
+    # CRITICAL: Get module ASM and re-parse in a fresh upstream context
+    # This ensures proper resource management and avoids cross-domain issues
+    asm = mlir_module.operation.get_asm(enable_debug_info=True)
+    
+    # Create a fresh upstream context for compilation
+    upstream_ctx = upstream_ir.Context()
+    upstream_ctx.allow_unregistered_dialects = True
+    upstream_ctx.load_all_available_dialects()
+    
+    # Import _fly to ensure passes are registered
+    from flydsl._mlir._mlir_libs import _fly
+    
+    # CRITICAL: Register fly dialect in this context
+    # Create a flydsl context wrapper sharing the same underlying C pointer
+    flydsl_ctx = _fly.Context._CAPICreate(upstream_ctx._CAPIPtr)
+    _fly._register_dialect(flydsl_ctx, load=True)
+    
+    module = None
     try:
         with ExitStack() as stack:
-            stack.enter_context(module.context)
+            stack.enter_context(upstream_ctx)
+            
+            # Parse module in this context
+            module = upstream_ir.Module.parse(asm)
+            
             pm = PassManager.parse(pipeline)
             pm.enable_verifier(verify)
             pm.enable_ir_printing(print_after_all=print_after_all)
