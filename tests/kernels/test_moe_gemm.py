@@ -482,7 +482,9 @@ def run_moe_stage1(
 
         rtol = 0.5 if is_int4 else 0.25
         atol = 0.5 if is_int4 else 0.25
-        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
+        print(out.to(torch.float32))
+        print(ref)
+        assert verify_output(out.to(torch.float32), ref, rtol=1e-4, atol=1e-4)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -668,22 +670,22 @@ def run_moe_stage2(
     x_fp32 = (
         x_fp32_in
         if x_fp32_in is not None
-        else torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
+        else torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
     )
     w1_fp32 = (
         w1_fp32_in
         if w1_fp32_in is not None
-        else torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
+        else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
     )
     w2_fp32 = (
         w2_fp32_in
         if w2_fp32_in is not None
-        else torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+        else torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
     )
 
     # Routing: deterministic torch topk + softmax.
     if topk_ids_in is None or topk_weights_in is None:
-        score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+        score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
         topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
         topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
     else:
@@ -885,7 +887,7 @@ def run_moe_stage2(
             model_dim=model_dim,
             doweight_stage2=doweight_stage2,
         )
-        assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
+        assert verify_output(out.to(torch.float32), ref2, rtol=0.000005, atol=0.000005)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
@@ -1045,13 +1047,13 @@ def test_moe_gemm_2stage(
     if init_scale == 1.0:
         init_scale = 0.2
     s = float(init_scale)
-    x_fp32 = torch.rand((tokens, model_dim), device=device, dtype=torch.float32) * s
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
-    w1_fp32 = torch.rand((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * (s / math.sqrt(model_dim))
     # fan_in = inter_dim for W2: [E, model, inter]
-    w2_fp32 = torch.rand((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
 
-    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
