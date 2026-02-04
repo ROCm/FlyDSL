@@ -192,6 +192,60 @@ def _infer_kernel_names_from_asm(asm: str) -> list[str]:
     return names
 
 
+def _apply_waves_per_eu_on_llvm_funcs(module: ir.Module, waves_per_eu: int) -> None:
+    """Apply AMDGPU waves-per-eu hint to llvm.func ops via LLVM passthrough.
+    
+    This sets the 'amdgpu-waves-per-eu' attribute on GPU kernel functions,
+    which hints the LLVM backend about the desired occupancy per EU.
+    
+    The passthrough attribute format for LLVM attributes with values is:
+    ["attribute-name", "attribute-value"]
+    """
+    # For attributes with values, passthrough needs an ArrayAttr with [key, value]
+    attr_key = ir.StringAttr.get("amdgpu-waves-per-eu")
+    attr_value = ir.StringAttr.get(f"{waves_per_eu},{waves_per_eu}")
+    new_entry = ir.ArrayAttr.get([attr_key, attr_value])
+    new_entry_str = f"amdgpu-waves-per-eu={waves_per_eu},{waves_per_eu}"
+
+    def _append_passthrough(func_op):
+        try:
+            existing = func_op.attributes["passthrough"]
+        except KeyError:
+            existing = None
+        
+        if existing is None:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        # Best-effort: if it's not an ArrayAttr-like object, just overwrite.
+        try:
+            existing_entries = list(existing)
+        except TypeError:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        if any(str(a).strip('"') == new_entry_str for a in existing_entries):
+            return
+        func_op.attributes["passthrough"] = ir.ArrayAttr.get(existing_entries + [new_entry])
+
+    try:
+        for op in module.body.operations:
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            # gpu.module has a single region with a single block
+            gpu_module_body = op.regions[0].blocks[0] if hasattr(op, 'regions') else op.body
+            for inner_op in gpu_module_body.operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                    continue
+                # Check for gpu.kernel attribute (it's a unit attribute)
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                _append_passthrough(inner_op)
+    except Exception:
+        # Best-effort only.
+        pass
+
+
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
     *,
@@ -203,6 +257,7 @@ def compile(
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
+    waves_per_eu: Optional[int] = None,
 ) -> Executor:
     """Compile a FLIR module to an Executor.
 
@@ -330,8 +385,14 @@ def compile(
 
                     # Dump ISA from the *post-LLVM* module (right before fatbin emission).
                     # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
+                    # Also apply waves_per_eu here (after LLVM lowering, before binary generation).
+                    # Match only the top-level reconcile-unrealized-casts, not the one inside gpu.module
                     if frag.strip() == "reconcile-unrealized-casts":
-                        asm_for_isa = stage_asm
+                        # Apply waves_per_eu if specified (BEFORE saving asm_for_isa)
+                        if waves_per_eu is not None:
+                            _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                        # Get ASM after applying waves_per_eu
+                        asm_for_isa = module.operation.get_asm(enable_debug_info=True)
 
                 if asm_for_isa is not None:
                     isa_out = _dump_isa_from_rocdl_module_asm(
@@ -344,9 +405,35 @@ def compile(
                         isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
                         print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
             else:
-                pm = PassManager.parse(pipeline, context=ctx)
-                pm.enable_verifier(bool(verify))
-                pm.run(module.operation)
+                if waves_per_eu is not None:
+                    # When waves_per_eu is specified, we need to split the pipeline
+                    # to apply the attribute after LLVM lowering but before binary generation.
+                    stage_frags = _pipeline_fragments(
+                        chip=chip,
+                        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+                        use_bare_pointers_for_host=use_bare_pointers_for_host,
+                        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+                    )
+                    # Run all passes except the last one (gpu-module-to-binary)
+                    pre_binary_frags = stage_frags[:-1]
+                    binary_frag = stage_frags[-1]
+                    
+                    pre_binary_pipeline = f"builtin.module({','.join(pre_binary_frags)})"
+                    pm = PassManager.parse(pre_binary_pipeline, context=ctx)
+                    pm.enable_verifier(bool(verify))
+                    pm.run(module.operation)
+                    
+                    # Apply waves_per_eu
+                    _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                    
+                    # Run the final binary generation pass
+                    pm_binary = PassManager.parse(f"builtin.module({binary_frag})", context=ctx)
+                    pm_binary.enable_verifier(bool(verify))
+                    pm_binary.run(module.operation)
+                else:
+                    pm = PassManager.parse(pipeline, context=ctx)
+                    pm.enable_verifier(bool(verify))
+                    pm.run(module.operation)
             if print_final_module:
                 print(module)
 

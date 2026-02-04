@@ -6,24 +6,26 @@ Configuration:
 - Block: 256 threads = 4 waves × 64 lanes
 - Tile: M=16 × N=64 × K=128 (configurable)
 - Currently supports bf16/fp16 input, f32 accumulator, bf16/fp16 output
-- Supports non-aligned M, N, K dimensions:
-  - M and N: kernel boundary checks on output stores
-  - K: caller pads to multiple of 8 (vector load granularity)
+
+Non-aligned shape handling (Triton-like approach):
+- M and N: mask-based loads/stores in kernel (no host padding needed)
+- K: padded to tile_k on host (required for MFMA vector loads)
+- num_records_bytes: explicitly set in buffer resource descriptor for hardware OOB
 
 A matrix loading:
 - GM → GPR → LDS: 256 threads cooperatively load the A tile with XOR16 swizzle
-- LDS → GPR: Each wave reads 16×32 sub-block for MFMA
+- Mask-based: OOB elements load zeros via buffer descriptor bounds checking
 
 B matrix loading:
 - Direct load: Each wave handles 16 columns of N
-- Wave 0: N[0:16], Wave 1: N[16:32], Wave 2: N[32:48], Wave 3: N[48:64]
+- Mask-based: OOB elements load zeros via buffer descriptor bounds checking
 
 Output C matrix (16×64):
 - Wave 0 → C[0:16, 0:16]
 - Wave 1 → C[0:16, 16:32]
 - Wave 2 → C[0:16, 32:48]
 - Wave 3 → C[0:16, 48:64]
-- Boundary check: skip stores for out-of-bounds elements
+- Mask-based stores: OOB stores are skipped via select(mask, offset, MAX_OFFSET)
 """
 
 import functools
@@ -35,10 +37,14 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator
 
 from _mlir import ir
-from _mlir.dialects import scf as _scf
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl, scf
+from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
+
+
+def _align_up(val: int, align: int) -> int:
+    """Round up val to the next multiple of align."""
+    return ((val + align - 1) // align) * align
 
 
 @functools.lru_cache(maxsize=1024)
@@ -48,23 +54,25 @@ def compile_simple_gemm(
     tile_n: int = 64,
     tile_k: int = 128,
     in_dtype: str = "bf16",
+    waves_per_eu: int = None,
 ):
     """Compile a simple GEMM kernel and return the compiled executable.
 
-    This kernel supports non-aligned M and N dimensions via output boundary checks.
-    The caller is responsible for:
-    - Passing M_pad, N_pad, K_pad as the actual tensor dimensions (padded to tile sizes)
-    - Passing M_orig, N_orig as the original dimensions for boundary checking on output
+    This kernel supports non-aligned M, N, K dimensions via mask-based loads/stores.
+    No host-side padding required.
 
     Args:
         tile_m, tile_n, tile_k: Block tile sizes.
         in_dtype: Input data type ("bf16" or "fp16").
+        waves_per_eu: Optional hint for AMDGPU backend about the desired number of waves
+                      per execution unit. This affects occupancy optimization.
     """
     if in_dtype not in ("bf16", "fp16"):
         raise ValueError(f"in_dtype must be 'bf16' or 'fp16', got {in_dtype!r}")
 
     is_bf16 = in_dtype == "bf16"
     elem_bytes = 2  # bf16 and fp16 are both 2 bytes
+    out_elem_bytes = 2  # output is also bf16/fp16
 
     # Validate tile configuration
     tile_k_bytes = tile_k * elem_bytes
@@ -115,11 +123,9 @@ def compile_simple_gemm(
             arg_c: lambda: memref(DYN, _out_type()),
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _elem_type()),
-            c_m_pad: lambda: T.index,  # Padded M dimension (tensor size)
-            c_n_pad: lambda: T.index,  # Padded N dimension (tensor size)
-            c_k_pad: lambda: T.index,  # Padded K dimension (tensor size)
-            c_m_orig: lambda: T.index,  # Original M dimension (for boundary check)
-            c_n_orig: lambda: T.index,  # Original N dimension (for boundary check)
+            c_m: lambda: T.index,  # Original M dimension
+            c_n: lambda: T.index,  # Original N dimension
+            c_k: lambda: T.index,  # Original K dimension
         ):
             # ================= Types =================
             f32 = T.f32
@@ -135,15 +141,33 @@ def compile_simple_gemm(
             # Accumulator initialization
             acc_init = arith.constant_vector(0.0, vec4_f32)
 
+            # ================= Buffer sizes in bytes for OOB handling =================
+            # A: [M, K] -> M * K * elem_bytes
+            a_nbytes_idx = c_m * c_k * arith.constant(elem_bytes, index=True)
+            a_nbytes_i32 = arith.index_cast(i32, a_nbytes_idx)
+            
+            # B: [N, K] -> N * K * elem_bytes
+            b_nbytes_idx = c_n * c_k * arith.constant(elem_bytes, index=True)
+            b_nbytes_i32 = arith.index_cast(i32, b_nbytes_idx)
+            
+            # C: [M, N] -> M * N * out_elem_bytes
+            c_nbytes_idx = c_m * c_n * arith.constant(out_elem_bytes, index=True)
+            c_nbytes_i32 = arith.index_cast(i32, c_nbytes_idx)
+
+            # ================= Buffer Resources with explicit sizes =================
+            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes_i32)
+            b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=False, num_records_bytes=b_nbytes_i32)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes_i32)
+
             # ================= Layouts =================
-            # A layout: [M_pad, K_pad] row-major
-            layout_a = flir.make_layout((c_m_pad, c_k_pad), stride=(c_k_pad, 1))
+            # A layout: [M, K] row-major
+            layout_a = flir.make_layout((c_m, c_k), stride=(c_k, 1))
 
-            # B layout: [N_pad, K_pad] row-major (B^T in standard GEMM)
-            layout_b = flir.make_layout((c_n_pad, c_k_pad), stride=(c_k_pad, 1))
+            # B layout: [N, K] row-major (B^T in standard GEMM)
+            layout_b = flir.make_layout((c_n, c_k), stride=(c_k, 1))
 
-            # C layout: [M_pad, N_pad] row-major
-            layout_c = flir.make_layout((c_m_pad, c_n_pad), stride=(c_n_pad, 1))
+            # C layout: [M, N] row-major
+            layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
             # LDS layout: [tile_m, tile_k]
             shape_lds = flir.make_shape(tile_m, tile_k)
@@ -180,11 +204,6 @@ def compile_simple_gemm(
             lds_a_ptr = _state["lds_a_decl"](base_ptr)
             lds_a = lds_a_ptr.get()
 
-            # ================= Buffer Resources =================
-            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-            b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=False)
-            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-
             # ================= Wave/Lane Mappings =================
             # For MFMA 16x16x16:
             # - A row index: lane_mod_16 (0..15)
@@ -208,7 +227,7 @@ def compile_simple_gemm(
             c_n_per_wave = arith.constant(n_per_wave, index=True)
             n_tile_base = wave_id * c_n_per_wave
 
-            # ================= A Tile Loading (GM -> LDS) =================
+            # ================= A Tile Loading (GM -> LDS) with mask =================
             # 256 threads load tile_m × tile_k elements (16B per thread)
             bytes_a_per_tile = tile_m * tile_k * elem_bytes
             bytes_per_thread_a = bytes_a_per_tile // total_threads
@@ -220,14 +239,10 @@ def compile_simple_gemm(
                 (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
             )
 
-            # Convert K to dwords for A addressing
-            c_k_div4bytes = (c_k_pad * arith.constant(elem_bytes, index=True)) / arith.constant(4, index=True)
-            layout_a_div4 = flir.make_layout((c_m_pad, c_k_div4bytes), stride=(c_k_div4bytes, 1))
-
             c4 = arith.constant(4, index=True)
+            c8 = arith.constant(8, index=True)
             tx_i32_base = tx * c4
 
-            atom_a_g2r = flir.make_copy_atom(_elem_type(), vector_size=8)
             atom_a_lds = flir.make_copy_atom(_elem_type(), vector_size=8)
 
             def a_tile_chunk_coord(i: int):
@@ -240,34 +255,32 @@ def compile_simple_gemm(
                 return row_local, col_local_i32
 
             def load_a_tile(base_k):
-                """Load A tile from global memory (tile_m × tile_k)."""
-                base_k_bytes = base_k * arith.constant(elem_bytes, index=True)
-                base_k_div4 = base_k_bytes / arith.constant(4, index=True)
+                """Load A tile from global memory (tile_m × tile_k) with mask."""
                 parts = []
                 for i in range_constexpr(num_a_loads):
                     row_local, col_local_i32 = a_tile_chunk_coord(i)
                     row_global = bx_m + row_local
-                    coord_a_g = flir.make_coord(row_global, base_k_div4 + col_local_i32)
-                    idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
-                    # Convert dword index to element index
-                    idx_elem = idx_i32 * arith.constant(2, index=True)  # 2 bf16 per dword
+                    # col_local_i32 is in dwords (4 bytes), convert to elements
+                    col_local_elem = col_local_i32 * arith.constant(2, index=True)  # 2 bf16 per dword
+                    k_global = base_k + col_local_elem
 
-                    a_view = flir.TensorView(
-                        arg_a,
-                        (8,),  # 8 bf16 elements = 16 bytes
-                        strides=(1,),
-                        base_indices=(idx_elem,),
-                        element_type=_elem_type(),
-                    )
-                    a_vec = flir.copy(
-                        atom_a_g2r,
-                        a_view,
-                        None,
-                        alignment=16,
-                        return_vector=True,
-                        src_buffer_resource=None,  # Use memref directly
-                    )
-                    parts.append(vector.bitcast(T.i32x4, a_vec))
+                    # Calculate linear element offset for buffer_load
+                    # buffer_load expects offset in elements (i32 unit), it will scale to bytes internally
+                    # offset = row_global * K + k_global (in dword units for vec4 i32 load)
+                    offset_elem = row_global * c_k + k_global
+                    # Convert to dword offset (divide by 2 since 2 bf16 per dword)
+                    offset_dword = offset_elem / arith.constant(2, index=True)
+                    offset_i32 = arith.index_cast(i32, offset_dword)
+
+                    # Mask: row_global < M and (k_global + 7) < K
+                    row_valid = arith.cmpu(row_global, c_m, "ult")
+                    k_end = k_global + c8
+                    k_valid = arith.cmpu(k_end, c_k + arith.constant(1, index=True), "ult")
+                    mask = arith.andi(row_valid, k_valid)
+
+                    # Load 4 dwords (16 bytes = 8 bf16 elements) with mask
+                    a_i32x4 = buffer_ops.buffer_load(a_rsrc, offset_i32, vec_width=4, dtype=i32, mask=mask)
+                    parts.append(a_i32x4)
                 return parts
 
             def store_a_tile_to_lds(a_parts):
@@ -290,9 +303,9 @@ def compile_simple_gemm(
                     )
                     flir.copy(atom_a_lds, v8, s_view, alignment=16)
 
-            # ================= B Tile Loading (Direct to GPR) =================
+            # ================= B Tile Loading (Direct to GPR) with mask =================
             def load_b_packs_k64(base_k, ku: int, ni: int):
-                """Load B pack for MFMA (16B -> 2 × i64 for K64-byte step)."""
+                """Load B pack for MFMA (16B -> 2 × i64 for K64-byte step) with mask."""
                 # Global N index for this wave/lane
                 n_offset = arith.constant(ni * 16, index=True)
                 n_global = by_n + n_tile_base + n_offset + lane_mod_16
@@ -305,28 +318,25 @@ def compile_simple_gemm(
                 k_lane_offset = lane_div_16 * arith.constant(8, index=True)
                 k_global = k_base + k_lane_offset
 
-                # Calculate linear index
-                coord_b = flir.make_coord(n_global, k_global)
-                idx_b = flir.crd2idx(coord_b, layout_b)
+                # Calculate linear element offset for buffer_load
+                # buffer_load with dtype=i32 scales offset by 4, so we need dword offset
+                # offset_elem = n_global * K + k_global (in bf16 elements)
+                # offset_dword = offset_elem / 2 (in i32 dwords)
+                offset_elem = n_global * c_k + k_global
+                offset_dword = offset_elem / arith.constant(2, index=True)
+                offset_i32 = arith.index_cast(i32, offset_dword)
 
-                # Load 8 elements (16 bytes)
-                b_view = flir.TensorView(
-                    arg_b,
-                    (8,),
-                    strides=(1,),
-                    base_indices=(idx_b,),
-                    element_type=_elem_type(),
-                )
-                b_vec = flir.copy(
-                    atom_a_g2r,  # Same atom type
-                    b_view,
-                    None,
-                    alignment=16,
-                    return_vector=True,
-                    src_buffer_resource=None,
-                )
+                # Mask: n_global < N and (k_global + 7) < K
+                n_valid = arith.cmpu(n_global, c_n, "ult")
+                k_end = k_global + c8
+                k_valid = arith.cmpu(k_end, c_k + arith.constant(1, index=True), "ult")
+                mask = arith.andi(n_valid, k_valid)
 
-                # Split into two i64 halves for two MFMA K16 steps
+                # Load 4 dwords (16 bytes = 8 bf16 elements) with mask
+                b_i32x4 = buffer_ops.buffer_load(b_rsrc, offset_i32, vec_width=4, dtype=i32, mask=mask)
+                
+                # Convert to vec8 bf16/fp16, then split into two i64 halves
+                b_vec = vector.bitcast(vec8_elem, b_i32x4)
                 b_i64x2 = vector.bitcast(vec2_i64, b_vec)
                 b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
                 b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
@@ -424,9 +434,9 @@ def compile_simple_gemm(
 
                 return current_accs
 
-            # ================= Epilogue (Store C) with boundary checks =================
+            # ================= Epilogue (Store C) with mask =================
             def store_output(final_accs):
-                """Store accumulated results to C with boundary checks."""
+                """Store accumulated results to C with mask-based boundary check."""
                 lane_div_16_mul4 = lane_div_16 * arith.constant(4, index=True)
 
                 for mi in range_constexpr(m_repeat):
@@ -449,17 +459,19 @@ def compile_simple_gemm(
 
                             col = col_base + arith.constant(ni * 16, index=True)
 
-                            # Boundary check: row < M_orig and col < N_orig
-                            row_valid = arith.cmpu(row, c_m_orig, "ult")
-                            col_valid = arith.cmpu(col, c_n_orig, "ult")
-                            in_bounds = arith.andi(row_valid, col_valid)
+                            # Calculate linear element offset for buffer_store
+                            # buffer_store expects offset in elements (it will scale by element size)
+                            # offset = row * N + col (in bf16/fp16 elements)
+                            offset_elem = row * c_n + col
+                            offset_i32 = arith.index_cast(i32, offset_elem)
 
-                            # Conditional store using IfOp
-                            if_op = scf.IfOp(in_bounds)
-                            with if_op.then():
-                                coord_c = flir.make_coord(row, col)
-                                idx_c = flir.crd2idx(coord_c, layout_c)
-                                buffer_ops.buffer_store(val_out, c_rsrc, idx_c)
+                            # Mask: row < M and col < N
+                            row_valid = arith.cmpu(row, c_m, "ult")
+                            col_valid = arith.cmpu(col, c_n, "ult")
+                            mask = arith.andi(row_valid, col_valid)
+
+                            # Store with mask (OOB stores are skipped)
+                            buffer_ops.buffer_store(val_out, c_rsrc, offset_i32, mask=mask)
 
             # ================= Main Pipeline =================
             # Single LDS buffer, simple pipeline
@@ -468,15 +480,17 @@ def compile_simple_gemm(
             # Initialize accumulators
             accs = [acc_init] * (num_acc_n * m_repeat)
 
-            # K loop
+            # K loop - iterate over K in tile_k steps
             c_tile_k = arith.constant(tile_k, index=True)
-            for k_base in range(arith.constant(0, index=True), c_k_pad, c_tile_k):
-                # Load A tile to LDS
+            # Calculate number of K iterations needed (ceiling division)
+            # We iterate through all K blocks, mask handles the boundary
+            for k_base in range(arith.constant(0, index=True), c_k, c_tile_k):
+                # Load A tile to LDS (with mask for boundary)
                 a_parts = load_a_tile(k_base)
                 store_a_tile_to_lds(a_parts)
                 gpu.barrier()
 
-                # Load B tile directly to GPR
+                # Load B tile directly to GPR (with mask for boundary)
                 b_tile = load_b_tile(k_base)
 
                 # Compute MFMA
@@ -485,7 +499,7 @@ def compile_simple_gemm(
                 # Barrier before next iteration (if any)
                 gpu.barrier()
 
-            # Store output (with boundary checks)
+            # Store output (with mask for boundary)
             store_output(accs)
 
         @flir.jit
@@ -494,20 +508,18 @@ def compile_simple_gemm(
             arg_c: lambda: memref(DYN, _out_type()),
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _elem_type()),
-            c_m_pad: lambda: T.index,
-            c_n_pad: lambda: T.index,
-            c_k_pad: lambda: T.index,
-            c_m_orig: lambda: T.index,
-            c_n_orig: lambda: T.index,
+            c_m: lambda: T.index,
+            c_n: lambda: T.index,
+            c_k: lambda: T.index,
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
             tm = arith.constant(tile_m, index=True)
             tn = arith.constant(tile_n, index=True)
             one = arith.constant(1, index=True)
-            # Use padded dimensions for grid size
-            gx = (c_m_pad + tm - one) / tm
-            gy = (c_n_pad + tn - one) / tn
+            # Grid size: ceiling division for non-aligned M and N
+            gx = (c_m + tm - one) / tm
+            gy = (c_n + tn - one) / tn
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),
@@ -516,21 +528,14 @@ def compile_simple_gemm(
                     arg_c,
                     arg_a,
                     arg_b,
-                    c_m_pad,
-                    c_n_pad,
-                    c_k_pad,
-                    c_m_orig,
-                    c_n_orig,
+                    c_m,
+                    c_n,
+                    c_k,
                 ],
             )
 
     m = _GEMM()
-    return flydsl.compile(m)
-
-
-def _align_up(val: int, align: int) -> int:
-    """Round up val to the next multiple of align."""
-    return ((val + align - 1) // align) * align
+    return flydsl.compile(m, waves_per_eu=waves_per_eu)
 
 
 def run_simple_gemm(
@@ -544,12 +549,13 @@ def run_simple_gemm(
     in_dtype: str = "bf16",
     A=None,
     B=None,
+    waves_per_eu: int = None,
 ):
     """Run simple GEMM: C = A @ B^T.
 
-    This function supports non-aligned M, N, K dimensions.
-    - M and N: handled by kernel boundary checks on output stores
-    - K: padded to multiple of tile_k to ensure correct computation
+    This function supports non-aligned M, N, K dimensions:
+    - M and N: handled by kernel mask-based loads/stores (Triton-like approach)
+    - K: padded to tile_k on host (required for MFMA vector loads)
 
     Args:
         M, N, K: Matrix dimensions (A[M,K], B[N,K], C[M,N]).
@@ -557,6 +563,7 @@ def run_simple_gemm(
         in_dtype: Input data type ("bf16" or "fp16").
         A: Optional input tensor A[M,K]. If None, creates random tensor.
         B: Optional input tensor B[N,K]. If None, creates random tensor.
+        waves_per_eu: Optional hint for AMDGPU backend about the desired number of waves.
 
     Returns:
         C: Output tensor C[M,N].
@@ -581,36 +588,35 @@ def run_simple_gemm(
     A = A.contiguous().to(device=device, dtype=torch_dtype)
     B = B.contiguous().to(device=device, dtype=torch_dtype)
 
-    # Pad all dimensions to tile sizes for kernel execution
-    M_pad = _align_up(M, tile_m)
-    N_pad = _align_up(N, tile_n)
+    # Pad K to tile_k (required for MFMA vector loads)
+    # M and N are handled by kernel mask-based boundary checks
     K_pad = _align_up(K, tile_k)
+    if K_pad != K:
+        A_pad = torch.zeros(M, K_pad, dtype=torch_dtype, device=device)
+        B_pad = torch.zeros(N, K_pad, dtype=torch_dtype, device=device)
+        A_pad[:, :K] = A
+        B_pad[:, :K] = B
+        A = A_pad
+        B = B_pad
+        K = K_pad
 
-    # Create padded tensors
-    A_pad = torch.zeros(M_pad, K_pad, dtype=torch_dtype, device=device)
-    B_pad = torch.zeros(N_pad, K_pad, dtype=torch_dtype, device=device)
-    C_pad = torch.zeros(M_pad, N_pad, dtype=torch_dtype, device=device)
-    
-    # Copy original data to padded tensors
-    A_pad[:M, :K] = A
-    B_pad[:N, :K] = B
+    # Create output tensor (original size, no padding needed for M and N)
+    C = torch.zeros(M, N, dtype=torch_dtype, device=device)
 
     # Compile and run kernel
     exe = compile_simple_gemm(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,
+        waves_per_eu=waves_per_eu,
     )
 
     # Flatten tensors for kernel interface
-    A_flat = A_pad.view(-1)
-    B_flat = B_pad.view(-1)
-    C_flat = C_pad.view(-1)
+    A_flat = A.view(-1)
+    B_flat = B.view(-1)
+    C_flat = C.view(-1)
 
-    # Pass both padded and original dimensions
-    exe(C_flat, A_flat, B_flat, M_pad, N_pad, K_pad, M, N)
+    # Pass dimensions (K is now padded, M and N are original)
+    exe(C_flat, A_flat, B_flat, M, N, K)
     torch.cuda.synchronize()
-
-    # Extract the actual output (only the M×N portion)
-    C = C_pad[:M, :N].contiguous()
 
     return C

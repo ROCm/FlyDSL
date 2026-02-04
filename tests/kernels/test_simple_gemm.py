@@ -3,7 +3,7 @@
 Simple test script for the simple GEMM kernel.
 
 Usage:
-    python tests/kernels/test_simple_gemm.py [--size S|M|L|XL|NA1|NA2|all] [--dtype bf16|fp16|all]
+    python tests/kernels/test_simple_gemm.py [--size S|M|L|XL|NA1|NA2|all] [--dtype bf16|fp16|all] [--waves_per_eu N]
 
 Examples:
     python tests/kernels/test_simple_gemm.py                    # Run Small with bf16
@@ -11,6 +11,7 @@ Examples:
     python tests/kernels/test_simple_gemm.py --dtype all        # Run Small with all dtypes
     python tests/kernels/test_simple_gemm.py --size all         # Run all sizes with bf16
     python tests/kernels/test_simple_gemm.py --size NA1         # Non-aligned test 1
+    python tests/kernels/test_simple_gemm.py --waves_per_eu 2   # Set waves per EU hint to 2
 """
 
 import argparse
@@ -135,6 +136,7 @@ def run_test(
     skip_ref: bool = False,
     rtol: float = 1e-2,
     atol: float = 1e-2,
+    waves_per_eu: int = None,
 ):
     """Run a single GEMM test."""
     config = TEST_CONFIGS[size]
@@ -145,15 +147,12 @@ def run_test(
     tile_n = config["tile_n"]
     tile_k = config["tile_k"]
 
-    # Pad all dimensions to tile sizes
-    M_pad = _align_up(M, tile_m)
-    N_pad = _align_up(N, tile_n)
+    # K must be padded to tile_k for MFMA vector loads
     K_pad = _align_up(K, tile_k)
 
     print("=" * 70)
     print(f"Running Simple GEMM Test: size={size} ({config['description']}), dtype={in_dtype}")
-    print(f"  M={M}, N={N}, K={K}")
-    print(f"  M_pad={M_pad}, N_pad={N_pad}, K_pad={K_pad}")
+    print(f"  M={M}, N={N}, K={K} (K_pad={K_pad})")
     print(f"  tile_m={tile_m}, tile_n={tile_n}, tile_k={tile_k}")
     print("=" * 70)
 
@@ -166,38 +165,45 @@ def run_test(
         A_orig = torch.randn(M, K, dtype=torch_dtype, device=device)
         B_orig = torch.randn(N, K, dtype=torch_dtype, device=device)
 
-        # Run reference computation (using float32 for accuracy) with original dimensions
+        # Run reference computation (using float32 for accuracy) with original K
         if not skip_ref:
             A_f32 = A_orig.to(torch.float32)
             B_f32 = B_orig.to(torch.float32)
             C_ref = torch.mm(A_f32, B_f32.T).to(torch_dtype)
 
-        # Create padded tensors
-        A_pad = torch.zeros(M_pad, K_pad, dtype=torch_dtype, device=device)
-        B_pad = torch.zeros(N_pad, K_pad, dtype=torch_dtype, device=device)
-        C_pad = torch.zeros(M_pad, N_pad, dtype=torch_dtype, device=device)
-        
-        # Copy original data
-        A_pad[:M, :K] = A_orig
-        B_pad[:N, :K] = B_orig
+        # Pad K for kernel (M and N are handled by kernel mask-based boundary checks)
+        if K_pad != K:
+            A = torch.zeros(M, K_pad, dtype=torch_dtype, device=device)
+            B = torch.zeros(N, K_pad, dtype=torch_dtype, device=device)
+            A[:, :K] = A_orig
+            B[:, :K] = B_orig
+        else:
+            A = A_orig
+            B = B_orig
+
+        # Create output tensor (original size, no padding needed for M and N)
+        C = torch.zeros(M, N, dtype=torch_dtype, device=device)
 
         # Compile kernel
         print("Compiling kernel...")
+        if waves_per_eu is not None:
+            print(f"  waves_per_eu={waves_per_eu}")
         exe = compile_simple_gemm(
             tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
             in_dtype=in_dtype,
+            waves_per_eu=waves_per_eu,
         )
         print("Kernel compiled successfully.")
 
         # Flatten tensors for kernel interface
-        A_flat = A_pad.view(-1)
-        B_flat = B_pad.view(-1)
-        C_flat = C_pad.view(-1)
+        A_flat = A.view(-1)
+        B_flat = B.view(-1)
+        C_flat = C.view(-1)
         C_flat.zero_()
 
         # Define launch function for run_perftest
         def launch():
-            exe(C_flat, A_flat, B_flat, M_pad, N_pad, K_pad, M, N)
+            exe(C_flat, A_flat, B_flat, M, N, K_pad)
 
         # Warmup and benchmark using run_perftest
         print(f"Running {num_warmup} warmup + {num_iters} benchmark iterations...")
@@ -219,10 +225,9 @@ def run_test(
         if not skip_ref:
             # Run one more time for correctness check
             C_flat.zero_()
-            exe(C_flat, A_flat, B_flat, M_pad, N_pad, K_pad, M, N)
+            exe(C_flat, A_flat, B_flat, M, N, K_pad)
             torch.cuda.synchronize()
-            # Extract only the M×N portion from the padded output
-            C_result = C_pad[:M, :N]
+            C_result = C
 
             # Check correctness using verify_output
             passed = verify_output(
@@ -304,6 +309,12 @@ def main():
         default=1e-2,
         help="Absolute tolerance for correctness check (default: 1e-2)",
     )
+    parser.add_argument(
+        "--waves_per_eu",
+        type=int,
+        default=None,
+        help="AMDGPU waves-per-eu hint for occupancy optimization (e.g., 1, 2, 4)",
+    )
 
     args = parser.parse_args()
 
@@ -330,6 +341,8 @@ def main():
     dtypes = DTYPES if args.dtype == "all" else [args.dtype]
 
     print(f"\nRunning Simple GEMM tests: sizes={sizes}, dtypes={dtypes}")
+    if args.waves_per_eu is not None:
+        print(f"waves_per_eu: {args.waves_per_eu}")
     print(f"GPU: {torch.cuda.get_device_name(0)}\n")
 
     results = []
@@ -343,6 +356,7 @@ def main():
                 skip_ref=args.skip_ref,
                 rtol=args.rtol,
                 atol=args.atol,
+                waves_per_eu=args.waves_per_eu,
             )
             results.append((size, dtype, passed))
 

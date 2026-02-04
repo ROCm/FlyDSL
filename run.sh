@@ -25,6 +25,7 @@ rocprofv3 --version
 
 
 function run_flydsl_op {
+    export MLIR_ASM_VERBOSE=1
     export FLIR_LOG_MORE=1
     export FLIR_DUMP_IR=1
     export FLIR_REBUILD=1
@@ -32,7 +33,7 @@ function run_flydsl_op {
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
-    python tests/kernels/test_simple_gemm.py --size XL
+    python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
     # python tests/kernels/test_simple_gemm.py --size NA4
 }
 
@@ -55,7 +56,8 @@ function get_flydsl_op_thread_trace {
         cd -
 
         rocprofv3 -i ./input.yaml -- \
-        python tests/kernels/test_simple_gemm.py --size XL
+        python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
+        # python tests/kernels/test_simple_gemm.py --size XL
 
         cd ./thread_trace
         cp -r ./rpf_v3/pass_1/*.att ${trace_dir}
@@ -81,7 +83,7 @@ function get_flydsl_op_thread_trace {
 
 
 run_flydsl_op
-get_flydsl_op_thread_trace
+# get_flydsl_op_thread_trace
 
 
 set +x
