@@ -2567,6 +2567,7 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        stream_ptr,
     ):
         """Execute GEMM2 + reduce.
 
@@ -2580,11 +2581,12 @@ class _MoeGemm2ReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        self._reduce_exe(X, Y, tokens_in)
+        self._reduce_exe(X, Y, tokens_in, stream_ptr)
 
     @property
     def mode(self) -> str:
