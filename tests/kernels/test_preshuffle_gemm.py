@@ -516,7 +516,7 @@ if __name__ == "__main__":
     else:
         pack_M = 2
         test_mfma_w4_flir_preshuffle(
-            args.in_dtype if args.in_dtype == "fp8" else "fp4", 
+            args.a_dtype if args.a_dtype == "fp8" else "fp4", 
             "fp4", 
             M=args.M, 
             N=args.N, 

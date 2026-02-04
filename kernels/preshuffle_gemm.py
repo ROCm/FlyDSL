@@ -105,7 +105,8 @@ def compile_preshuffle_gemm(
             f"(tile_k={tile_k}, b_elem_bytes={b_elem_bytes})"
         )
 
-    a_tile_k_bytes = int(tile_k) * int(a_elem_bytes)
+    # For FP4: A is packed (2 elems/byte), so actual bytes = tile_k * a_elem_bytes / a_elem_pack
+    a_tile_k_bytes = int(tile_k) * int(a_elem_bytes) // a_elem_pack
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
@@ -117,7 +118,8 @@ def compile_preshuffle_gemm(
     a_bytes_per_thread = pipeline_manager.get_a_bytes_per_thread(tile_m, tile_k)
 
     # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
-    lds_stride_bytes = a_tile_k_bytes // a_elem_pack
+    # a_tile_k_bytes already accounts for packing, so no further division needed
+    lds_stride_bytes = a_tile_k_bytes
 
     def _get_mfma_dict_value(key, pipeline):
         value = mfma_pipeline_dicts[key][pipeline]
@@ -146,6 +148,9 @@ def compile_preshuffle_gemm(
     is_int8 = mfma_pipeline in [MfmaPipeline.I8I8_16x16_PIPELINE]
     is_fp4 = mfma_pipeline in [MfmaPipeline.F4F4_MXFP4_PIPELINE,
                                MfmaPipeline.F8F4_MXFP4_PIPELINE]
+    print(is_fp4)
+
+    no_epilogue_dequant = is_fp4 or is_f16_or_bf16
 
     # 350 16x16x128 adtype(cbsz) & bdtype(blgp)
     cbsz = 4 if mfma_pipeline == MfmaPipeline.F4F4_MXFP4_PIPELINE else 0
@@ -214,9 +219,11 @@ def compile_preshuffle_gemm(
             layout_a_div4 = flir.make_layout((c_m, c_k_div4bytes), stride=(c_k_div4bytes, 1))
 
             # B preshuffle layout (shared with MoE kernels).
-            b_kpack_bytes = 16 // b_elem_pack
+            # For FP4: B is packed (2 elems/byte), so adjust c_k accordingly
+            b_kpack_bytes = 16
+            c_k_b = c_k // b_elem_pack
             layout_b = make_preshuffle_b_layout(
-                flir, arith, c_n=c_n, c_k=c_k, kpack_bytes=b_kpack_bytes, elem_bytes=b_elem_bytes
+                flir, arith, c_n=c_n, c_k=c_k_b, kpack_bytes=b_kpack_bytes, elem_bytes=b_elem_bytes
             ).layout_b
 
             # Scale layouts for FP4/MXFP4 (block-scale MFMA).
@@ -225,8 +232,10 @@ def compile_preshuffle_gemm(
 
             # LDS layout is element-indexed, but XOR16 swizzle is byte-based.
             # Represent LDS as (tile_m, tile_k) in elements and scale swizzle math by elem_bytes.
-            shape_lds = flir.make_shape(tile_m, tile_k)
-            stride_lds = flir.make_stride(tile_k, 1)
+            # For FP4: A is packed (2 elems/byte), so LDS K dimension is tile_k / a_elem_pack
+            lds_tile_k = tile_k // a_elem_pack if is_fp4 else tile_k
+            shape_lds = flir.make_shape(tile_m, lds_tile_k)
+            stride_lds = flir.make_stride(lds_tile_k, 1)
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             # CK-style XOR16 swizzle parameter (const).
@@ -286,8 +295,13 @@ def compile_preshuffle_gemm(
             )
 
             m_repeat = tile_m // 16
-            # K stepping is byte-addressed: one "micro-tile step" is 64 bytes.
-            k_unroll = b_tile_k_bytes // 64
+            # K stepping is byte-addressed:
+            # - For FP4/MXFP4 (mfma 16x16x128): one micro-step is 128 bytes
+            # - For FP8/INT8 (mfma 16x16x32): one micro-step is 64 bytes (K32 x 2)
+            if is_fp4:
+                k_unroll = b_tile_k_bytes // 64 // b_elem_pack
+            else:
+                k_unroll = b_tile_k_bytes // 64
 
             # --- Dynamic tiling along N (4 waves) ---
             num_waves = 4
@@ -374,7 +388,8 @@ def compile_preshuffle_gemm(
                 """Prefetch A and B scale tiles for FP4/MXFP4."""
                 if not is_fp4:
                     return None, None
-                return load_a_scale_tile(base_k), load_b_scale_tile(base_k)
+                # return load_a_scale_tile(base_k), load_b_scale_tile(base_k)
+                return load_a_scale_tile(0), load_b_scale_tile(0)
 
             # --- B load logic ---
             # Shared loader supports:
@@ -496,7 +511,11 @@ def compile_preshuffle_gemm(
             num_a_loads = a_bytes_per_thread // a_load_bytes
             # A tile mapping in dwords along K:
             #   tile_k_dwords = (tile_k * elem_bytes) / 4
-            a_tile_k_dwords = tile_k * a_elem_bytes // 4
+            # For FP4: A is packed (2 elems/byte), so divide by a_elem_pack
+            if is_fp4:
+                a_tile_k_dwords = tile_k * a_elem_bytes // 4 // a_elem_pack
+            else:
+                a_tile_k_dwords = tile_k * a_elem_bytes // 4
             layout_a_tile_div4 = flir.make_layout((tile_m, a_tile_k_dwords), stride=(a_tile_k_dwords, 1))
             c4 = arith.constant(4, index=True)
             tx_i32_base = tx * c4
@@ -564,15 +583,20 @@ def compile_preshuffle_gemm(
                 # Convert element index to byte index, then to dword index.
                 base_k_bytes = base_k * arith.constant(int(a_elem_bytes), index=True)
                 base_k_div4 = base_k_bytes / 4
-                a_regs = load_a_tile(base_k_div4)
-                b_regs = load_b_tile(base_k)
+                if is_fp4:
+                    # For FP4/MXFP4: A and B are packed (2 elems/byte), need to adjust offsets
+                    a_regs = load_a_tile(base_k_div4 // a_elem_pack)
+                    b_regs = load_b_tile(base_k // b_elem_pack)
+                else:
+                    a_regs = load_a_tile(base_k_div4)
+                    b_regs = load_b_tile(base_k)
                 return a_regs, b_regs
 
             def compute_tile(accs_in, b_tile_in, lds_base, *, is_last_tile=False, a0_prefetch=None, a_scale=None, b_scale=None):
                 scales_pf = {}
 
                 mfma_res_ty = _mfma_output_pack_ty()
-                if is_last_tile and (not is_f16_or_bf16) and (not is_fp4):
+                if is_last_tile and (not no_epilogue_dequant):
                     # Prefetch scales for non-FP4 scaled paths (fp8/int8/int4 with per-tensor scale).
                     s_b_vals = []
                     for ni in range_constexpr(num_acc_n):
@@ -612,7 +636,7 @@ def compile_preshuffle_gemm(
                         a_elem_vec_pack=a_elem_pack,
                         k_unroll=k_unroll,
                         m_repeat=m_repeat,
-                        num_acc=num_acc_n,
+                        num_acc_n=num_acc_n,
                         pack_K=pack_K,
                         pack_M=pack_M,
                         pack_N=pack_N,
@@ -661,7 +685,7 @@ def compile_preshuffle_gemm(
 
             def store_output(final_accs, scales):
                 # fp16/bf16: no scale fetch, no scale multiply in epilogue.
-                if is_f16_or_bf16:
+                if no_epilogue_dequant:
                     s_b_vals = None
                     s_a_vecs = None
                 else:
@@ -716,7 +740,7 @@ def compile_preshuffle_gemm(
                             # if is_int8:
                             if is_int8 or is_int4:
                                 val = arith.sitofp(T.f32, val)
-                            if is_f16_or_bf16:
+                            if no_epilogue_dequant:
                                 val_s = val
                             else:
                                 val_s = (val * s_a) * s_b_vals[ni]
@@ -823,7 +847,7 @@ def compile_preshuffle_gemm(
                     return
 
                 def body_row(*, mi: int, ii: int, row_in_tile, row):
-                    if not is_f16_or_bf16:
+                    if not no_epilogue_dequant:
                         s_a_vec4 = s_a_vecs[mi]
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                     col_base = by_n + n_tile_base + lane_mod_16
@@ -835,7 +859,7 @@ def compile_preshuffle_gemm(
                         if is_int8 or is_int4:
                             # INT8/INT4 paths use i32 accumulators; convert to f32 for scaled epilogue.
                             val = arith.sitofp(T.f32, val)
-                        if is_f16_or_bf16:
+                        if no_epilogue_dequant:
                             val_s = val
                         else:
                             val_s = (val * s_a) * s_b_vals[ni]
@@ -905,7 +929,9 @@ def compile_preshuffle_gemm(
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
             # We keep LDS laid out as (tile_m, tile_k) in element units.
-            lds_tile_elems = arith.constant(tile_m * tile_k, index=True)
+            # For FP4: A is packed (2 elems/byte), so divide by a_elem_pack
+            lds_tile_elems_val = tile_m * tile_k // a_elem_pack if is_fp4 else tile_m * tile_k
+            lds_tile_elems = arith.constant(lds_tile_elems_val, index=True)
             lds_base0 = arith.constant(0, index=True)
             lds_base1 = lds_tile_elems
 
@@ -923,7 +949,7 @@ def compile_preshuffle_gemm(
                 k0 = arith.constant(0, index=True)
                 a_regs0, b_tile0 = prefetch_ab_tile(k0)
                 # Prefetch scales for FP4/MXFP4 at tile-0.
-                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2) if is_fp4 else (k0, k0)
+                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 256) if is_fp4 else (k0, k0)
 
                 store_a_tile_to_lds(a_regs0, lds_base0)
                 gpu.barrier()

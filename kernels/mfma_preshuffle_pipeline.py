@@ -40,7 +40,7 @@ class EpilogPipeline(Enum):
 
 a_elem_type_dict = {
     MfmaPipeline.F4F4_MXFP4_PIPELINE: lambda: T.ui8,
-    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.ui8,
+    MfmaPipeline.F8F4_MXFP4_PIPELINE: lambda: T.f8,
     MfmaPipeline.F8F8_16x16_PIPELINE: lambda: T.f8,
     MfmaPipeline.F16F16_16x16_PIPELINE: lambda: T.f16,
     MfmaPipeline.BF16BF16_16x16_PIPELINE: lambda: T.bf16,
@@ -267,6 +267,8 @@ class PreshufflePipelineManager:
             return get_mfma_i32_k32()
         elif self.mfma_pipeline == MfmaPipeline.I8I4_16x16_PIPELINE:
             return get_mfma_i32_k32()
+        elif self.mfma_pipeline in [MfmaPipeline.F4F4_MXFP4_PIPELINE, MfmaPipeline.F8F4_MXFP4_PIPELINE]:
+            return rocdl.mfma_scale_f32_16x16x128_f8f6f4
         else:
             raise ValueError(f"Invalid mfma pipeline: {self.mfma_pipeline}")
     
@@ -275,11 +277,11 @@ class PreshufflePipelineManager:
         tile_m: int,
         tile_k: int,
     ):
-        a_bytes_per_tile = int(tile_m) * int(tile_k) * int(self.a_elem_bytes)
+        a_bytes_per_tile = int(tile_m) * int(tile_k) * int(self.a_elem_bytes) // self.a_elem_pack
         if a_bytes_per_tile % self.block_size != 0:
             raise ValueError(
-                "tile_m*tile_k*elem_bytes must be divisible by "
-                f"{self.block_size}: tile_m={tile_m}, tile_k={tile_k}, a_elem_bytes={self.a_elem_bytes}"
+                "tile_m*tile_k*elem_bytes/a_elem_pack must be divisible by "
+                f"{self.block_size}: tile_m={tile_m}, tile_k={tile_k}, a_elem_bytes={self.a_elem_bytes}, a_elem_pack={self.a_elem_pack}"
             )
         a_bytes_per_thread = a_bytes_per_tile // self.block_size
 
@@ -806,17 +808,15 @@ def block_mfma_block_scale_f8f6f4(
     a_elem_vec_pack,
     k_unroll,
     m_repeat,
-    num_acc,
+    num_acc_n,
     pack_K,
     pack_M,
     pack_N,
     a0_prefetch=None,
 ):
-    current_accs_list = list(accs_in)
-
     k_unroll_packed = k_unroll // pack_K
     m_repeat_packed = m_repeat // pack_M
-    num_acc_n_packed = num_acc // pack_N
+    num_acc_n_packed = num_acc_n // pack_N
 
     mfma_res_ty = T.f32x4
     vec4_i64 = T.vec(4, T.i64)
@@ -851,24 +851,26 @@ def block_mfma_block_scale_f8f6f4(
                         else:
                             a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                        col_base1 = col_base + 64
-                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                        if cbsz == 0:
+                            col_base1 = col_base + 64
+                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                        else:
+                            a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
                         for inxdl in range_constexpr(pack_N):
                             ni_idx = ni * pack_N + inxdl
-
                             b0 = b_packs0[ni_idx]
                             b1 = b_packs1[ni_idx]
                             b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                             acc_idx = mi_idx * num_acc_n + ni_idx
-                            current_accs_list[acc_idx] = mfma_fn(
+                            accs_in[acc_idx] = mfma_fn(
                                 mfma_res_ty,
                                 [
                                     a128,
                                     b128,
-                                    current_accs_list[acc_idx],
+                                    accs_in[acc_idx],
                                     # cbsz, abid, blgp
                                     cbsz,
                                     blgp,
@@ -881,7 +883,7 @@ def block_mfma_block_scale_f8f6f4(
                                     b_scale_val,
                                 ],
                             )
-    return current_accs_list, None
+    return accs_in
 
 # ---------------- gfx95 fast path (K128 MFMA scale) ----------------
 # This is the key optimization from `zhimding/develop_0107` for FP8:
