@@ -148,7 +148,6 @@ def compile_preshuffle_gemm(
     is_int8 = mfma_pipeline in [MfmaPipeline.I8I8_16x16_PIPELINE]
     is_fp4 = mfma_pipeline in [MfmaPipeline.F4F4_MXFP4_PIPELINE,
                                MfmaPipeline.F8F4_MXFP4_PIPELINE]
-    print(is_fp4)
 
     no_epilogue_dequant = is_fp4 or is_f16_or_bf16
 

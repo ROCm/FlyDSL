@@ -285,7 +285,9 @@ def run_moe_stage1(
     tile_k: int,
     doweight_stage1: bool,
     *,
-    in_dtype: str = "fp8",
+    x_dtype: str = "fp8",
+    w_dtype: str = "fp8",
+    out_dtype: str = "f16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -357,36 +359,40 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
-    is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int4")
+    if x_dtype not in ("fp8", "fp16", "int8"):
+        raise ValueError(f"x_dtype must be one of ('fp8','fp16','int8','int4'), got {x_dtype!r}")
+    if w_dtype not in ("fp8", "fp16", "int8", "int4"):
+        raise ValueError(f"w_dtype must be one of ('fp8','fp16','int8','int4'), got {w_dtype!r}")
+    is_int4 = w_dtype == "int4"
+    is_int8 = x_dtype in ("int8", "int4")
 
     # Quantize inputs / weights.
-    if in_dtype == "fp8":
+    if x_dtype == "fp8" and w_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
     # w2 is not used by our kernel, but required by CK stage1 API
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
-    elif in_dtype == "fp16":
+    elif x_dtype == "fp16" and w_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
         w1_q = w1_fp32.to(torch.float16)
         w2_q = w2_fp32.to(torch.float16)
         scale_x = None
         scale_w1 = None
-    elif in_dtype == "int8":
+    elif x_dtype == "int8" and w_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
-    else:
+    elif x_dtype == "int8" and w_dtype == "int4":
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    else:
+        raise ValueError(f"Invalid combination of x_dtype and w_dtype: {x_dtype!r}, {w_dtype!r}")
 
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
-    w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
+    w2_shuffled = shuffle_weight(w2_q) if w_dtype == "fp8" else None
 
     # Flatten W1 for our flir kernel (treat expert dim as part of N).
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
@@ -420,7 +426,9 @@ def run_moe_stage1(
         inter_dim=inter_dim,
         experts=experts,
         topk=topk,
-        in_dtype=in_dtype,
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -493,7 +501,7 @@ def run_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"FLIR MoE stage1[{in_dtype}]: "
+        f"FLIR MoE stage1[{x_dtype} | {w_dtype} -> {out_dtype}]: "
         f"{us:.1f} us, "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
@@ -504,7 +512,7 @@ def run_moe_stage1(
     else:
         compare_ck = bool(compare_aiter_ck)
     # aiter CK paths are fp8-only in our setup.
-    compare_ck = compare_ck and (in_dtype == "fp8")
+    compare_ck = compare_ck and (x_dtype == "fp8" and w_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
             pytest.skip("aiter not available; cannot compare to CK moe stage1.", allow_module_level=False)
@@ -586,7 +594,8 @@ def run_moe_stage2(
     tile_k: int,
     doweight_stage1: bool,
     *,
-    in_dtype: str = "fp8",
+    x_dtype: str = "fp8",
+    w_dtype: str = "fp8",
     # Stage2 output is fp16 (half2 atomics + CShuffle). The legacy f32-atomic path was removed.
     out_dtype: str = "f16",
     seed: int = 0,
@@ -704,39 +713,41 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
-    is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int4")
+    if x_dtype not in ("fp8", "fp16", "int8", "int4"):
+        raise ValueError(f"x_dtype must be one of ('fp8','fp16','int8','int4'), got {x_dtype!r}")
+    is_int4 = w_dtype == "int4"
+    is_int8 = x_dtype in ("int8", "int4")
 
     # Quantize inputs / weights.
-    if in_dtype == "fp8":
+    if x_dtype == "fp8" and w_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
-    elif in_dtype == "fp16":
+    elif x_dtype == "fp16" and w_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
         w1_q = w1_fp32.to(torch.float16)
         w2_q = w2_fp32.to(torch.float16)
         scale_x = None
         scale_w1 = None
         scale_w2 = None
-    elif in_dtype == "int8":
+    elif x_dtype == "int8" and w_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
-    else:
+    elif x_dtype == "int8" and w_dtype == "int4":
         # W4A8: A2 is int8, W2 is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    else:
+        raise ValueError(f"Invalid combination of x_dtype and w_dtype: {x_dtype!r}, {w_dtype!r}")
 
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
-    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype == "fp16"):
+    if a2_fp8_in is not None and (a2_scale_in is not None or (x_dtype == "fp16" and w_dtype == "fp16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
     else:
@@ -758,9 +769,9 @@ def run_moe_stage2(
             inter_dim=inter_dim,
             doweight_stage1=bool(doweight_stage1),
         )  # [tokens, topk, inter] fp32
-        if in_dtype == "fp8":
+        if x_dtype == "fp8" and w_dtype == "fp8":
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
-        elif in_dtype == "fp16":
+        elif x_dtype == "fp16" and w_dtype == "fp16":
             a2_q = out1_ref.to(torch.float16)
             a2_scale = None
         else:
@@ -805,7 +816,9 @@ def run_moe_stage2(
         inter_dim=inter_dim,
         experts=experts,
         topk=topk,
-        in_dtype=in_dtype,
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -889,7 +902,7 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} | "
+        f"FLIR MoE stage2 [{kernel_name}] {x_dtype} | {w_dtype} -> {out_dtype} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
@@ -899,7 +912,7 @@ def run_moe_stage2(
     else:
         compare_ck = bool(compare_aiter_ck)
     # aiter CK paths are fp8-only in our setup.
-    compare_ck = compare_ck and (in_dtype == "fp8")
+    compare_ck = compare_ck and (x_dtype == "fp8" and w_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
             pytest.skip("aiter not available; cannot compare to CK moe stage2.", allow_module_level=False)
@@ -987,15 +1000,16 @@ def run_moe_stage2(
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
     [
-        # Small smoke (fast compile + run) for all in_dtype.
+        # Small smoke (fast compile + run) for all x_dtype and w_dtype.
         pytest.param(64, 256, 128, 4, 2, 32, 64, 128, 64, 128, False, id="S"),
-        # Medium (more realistic) for all in_dtype (skip_ref will auto-enable).
+        # Medium (more realistic) for all x_dtype and w_dtype (skip_ref will auto-enable).
         pytest.param(128, 1024, 256, 8, 2, 64, 128, 128, 128, 128, False, id="M"),
         # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
         pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
+@pytest.mark.parametrize("x_dtype", ["fp8", "fp16", "int8"])
+@pytest.mark.parametrize("w_dtype", ["fp8", "fp16", "int8", "int4"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
@@ -1009,7 +1023,9 @@ def test_moe_gemm_2stage(
     tile_n2: int,
     tile_k2: int,
     doweight_stage1: bool,
-    in_dtype: str,
+    x_dtype: str,
+    w_dtype: str,
+    out_dtype: str,
     use_reduce: bool,
     *,
     seed: int = 0,
@@ -1062,7 +1078,9 @@ def test_moe_gemm_2stage(
         inter_dim=inter_dim,
         experts=experts,
         topk=topk,
-        in_dtype=in_dtype,
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n1,
         tile_k=tile_k1,
@@ -1070,7 +1088,7 @@ def test_moe_gemm_2stage(
         seed=seed,
         num_iters=num_iters,
         num_warmup=num_warmup,
-        compare_aiter_ck=bool(compare_aiter_ck) and (in_dtype == "fp8"),
+        compare_aiter_ck=bool(compare_aiter_ck) and (x_dtype == "fp8" and w_dtype == "fp8"),
         moe_sort_mode=moe_sort_mode,
         x_fp32_in=x_fp32,
         w1_fp32_in=w1_fp32,
@@ -1082,10 +1100,10 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
     )
 
-    if in_dtype == "fp8":
+    if x_dtype == "fp8" and w_dtype == "fp8":
         out1_fp32 = out1_fp16.to(torch.float32)
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
-    elif in_dtype == "fp16":
+    elif x_dtype == "fp16" and w_dtype == "fp16":
         a2_q = out1_fp16
         a2_scale = None
     else:
@@ -1098,7 +1116,9 @@ def test_moe_gemm_2stage(
         inter_dim=inter_dim,
         experts=experts,
         topk=topk,
-        in_dtype=in_dtype,
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
         tile_m=tile_m,
         tile_n=tile_n2,
         tile_k=tile_k2,
@@ -1141,7 +1161,8 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
         tile_n: int,
         tile_k: int,
         doweight_stage2: bool,
-        in_dtype: str = "fp8",
+        x_dtype: str,
+        w_dtype: str,
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
@@ -1155,7 +1176,8 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 tile_n=tile_n,
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
-                in_dtype=in_dtype,
+                x_dtype=x_dtype,
+                w_dtype=w_dtype,
                 out_dtype=out_dtype,
                 mode=MoeGemm2Mode.REDUCE,
             )
@@ -1170,7 +1192,8 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 tile_n=tile_n,
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
-                in_dtype=in_dtype,
+                x_dtype=x_dtype,
+                w_dtype=w_dtype,
                 out_dtype=out_dtype,
                 accumulate=False,
             )
@@ -1367,14 +1390,16 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
         pytest.param(256, 5120, 1536, 64, 6, id="EP-K6-decode-L"),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8"])
+@pytest.mark.parametrize("x_dtype", ["fp8"])
+@pytest.mark.parametrize("w_dtype", ["fp8"])
 def test_moe_stage2_standalone(
     tokens: int,
     model_dim: int,
     inter_dim: int,
     experts: int,
     topk: int,
-    in_dtype: str,
+    x_dtype: str,
+    w_dtype: str,
     *,
     tile_m: int = 64,   # Common block size for M
     tile_n: int = 256,  # Common block size for N2
@@ -1401,7 +1426,8 @@ def test_moe_stage2_standalone(
         tile_n=tile_n,
         tile_k=tile_k,
         doweight_stage1=False,  # Apply weight in stage2
-        in_dtype=in_dtype,
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
         seed=seed,
         num_iters=num_iters,
         num_warmup=num_warmup,
@@ -1456,12 +1482,25 @@ if __name__ == "__main__":
         description="MoE 2-stage (FLIR MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
     )
     parser.add_argument(
-        "--in_dtype",
+        "--x_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4", "all"],
-        help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
-        "int4 means W4A8: A int8, W packed int4.",
+        choices=["fp8", "fp16", "int8", "int4"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int4.",
+    )
+    parser.add_argument(
+        "--w_dtype",
+        type=str,
+        default="fp8",
+        choices=["fp8", "fp16", "int8", "int4"],
+        help="Kernel weight dtype: fp8 / fp16 / int8 / int4.",
+    )
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="f16",
+        choices=["f16", "bf16", "f32"],
+        help="Stage2 output dtype: f16 / f32.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1496,28 +1535,28 @@ if __name__ == "__main__":
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    for dt in args.in_dtype.split(","):
-        test_moe_gemm_2stage(
-            tokens=int(args.tokenNum),
-            model_dim=int(model_dim),
-            inter_dim=int(inter_dim),
-            experts=int(args.expert),
-            topk=int(args.topk),
-            tile_m=int(args.tile_m),
-            tile_n1=int(args.tile_n),
-            tile_k1=int(args.tile_k),
-            tile_n2=tile_n2,
-            tile_k2=tile_k2,
-            doweight_stage1=bool(args.doweight_stage1),
-            in_dtype=dt,
-            seed=int(args.seed),
-            num_iters=int(args.num_iters),
-            num_warmup=int(args.num_warmup),
-            moe_sort_mode=args.moe_sort_mode,
-            compare_aiter_ck=args.compare_aiter_ck,
-            skip_ref=bool(args.skip_ref),
-            use_reduce=bool(args.reduce),
-        )
-
-
-
+    for x_dtype in args.x_dtype.split(","):
+        for w_dtype in args.w_dtype.split(","):
+            test_moe_gemm_2stage(
+                tokens=int(args.tokenNum),
+                model_dim=int(model_dim),
+                inter_dim=int(inter_dim),
+                experts=int(args.expert),
+                topk=int(args.topk),
+                tile_m=int(args.tile_m),
+                tile_n1=int(args.tile_n),
+                tile_k1=int(args.tile_k),
+                tile_n2=tile_n2,
+                tile_k2=tile_k2,
+                doweight_stage1=bool(args.doweight_stage1),
+                x_dtype=x_dtype,
+                w_dtype=w_dtype,
+                out_dtype=args.out_dtype,
+                seed=int(args.seed),
+                num_iters=int(args.num_iters),
+                num_warmup=int(args.num_warmup),
+                moe_sort_mode=args.moe_sort_mode,
+                compare_aiter_ck=args.compare_aiter_ck,
+                skip_ref=bool(args.skip_ref),
+                use_reduce=bool(args.reduce),
+            )
