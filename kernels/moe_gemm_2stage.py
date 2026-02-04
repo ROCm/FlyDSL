@@ -35,6 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.kernels_common import stream_ptr_to_async_token
 
 
 @functools.lru_cache(maxsize=1024)
@@ -1081,12 +1082,15 @@ def compile_moe_gemm1(
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = inter_in / arith.index(tile_n)
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1106,6 +1110,7 @@ def compile_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
@@ -2239,10 +2244,13 @@ def compile_moe_gemm2(
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -2262,6 +2270,7 @@ def compile_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE2()
@@ -2418,6 +2427,7 @@ def compile_moe_reduction(
             X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
             m_tokens: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             from flydsl.dialects.ext import arith as arith_ext
             c1 = arith.as_value(arith_ext.index(1))
@@ -2425,11 +2435,14 @@ def compile_moe_reduction(
             tile_size = BLOCK_SIZE * VEC_WIDTH
             gy = arith.as_value(arith_ext.index((model_dim + tile_size - 1) // tile_size))
             bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, c1, c1),
                 kernel_operands=[X, Y, m_tokens],
+                async_dependencies=[stream_token],
             )
 
     m = _MoeReduction()

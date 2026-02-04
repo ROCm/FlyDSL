@@ -302,6 +302,7 @@ def run_moe_stage1(
     return_outputs: bool = False,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    test_graph: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -432,6 +433,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -446,6 +448,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
+            stream_ptr,
         )
 
     _, us = run_perftest(
@@ -460,6 +463,7 @@ def run_moe_stage1(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -560,6 +564,7 @@ def run_moe_stage1(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Correctness: flir vs CK
@@ -615,6 +620,7 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
     # Use reduce mode (accumulate=False) instead of atomic mode.
     use_reduce: bool = False,
+    test_graph: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -816,6 +822,7 @@ def run_moe_stage2(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -830,6 +837,7 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
+            stream_ptr,
         )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -847,6 +855,7 @@ def run_moe_stage2(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -948,6 +957,7 @@ def run_moe_stage2(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
@@ -1023,6 +1033,7 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1217,6 +1228,7 @@ class _TorchReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        stream_ptr,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1232,6 +1244,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
@@ -1282,15 +1295,16 @@ def profile_reduce_kernel(
         return total
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
+    stream_ptr = torch.cuda.current_stream().cuda_stream
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens)
+        reduce_exe(X, Y, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens)
+            reduce_exe(X, Y, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1351,7 +1365,8 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
 
     # Run kernels
-    reduce_exe(X, Y_flydsl, tokens)
+    stream_ptr = torch.cuda.current_stream().cuda_stream
+    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
@@ -1500,6 +1515,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
 
+    # graph mode test
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
+
     # w fp4 moe kernel
     parser.add_argument(
         "--wfp4",
@@ -1537,4 +1561,5 @@ if __name__ == "__main__":
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
             use_reduce=bool(args.reduce),
+            test_graph=bool(args.test_graph),
         )
