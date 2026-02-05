@@ -34,6 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import mfma_epilog
+from kernels.kernels_common import stream_ptr_to_async_token
 
 
 def compile_mxfp4_preshuffle_gemm(
@@ -611,13 +612,12 @@ def compile_mxfp4_preshuffle_gemm(
                                                 # op_sel_a + scale_a (1.0f as i32 bits)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
-                                                # 
+                                                #
                                                 # op_sel_b + scale_b (1.0f as i32 bits)
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],
                                         )
-
                 return current_accs_list, None
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
@@ -848,7 +848,7 @@ def compile_mxfp4_preshuffle_gemm(
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
             # We keep LDS laid out as (tile_m, tile_k) in element units.
-            lds_tile_elems = arith.constant(tile_m * tile_k, index=True)
+            lds_tile_elems = arith.constant(tile_m * tile_k // a_elem_vec_pack, index=True)
             lds_base0 = arith.constant(0, index=True)
             lds_base1 = lds_tile_elems
 
@@ -1051,6 +1051,7 @@ def compile_mxfp4_preshuffle_gemm(
             c_m: lambda: T.index,
             c_n: lambda: T.index,
             c_k: lambda: T.index,
+            stream_ptr: lambda: T.i64,  # PyTorch stream pointer
         ):
             c1 = arith.constant(1, index=True)
             bdx = arith.constant(256, index=True)
@@ -1060,6 +1061,7 @@ def compile_mxfp4_preshuffle_gemm(
             gx = (c_m + tm - one) / tm
             gy = c_n / tn
 
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "kernel_gemm"],
                 grid_size=(gx, gy, c1),
@@ -1074,6 +1076,7 @@ def compile_mxfp4_preshuffle_gemm(
                     c_n,
                     c_k,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _GEMM()

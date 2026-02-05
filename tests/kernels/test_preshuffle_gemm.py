@@ -56,24 +56,6 @@ def run_torch_w4(x, w, x_scales, w_scales, dtype):
     w_f32 = w_f32 * w_scales_f32
     return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
 
-def run_torch_w4(x, w, x_scales, w_scales, dtype):
-    m, k = x.shape
-    n, k = w.shape
-    # First convert the x and w inputs to f32.
-    x_f32 = fp4_utils.mxfp4_to_f32(x)
-    w_f32 = fp4_utils.mxfp4_to_f32(w)
-    # Next convert the e8m0 scales to f32.
-    x_scales = x_scales[:m]
-    x_scales = x_scales.repeat_interleave(32, dim=1)
-    x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales)
-    x_f32 = x_f32 * x_scales_f32
-    w_scales = w_scales[:n]
-    w_scales = w_scales.repeat_interleave(32, dim=1)
-    w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales)
-    w_f32 = w_f32 * w_scales_f32
-    return torch.mm(x_f32, w_f32.T).to(dtype)[:m, :n]
-
-
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
@@ -136,6 +118,7 @@ def test_mfma_a8_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
@@ -177,8 +160,8 @@ def test_mfma_a8_flir_preshuffle(
     device = torch.device("cuda")
 
     # torch.manual_seed(42)
-    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
+    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
 
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
@@ -243,7 +226,9 @@ def test_mfma_a8_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
@@ -257,6 +242,7 @@ def test_mfma_a8_flir_preshuffle(
         scale_b,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -276,7 +262,7 @@ def test_mfma_a8_flir_preshuffle(
             def launch_aiter(a, b, sa, sb):
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
             verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
             tflops_aiter = flops / (us1 / 1e6) / 1e12
@@ -325,6 +311,7 @@ def test_mfma_w4_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
@@ -363,8 +350,9 @@ def test_mfma_w4_flir_preshuffle(
 
     device = torch.device("cuda")
 
-    M_align_32 = (M + 31 // 32) * 32
-    N_align_32 = (N + 31 // 32) * 32
+    # torch.manual_seed(42)
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
 
     a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
     b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)  # (N, K)
@@ -409,7 +397,9 @@ def test_mfma_w4_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
@@ -423,6 +413,7 @@ def test_mfma_w4_flir_preshuffle(
         scale_b_shuffled,
         num_iters=2,
         num_warmup=1,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -493,6 +484,13 @@ if __name__ == "__main__":
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
     parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
+    parser.add_argument(
         "--wfp4",
         action="store_true",
         default=False,
@@ -516,6 +514,7 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            test_graph=bool(args.test_graph),
         )
     else:
         pack_M = 2
@@ -533,5 +532,6 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            test_graph=bool(args.test_graph),
         )
 

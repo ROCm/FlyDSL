@@ -35,6 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.kernels_common import stream_ptr_to_async_token
 
 
 
@@ -1135,12 +1136,15 @@ def compile_moe_gemm1(
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = inter_in / arith.index(tile_n)
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1160,6 +1164,7 @@ def compile_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
@@ -2038,7 +2043,16 @@ def compile_moe_gemm2(
                 zero_i32 = arith.i32(0)
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
-    
+
+                e_vec = 2 if bool(accumulate) else 8
+                if not bool(accumulate):
+                    cshuffle_nlane = 32
+                    cshuffle_stride = cshuffle_nlane * e_vec
+                    if (int(tile_n) % cshuffle_stride) != 0:
+                        raise ValueError(
+                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
+                        )
+
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(
                         val_f16x2,
@@ -2048,7 +2062,6 @@ def compile_moe_gemm2(
                         zero_i32,
                     )
 
-    
                 sw_pf = None
                 tw_pf = None
                 if epilogue_pf is not None:
@@ -2235,7 +2248,7 @@ def compile_moe_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x2 directly via buffer store.
+                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
                             byte_off = idx_elem_even * c2_i32
@@ -2252,7 +2265,7 @@ def compile_moe_gemm2(
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,
-                        e_vec=2,
+                        e_vec=e_vec,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,
@@ -2287,10 +2300,13 @@ def compile_moe_gemm2(
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -2310,6 +2326,7 @@ def compile_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE2()
@@ -2474,17 +2491,21 @@ def compile_moe_reduction(
                 X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
                 Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
                 m_tokens: lambda: T.index(),
+                stream_ptr: lambda: T.i64(),  # PyTorch stream pointer (runtime)
             ):
                 from flydsl.dialects.ext import arith as arith_ext
+                from flydsl.kernels.kernels_common import stream_ptr_to_async_token
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
                 
+                stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir.gpu_ext.LaunchFuncOp(
                     [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
                     grid_size=(gx, c1, c1),
                     block_size=(bx, c1, c1),
                     kernel_operands=[X, Y, m_tokens],
+                    async_dependencies=[stream_token],
                 )
 
     else:
@@ -2646,17 +2667,21 @@ def compile_moe_reduction(
                 Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
                 valid_mask: lambda: T.memref(DYN, topk, T.i8()),
                 m_tokens: lambda: T.index(),
+                stream_ptr: lambda: T.i64(),  # PyTorch stream pointer (runtime)
             ):
                 from flydsl.dialects.ext import arith as arith_ext
+                from flydsl.kernels.kernels_common import stream_ptr_to_async_token
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
                 
+                stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir.gpu_ext.LaunchFuncOp(
                     [f"moe_reduction_{topk}_{model_dim}_{dtype_str}_masked", "moe_reduction_kernel"],
                     grid_size=(gx, c1, c1),
                     block_size=(bx, c1, c1),
                     kernel_operands=[X, Y, valid_mask, m_tokens],
+                    async_dependencies=[stream_token],
                 )
 
 
@@ -2716,19 +2741,17 @@ class _MoeGemm2ReduceWrapper:
     def _ensure_intermediate_buffer(self, tokens: int, device):
         """Ensure intermediate buffer is large enough."""
         import torch
-        max_token = 1024
-        if self._intermediate is None:
-            # Use torch.empty instead of torch.zeros for better performance
-            # GEMM2 will overwrite all values, so initialization not needed
+        required_size = tokens * self._topk * self._model_dim
+        if self._intermediate is None or self._intermediate.numel() < required_size:
+            # Allocate with some headroom to reduce reallocations
+            capacity = max(tokens, 1024)
             self._intermediate = torch.empty(
-                max_token * self._topk, self._model_dim,
+                capacity * self._topk, self._model_dim,
                 device=device,
                 dtype=self._get_torch_dtype()
             )
-            # self._intermediate_capacity = required_size
-        # else:
-        #     # Zero out the portion we're about to use when reusing buffer
-        #     # Commented out: GEMM2 overwrites all values, zeroing not needed
+            self._intermediate_capacity = capacity * self._topk * self._model_dim
+        # Zero out the portion we're about to use
         self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
@@ -2747,7 +2770,8 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
-        valid_mask
+        valid_mask,
+        stream_ptr,
     ):
         """Execute GEMM2 + reduce.
 
@@ -2761,16 +2785,17 @@ class _MoeGemm2ReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
         if self._use_mask:
             # Masked reduction for EP mode
-            self._reduce_exe(X, Y, valid_mask, tokens_in)
+            self._reduce_exe(X, Y, valid_mask, tokens_in, stream_ptr)
         else:
             # Non-masked reduction
-            self._reduce_exe(X, Y, tokens_in)
+            self._reduce_exe(X, Y, tokens_in, stream_ptr)
 
     @property
     def mode(self) -> str:

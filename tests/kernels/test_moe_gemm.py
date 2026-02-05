@@ -302,6 +302,7 @@ def run_moe_stage1(
     return_outputs: bool = False,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    test_graph: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -461,6 +462,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -475,6 +477,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
+            stream_ptr,
         )
 
     _, us = run_perftest(
@@ -489,6 +492,7 @@ def run_moe_stage1(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -596,6 +600,7 @@ def run_moe_stage1(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Correctness: flir vs CK
@@ -649,6 +654,9 @@ def run_moe_stage2(
     compile_fn=None,
     # Kernel name for logging (default: "moe_gemm2").
     kernel_name: str = "moe_gemm2",
+    # Use reduce mode (accumulate=False) instead of atomic mode.
+    use_reduce: bool = False,
+    test_graph: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -682,7 +690,10 @@ def run_moe_stage2(
 
     # Default compile function.
     if compile_fn is None:
-        compile_fn = compile_moe_gemm2
+        if use_reduce:
+            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True)
+        else:
+            compile_fn = compile_moe_gemm2
 
     device = torch.device("cuda")
     torch.manual_seed(int(seed))
@@ -860,6 +871,9 @@ def run_moe_stage2(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        # For non-EP mode tests, pass None for valid_mask
+        valid_mask = None
         exe(
             o,
             x,
@@ -874,8 +888,10 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
+            valid_mask,
+            stream_ptr,
         )
-
+ 
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
@@ -891,6 +907,7 @@ def run_moe_stage2(
         sorted_weights_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -992,6 +1009,7 @@ def run_moe_stage2(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
@@ -1043,6 +1061,7 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
+@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1055,8 +1074,9 @@ def test_moe_gemm_2stage(
     tile_n2: int,
     tile_k2: int,
     doweight_stage1: bool,
-    *,
     in_dtype: str,
+    use_reduce: bool,
+    *,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -1067,6 +1087,7 @@ def test_moe_gemm_2stage(
     compile_fn=None,
     w_fp4_kernel: bool = False,
     gemm2_mode: Optional[str] = None,
+    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
@@ -1142,6 +1163,7 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
+        test_graph=test_graph,
     )
 
     if w_fp4_kernel:
@@ -1193,6 +1215,8 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
         compile_fn=compile_fn,
+        use_reduce=bool(use_reduce),
+        test_graph=test_graph,
     )
 
 
@@ -1278,6 +1302,7 @@ class _TorchReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        stream_ptr,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1293,6 +1318,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
@@ -1343,15 +1369,16 @@ def profile_reduce_kernel(
         return total
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
+    stream_ptr = torch.cuda.current_stream().cuda_stream
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens)
+        reduce_exe(X, Y, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens)
+            reduce_exe(X, Y, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1390,9 +1417,13 @@ def print_reduce_profile(results: dict):
 @pytest.mark.parametrize(
     "tokens, topk, model_dim",
     [
-        pytest.param(256, 8, 7168, id="DS-TP8-decode"),
         pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
         pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
+        pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
+        pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
+        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
+        pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
+        pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
     ],
 )
 def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
@@ -1408,7 +1439,8 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
 
     # Run kernels
-    reduce_exe(X, Y_flydsl, tokens)
+    stream_ptr = torch.cuda.current_stream().cuda_stream
+    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
@@ -1427,9 +1459,13 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk",
     [
-        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode"),
         pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
         pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
+        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
+        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
+        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1441,9 +1477,9 @@ def test_moe_stage2_standalone(
     topk: int,
     in_dtype: str,
     *,
-    tile_m: int = 32,
-    tile_n: int = 512,
-    tile_k: int = 128,
+    tile_m: int = 64,   # Common block size for M
+    tile_n: int = 256,  # Common block size for N2
+    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
@@ -1548,11 +1584,21 @@ if __name__ == "__main__":
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
     parser.add_argument("--gemm2_mode", type=str, default=None, choices=["atomic", "reduce"], help="Stage2 mode: 'atomic' (default) or 'reduce' (GEMM+reduce kernel).")
+    parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
     parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
+
+    # graph mode test
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
 
     # w fp4 moe kernel
     parser.add_argument(
@@ -1592,7 +1638,6 @@ if __name__ == "__main__":
             skip_ref=bool(args.skip_ref),
             w_fp4_kernel=args.wfp4,
             gemm2_mode=args.gemm2_mode,
+            use_reduce=bool(args.reduce),
+            test_graph=bool(args.test_graph),
         )
-
-
-
