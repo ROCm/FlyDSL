@@ -53,6 +53,7 @@ def compile_moe_gemm1(
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    total_thread_size: int = 256,
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -105,7 +106,7 @@ def compile_moe_gemm1(
     size_sorted = DYN
     size_expert_ids = DYN
 
-    total_threads = 256
+    total_threads = total_thread_size
     bytes_x_per_tile = int(tile_m) * int(tile_k) * int(elem_bytes)
     if bytes_x_per_tile % total_threads != 0:
         raise ValueError(
@@ -464,11 +465,11 @@ def compile_moe_gemm1(
     
                 # Dynamic N tiling within block (same as existing kernels)
                 by_n = by * arith.constant(tile_n, index=True)
-                num_waves = 4
+                num_waves = total_threads // 64
                 n_per_wave = tile_n // num_waves
                 num_acc_n = n_per_wave // 16
                 c_n_per_wave = arith.constant(n_per_wave, index=True)
-                wave_mod_4 = wave_id % arith.index(4)
+                wave_mod_4 = wave_id % arith.index(num_waves)
                 n_tile_base = wave_mod_4 * c_n_per_wave
     
                 # Precompute n_blk/n_intra for gate and up rows (GEMM-style: idx2crd/get)
@@ -1084,7 +1085,7 @@ def compile_moe_gemm1(
             size_expert_ids_in: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
-            bdx = 256
+            bdx = total_threads
             gx = inter_in / arith.index(tile_n)
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
@@ -1136,6 +1137,7 @@ def compile_moe_gemm2(
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
+    total_thread_size: int = 256,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
 
@@ -1191,7 +1193,7 @@ def compile_moe_gemm2(
     # W is packed int4 for W4A8: 2 values per byte.
     size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
 
-    total_threads = 256
+    total_threads = total_thread_size
     tile_k_bytes = int(tile_k) * int(elem_bytes)
     if (tile_k_bytes % 64) != 0:
         raise ValueError(
@@ -1585,11 +1587,11 @@ def compile_moe_gemm2(
     
                 # Dynamic N tiling within block.
                 by_n = by * arith.constant(tile_n, index=True)
-                num_waves = 4
+                num_waves = total_thread_size // 64
                 n_per_wave = tile_n // num_waves
                 num_acc_n = n_per_wave // 16
                 c_n_per_wave = arith.constant(n_per_wave, index=True)
-                wave_mod_4 = wave_id % arith.constant(4, index=True)
+                wave_mod_4 = wave_id % arith.constant(num_waves, index=True)
                 n_tile_base = wave_mod_4 * c_n_per_wave
     
                 # Precompute (n_blk, n_intra) for B, and col indices for output.
@@ -2246,7 +2248,7 @@ def compile_moe_gemm2(
             size_expert_ids_in: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
-            bdx = 256
+            bdx = total_thread_size
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
 
@@ -2429,6 +2431,7 @@ def compile_moe_reduction(
             m_tokens: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
+            print(f"[flydsl] Launching MoE reduction kernel with topk={topk}, model_dim={model_dim}, dtype={dtype_str}")
             from flydsl.dialects.ext import arith as arith_ext
             c1 = arith.as_value(arith_ext.index(1))
             gx = arith.as_value(m_tokens)
@@ -2611,6 +2614,7 @@ def compile_moe_gemm2_ex(
     mode: str = MoeGemm2Mode.AUTO,
     tokens_hint: int | None = None,
     reduce_rules: list | None = None,
+    total_thread_size: int = 256,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -2663,6 +2667,7 @@ def compile_moe_gemm2_ex(
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
+            total_thread_size=total_thread_size,
         )
         # Compile reduction kernel
         out_s = str(out_dtype).strip().lower()
@@ -2699,4 +2704,5 @@ def compile_moe_gemm2_ex(
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=True,
+            total_thread_size=total_thread_size,
         )
