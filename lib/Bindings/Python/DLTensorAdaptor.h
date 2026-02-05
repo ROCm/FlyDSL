@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace nb = nanobind;
@@ -26,6 +27,19 @@ using namespace mlir::fly;
 using namespace mlir::python::nanobind_adaptors;
 
 namespace mlir::fly::utils {
+
+inline MLIRContext *getCurrentContext() {
+  nb::object currentCtx = mlir::python::irModule().attr("Context").attr("current");
+  if (currentCtx.is_none()) {
+    throw std::runtime_error("No MLIR context available. Either pass a context explicitly or "
+                             "call within an active ir.Context (using 'with context:')");
+  }
+  auto capsule = mlirApiObjectToCapsule(currentCtx);
+  if (!capsule) {
+    throw std::runtime_error("Invalid MLIR context capsule");
+  }
+  return unwrap(mlirPythonCapsuleToContext(capsule->ptr()));
+}
 
 class DLTensorAdaptor {
 private:
@@ -59,16 +73,24 @@ private:
   };
 
 public:
-  DLTensorAdaptor(nb::object dlpackCapsule, int32_t alignment, bool use32BitStride,
-                  MlirContext context)
-      : dlpackCapsule_(dlpackCapsule), alignment_(alignment), use32BitStride_(use32BitStride),
-        ctx_(unwrap(context)) {
+  DLTensorAdaptor(nb::object dlpackCapsule, std::optional<int32_t> alignment, bool use32BitStride)
+      : dlpackCapsule_(dlpackCapsule), use32BitStride_(use32BitStride) {
     DLManagedTensor *managed =
         static_cast<DLManagedTensor *>(PyCapsule_GetPointer(dlpackCapsule.ptr(), "dltensor"));
     if (!managed) {
       throw std::runtime_error("Invalid DLPack capsule: expected 'dltensor'");
     }
     tensor_ = &managed->dl_tensor;
+
+    // Calculate element size in bytes (minimum 1 byte)
+    int32_t bitsPerElem = tensor_->dtype.bits * tensor_->dtype.lanes;
+    int32_t bytesPerElem = (bitsPerElem + 7) / 8;
+
+    // Set alignment: use provided value or default to element size
+    alignment_ = alignment.value_or(bytesPerElem);
+    if (alignment_ < 1) {
+      throw std::runtime_error("Alignment must be at least 1");
+    }
 
     ndim_ = tensor_->ndim;
     if (ndim_ == 0) {
@@ -133,45 +155,46 @@ public:
     }
   }
 
-  Type getElementType() const {
+  Type getElementType() {
     DLDataType dtype = tensor_->dtype;
+    MLIRContext *ctx = getCurrentContext();
 
     switch (dtype.code) {
     case kDLFloat:
       switch (dtype.bits) {
       case 16:
-        return Float16Type::get(ctx_);
+        return Float16Type::get(ctx);
       case 32:
-        return Float32Type::get(ctx_);
+        return Float32Type::get(ctx);
       case 64:
-        return Float64Type::get(ctx_);
+        return Float64Type::get(ctx);
       default:
         throw std::runtime_error("Unsupported float bit width: " + std::to_string(dtype.bits));
       }
     case kDLInt:
-      return IntegerType::get(ctx_, dtype.bits, IntegerType::Signed);
+      return IntegerType::get(ctx, dtype.bits, IntegerType::Signed);
     case kDLUInt:
-      return IntegerType::get(ctx_, dtype.bits, IntegerType::Unsigned);
+      return IntegerType::get(ctx, dtype.bits, IntegerType::Unsigned);
     case kDLBfloat:
-      return BFloat16Type::get(ctx_);
+      return BFloat16Type::get(ctx);
     case kDLBool:
-      return IntegerType::get(ctx_, 1);
+      return IntegerType::get(ctx, 1);
     case kDLFloat8_e5m2:
-      return Float8E5M2Type::get(ctx_);
+      return Float8E5M2Type::get(ctx);
     case kDLFloat8_e4m3fn:
-      return Float8E4M3FNType::get(ctx_);
+      return Float8E4M3FNType::get(ctx);
     case kDLFloat8_e5m2fnuz:
-      return Float8E5M2FNUZType::get(ctx_);
+      return Float8E5M2FNUZType::get(ctx);
     case kDLFloat8_e4m3fnuz:
-      return Float8E4M3FNUZType::get(ctx_);
+      return Float8E4M3FNUZType::get(ctx);
     case kDLFloat8_e4m3b11fnuz:
-      return Float8E4M3B11FNUZType::get(ctx_);
+      return Float8E4M3B11FNUZType::get(ctx);
     case kDLComplex:
       switch (dtype.bits) {
       case 64:
-        return ComplexType::get(Float32Type::get(ctx_));
+        return ComplexType::get(Float32Type::get(ctx));
       case 128:
-        return ComplexType::get(Float64Type::get(ctx_));
+        return ComplexType::get(Float64Type::get(ctx));
       default:
         throw std::runtime_error("Unsupported complex bit width: " + std::to_string(dtype.bits));
       }
@@ -185,6 +208,7 @@ public:
       return;
     }
 
+    MLIRContext *ctx = getCurrentContext();
     SmallVector<Attribute> shapeLeaves, strideLeaves;
     shapeLeaves.resize(ndim_);
     strideLeaves.resize(ndim_);
@@ -192,8 +216,8 @@ public:
     size_t shapeDyncCount = 0;
     size_t strideDyncCount = 0;
     for (int i = 0; i < ndim_; ++i) {
-      shapeLeaves[i] = shape_[i].getIntAttr(ctx_, true);
-      strideLeaves[i] = stride_[i].getIntAttr(ctx_, use32BitStride_);
+      shapeLeaves[i] = shape_[i].getIntAttr(ctx, true);
+      strideLeaves[i] = stride_[i].getIntAttr(ctx, use32BitStride_);
 
       if (shape_[i].isDynamic)
         shapeDyncCount++;
@@ -201,17 +225,27 @@ public:
         strideDyncCount++;
     }
 
-    IntTupleAttr shapeAttr = IntTupleAttr::get(ArrayAttr::get(ctx_, shapeLeaves));
-    IntTupleAttr strideAttr = IntTupleAttr::get(ArrayAttr::get(ctx_, strideLeaves));
-    LayoutAttr layoutAttr = LayoutAttr::get(ctx_, shapeAttr, strideAttr);
+    IntTupleAttr shapeAttr, strideAttr;
+    if (shapeLeaves.size() == 1) {
+      shapeAttr = cast<IntTupleAttr>(shapeLeaves[0]);
+    } else {
+      shapeAttr = IntTupleAttr::get(ArrayAttr::get(ctx, shapeLeaves));
+    }
+    if (strideLeaves.size() == 1) {
+      strideAttr = cast<IntTupleAttr>(strideLeaves[0]);
+    } else {
+      strideAttr = IntTupleAttr::get(ArrayAttr::get(ctx, strideLeaves));
+    }
+
+    LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
 
     if (getAddressSpace() != 1) {
       throw std::runtime_error("Only device address space is supported");
     }
-    AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx_, AddressSpace::Global);
+    AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
 
     assert(alignment_ > 0 && "alignment must be positive");
-    AlignAttr alignAttr = AlignAttr::get(ctx_, alignment_);
+    AlignAttr alignAttr = AlignAttr::get(ctx, alignment_);
 
     memrefDesc_.memrefType =
         fly::MemRefType::get(getElementType(), addrSpaceAttr, layoutAttr, alignAttr);
@@ -292,6 +326,9 @@ public:
     if (leadingDim < 0 || leadingDim >= ndim_) {
       throw std::runtime_error("Cannot determine leading dimension");
     }
+    if (stride_[leadingDim].dimSize != 1) {
+      throw std::runtime_error("Leading dimension must have stride 1");
+    }
 
     isMemrefStale_ = true;
     for (int i = 0; i < ndim_; ++i) {
@@ -318,7 +355,6 @@ private:
   nb::object dlpackCapsule_;
   int32_t alignment_;
   bool use32BitStride_;
-  MLIRContext *ctx_;
 
   DLTensor *tensor_;
   int32_t ndim_;
