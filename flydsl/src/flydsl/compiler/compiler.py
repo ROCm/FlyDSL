@@ -203,10 +203,17 @@ def compile(
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
-) -> Executor:
+) -> Optional["Executor"]:
     """Compile a FLIR module to an Executor.
 
-    Returns an MLIR ExecutionEngine-backed executor.
+    Returns an MLIR ExecutionEngine-backed executor, or None if COMPILE_ONLY=1.
+
+    Environment Variables:
+        COMPILE_ONLY: If set to "1", only compile the module without creating
+            an executor. Returns None instead of an Executor. Useful for
+            offline compilation or verifying compilation without a GPU.
+        ARCH: Override the target GPU architecture. Supported values: "gfx942",
+            "gfx950". If not set, auto-detects from the current GPU.
     """
 
     # Accept `flir.lang.MlirModule` instances.
@@ -219,6 +226,7 @@ def compile(
     ctx = mlir_module.context
     ensure_flir_python_extensions(ctx)
 
+    compile_only = _env_truthy("COMPILE_ONLY", "0")
     dump_enabled = _env_truthy("FLIR_DUMP_IR", "0")
     dump_root_dir = Path(os.environ.get("FLIR_DUMP_DIR", "my_ir_dumps")).resolve()
     dump_prefix_base = (
@@ -251,7 +259,8 @@ def compile(
             except Exception:
                 module = mlir_module
 
-    chip = get_rocm_arch()
+    # Allow overriding target arch via env var (useful for cross-compilation or COMPILE_ONLY mode)
+    chip = os.environ.get("ARCH", "").strip() or get_rocm_arch()
 
     pipeline = _build_pipeline_str(
         chip=chip,
@@ -293,6 +302,10 @@ def compile(
                         cached_mod = ir.Module.parse(cached_asm, context=ctx)
                         if dump_enabled:
                             print(f"[flir.compile] cache hit key={cache_key}")
+                        if compile_only:
+                            if dump_enabled or print_final_module:
+                                print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+                            return None
                         from .executor import ExecutionEngineExecutor as Executor
                         if shared_libs is None:
                             shared_libs = default_shared_libs().as_list()
@@ -365,6 +378,12 @@ def compile(
                         print(f"[flir.compile] cache put key={cache_key}")
                 except Exception:
                     pass
+
+    # In compile-only mode, skip executor creation and return None
+    if compile_only:
+        if dump_enabled or print_final_module:
+            print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+        return None
 
     from .executor import ExecutionEngineExecutor as Executor
 

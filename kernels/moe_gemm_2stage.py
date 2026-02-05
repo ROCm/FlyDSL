@@ -35,6 +35,7 @@ from kernels.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.kernels_common import stream_ptr_to_async_token
 
 
 
@@ -412,7 +413,11 @@ def compile_moe_gemm1(
                     else:
                         t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
                         t_safe = arith.select(t_valid_i32, t_idx, arith.index(0))
-                        x_row_base_div4.append(t_safe * c_k_div4)
+                        # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
+                    # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
+                    t_valid_i32 = arith.cmpu(t_raw, tokens_i32, "ult")
+                    t_safe = arith.select(t_valid_i32, t_idx, arith.index(0))
+                    x_row_base_div4.append(t_safe * c_k_div4)
     
                 vec1_i32 = I.vec(1, i32)
                 vec2_i32 = I.vec(2, i32)
@@ -1086,7 +1091,7 @@ def compile_moe_gemm1(
                             col_i32 = col_i32_list[ni]
                             sw_gate = sw_gate_vals[ni]
                             sw_up = sw_up_vals[ni]
-        
+
                             acc_idx = mi * num_acc_n + ni
                             vg = vector.extract(
                                 acc_gate[acc_idx], static_position=[ii], dynamic_position=[]
@@ -1094,13 +1099,13 @@ def compile_moe_gemm1(
                             vu = vector.extract(
                                 acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                             )
-        
+
                             if is_int8:
                                 vg = arith.sitofp(f32, vg)
                                 vu = arith.sitofp(f32, vu)
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
-        
+
                             y = silu(vg) * vu
                             if doweight_stage1:
                                 y = y * tw
@@ -1135,12 +1140,15 @@ def compile_moe_gemm1(
             inter_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = inter_in / arith.index(tile_n)
             # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
             # This avoids device->host sync on num_valid_ids.
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm1"],
                 grid_size=(gx, gy, 1),
@@ -1160,6 +1168,7 @@ def compile_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
@@ -2038,7 +2047,16 @@ def compile_moe_gemm2(
                 zero_i32 = arith.i32(0)
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
-    
+
+                e_vec = 2 if bool(accumulate) else 8
+                if not bool(accumulate):
+                    cshuffle_nlane = 32
+                    cshuffle_stride = cshuffle_nlane * e_vec
+                    if (int(tile_n) % cshuffle_stride) != 0:
+                        raise ValueError(
+                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
+                        )
+
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(
                         val_f16x2,
@@ -2048,7 +2066,6 @@ def compile_moe_gemm2(
                         zero_i32,
                     )
 
-    
                 sw_pf = None
                 tw_pf = None
                 if epilogue_pf is not None:
@@ -2235,7 +2252,7 @@ def compile_moe_gemm2(
                                     alignment=4,
                                 )
                             else:
-                                # Scatter store (no atomic): store bf16x2 directly via buffer store.
+                                # Scatter store (no atomic): store bf16x(e_vec) directly via buffer store.
                                 buffer_ops.buffer_store(frag, out_rsrc, idx_elem_even)
                         else:
                             byte_off = idx_elem_even * c2_i32
@@ -2252,7 +2269,7 @@ def compile_moe_gemm2(
                         range_constexpr=range_constexpr,
                         tile_m=tile_m,
                         tile_n=tile_n,
-                        e_vec=2,
+                        e_vec=e_vec,
                         m_repeat=m_repeat,
                         num_acc_n=num_acc_n,
                         tx=tx,
@@ -2287,10 +2304,13 @@ def compile_moe_gemm2(
             n_in: lambda: T.index(),
             k_in: lambda: T.index(),
             size_expert_ids_in: lambda: T.index(),
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             bdx = 256
             gx = n_in / arith.index(tile_n)
             gy = size_expert_ids_in
+
+            stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
                 [module_name, "moe_gemm2"],
                 grid_size=(gx, gy, 1),
@@ -2310,6 +2330,7 @@ def compile_moe_gemm2(
                     k_in,
                     size_expert_ids_in,
                 ],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE2()
@@ -2410,7 +2431,6 @@ def compile_moe_reduction(
                 thr_copy_X = tiled_copy_X.get_slice(tid)
                 thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-                step = BLOCK_SIZE * VEC_WIDTH
                 thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
 
                 vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
@@ -2418,55 +2438,53 @@ def compile_moe_reduction(
 
                 c_model_dim = arith.index(model_dim).value
 
-                for base_idx_int in range_constexpr(0, model_dim, step):
-                    c_base = arith.index(base_idx_int)
-                    curr_idx = (c_base + thread_offset_base).value
+                tile_n_idx = arith.ArithValue(flir.block_idx("y"))
+                c_base = tile_n_idx * BLOCK_SIZE * VEC_WIDTH
+                curr_idx = (c_base + thread_offset_base).value
 
-                    # Bounds check
-                    c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
-                    in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
+                # Bounds check
+                c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+                in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
 
-                    tile_i = base_idx_int // tile_cols
+                _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
+                with _if_in_bounds.then():
+                    c_zero_f32 = arith.constant(0.0, type=compute_type)
+                    acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
 
-                    _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
-                    with _if_in_bounds.then():
-                        c_zero_f32 = arith.constant(0.0, type=compute_type)
-                        acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
-
-                        for k in range_constexpr(topk):
-                            blkX = gX[(token_idx, k, tile_i)]
-                            thrX = thr_copy_X.partition_S(blkX)
-                            frgX = flir.make_fragment_like(thrX, elem_type)
-                            flir.copy(
-                                tiled_copy_X,
-                                thrX,
-                                frgX,
-                                nontemporal=USE_NONTEMPORAL,
-                                alignment=VEC_ALIGN,
-                            )
-                            vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
-                            if dtype_str in ("f16", "bf16"):
-                                vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
-                            else:
-                                vec_val = vec_val_e
-                            acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
-
-                        if dtype_str in ("f16", "bf16"):
-                            out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
-                        else:
-                            out_vec = acc
-
-                        blkY = gY[(token_idx, tile_i)]
-                        thrY = thr_copy_Y.partition_S(blkY)
-                        frgY = flir.make_fragment_like(thrY, elem_type)
-                        mlir_vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                    for k in range_constexpr(topk):
+                        blkX = gX[(token_idx, k, tile_n_idx)]
+                        thrX = thr_copy_X.partition_S(blkX)
+                        frgX = flir.make_fragment_like(thrX, elem_type)
                         flir.copy(
-                            tiled_copy_Y,
-                            frgY,
-                            thrY,
+                            tiled_copy_X,
+                            thrX,
+                            frgX,
                             nontemporal=USE_NONTEMPORAL,
                             alignment=VEC_ALIGN,
                         )
+                        vec_val_e = mlir_vector.load(vec_type_e, frgX.memref, [c0_idx, c0_idx, c0_idx], alignment=VEC_ALIGN)
+                        if dtype_str in ("f16", "bf16"):
+                            vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
+                        else:
+                            vec_val = vec_val_e
+                        acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+
+                    if dtype_str in ("f16", "bf16"):
+                        out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
+                    else:
+                        out_vec = acc
+
+                    blkY = gY[(token_idx, tile_n_idx)]
+                    thrY = thr_copy_Y.partition_S(blkY)
+                    frgY = flir.make_fragment_like(thrY, elem_type)
+                    mlir_vector.store(arith.as_value(out_vec), frgY.memref, [c0_idx, c0_idx], alignment=VEC_ALIGN)
+                    flir.copy(
+                        tiled_copy_Y,
+                        frgY,
+                        thrY,
+                        nontemporal=USE_NONTEMPORAL,
+                        alignment=VEC_ALIGN,
+                    )
 
             @flir.jit
             def __call__(
@@ -2474,17 +2492,22 @@ def compile_moe_reduction(
                 X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
                 Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
                 m_tokens: lambda: T.index(),
+                stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
             ):
                 from flydsl.dialects.ext import arith as arith_ext
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
+                tile_size = BLOCK_SIZE * VEC_WIDTH
+                gy = arith.as_value(arith_ext.index((model_dim + tile_size - 1) // tile_size))
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
-                
+
+                stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir.gpu_ext.LaunchFuncOp(
                     [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
-                    grid_size=(gx, c1, c1),
+                    grid_size=(gx, gy, c1),
                     block_size=(bx, c1, c1),
                     kernel_operands=[X, Y, m_tokens],
+                    async_dependencies=[stream_token],
                 )
 
     else:
@@ -2646,17 +2669,20 @@ def compile_moe_reduction(
                 Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
                 valid_mask: lambda: T.memref(DYN, topk, T.i8()),
                 m_tokens: lambda: T.index(),
+                stream_ptr: lambda: T.i64(),
             ):
                 from flydsl.dialects.ext import arith as arith_ext
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
                 
+                stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir.gpu_ext.LaunchFuncOp(
                     [f"moe_reduction_{topk}_{model_dim}_{dtype_str}_masked", "moe_reduction_kernel"],
                     grid_size=(gx, c1, c1),
                     block_size=(bx, c1, c1),
                     kernel_operands=[X, Y, valid_mask, m_tokens],
+                    async_dependencies=[stream_token],
                 )
 
 
@@ -2696,7 +2722,7 @@ class _MoeGemm2ReduceWrapper:
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
-        
+
         # Lazy-allocated intermediate buffer
         self._intermediate = None
         self._intermediate_capacity = 0
@@ -2747,7 +2773,8 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
-        valid_mask
+        valid_mask,
+        stream_ptr,
     ):
         """Execute GEMM2 + reduce.
 
@@ -2761,16 +2788,17 @@ class _MoeGemm2ReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
         if self._use_mask:
             # Masked reduction for EP mode
-            self._reduce_exe(X, Y, valid_mask, tokens_in)
+            self._reduce_exe(X, Y, valid_mask, tokens_in, stream_ptr)
         else:
             # Non-masked reduction
-            self._reduce_exe(X, Y, tokens_in)
+            self._reduce_exe(X, Y, tokens_in, stream_ptr)
 
     @property
     def mode(self) -> str:
@@ -2811,7 +2839,7 @@ def compile_moe_gemm2_ex(
     if mode == MoeGemm2Mode.REDUCE:
         # Determine if we need masked reduction
         use_mask = valid_mask is not None
-        
+
         # Compile GEMM2 with accumulate=False
         gemm2_exe = compile_moe_gemm2(
             model_dim=model_dim,
