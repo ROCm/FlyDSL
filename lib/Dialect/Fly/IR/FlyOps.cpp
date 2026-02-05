@@ -130,8 +130,8 @@ FLY_INFER_RETURN_TYPES(MakeViewOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[1].getType());
   if (!ptrTy || !layoutTy)
     return failure();
-  inferredReturnTypes.assign(
-      {MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(), layoutTy.getAttr())});
+  inferredReturnTypes.assign({MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(),
+                                              layoutTy.getAttr(), ptrTy.getAlignment())});
   return success();
 }
 

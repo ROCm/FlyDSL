@@ -1,0 +1,437 @@
+from flydsl.lang.meta import dsl_api_wrapper
+
+from .._mlir import ir
+from .._mlir.dialects import arith, fly, gpu
+from .._mlir.dialects.fly import (
+    # Enum Attributes
+    AddressSpace,
+    CachePolicy,
+    # Type
+    CopyAtomUniversalCopyType,
+    IntTupleType,
+    LayoutType,
+    MemRefType,
+    MmaAtomUniversalFMAType,
+    PointerType,
+    SwizzleType,
+)
+from .._mlir.extras import types as T
+
+# @ir.register_value_caster(T.F16Type.static_typeid)
+# @ir.register_value_caster(T.F32Type.static_typeid)
+# @ir.register_value_caster(T.F64Type.static_typeid)
+# @ir.register_value_caster(T.IntegerType.static_typeid)
+# class ArithValue(ir.Value):
+#     def __init__(self, v):
+#         super().__init__(v)
+
+#     __add__ = partialmethod(_binary_op, op="add")
+#     __sub__ = partialmethod(_binary_op, op="sub")
+#     __mul__ = partialmethod(_binary_op, op="mul")
+
+#     def __str__(self):
+#         return super().__str__().replace(ir.Value.__name__, ArithValue.__name__)
+
+
+class classproperty(property):
+    def __get__(self, owner_self, owner_cls):
+        return self.fget(owner_cls)
+
+
+class block_idx:
+    @classproperty
+    def x(cls):
+        return gpu.block_id("x")
+
+    @classproperty
+    def y(cls):
+        return gpu.block_id("y")
+
+    @classproperty
+    def z(cls):
+        return gpu.block_id("z")
+
+
+class block_dim:
+    @classproperty
+    def x(cls):
+        return gpu.block_dim("x")
+
+    @classproperty
+    def y(cls):
+        return gpu.block_dim("y")
+
+    @classproperty
+    def z(cls):
+        return gpu.block_dim("z")
+
+
+class thread_idx:
+    @classproperty
+    def x(cls):
+        return gpu.thread_id("x")
+
+    @classproperty
+    def y(cls):
+        return gpu.thread_id("y")
+
+    @classproperty
+    def z(cls):
+        return gpu.thread_id("z")
+
+
+class grid_dim:
+    @classproperty
+    def x(cls):
+        return gpu.grid_dim("x")
+
+    @classproperty
+    def y(cls):
+        return gpu.grid_dim("y")
+
+    @classproperty
+    def z(cls):
+        return gpu.grid_dim("z")
+
+
+def make_int32(value):
+    return fly.make_int32(value)
+
+
+def make_int32_tuple(value):
+    return fly.make_int32_tuple(value)
+
+
+def rank(int_or_tuple):
+    return fly.rank(int_or_tuple)
+
+
+def depth(int_or_tuple):
+    return fly.depth(int_or_tuple)
+
+
+@dsl_api_wrapper
+def int_tuple_add(lhs, rhs, loc=None, ip=None):
+    return fly.int_tuple_add(lhs, rhs, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def int_tuple_sub(lhs, rhs, loc=None, ip=None):
+    return fly.int_tuple_sub(lhs, rhs, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def int_tuple_mul(lhs, rhs, loc=None, ip=None):
+    return fly.int_tuple_mul(lhs, rhs, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def int_tuple_div(lhs, rhs, loc=None, ip=None):
+    return fly.int_tuple_div(lhs, rhs, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def int_tuple_product(int_tuple, loc=None, ip=None):
+    return fly.int_tuple_product(int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_identity_tensor(shape, loc=None, ip=None):
+    return fly.make_identity_tensor(shape, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_identity_layout(shape, loc=None, ip=None):
+    return fly.make_identity_layout(shape, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_shape(*shape, loc=None, ip=None):
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(shape)
+    return fly.make_shape(IntTupleTy, dyncElems, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_stride(*stride, loc=None, ip=None):
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(stride)
+    return fly.make_stride(IntTupleTy, dyncElems, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_coord(*coord, loc=None, ip=None):
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(coord)
+    return fly.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_int_tuple(elems, loc=None, ip=None):
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(elems)
+    return fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_layout(shape, stride, loc=None, ip=None):
+    if not isinstance(shape, ir.Value):
+        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
+        shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
+    if not isinstance(stride, ir.Value):
+        strideTy, dyncElems = fly.infer_int_tuple_type(stride)
+        stride = fly.make_stride(strideTy, dyncElems, loc=loc, ip=ip)
+    return fly.make_layout(shape, stride=stride, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def size(int_tuple, loc=None, ip=None):
+    return fly.size(int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_scalar(int_tuple, loc=None, ip=None):
+    return fly.get_scalar(int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def slice(src, coord, loc=None, ip=None):
+    if not isinstance(coord, ir.Value):
+        coordTy, dyncElems = fly.infer_int_tuple_type(coord)
+        coord = fly.make_coord(coordTy, dyncElems, loc=loc, ip=ip)
+    return fly.slice(src, coord, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def crd2idx(crd, layout, loc=None, ip=None):
+    return fly.crd2idx(crd, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def composition(layout, tiler, loc=None, ip=None):
+    return fly.composition(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def complement(layout, codomain_size, loc=None, ip=None):
+    if not isinstance(codomain_size, ir.Value):
+        codomain_sizeTy, dyncElems = fly.infer_int_tuple_type(codomain_size)
+        codomain_size = fly.make_shape(codomain_sizeTy, dyncElems, loc=loc, ip=ip)
+    return fly.complement(layout, codomain_size=codomain_size, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def coalesce(layout, pattern=None, loc=None, ip=None):
+    return fly.coalesce(layout, pattern=pattern, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def zip(lhs, rhs, loc=None, ip=None):
+    return fly.zip(lhs, rhs, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def select(int_tuple, indices, loc=None, ip=None):
+    return fly.select(int_tuple, indices=indices, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def group(int_tuple, begin: int, end: int, loc=None, ip=None):
+    return fly.group(int_tuple, begin=begin, end=end, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def append(base, elem, n: int | None = None, loc=None, ip=None):
+    return fly.append(base, elem, n=n, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def prepend(base, elem, n: int | None = None, loc=None, ip=None):
+    return fly.prepend(base, elem, n=n, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def logical_divide(layout, divisor, loc=None, ip=None):
+    return fly.logical_divide(layout, divisor, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def zipped_divide(layout, divisor, loc=None, ip=None):
+    return fly.zipped_divide(layout, divisor, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def tiled_divide(layout, divisor, loc=None, ip=None):
+    return fly.tiled_divide(layout, divisor, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def flat_divide(layout, divisor, loc=None, ip=None):
+    return fly.flat_divide(layout, divisor, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def logical_product(layout, tiler, loc=None, ip=None):
+    return fly.logical_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def zipped_product(layout, tiler, loc=None, ip=None):
+    return fly.zipped_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def tiled_product(layout, tiler, loc=None, ip=None):
+    return fly.tiled_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def flat_product(layout, tiler, loc=None, ip=None):
+    return fly.flat_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def block_product(layout, tiler, loc=None, ip=None):
+    return fly.block_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def raked_product(layout, tiler, loc=None, ip=None):
+    return fly.raked_product(layout, tiler, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_atom(atom_type, loc=None, ip=None):
+    return fly.make_atom(atom_type, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_tile(layouts, loc=None, ip=None):
+    return fly.make_tile(layouts, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
+    return fly.mma_atom_call(mma_atom, d, a, b, c, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def copy_atom_call(copy_atom, src, dst, loc=None, ip=None):
+    return fly.copy_atom_call(copy_atom, src, dst, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_tiled_copy(copy_atom, layout_tv, tile_mn, loc=None, ip=None):
+    return fly.make_tiled_copy(copy_atom, layout_tv, tile_mn, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def memref_alloca(memref_type, layout, loc=None, ip=None):
+    return fly.memref_alloca(memref_type, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def memref_load(memref, indices, loc=None, ip=None):
+    # `fly.memref.load` expects `indices` as `!fly.int_tuple` (typically a scalar offset).
+    # Accept convenience forms:
+    # - int_tuple Value (pass through)
+    # - python int / tuple/list (make_int_tuple)
+    # - index/i32/i64 Value (cast index->i32 then make_int_tuple)
+    if isinstance(indices, ir.Value):
+        if str(indices.type).startswith("!fly.int_tuple"):
+            return fly.memref_load(memref, indices, loc=loc, ip=ip)
+        # Common case: user passes `index` as a 1-D coordinate/offset.
+        if str(indices.type) == "index":
+            indices = arith.IndexCastOp(T.i32(), indices)
+        indices = make_int_tuple(indices, loc=loc, ip=ip)
+        return fly.memref_load(memref, indices, loc=loc, ip=ip)
+
+    # List/tuple (e.g. [row]) or python int.
+    indices = make_int_tuple(indices, loc=loc, ip=ip)
+    return fly.memref_load(memref, indices, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def memref_store(value, memref, indices, loc=None, ip=None):
+    if isinstance(indices, ir.Value):
+        if str(indices.type).startswith("!fly.int_tuple"):
+            return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
+        if str(indices.type) == "index":
+            indices = arith.IndexCastOp(T.i32(), indices)
+        indices = make_int_tuple(indices, loc=loc, ip=ip)
+        return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
+
+    indices = make_int_tuple(indices, loc=loc, ip=ip)
+    return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def memref_load_vec(memref, loc=None, ip=None):
+    return fly.memref_load_vec(memref, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def memref_store_vec(vector, memref, loc=None, ip=None):
+    return fly.memref_store_vec(vector, memref, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_layout(memref, loc=None, ip=None):
+    return fly.get_layout(memref, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_iter(memref, loc=None, ip=None):
+    return fly.get_iter(memref, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_view(iter, layout, loc=None, ip=None):
+    return fly.make_view(iter, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def add_offset(ptr, offset, loc=None, ip=None):
+    if not isinstance(offset, ir.Value):
+        offset = make_int_tuple(offset, loc=loc, ip=ip)
+    return fly.add_offset(ptr, offset, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def cooperative_copy(tiled_copy, partition_idx, src, dst, loc=None, ip=None):
+    return fly.cooperative_copy(
+        tiled_copy,
+        partition_idx,
+        src,
+        dst,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_api_wrapper
+def printf(*args, format_str="", loc=None, ip=None):
+    def _convert_printf_value(val):
+        """Convert Python values to MLIR Values for printf."""
+        if isinstance(val, ir.Value):
+            return val
+        elif isinstance(val, bool):
+            return arith.constant(T.i1(), int(val))
+        elif isinstance(val, int):
+            return arith.constant(T.i32(), val)
+        elif isinstance(val, float):
+            return arith.constant(T.f64(), val)
+        elif hasattr(val, "__extract_ir_values__"):
+            ir_values = val.__extract_ir_values__()
+            if len(ir_values) == 1:
+                return ir_values[0]
+            raise ValueError(f"Cannot use multi-value type in printf: {type(val)}")
+        elif hasattr(val, "value") and isinstance(val.value, ir.Value):
+            return val.value
+        else:
+            raise ValueError(f"Cannot convert {type(val)} to MLIR Value for printf")
+
+    if len(args) > 0 and isinstance(args[0], str):
+        format_str = args[0]
+        raw_values = list(args[1:])
+    else:
+        raw_values = list(args)
+
+    values = [_convert_printf_value(v) for v in raw_values]
+    return fly.print_(format_str, values, loc=loc, ip=ip)

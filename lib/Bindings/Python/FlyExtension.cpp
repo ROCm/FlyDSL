@@ -136,9 +136,10 @@ NB_MODULE(_fly, m) {
   using DLTensorAdaptor = utils::DLTensorAdaptor;
 
   nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
-      .def(nb::init<nb::object, int32_t, bool, MlirContext>(), "dlpack_capsule"_a,
-           "alignment"_a = 1, "use_32bit_stride"_a = false, "context"_a,
-           "Create a DLTensorAdaptor from a DLPack capsule")
+      .def(nb::init<nb::object, std::optional<int32_t>, bool>(), "dlpack_capsule"_a,
+           "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
+           "Create a DLTensorAdaptor from a DLPack capsule. "
+           "If alignment is None, defaults to element size in bytes (minimum 1). ")
       .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
       .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
