@@ -194,25 +194,39 @@ class CompileEnvManager(EnvManager):
     env_prefix = "COMPILE"
 
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
-    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
-    enable_verifier = OptBool(False, description="Verify IR module")
+
+
+class DebugEnvManager(EnvManager):
+    env_prefix = "DEBUG"
+
+    dump_asm = OptBool(False, description="Dump ASM to file")
+    dump_ir = OptBool(False, description="Dump IR to file")
+    dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), description="Directory for dumping IR")
+
+    # Logging options
+    log_level = OptStr("WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], description="Logging level")
+    log_to_file = OptStr("", description="Log file path, empty to disable file logging")
+    log_to_console = OptBool(False, description="Enable console logging")
+
+    # MLIR pass manager options
     print_after_all = OptBool(False, description="Print IR after each MLIR pass")
+    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
+    enable_verifier = OptBool(True, description="Verify IR module")
 
 
 class RuntimeEnvManager(EnvManager):
     env_prefix = "RUNTIME"
 
-    log_level = OptStr("WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], description="Logging level")
-    log_to_file = OptStr("", description="Log file path, empty to disable file logging")
-    log_to_console = OptBool(False, description="Enable console logging")
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")
     enable_cache = OptBool(True, description="Enable kernel caching")
 
 
 compile = CompileEnvManager()
+debug = DebugEnvManager()
 runtime = RuntimeEnvManager()
 
 __all__ = [
     "compile",
+    "debug",
     "runtime",
 ]
