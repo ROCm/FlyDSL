@@ -2773,8 +2773,8 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
-        valid_mask,
         stream_ptr,
+        valid_mask=None,
     ):
         """Execute GEMM2 + reduce.
 
