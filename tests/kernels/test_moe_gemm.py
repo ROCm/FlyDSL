@@ -51,6 +51,22 @@ def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch
     out[:, 3] = u[:, 3] | (u[:, 7] << 4)
     return out.view(-1).to(torch.int8)
 
+
+def _pack_int8_to_packed_int4_sequential(x_shuf_i8: torch.Tensor) -> torch.Tensor:
+    """Pack int8 tensor (values in [-8, 7]) into packed int4 bytes sequentially.
+
+    Each contiguous 2-value pair [v0,v1] -> 1 byte: (v1<<4)|v0.
+    So for 8 values [v0..v7] -> 4 bytes: [(v1<<4)|v0, (v3<<4)|v2, (v5<<4)|v4, (v7<<4)|v6].
+
+    This sequential layout is suitable for W4A16 (bf16 activations) where the kernel
+    loads 2 bytes at a time and expects v0,v1,v2,v3 in little-endian order.
+    """
+    flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
+    assert flat.numel() % 2 == 0
+    u = (flat & 0xF).to(torch.uint8).view(-1, 2)
+    out = u[:, 0] | (u[:, 1] << 4)
+    return out.view(-1).to(torch.int8)
+
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -360,9 +376,10 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int4", "int4_bf16"):
+        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4','int4_bf16'), got {in_dtype!r}")
     is_int4 = in_dtype == "int4"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int4")
 
     # Quantize inputs / weights.
@@ -381,6 +398,12 @@ def run_moe_stage1(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int4_bf16":
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -398,10 +421,13 @@ def run_moe_stage1(
 
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
     x_q = x_q.contiguous().view(tokens, model_dim)
+    # Pack weights for int4 variants (W4A8 and W4A16).
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = is_int4 or is_int4_bf16
     w_kernel = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
+        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if use_packed_int4 else w1_shuffled_flat
     ).contiguous()
-    if not is_int4:
+    if not use_packed_int4:
         w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -479,8 +505,8 @@ def run_moe_stage1(
             doweight_stage1=doweight_stage1,
         )
 
-        rtol = 0.5 if is_int4 else 0.25
-        atol = 0.5 if is_int4 else 0.25
+        rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+        atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -489,8 +515,9 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    bytes_moved += tokens * model_dim * 1  # x fp8
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
+    x_elem_bytes = 2 if is_int4_bf16 else 1  # bf16 activations for W4A16
+    bytes_moved += tokens * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
+    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += tokens * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
@@ -713,9 +740,10 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int4", "int4_bf16"):
+        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4','int4_bf16'), got {in_dtype!r}")
     is_int4 = in_dtype == "int4"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int4")
 
     # Quantize inputs / weights.
@@ -734,6 +762,12 @@ def run_moe_stage2(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int4_bf16":
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: A2 is int8, W2 is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -745,7 +779,8 @@ def run_moe_stage2(
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
-    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype == "fp16"):
+    # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
+    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "int4_bf16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
     else:
@@ -772,6 +807,10 @@ def run_moe_stage2(
         elif in_dtype == "fp16":
             a2_q = out1_ref.to(torch.float16)
             a2_scale = None
+        elif in_dtype == "int4_bf16":
+            # W4A16: A2 is bf16 (no quant).
+            a2_q = out1_ref.to(torch.bfloat16)
+            a2_scale = None
         else:
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
@@ -779,14 +818,16 @@ def run_moe_stage2(
     w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
     scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
+    # For W4A8 and W4A16, pack preshuffled int8 weights into packed int4 bytes.
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = is_int4 or is_int4_bf16
     w2_kernel = w2_shuffled_flat
-    if is_int4:
+    if use_packed_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
 
     w2_flat = w2_kernel.contiguous().view(-1)
     w2_kernel = w2_flat
-    if not is_int4:
+    if not use_packed_int4:
         w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -1008,7 +1049,7 @@ def run_moe_stage2(
         pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4", "int4_bf16"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
@@ -1111,6 +1152,10 @@ def test_moe_gemm_2stage(
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
         a2_q = out1_fp16
+        a2_scale = None
+    elif in_dtype == "int4_bf16":
+        # W4A16: A2 is bf16 (no quant)
+        a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
@@ -1486,9 +1531,10 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4", "all"],
-        help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
-        "int4 means W4A8: A int8, W packed int4.",
+        choices=["fp8", "fp16", "int8", "int4", "int4_bf16", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int4 / int4_bf16 / all (default: all). "
+        "int4 means W4A8: A int8, W packed int4. "
+        "int4_bf16 means W4A16: A bf16, W packed int4.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1540,7 +1586,11 @@ if __name__ == "__main__":
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    for dt in args.in_dtype.split(","):
+    # Expand "all" to all supported dtypes.
+    in_dtypes = args.in_dtype.split(",")
+    if "all" in in_dtypes:
+        in_dtypes = ["fp8", "fp16", "int8", "int4", "int4_bf16"]
+    for dt in in_dtypes:
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
