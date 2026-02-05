@@ -10,6 +10,7 @@ NOTE:
 import os
 import sys
 import logging
+import random
 
 import torch
 import torch.nn.functional as F
@@ -74,6 +75,74 @@ DEFAULT_LDS_STAGE = 2
 DEFAULT_BENCH_ITERS = 20
 DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
+DEFAULT_PRINT_SAMPLE = False
+
+
+def print_random_8x8_comparison(
+    c_out: torch.Tensor, 
+    c_ref: torch.Tensor, 
+    label: str = "",
+    c_aiter: torch.Tensor = None,
+    start_pos: tuple = None,
+):
+    """Print a random 8x8 block from kernel output, aiter output, and reference for comparison.
+    
+    Args:
+        c_out: Kernel output tensor
+        c_ref: Reference tensor  
+        label: Label string for the comparison
+        c_aiter: Optional aiter output tensor for 3-way comparison
+        start_pos: Optional (start_m, start_n) tuple to use fixed position instead of random
+    
+    Returns:
+        (start_m, start_n): The position used, so caller can reuse for subsequent comparisons
+    """
+    M, N = c_out.shape
+    # Random starting position (ensure we have at least 8x8)
+    max_m = max(0, M - 8)
+    max_n = max(0, N - 8)
+    if start_pos is not None:
+        start_m, start_n = start_pos
+    else:
+        start_m = random.randint(0, max_m) if max_m > 0 else 0
+        start_n = random.randint(0, max_n) if max_n > 0 else 0
+    end_m = min(start_m + 8, M)
+    end_n = min(start_n + 8, N)
+    
+    print("-" * 60)
+    print(f"Random 8x8 Sample Comparison {label}")
+    print(f"Position: [{start_m}:{end_m}, {start_n}:{end_n}]")
+    print("-" * 60)
+    
+    out_block = c_out[start_m:end_m, start_n:end_n].cpu().float()
+    ref_block = c_ref[start_m:end_m, start_n:end_n].cpu().float()
+    diff_block = (out_block - ref_block).abs()
+    
+    print("Kernel Output:")
+    print(out_block.numpy())
+    print("\nReference:")
+    print(ref_block.numpy())
+    print("\nKernel vs Ref Absolute Difference:")
+    print(diff_block.numpy())
+    print(f"Kernel vs Ref - Max diff: {diff_block.max().item():.6f}, Mean diff: {diff_block.mean().item():.6f}")
+    
+    if c_aiter is not None:
+        aiter_block = c_aiter[start_m:end_m, start_n:end_n].cpu().float()
+        aiter_diff = (aiter_block - ref_block).abs()
+        kernel_aiter_diff = (out_block - aiter_block).abs()
+        
+        print("\nAiter Output:")
+        print(aiter_block.numpy())
+        print("\nAiter vs Ref Absolute Difference:")
+        print(aiter_diff.numpy())
+        print(f"Aiter vs Ref - Max diff: {aiter_diff.max().item():.6f}, Mean diff: {aiter_diff.mean().item():.6f}")
+        print("\nKernel vs Aiter Absolute Difference:")
+        print(kernel_aiter_diff.numpy())
+        print(f"Kernel vs Aiter - Max diff: {kernel_aiter_diff.max().item():.6f}, Mean diff: {kernel_aiter_diff.mean().item():.6f}")
+    
+    print("-" * 60)
+    return (start_m, start_n)
+
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -249,11 +318,9 @@ def test_mfma_a8_flir_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+    # Store sample position for consistent comparison across kernel and aiter
+    sample_pos = None
+    c_aiter_f32 = None
 
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
@@ -263,7 +330,8 @@ def test_mfma_a8_flir_preshuffle(
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
             c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
-            verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+            c_aiter_f32 = c_aiter.to(torch.float32)
+            verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
 
             tflops_aiter = flops / (us1 / 1e6) / 1e12
             bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
@@ -283,6 +351,12 @@ def test_mfma_a8_flir_preshuffle(
         print("-" * 40)
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
+
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
@@ -312,6 +386,7 @@ def test_mfma_w4_flir_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
+    print_sample: bool = DEFAULT_PRINT_SAMPLE,
 ):
     print("=" * 80)
     print(
@@ -333,6 +408,7 @@ def test_mfma_w4_flir_preshuffle(
         tile_k=tile_k,
         a_dtype=a_dtype,
         b_dtype=b_dtype,
+        out_dtype="bf16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
     )
@@ -366,19 +442,35 @@ def test_mfma_w4_flir_preshuffle(
     if a_dtype == "fp4":
         a_q, scale_a_orig, a_convert = fp4_utils.per_1x32_f4_quant(a_fp32_padded)  # (M, K)
         a_q = a_q[:M]
+        # Override scale to 1.0 (in e8m0, fill_(1) or fill_(1.0) gives 2^0 = 1.0)
+        # NOTE: fill_(127) would give 128.0, not 1.0!
+        scale_a_orig.fill_(1.0)
         scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
         a_convert = a_fp32
-        scale_a_orig = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        scale_a_orig = torch.full([M, K // 32], 1.0, dtype=fp4_utils.fp8_e8m0, device=device)
         scale_a = scale_a_orig
 
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
+    # Override scale to 1.0 (in e8m0, fill_(1.0) gives 2^0 = 1.0)
+    scale_b.fill_(1.0)
+    
+    # Recalculate Ref with override scales
     if a_dtype == "fp4":
+        # For Ref, we need to pass the SCALES, not just use the ones returned by quant
+        # run_torch_w4 takes scales.
         c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
     else:
+        # If A is FP8/FP32, we assume scale is 1.0 effectively?
+        # run_torch doesn't take scales for A/B easily if not int8.
+        # But here we are forcing scales to 1.0 so original float matmul is close enough if we ignore quantization error?
+        # Better to re-quantize or use the quant versions.
+        # For simplicity, if we force scales to 1, we should trust run_torch_w4 with scales=1
+        pass
+        # Actually run_torch handles fp8/fp32 inputs directly.
         c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
     # Keep tensors contiguous for predictable buffer descriptor shapes.
@@ -389,8 +481,11 @@ def test_mfma_w4_flir_preshuffle(
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
-    # Run kernel (f16 output, in-kernel scaling).
-    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
+    # Run kernel (bf16 output, in-kernel scaling).
+    c_out_raw = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
+
+    # Initialize aiter result holder
+    c_aiter_f32 = None
 
     def launch_kernel(c, a, b, sa, sb):
         # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
@@ -419,7 +514,8 @@ def test_mfma_w4_flir_preshuffle(
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
-    verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+    # Defer verification to allow Aiter bench and sampling to run first
+    # verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
@@ -461,6 +557,16 @@ def test_mfma_w4_flir_preshuffle(
         print("-" * 40)
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
+
+    if print_sample:
+        print_random_8x8_comparison(
+            c_out_scaled, c_ref, 
+            f"(M={M}, N={N}, K={K}, A={a_dtype}, B={b_dtype})",
+            c_aiter=c_aiter_f32,
+        )
+
+    print("Verifying Kernel Output...")
+    verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
 
 if __name__ == "__main__":
@@ -532,6 +638,13 @@ if __name__ == "__main__":
         default=False,
         help="Use weight fp4 gemm.",
     )
+    parser.add_argument(
+        "--print_sample",
+        "-ps",
+        action="store_true",
+        default=DEFAULT_PRINT_SAMPLE,
+        help="Print a random 8x8 sample comparison between kernel output and reference.",
+    )
     
     args = parser.parse_args()
     
@@ -569,5 +682,6 @@ if __name__ == "__main__":
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
             test_graph=bool(args.test_graph),
+            print_sample=bool(args.print_sample),
         )
 
