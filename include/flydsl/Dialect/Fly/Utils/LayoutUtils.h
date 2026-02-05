@@ -538,7 +538,69 @@ Layout layoutComplement(
   return builder.makeLayout(retShape, retStride);
 }
 
-template <class Layout> Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout);
+template <class Layout>
+Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  auto coalesced = layoutCoalesce(builder, layout);
+  auto shape = builder.getShape(coalesced);
+  auto stride = builder.getStride(coalesced);
+
+  SmallVector<IntTuple> flatShapeLeaves;
+  SmallVector<IntTuple> flatStrideLeaves;
+  intTupleFlattenToVector(builder, shape, flatShapeLeaves);
+  intTupleFlattenToVector(builder, stride, flatStrideLeaves);
+
+  SmallVector<ArithValue> prefixProducts;
+  prefixProducts.reserve(flatShapeLeaves.size() + 1);
+  ArithValue one = builder.materializeConstantArith(1);
+  prefixProducts.push_back(one);
+  for (size_t i = 0; i < flatShapeLeaves.size(); ++i) {
+    ArithValue next =
+        builder.mul(prefixProducts.back(), builder.getArithValue(flatShapeLeaves[i]));
+    prefixProducts.push_back(next);
+  }
+
+  SmallVector<int32_t> sortedIdx;
+  sortedIdx.reserve(flatStrideLeaves.size());
+  for (size_t i = 0; i < flatStrideLeaves.size(); ++i) {
+    ArithValue strideVal = builder.getArithValue(flatStrideLeaves[i]);
+    if (!builder.isStatic(strideVal) || builder.isNone(strideVal))
+      continue;
+    sortedIdx.push_back(static_cast<int32_t>(i));
+  }
+  std::sort(sortedIdx.begin(), sortedIdx.end(), [&](int32_t a, int32_t b) {
+    auto strideA = builder.getArithValue(flatStrideLeaves[a]);
+    auto strideB = builder.getArithValue(flatStrideLeaves[b]);
+    return builder.getStaticValue(strideA) < builder.getStaticValue(strideB);
+  });
+
+  typename LayoutBuilder<Layout>::ElemCollector resultShape;
+  typename LayoutBuilder<Layout>::ElemCollector resultStride;
+  resultShape.push_back(builder.makeInt(one));
+  resultStride.push_back(builder.makeInt(builder.materializeConstantArith(0)));
+
+  ArithValue currStride = one;
+  for (int32_t idx : sortedIdx) {
+    ArithValue shapeVal = builder.getArithValue(flatShapeLeaves[idx]);
+    ArithValue strideVal = builder.getArithValue(flatStrideLeaves[idx]);
+    if (!builder.isStatic(shapeVal))
+      continue;
+    if (!builder.isStatic(currStride))
+      break;
+    if (builder.getStaticValue(strideVal) != builder.getStaticValue(currStride))
+      continue;
+
+    resultShape.push_back(builder.makeInt(shapeVal));
+    resultStride.push_back(builder.makeInt(prefixProducts[idx]));
+    currStride = builder.mul(shapeVal, strideVal);
+  }
+
+  Layout resultLayout =
+      builder.makeLayout(builder.makeTuple(resultShape), builder.makeTuple(resultStride));
+  return layoutCoalesce(builder, resultLayout);
+}
 template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
 
 template <class Layout>

@@ -733,7 +733,9 @@ FLY_INFER_RETURN_TYPES(RightInverseOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[0].getType());
   if (!layoutTy)
     return failure();
-  inferredReturnTypes.assign({layoutTy});
+  LayoutBuilder<LayoutAttr> layoutBuilder(context);
+  LayoutAttr inferred = layoutRightInverse(layoutBuilder, layoutTy.getAttr());
+  inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }
 
