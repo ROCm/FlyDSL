@@ -23,6 +23,7 @@ from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
+from tests.kernels.utils import fp4_utils
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -387,39 +388,53 @@ def run_moe_stage1(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    elif x_dtype == "fp8" and w_dtype == "fp4":
+        x_q = x_fp32.to(DTYPE_FP8)
+        scale_x = torch.ones([tokens, model_dim // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        w1_q, scale_w1, w1_convert = fp4_utils.per_1x32_f4_quant(w1_fp32)  # (E, 2*inter, K)
+        w2_q, scale_w2, w2_convert = fp4_utils.per_1x32_f4_quant(w2_fp32)  # (E, model_dim, inter)
     else:
         raise ValueError(f"Invalid combination of x_dtype and w_dtype: {x_dtype!r}, {w_dtype!r}")
 
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
-    w1_shuffled = shuffle_weight(w1_q)
-    w2_shuffled = shuffle_weight(w2_q) if w_dtype == "fp8" else None
+    if w_dtype != "fp4":
+        w1_shuffled = shuffle_weight(w1_q)
+        w2_shuffled = shuffle_weight(w2_q) if w_dtype == "fp8" else None
+        # Flatten W1 for our flir kernel (treat expert dim as part of N).
+        w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
+        w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+        scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+        w_kernel = (
+            _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
+        ).contiguous()
+        if not is_int4:
+            w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
+        if scale_w1_flat is None:
+            scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
+        else:
+            scale_w1_1d = scale_w1_flat.view(-1).contiguous()  # [rows]
 
-    # Flatten W1 for our flir kernel (treat expert dim as part of N).
-    w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
-    w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
-    scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+    else:
+        w1_shuffled = fp4_utils.shuffle_weight_w4(w1_q, 16, True, True)
+        w2_shuffled = fp4_utils.shuffle_weight_w4(w2_q, 16, True, True)
+        scale_w1_shuffled = fp4_utils.shuffle_scale_w4(scale_w1, experts, True)
+        scale_w1_1d = scale_w1_shuffled
+        w_kernel = w1_shuffled 
+
 
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
     x_q = x_q.contiguous().view(tokens, model_dim)
-    w_kernel = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
-    ).contiguous()
-    if not is_int4:
-        w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
-
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
     if scale_x is None:
         scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_x_1d = scale_x.view(-1).contiguous()  # [tokens]
-    if scale_w1_flat is None:
-        scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
-    else:
-        scale_w1_1d = scale_w1_flat.view(-1).contiguous()  # [rows]
+
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: [tokens, topk, inter_dim] fp16
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    out_torch_dtype = DTYPE_FP8 if out_dtype == "fp8" else torch.float16
+    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=out_torch_dtype)
 
     exe = compile_moe_gemm1(
         model_dim=model_dim,
@@ -469,11 +484,21 @@ def run_moe_stage1(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
+        if w_dtype != "fp4":
+            x_ref = x_q
+            w1_flat_ref = w1_q_flat
+            scale_x_ref = scale_x
+            scale_w1_flat_ref = scale_w1_flat
+        else:
+            x_ref = x_f32
+            w1_flat_ref = w1_f32
+            scale_x_ref = None
+            scale_w1_flat_ref = None
         ref = torch_moe_gemm1(
-            x_q,
-            w1_q_flat,
-            scale_x,
-            scale_w1_flat,
+            x_ref,
+            w1_flat_ref,
+            scale_x_ref,
+            scale_w1_flat_ref,
             topk_ids.to(torch.int64),
             topk_weights,
             inter_dim=inter_dim,
@@ -741,12 +766,23 @@ def run_moe_stage2(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+    elif x_dtype == "fp8" and w_dtype == "fp4":
+        x_q = x_fp32.to(DTYPE_FP8)
+        scale_x = torch.ones([tokens, model_dim // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        w1_q, scale_w1, w1_convert = fp4_utils.per_1x32_f4_quant(w1_fp32)  # (E, 2*inter, K)
+        w2_q, scale_w2, w2_convert = fp4_utils.per_1x32_f4_quant(w2_fp32)  # (E, model_dim, inter)
     else:
         raise ValueError(f"Invalid combination of x_dtype and w_dtype: {x_dtype!r}, {w_dtype!r}")
 
     # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
-    w1_shuffled = shuffle_weight(w1_q)
-    w2_shuffled = shuffle_weight(w2_q)
+    if w_dtype == "fp4":
+        w1_shuffled = fp4_utils.shuffle_weight_w4(w1_q, 16, True, True)
+        w2_shuffled = fp4_utils.shuffle_weight_w4(w2_q, 16, True, True)
+        scale_w1_shuffled = fp4_utils.shuffle_scale_w4(scale_w1, experts, True)
+        scale_w2_shuffled = fp4_utils.shuffle_scale_w4(scale_w2, experts, True)
+    else:
+        w1_shuffled = shuffle_weight(w1_q)
+        w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
     if a2_fp8_in is not None and (a2_scale_in is not None or (x_dtype == "fp16" and w_dtype == "fp16")):
@@ -762,10 +798,10 @@ def run_moe_stage2(
                 "(so we don't have to run the huge torch reference stage1)."
             )
         out1_ref = torch_moe_gemm1(
-            x_q,
-            w1_q_flat,
-            scale_x,
-            scale_w1_flat,
+            x_fp32_in,
+            w1_fp32_in,
+            None,
+            None,
             topk_ids.to(torch.int64),
             topk_weights,
             inter_dim=inter_dim,
@@ -877,11 +913,21 @@ def run_moe_stage2(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
+        if w_dtype != "fp4":
+            a2_ref = a2_q
+            w2_ref = w2_q
+            a2_scale_ref = a2_scale
+            scale_w2_ref = scale_w2
+        else:
+            a2_ref = a2_q.to(torch.float32)
+            w2_ref = w2_fp32_in
+            a2_scale_ref = None
+            scale_w2_ref = None
         ref2 = torch_moe_gemm2(
-            a2_q,
-            w2_q,
-            a2_scale,
-            scale_w2,
+            a2_ref,
+            w2_ref,
+            a2_scale_ref,
+            scale_w2_ref,
             topk_ids.to(torch.int64),
             topk_weights,
             model_dim=model_dim,
@@ -1108,6 +1154,12 @@ def test_moe_gemm_2stage(
     elif x_dtype == "fp16" and w_dtype == "fp16":
         a2_q = out1_fp16
         a2_scale = None
+    elif x_dtype == "fp8" and w_dtype == "fp4":
+        if out1_fp16.dtype == torch.float16:
+            a2_q = out1_fp16.to(DTYPE_FP8)
+        else:
+            a2_q = out1_fp16
+        a2_scale = torch.ones([tokens, topk, inter_dim // 32], dtype=fp4_utils.fp8_e8m0, device=device)
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
