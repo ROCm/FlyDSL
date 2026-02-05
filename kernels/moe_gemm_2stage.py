@@ -2670,50 +2670,6 @@ class MoeGemm2Mode:
     """Execution mode for MoE GEMM2."""
     ATOMIC = "atomic"       # Use atomic accumulation (default)
     REDUCE = "reduce"       # Use non-atomic write + reduce kernel
-    AUTO = "auto"           # Auto-select based on shape heuristics
-
-
-# Default reduce mode rules: list of (topk, model_dim, min_tokens, max_tokens) tuples
-# Only exact (topk, model_dim) matches with tokens in [min_tokens, max_tokens] enable reduce mode
-_DEFAULT_REDUCE_RULES = [
-    # (topk, model_dim, min_tokens, max_tokens)
-    (8, 7168, 16384, 32768),
-]
-
-
-def _should_use_reduce_mode(
-    tokens: int,
-    topk: int,
-    model_dim: int,
-    rules: list | None = None,
-) -> bool:
-    """Determine if reduce mode should be used based on shape matching rules.
-
-    For specific (topk, model_dim) combinations with tokens in a certain range,
-    atomic contention becomes significant. In these cases, using non-atomic writes
-    followed by a reduce kernel is faster.
-
-    Args:
-        tokens: Number of tokens (must be in [min_tokens, max_tokens] of a rule)
-        topk: Top-k value (must exactly match a rule)
-        model_dim: Model dimension (must exactly match a rule)
-        rules: Custom rules list, each entry is (topk, model_dim, min_tokens, max_tokens).
-               If None, uses _DEFAULT_REDUCE_RULES.
-
-    Returns:
-        True if reduce mode should be used, False otherwise.
-    """
-    if rules is None:
-        rules = _DEFAULT_REDUCE_RULES
-
-    for rule_topk, rule_model_dim, min_tokens, max_tokens in rules:
-        if (
-            topk == rule_topk and
-            model_dim == rule_model_dim and
-            min_tokens <= tokens <= max_tokens
-        ):
-            return True
-    return False
 
 
 class _MoeGemm2ReduceWrapper:
@@ -2733,7 +2689,6 @@ class _MoeGemm2ReduceWrapper:
         model_dim: int,
         out_dtype_str: str = "f16",
         use_mask: bool = False,
-        valid_mask = None,
     ):
         self._gemm2_exe = gemm2_exe
         self._reduce_exe = reduce_exe
@@ -2741,11 +2696,11 @@ class _MoeGemm2ReduceWrapper:
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
-        self._valid_mask = valid_mask
         
         # Lazy-allocated intermediate buffer
         self._intermediate = None
         self._intermediate_capacity = 0
+        # print("init _MoeGemm2ReduceWrapper")
 
     def _get_torch_dtype(self):
         """Convert dtype string to torch dtype."""
@@ -2774,7 +2729,7 @@ class _MoeGemm2ReduceWrapper:
         # else:
         #     # Zero out the portion we're about to use when reusing buffer
         #     # Commented out: GEMM2 overwrites all values, zeroing not needed
-        #     self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
+        self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
     def __call__(
@@ -2792,6 +2747,7 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        valid_mask
     ):
         """Execute GEMM2 + reduce.
 
@@ -2809,10 +2765,9 @@ class _MoeGemm2ReduceWrapper:
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        
         if self._use_mask:
             # Masked reduction for EP mode
-            self._reduce_exe(X, Y, self._valid_mask, tokens_in)
+            self._reduce_exe(X, Y, valid_mask, tokens_in)
         else:
             # Non-masked reduction
             self._reduce_exe(X, Y, tokens_in)
@@ -2837,48 +2792,23 @@ def compile_moe_gemm2_ex(
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     # Extended parameters for mode control
-    mode: str = MoeGemm2Mode.AUTO,
-    tokens_hint: int | None = None,
-    reduce_rules: list | None = None,
+    mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
-    This is the extended interface that supports automatic mode selection
-    or explicit mode control for testing.
+    This is the extended interface that supports explicit mode control.
 
     Args:
         mode: Execution mode selection:
-            - "auto": Automatically select based on shape matching rules (requires tokens_hint)
-            - "atomic": Force atomic accumulation (original behavior)
-            - "reduce": Force non-atomic + reduce kernel
-        tokens_hint: Expected token count for auto mode selection.
-            Only used when mode="auto".
-        reduce_rules: Custom rules for auto mode selection.
-            List of (topk, model_dim, min_tokens, max_tokens) tuples.
-            Reduce mode is enabled only when (topk, model_dim) exactly matches
-            a rule and tokens is in [min_tokens, max_tokens].
-            Default rule: (8, 7168, 16384, 32768)
+            - "atomic": Use atomic accumulation (original behavior)
+            - "reduce": Use non-atomic write + reduce kernel
 
     Returns:
         Compiled executable (either wrapped or raw depending on mode).
     """
-    # Determine actual mode
-    actual_mode = mode
-    if mode == MoeGemm2Mode.AUTO:
-        # TODO: Autotuning-based kernel selection
-        # The current implementation uses static rule matching to select between
-        # atomic and reduce modes. A more robust approach would be to perform
-        # runtime autotuning during compilation.
-        if tokens_hint is not None and _should_use_reduce_mode(
-            tokens_hint, topk, model_dim, reduce_rules
-        ):
-            actual_mode = MoeGemm2Mode.REDUCE
-        else:
-            actual_mode = MoeGemm2Mode.ATOMIC
-
     # Compile based on mode
-    if actual_mode == MoeGemm2Mode.REDUCE:
+    if mode == MoeGemm2Mode.REDUCE:
         # Determine if we need masked reduction
         use_mask = valid_mask is not None
         
@@ -2918,7 +2848,6 @@ def compile_moe_gemm2_ex(
             model_dim=model_dim,
             out_dtype_str=dtype_str,
             use_mask=use_mask,
-            valid_mask=valid_mask,
         )
     else:
         # Compile GEMM2 with accumulate=True (atomic mode)
