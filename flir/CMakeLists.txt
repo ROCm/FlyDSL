@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Symbol visibility: hide internal symbols to avoid SO conflicts with other MLIR-based packages.
+# This is critical for packaging wheels that can coexist with torch-mlir, iree, triton, etc.
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
 # Repo root (parent of this `flir/` directory). Used to locate python sources, docs, etc.
 get_filename_component(FLIR_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 

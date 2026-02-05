@@ -83,15 +83,60 @@ add_mlir_python_modules(FlirPythonModules
 set(_flir_embedded_mlir_libs_root "${FlirPythonModules_ROOT_PREFIX}/_mlir_libs")
 set(_flir_embedded_mlir_runtime_dir "${_flir_embedded_mlir_libs_root}/lib")
 
-option(FLIR_BUILD_THIN_JIT_RUNTIME
-  "Build and embed a thin ROCm JIT runtime shared library (recommended)."
-  ON
-)
+# Build ROCm JIT runtime by compiling MLIR's RocmRuntimeWrappers.cpp directly.
+# This avoids needing to modify LLVM and automatically follows upstream updates.
+find_package(hip QUIET CONFIG PATHS /opt/rocm)
+if(hip_FOUND)
+  # Locate MLIR's RocmRuntimeWrappers.cpp source file
+  # MLIR_DIR is typically <build>/lib/cmake/mlir, we need <source>/mlir
+  # Try to find it via MLIR_INCLUDE_DIRS which points to source includes
+  set(MLIR_ROCM_RUNTIME_SRC "")
+  foreach(_inc_dir ${MLIR_INCLUDE_DIRS})
+    if("${_inc_dir}" MATCHES ".*/mlir/include$")
+      get_filename_component(_mlir_src_root "${_inc_dir}/.." ABSOLUTE)
+      set(_candidate "${_mlir_src_root}/lib/ExecutionEngine/RocmRuntimeWrappers.cpp")
+      if(EXISTS "${_candidate}")
+        set(MLIR_ROCM_RUNTIME_SRC "${_candidate}")
+        break()
+      endif()
+    endif()
+  endforeach()
+  
+  if(NOT "${MLIR_ROCM_RUNTIME_SRC}" STREQUAL "" AND EXISTS "${MLIR_ROCM_RUNTIME_SRC}")
+    message(STATUS "Using MLIR source: ${MLIR_ROCM_RUNTIME_SRC}")
+    
+    add_library(FlirJitRuntime SHARED
+      ${MLIR_ROCM_RUNTIME_SRC}
+    )
+    target_include_directories(FlirJitRuntime PRIVATE
+      ${LLVM_INCLUDE_DIRS}
+      ${MLIR_INCLUDE_DIRS}
+    )
+    target_compile_features(FlirJitRuntime PRIVATE cxx_std_17)
+    
+    # Override hidden visibility for this target - mgpu* symbols must be exported
+    # for MLIR JIT ExecutionEngine to resolve them at runtime
+    set_target_properties(FlirJitRuntime PROPERTIES
+      CXX_VISIBILITY_PRESET default
+      C_VISIBILITY_PRESET default
+    )
+    
+    # Link LLVM support library (required for llvm::SmallVector used in MLIR source)
+    target_link_libraries(FlirJitRuntime PRIVATE 
+      hip::host hip::amdhip64
+      LLVMSupport
+    )
 
-if(FLIR_BUILD_THIN_JIT_RUNTIME)
-  # Only build the ROCm runtime if HIP is available.
-  find_package(hip QUIET CONFIG PATHS /opt/rocm)
-  if(hip_FOUND)
+    set_target_properties(FlirJitRuntime PROPERTIES
+      OUTPUT_NAME "flir_jit_runtime"
+      LIBRARY_OUTPUT_DIRECTORY "${_flir_embedded_mlir_runtime_dir}"
+    )
+
+    add_dependencies(FlirPythonCAPI FlirJitRuntime)
+    message(STATUS "Building JIT runtime from MLIR source (auto-follows upstream)")
+  else()
+    message(STATUS "MLIR RocmRuntimeWrappers.cpp not found at ${MLIR_ROCM_RUNTIME_SRC}, using local copy")
+    # Fallback to our local copy
     add_library(FlirJitRuntime SHARED
       runtime/FlirRocmRuntimeWrappers.cpp
     )
@@ -107,14 +152,13 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
       LIBRARY_OUTPUT_DIRECTORY "${_flir_embedded_mlir_runtime_dir}"
     )
 
-    # Ensure the thin runtime is staged when building FlirPythonCAPI (flir/build.sh).
     add_dependencies(FlirPythonCAPI FlirJitRuntime)
-  else()
-    message(WARNING
-      "hip not found; cannot build thin ROCm JIT runtime. "
-      "GPU execution via ExecutionEngine may require external MLIR runtime libs."
-    )
   endif()
+else()
+  message(WARNING
+    "hip not found; cannot build ROCm JIT runtime. "
+    "GPU execution via ExecutionEngine may require external MLIR runtime libs."
+  )
 endif()
 
 option(FLIR_SUPPRESS_THIRD_PARTY_WARNINGS
