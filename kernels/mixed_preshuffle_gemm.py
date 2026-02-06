@@ -248,7 +248,10 @@ def compile_mxfp4_preshuffle_gemm(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             # CK-style XOR16 swizzle parameter (const).
-            k_blocks16 = arith.index(tile_k_bytes // 16)
+            # For FP4, LDS K dimension is tile_k_bytes // a_elem_vec_pack (128 bytes)
+            # k_blocks16 must match actual LDS size to avoid swizzle address overflow
+            lds_k_bytes = tile_k_bytes // a_elem_vec_pack
+            k_blocks16 = arith.index(lds_k_bytes // 16)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -595,9 +598,14 @@ def compile_mxfp4_preshuffle_gemm(
                                     else:
                                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                                    col_base1 = col_base + 64
-                                    a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                    a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    if is_fp8_a:
+                                        # FP8: load full 32 bytes (2 x 16B)
+                                        col_base1 = col_base + 64
+                                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    else:
+                                        # FP4: only 16 bytes, pad with zeros (same as mixed_moe_gemm_2stage.py)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
                                     for inxdl in range_constexpr(pack_N):
                                         ni_idx = ni * pack_N + inxdl
@@ -614,14 +622,13 @@ def compile_mxfp4_preshuffle_gemm(
                                                 a128,
                                                 b128,
                                                 current_accs_list[acc_idx],
-                                                # cbsz, abid, blgp
+                                                # cbsz, blgp
                                                 cbsz,
                                                 blgp,
-                                                # op_sel_a + scale_a (1.0f as i32 bits)
+                                                # op_sel_a + scale_a (per-block quant)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
-                                                #
-                                                # op_sel_b + scale_b (1.0f as i32 bits)
+                                                # op_sel_b + scale_b
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],

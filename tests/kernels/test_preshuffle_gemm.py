@@ -75,73 +75,6 @@ DEFAULT_LDS_STAGE = 2
 DEFAULT_BENCH_ITERS = 20
 DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
-DEFAULT_PRINT_SAMPLE = False
-
-
-def print_random_8x8_comparison(
-    c_out: torch.Tensor, 
-    c_ref: torch.Tensor, 
-    label: str = "",
-    c_aiter: torch.Tensor = None,
-    start_pos: tuple = None,
-):
-    """Print a random 8x8 block from kernel output, aiter output, and reference for comparison.
-    
-    Args:
-        c_out: Kernel output tensor
-        c_ref: Reference tensor  
-        label: Label string for the comparison
-        c_aiter: Optional aiter output tensor for 3-way comparison
-        start_pos: Optional (start_m, start_n) tuple to use fixed position instead of random
-    
-    Returns:
-        (start_m, start_n): The position used, so caller can reuse for subsequent comparisons
-    """
-    M, N = c_out.shape
-    # Random starting position (ensure we have at least 8x8)
-    max_m = max(0, M - 8)
-    max_n = max(0, N - 8)
-    if start_pos is not None:
-        start_m, start_n = start_pos
-    else:
-        start_m = random.randint(0, max_m) if max_m > 0 else 0
-        start_n = random.randint(0, max_n) if max_n > 0 else 0
-    end_m = min(start_m + 8, M)
-    end_n = min(start_n + 8, N)
-    
-    print("-" * 60)
-    print(f"Random 8x8 Sample Comparison {label}")
-    print(f"Position: [{start_m}:{end_m}, {start_n}:{end_n}]")
-    print("-" * 60)
-    
-    out_block = c_out[start_m:end_m, start_n:end_n].cpu().float()
-    ref_block = c_ref[start_m:end_m, start_n:end_n].cpu().float()
-    diff_block = (out_block - ref_block).abs()
-    
-    print("Kernel Output:")
-    print(out_block.numpy())
-    print("\nReference:")
-    print(ref_block.numpy())
-    print("\nKernel vs Ref Absolute Difference:")
-    print(diff_block.numpy())
-    print(f"Kernel vs Ref - Max diff: {diff_block.max().item():.6f}, Mean diff: {diff_block.mean().item():.6f}")
-    
-    if c_aiter is not None:
-        aiter_block = c_aiter[start_m:end_m, start_n:end_n].cpu().float()
-        aiter_diff = (aiter_block - ref_block).abs()
-        kernel_aiter_diff = (out_block - aiter_block).abs()
-        
-        print("\nAiter Output:")
-        print(aiter_block.numpy())
-        print("\nAiter vs Ref Absolute Difference:")
-        print(aiter_diff.numpy())
-        print(f"Aiter vs Ref - Max diff: {aiter_diff.max().item():.6f}, Mean diff: {aiter_diff.mean().item():.6f}")
-        print("\nKernel vs Aiter Absolute Difference:")
-        print(kernel_aiter_diff.numpy())
-        print(f"Kernel vs Aiter - Max diff: {kernel_aiter_diff.max().item():.6f}, Mean diff: {kernel_aiter_diff.mean().item():.6f}")
-    
-    print("-" * 60)
-    return (start_m, start_n)
 
 
 ARCH = get_rocm_arch()
@@ -386,7 +319,6 @@ def test_mfma_w4_flir_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
-    print_sample: bool = DEFAULT_PRINT_SAMPLE,
 ):
     print("=" * 80)
     print(
@@ -442,9 +374,7 @@ def test_mfma_w4_flir_preshuffle(
     if a_dtype == "fp4":
         a_q, scale_a_orig, a_convert = fp4_utils.per_1x32_f4_quant(a_fp32_padded)  # (M, K)
         a_q = a_q[:M]
-        # Override scale to 1.0 (in e8m0, fill_(1) or fill_(1.0) gives 2^0 = 1.0)
-        # NOTE: fill_(127) would give 128.0, not 1.0!
-        scale_a_orig.fill_(1.0)
+        # Use quantized scales (no longer forcing to 1.0)
         scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
@@ -455,8 +385,7 @@ def test_mfma_w4_flir_preshuffle(
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
-    # Override scale to 1.0 (in e8m0, fill_(1.0) gives 2^0 = 1.0)
-    scale_b.fill_(1.0)
+    # Use quantized scales (no longer forcing to 1.0)
     
     # Recalculate Ref with override scales
     if a_dtype == "fp4":
@@ -558,13 +487,6 @@ def test_mfma_w4_flir_preshuffle(
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
 
-    if print_sample:
-        print_random_8x8_comparison(
-            c_out_scaled, c_ref, 
-            f"(M={M}, N={N}, K={K}, A={a_dtype}, B={b_dtype})",
-            c_aiter=c_aiter_f32,
-        )
-
     print("Verifying Kernel Output...")
     verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
@@ -638,13 +560,7 @@ if __name__ == "__main__":
         default=False,
         help="Use weight fp4 gemm.",
     )
-    parser.add_argument(
-        "--print_sample",
-        "-ps",
-        action="store_true",
-        default=DEFAULT_PRINT_SAMPLE,
-        help="Print a random 8x8 sample comparison between kernel output and reference.",
-    )
+
     
     args = parser.parse_args()
     
@@ -682,6 +598,5 @@ if __name__ == "__main__":
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
             test_graph=bool(args.test_graph),
-            print_sample=bool(args.print_sample),
         )
 
