@@ -56,6 +56,11 @@ def _is_constexpr_annotation(annotation) -> bool:
     return get_origin(annotation) is Constexpr
 
 
+def _is_type_param_annotation(annotation) -> bool:
+    """Check if annotation is Type, Type[T]."""
+    return annotation is Type or get_origin(annotation) is Type
+
+
 def convert_to_jit_arguments(
     sig: inspect.Signature, bound
 ) -> tuple[List[str], List[JitArgument], List[DslType], dict[str, any]]:
@@ -69,6 +74,10 @@ def convert_to_jit_arguments(
         annotation = param.annotation
 
         if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+            constexpr_values[param_name] = value
+            continue
+
+        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
             constexpr_values[param_name] = value
             continue
 
