@@ -154,12 +154,13 @@ def f64(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "Ar
     """Create an f64 constant."""
     return constant(value, type=F64Type.get(), loc=loc, ip=ip)
 
-def maximum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+def maximum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *, fastmath=None, loc: Location = None) -> "ArithValue":
     """Compute maximum of two values (automatically handles float/int types).
     
     Args:
         lhs: Left operand (ArithValue, Value, or Python number)
         rhs: Right operand (ArithValue, Value, or Python number)
+        fastmath: Optional fast-math flags (e.g. arith.FastMathFlags.fast)
         loc: Optional source location
         
     Returns:
@@ -171,7 +172,7 @@ def maximum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *,
         >>> c = arith.maximum(a, b)  # Function style
         >>> d = a.max(b)              # Method style (equivalent)
     """
-    return _minmax_op(lhs, rhs, op_type="max", loc=loc)
+    return _minmax_op(lhs, rhs, op_type="max", fastmath=fastmath, loc=loc)
 
 def minimum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
     """Compute minimum of two values (automatically handles float/int types).
@@ -788,6 +789,7 @@ def _minmax_op(
     rhs: "ArithValue",
     op_type: str,  # "max" or "min"
     *,
+    fastmath=None,
     loc: Location = None,
 ) -> "ArithValue":
     """Execute min/max operation based on operand types."""
@@ -809,7 +811,10 @@ def _minmax_op(
             op_class = _arith.MaximumFOp
         else:
             op_class = _arith.MinimumFOp
-        result = op_class(lhs_val, rhs_val, loc=loc).result
+        if fastmath is not None:
+            result = op_class(lhs_val, rhs_val, fastmath=fastmath, loc=loc).result
+        else:
+            result = op_class(lhs_val, rhs_val, loc=loc).result
     elif _is_integer_like_type(lhs_val.type):
         # Integer min/max (signed/unsigned logic could be tricky, default to signed for now)
         # TODO: Add unsigned support if needed

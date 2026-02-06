@@ -15,8 +15,10 @@ Examples:
 """
 
 import argparse
+import hashlib
 import logging
 import os
+import random
 import sys
 
 # Ensure repo-local flydsl is used
@@ -24,6 +26,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+import numpy as np
 import torch
 
 from kernels.simple_gemm import compile_simple_gemm, run_simple_gemm
@@ -112,6 +115,18 @@ TEST_CONFIGS = {
 
 DTYPES = ["bf16", "fp16"]
 
+# Tensor initialization range (uniform distribution)
+UNIFORM_RANGE = (-1, 1)
+DEFAULT_SEED = 123
+
+
+def setup_seed(seed: int) -> None:
+    """Set random seed for reproducibility across all RNG sources."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+
 
 def get_torch_dtype(in_dtype: str):
     """Convert string dtype to torch dtype."""
@@ -128,6 +143,105 @@ def _align_up(val: int, align: int) -> int:
     return ((val + align - 1) // align) * align
 
 
+def compute_md5(tensor: torch.Tensor) -> str:
+    """Compute MD5 hash of a tensor's raw bytes."""
+    return hashlib.md5(
+        tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()
+    ).hexdigest()
+
+
+def compare_arrays(
+    arr1: np.ndarray,
+    arr2: np.ndarray,
+    k: int = 5,
+    thresholds: list = None,
+) -> dict:
+    """Compare two numpy arrays and compute various difference metrics.
+
+    Args:
+        arr1: First input array (result), will be cast to float32.
+        arr2: Second input array (reference), will be cast to float32.
+        k: Number of top differences to report.
+        thresholds: Difference magnitude buckets for histogram.
+
+    Returns:
+        Dictionary with top_k_diff, threshold_stats, nan_info, max_diff, max_diff_thr.
+    """
+    if thresholds is None:
+        thresholds = [0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]
+
+    if arr1.shape != arr2.shape:
+        raise ValueError(
+            f"Shape mismatch: arr1 {arr1.shape} vs arr2 {arr2.shape}"
+        )
+
+    arr1 = arr1.astype(np.float32)
+    arr2 = arr2.astype(np.float32)
+
+    result = {"top_k_diff": [], "threshold_stats": [], "nan_info": {}}
+
+    # Check for NaN values
+    nan_mask1 = np.isnan(arr1)
+    nan_mask2 = np.isnan(arr2)
+    if np.any(nan_mask1):
+        result["nan_info"]["arr1_nan_count"] = int(np.sum(nan_mask1))
+        print(f"  Warning: result contains {result['nan_info']['arr1_nan_count']} NaN values")
+    if np.any(nan_mask2):
+        result["nan_info"]["arr2_nan_count"] = int(np.sum(nan_mask2))
+        print(f"  Warning: reference contains {result['nan_info']['arr2_nan_count']} NaN values")
+
+    # Compute absolute differences
+    diff = np.abs(arr1 - arr2)
+    total_elements = arr1.size
+
+    max_diff_thr = (diff / (1.0 + np.abs(arr2))).max()
+    result["max_diff"] = float(diff.max())
+    result["max_diff_thr"] = float(max_diff_thr)
+
+    print(f"  diff.abs.max = {diff.max():.6f}")
+    print(f"  diff.abs.mean = {diff.mean():.6f}")
+    print(f"  max_diff_thr (rel) = {max_diff_thr:.6e}")
+
+    # Find top k differences
+    flat_diff = diff.flatten()
+    actual_k = min(k, len(flat_diff))
+    top_k_indices = np.argpartition(flat_diff, -actual_k)[-actual_k:]
+    top_k_indices = top_k_indices[np.argsort(-flat_diff[top_k_indices])]
+
+    orig_indices = np.unravel_index(top_k_indices, diff.shape)
+    print(f"  Top-{actual_k} differences:")
+    for i in range(actual_k):
+        idx = tuple(dim[i] for dim in orig_indices)
+        entry = {
+            "value": float(diff[idx]),
+            "position": idx,
+            "arr1_value": float(arr1[idx]),
+            "arr2_value": float(arr2[idx]),
+        }
+        result["top_k_diff"].append(entry)
+        print(f"    [{idx}] result={arr1[idx]:.6f}, ref={arr2[idx]:.6f}, diff={diff[idx]:.6f}")
+
+    # Compute threshold statistics
+    print(f"  Threshold distribution ({total_elements} elements):")
+    for i in range(len(thresholds) - 1):
+        lower, upper = thresholds[i], thresholds[i + 1]
+        count = int(np.sum((diff >= lower) & (diff < upper)))
+        pct = 100.0 * count / total_elements
+        result["threshold_stats"].append(
+            {"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct}
+        )
+        print(f"    [{lower:.0e}, {upper:.0e}): {count:>8d} ({pct:6.2f}%)")
+
+    count = int(np.sum(diff >= thresholds[-1]))
+    pct = 100.0 * count / total_elements
+    result["threshold_stats"].append(
+        {"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct}
+    )
+    print(f"    >={thresholds[-1]:.0e}       : {count:>8d} ({pct:6.2f}%)")
+
+    return result
+
+
 def run_test(
     size: str,
     in_dtype: str,
@@ -137,6 +251,7 @@ def run_test(
     rtol: float = 1e-2,
     atol: float = 1e-2,
     waves_per_eu: int = None,
+    seed: int = DEFAULT_SEED,
 ):
     """Run a single GEMM test."""
     config = TEST_CONFIGS[size]
@@ -160,10 +275,10 @@ def run_test(
     device = "cuda"
 
     try:
-        # Create random inputs (original size)
-        torch.manual_seed(42)
-        A_orig = torch.randn(M, K, dtype=torch_dtype, device=device)
-        B_orig = torch.randn(N, K, dtype=torch_dtype, device=device)
+        # Create random inputs (uniform distribution in UNIFORM_RANGE)
+        setup_seed(seed)
+        A_orig = torch.empty(M, K, dtype=torch_dtype, device=device).uniform_(*UNIFORM_RANGE)
+        B_orig = torch.empty(N, K, dtype=torch_dtype, device=device).uniform_(*UNIFORM_RANGE)
 
         # Run reference computation (using float32 for accuracy) with original K
         if not skip_ref:
@@ -228,6 +343,23 @@ def run_test(
             exe(C_flat, A_flat, B_flat, M, N, K_pad)
             torch.cuda.synchronize()
             C_result = C
+
+            # Compute and print MD5 hashes
+            result_md5 = compute_md5(C_result)
+            ref_md5 = compute_md5(C_ref)
+            print(f"  result_md5 = {result_md5}")
+            print(f"  ref_md5    = {ref_md5}")
+            if result_md5 == ref_md5:
+                print("  MD5 match: EXACT (bit-identical)")
+            else:
+                print("  MD5 match: DIFFER (not bit-identical)")
+
+            # Detailed comparison using compare_arrays
+            print("  --- compare_arrays ---")
+            compare_arrays(
+                C_result.to(torch.float32).detach().cpu().numpy(),
+                C_ref.to(torch.float32).detach().cpu().numpy(),
+            )
 
             # Check correctness using verify_output
             passed = verify_output(
@@ -315,6 +447,12 @@ def main():
         default=None,
         help="AMDGPU waves-per-eu hint for occupancy optimization (e.g., 1, 2, 4)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})",
+    )
 
     args = parser.parse_args()
 
@@ -341,6 +479,7 @@ def main():
     dtypes = DTYPES if args.dtype == "all" else [args.dtype]
 
     print(f"\nRunning Simple GEMM tests: sizes={sizes}, dtypes={dtypes}")
+    print(f"seed: {args.seed}")
     if args.waves_per_eu is not None:
         print(f"waves_per_eu: {args.waves_per_eu}")
     print(f"GPU: {torch.cuda.get_device_name(0)}\n")
@@ -357,6 +496,7 @@ def main():
                 rtol=args.rtol,
                 atol=args.atol,
                 waves_per_eu=args.waves_per_eu,
+                seed=args.seed,
             )
             results.append((size, dtype, passed))
 
