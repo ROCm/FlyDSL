@@ -59,13 +59,6 @@ def : Pat<(Fly_LogicalDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]
             (Fly_LogicalDivideOp (Fly_GetLayoutOp $mem), $divisor)
         )>;
 
-def : Pat<(Fly_RightInverseOp Fly_ComposedLayout:$layout),
-          (Fly_MakeComposedLayoutOp
-            (Fly_ComposedGetInnerOp $layout),
-            (Fly_ComposedGetOffsetOp $layout),
-            (Fly_RightInverseOp (Fly_ComposedGetOuterOp $layout))
-        )>;
-
 def : Pat<(Fly_RightInverseOp Fly_MemRef:$mem),
           (Fly_MakeViewOp
             (Fly_GetIterOp $mem),

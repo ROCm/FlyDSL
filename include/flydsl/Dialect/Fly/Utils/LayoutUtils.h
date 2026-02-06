@@ -585,10 +585,8 @@ Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
   for (int32_t idx : sortedIdx) {
     ArithValue shapeVal = builder.getArithValue(flatShapeLeaves[idx]);
     ArithValue strideVal = builder.getArithValue(flatStrideLeaves[idx]);
-    if (!builder.isStatic(shapeVal))
+    if (!builder.isStatic(shapeVal) || !builder.isStatic(strideVal))
       continue;
-    if (!builder.isStatic(currStride))
-      break;
     if (builder.getStaticValue(strideVal) != builder.getStaticValue(currStride))
       continue;
 
