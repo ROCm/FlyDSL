@@ -95,9 +95,6 @@ def compile_mxfp4_preshuffle_gemm(
 
     # Pipeline is byte-addressed along K (16B loads, XOR16 swizzle in bytes).
     # For fp16/bf16 (2B/elem), user passes tile_k halved so tile_k_bytes stays constant.
-    # NOTE: tile_k_bytes is used for k_unroll calculation (MFMA logical steps), NOT actual
-    # physical byte counts. For FP4, each "logical byte" maps to 2 elements packed into 1 byte,
-    # but we keep tile_k_bytes = tile_k * elem_bytes for k_unroll math consistency.
     tile_k_bytes = int(tile_k) * int(elem_bytes)
 
     # K64-byte micro-step wrapper uses 2x "half-pack" MFMA.
