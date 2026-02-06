@@ -129,7 +129,9 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     # AIter-like meta/rank_data (we repurpose rank_data as the local registered buffer).
     meta = torch.empty((meta_size(),), device=device, dtype=torch.int8)
     rank_data = x_flat
-    fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=False)
+    # Create output buffer before init_custom_ar so it can be registered
+    out = torch.empty_like(x_flat)
+    fa = init_custom_ar(meta, rank_data, handles, offsets, rank=rank, full_nvlink=False, out=out)
     backend = os.environ.get("FLYDSL_CUSTOM_ALL_REDUCE_BACKEND")
     aiter_impl = os.environ.get("FLYDSL_AITER_IMPL")
     if rank == 0:
@@ -143,8 +145,6 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
     # Warmup: align all ranks.
     dist.all_reduce(torch.zeros(1, device=device), group=group)
     torch.cuda.synchronize()
-
-    out = torch.empty_like(x_flat)
 
     # -------------------------------------------------------------------------
     # Profiling
@@ -168,8 +168,8 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
         if hasattr(fa, 'all_reduce_reg'):
             fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
         else:
-            # aiter implementation uses all_reduce with registered=True
-            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
+            # aiter implementation uses all_reduce with registered_input/registered_output=True
+            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
         torch.cuda.synchronize()
 
         kernel_ms_list = []
@@ -180,7 +180,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
                 if hasattr(fa, 'all_reduce_reg'):
                     fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
                 else:
-                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
+                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
             torch.cuda.synchronize()
 
             start_evt = torch.cuda.Event(enable_timing=True)
@@ -193,7 +193,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
                 if hasattr(fa, 'all_reduce_reg'):
                     fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
                 else:
-                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
+                    fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
                 end_evt.record()
                 torch.cuda.synchronize()
 
@@ -205,7 +205,7 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
             if hasattr(fa, 'all_reduce_reg'):
                 fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
             else:
-                fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered=True)
+                fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
             torch.cuda.synchronize()
 
         torch.cuda.synchronize()
@@ -278,7 +278,6 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     rank_data = torch.empty((1,), device="cuda", dtype=torch.int8)
     handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
     offsets = [0 for _ in range(world_size)]
-    fa = init_custom_ar(meta, rank_data, handles, offsets, rank=0, full_nvlink=False)
 
     if dtype_str == "f32":
         dtype = DTYPE_FP32
@@ -295,10 +294,12 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     if world_size == 1:
         x = torch.randn((N,), device="cuda", dtype=dtype).contiguous()
         y = torch.empty((N,), device="cuda", dtype=dtype)
+        # Create output buffer before init_custom_ar so it can be registered
+        fa = init_custom_ar(meta, rank_data, handles, offsets, rank=0, full_nvlink=False, out=y)
         if hasattr(fa, 'all_reduce_reg'):
             fa.all_reduce_reg(x, y, open_fp8_quant=False)
         else:
-            fa.all_reduce(x, out=y, open_fp8_quant=False, registered=True)
+            fa.all_reduce(x, out=y, open_fp8_quant=False, registered_input=True, registered_output=True)
         torch.cuda.synchronize()
         max_err = (y.to(torch.float32) - x.to(torch.float32)).abs().max().item()
         assert max_err < atol, f"max_err={max_err:.3e} >= atol={atol}"
@@ -312,10 +313,12 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     else:
         xs = [torch.randn((N,), device="cuda", dtype=dtype).contiguous() for _ in range(world_size)]
         y = torch.empty((N,), device="cuda", dtype=dtype)
+        # Create output buffer before init_custom_ar so it can be registered
+        fa = init_custom_ar(meta, rank_data, handles, offsets, rank=0, full_nvlink=False, out=y)
         if hasattr(fa, 'all_reduce_reg'):
             fa.all_reduce_reg(xs, y, open_fp8_quant=False)
         else:
-            fa.all_reduce(xs, out=y, open_fp8_quant=False, registered=True)
+            fa.all_reduce(xs, out=y, open_fp8_quant=False, registered_input=True, registered_output=True)
         torch.cuda.synchronize()
         expected = torch.stack(xs, dim=0).to(torch.float32).sum(dim=0)
         max_err = (y.to(torch.float32) - expected).abs().max().item()
