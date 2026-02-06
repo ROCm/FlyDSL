@@ -1,11 +1,12 @@
-"""Raw MLIR (no flydsl.dialects.ext wrappers) implementation of AIter-style all-reduce on ROCm.
+"""Hybrid MLIR implementation of AIter-style all-reduce on ROCm.
 
 Goal:
 - Match AIter's ROCm signal protocol (start/end/_flag) for multi-GPU correctness.
 - Provide 1-stage and 2-stage (reduce-scatter + all-gather) kernels.
 
-This file intentionally uses only `_mlir.dialects.*` ODS ops so we don't hit the
-Value-wrapper issues seen when mixing `flydsl.dialects.ext.*` with `llvm.inline_asm`.
+This file uses a hybrid approach:
+- Raw MLIR (`_mlir.dialects.*`) for synchronization and inline assembly
+- FlyDSL high-level API for computation (vector load/store) to simplify code
 """
 
 from __future__ import annotations
@@ -65,6 +66,43 @@ def _c_index(v: int):
     from _mlir.dialects import arith
 
     return _res(arith.ConstantOp(ir.IndexType.get(), v).result)
+
+
+def _compute_allreduce_vector(ins, out, base_idx, world_size, vec_e_ty, vec_f32_ty, elem_ty):
+    """Compute all-reduce for a vector pack using FlyDSL vector API.
+    
+    Simplified version using FlyDSL's vector.load_op/store for cleaner code.
+    """
+    from flydsl.dialects.ext import vector as flir_vector
+    from _mlir.dialects import arith
+    
+    # Load and accumulate vectors from all ranks
+    acc = None
+    for r in range(world_size):
+        # Use FlyDSL vector.load_op (result_type, memref, indices)
+        v_e = flir_vector.load_op(vec_e_ty, ins[r], [base_idx])
+        v_e_raw = _res(v_e)
+        
+        # Convert to f32 if needed
+        if elem_ty == ir.F32Type.get():
+            v_f = _res(v_e_raw)
+        else:
+            v_f = _res(arith.ExtFOp(vec_f32_ty, _res(v_e_raw)))
+        
+        # Accumulate - ensure both operands are Values
+        if acc is None:
+            acc = _res(v_f)
+        else:
+            acc = _res(arith.AddFOp(_res(acc), _res(v_f)))
+    
+    # Convert back to element type if needed
+    if elem_ty == ir.F32Type.get():
+        out_v = _res(acc)
+    else:
+        out_v = _res(arith.TruncFOp(vec_e_ty, _res(acc)))
+    
+    # Use FlyDSL vector.store (value, memref, indices, alignment=...)
+    flir_vector.store(_res(out_v), out, [base_idx], alignment=16)
 
 
 def _res(x):
@@ -485,6 +523,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 k1 = gpu.GPUFuncOp(ir.TypeAttr.get(k1_fty))
                 k1.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_1stage_ws{world_size}")
                 k1.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                # Set workgroup size attributes to allow threads/block
+                k1.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+                k1.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k1_entry = ir.Block.create_at_start(k1.operation.regions[0], k1_args)
                 with ir.InsertionPoint(k1_entry):
                     rank = k1_entry.arguments[0]
@@ -515,13 +556,16 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         base_elem_i32 = _muli(p, _c_i32(pack_elems))
                         base_idx = _res(arith.IndexCastOp(idx, _res(base_elem_i32)))
 
-                        acc = None
-                        for r in range(world_size):
-                            v_e = _res(vector.LoadOp(vec_e_ty, ins[r], [_res(base_idx)]))
-                            v_f = v_e if elem_ty == ir.F32Type.get() else _res(arith.ExtFOp(vec_f32_ty, _res(v_e)))
-                            acc = v_f if acc is None else _res(arith.AddFOp(_res(acc), _res(v_f)))
-                        out_v = acc if elem_ty == ir.F32Type.get() else _res(arith.TruncFOp(vec_e_ty, _res(acc)))
-                        vector.StoreOp(_res(out_v), out, [_res(base_idx)])
+                        # Use FlyDSL vector API for cleaner computation
+                        _compute_allreduce_vector(
+                            ins=ins,
+                            out=out,
+                            base_idx=_res(base_idx),
+                            world_size=world_size,
+                            vec_e_ty=vec_e_ty,
+                            vec_f32_ty=vec_f32_ty,
+                            elem_ty=elem_ty,
+                        )
 
                         p_next = _addi(p, stride_p)
                         scf.YieldOp([_res(p_next)])
@@ -546,6 +590,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 k2 = gpu.GPUFuncOp(ir.TypeAttr.get(k2_fty))
                 k2.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_ws{world_size}")
                 k2.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                # Set workgroup size attributes to allow threads/block
+                k2.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+                k2.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k2_entry = ir.Block.create_at_start(k2.operation.regions[0], k2_args)
                 with ir.InsertionPoint(k2_entry):
                     rank = k2_entry.arguments[0]
@@ -779,6 +826,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 k2p = gpu.GPUFuncOp(ir.TypeAttr.get(k2p_fty))
                 k2p.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}")
                 k2p.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                # Set workgroup size attributes to allow threads/block
+                k2p.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+                k2p.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k2p_entry = ir.Block.create_at_start(k2p.operation.regions[0], k2p_args)
                 with ir.InsertionPoint(k2p_entry):
                     rank = k2p_entry.arguments[0]

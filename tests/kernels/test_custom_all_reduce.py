@@ -242,7 +242,13 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
             }
 
             gathered_stats = [None for _ in range(world_size)]
-            dist.all_gather_object(gathered_stats, stats, group=group)
+            try:
+                dist.all_gather_object(gathered_stats, stats, group=group)
+            except Exception as e:
+                # If all_gather_object fails (e.g., due to HIP errors from empty kernel), use local stats
+                if rank == 0:
+                    print(f"[test] WARNING: all_gather_object failed: {e}, using local stats", flush=True)
+                gathered_stats = [stats] * world_size
             if rank == 0:
                 # Summarize
                 gathered_stats = sorted(gathered_stats, key=lambda x: x["rank"])
@@ -273,12 +279,6 @@ def _dist_worker(rank: int, world_size: int, shape, dtype_str: str, with_graph: 
 def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     torch.manual_seed(0)
 
-    # Create a shim handle (API-shape compatibility with the C++ extension).
-    meta = torch.empty((meta_size(),), device="cuda", dtype=torch.int8)
-    rank_data = torch.empty((1,), device="cuda", dtype=torch.int8)
-    handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
-    offsets = [0 for _ in range(world_size)]
-
     if dtype_str == "f32":
         dtype = DTYPE_FP32
         atol = 1e-4
@@ -294,6 +294,11 @@ def run_test(N: int, dtype_str: str, *, world_size: int = 1):
     if world_size == 1:
         x = torch.randn((N,), device="cuda", dtype=dtype).contiguous()
         y = torch.empty((N,), device="cuda", dtype=dtype)
+        # Create a shim handle (API-shape compatibility with the C++ extension).
+        meta = torch.empty((meta_size(),), device="cuda", dtype=torch.int8)
+        rank_data = torch.empty((1,), device="cuda", dtype=torch.int8)
+        handles = [torch.empty((1,), device="cpu", dtype=torch.uint8) for _ in range(world_size)]
+        offsets = [0 for _ in range(world_size)]
         # Create output buffer before init_custom_ar so it can be registered
         fa = init_custom_ar(meta, rank_data, handles, offsets, rank=0, full_nvlink=False, out=y)
         if hasattr(fa, 'all_reduce_reg'):

@@ -378,7 +378,7 @@ class FlyDSLAllreduce:
             self._in_ptrs[i] = int(self._in_ptrs[0])
 
         self._exe_cache = {}
-        self._threads = 256
+        self._threads = 512 #256
         self._max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
 
     def close(self):
