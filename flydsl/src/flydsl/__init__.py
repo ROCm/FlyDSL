@@ -1,6 +1,6 @@
 """FLIR - ROCm Domain Specific Language for layout algebra"""
 
-__version__ = "0.1.0"
+__version__ = "0.0.1.exp.ef881a7"
 
 # Setup Python path for embedded MLIR modules
 import sys
