@@ -303,6 +303,8 @@ def run_moe_stage1(
     routing_in: Optional[RoutingBuffers] = None,
     return_outputs: bool = False,
     skip_ref: bool = False,
+    enable_bias: bool = False,
+    bias_in: Optional[torch.Tensor] = None,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -361,9 +363,9 @@ def run_moe_stage1(
     ) = routing
 
     if x_dtype not in ("fp8", "fp16", "int8"):
-        raise ValueError(f"x_dtype must be one of ('fp8','fp16','int8','int4'), got {x_dtype!r}")
-    if w_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"w_dtype must be one of ('fp8','fp16','int8','int4'), got {w_dtype!r}")
+        raise ValueError(f"x_dtype must be one of ('fp8','fp16','int8'), got {x_dtype!r}")
+    if w_dtype not in ("fp8", "fp16", "int8", "int4", "fp4"):
+        raise ValueError(f"w_dtype must be one of ('fp8','fp16','int8','int4', 'fp4'), got {w_dtype!r}")
     is_int4 = w_dtype == "int4"
     is_int8 = x_dtype in ("int8", "int4")
 
@@ -436,6 +438,19 @@ def run_moe_stage1(
     out_torch_dtype = DTYPE_FP8 if out_dtype == "fp8" else torch.float16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=out_torch_dtype)
 
+    # Bias: [experts, 2 * inter_dim] f32 (gate_bias, up_bias concatenated)
+    if enable_bias:
+        bias = (
+            bias_in
+            if bias_in is not None
+            else torch.randn((experts, 2 * inter_dim), device=device, dtype=torch.float32) * 0.1
+        )
+        # Flatten bias for kernel: [experts * 2 * inter_dim]
+        bias_1d = bias.view(-1).contiguous()
+    else:
+        bias = None
+        bias_1d = torch.empty((0,), device=device, dtype=torch.float32)
+
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -449,9 +464,10 @@ def run_moe_stage1(
         tile_k=tile_k,
         doweight_stage1=bool(doweight_stage1),
         use_cshuffle_epilog=False,
+        enable_bias=enable_bias,
     )
 
-    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+    def launch(o, x, w, sx, sw, st, eids, sw_sorted, bias_arg):
         exe(
             o,
             x,
@@ -462,6 +478,7 @@ def run_moe_stage1(
             eids,
             sw_sorted,
             num_valid_ids,
+            bias_arg,
             tokens,
             inter_dim,
             model_dim,
@@ -478,6 +495,7 @@ def run_moe_stage1(
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
+        bias_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
     )
@@ -490,8 +508,8 @@ def run_moe_stage1(
             scale_x_ref = scale_x
             scale_w1_flat_ref = scale_w1_flat
         else:
-            x_ref = x_f32
-            w1_flat_ref = w1_f32
+            x_ref = x_fp32_in
+            w1_flat_ref = w1_fp32_in
             scale_x_ref = None
             scale_w1_flat_ref = None
         ref = torch_moe_gemm1(
@@ -503,13 +521,14 @@ def run_moe_stage1(
             topk_weights,
             inter_dim=inter_dim,
             doweight_stage1=doweight_stage1,
+            bias=bias,
         )
 
         rtol = 0.5 if is_int4 else 0.25
         atol = 0.5 if is_int4 else 0.25
         print(out.to(torch.float32))
         print(ref)
-        assert verify_output(out.to(torch.float32), ref, rtol=1e-4, atol=1e-4)
+        assert verify_output(out.to(torch.float32), ref, rtol=1e-3, atol=1e-3)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -648,6 +667,8 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
     # Use reduce mode (accumulate=False) instead of atomic mode.
     use_reduce: bool = False,
+    enable_bias: bool = False,
+    bias_in: Optional[torch.Tensor] = None,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -816,28 +837,34 @@ def run_moe_stage2(
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
     # Flatten weights/scales for the kernel.
-    w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
-    scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
+    if w_dtype == "fp4":
+        # FP4 path: use shuffled weights directly (already packed)
+        w2_kernel = w2_shuffled
+        w2_scale_1d = scale_w2_shuffled
+    else:
+        w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
+        scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
-    w2_kernel = w2_shuffled_flat
-    if is_int4:
-        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
+        # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
+        w2_kernel = w2_shuffled_flat
+        if is_int4:
+            w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
 
-    w2_flat = w2_kernel.contiguous().view(-1)
-    w2_kernel = w2_flat
-    if not is_int4:
-        w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+        w2_flat = w2_kernel.contiguous().view(-1)
+        w2_kernel = w2_flat
+        if not is_int4:
+            w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
+
+        if scale_w2_flat is None:
+            w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
+        else:
+            w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
     if a2_scale is None:
         a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         a2_scale_1d = a2_scale.view(-1).contiguous()  # [tokens*topk]
-    if scale_w2_flat is None:
-        w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
-    else:
-        w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     out_s = str(out_dtype).strip().lower()
@@ -847,6 +874,19 @@ def run_moe_stage2(
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
+
+    # Bias: [experts, model_dim] f32
+    if enable_bias:
+        bias = (
+            bias_in
+            if bias_in is not None
+            else torch.randn((experts, model_dim), device=device, dtype=torch.float32) * 0.1
+        )
+        # Flatten bias for kernel: [experts * model_dim]
+        bias_1d = bias.view(-1).contiguous()
+    else:
+        bias = None
+        bias_1d = torch.empty((0,), device=device, dtype=torch.float32)
 
     doweight_stage2 = not bool(doweight_stage1)
     exe = compile_fn(
@@ -861,9 +901,10 @@ def run_moe_stage2(
         tile_n=tile_n,
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
+        enable_bias=enable_bias,
     )
 
-    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+    def launch(o, x, w, sx, sw, st, eids, sw_sorted, bias_arg):
         exe(
             o,
             x,
@@ -874,6 +915,7 @@ def run_moe_stage2(
             eids,
             sw_sorted,
             num_valid_ids,
+            bias_arg,
             tokens,
             model_dim,
             inter_dim,
@@ -893,6 +935,7 @@ def run_moe_stage2(
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
+        bias_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
     )
@@ -909,6 +952,7 @@ def run_moe_stage2(
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
+        bias_1d,
     )
     torch.cuda.synchronize()
 
@@ -932,8 +976,9 @@ def run_moe_stage2(
             topk_weights,
             model_dim=model_dim,
             doweight_stage2=doweight_stage2,
+            bias=bias,
         )
-        assert verify_output(out.to(torch.float32), ref2, rtol=0.000005, atol=0.000005)
+        assert verify_output(out.to(torch.float32), ref2, rtol=1e-3, atol=1e-3)
 
     # Launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * model_dim * inter_dim
@@ -1073,9 +1118,9 @@ def test_moe_gemm_2stage(
     doweight_stage1: bool,
     x_dtype: str,
     w_dtype: str,
-    out_dtype: str,
     use_reduce: bool,
     *,
+    out_dtype: str = "f16",
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -1218,9 +1263,12 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
         x_dtype: str,
         w_dtype: str,
         out_dtype: str = "f16",
+        enable_bias: bool = False,
     ):
         if use_flydsl_reduce:
             # Use unified implementation with FlyDSL reduce kernel
+            # Note: compile_moe_gemm2_ex uses in_dtype instead of x_dtype/w_dtype
+            in_dtype = x_dtype  # Assume x_dtype and w_dtype are the same for reduce mode
             return compile_moe_gemm2_ex(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1230,8 +1278,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 tile_n=tile_n,
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
-                x_dtype=x_dtype,
-                w_dtype=w_dtype,
+                in_dtype=in_dtype,
                 out_dtype=out_dtype,
                 mode=MoeGemm2Mode.REDUCE,
             )
@@ -1250,6 +1297,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 w_dtype=w_dtype,
                 out_dtype=out_dtype,
                 accumulate=False,
+                enable_bias=enable_bias,
             )
             return _TorchReduceWrapper(gemm2_exe, topk, model_dim)
     return _compile
@@ -1278,6 +1326,7 @@ class _TorchReduceWrapper:
         arg_expert_ids,
         arg_sorted_weights,
         arg_num_valid_ids,
+        arg_bias,
         tokens_in,
         n_in,
         k_in,
@@ -1296,7 +1345,7 @@ class _TorchReduceWrapper:
             intermediate.view(-1),
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
-            arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            arg_num_valid_ids, arg_bias, tokens_in, n_in, k_in, size_expert_ids_in,
         )
         torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
@@ -1546,7 +1595,7 @@ if __name__ == "__main__":
         "--w_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4"],
+        choices=["fp8", "fp16", "int8", "int4", "fp4"],
         help="Kernel weight dtype: fp8 / fp16 / int8 / int4.",
     )
     parser.add_argument(

@@ -10,8 +10,13 @@ def torch_moe_gemm1(
     topk_weights: torch.Tensor,
     inter_dim: int,
     doweight_stage1: bool,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Return [tokens, topk, inter_dim] fp32."""
+    """Return [tokens, topk, inter_dim] fp32.
+    
+    Args:
+        bias: Optional bias tensor of shape [experts, 2 * inter_dim] (gate_bias, up_bias concatenated).
+    """
     tokens, model_dim = x_fp8.shape
     topk = topk_ids.shape[1]
     # Derive experts from weight shapes (topk_ids may not cover all experts when tokens are tiny).
@@ -40,6 +45,10 @@ def torch_moe_gemm1(
         y2 = F.linear(x[t_idx, :], w1[e, :, :])  # [num, 2*inter_dim]
         gate = y2[:, :inter_dim]
         up = y2[:, inter_dim:]
+        # Apply bias if provided
+        if bias is not None:
+            gate = gate + bias[e, :inter_dim]
+            up = up + bias[e, inter_dim:]
         y = F.silu(gate) * up
         if doweight_stage1:
             y = y * topk_weights[t_idx, s_idx].unsqueeze(-1)
@@ -56,14 +65,19 @@ def torch_moe_gemm2(
     topk_weights: torch.Tensor,
     model_dim: int,
     doweight_stage2: bool,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return [tokens, model_dim] fp32.
 
     Semantics align with aiter `torch_moe_stage2`:
     - Dequantize `a2_fp8` and `w2_fp8` with per-token/row scales.
     - For each routed (token, slot) -> expert, compute y = a2 @ W2[expert]^T.
+    - Optionally add bias (if provided).
     - Optionally multiply routed weight in stage2 (when stage1 did *not*).
     - Reduce across topk by summing into [tokens, model_dim].
+    
+    Args:
+        bias: Optional bias tensor of shape [experts, model_dim].
     """
     assert a2_fp8.is_cuda and w2_fp8.is_cuda
     tokens, topk, inter_dim = a2_fp8.shape
@@ -87,6 +101,9 @@ def torch_moe_gemm2(
         t_idx = idx[:, 0]
         s_idx = idx[:, 1]
         y = F.linear(a2[t_idx, s_idx, :], w2[e, :, :])  # [num, model_dim]
+        # Apply bias if provided
+        if bias is not None:
+            y = y + bias[e, :]
         if doweight_stage2:
             y = y * topk_weights[t_idx, s_idx].unsqueeze(-1)
         out.index_add_(0, t_idx, y)

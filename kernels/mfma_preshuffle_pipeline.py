@@ -34,6 +34,7 @@ class EpilogPipeline(Enum):
     CSHUFFLE_F16 = "CSHUFFLE_F16"
     CSHUFFLE_BF16 = "CSHUFFLE_BF16"
     CSHUFFLE_F32 = "CSHUFFLE_F32"
+    CSHUFFLE_F8 = "CSHUFFLE_F8"
     DIRECT_F16 = "DIRECT_F16"
     DIRECT_BF16 = "DIRECT_BF16"
     DIRECT_F32 = "DIRECT_F32"
@@ -73,6 +74,7 @@ out_elem_type_dict = {
     EpilogPipeline.CSHUFFLE_F16: lambda: T.f16,
     EpilogPipeline.CSHUFFLE_BF16: lambda: T.bf16,
     EpilogPipeline.CSHUFFLE_F32: lambda: T.f32,
+    EpilogPipeline.CSHUFFLE_F8: lambda: T.f8,
     EpilogPipeline.DIRECT_F16: lambda: T.f16,
     EpilogPipeline.DIRECT_BF16: lambda: T.bf16,
     EpilogPipeline.DIRECT_F32: lambda: T.f32,
@@ -185,7 +187,7 @@ class PreshufflePipelineManager:
         self.b_dtype = _normalize_dtype(self.b_dtype)
         self.out_dtype = _normalize_dtype(self.out_dtype)
 
-        if self.out_dtype not in ("fp16", "bf16", "f32"):
+        if self.out_dtype not in ("fp16", "bf16", "f32", "fp8"):
             raise ValueError(
                 f"out_dtype must be 'f16', 'bf16', or 'f32', got {self.out_dtype!r}"
             )
@@ -195,7 +197,7 @@ class PreshufflePipelineManager:
             raise ValueError(f"Invalid a_dtype: {self.a_dtype}")
         if self.b_dtype not in ["fp8", "fp4", "int8", "int4", "fp16", "bf16"]:
             raise ValueError(f"Invalid b_dtype: {self.b_dtype}")
-        if self.out_dtype not in ["fp16", "bf16", "f32"]:
+        if self.out_dtype not in ["fp16", "bf16", "f32", "fp8"]:
             raise ValueError(f"Invalid out_dtype: {self.out_dtype}")
 
     def get_mfma_pipeline(self):
@@ -223,6 +225,8 @@ class PreshufflePipelineManager:
             return EpilogPipeline.CSHUFFLE_BF16
         elif self.use_cshuffle_epilog and self.out_dtype == "f32":
             return EpilogPipeline.CSHUFFLE_F32
+        elif self.use_cshuffle_epilog and self.out_dtype == "fp8":
+            return EpilogPipeline.CSHUFFLE_F8
         elif not self.use_cshuffle_epilog and self.out_dtype == "f32":
             return EpilogPipeline.DIRECT_F32
         elif not self.use_cshuffle_epilog and self.out_dtype == "fp16":
@@ -249,6 +253,8 @@ class PreshufflePipelineManager:
             raise ValueError(f"Invalid a_dtype: {self.a_dtype}")
 
     def get_out_elem_bytes(self):
+        if self.out_dtype in ["fp8", "int8", "int4", "fp4"]:
+            return 1
         if self.out_dtype in ["fp16", "bf16"]:
             return 2
         elif self.out_dtype == "f32":
