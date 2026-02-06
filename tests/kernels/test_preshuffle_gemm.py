@@ -252,7 +252,6 @@ def test_mfma_a8_flir_preshuffle(
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
     # Store sample position for consistent comparison across kernel and aiter
-    sample_pos = None
     c_aiter_f32 = None
 
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
@@ -385,36 +384,19 @@ def test_mfma_w4_flir_preshuffle(
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
-    # Use quantized scales (no longer forcing to 1.0)
     
-    # Recalculate Ref with override scales
     if a_dtype == "fp4":
-        # For Ref, we need to pass the SCALES, not just use the ones returned by quant
-        # run_torch_w4 takes scales.
         c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
     else:
-        # If A is FP8/FP32, we assume scale is 1.0 effectively?
-        # run_torch doesn't take scales for A/B easily if not int8.
-        # But here we are forcing scales to 1.0 so original float matmul is close enough if we ignore quantization error?
-        # Better to re-quantize or use the quant versions.
-        # For simplicity, if we force scales to 1, we should trust run_torch_w4 with scales=1
-        pass
-        # Actually run_torch handles fp8/fp32 inputs directly.
         c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
-    # Keep tensors contiguous for predictable buffer descriptor shapes.
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
-    # Preshuffle B using fp4_utils (same for kernel and aiter)
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
-    # Run kernel (bf16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
-
-    # Initialize aiter result holder
-    c_aiter_f32 = None
 
     def launch_kernel(c, a, b, sa, sb):
         # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
@@ -443,8 +425,6 @@ def test_mfma_w4_flir_preshuffle(
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
-    # Defer verification to allow Aiter bench and sampling to run first
-    # verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
