@@ -413,11 +413,7 @@ def compile_moe_gemm1(
                     else:
                         t_idx = arith.index_cast(ir.IndexType.get(), t_raw)
                         t_safe = arith.select(t_valid_i32, t_idx, arith.index(0))
-                        # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
-                    # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
-                    t_valid_i32 = arith.cmpu(t_raw, tokens_i32, "ult")
-                    t_safe = arith.select(t_valid_i32, t_idx, arith.index(0))
-                    x_row_base_div4.append(t_safe * c_k_div4)
+                        x_row_base_div4.append(t_safe * c_k_div4)
     
                 vec1_i32 = I.vec(1, i32)
                 vec2_i32 = I.vec(2, i32)
