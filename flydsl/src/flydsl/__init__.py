@@ -1,6 +1,25 @@
 """FLIR - ROCm Domain Specific Language for layout algebra"""
 
-__version__ = "0.0.1.exp.ef881a7"
+import subprocess as _subprocess
+
+def _get_git_commit() -> str:
+    """Get short git commit hash, return empty string if not in a git repo."""
+    try:
+        result = _subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+_BASE_VERSION = "0.0.1.dev"
+_git_commit = _get_git_commit()
+__version__ = f"{_BASE_VERSION}+{_git_commit}" if _git_commit else _BASE_VERSION
 
 # Setup Python path for embedded MLIR modules
 import sys
