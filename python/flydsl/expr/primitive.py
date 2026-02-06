@@ -1,5 +1,3 @@
-from flydsl.lang.meta import dsl_api_wrapper
-
 from .._mlir import ir
 from .._mlir.dialects import arith, fly, gpu
 from .._mlir.dialects.fly import (
@@ -16,21 +14,7 @@ from .._mlir.dialects.fly import (
     SwizzleType,
 )
 from .._mlir.extras import types as T
-
-# @ir.register_value_caster(T.F16Type.static_typeid)
-# @ir.register_value_caster(T.F32Type.static_typeid)
-# @ir.register_value_caster(T.F64Type.static_typeid)
-# @ir.register_value_caster(T.IntegerType.static_typeid)
-# class ArithValue(ir.Value):
-#     def __init__(self, v):
-#         super().__init__(v)
-
-#     __add__ = partialmethod(_binary_op, op="add")
-#     __sub__ = partialmethod(_binary_op, op="sub")
-#     __mul__ = partialmethod(_binary_op, op="mul")
-
-#     def __str__(self):
-#         return super().__str__().replace(ir.Value.__name__, ArithValue.__name__)
+from .meta import dsl_api_wrapper
 
 
 class classproperty(property):
@@ -408,22 +392,27 @@ def cooperative_copy(tiled_copy, partition_idx, src, dst, loc=None, ip=None):
 @dsl_api_wrapper
 def printf(*args, format_str="", loc=None, ip=None):
     def _convert_printf_value(val):
-        """Convert Python values to MLIR Values for printf."""
+        """Convert Python values to MLIR Values for printf.
+        Returns tuple of (is_static, value) where is_static=True means value is a string to embed."""
         if isinstance(val, ir.Value):
-            return val
+            return (False, val)
+        elif isinstance(val, type):
+            return (True, val.__name__)
+        elif isinstance(val, str):
+            return (True, val)
         elif isinstance(val, bool):
-            return arith.constant(T.i1(), int(val))
+            return (False, arith.constant(T.i1(), int(val)))
         elif isinstance(val, int):
-            return arith.constant(T.i32(), val)
+            return (False, arith.constant(T.i32(), val))
         elif isinstance(val, float):
-            return arith.constant(T.f64(), val)
+            return (False, arith.constant(T.f64(), val))
         elif hasattr(val, "__extract_ir_values__"):
             ir_values = val.__extract_ir_values__()
             if len(ir_values) == 1:
-                return ir_values[0]
+                return (False, ir_values[0])
             raise ValueError(f"Cannot use multi-value type in printf: {type(val)}")
         elif hasattr(val, "value") and isinstance(val.value, ir.Value):
-            return val.value
+            return (False, val.value)
         else:
             raise ValueError(f"Cannot convert {type(val)} to MLIR Value for printf")
 
@@ -433,5 +422,29 @@ def printf(*args, format_str="", loc=None, ip=None):
     else:
         raw_values = list(args)
 
-    values = [_convert_printf_value(v) for v in raw_values]
-    return fly.print_(format_str, values, loc=loc, ip=ip)
+    converted = [_convert_printf_value(v) for v in raw_values]
+
+    final_format = format_str
+    ir_values = []
+    placeholder_idx = 0
+    result_parts = []
+    i = 0
+    while i < len(final_format):
+        if i + 1 < len(final_format) and final_format[i : i + 2] == "{}":
+            if placeholder_idx < len(converted):
+                is_static, val = converted[placeholder_idx]
+                if is_static:
+                    result_parts.append(str(val))
+                else:
+                    result_parts.append("{}")
+                    ir_values.append(val)
+                placeholder_idx += 1
+            else:
+                result_parts.append("{}")
+            i += 2
+        else:
+            result_parts.append(final_format[i])
+            i += 1
+
+    final_format = "".join(result_parts)
+    return fly.print_(final_format, ir_values, loc=loc, ip=ip)
