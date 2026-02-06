@@ -38,7 +38,7 @@ from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.kernels_common import stream_ptr_to_async_token
 
 
-@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=None)
 def compile_moe_gemm1(
     *,
     model_dim: int,
@@ -1119,7 +1119,7 @@ def compile_moe_gemm1(
     return exe
 
 
-@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=None)
 def compile_moe_gemm2(
     *,
     model_dim: int,
@@ -2281,7 +2281,7 @@ def compile_moe_gemm2(
 
 
 # MoE Reduction Kernel (reduce sum over topk dimension)
-@functools.lru_cache(maxsize=1024)
+@functools.lru_cache(maxsize=None)
 def compile_moe_reduction(
     *,
     topk: int,
@@ -2431,7 +2431,6 @@ def compile_moe_reduction(
             m_tokens: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
-            print(f"[flydsl] Launching MoE reduction kernel with topk={topk}, model_dim={model_dim}, dtype={dtype_str}")
             from flydsl.dialects.ext import arith as arith_ext
             c1 = arith.as_value(arith_ext.index(1))
             gx = arith.as_value(m_tokens)
