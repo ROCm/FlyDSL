@@ -153,10 +153,14 @@ def test_mfma_a8_flir_preshuffle(
 
     size_c = M * N
     size_a = M * K
-    # B is packed int4 for W4A8: 2 values per byte.
-    if in_dtype == "int4":
+    # B is packed int4 for W4A8/W4A16: 2 values per byte.
+    is_int4 = in_dtype == "int4"
+    is_int4_bf16 = in_dtype == "int4_bf16"
+    use_packed_int4 = is_int4 or is_int4_bf16
+    
+    if use_packed_int4:
         size_b = (N * K) // 2
-        elem_bytes = 1
+        elem_bytes = 2 if is_int4_bf16 else 1  # activation elem_bytes
     elif in_dtype in ("fp16", "bf16"):
         size_b = (N * K) * 2
         elem_bytes = 2
@@ -170,7 +174,6 @@ def test_mfma_a8_flir_preshuffle(
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)  # (N, K)
 
-    is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A is INT8, B is packed INT4 and unpacked to INT8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
 
@@ -182,6 +185,11 @@ def test_mfma_a8_flir_preshuffle(
         # we will materialize an internal "all-ones" scale only when launching the kernel.
         scale_a = None
         scale_b = None
+    elif is_int4_bf16:
+        # W4A16: A is bf16 (no quant), B is packed int4 (values in [-8, 7]).
+        a_q = a_fp32.to(torch.bfloat16)
+        b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.int8, dtypeMax=7)  # (N, K)
+        scale_a = None
     else:
         quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
         a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)  # (M, K)
@@ -218,11 +226,17 @@ def test_mfma_a8_flir_preshuffle(
         return out.view(-1).to(torch.int8)
 
     b_packed = None
-    if is_int4:
+    if use_packed_int4:
         b_packed = _pack_shuffled_int8_to_packed_int4_no_perm(b_shuffled)
 
     # Reference (dequant + matmul).
-    c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
+    # For int4_bf16: kernel does NOT apply scale_b in epilogue (is_f16_or_bf16 path).
+    # So reference should NOT include scale_b either for validation.
+    if is_int4_bf16:
+        # A is bf16, B is int4 (raw values, no scale). Reference: A @ B.T
+        c_ref = torch.matmul(a_q.float(), b_q.float().T)  # (M, K) @ (K, N) -> (M, N)
+    else:
+        c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
 
     # Run kernel (f16 output, in-kernel scaling).
     c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
@@ -244,7 +258,7 @@ def test_mfma_a8_flir_preshuffle(
         launch_kernel,
         c_out_raw,
         a_q,
-        b_packed if is_int4 else b_shuffled,
+        b_packed if use_packed_int4 else b_shuffled,
         scale_a,
         scale_b,
         num_iters=bench_iters,
@@ -490,7 +504,7 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
+        choices=["fp8", "int8", "int4", "int4_bf16", "fp16", "bf16", "fp4"],
         help="Input dtype",
     )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
