@@ -871,10 +871,6 @@ def compile_preshuffle_gemm_a8(
                 return current_accs_list, scales_pf
 
             vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
-            vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
-            vec1_i16 = ir.VectorType.get([1], ir.IntegerType.get_signless(16))
-            vec2_i16 = ir.VectorType.get([2], ir.IntegerType.get_signless(16))
-            vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
 
             def store_output(final_accs, scales):
                 # fp16/bf16: no scale fetch, no scale multiply in epilogue.
@@ -907,24 +903,15 @@ def compile_preshuffle_gemm_a8(
                         num_acc_n: int,
                         lds_out,
                     ):
-                        # Store packed half2 to LDS as i32:
-                        # - Each lane computes one f16 (for its lane_mod_16 column)
-                        # - Use ds_bpermute to grab the neighbor lane's f16 bits and pack (even, odd)
-                        # - Store to the even column address / 2 in the i32 alias view
-                        c0_i32 = arith.constant(0, type=T.i32)
-                        c1_i32 = arith.constant(1, type=T.i32)
-                        cFE_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
-                        c2_i32 = arith.constant(2, type=T.i32)
-
-                        lane_id_i32 = arith.index_cast(T.i32, lane_id)
-                        lane_lsb = arith.andi(lane_id_i32, c1_i32)
-                        is_odd = lane_lsb != c0_i32
-                        nbr_lane = arith.xori(lane_id_i32, c1_i32)
-                        nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)  # lane_id * 4 (bytes)
-
+                        # CShuffle write (non-pack):
+                        # - Each lane computes one f16 element for its `col_local`
+                        # - Write directly to LDS in row-major [tile_m, tile_n] order
+                        # - The shuffle/remap happens in the LDS read phase
                         if not is_f16_or_bf16:
                             s_a_vec4 = s_a_vecs[mi]
-                            s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
+                            s_a = vector.extract(
+                                s_a_vec4, static_position=[ii], dynamic_position=[]
+                            )
                         for ni in range_constexpr(num_acc_n):
                             col_local = col_base_local + (ni * 16)
                             acc_idx = mi * num_acc_n + ni
@@ -938,52 +925,9 @@ def compile_preshuffle_gemm_a8(
                                 val_s = (val * s_a) * s_b_vals[ni]
                             v16 = arith.trunc_f(T.f16, val_s)
 
-                            # v16 (f16) -> bits in i32 low16
-                            v1_f16 = vector.from_elements(vec1_f16, [v16])
-                            v1_i16 = vector.bitcast(vec1_i16, v1_f16)
-                            v16_i16 = vector.extract(
-                                v1_i16, static_position=[0], dynamic_position=[]
-                            )
-                            # Zero-extend i16 bits to i32:
-                            # Build a 2xi16 vector (low16=v16 bits, high16=0) then bitcast to 1xi32.
-                            z16 = arith.constant(0, type=T.i16)
-                            v2_i16 = vector.from_elements(vec2_i16, [v16_i16, z16])
-                            v16_i32 = vector.extract(
-                                vector.bitcast(vec1_i32, v2_i16),
-                                static_position=[0],
-                                dynamic_position=[],
-                            )
-
-                            # Neighbor's bits (per-lane): ds_bpermute uses a byte index.
-                            nbr_i32 = rocdl.ds_bpermute(
-                                T.i32,
-                                arith.unwrap(nbr_lane_bytes),
-                                arith.unwrap(v16_i32),
-                            )
-
-                            # Convert neighbor bits back to f16 so we can store vec2<f16>.
-                            nbr_v1_i32 = vector.from_elements(vec1_i32, [nbr_i32])
-                            nbr_v2_i16 = vector.bitcast(vec2_i16, nbr_v1_i32)
-                            nbr_i16 = vector.extract(
-                                nbr_v2_i16, static_position=[0], dynamic_position=[]
-                            )
-                            nbr_v1_i16 = vector.from_elements(vec1_i16, [nbr_i16])
-                            nbr_v1_f16 = vector.bitcast(vec1_f16, nbr_v1_i16)
-                            nbr_f16 = vector.extract(
-                                nbr_v1_f16, static_position=[0], dynamic_position=[]
-                            )
-
-                            even_f16 = arith.select(is_odd, nbr_f16, v16)
-                            odd_f16 = arith.select(is_odd, v16, nbr_f16)
-
-                            # Store [even, odd] as a single 32-bit LDS write (2xf16).
-                            col_local_i32 = arith.index_cast(T.i32, col_local)
-                            col_even_i32 = arith.andi(col_local_i32, cFE_i32)
-                            col_even = arith.index_cast(T.index, col_even_i32)
-
-                            lds_idx = row_base_lds + col_even
-                            v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
-                            vector.store(v2, lds_out, [lds_idx], alignment=4)
+                            lds_idx = row_base_lds + col_local
+                            v1 = vector.from_elements(vec1_f16, [v16])
+                            vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
