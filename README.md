@@ -305,6 +305,18 @@ in `tests/kernels/` for timing—just like the full benchmark.
 *   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
 *   Linux / ROCm 6.x, 7.x
 
+## 🙏 Acknowledgements
+
+We would like to thank Colfax Research for their foundational work on categorical layout algebra,
+which provides a rigorous mathematical framework for understanding and manipulating CuTe layouts.
+Their work has been instrumental in shaping the design of FLIR's layout system.
+
+## 📚 References
+
+[1] J. van de Ven, Y. Goldfarb, V. Krakovna, T. Ben-Nun, "Categorical Foundations for CuTe Layouts", arXiv:2601.05972, 2025. https://arxiv.org/abs/2601.05972
+
+[2] Colfax Research, "layout-categories" - Companion software for the Categorical Foundations for CuTe Layouts paper. https://github.com/ColfaxResearch/layout-categories
+
 ## 📄 License
 
 Apache License 2.0
