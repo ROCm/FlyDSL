@@ -354,6 +354,20 @@ class FlyDSLAllreduce:
             self._sg_ptrs[i] = int(self._sg_ptrs[0])
             self._tmp_ptrs[i] = int(self._tmp_ptrs[0])
         self._self_sg = int(self._sg_ptrs[self.rank])
+        
+        # Create continuous pointer array for optimized global_load_dwordx2 access
+        # Array layout: [sg_ptr0, sg_ptr1, ..., sg_ptr7] (8 * 8 = 64 bytes, 16-byte aligned)
+        import torch
+        sg_signals_array = torch.empty((8,), device=self.device, dtype=torch.int64)
+        for i in range(8):
+            sg_signals_array[i] = self._sg_ptrs[i]
+        # Ensure 16-byte alignment (required for global_load_dwordx2 optimization)
+        sg_signals_base = int(sg_signals_array.data_ptr())
+        if sg_signals_base % 16 != 0:
+            # If not aligned, fall back to chain selection (set to 0)
+            sg_signals_base = 0
+        self._sg_signals_base = sg_signals_base
+        self._sg_signals_array = sg_signals_array  # Keep reference to prevent GC
 
         # ---- Exchange and map input buffers ----
         # Use raw HIP handle export (64B) to match hipIpcOpenMemHandle.
@@ -470,6 +484,7 @@ class FlyDSLAllreduce:
             int(self.rank),
             int(grid_x),
             int(self._self_sg),
+            int(self._sg_signals_base),  # Base address of signals pointer array (0 = use chain selection)
             *self._sg_ptrs[:8],
             *in_ptrs[:8],
             *tmp_ptrs[:8],

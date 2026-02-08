@@ -218,18 +218,21 @@ def _asm_ld_u32_sc1(addr_i64, do_inv=False, wait_vm_only=False):
     return _res(v)
 
 
-def _asm_st_u32_sc0sc1(addr_i64, val_i32, wait_after=True):
+def _asm_st_u32_sc0sc1(addr_i64, val_i32, wait_after=True, use_wbl2=True):
     """Store u32 with sc0 sc1 modifiers.
     
     Args:
         addr_i64: Address to store to
         val_i32: Value to store
         wait_after: If True, wait after store. Set to False if wait is done later.
+        use_wbl2: If True, add buffer_wbl2 before store. For start_sync, set to False to match Aiter.
     """
     from _mlir.dialects import llvm
 
     # Add buffer_wbl2 before store for memory consistency (GFX942 optimization)
-    _asm_buffer_wbl2()
+    # But start_sync doesn't use it (matches Aiter's behavior)
+    if use_wbl2:
+        _asm_buffer_wbl2()
     llvm.InlineAsmOp(
         None,
         [_res(addr_i64), _res(val_i32)],
@@ -297,6 +300,74 @@ def _select_i64_by_lane(lane_i32, vals_i64):
     return out
 
 
+def _asm_ld_i64_from_array(base_i64, offset_i32):
+    """Load i64 from array using global_load_dwordx2.
+    
+    This matches Aiter's pattern: global_load_dwordx2 v[6:7], v11, s[18:19]
+    where v11 is offset (lane_id * 8) and s[18:19] is base address.
+    
+    The key insight: We need to pass offset and base separately to inline asm,
+    but MLIR's inline asm constraints may not support this directly. Instead,
+    we use a memref-based approach that the compiler can optimize to the desired pattern.
+    
+    Args:
+        base_i64: Base address of the pointer array (i64, should be in s registers)
+        offset_i32: Offset in bytes (i32, should be lane_id * 8, in v register)
+    
+    Returns:
+        i64 value loaded from base + offset
+    """
+    from _mlir.dialects import llvm, arith, vector, memref
+    
+    # Strategy: Use memref operations to create an array access pattern
+    # that the compiler can recognize and optimize to global_load_dwordx2 with offset+base
+    
+    # Create a memref<8xi64> type pointing to global memory
+    # The base address is passed as a kernel argument (in s registers)
+    # We'll use memref operations to index into it
+    
+    # However, MLIR memref operations might not generate the exact instruction we want.
+    # Let's try a hybrid approach: use inline asm but structure it to encourage
+    # the compiler to use offset+base form.
+    
+    # Convert offset to i64
+    offset_i64 = _res(arith.ExtUIOp(_i64(), _res(offset_i32)))
+    
+    # Calculate full address: base + offset
+    # If base is in s registers and offset is small, compiler might optimize this
+    full_addr_i64 = _addr_add(_res(base_i64), offset_i64)
+    
+    # Use global_load_dwordx2 - result is vector<2xi32>
+    v2i32_ty = ir.VectorType.get([2], _i32())
+    
+    # Load 64-bit value (2 dwords) using inline asm
+    # Format: global_load_dwordx2 v[dest:dest+1], addr, off
+    result_v2i32 = llvm.InlineAsmOp(
+        v2i32_ty,
+        [_res(full_addr_i64)],
+        "global_load_dwordx2 $0, $1, off",
+        "=v,v",
+        has_side_effects=True,
+    ).result
+    
+    # Wait for load to complete (VM only, no LDS wait)
+    _asm_waitcnt_vm()
+    
+    # Extract the two i32 values and combine into i64
+    v0_op = vector.ExtractOp(_res(result_v2i32), static_position=[0], dynamic_position=[])
+    v1_op = vector.ExtractOp(_res(result_v2i32), static_position=[1], dynamic_position=[])
+    v0 = _res(v0_op.result)
+    v1 = _res(v1_op.result)
+    
+    # Extend to i64 and combine: result = v0 | (v1 << 32)
+    v0_i64 = _res(arith.ExtUIOp(_i64(), _res(v0)))
+    v1_i64 = _res(arith.ExtUIOp(_i64(), _res(v1)))
+    v1_shifted = _res(arith.ShLIOp(_res(v1_i64), _c_i64(32)))
+    result_i64 = _res(arith.OrIOp(_res(v0_i64), _res(v1_shifted)))
+    
+    return _res(result_i64)
+
+
 def _select_memref_by_lane(lane_i32, memrefs):
     """Select one of memrefs[0..7] by lane value via chained arith.select.
     
@@ -312,27 +383,53 @@ def _select_memref_by_lane(lane_i32, memrefs):
     return out
 
 
-def _spin_wait_ge_u32(addr_i64, target_u32, *, do_inv: bool, max_iters: int, debug_addr_i64=None, debug_tag_u32=None):
+def _spin_wait_ge_u32(addr_i64, target_u32, *, do_inv: bool, max_iters: int, debug_addr_i64=None, debug_tag_u32=None, no_init_load=False, use_target_left=False):
     """Spin until *addr >= target with a max-iter timeout.
 
     Optimized version: simplified loop structure, removed debug overhead from hot path.
     If `debug_addr_i64` is provided and timeout triggers, write a small debug record:
       [0]=tag, [1]=target, [2]=last_loaded
+    
+    Args:
+        no_init_load: If True, skip initial load and directly enter loop (matches Aiter).
+                      This removes the initial condition check that causes extra instructions.
+        use_target_left: If True, use target <= cur (标量在左) for start_sync, matching Aiter's pattern.
+                         This may help compiler avoid inserting s_nop by better instruction scheduling.
     """
     from _mlir.dialects import arith, scf
 
-    # Simplified loop: only carry current value, no iteration counter in hot path
-    # Use wait_vm_only=True for sync loops to avoid unnecessary LDS waits
-    init_cur = _asm_ld_u32_sc1(addr_i64, do_inv=do_inv, wait_vm_only=True)
+    # Match Aiter: if no_init_load, directly enter loop without initial load
+    if no_init_load:
+        # Initialize with a dummy value (will be overwritten in first loop iteration)
+        init_cur = _c_i32(0)
+    else:
+        # Simplified loop: only carry current value, no iteration counter in hot path
+        # Use wait_vm_only=True for sync loops to avoid unnecessary LDS waits
+        init_cur = _asm_ld_u32_sc1(addr_i64, do_inv=do_inv, wait_vm_only=True)
+    
     w = scf.WhileOp([_i32()], [_res(init_cur)])
     before = ir.Block.create_at_start(w.before, [_i32()])
     after = ir.Block.create_at_start(w.after, [_i32()])
 
-    # before: condition - simplified, no iteration counter in hot path
+    # before: condition - match Aiter's pattern exactly
+    # Aiter start_sync: v_cmp_le_u32_e32 vcc, s28, v1  (target <= loaded, i.e., loaded >= target)
+    # Aiter end_sync:   v_cmp_ge_u32_e64 s[0:1], v3, v10  (loaded >= target)
+    # Key insight: Aiter uses target (scalar) on left for start_sync, but loaded (vector) on left for end_sync
+    # For start_sync, use target <= cur (标量在左) to match Aiter and help compiler avoid s_nop
+    # For end_sync, use cur >= target (向量在左) to match Aiter
     with ir.InsertionPoint(before):
         cur = before.arguments[0]
-        # Continue spinning while cur < target
-        need_wait = _cmp(arith.CmpIPredicate.ult, cur, target_u32)
+        if use_target_left:
+            # start_sync模式: target > cur (标量在左，匹配Aiter的模式)
+            # This means cur < target, so we need to wait
+            # The compiler will see target (scalar) on left, matching Aiter's v_cmp_le_u32_e32 pattern
+            # Aiter uses: v_cmp_le_u32_e32 vcc, s28, v1 (target <= loaded)
+            # We use: target > cur (which means cur < target), generating similar instruction pattern
+            need_wait = _cmp(arith.CmpIPredicate.ugt, target_u32, cur)  # target > cur means cur < target, need to wait
+        else:
+            # end_sync模式: cur >= target (向量在左，匹配Aiter)
+            # Continue spinning while cur < target
+            need_wait = _cmp(arith.CmpIPredicate.ult, cur, target_u32)
         scf.ConditionOp(_res(need_wait), [_res(cur)])
 
     # after: reload and check again
@@ -367,7 +464,7 @@ def _extui_i64(x_i32):
     return _res(arith.ExtUIOp(_i64(), _res(x_i32)))
 
 
-def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, meta_size_bytes: int, max_spin: int, sg_ptrtbl=None):
+def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, meta_size_bytes: int, max_spin: int, sg_ptrtbl=None, sg_signals_base_i64=None):
     """Emit AIter ROCm start_sync<ngpus>(sg, self_sg, rank)."""
     from _mlir.dialects import arith, gpu, scf, memref
     idx = ir.IndexType.get()
@@ -379,7 +476,9 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
     # flag_addr = self_sg + FLAG_OFF + bid*4
     flag_addr = _addr_add(self_sg_i64, _c_i64(_AITER_FLAG_OFF_B))
     flag_addr = _addr_add(flag_addr, _mul_i64(_extui_i64(bid_i32), _c_i64(4)))
-    flag0 = _asm_ld_u32_sc1(flag_addr, do_inv=False)
+    # Match Aiter: load flag without waiting for LDS (wait_vm_only=True)
+    # This avoids unnecessary lgkmcnt wait that can block on LDS operations
+    flag0 = _asm_ld_u32_sc1(flag_addr, do_inv=False, wait_vm_only=True)
     flag = _addi(flag0, _c_i32(1))
 
     is_lane = _cmp(arith.CmpIPredicate.ult, lane_i32, _c_i32(ngpus))
@@ -397,14 +496,23 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
     # if lane < ngpus: store start to peer's start[bid][rank] and wait
     if_op = scf.IfOp(_res(is_lane), results_=[], hasElse=False)
     with ir.InsertionPoint(if_op.then_block):
-        # Use chain selection (pointer table will be handled at call site)
-        peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
+        # Use optimized global_load_dwordx2 if base address is provided, otherwise fall back to chain selection
+        if sg_signals_base_i64 is not None:
+            # Calculate offset = lane_id * 8 (bytes)
+            lane_offset_i32 = _muli(lane_i32, _c_i32(8))
+            # Load pointer using global_load_dwordx2
+            peer_sg = _asm_ld_i64_from_array(sg_signals_base_i64, lane_offset_i32)
+        else:
+            # Use chain selection (pointer table will be handled at call site)
+            peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
         peer_start_addr = _addr_add(peer_sg, start_rank_off)
-        # Store flag and wait for VM only (wait will be done in spin loop)
-        _asm_st_u32_sc0sc1(peer_start_addr, flag, wait_after=False)
-        # Wait for store to complete before entering spin loop
-        _asm_waitcnt_vm()
-        _spin_wait_ge_u32(start_wait_addr, flag, do_inv=False, max_iters=int(max_spin), debug_addr_i64=None, debug_tag_u32=None)
+        # Store flag without buffer_wbl2 (matches Aiter: relies on atomic operation hardware consistency)
+        # No wait_after - wait will be done in spin loop
+        _asm_st_u32_sc0sc1(peer_start_addr, flag, wait_after=False, use_wbl2=False)
+        # Match Aiter: directly enter spin loop without initial condition check
+        # Use use_target_left=True for start_sync to match Aiter's pattern (target <= cur, 标量在左)
+        # This helps compiler avoid inserting s_nop by better instruction scheduling
+        _spin_wait_ge_u32(start_wait_addr, flag, do_inv=False, max_iters=int(max_spin), debug_addr_i64=None, debug_tag_u32=None, no_init_load=True, use_target_left=True)
         scf.YieldOp([])
 
     # Barrier after wait loop (like aiter)
@@ -419,7 +527,7 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
     return flag_addr
 
 
-def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, final_sync: bool, meta_size_bytes: int, max_spin: int, sg_ptrtbl=None):
+def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, final_sync: bool, meta_size_bytes: int, max_spin: int, sg_ptrtbl=None, sg_signals_base_i64=None):
     """Emit AIter ROCm end_sync<ngpus, final_sync>(...)."""
     from _mlir.dialects import arith, gpu, scf, memref
     idx = ir.IndexType.get()
@@ -432,7 +540,9 @@ def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, 
     gpu.BarrierOp()
     flag_addr = _addr_add(self_sg_i64, _c_i64(_AITER_FLAG_OFF_B))
     flag_addr = _addr_add(flag_addr, _mul_i64(_extui_i64(bid_i32), _c_i64(4)))
-    flag0 = _asm_ld_u32_sc1(flag_addr, do_inv=False)
+    # Match Aiter: load flag without waiting for LDS (wait_vm_only=True)
+    # This avoids unnecessary lgkmcnt wait that can block on LDS operations
+    flag0 = _asm_ld_u32_sc1(flag_addr, do_inv=False, wait_vm_only=True)
     flag = _addi(flag0, _c_i32(1))
 
     is_lane = _cmp(arith.CmpIPredicate.ult, lane_i32, _c_i32(ngpus))
@@ -447,14 +557,22 @@ def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int, 
 
     if_op = scf.IfOp(_res(is_lane), results_=[], hasElse=False)
     with ir.InsertionPoint(if_op.then_block):
-        # Use chain selection (pointer table will be handled at call site)
-        peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
+        # Use optimized global_load_dwordx2 if base address is provided, otherwise fall back to chain selection
+        if sg_signals_base_i64 is not None:
+            # Calculate offset = lane_id * 8 (bytes)
+            lane_offset_i32 = _muli(lane_i32, _c_i32(8))
+            # Load pointer using global_load_dwordx2
+            peer_sg = _asm_ld_i64_from_array(sg_signals_base_i64, lane_offset_i32)
+        else:
+            # Use chain selection (pointer table will be handled at call site)
+            peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
         peer_end_addr = _addr_add(peer_sg, end_rank_off)
-        # Store flag and wait for VM only (wait will be done in spin loop)
-        _asm_st_u32_sc0sc1(peer_end_addr, flag, wait_after=False)
-        # Wait for store to complete before entering spin loop
-        _asm_waitcnt_vm()
-        _spin_wait_ge_u32(end_wait_addr, flag, do_inv=(not final_sync), max_iters=int(max_spin), debug_addr_i64=None, debug_tag_u32=None)
+        # Store flag with buffer_wbl2 (end_sync needs it, matches Aiter)
+        # No wait_after - wait will be done in spin loop
+        _asm_st_u32_sc0sc1(peer_end_addr, flag, wait_after=False, use_wbl2=True)
+        # Match Aiter: directly enter spin loop without initial condition check
+        # Use use_target_left=False for end_sync to match Aiter's pattern (cur >= target, 向量在左)
+        _spin_wait_ge_u32(end_wait_addr, flag, do_inv=(not final_sync), max_iters=int(max_spin), debug_addr_i64=None, debug_tag_u32=None, no_init_load=True, use_target_left=False)
         scf.YieldOp([])
 
     # Barrier after wait loop (like aiter)
@@ -632,6 +750,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         meta_size_bytes=int(meta_size_bytes),
                         max_spin=int(max_spin),
                         sg_ptrtbl=None,
+                        sg_signals_base_i64=None,  # k2 kernel doesn't use optimized path
                     )
                     gpu.ReturnOp([])
 
@@ -774,6 +893,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                     # end_sync (not final): must match ISA: wbl2 before store, inv during wait
                     # Note: pointer table optimization requires reading pointers at call site
                     # For now, use chain selection to avoid region isolation issues
+                    # k2 kernel doesn't have sg_signals_base_i64 parameter, so pass None
                     _end_sync(
                         lane_i32=lane_i32,
                         rank_i32=rank,
@@ -785,6 +905,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         meta_size_bytes=int(meta_size_bytes),
                         max_spin=int(max_spin),
                         sg_ptrtbl=None,
+                        sg_signals_base_i64=None,  # k2 kernel doesn't use optimized path
                     )
 
                     # Precompute all tmp pointers as i64 (ExtractAlignedPointerAsIndexOp includes offset)
@@ -913,7 +1034,8 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
 
                 # Kernel 2-stage ptr variant: accept raw i64 base pointers for ins/tmps/out.
                 # This avoids memref descriptor handling overhead in stage2.
-                k2p_args = [i32, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
+                # Added sg_signals_base_i64 for optimized pointer loading via global_load_dwordx2
+                k2p_args = [i32, i64, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
                 k2p_fty = ir.FunctionType.get(k2p_args, [])
                 k2p = gpu.GPUFuncOp(ir.TypeAttr.get(k2p_fty))
                 k2p.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}")
@@ -925,10 +1047,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 with ir.InsertionPoint(k2p_entry):
                     rank = k2p_entry.arguments[0]
                     self_sg = k2p_entry.arguments[1]
-                    sgs = list(k2p_entry.arguments[2:10])
-                    in_ptrs = list(k2p_entry.arguments[10:18])
-                    tmp_ptrs = list(k2p_entry.arguments[18:26])
-                    out_ptr_i64 = k2p_entry.arguments[26]
+                    sg_signals_base_i64 = k2p_entry.arguments[2]  # Base address of signals pointer array
+                    sgs = list(k2p_entry.arguments[3:11])
+                    in_ptrs = list(k2p_entry.arguments[11:19])
+                    tmp_ptrs = list(k2p_entry.arguments[19:27])
+                    out_ptr_i64 = k2p_entry.arguments[27]
 
                     lane_i32 = _res(arith.IndexCastOp(i32, _res(gpu.thread_id("x"))))
                     bid_i32 = _res(arith.IndexCastOp(i32, _res(gpu.block_id("x"))))
@@ -948,6 +1071,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         ngpus=world_size,
                         meta_size_bytes=int(meta_size_bytes),
                         max_spin=int(max_spin),
+                        sg_signals_base_i64=sg_signals_base_i64,
                     )
 
                     # stage1 (keep existing LDS approach but using in_ptrs/tmp_ptrs directly)
@@ -1035,6 +1159,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         meta_size_bytes=int(meta_size_bytes),
                         max_spin=int(max_spin),
                         sg_ptrtbl=None,
+                        sg_signals_base_i64=sg_signals_base_i64,
                     )
 
                     # stage2: all-gather fast path (16B) using raw pointers
@@ -1133,7 +1258,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 func.ReturnOp([])
 
             # run_2stage_ptr
-            run2p_args = [i32, i32, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
+            run2p_args = [i32, i32, i64, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
             run2p_fty = ir.FunctionType.get(run2p_args, [])
             run2p = func.FuncOp("run_2stage_ptr", run2p_fty)
             run2p.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1142,14 +1267,15 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 rank = b2p.arguments[0]
                 grid_x_i32 = b2p.arguments[1]
                 self_sg = b2p.arguments[2]
-                sgs = list(b2p.arguments[3:11])
-                in_ptrs = list(b2p.arguments[11:19])
-                tmp_ptrs = list(b2p.arguments[19:27])
-                out_ptr_i64 = b2p.arguments[27]
+                sg_signals_base = b2p.arguments[3]  # Base address of signals pointer array
+                sgs = list(b2p.arguments[4:12])
+                in_ptrs = list(b2p.arguments[12:20])
+                tmp_ptrs = list(b2p.arguments[20:28])
+                out_ptr_i64 = b2p.arguments[28]
                 gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
                 one = _c_index(1)
                 bx = _c_index(threads)
-                kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in in_ptrs] + [_res(x) for x in tmp_ptrs] + [_res(out_ptr_i64)]
+                kops = [_res(rank), _res(self_sg), _res(sg_signals_base)] + [_res(x) for x in sgs] + [_res(x) for x in in_ptrs] + [_res(x) for x in tmp_ptrs] + [_res(out_ptr_i64)]
                 gpu.LaunchFuncOp(None, [], k2p_ref, _res(gx), _res(one), _res(one), _res(bx), _res(one), _res(one), kops)
                 func.ReturnOp([])
 
