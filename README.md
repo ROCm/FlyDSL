@@ -315,7 +315,7 @@ See `tests/kernels/test_vec_add.py` for the complete implementation with benchma
 FLIR's design is inspired by ideas from several projects:
 
 - [Categorical Foundations for CuTe Layouts](https://arxiv.org/abs/2601.05972) – mathematical framework for layout algebra (Colfax Research)
-- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) – CuTe layout algebra concepts (BSD-3-Clause parts portions only; no EULA-licensed code was referenced)
+- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) – CuTe layout algebra concepts (BSD-3-Clause parts only; no EULA-licensed code was referenced)
 - [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) – tile-based kernel design patterns for AMD GPUs
 - [Triton](https://github.com/triton-lang/triton) – Python DSL for GPU kernel authoring
 
