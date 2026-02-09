@@ -600,6 +600,7 @@ def compile_moe_gemm1(
                                         expert_offset=expert_off_idx,
                                         num_groups=num_groups,
                                         group_size=group_size,
+                                        n_per_expert=2*inter_dim,
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
                                 else:
@@ -1811,6 +1812,7 @@ def compile_moe_gemm2(
                                         expert_offset=expert_idx * arith.constant(model_dim, index=True),
                                         num_groups=num_groups,
                                         group_size=group_size,
+                                        n_per_expert=model_dim,
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
                                 else:

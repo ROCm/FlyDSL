@@ -329,20 +329,18 @@ def shuffle_scale_for_int4(scale: torch.Tensor, group_size: int = 32, layout=(16
     """Prepare scale tensor for W4A16 groupwise scale kernel.
 
     NOTE: Despite the name, this function does NOT shuffle the scale tensor.
-    The kernel uses logical (n, group) coordinates directly to index the scale,
-    so the scale should remain in its original layout [E, N, num_groups].
+    The kernel uses the [E, num_groups, N] layout (Opt 0: cache-friendly) where
+    adjacent threads read adjacent N elements (stride-1 access).
 
-    The weight preshuffle only affects weight memory layout; the kernel uses
-    layout_b to correctly map logical coordinates to preshuffled addresses.
-    Scale indexing uses logical coordinates: scale_idx = n * num_groups + group_idx.
+    Scale indexing uses: scale_idx = expert_offset*(G-1) + n_global + group_idx*N_pe
 
     Args:
-        scale: Scale tensor of shape [E, N, num_groups] where num_groups = K_dim // group_size
+        scale: Scale tensor of shape [E, num_groups, N] where num_groups = K_dim // group_size
         group_size: Group size for quantization (must be 32 for FlyDSL)
         layout: Tile layout (unused, kept for API compatibility)
 
     Returns:
-        Scale tensor in original layout [E, N, num_groups], ready for kernel consumption.
+        Scale tensor in [E, num_groups, N] layout, ready for kernel consumption.
     """
     if group_size != 32:
         raise ValueError(
