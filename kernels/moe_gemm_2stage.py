@@ -1193,8 +1193,24 @@ def compile_moe_gemm2(
         )
         rdtype = "f32" if out_is_f32 else "bf16" if out_is_bf16 else "f16"
         reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=rdtype)
-        return _MoeGemm2ReduceWrapper(gemm2_exe, reduce_exe, topk, model_dim, rdtype)
 
+        # NOTE: We intentionally do not return a shared `_MoeGemm2ReduceWrapper` instance here,
+        # because the surrounding compile API may be cached. Returning a single mutable wrapper
+        # from a cached function would cause its internal intermediate buffer to be shared across
+        # concurrent uses (e.g., multiple threads or overlapping streams), leading to races and
+        # silent data corruption. Instead, we return a small trampoline that constructs a fresh
+        # wrapper on each invocation, so the intermediate buffer is per-call and concurrency-safe.
+        def _wrapped(*args, **kwargs):
+            wrapper = _MoeGemm2ReduceWrapper(
+                gemm2_exe,
+                reduce_exe,
+                topk,
+                model_dim,
+                rdtype,
+            )
+            return wrapper(*args, **kwargs)
+
+        return _wrapped
     mfma_i32_k32 = None
     if is_int8:
         mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(
@@ -2403,7 +2419,12 @@ class _MoeGemm2ReduceWrapper:
                 dtype=self._get_torch_dtype()
             )
             self._intermediate_capacity = required_size
-        # self._intermediate[:tokens * self._topk, :self._model_dim].zero_()  # performance degradation?
+        # Optionally zero the reused portion of the buffer.
+        # Enable via MOE_GEMM2_ZERO_INTERMEDIATE=1 if GEMM2 does not fully overwrite
+        # all elements of this slice (e.g. when accumulate=True), at the cost of
+        # some performance overhead.
+        if os.getenv("MOE_GEMM2_ZERO_INTERMEDIATE", "0") == "1":
+            self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
     def __call__(
