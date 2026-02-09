@@ -297,6 +297,36 @@ def _select_i64_by_lane(lane_i32, vals_i64):
     return out
 
 
+def _load_ptr_from_array(array_base_i64, index_i32):
+    """Load an i64 pointer value from device memory array.
+    
+    Args:
+        array_base_i64: Base address of the pointer array (i64)
+        index_i32: Index into the array (i32)
+    
+    Returns:
+        Loaded pointer value (i64)
+    """
+    from _mlir.dialects import llvm
+    from _mlir.dialects import arith
+    
+    # Calculate offset: index * 8 (each pointer is 8 bytes)
+    # Use ExtUIOp to convert i32 to i64 (unsigned extension)
+    index_i64 = _res(arith.ExtUIOp(_i64(), _res(index_i32)))
+    offset_i64 = _muli(index_i64, _c_i64(8))
+    
+    # Calculate element address: base + offset
+    elem_addr_i64 = _addi(array_base_i64, offset_i64)
+    
+    # Convert i64 address to LLVM pointer
+    ptr_type = ir.Type.parse('!llvm.ptr')
+    elem_ptr = llvm.IntToPtrOp(ptr_type, _res(elem_addr_i64)).result
+    
+    # Load the i64 pointer value
+    loaded = llvm.LoadOp(_i64(), elem_ptr).result
+    return _res(loaded)
+
+
 def _select_memref_by_lane(lane_i32, memrefs):
     """Select one of memrefs[0..7] by lane value via chained arith.select.
     
@@ -1133,7 +1163,8 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 func.ReturnOp([])
 
             # run_2stage_ptr
-            run2p_args = [i32, i32, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
+            # New signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base, tmp_offset, out_ptr
+            run2p_args = [i32, i32, i64, i64, i64, i64, i64]
             run2p_fty = ir.FunctionType.get(run2p_args, [])
             run2p = func.FuncOp("run_2stage_ptr", run2p_fty)
             run2p.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1142,10 +1173,36 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 rank = b2p.arguments[0]
                 grid_x_i32 = b2p.arguments[1]
                 self_sg = b2p.arguments[2]
-                sgs = list(b2p.arguments[3:11])
-                in_ptrs = list(b2p.arguments[11:19])
-                tmp_ptrs = list(b2p.arguments[19:27])
-                out_ptr_i64 = b2p.arguments[27]
+                sg_ptrs_array_base = b2p.arguments[3]
+                in_ptrs_array_base = b2p.arguments[4]
+                tmp_offset = b2p.arguments[5]
+                out_ptr_i64 = b2p.arguments[6]
+                
+                # Load 8 sg_ptrs from device memory array
+                sgs = []
+                for i in range(8):
+                    sg_ptr = _load_ptr_from_array(sg_ptrs_array_base, _c_i32(i))
+                    sgs.append(sg_ptr)
+                
+                # Load 8 in_ptrs from device memory array
+                in_ptrs = []
+                for i in range(8):
+                    in_ptr = _load_ptr_from_array(in_ptrs_array_base, _c_i32(i))
+                    in_ptrs.append(in_ptr)
+                
+                # Compute tmp_ptrs with rotation: tmp_ptrs[i] = sg_ptrs[(rank + i) % world_size] + tmp_offset
+                # This matches the original rotated layout where index i corresponds to target=(rank+i)%ws
+                tmp_ptrs = []
+                for i in range(8):
+                    # Calculate rotated index: (rank + i) % world_size
+                    rank_plus_i = _addi(rank, _c_i32(i))
+                    rotated_idx = _res(arith.RemUIOp(_res(rank_plus_i), _res(_c_i32(world_size))))
+                    # Load sg_ptr at rotated index
+                    sg_ptr_rotated = _load_ptr_from_array(sg_ptrs_array_base, rotated_idx)
+                    # Compute tmp_ptr = sg_ptr + offset
+                    tmp_ptr = _addi(sg_ptr_rotated, tmp_offset)
+                    tmp_ptrs.append(tmp_ptr)
+                
                 gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
                 one = _c_index(1)
                 bx = _c_index(threads)

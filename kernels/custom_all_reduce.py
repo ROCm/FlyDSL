@@ -377,9 +377,30 @@ class FlyDSLAllreduce:
         for i in range(self.world_size, 8):
             self._in_ptrs[i] = int(self._in_ptrs[0])
 
+        # Pre-compute rotated pointer arrays and copy to GPU tensors
+        # Rotated layout (AIter-style): index i corresponds to target=(rank+i)%ws.
+        ws = int(self.world_size)
+        rk = int(self.rank)
+        # Compute rotated in_ptrs (base rotation, index 0 will be updated per call)
+        rotated_in_ptrs_base = [int(self._in_ptrs[(rk + i) % ws]) for i in range(8)]
+        
+        # Copy to GPU tensors (int64 for pointer values) as device memory arrays
+        # sg_ptrs are NOT rotated (passed as-is), tmp_ptrs rotation will be handled in kernel
+        self._gpu_sg_ptrs_array = torch.tensor([int(x) for x in self._sg_ptrs[:8]], dtype=torch.int64, device=self.device)
+        self._gpu_in_ptrs_array = torch.tensor(rotated_in_ptrs_base, dtype=torch.int64, device=self.device)
+        
+        # Store tmp_offset and world_size for computing tmp_ptrs in kernel
+        # tmp_ptrs[i] = sg_ptrs[(rank + i) % world_size] + tmp_offset (rotation handled in kernel)
+        self._tmp_offset = int(self._meta_size)
+
         self._exe_cache = {}
         self._threads = 512  # Match AIter's cross_device_reduce_2stage_write_mode
         self._max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
+        
+        # Compile kernel once during initialization
+        N = int(rank_data.numel())
+        dtype_str = self._dtype_str(rank_data)
+        self._exe = self._compile(N=N, dtype_str=dtype_str)
 
     def close(self):
         # Close mapped peer meta and input handles.
@@ -411,6 +432,7 @@ class FlyDSLAllreduce:
     def _compile(self, *, N: int, dtype_str: str):
         import flydsl
         from kernels.aiter_signal_all_reduce_raw import build_aiter_signal_allreduce_raw_module
+        print("start compile ****************************")
 
         key = (int(N), str(dtype_str), int(self.world_size))
         exe = self._exe_cache.get(key)
@@ -449,7 +471,8 @@ class FlyDSLAllreduce:
             raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
 
         N = int(out.numel())
-        exe = self._compile(N=N, dtype_str=dtype_str)
+        # Get compiled kernel from cache (compiled during __init__)
+        # exe = self._compile(N=N, dtype_str=dtype_str)
         pack_elems = 8 if dtype_str == "f16" else 4
         num_packs = int(N) // int(pack_elems)
         part_p = int(num_packs) // int(self.world_size)
@@ -457,22 +480,17 @@ class FlyDSLAllreduce:
         blocks_2 = max(1, min(int(_AITER_KMAXBLOCKS), (max(1, int(part_p)) + int(self._threads) - 1) // int(self._threads)))
         grid_x = int(blocks_2)
 
-        # Rotated layout (AIter-style): index i corresponds to target=(rank+i)%ws.
-        ws = int(self.world_size)
-        rk = int(self.rank)
-        in_ptrs = [int(self._in_ptrs[(rk + i) % ws]) for i in range(8)]
-        tmp_ptrs = [int(self._tmp_ptrs[(rk + i) % ws]) for i in range(8)]
-        # Ensure index0 uses the current inp pointer.
-        in_ptrs[0] = int(inp.data_ptr())
+        # Update index 0 of in_ptrs_array with current inp pointer
+        self._gpu_in_ptrs_array[0] = int(inp.data_ptr())
         out_ptr = int(out.data_ptr())
 
-        exe.run_2stage_ptr(
+        self._exe.run_2stage_ptr(
             int(self.rank),
             int(grid_x),
             int(self._self_sg),
-            *self._sg_ptrs[:8],
-            *in_ptrs[:8],
-            *tmp_ptrs[:8],
+            int(self._gpu_sg_ptrs_array.data_ptr()),  # sg_ptrs数组首地址
+            int(self._gpu_in_ptrs_array.data_ptr()),  # in_ptrs数组首地址
+            int(self._tmp_offset),  # tmp_offset
             int(out_ptr),
         )
         return out
