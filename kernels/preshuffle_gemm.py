@@ -168,6 +168,9 @@ def compile_preshuffle_gemm_a8(
             )
 
     gpu_arch = get_hip_arch()
+    if use_async_copy and gpu_arch != "gfx950":
+        raise NotImplementedError(f"Async_copy is only supported on gfx950, but got '{gpu_arch}'")
+        
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_pong")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_ping")
     _state = {}
