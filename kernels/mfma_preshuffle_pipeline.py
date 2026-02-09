@@ -66,7 +66,6 @@ def make_preshuffle_b_layout(
     # - NLane stride = KPackElems
     # - KLane stride = NLane * KPackElems = 16 * KPackElems
     # - K0   stride = KLane * NLane * KPackElems = 4 * 16 * KPackElems
-    stride_nlane = c_kpack
     stride_nlane = c_kpack_elems
     stride_klane = c16 * stride_nlane
     stride_k0 = c4 * stride_klane
@@ -81,6 +80,58 @@ def make_preshuffle_b_layout(
     )
     layout_b = flir.make_layout((n0, c_k0, c4, c16, c_kpack_elems), stride=stride_b)
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
+
+
+def make_preshuffle_scale_layout(
+    flir,
+    arith,
+    *,
+    c_mn: ir.Value,
+    c_k: ir.Value,
+    mn_pack: int = 2,
+    k_pack: int = 2,
+    elem_bytes: int = 4,
+    scale_block_size: int = 32,
+) -> object:
+    """Build scale layout matching aiter/CK preshuffle for MXFP4 MFMA kernels.
+    scale dtype is e8m0
+    the scale shuffle to [K_Pack, N_Pack], pack to int32
+
+    Shape: (N1, K1, KLane, NLane, [K_Pack, N_Pack]) = (N/32, K/8, 4, 16, [2, 2])
+    """
+    c16 = arith.constant(16, index=True)
+    c32 = arith.constant(32, index=True)
+    c4 = arith.constant(4, index=True)
+
+    c_mn_pack = arith.constant(mn_pack, index=True)
+    c_k_pack = arith.constant(k_pack, index=True)
+    c_k_scale = c_k / scale_block_size
+
+    c_mn1 = c_mn / c16 / c_mn_pack
+    c_k1 = c_k_scale / c4 / c_k_pack
+
+    # We keep the same 64B K0 "macro-step" used by CK/aiter preshuffle.
+    if elem_bytes != mn_pack * k_pack:
+        raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
+
+    # Strides derived from the layout shape:
+    # - KPack stride = 1
+    # - NLane stride = KPackElems
+    # - KLane stride = NLane * KPackElems = 16 * KPackElems
+    # - K0   stride = KLane * NLane * KPackElems = 4 * 16 * KPackElems
+    stride_nlane = arith.constant(1, index=True)
+    stride_klane = c16
+    stride_k0 = c4 * stride_klane
+    stride_n0 = c_k1 * stride_k0
+
+    stride_b_scale = (
+        stride_n0,      # n0
+        stride_k0,      # k0
+        stride_klane,   # KLane
+        stride_nlane,   # NLane
+    )
+    layout_b = flir.make_layout((c_mn1, c_k1, c4, c16), stride=stride_b_scale)
+    return layout_b
 
 
 def load_b_pack_k32(
@@ -467,6 +518,7 @@ __all__ = [
     "lds_store_8b_xor16",
     "lds_store_16b_xor16",
     "make_preshuffle_b_layout",
+    "make_preshuffle_scale_layout",
     "load_b_pack_k32",
     "tile_chunk_coord_i32",
 ]

@@ -1,6 +1,8 @@
 """FLIR - ROCm Domain Specific Language for layout algebra"""
 
-__version__ = "0.1.0"
+# Base version - git commit is appended at build time by setup.py
+# Format: "0.0.1.dev" or "0.0.1.dev+abc1234" (with git commit)
+__version__ = "0.0.1.dev"
 
 # Setup Python path for embedded MLIR modules
 import sys

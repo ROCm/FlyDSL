@@ -48,6 +48,22 @@ class Types:
         return ir.VectorType.get([16], ir.IntegerType.get_signless(8))
 
     @property
+    def ui8(self) -> ir.Type:
+        return ir.IntegerType.get_unsigned(8)
+    @property
+    def ui8x2(self) -> ir.Type:
+        return ir.VectorType.get([2], ir.IntegerType.get_unsigned(8))
+    @property
+    def ui8x4(self) -> ir.Type:
+        return ir.VectorType.get([4], ir.IntegerType.get_unsigned(8))
+    @property
+    def ui8x8(self) -> ir.Type:
+        return ir.VectorType.get([8], ir.IntegerType.get_unsigned(8))
+    @property
+    def ui8x16(self) -> ir.Type:
+        return ir.VectorType.get([16], ir.IntegerType.get_unsigned(8))
+
+    @property
     def i16(self) -> ir.Type:
         return ir.IntegerType.get_signless(16)
     @property
@@ -71,6 +87,10 @@ class Types:
         return ir.VectorType.get([4], ir.IntegerType.get_signless(32))
 
     @property
+    def ui32(self) -> ir.Type:
+        return ir.IntegerType.get_unsigned(32)
+
+    @property
     def i64(self) -> ir.Type:
         return ir.IntegerType.get_signless(64)
     @property
@@ -80,6 +100,9 @@ class Types:
     @property
     def f16(self) -> ir.Type:
         return ir.F16Type.get()
+    @property
+    def f16x1(self) -> ir.Type:
+        return ir.VectorType.get([1], ir.F16Type.get())
     @property
     def f16x2(self) -> ir.Type:
         return ir.VectorType.get([2], ir.F16Type.get())
@@ -127,6 +150,9 @@ class Types:
     def f8(self) -> ir.Type:
         return _flir_default_f8_type()
     @property
+    def f8x1(self) -> ir.Type:
+        return ir.VectorType.get([1], _flir_default_f8_type())
+    @property
     def f8x2(self) -> ir.Type:
         return ir.VectorType.get([2], _flir_default_f8_type())
     @property
@@ -138,6 +164,41 @@ class Types:
     @property
     def f8x16(self) -> ir.Type:
         return ir.VectorType.get([16], _flir_default_f8_type())
+
+    @property
+    def e8m0(self) -> ir.Type:
+        return Float8E8M0FNUType.get()
+    @property
+    def e8m0x2(self) -> ir.Type:
+        return ir.VectorType.get([2], Float8E8M0FNUType.get())
+    @property
+    def e8m0x4(self) -> ir.Type:
+        return ir.VectorType.get([4], Float8E8M0FNUType.get())
+    @property
+    def e8m0x8(self) -> ir.Type:
+        return ir.VectorType.get([8], Float8E8M0FNUType.get())
+    @property
+    def e8m0x16(self) -> ir.Type:
+        return ir.VectorType.get([16], Float8E8M0FNUType.get())
+
+    @property
+    def f4(self) -> ir.Type:
+        return ir.Float4E2M1FNType.get()
+    @property
+    def f4x2(self) -> ir.Type:
+        return ir.VectorType.get([2], ir.Float4E2M1FNType.get())
+    @property
+    def f4x4(self) -> ir.Type:
+        return ir.VectorType.get([4], ir.Float4E2M1FNType.get())
+    @property
+    def f4x8(self) -> ir.Type:
+        return ir.VectorType.get([8], ir.Float4E2M1FNType.get())
+    @property
+    def f4x16(self) -> ir.Type:
+        return ir.VectorType.get([16], ir.Float4E2M1FNType.get())
+    @property
+    def f4x32(self) -> ir.Type:
+        return ir.VectorType.get([32], ir.Float4E2M1FNType.get())
 
     # ---- Vectors ----
     def vec(self, n: int, elem: ir.Type) -> ir.Type:

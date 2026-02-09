@@ -73,7 +73,10 @@ cmake -G "$GENERATOR" \
     -DLLVM_INSTALL_UTILS=ON \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
     -DPython3_EXECUTABLE=$(which python3) \
-    -Dnanobind_DIR="$NANOBIND_DIR" 
+    -Dnanobind_DIR="$NANOBIND_DIR" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DLLVM_BUILD_LLVM_DYLIB=OFF \
+    -DLLVM_LINK_LLVM_DYLIB=OFF 
 
 # 4. Build
 echo "Starting build with $(nproc) parallel jobs..."

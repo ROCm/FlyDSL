@@ -141,6 +141,8 @@ def c_shuffle_epilog(
             lds_out=lds_out,
         )
 
+    # Ensure all LDS reads finished before the lds write.
+    gpu.barrier()
     default_epilog(
         arith=arith,
         range_constexpr=range_constexpr,
