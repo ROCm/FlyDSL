@@ -36,6 +36,11 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     load_b_pack_w4a16,
     tile_chunk_coord_i32,
+    # Opt 1: split load/unpack for W4A16 latency hiding
+    load_b_raw_w4a16,
+    unpack_b_w4a16,
+    load_b_raw_w4a16_groupwise,
+    unpack_b_w4a16_groupwise,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.kernels_common import stream_ptr_to_async_token
@@ -604,15 +609,15 @@ def compile_moe_gemm1(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    b_tile = []
-                    for ku in range_constexpr(k_unroll):
-                        packs0 = []
-                        packs1 = []
-                        for ni in range_constexpr(num_acc_n):
-                            if is_int4_bf16:
-                                # W4A16: one load provides both b0 and b1
+                    if is_int4_bf16:
+                        # ---- W4A16: 2-phase load+unpack for VMEM latency hiding (Opt 1) ----
+                        # Phase 1: Issue ALL buffer_loads first.
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ni in range_constexpr(num_acc_n):
                                 if use_groupwise_scale:
-                                    b0, b1 = load_b_pack_w4a16_groupwise(
+                                    raw = load_b_raw_w4a16_groupwise(
                                         buffer_ops, flir, arith, vector,
                                         arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
                                         base_k=base_k, ku=ku,
@@ -626,7 +631,7 @@ def compile_moe_gemm1(
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
                                 else:
-                                    b0, b1 = load_b_pack_w4a16(
+                                    raw = load_b_raw_w4a16(
                                         buffer_ops, flir, arith, vector,
                                         arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
                                         base_k=base_k, ku=ku,
@@ -634,15 +639,38 @@ def compile_moe_gemm1(
                                         lane_div_16=lane_div_16, elem_type=w_elem,
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
-                            else:
+                                raw_ku.append(raw)
+                            raw_data.append(raw_ku)
+                        # Phase 2: Unpack ALL (by now early loads have completed).
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0 = []
+                            packs1 = []
+                            for ni in range_constexpr(num_acc_n):
+                                if use_groupwise_scale:
+                                    packed32, scale_val = raw_data[ku][ni]
+                                    b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector)
+                                else:
+                                    b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
+                    else:
+                        # ---- fp8/int8/bf16: original code, completely unchanged ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0 = []
+                            packs1 = []
+                            for ni in range_constexpr(num_acc_n):
                                 ki0 = (ku * 2) + 0
                                 ki1 = (ku * 2) + 1
                                 b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list)
                                 b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list)
-                            packs0.append(b0)
-                            packs1.append(b1)
-                        b_tile.append((packs0, packs1))
-                    return b_tile
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
     
                 acc_gate = [acc_init] * (num_acc_n * m_repeat)
                 acc_up = [acc_init] * (num_acc_n * m_repeat)
@@ -1845,15 +1873,15 @@ def compile_moe_gemm2(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    b_tile = []
-                    for ku in range_constexpr(k_unroll):
-                        packs0 = []
-                        packs1 = []
-                        for ni in range_constexpr(num_acc_n):
-                            if is_int4_bf16:
-                                # W4A16: one load provides both b0 and b1
+                    if is_int4_bf16:
+                        # ---- W4A16: 2-phase load+unpack for VMEM latency hiding (Opt 1) ----
+                        # Phase 1: Issue ALL buffer_loads first.
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ni in range_constexpr(num_acc_n):
                                 if use_groupwise_scale:
-                                    b0, b1 = load_b_pack_w4a16_groupwise(
+                                    raw = load_b_raw_w4a16_groupwise(
                                         buffer_ops, flir, arith, vector,
                                         arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
                                         base_k=base_k, ku=ku,
@@ -1867,7 +1895,7 @@ def compile_moe_gemm2(
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
                                 else:
-                                    b0, b1 = load_b_pack_w4a16(
+                                    raw = load_b_raw_w4a16(
                                         buffer_ops, flir, arith, vector,
                                         arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
                                         base_k=base_k, ku=ku,
@@ -1875,15 +1903,38 @@ def compile_moe_gemm2(
                                         lane_div_16=lane_div_16, elem_type=w_elem,
                                         kpack_bytes=kpack_bytes, act_elem_bytes=elem_bytes,
                                     )
-                            else:
+                                raw_ku.append(raw)
+                            raw_data.append(raw_ku)
+                        # Phase 2: Unpack ALL (by now early loads have completed).
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0 = []
+                            packs1 = []
+                            for ni in range_constexpr(num_acc_n):
+                                if use_groupwise_scale:
+                                    packed32, scale_val = raw_data[ku][ni]
+                                    b0, b1 = unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector)
+                                else:
+                                    b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
+                    else:
+                        # ---- fp8/int8/bf16: original code, completely unchanged ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0 = []
+                            packs1 = []
+                            for ni in range_constexpr(num_acc_n):
                                 ki0 = (ku * 2) + 0
                                 ki1 = (ku * 2) + 1
                                 b0 = load_b_pack(base_k, ki0, ni)
                                 b1 = load_b_pack(base_k, ki1, ni)
-                            packs0.append(b0)
-                            packs1.append(b1)
-                        b_tile.append((packs0, packs1))
-                    return b_tile
+                                packs0.append(b0)
+                                packs1.append(b1)
+                            b_tile.append((packs0, packs1))
+                        return b_tile
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
