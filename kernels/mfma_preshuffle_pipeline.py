@@ -704,9 +704,10 @@ def load_b_pack_w4a16_groupwise(
     elem_type: "ir.Type",
     # Group-wise scale parameters
     scale_rsrc,
-    expert_offset: "ir.Value",  # expert_id * N (for scale indexing)
+    expert_offset: "ir.Value",  # expert_id * N_per_expert (runtime SSA value)
     num_groups: int,  # K // group_size
     group_size: int,
+    n_per_expert: int,  # N per expert (2*inter_dim for stage1, model_dim for stage2)
     kpack_bytes: int = 8,
     act_elem_bytes: int = 2,
 ) -> tuple:
@@ -715,15 +716,16 @@ def load_b_pack_w4a16_groupwise(
     Similar to load_b_pack_w4a16 but applies per-group scale during dequant.
 
     For W4A16 with group_size=G:
-    - scale shape: [E, N, K//G] or equivalently a 1D buffer with proper strides
-    - For each loaded int4, compute k_pos // G to index the correct scale
-    - Apply scale immediately after int4->bf16 conversion
+    - scale layout: [E, K//G, N] (Opt 0: cache-friendly, adjacent threads read adjacent N)
+    - Flat index = expert_offset*(G-1) + n_global + group_idx * N_per_expert
+    - For each loaded int4, compute k_pos // G to index the correct scale group
 
     Args:
-        scale_rsrc: Buffer resource for scale tensor (flattened)
-        expert_offset: NOT USED (n_global already includes expert offset)
-        num_groups: K // group_size
+        scale_rsrc: Buffer resource for scale tensor (flattened [E, K//G, N])
+        expert_offset: expert_id * N_per_expert (SSA value for index computation)
+        num_groups: K // group_size (compile-time constant)
         group_size: Number of K elements sharing one scale value
+        n_per_expert: N dimension per expert (compile-time constant)
 
     Returns:
         (b0, b1): Two i64 values, each containing 4 scaled bf16 for one MFMA.
@@ -810,13 +812,16 @@ def load_b_pack_w4a16_groupwise(
     c_group_size = arith.constant(group_size, index=True)
     group_idx = k_pos_base / c_group_size
 
-    # N position for scale indexing (already includes expert offset)
+    # N position for scale indexing (includes expert offset)
     c16 = arith.constant(16, index=True)
     n_global = n_blk * c16 + n_intra
 
-    # Scale index: n_global * num_groups + group_idx
-    c_num_groups = arith.constant(num_groups, index=True)
-    scale_idx = n_global * c_num_groups + group_idx
+    # Scale index for [E, K//G, N] layout (Opt 0):
+    #   flat_idx = expert_offset * (G-1) + n_global + group_idx * N_per_expert
+    # Proof: e*N*(G-1) + (e*N+n) + g*N = e*G*N + g*N + n  (correct for [E,G,N] flat)
+    c_gm1 = arith.constant(num_groups - 1, index=True)
+    c_npe = arith.constant(n_per_expert, index=True)
+    scale_idx = expert_offset * c_gm1 + n_global + group_idx * c_npe
     scale_idx_i32 = arith.index_cast(i32, scale_idx)
     scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=f32)
 

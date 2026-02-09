@@ -320,7 +320,7 @@ def run_moe_stage1(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
     test_graph: bool = False,
-    # Optional override for pre-built groupwise scale tensor [E, 2*inter_dim, K//group_size].
+    # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
 ):
     assert model_dim % 64 == 0
@@ -415,16 +415,16 @@ def run_moe_stage1(
 
     # --- Groupwise scale for W4A16 ---
     use_groupwise_scale = is_int4_bf16 and group_size > 0
-    scale_w1_groups = None  # [E, 2*inter_dim, K//group_size] for reference
+    scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
     if use_groupwise_scale:
         N_total = 2 * inter_dim
         num_groups_s1 = model_dim // group_size
         if scale_w1_groups_in is not None:
             scale_w1_groups = scale_w1_groups_in
         else:
-            # Generate random groupwise scale (mimics real quantization).
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
             scale_w1_groups = (
-                torch.rand(experts, N_total, num_groups_s1, device=device, dtype=torch.float32)
+                torch.rand(experts, num_groups_s1, N_total, device=device, dtype=torch.float32)
                 * 0.05 + 0.005
             )
         # Prepare scale for kernel (no-op shuffle, returns contiguous).
@@ -458,7 +458,7 @@ def run_moe_stage1(
     else:
         scale_x_1d = scale_x.view(-1).contiguous()  # [tokens]
     if use_groupwise_scale:
-        # Groupwise scale: flatten [E, N, num_groups] -> 1D for kernel memref.
+        # Groupwise scale: flatten [E, num_groups, N] -> 1D for kernel memref.
         scale_w1_1d = scale_w1_prepared.view(-1).contiguous()
     elif scale_w1_flat is None:
         scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
@@ -677,7 +677,7 @@ def run_moe_stage2(
     # Use reduce mode (accumulate=False) instead of atomic mode.
     use_reduce: bool = False,
     test_graph: bool = False,
-    # Optional override for pre-built groupwise scale tensor [E, model_dim, inter_dim//group_size].
+    # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
@@ -807,14 +807,15 @@ def run_moe_stage2(
 
     # --- Groupwise scale for W4A16 (stage 2) ---
     use_groupwise_scale = is_int4_bf16 and group_size > 0
-    scale_w2_groups = None  # [E, model_dim, inter_dim//group_size] for reference
+    scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
     if use_groupwise_scale:
         num_groups_s2 = inter_dim // group_size
         if scale_w2_groups_in is not None:
             scale_w2_groups = scale_w2_groups_in
         else:
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
             scale_w2_groups = (
-                torch.rand(experts, model_dim, num_groups_s2, device=device, dtype=torch.float32)
+                torch.rand(experts, num_groups_s2, model_dim, device=device, dtype=torch.float32)
                 * 0.05 + 0.005
             )
         scale_w2_prepared = shuffle_scale_for_int4(scale_w2_groups, group_size=group_size)

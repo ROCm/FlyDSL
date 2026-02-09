@@ -76,10 +76,10 @@ def benchmark_sglang(
         # sglang shape convention: (E, N, K_packed) where K_packed = K_original // 2
         w1 = torch.randint(0, 256, (experts, N1, K1 // 2), dtype=torch.uint8, device=device).to(torch.int8)
         w2 = torch.randint(0, 256, (experts, N2, K2 // 2), dtype=torch.uint8, device=device).to(torch.int8)
-        # Per-group scale: (E, N, K_original // group_size)
+        # Per-group scale: (E, K_original // group_size, N) -- Opt0 cache-friendly layout
         # NOTE: group_size is in terms of original (unpacked) elements.
-        w1_scale = torch.ones(experts, N1, K1 // group_size, dtype=torch.float32, device=device)
-        w2_scale = torch.ones(experts, N2, K2 // group_size, dtype=torch.float32, device=device)
+        w1_scale = torch.ones(experts, K1 // group_size, N1, dtype=torch.float32, device=device)
+        w2_scale = torch.ones(experts, K2 // group_size, N2, dtype=torch.float32, device=device)
         block_shape = [0, group_size]
     else:
         # bf16 weights (no quantization)

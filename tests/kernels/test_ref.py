@@ -17,7 +17,7 @@ def torch_moe_gemm1(
 
     Args:
         group_size: -1 for per-row scale (uses scale_w1_flat), >0 for group-wise scale.
-        scale_w1_groups: Group-wise scale tensor of shape [E, 2*inter_dim, K//group_size].
+        scale_w1_groups: Group-wise scale tensor of shape [E, K//group_size, 2*inter_dim] (Opt 0 layout).
                          Required when group_size > 0; ignored otherwise.
     """
     tokens, model_dim = x_fp8.shape
@@ -31,12 +31,13 @@ def torch_moe_gemm1(
     x = x_fp8.to(torch.float32) if scale_x is None else (x_fp8.to(torch.float32) * scale_x)
 
     if group_size > 0 and scale_w1_groups is not None:
-        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e,n,k//group_size]
+        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
+        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
         w1 = w1_fp8_flat.to(torch.float32).view(experts, 2 * inter_dim, model_dim)
         num_groups = model_dim // group_size
         for g in range(num_groups):
             k_s, k_e = g * group_size, (g + 1) * group_size
-            w1[:, :, k_s:k_e] *= scale_w1_groups[:, :, g:g + 1]
+            w1[:, :, k_s:k_e] *= scale_w1_groups[:, g, :].unsqueeze(-1)
     else:
         # Per-row dequantization (original path).
         w1 = (
@@ -87,7 +88,7 @@ def torch_moe_gemm2(
 
     Args:
         group_size: -1 for per-row scale (uses scale_w2), >0 for group-wise scale.
-        scale_w2_groups: Group-wise scale tensor of shape [E, model_dim, inter_dim//group_size].
+        scale_w2_groups: Group-wise scale tensor of shape [E, inter_dim//group_size, model_dim] (Opt 0 layout).
                          Required when group_size > 0; ignored otherwise.
     """
     assert a2_fp8.is_cuda and w2_fp8.is_cuda
@@ -102,12 +103,13 @@ def torch_moe_gemm2(
     a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
 
     if group_size > 0 and scale_w2_groups is not None:
-        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e,n,k//group_size]
+        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
+        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
         w2 = w2_fp8.to(torch.float32).view(experts, model_dim, inter_dim)
         num_groups = inter_dim // group_size
         for g in range(num_groups):
             k_s, k_e = g * group_size, (g + 1) * group_size
-            w2[:, :, k_s:k_e] *= scale_w2_groups[:, :, g:g + 1]
+            w2[:, :, k_s:k_e] *= scale_w2_groups[:, g, :].unsqueeze(-1)
     else:
         # Per-row dequantization (original path).
         w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
