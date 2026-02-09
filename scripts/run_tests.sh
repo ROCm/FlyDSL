@@ -171,6 +171,62 @@ else
 fi
 
 
+
+#=============================================================================
+# Part 4b: Extra GPU Tests
+#=============================================================================
+echo "========================================================================"
+echo "Part 4b: Extra Tests (Extra test commands)"
+echo "========================================================================"
+echo ""
+
+if command -v rocm-smi &> /dev/null; then
+    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
+    if [ -n "$GPU_NAME" ]; then
+        echo "GPU detected: $GPU_NAME"
+    else
+        echo "GPU detected (ROCm available)"
+    fi
+    echo ""
+    
+    GPU_EXTRA_TEST_COUNT=0
+    GPU_EXTRA_PASS_COUNT=0
+
+    # Enumerate explicit test commands (each entry is a full command string).
+    GPU_EXTRA_TEST_CMDS=(
+        "python3 tests/kernels/test_moe_gemm.py --reduce"
+    )
+
+    for cmd in "${GPU_EXTRA_TEST_CMDS[@]}"; do
+        GPU_EXTRA_TEST_COUNT=$((GPU_EXTRA_TEST_COUNT + 1))
+        test_name="extra_$GPU_EXTRA_TEST_COUNT"
+        echo "Running: ${cmd}"
+        sh -c "${cmd}" > /tmp/${test_name}.log 2>&1
+        if [ $? -eq 0 ]; then
+            echo "   PASS"
+            GPU_EXTRA_PASS_COUNT=$((GPU_EXTRA_PASS_COUNT + 1))
+            if grep -q "TFLOPS" /tmp/${test_name}.log; then
+                grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+            fi
+            if grep -q "Bandwidth:" /tmp/${test_name}.log; then
+                grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+            fi
+        else
+            echo "   FAIL"
+            echo "      Log: /tmp/${test_name}.extra.log"
+        fi
+    done
+
+    echo ""
+    echo "Extra GPU Tests: $GPU_EXTRA_PASS_COUNT/$GPU_EXTRA_TEST_COUNT passed"
+else
+    echo "No GPU detected (ROCm not found)"
+    echo "   Skipping extra GPU tests"
+    echo ""
+    GPU_EXTRA_TEST_COUNT=0
+    GPU_EXTRA_PASS_COUNT=0
+fi
+
 #=============================================================================
 # Part 5: GPU Execution Tests With HIPGraph Mode (Real GPU kernels)
 #=============================================================================
@@ -245,24 +301,32 @@ echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 if command -v rocm-smi >/dev/null 2>&1; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
     echo "GPU HIPGraph Execution Tests:    $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
+    echo "Extra GPU Tests:                 $GPU_EXTRA_PASS_COUNT/$GPU_EXTRA_TEST_COUNT passed"
 else
     echo "GPU Execution Tests:             Skipped (no GPU)"
     echo "GPU HIPGraph Execution Tests:    Skipped (no GPU)"
+    echo "Extra GPU Tests:                 Skipped (no GPU)"
 fi
 
 if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
-    echo ""
-    echo ""
-    echo "Verified Capabilities:"
-    echo "  * Flir IR generation and lowering"
+        echo ""
+        echo ""
+        echo "Verified Capabilities:"
+        echo "  * Flir IR generation and lowering"
     echo "  * GPU kernel compilation and execution (MLIR → HSACO)"
-    echo ""
-    exit 0
-else
+        echo ""
+        exit 0
+    else
     if command -v rocm-smi >/dev/null 2>&1; then
         echo ""
         if [ $GPU_PASS_COUNT -ne $GPU_TEST_COUNT ]; then
             echo "Some GPU tests failed"
+        fi
+        if [ $GPU_EXTRA_PASS_COUNT -ne $GPU_EXTRA_TEST_COUNT ]; then
+            echo "Some extra GPU tests failed"
+        fi
+        if [ $GPU_GRAPH_PASS_COUNT -ne $GPU_GRAPH_TEST_COUNT ]; then
+            echo "Some GPU HIPGraph tests failed"
         fi
         exit 1
     else

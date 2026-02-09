@@ -1099,6 +1099,7 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
+        test_graph=test_graph,
     )
 
     if w_fp4_kernel:
@@ -1143,6 +1144,7 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
         use_reduce=bool(use_reduce),
+        test_graph=test_graph,
     )
 
 
