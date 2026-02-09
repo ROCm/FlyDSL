@@ -2494,7 +2494,6 @@ def compile_moe_reduction(
                 stream_ptr: lambda: T.i64(),  # PyTorch stream pointer (runtime)
             ):
                 from flydsl.dialects.ext import arith as arith_ext
-                from flydsl.kernels.kernels_common import stream_ptr_to_async_token
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
@@ -2670,7 +2669,6 @@ def compile_moe_reduction(
                 stream_ptr: lambda: T.i64(),  # PyTorch stream pointer (runtime)
             ):
                 from flydsl.dialects.ext import arith as arith_ext
-                from flydsl.kernels.kernels_common import stream_ptr_to_async_token
                 c1 = arith.as_value(arith_ext.index(1))
                 gx = arith.as_value(m_tokens)
                 bx = arith.as_value(arith_ext.index(BLOCK_SIZE))
