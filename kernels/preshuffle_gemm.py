@@ -984,10 +984,6 @@ def compile_preshuffle_gemm_a8(
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # Async-copy path can have different DS-read behavior; explicitly disable
-                # rocdl.sched_dsrd(1) hints while keeping the preload (sched_dsrd(2)).
-                enable_dsrd_1 = not use_async_copy
-
                 # DS-read preload (CK default is 2).
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
@@ -996,7 +992,7 @@ def compile_preshuffle_gemm_a8(
                 rocdl.sched_mfma(1)
                 if tile_m == 16:
                     rocdl.sched_vmem(1)
-                if enable_dsrd_1 and (num_acc_n < 4):
+                if num_acc_n < 4:
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(1)
                     if tile_m == 16:
@@ -1016,10 +1012,9 @@ def compile_preshuffle_gemm_a8(
                 for sche_i in range_constexpr(sche_iters):
                     rocdl.sched_vmem(1)
                     rocdl.sched_mfma(mfma_group)
-                    if enable_dsrd_1:
-                        rocdl.sched_dsrd(1)
+                    rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
+                    if (not use_async_copy) and (sche_i >= dswr_start - 1):
                         rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
 
