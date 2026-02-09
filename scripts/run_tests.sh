@@ -309,14 +309,14 @@ else
 fi
 
 if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
-        echo ""
-        echo ""
-        echo "Verified Capabilities:"
-        echo "  * Flir IR generation and lowering"
+    echo ""
+    echo ""
+    echo "Verified Capabilities:"
+    echo "  * Flir IR generation and lowering"
     echo "  * GPU kernel compilation and execution (MLIR → HSACO)"
-        echo ""
-        exit 0
-    else
+    echo ""
+    exit 0
+else
     if command -v rocm-smi >/dev/null 2>&1; then
         echo ""
         if [ $GPU_PASS_COUNT -ne $GPU_TEST_COUNT ]; then
