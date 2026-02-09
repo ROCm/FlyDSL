@@ -65,8 +65,6 @@ except Exception:
 from kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
-    compile_moe_gemm2_ex,
-    MoeGemm2Mode,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -417,7 +415,6 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    from kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -1167,8 +1164,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
-            # Use unified implementation with FlyDSL reduce kernel
-            return compile_moe_gemm2_ex(
+            return compile_moe_gemm2(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
                 experts=experts,
@@ -1179,7 +1175,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
                 out_dtype=out_dtype,
-                mode=MoeGemm2Mode.REDUCE,
+                reduce=True,
             )
         else:
             # Use torch.sum for reduction (baseline comparison)

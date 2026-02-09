@@ -36,6 +36,7 @@ from kernels.mfma_preshuffle_pipeline import (
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.kernels_common import stream_ptr_to_async_token
+from kernels.moe_reduce import compile_moe_reduction
 
 
 @functools.lru_cache(maxsize=1024)
@@ -1136,8 +1137,17 @@ def compile_moe_gemm2(
     # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
     # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
+    # When True, automatically set accumulate=False, compile a reduce kernel, and return
+    # a fused callable that runs GEMM2 → reduce.  The returned callable has the *same*
+    # positional calling convention as the plain GEMM2 executable, so callers need no changes.
+    reduce: bool = False,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
+
+    When ``reduce=True`` the returned callable transparently runs two GPU launches:
+    1. GEMM2 (non-atomic) writing per-slot results to an internal buffer
+    2. Reduction kernel summing over the topk dimension
+    Callers use the exact same call signature in both cases.
 
     in_dtype:
       - "fp8": A2/W are fp8
@@ -1170,6 +1180,20 @@ def compile_moe_gemm2(
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_int4
+
+    # reduce mode: compile GEMM2(accumulate=False) + reduce
+    if reduce:
+        gemm2_exe = compile_moe_gemm2(
+            model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            doweight_stage2=doweight_stage2,
+            in_dtype=in_dtype, out_dtype=out_dtype,
+            use_cshuffle_epilog=use_cshuffle_epilog,
+            accumulate=False, reduce=False,
+        )
+        rdtype = "f32" if out_is_f32 else "bf16" if out_is_bf16 else "f16"
+        reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=rdtype)
+        return _MoeGemm2ReduceWrapper(gemm2_exe, reduce_exe, topk, model_dim, rdtype)
 
     mfma_i32_k32 = None
     if is_int8:
@@ -2379,6 +2403,7 @@ class _MoeGemm2ReduceWrapper:
                 dtype=self._get_torch_dtype()
             )
             self._intermediate_capacity = required_size
+        # self._intermediate[:tokens * self._topk, :self._model_dim].zero_()  # performance degradation?
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
     def __call__(
@@ -2462,72 +2487,26 @@ def compile_moe_gemm2_ex(
     Returns:
         Compiled executable (either wrapped or raw depending on mode).
     """
-    # Determine actual mode
-    actual_mode = mode
+    # Resolve auto mode.
     if mode == MoeGemm2Mode.AUTO:
-        # TODO: Autotuning-based kernel selection
-        # The current implementation uses static rule matching to select between
-        # atomic and reduce modes. A more robust approach would be to perform
-        # runtime autotuning during compilation.
-        if tokens_hint is not None and _should_use_reduce_mode(
-            tokens_hint, topk, model_dim, reduce_rules
-        ):
-            actual_mode = MoeGemm2Mode.REDUCE
-        else:
-            actual_mode = MoeGemm2Mode.ATOMIC
-
-    # Compile based on mode
-    if actual_mode == MoeGemm2Mode.REDUCE:
-        # Compile GEMM2 with accumulate=False
-        gemm2_exe = compile_moe_gemm2(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=experts,
-            topk=topk,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
-            out_dtype=out_dtype,
-            use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=False,
-        )
-        # Compile reduction kernel
-        out_s = str(out_dtype).strip().lower()
-        if out_s in ("f16", "fp16", "half"):
-            dtype_str = "f16"
-        elif out_s in ("bf16", "bfloat16"):
-            dtype_str = "bf16"
-        else:
-            dtype_str = "f32"
-
-        from kernels.moe_reduce import compile_moe_reduction
-        reduce_exe = compile_moe_reduction(
-            topk=topk,
-            model_dim=model_dim,
-            dtype_str=dtype_str,
-        )
-        return _MoeGemm2ReduceWrapper(
-            gemm2_exe=gemm2_exe,
-            reduce_exe=reduce_exe,
-            topk=topk,
-            model_dim=model_dim,
-            out_dtype_str=dtype_str,
+        use_reduce = (
+            tokens_hint is not None
+            and _should_use_reduce_mode(tokens_hint, topk, model_dim, reduce_rules)
         )
     else:
-        # Compile GEMM2 with accumulate=True (atomic mode)
-        return compile_moe_gemm2(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=experts,
-            topk=topk,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
-            out_dtype=out_dtype,
-            use_cshuffle_epilog=use_cshuffle_epilog,
-            accumulate=True,
-        )
+        use_reduce = (mode == MoeGemm2Mode.REDUCE)
+
+    return compile_moe_gemm2(
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage2=doweight_stage2,
+        in_dtype=in_dtype,
+        out_dtype=out_dtype,
+        use_cshuffle_epilog=use_cshuffle_epilog,
+        reduce=use_reduce,
+    )
