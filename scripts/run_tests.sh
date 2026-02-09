@@ -213,7 +213,7 @@ if command -v rocm-smi &> /dev/null; then
             fi
         else
             echo "   FAIL"
-            echo "      Log: /tmp/${test_name}.extra.log"
+            echo "      Log: /tmp/${test_name}.log"
         fi
     done
 
@@ -308,7 +308,10 @@ else
     echo "Extra GPU Tests:                 Skipped (no GPU)"
 fi
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
+if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && \
+   [ $GPU_EXTRA_PASS_COUNT -eq $GPU_EXTRA_TEST_COUNT ] && \
+   [ $GPU_GRAPH_PASS_COUNT -eq $GPU_GRAPH_TEST_COUNT ] && \
+   [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"
