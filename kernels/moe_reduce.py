@@ -67,6 +67,8 @@ def compile_moe_reduction(
     USE_NONTEMPORAL = True
     VEC_ALIGN = 16
 
+    assert model_dim % VEC_WIDTH == 0, f"Unsupported model_dim: {model_dim} (must be divisible by {VEC_WIDTH})"
+
     _state = {}
 
     class _MoeReduction(flir.MlirModule):

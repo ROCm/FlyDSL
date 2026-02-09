@@ -1211,6 +1211,7 @@ def compile_moe_gemm2(
             return wrapper(*args, **kwargs)
 
         return _wrapped
+
     mfma_i32_k32 = None
     if is_int8:
         mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(
@@ -2420,10 +2421,10 @@ class _MoeGemm2ReduceWrapper:
             )
             self._intermediate_capacity = required_size
         # Optionally zero the reused portion of the buffer.
-        # Enable via MOE_GEMM2_ZERO_INTERMEDIATE=1 if GEMM2 does not fully overwrite
+        # Enable via FLYDSL_MOE_GEMM2_ZERO_INTERMEDIATE=1 if GEMM2 does not fully overwrite
         # all elements of this slice (e.g. when accumulate=True), at the cost of
         # some performance overhead.
-        if os.getenv("MOE_GEMM2_ZERO_INTERMEDIATE", "0") == "1":
+        if os.getenv("FLYDSL_MOE_GEMM2_ZERO_INTERMEDIATE", "0") == "1":
             self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
         return self._intermediate[:tokens * self._topk, :self._model_dim]
 
