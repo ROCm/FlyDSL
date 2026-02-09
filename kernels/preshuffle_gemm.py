@@ -688,7 +688,7 @@ def compile_preshuffle_gemm_a8(
                         
                         # Get LDS pointer from the specific buffer (no offset needed - separate allocations)
                         lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + idx_lds
-                        lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr) // 1024 * 1024)
+                        lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
                     else:
                         lds_ptr_i64_lane0 += 1024 * 4
                     lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_i64_lane0, address_space=3)
@@ -701,16 +701,6 @@ def compile_preshuffle_gemm_a8(
                     
                     rocdl.raw_ptr_buffer_load_lds(a_rsrc, lds_ptr, arith.unwrap(size_i32), arith.unwrap(global_offset), 
                                                 arith.unwrap(soffset), arith.unwrap(offset_imm), arith.unwrap(aux))
-                    
-                    # check lds data (correctness) convert data to float32 for printing
-                    # if bx == 0 and by == 0 and i == 0 and tx <= 64:
-                    #     loaded_val = vector.load_op(_vec16_type(), lds_a, [idx_lds_total])
-                    #     global_val = vector.load_op(_vec16_type(), arg_a, [global_byte_offset])
-                    #     for vi in range_constexpr(1):
-                    #         elem = vector.extract(loaded_val, static_position=[vi], dynamic_position=[])
-                    #         g_elem = vector.extract(global_val, static_position=[vi], dynamic_position=[])
-                    #         flir.printf("lds_base = %d, i = %d, tx = %d, vi = %d, lds_elem = %d, global_elem = %d, idx_lds_total = %d, global_byte_offset = %d, lds_ptr = %p, lds_ptr_i64_lane0 = %d\n", 
-                    #                     lds_base, i, tx, vi, elem, g_elem, idx_lds_total, global_byte_offset, lds_ptr_i64, lds_ptr_i64_lane0)
 
             def prefetch_a_to_lds(base_k, lds_buffer):
                 """Load A tile from global memory to LDS via DMA.
