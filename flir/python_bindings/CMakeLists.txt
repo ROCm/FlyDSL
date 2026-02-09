@@ -105,7 +105,17 @@ if(FLIR_BUILD_THIN_JIT_RUNTIME)
     set_target_properties(FlirJitRuntime PROPERTIES
       OUTPUT_NAME "flir_jit_runtime"
       LIBRARY_OUTPUT_DIRECTORY "${_flir_embedded_mlir_runtime_dir}"
+      CXX_VISIBILITY_PRESET hidden
+      C_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON
     )
+
+    # Hide symbols
+    if(UNIX AND NOT APPLE)
+      target_link_options(FlirJitRuntime PRIVATE
+        "LINKER:--exclude-libs,ALL"
+      )
+    endif()
 
     # Ensure the thin runtime is staged when building FlirPythonCAPI (flir/build.sh).
     add_dependencies(FlirPythonCAPI FlirJitRuntime)
@@ -154,3 +164,5 @@ endif()
 # NOTE: Pure Python sources (flydsl package) are NOT copied to the build directory.
 # Use `pip install -e .` which reads flydsl directly from flydsl/src/ and
 # _mlir from the build output (python_packages/flydsl/_mlir).
+
+add_subdirectory(flir_ir)
