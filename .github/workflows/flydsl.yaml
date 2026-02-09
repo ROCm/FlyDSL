@@ -23,7 +23,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runners: [ 'flydsl-mi325-1gpu', 'flydsl-mi355-1gpu' ]
+        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1' ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
