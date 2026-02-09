@@ -38,21 +38,21 @@ from kernels.mfma_epilogues import mfma_epilog
 
 def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
     """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
-    
+
     This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
     attribute to gpu.func operations marked as kernels.
-    
+
     Args:
         mlir_module: MLIR module containing GPU kernels
         waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
     """
     if waves_per_eu is None:
         return
-    
+
     w = int(waves_per_eu)
     if w < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {w}")
-    
+
     try:
         # Get the context from the module
         with mlir_module.context:
@@ -61,19 +61,19 @@ def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
                 # Look for gpu.module operations
                 if getattr(op, "OPERATION_NAME", None) != "gpu.module":
                     continue
-                
+
                 # gpu.module has a single region with a single block
                 gpu_module_region = op.regions[0]
-                
+
                 # Within gpu.module, find gpu.func operations with gpu.kernel attribute
                 for inner_op in gpu_module_region.blocks[0].operations:
                     if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
                         continue
-                    
+
                     # Only apply to kernel functions (not device functions)
                     if "gpu.kernel" not in inner_op.attributes:
                         continue
-                    
+
                     # Add or append to the 'rocdl.waves_per_eu' attribute
                     # This attribute is read by the ROCDL conversion pass
                     inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
@@ -98,8 +98,6 @@ def compile_preshuffle_gemm_a8(
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = False,
-    # Threadblock swizzling
-    swizzle_log: int = 0,
     # Occupancy control
     waves_per_eu: int = None,
     # Memory transfer options
@@ -118,12 +116,6 @@ def compile_preshuffle_gemm_a8(
           - 2: ping-pong LDS for A (2 LDS buffers), tuned schedule (original).
           - 1: single LDS buffer for A .
         use_cshuffle_epilog: Enable cross-shuffle epilogue for better cache behavior.
-        swizzle_log: Log2 of the swizzle size for threadblock remapping.
-          - 0: No swizzling (default, linear block mapping)
-          - 1: 2x2 tile swizzle
-          - 2: 4x4 tile swizzle
-          - 3: 8x8 tile swizzle, etc.
-          Higher values improve L2 cache locality for large GEMMs.
         waves_per_eu: Number of wavefronts per execution unit (occupancy hint).
           - None: No hint, use default occupancy (default)
           - 1-4: Limit occupancy to improve register/LDS availability per wave
@@ -171,7 +163,7 @@ def compile_preshuffle_gemm_a8(
     gpu_arch = get_hip_arch()
     if use_async_copy and gpu_arch != "gfx950":
         raise NotImplementedError(f"Async_copy is only supported on gfx950, but got '{gpu_arch}'")
-        
+
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_pong")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_ping")
     _state = {}
@@ -246,13 +238,13 @@ def compile_preshuffle_gemm_a8(
             #
             # For 2-stage pipeline: create separate ping/pong allocations for no-alias optimization
             # For 1-stage pipeline: single buffer allocation
-            # 
+            #
             # IMPORTANT: When CShuffle is enabled, lds_out REUSES one of the A buffers (they are
             # dead after mainloop). This saves LDS memory.
-            
+
             lds_tile_bytes = int(tile_m) * int(lds_stride_bytes)
             lds_out_bytes = 2 * int(tile_m) * int(tile_n) if use_cshuffle_epilog else 0
-            
+
             if int(lds_stage) == 2:
                 # Separate ping/pong buffers for no-alias guarantee
                 # Size each buffer to fit max(A_tile, CShuffle_output) to enable reuse
@@ -266,7 +258,7 @@ def compile_preshuffle_gemm_a8(
                 lds_total_bytes = max(lds_tile_bytes, lds_out_bytes)
                 lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
                 _state["lds_a_decl"] = allocator_pong.allocate_array(_elem_type(), lds_total_elems)
-            
+
             allocator_pong.finalize()
             allocator_ping.finalize()
 
@@ -325,63 +317,28 @@ def compile_preshuffle_gemm_a8(
             bx = gpu.block_id("x")
             by = gpu.block_id("y")
 
-            # Threadblock swizzling: remap (bx, by) to improve L2 cache locality
-            # Standard pattern: divide grid into tiles of size (swizzle_size x swizzle_size)
-            # and traverse tiles in a more cache-friendly order.
-            if swizzle_log > 0:
-                swizzle_size = arith.constant(1 << swizzle_log, index=True)
-                
-                # Compute grid dimensions (needed for swizzle math)
-                tile_m_const = arith.constant(tile_m, index=True)
-                tile_n_const = arith.constant(tile_n, index=True)
-                one_idx = arith.constant(1, index=True)
-                
-                # grid_x = ceildiv(M, tile_m), grid_y = N / tile_n
-                grid_x = (c_m + tile_m_const - one_idx) / tile_m_const
-                grid_y = c_n / tile_n_const
-                
-                # Linear block ID
-                linear_blk_id = by * grid_x + bx
-                
-                # Swizzle pattern: tile the grid into (swizzle_size x swizzle_size) blocks
-                # Each "super-tile" contains swizzle_size^2 blocks arranged for better locality
-                blocks_per_tile = swizzle_size * swizzle_size
-                tile_id = linear_blk_id / blocks_per_tile
-                in_tile_id = linear_blk_id % blocks_per_tile
-                
-                # Within each tile: map linear ID to 2D using row-major order
-                tile_x = in_tile_id % swizzle_size
-                tile_y = in_tile_id / swizzle_size
-                
-                # Compute which super-tile we're in (in 2D grid of super-tiles)
-                swizzled_grid_x = (grid_x + swizzle_size - one_idx) / swizzle_size
-                super_tile_x = tile_id % swizzled_grid_x
-                super_tile_y = tile_id / swizzled_grid_x
-                
-                # Final swizzled block coordinates
-                bx = super_tile_x * swizzle_size + tile_x
-                by = super_tile_y * swizzle_size + tile_y
-
-
             base_ptr, base_ptr1 = allocator_pong.get_base(), allocator_ping.get_base()
-            
+
             # Get LDS pointers based on pipeline stage
             if lds_stage == 2:
                 # Separate ping/pong buffers - compiler knows they don't alias!
                 lds_a_pong_ptr = _state["lds_a_pong"](base_ptr)
                 lds_a_ping_ptr = _state["lds_a_ping"](base_ptr1)
-                
+
                 # View as fp8/int8 arrays for A tiles
                 # The buffer size is max(tile_bytes, out_bytes) but we just need tile_m*tile_k elements
-                lds_a_pong = SmemPtr(base_ptr, lds_a_pong_ptr.byte_offset, _elem_type(), 
-                                     shape=(tile_m * tile_k,)).get()
-                lds_a_ping = SmemPtr(base_ptr1, lds_a_ping_ptr.byte_offset, _elem_type(), 
-                                     shape=(tile_m * tile_k,)).get()
-                
+                lds_a_pong = SmemPtr(
+                    base_ptr, lds_a_pong_ptr.byte_offset, _elem_type(), shape=(tile_m * tile_k,)
+                ).get()
+                lds_a_ping = SmemPtr(
+                    base_ptr1, lds_a_ping_ptr.byte_offset, _elem_type(), shape=(tile_m * tile_k,)
+                ).get()
+
                 # CShuffle output buffer: REUSE pong buffer (A tiles are dead after mainloop)
                 if use_cshuffle_epilog:
-                    lds_out = SmemPtr(base_ptr, lds_a_pong_ptr.byte_offset, T.f16, 
-                                     shape=(tile_m * tile_n,)).get()
+                    lds_out = SmemPtr(
+                        base_ptr, lds_a_pong_ptr.byte_offset, T.f16, shape=(tile_m * tile_n,)
+                    ).get()
                 else:
                     lds_out = None
             else:
@@ -672,43 +629,50 @@ def compile_preshuffle_gemm_a8(
             # DMA async version: direct global-to-LDS transfer
             def dma_a_tile_to_lds(base_k_div4, lds_buffer):
                 from _mlir.dialects import llvm, memref as memref_dialect
-                
+
                 # GFX942 doesn't support 16B buffer_load_lds, use 4B per operation
                 # GFX950+ (MI355) supports 16B
                 use_16b_dma = str(gpu_arch).startswith("gfx95")
                 dma_bytes = 16 if use_16b_dma else 4
-                
+
                 for i in range_constexpr(num_a_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                     col_a_local_sw = flir.swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
                     row_a_global = bx_m + row_a_local
                     coord_a_g = flir.make_coord(row_a_global, base_k_div4 * c4 + col_a_local_sw)
                     global_offset = arith.index_cast(T.i32, flir.crd2idx(coord_a_g, layout_a))
-                    
-                    if i == 0:            
+
+                    if i == 0:
                         col_local_bytes = (col_a_local_i32 * c4)
                         coord_lds = flir.make_coord(row_a_local, col_local_bytes)
                         idx_lds = flir.crd2idx(coord_lds, layout_lds)
-                        
+
                         # Get LDS pointer from the specific buffer (no offset needed - separate allocations)
                         lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + idx_lds
                         lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
                     else:
                         lds_ptr_i64_lane0 += 1024 * 4
                     lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_i64_lane0, address_space=3)
-                    
+
                     # DMA from global to LDS using buffer_load_lds
                     size_i32 = arith.constant(dma_bytes, type=T.i32)
                     soffset = arith.constant(0, type=T.i32)
                     offset_imm = arith.constant(0, type=T.i32)
                     aux = arith.constant(1, type=T.i32)
-                    
-                    rocdl.raw_ptr_buffer_load_lds(a_rsrc, lds_ptr, arith.unwrap(size_i32), arith.unwrap(global_offset), 
-                                                arith.unwrap(soffset), arith.unwrap(offset_imm), arith.unwrap(aux))
+
+                    rocdl.raw_ptr_buffer_load_lds(
+                        a_rsrc,
+                        lds_ptr,
+                        arith.unwrap(size_i32),
+                        arith.unwrap(global_offset),
+                        arith.unwrap(soffset),
+                        arith.unwrap(offset_imm),
+                        arith.unwrap(aux),
+                    )
 
             def prefetch_a_to_lds(base_k, lds_buffer):
                 """Load A tile from global memory to LDS via DMA.
-                
+
                 Args:
                     base_k: Starting K coordinate
                     lds_buffer: The specific LDS buffer (lds_a_ping or lds_a_pong) to write to
@@ -782,7 +746,7 @@ def compile_preshuffle_gemm_a8(
                         for mi in range_constexpr(m_repeat):
                             mi_val = arith.constant(mi * 16, index=True)
                             curr_row_a_lds = row_a_lds + mi_val
-                            
+
                             # if (mi == 0) and bx == 0 and by == 0:
                             #     flir.printf("mfma_scale_128: ku0=%d, ku1=%d, col_base0=%d, col_base1=%d\n", ku0, ku1, col_base0, col_base1)
 
@@ -1016,48 +980,47 @@ def compile_preshuffle_gemm_a8(
                 # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                 # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
                 mfma_group = num_acc_n
-                # mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                mfma_total = 2 * m_repeat * mfma_group
+                mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # # DS-read preload (CK default is 2).
-                # rocdl.sched_dsrd(2)
-                # rocdl.sched_mfma(1)
-                # if tile_m == 16:
-                #     rocdl.sched_vmem(1)
-                # rocdl.sched_mfma(1)
-                # if tile_m == 16:
-                #     rocdl.sched_vmem(1)
-                # if num_acc_n < 4:
-                #     rocdl.sched_dsrd(1)
-                #     rocdl.sched_mfma(1)
-                #     if tile_m == 16:
-                #         rocdl.sched_vmem(1)
-                #     rocdl.sched_dsrd(1)
-                #     rocdl.sched_mfma(1)
-                #     if tile_m == 16:
-                #         rocdl.sched_vmem(1)
-                #     rocdl.sched_mfma(1)
+                # Async-copy path can have different DS-read behavior; explicitly disable
+                # rocdl.sched_dsrd(1) hints while keeping the preload (sched_dsrd(2)).
+                enable_dsrd_1 = not use_async_copy
 
-                # # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                # dswr_tail = num_a_loads
-                # if dswr_tail > sche_iters:
-                #     dswr_tail = sche_iters
-                # dswr_start = sche_iters - dswr_tail
+                # DS-read preload (CK default is 2).
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                if tile_m == 16:
+                    rocdl.sched_vmem(1)
+                rocdl.sched_mfma(1)
+                if tile_m == 16:
+                    rocdl.sched_vmem(1)
+                if enable_dsrd_1 and (num_acc_n < 4):
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
 
-                # flir.print("hot_loop_scheduler: mfma_total=%d, sche_iters=%d\n", mfma_total, sche_iters)
+                # DS-write hints near the end: match total A LDS-store micro-ops per thread.
+                dswr_tail = num_a_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+
                 for sche_i in range_constexpr(sche_iters):
                     rocdl.sched_vmem(1)
-                    # rocdl.sched_dsrd(2)
-                    for _ in range_constexpr(mfma_group):
+                    rocdl.sched_mfma(mfma_group)
+                    if enable_dsrd_1:
                         rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(1)
-                    for _ in range_constexpr(mfma_group):
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(1)
-                    # if sche_i >= dswr_start - 1:
-                    #     rocdl.sched_dswr(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
@@ -1108,7 +1071,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_pong = None
 
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
 
                         # Cross-tile prefetch for the ping tile we are about to compute.
@@ -1126,7 +1089,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_ping = None
 
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
 
                         # Cross-tile prefetch for the next pong tile.
@@ -1152,11 +1115,11 @@ def compile_preshuffle_gemm_a8(
                             accs, b_tile_pong, lds_a_pong, a0_prefetch=a0_prefetch_pong
                         )
                         a0_prefetch_pong = None
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
 
                         a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
-                        
+
                         next_k2 = k_iv + tile_k * 2
                         b_tile_pong = prefetch_b_tile(next_k2)
                         if use_async_copy:
@@ -1168,7 +1131,7 @@ def compile_preshuffle_gemm_a8(
                         )
                         a0_prefetch_ping = None
 
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
 
                         a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
@@ -1270,11 +1233,11 @@ def compile_preshuffle_gemm_a8(
             )
 
     m = _GEMM()
-    
+
     # Apply waves_per_eu hint if specified (before final compilation)
     if waves_per_eu is not None:
         _apply_waves_per_eu_hint(m.module, waves_per_eu)
-    
+
     return flydsl.compile(
         m,
         use_bare_ptr_memref_call_conv=False,
