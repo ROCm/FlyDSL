@@ -691,7 +691,7 @@ def compile_preshuffle_gemm_a8(
                         lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr) // 1024 * 1024)
                     else:
                         lds_ptr_i64_lane0 += 1024 * 4
-                    lds_ptr = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), arith.unwrap(lds_ptr_i64_lane0))
+                    lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_i64_lane0, address_space=3)
                     
                     # DMA from global to LDS using buffer_load_lds
                     size_i32 = arith.constant(dma_bytes, type=T.i32)
