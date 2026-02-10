@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
+from .ast_rewriter import ASTRewriter
 from .protocol import extract_ir_values, get_ir_types, new_from_ir_values
 
 # =============================================================================
@@ -283,7 +284,7 @@ class KernelFunction:
     """
 
     def __init__(self, func: Callable, some_args=None):
-        self._func = func
+        self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)

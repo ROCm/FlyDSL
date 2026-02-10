@@ -17,6 +17,14 @@ from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
 
 
+def const_expr(x):
+    return x
+
+
+def range_constexpr(*args):
+    raise ValueError("range_constexpr should be process by AST rewriter")
+
+
 def make_int32(value):
     return fly.make_int32(value)
 
