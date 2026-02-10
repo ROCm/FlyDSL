@@ -1,5 +1,5 @@
 from .._mlir import ir
-from .._mlir.dialects import arith, fly, gpu
+from .._mlir.dialects import arith, fly
 from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
@@ -15,67 +15,6 @@ from .._mlir.dialects.fly import (
 )
 from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
-
-
-class classproperty(property):
-    def __get__(self, owner_self, owner_cls):
-        return self.fget(owner_cls)
-
-
-class block_idx:
-    @classproperty
-    def x(cls):
-        return gpu.block_id("x")
-
-    @classproperty
-    def y(cls):
-        return gpu.block_id("y")
-
-    @classproperty
-    def z(cls):
-        return gpu.block_id("z")
-
-
-class block_dim:
-    @classproperty
-    def x(cls):
-        return gpu.block_dim("x")
-
-    @classproperty
-    def y(cls):
-        return gpu.block_dim("y")
-
-    @classproperty
-    def z(cls):
-        return gpu.block_dim("z")
-
-
-class thread_idx:
-    @classproperty
-    def x(cls):
-        return gpu.thread_id("x")
-
-    @classproperty
-    def y(cls):
-        return gpu.thread_id("y")
-
-    @classproperty
-    def z(cls):
-        return gpu.thread_id("z")
-
-
-class grid_dim:
-    @classproperty
-    def x(cls):
-        return gpu.grid_dim("x")
-
-    @classproperty
-    def y(cls):
-        return gpu.grid_dim("y")
-
-    @classproperty
-    def z(cls):
-        return gpu.grid_dim("z")
 
 
 def make_int32(value):
