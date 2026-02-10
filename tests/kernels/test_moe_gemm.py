@@ -199,6 +199,18 @@ RoutingBuffers = Tuple[
 ]
 
 
+def get_topk_valid_mask(topk_ids: torch.Tensor, expert_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Build valid_mask [tokens, topk] for (optional) EP-style masking.
+
+    Mirrors `aiter.fused_moe.get_topk_valid_mask` semantics:
+    - If expert_mask is None: all slots are valid (all ones)
+    - Else: valid_mask[t, k] = expert_mask[topk_ids[t, k]] (cast to int8)
+    """
+    if expert_mask is None:
+        return torch.ones(topk_ids.shape, dtype=torch.int8, device=topk_ids.device)
+    return expert_mask[topk_ids].to(torch.int8)
+
+
 def build_routing_buffers(
     *,
     topk_ids: torch.Tensor,
@@ -656,6 +668,9 @@ def run_moe_stage2(
     kernel_name: str = "moe_gemm2",
     # Use reduce mode (accumulate=False) instead of atomic mode.
     use_reduce: bool = False,
+    # Use valid mask for optimizationwhen reduce or not
+    use_valid_mask: bool = False,
+    # graph mode
     test_graph: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
@@ -691,7 +706,7 @@ def run_moe_stage2(
     # Default compile function.
     if compile_fn is None:
         if use_reduce:
-            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True)
+            compile_fn = _make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=bool(use_valid_mask))
         else:
             compile_fn = compile_moe_gemm2
 
@@ -869,28 +884,50 @@ def run_moe_stage2(
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
     )
+    is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
-        # For non-EP mode tests, pass None for valid_mask
         valid_mask = None
-        exe(
-            o,
-            x,
-            w,
-            sx,
-            sw,
-            st,
-            eids,
-            sw_sorted,
-            num_valid_ids,
-            tokens,
-            model_dim,
-            inter_dim,
-            int(blocks),
-            valid_mask,
-            stream_ptr,
-        )
+        if is_reduce_exe and bool(use_valid_mask):
+            # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
+            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
+        if is_reduce_exe:
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                valid_mask,
+                stream_ptr,
+            )
+        else:
+            # Atomic mode does not take valid_mask.
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                stream_ptr,
+            )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
@@ -1062,6 +1099,7 @@ def run_moe_stage2(
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
+@pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1076,6 +1114,7 @@ def test_moe_gemm_2stage(
     doweight_stage1: bool,
     in_dtype: str,
     use_reduce: bool,
+    use_valid_mask: bool,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -1090,6 +1129,8 @@ def test_moe_gemm_2stage(
     test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    if (not bool(use_reduce)) and bool(use_valid_mask):
+        pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1134,7 +1175,9 @@ def test_moe_gemm_2stage(
         if mode_str == "atomic":
             compile_fn = None
         elif mode_str == "reduce":
-            compile_fn = lambda **kw: compile_moe_gemm2_ex(**kw, mode=MoeGemm2Mode.REDUCE)
+            compile_fn = lambda **kw: compile_moe_gemm2_ex(
+                **kw, mode=MoeGemm2Mode.REDUCE, valid_mask=(True if bool(use_valid_mask) else None)
+            )
         else:
             raise ValueError(f"Invalid gemm2_mode={gemm2_mode!r}, expected 'atomic' or 'reduce'")
 
@@ -1216,12 +1259,13 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         compile_fn=compile_fn,
         use_reduce=bool(use_reduce),
+        use_valid_mask=use_valid_mask,
         test_graph=test_graph,
     )
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
-def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
+def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False):
     """Create a compile function that forces reduce mode.
     
     Args:
@@ -1254,6 +1298,9 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
                 out_dtype=out_dtype,
+                # `compile_moe_gemm2_ex` uses `valid_mask is not None` as a compile-time sentinel
+                # to enable masked reduction (different reduce kernel signature).
+                valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
             )
         else:
@@ -1286,6 +1333,7 @@ class _TorchReduceWrapper:
         self._topk = topk
         self._model_dim = model_dim
         self._intermediate = None
+        self._mode = MoeGemm2Mode.REDUCE
 
     def __call__(
         self,
@@ -1302,6 +1350,7 @@ class _TorchReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        valid_mask,
         stream_ptr,
     ):
         # Lazy allocate intermediate buffer
@@ -1320,7 +1369,14 @@ class _TorchReduceWrapper:
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
             stream_ptr,
         )
-        torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
+        X = intermediate.view(tokens_in, self._topk, self._model_dim)
+        if valid_mask is not None:
+            X = X * valid_mask.view(tokens_in, self._topk, 1).to(dtype=X.dtype)
+        torch.sum(X, dim=1, out=arg_out)
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
 
 # Reduce Kernel Performance Profiling
@@ -1528,6 +1584,13 @@ def test_moe_stage2_standalone(
         kernel_name="moe_gemm2_reduce_flydsl",
     )
 
+    # Run reduce mode with FlyDSL kernel (production path)
+    run_moe_stage2(
+        **common_args,
+        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
+        kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
+    )
+
 
 if __name__ == "__main__":
     torch.set_default_device("cuda")
@@ -1585,6 +1648,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
     parser.add_argument("--gemm2_mode", type=str, default=None, choices=["atomic", "reduce"], help="Stage2 mode: 'atomic' (default) or 'reduce' (GEMM+reduce kernel).")
     parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
+    parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
@@ -1639,5 +1703,6 @@ if __name__ == "__main__":
             w_fp4_kernel=args.wfp4,
             gemm2_mode=args.gemm2_mode,
             use_reduce=bool(args.reduce),
+            use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
         )

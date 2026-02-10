@@ -2736,23 +2736,6 @@ class _MoeGemm2ReduceWrapper:
         }
         return dtype_map.get(self._out_dtype_str, torch.float16)
 
-    def _ensure_intermediate_buffer(self, tokens: int, device):
-        """Ensure intermediate buffer is large enough."""
-        import torch
-        required_size = tokens * self._topk * self._model_dim
-        if self._intermediate is None or self._intermediate.numel() < required_size:
-            # Allocate with some headroom to reduce reallocations
-            capacity = max(tokens, 1024)
-            self._intermediate = torch.empty(
-                capacity * self._topk, self._model_dim,
-                device=device,
-                dtype=self._get_torch_dtype()
-            )
-            self._intermediate_capacity = capacity * self._topk * self._model_dim
-        # Zero out the portion we're about to use
-        self._intermediate[:tokens * self._topk, :self._model_dim].zero_()
-        return self._intermediate[:tokens * self._topk, :self._model_dim]
-
     def __call__(
         self,
         arg_out,
@@ -2776,7 +2759,14 @@ class _MoeGemm2ReduceWrapper:
         Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
         """
         # Allocate/reuse intermediate buffer
-        intermediate = self._ensure_intermediate_buffer(tokens_in, arg_out.device)
+        import torch
+        intermediate = torch.empty(
+                tokens_in * self._topk, self._model_dim,
+                device=arg_out.device,
+                dtype=self._get_torch_dtype()
+            )
+        if not self._use_mask:
+            intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
             intermediate.view(-1),
