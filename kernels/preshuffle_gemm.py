@@ -599,7 +599,7 @@ def compile_preshuffle_gemm_a8(
                         idx_lds = flir.crd2idx(coord_lds, layout_lds)
 
                         # Get LDS pointer from the specific buffer (no offset needed - separate allocations)
-                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + idx_lds
+                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + idx_lds * elem_bytes
                         lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
                     else:
                         lds_ptr_i64_lane0 += 1024 * 4
