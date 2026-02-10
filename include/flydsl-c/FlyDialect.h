@@ -120,6 +120,13 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, M
 // Accessors
 MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
 
+//===----------------------------------------------------------------------===//
+// Pass Registration
+//===----------------------------------------------------------------------===//
+
+/// Register all Fly dialect passes (fly-canonicalize, fly-layout-lowering).
+MLIR_CAPI_EXPORTED void mlirRegisterFlyPasses(void);
+
 #ifdef __cplusplus
 }
 #endif

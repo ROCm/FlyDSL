@@ -1,6 +1,7 @@
 #include "flydsl-c/FlyDialect.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Transforms/Passes.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
@@ -212,3 +213,9 @@ MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy) {
 MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type) {
   return wrap(cast<MmaAtomUniversalFMAType>(unwrap(type)).getElemTy());
 }
+
+//===----------------------------------------------------------------------===//
+// Pass Registration
+//===----------------------------------------------------------------------===//
+
+void mlirRegisterFlyPasses(void) { mlir::fly::registerFlyPasses(); }
