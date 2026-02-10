@@ -32,6 +32,7 @@ echo "LLVM Commit:    $LLVM_COMMIT"
 # 1. Clone LLVM
 LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
 
+# 1. Clone LLVM
 if [ ! -d "$LLVM_SRC_DIR" ]; then
     echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
     git init "$LLVM_SRC_DIR"
@@ -48,19 +49,30 @@ fi
 git checkout "${LLVM_COMMIT}"
 popd
 
+# 2. Create Build Directory
 mkdir -p "$LLVM_BUILD_DIR"
+cd "$LLVM_BUILD_DIR"
 
+# 3. Configure CMake
+echo "Configuring LLVM..."
+
+# Install dependencies for Python bindings
+echo "Installing Python dependencies..."
+pip install nanobind numpy pybind11
+
+# Check for ninja
 GENERATOR="Unix Makefiles"
 if command -v ninja &> /dev/null; then
     GENERATOR="Ninja"
+    echo "Using Ninja generator."
+else
+    echo "Ninja not found. Using Unix Makefiles (this might be slower)."
 fi
 
-echo "Installing Python build dependencies..."
-pip install -q nanobind numpy pybind11
-
+# Build only MLIR and necessary Clang tools, targeting native architecture, in Release mode
+# Explicitly set nanobind directory if found to help CMake locate it
 NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')")
 
-echo "Configuring LLVM with ${GENERATOR}..."
 cmake -G "$GENERATOR" \
     -S "$LLVM_SRC_DIR/llvm" \
     -B "$LLVM_BUILD_DIR" \
@@ -94,15 +106,16 @@ echo "Starting build with ${PARALLEL_JOBS} parallel jobs..."
 cmake --build . -j${PARALLEL_JOBS}
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
-    echo "Installing to ${LLVM_INSTALL_DIR}..."
-    rm -rf "${LLVM_INSTALL_DIR}"
-    mkdir -p "${LLVM_INSTALL_DIR}"
-    cmake --install "${LLVM_BUILD_DIR}" --prefix "${LLVM_INSTALL_DIR}"
+  echo "=============================================="
+  echo "Installing MLIR/LLVM to a clean prefix..."
+  rm -rf "${LLVM_INSTALL_DIR}"
+  mkdir -p "${LLVM_INSTALL_DIR}"
+  cmake --install "${LLVM_BUILD_DIR}" --prefix "${LLVM_INSTALL_DIR}"
 
-    if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
-        echo "Error: install prefix missing lib/cmake/mlir" >&2
-        exit 1
-    fi
+  if [[ ! -d "${LLVM_INSTALL_DIR}/lib/cmake/mlir" ]]; then
+    echo "Error: install prefix missing lib/cmake/mlir: ${LLVM_INSTALL_DIR}" >&2
+    exit 1
+  fi
 
   echo "Creating tarball..."
   # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
