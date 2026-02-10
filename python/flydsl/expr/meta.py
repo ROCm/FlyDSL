@@ -4,6 +4,26 @@ from functools import wraps
 from .._mlir import ir
 
 
+def _unwrap_dsl_value(obj):
+    if isinstance(obj, ir.Value):
+        return obj
+    if hasattr(obj, "__extract_ir_values__"):
+        values = obj.__extract_ir_values__()
+        if len(values) == 1:
+            return values[0]
+    if isinstance(obj, tuple):
+        return tuple(_unwrap_dsl_value(e) for e in obj)
+    if isinstance(obj, list):
+        return [_unwrap_dsl_value(e) for e in obj]
+    return obj
+
+
+def _unwrap_args(args, kwargs):
+    new_args = tuple(_unwrap_dsl_value(a) for a in args)
+    new_kwargs = {k: _unwrap_dsl_value(v) if k not in ("loc", "ip") else v for k, v in kwargs.items()}
+    return new_args, new_kwargs
+
+
 def dsl_api_wrapper(op):
     @wraps(op)
     def wrapper(*args, **kwargs):
@@ -24,6 +44,7 @@ def dsl_api_wrapper(op):
                 ),
                 childLoc=file_loc,
             )
+        args, kwargs = _unwrap_args(args, kwargs)
         with loc:
             return op(*args, **kwargs)
 
