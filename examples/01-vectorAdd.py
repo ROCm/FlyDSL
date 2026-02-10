@@ -21,9 +21,9 @@ def vectorAddKernel(
     tB = fx.logical_divide(B, fx.make_layout(block_dim, 1))
     tC = fx.logical_divide(C, fx.make_layout(block_dim, 1))
 
-    tA = fx.slice(tA, (None, bid))
-    tB = fx.slice(tB, (None, bid))
-    tC = fx.slice(tC, (None, bid))
+    tA = fx.slice(tA, (None, bid.value))
+    tB = fx.slice(tB, (None, bid.value))
+    tC = fx.slice(tC, (None, bid.value))
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
     tB = fx.logical_divide(tB, fx.make_layout(1, 1))
     tC = fx.logical_divide(tC, fx.make_layout(1, 1))
@@ -43,7 +43,7 @@ def vectorAddKernel(
     vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
     fx.memref_store_vec(vC, rC)
 
-    fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid)))
+    fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid.value)))
 
 
 @flyc.jit
