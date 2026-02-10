@@ -112,8 +112,6 @@ def compile_preshuffle_gemm_a8(
             )
 
     gpu_arch = get_hip_arch()
-    if use_async_copy and gpu_arch != "gfx950":
-        raise NotImplementedError(f"Async_copy is only supported on gfx950, but got '{gpu_arch}'")
 
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_pong")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_ping")
@@ -142,7 +140,8 @@ def compile_preshuffle_gemm_a8(
         raise ValueError(
             f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
         )
-
+    a_async_load_bytes = 4 if gpu_arch == "gfx942" else 16
+    a_async_load_dword = a_async_load_bytes // 4
     # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
 
@@ -316,7 +315,8 @@ def compile_preshuffle_gemm_a8(
             by_n = by * tile_n
 
             # (thread_id.x) -> (wave_id, lane_id) via FLIR.
-            layout_wave_lane = flir.make_layout((4, 64), stride=(64, 1))
+            wave_size = 64
+            layout_wave_lane = flir.make_layout((4, wave_size), stride=(64, 1))
             coord_wave_lane = flir.idx2crd(tx, layout_wave_lane)
             wave_id = flir.get(coord_wave_lane, 0)
             lane_id = flir.get(coord_wave_lane, 1)
@@ -492,6 +492,7 @@ def compile_preshuffle_gemm_a8(
             # --- A load/store (16B chunks), XOR16 swizzle ---
             # Original register-based approach (commented out, kept for reference)
             num_a_loads = bytes_per_thread_a // a_load_bytes
+            num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
             # A tile mapping in dwords along K:
             #   tile_k_dwords = (tile_k * elem_bytes) / 4
             if elem_bytes == 2:
@@ -501,6 +502,7 @@ def compile_preshuffle_gemm_a8(
             layout_a_tile_div4 = flir.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
             c4 = arith.constant(4, index=True)
             tx_i32_base = tx * c4
+            tx_i32_async_base = tx * a_async_load_dword
             atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if elem_bytes == 1 else 8))
 
             def load_a_16(idx_elem):
@@ -514,7 +516,7 @@ def compile_preshuffle_gemm_a8(
                     vec_elems=(16 if elem_bytes == 1 else 8),
                 )
 
-            def a_tile_chunk_coord_i32(i: int):
+            def a_tile_chunk_coord_i32(i: int, tx_i32_base: int, chunk_i32: int = 4):
                 return tile_chunk_coord_i32(
                     flir,
                     arith,
@@ -522,13 +524,14 @@ def compile_preshuffle_gemm_a8(
                     i=i,
                     total_threads=total_threads,
                     layout_tile_div4=layout_a_tile_div4,
+                    chunk_i32=chunk_i32,
                 )
 
             # Original register-based load/store (kept for reference)
             def load_a_tile(base_k_div4):
                 parts = []
                 for i in range_constexpr(num_a_loads):
-                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base)
                     row_a_global = bx_m + row_a_local
                     coord_a_g = flir.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
                     idx_i32 = flir.crd2idx(coord_a_g, layout_a_div4)
@@ -546,7 +549,7 @@ def compile_preshuffle_gemm_a8(
 
             def store_a_tile_to_lds(vec_a_parts, lds_buffer):
                 for i in range_constexpr(num_a_loads):
-                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base)
                     lds_store_16b_xor16(
                         flir,
                         arith,
@@ -582,28 +585,22 @@ def compile_preshuffle_gemm_a8(
             def dma_a_tile_to_lds(base_k_div4, lds_buffer):
                 from _mlir.dialects import llvm, memref as memref_dialect
 
-                # GFX942 doesn't support 16B buffer_load_lds, use 4B per operation
-                # GFX950+ (MI355) supports 16B
-                use_16b_dma = str(gpu_arch).startswith("gfx95")
-                dma_bytes = 16 if use_16b_dma else 4
+                dma_bytes = a_async_load_bytes
+                bytes_per_dword = 4
+                chunk_i32 = dma_bytes // bytes_per_dword
 
-                for i in range_constexpr(num_a_loads):
-                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
+                for i in range_constexpr(num_a_async_loads):
+                    row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_async_base, chunk_i32=chunk_i32)
                     col_a_local_sw = flir.swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
                     row_a_global = bx_m + row_a_local
                     coord_a_g = flir.make_coord(row_a_global, base_k_div4 * c4 + col_a_local_sw)
                     global_offset = arith.index_cast(T.i32, flir.crd2idx(coord_a_g, layout_a))
 
                     if i == 0:
-                        col_local_bytes = (col_a_local_i32 * c4)
-                        coord_lds = flir.make_coord(row_a_local, col_local_bytes)
-                        idx_lds = flir.crd2idx(coord_lds, layout_lds)
-
-                        # Get LDS pointer from the specific buffer (no offset needed - separate allocations)
-                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + idx_lds * elem_bytes
+                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * wave_size * dma_bytes
                         lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
                     else:
-                        lds_ptr_i64_lane0 += 1024 * 4
+                        lds_ptr_i64_lane0 += total_threads * dma_bytes
                     lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_i64_lane0, address_space=3)
 
                     # DMA from global to LDS using buffer_load_lds

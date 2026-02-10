@@ -122,8 +122,6 @@ def test_mfma_a8_flir_preshuffle(
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
 ):
-    if use_async_copy and get_hip_arch() != "gfx950":
-        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
