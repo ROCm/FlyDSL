@@ -15,6 +15,7 @@ import random
 import torch
 import torch.nn.functional as F
 import pytest
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 # -----------------------------------------------------------------------------
 # Ensure we use the repo-local `flydsl` when running this file directly.
@@ -95,7 +96,6 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
         out = out.to(bias.dtype) + bias
     return out.to(dtype)
 
-
 @pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
@@ -106,6 +106,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
         (5133, 5120, 8320, 64, 256, 128),
     ]
 )
+@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
 def test_mfma_a8_flir_preshuffle(
     in_dtype,
     M,
@@ -115,6 +116,7 @@ def test_mfma_a8_flir_preshuffle(
     tile_n,
     tile_k,
     *,
+    use_async_copy,
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
@@ -122,6 +124,8 @@ def test_mfma_a8_flir_preshuffle(
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
 ):
+    if use_async_copy and get_hip_arch() != "gfx950":
+        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -143,8 +147,9 @@ def test_mfma_a8_flir_preshuffle(
         in_dtype=in_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage})")
+    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
 
     size_c = M * N
     size_a = M * K
@@ -482,7 +487,8 @@ if __name__ == "__main__":
         type=str,
         default="fp8",
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
-                        help="Input dtype")
+        help="Input dtype",
+    )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
     parser.add_argument("-K", type=int, default=8192, help="K dimension")
@@ -528,17 +534,23 @@ if __name__ == "__main__":
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
     parser.add_argument(
+        "--use_async_copy",
+        action="store_true",
+        default=False,
+        help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
+    )
+    parser.add_argument(
         "--test_graph",
         "-tg",
         action="store_true",
         default=False,
-        help="test with graph mode.",
+        help="Run the perf harness with CUDA graph mode.",
     )
     parser.add_argument(
         "--wfp4",
         action="store_true",
         default=False,
-        help="Use weight fp4 gemm.",
+        help="Run weight-fp4 (MXFP4) preshuffle GEMM test.",
     )
 
     
@@ -546,31 +558,34 @@ if __name__ == "__main__":
     
     torch.set_default_device("cuda")
     if not args.wfp4:
+        if args.in_dtype == "fp4":
+            raise ValueError("--in_dtype fp4 requires --wfp4")
         test_mfma_a8_flir_preshuffle(
-            args.in_dtype, 
-            M=args.M, 
-            N=args.N, 
-            K=args.K, 
-            tile_m=args.tile_m, 
-            tile_n=args.tile_n, 
+            args.in_dtype,
+            M=args.M,
+            N=args.N,
+            K=args.K,
+            tile_m=args.tile_m,
+            tile_n=args.tile_n,
             tile_k=args.tile_k,
             lds_stage=args.lds_stage,
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            use_async_copy=bool(args.use_async_copy),
             test_graph=bool(args.test_graph),
         )
     else:
         pack_M = 2
         test_mfma_w4_flir_preshuffle(
-            args.in_dtype if args.in_dtype == "fp8" else "fp4", 
-            "fp4", 
-            M=args.M, 
-            N=args.N, 
-            K=args.K, 
-            tile_m=args.tile_m * pack_M, 
-            tile_n=args.tile_n, 
+            args.in_dtype if args.in_dtype == "fp8" else "fp4",
+            "fp4",
+            M=args.M,
+            N=args.N,
+            K=args.K,
+            tile_m=args.tile_m * pack_M,
+            tile_n=args.tile_n,
             tile_k=args.tile_k,
             lds_stage=args.lds_stage,
             bench_iters=args.num_iters,

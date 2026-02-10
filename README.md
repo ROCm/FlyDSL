@@ -123,6 +123,16 @@ For the test folder organization, see `tests/` (`mlir/`, `pyir/`, `kernels/`).
   - Add MLIR build lib dir to the loader path:
     - `export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH`
 
+## Documentation
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
+| Layout System | FLIR layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
+| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
+
 ## 📐 FLIR Layout System
 
 > FLIR = **F**lexible **L**ayout **I**ntermediate **R**epresentation.
@@ -304,6 +314,18 @@ in `tests/kernels/` for timing—just like the full benchmark.
 **Verified Platforms**:
 *   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
 *   Linux / ROCm 6.x, 7.x
+
+## 🙏 Acknowledgements
+
+We would like to thank Colfax Research for their foundational work on categorical layout algebra,
+which provides a rigorous mathematical framework for understanding and manipulating CuTe layouts.
+Their work has been instrumental in shaping the design of FLIR's layout system.
+
+## 📚 References
+
+[1] J. van de Ven, Y. Goldfarb, V. Krakovna, T. Ben-Nun, "Categorical Foundations for CuTe Layouts", arXiv:2601.05972, 2025. https://arxiv.org/abs/2601.05972
+
+[2] Colfax Research, "layout-categories" - Companion software for the Categorical Foundations for CuTe Layouts paper. https://github.com/ColfaxResearch/layout-categories
 
 ## 📄 License
 
