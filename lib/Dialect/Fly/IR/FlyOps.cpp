@@ -1172,16 +1172,6 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(MemRefAllocSharedOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
-  if (!memrefTy)
-    return failure();
-  auto sharedSpace = AddressSpaceAttr::get(context, AddressSpace::Shared);
-  inferredReturnTypes.assign(
-      {MemRefType::get(memrefTy.getElemTy(), sharedSpace, memrefTy.getLayout())});
-  return success();
-}
-
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
   auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
   if (!memrefTy)

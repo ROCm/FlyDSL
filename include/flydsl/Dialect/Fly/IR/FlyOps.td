@@ -496,11 +496,6 @@ def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
   let results = (outs Fly_MemRef:$result);
   let assemblyFormat = "`(` $layout `)` attr-dict `:` functional-type(operands, results)";
 }
-def Fly_MemRefAllocSharedOp : Fly_Op<"memref.alloc_shared", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyLayoutType:$memref);
-  let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $memref `)` attr-dict `:` functional-type(operands, results)";
-}
 
 def Fly_MemRefLoadOp : Fly_Op<"memref.load", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_MemRef:$memref, Fly_IntTuple:$indices);

@@ -1,9 +1,11 @@
 import hashlib
 import inspect
+import os
 import pickle
+import types
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import flydsl
 
@@ -11,11 +13,13 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..utils import env, log
+from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import JitCompiledFunction
 from .kernel_function import (
     CompilationContext,
     FuncLocationTracker,
+    KernelFunction,
     create_gpu_module,
     get_gpu_module_body,
 )
@@ -39,15 +43,60 @@ def _flydsl_verison_key() -> str:
     return f"flydsl:{flydsl.__version__}|llvm:{_get_llvm_version()}"
 
 
+def _get_underlying_func(obj):
+    if isinstance(obj, KernelFunction):
+        return obj._func
+    if isinstance(obj, JitFunction):
+        return obj.func
+    if isinstance(obj, types.FunctionType):
+        return obj
+    return None
+
+
+def _is_user_function(func, rootFile):
+    try:
+        funcFile = inspect.getfile(func)
+    except (TypeError, OSError):
+        return False
+    return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
+
+
+def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
+    if visited is None:
+        visited = set()
+    sources = []
+    for name in func.__code__.co_names:
+        obj = func.__globals__.get(name)
+        underlying = _get_underlying_func(obj)
+        if underlying is None or id(underlying) in visited:
+            continue
+        if not _is_user_function(underlying, rootFile):
+            continue
+        visited.add(id(underlying))
+        try:
+            src = inspect.getsource(underlying)
+        except OSError:
+            src = underlying.__code__.co_code.hex()
+        sources.append(f"{name}:{src}")
+        sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+    return sources
+
+
 def _jit_function_cache_key(func: Callable) -> str:
     parts = []
     parts.append(_flydsl_verison_key())
     try:
         source = inspect.getsource(func)
     except OSError:
-        # Fallback to bytecode if source unavailable
         source = func.__code__.co_code.hex()
     parts.append(source)
+    try:
+        rootFile = inspect.getfile(func)
+    except (TypeError, OSError):
+        rootFile = ""
+    depSources = _collect_dependency_sources(func, rootFile)
+    depSources.sort()
+    parts.extend(depSources)
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
@@ -61,11 +110,14 @@ class MlirCompiler:
         "convert-fly-to-rocdl,"
         "canonicalize,"
         "gpu.module("
+        "convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "canonicalize,"
         "convert-gpu-to-rocdl{chipset=gfx942 index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}"
         "),"
         "rocdl-attach-target{O=2 abi=600 chip=gfx942 correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true},"
+        "convert-scf-to-cf,"
+        "convert-cf-to-llvm,"
         "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true},"
         "convert-arith-to-llvm,"
         "convert-func-to-llvm,"
@@ -80,6 +132,9 @@ class MlirCompiler:
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         pm = PassManager.parse(cls.PIPELINE)
+
+        if env.debug.print_origin_ir:
+            log().info(f"Origin IR: \n{module}")
 
         pm.enable_verifier(env.debug.enable_verifier)
         pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
@@ -153,16 +208,19 @@ class JitCacheManager:
 
 class JitFunction:
     def __init__(self, func: Callable):
-        self.func = func
-        self.managerKey = _jit_function_cache_key(func)
+        self.func = ASTRewriter.transform(func)
+        self.manager_key = None
+        self.cache_manager = None
 
+    def _ensure_cache_manager(self):
+        if self.manager_key is not None:
+            return
+        self.manager_key = _jit_function_cache_key(self.func)
         cache_root = env.runtime.cache_dir
         if cache_root:
-            cache_dir = Path(cache_root) / f"{func.__name__}_{self.managerKey}"
-            self.cacheManager = JitCacheManager(cache_dir)
-            self.cacheManager.load_all()
-        else:
-            self.cacheManager = None
+            cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
+            self.cache_manager = JitCacheManager(cache_dir)
+            self.cache_manager.load_all()
 
     def _make_cache_key(self, bound_args: Dict) -> str:
         key_parts = []
@@ -181,15 +239,16 @@ class JitFunction:
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
-            log().debug(f"JitFunction {self.func.__name__} within ir.Context")
             return self.func(*args, **kwargs)
+
+        self._ensure_cache_manager()
 
         sig = inspect.signature(self.func)
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
-        cached_func = self.cacheManager.get(cache_key) if self.cacheManager else None
+        cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
 
         if cached_func is not None and env.runtime.enable_cache:
             log().info(f"Cache hit for {self.func.__name__}")
@@ -240,8 +299,8 @@ class JitFunction:
                 original_ir,
             )
 
-            if self.cacheManager:
-                self.cacheManager.set(cache_key, compiled_func)
+            if self.cache_manager:
+                self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
 
