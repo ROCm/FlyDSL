@@ -3038,46 +3038,348 @@ import sys as _sys
 flir = _sys.modules[__name__]
 
 
-def printf(format_str: str, *args, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
-    """Print formatted output at runtime (dynamic values).
-    
-    This function prints dynamic values that are only known at runtime.
-    It uses GPU printf to display values during kernel execution.
-    
-    Args:
-        format_str: Format string (e.g., "value: {}")
-        *args: Values to print (can be dynamic runtime values)
-        loc: Optional source location
-        ip: Optional insertion point
-        
-    Example:
-        >>> # Print static value (compile time)
-        >>> flir.print(">>>", b)  # Shows static value
-        >>> flir.print(">>>", a)  # Shows "?" for dynamic value
-        >>> 
-        >>> # Print dynamic value (runtime)
-        >>> flir.printf(">?? {}", a)  # Shows actual runtime value
-        >>> flir.printf(">?? {}", b)  # Also works for static values
-        >>> 
-        >>> # Print layout
-        >>> layout = flir.make_layout(shape, stride)
-        >>> flir.print(">>>", layout)  # Shows layout with "?" for dynamic parts
-        >>> flir.printf(">?? {}", layout)  # Shows actual runtime values
-    
-    Note:
-        - Use `flir.print` (Python's print) for compile-time/static values
-        - Use `flir.printf` for runtime/dynamic values
-        - Format strings use "{}" as placeholders (similar to Python f-strings)
+def _type_to_format_specifier(ty: Type) -> str:
+    """Map an MLIR type to its C printf format specifier.
+
+    Handles index, integer (1/8/16/32/64-bit), and floating-point types.
+    For types that gpu.printf cannot print natively (f16, bf16, fp8, etc.)
+    the caller is expected to extend the value to f32 first.
+    """
+    from _mlir.ir import (
+        IndexType, IntegerType, F16Type, F32Type, F64Type, BF16Type,
+    )
+    if IndexType.isinstance(ty):
+        return "%lld"
+    if IntegerType.isinstance(ty):
+        width = IntegerType(ty).width
+        if width == 1:
+            return "%d"
+        if width <= 32:
+            return "%d"
+        return "%lld"
+    if F32Type.isinstance(ty):
+        return "%f"
+    if F64Type.isinstance(ty):
+        return "%f"
+    # f16 / bf16 / fp8 should already be promoted to f32 before reaching here.
+    if F16Type.isinstance(ty) or BF16Type.isinstance(ty):
+        return "%f"
+    # Fallback – best-effort
+    return "%d"
+
+
+def _promote_to_printable(val: Value, loc=None, ip=None) -> Value:
+    """Promote narrow float types (f16, bf16, fp8) to f32 so gpu.printf can handle them.
+
+    Integer / index / f32 / f64 values are returned unchanged.
+    """
+    from _mlir.ir import F16Type, F32Type, BF16Type
+    ty = val.type
+    needs_ext = False
+    try:
+        needs_ext = F16Type.isinstance(ty) or BF16Type.isinstance(ty)
+    except Exception:
+        pass
+    if not needs_ext:
+        # Also try fp8 variants which surface as opaque float types whose
+        # str() contains "f8".
+        ty_str = str(ty)
+        if "f8" in ty_str:
+            needs_ext = True
+    if needs_ext:
+        return arith.ExtFOp(F32Type.get(), val, loc=loc).result
+    return val
+
+
+def _is_flir_type(val) -> bool:
+    """Check whether an MLIR Value carries a flir dialect type (!flir.*)."""
+    try:
+        return str(val.type).startswith("!flir.")
+    except Exception:
+        return False
+
+
+def _flir_type_kind(val) -> Optional[str]:
+    """Return 'shape', 'stride', 'layout', 'coord' – or None."""
+    try:
+        ty_str = str(val.type)
+    except Exception:
+        return None
+    for kind in ("layout", "shape", "stride", "coord"):
+        if f"!flir.{kind}" in ty_str:
+            return kind
+    return None
+
+
+def _emit_flir_printf(label: str, val, *, loc, ip):
+    """Emit a sequence of gpu.printf calls to pretty-print a flir compound value.
+
+    Layout  → ``(shape):(stride)``
+    Shape   → ``(d0,d1,...)``
+    Stride  → ``(s0,s1,...)``
+    Coord   → ``(c0,c1,...)``
     """
     from _mlir.dialects import gpu as _gpu
-    
+
+    kind = _flir_type_kind(val)
+    if kind is None:
+        # Not a flir type – fall through to scalar printf
+        return False
+
+    raw = _unwrap_value(val)
+    type_str = str(raw.type)
+    rank_val = _extract_rank_from_flir_type_str(type_str)
+
+    def _print_tuple(v, rk, open_str="(", close_str=")"):
+        """Emit prints for each element of a shape/stride/coord of rank *rk*."""
+        _gpu.printf(open_str, [], loc=loc, ip=ip)
+        for i in range(rk):
+            idx = _unwrap_value(arith.ConstantOp(
+                IndexType.get(), IntegerAttr.get(IndexType.get(), i), loc=loc
+            ).result)
+            elem = _unwrap_value(flir_ops.GetOp(IndexType.get(), _unwrap_value(v), idx, loc=loc, ip=ip).result)
+            sep = "," if i < rk - 1 else ""
+            _gpu.printf(f"%lld{sep}", [elem], loc=loc, ip=ip)
+        _gpu.printf(close_str, [], loc=loc, ip=ip)
+
+    if label:
+        _gpu.printf(label, [], loc=loc, ip=ip)
+
+    if kind == "layout":
+        shape_val = _unwrap_value(flir_ops.GetShapeOp(
+            ShapeType.get(rank_val), _unwrap_value(raw), loc=loc
+        ).result)
+        stride_val = _unwrap_value(flir_ops.GetStrideOp(
+            StrideType.get(rank_val), _unwrap_value(raw), loc=loc
+        ).result)
+        _print_tuple(shape_val, rank_val)
+        _gpu.printf(":", [], loc=loc, ip=ip)
+        _print_tuple(stride_val, rank_val)
+    elif kind in ("shape", "stride", "coord"):
+        _print_tuple(raw, rank_val)
+    else:
+        return False
+    return True
+
+
+def _process_printf_arg(arg, loc=None, ip=None):
+    """Convert a user-supplied argument to an MLIR Value ready for gpu.printf.
+
+    Returns ``(mlir_value, is_flir_compound)``.
+    * For scalar / integer / float → returns ``(Value, False)``
+    * For flir layout/shape/stride/coord → returns ``(unwrapped Value, True)``
+    """
+    # -- Python literal constants (check BEFORE _unwrap_value because
+    #    _unwrap_value materializes int/bool as index constants) --------------
+    if isinstance(arg, bool):
+        # bool before int — bool is a subclass of int in Python
+        op = arith.ConstantOp(
+            IntegerType.get_signless(32),
+            IntegerAttr.get(IntegerType.get_signless(32), int(arg)),
+            loc=loc,
+        )
+        return _unwrap_value(op.result), False
+    if isinstance(arg, int) and not isinstance(arg, Value):
+        op = arith.ConstantOp(
+            IndexType.get(),
+            IntegerAttr.get(IndexType.get(), arg),
+            loc=loc,
+        )
+        return _unwrap_value(op.result), False
+    if isinstance(arg, float):
+        from _mlir.ir import F32Type, FloatAttr
+        op = arith.ConstantOp(
+            F32Type.get(),
+            FloatAttr.get(F32Type.get(), arg),
+            loc=loc,
+        )
+        return _unwrap_value(op.result), False
+
+    # -- ArithValue / MLIR Value wrapper --------------------------------------
+    raw = _unwrap_value(arg)
+
+    # -- MLIR Value -----------------------------------------------------------
+    if isinstance(raw, Value):
+        if _is_flir_type(raw):
+            return raw, True
+        # Promote narrow floats to f32
+        promoted = _promote_to_printable(raw, loc=loc, ip=ip)
+        return _unwrap_value(promoted), False
+
+    raise TypeError(f"unsupported argument type in printf, got {type(arg)}")
+
+
+def printf(*args, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Device printf – print runtime values on the GPU.
+
+    Supports three calling conventions:
+
+    1. **Formatted**: first arg is a format string, remaining args are values::
+
+           flir.printf("tid=%d val=%f", tid, val)
+           flir.printf("x={}, y={}", x, y)       # {} auto-resolves to %specifier
+
+    2. **Direct / bare values**: prints each argument separated by ", "::
+
+           flir.printf(a, b, c)                   # → "a_val, b_val, c_val\\n"
+
+    3. **No args**: prints a newline::
+
+           flir.printf()                           # → "\\n"
+
+    Supported value types:
+
+    * ``int`` / ``float`` / ``bool`` Python literals (auto-materialised as constants)
+    * ``ArithValue`` wrappers (auto-unwrapped)
+    * MLIR ``Value`` – index, i1..i64, f16, bf16, f32, f64
+      (f16/bf16/fp8 are automatically promoted to f32)
+    * Flir compound types: ``!flir.layout``, ``!flir.shape``, ``!flir.stride``,
+      ``!flir.coord`` – pretty-printed element-wise
+
+    Args:
+        *args: Optional format string followed by values, or bare values.
+        loc:  Optional MLIR source location.
+        ip:   Optional MLIR insertion point.
+
+    Examples::
+
+        flir.printf("hello from GPU!\\n")
+        flir.printf("tid={} val={}", tid, val)
+        flir.printf("layout = {}", my_layout)
+        flir.printf(a, b, c)
+    """
+    from _mlir.dialects import gpu as _gpu
+
     loc = _get_location(loc)
-    
-    # Unwrap all argument values
-    unwrapped_args = [_unwrap_value(arg) for arg in args]
-    
+
+    # ---- trivial case: no args → newline ------------------------------------
+    if len(args) == 0:
+        with ip or InsertionPoint.current:
+            _gpu.printf("\n", [], loc=loc, ip=ip)
+        return
+
+    # ---- determine if the first arg is a format string ----------------------
+    has_fmt = isinstance(args[0], str)
+    if has_fmt:
+        fmt = args[0]
+        value_args = args[1:]
+    else:
+        # Auto-generate format: "{}, {}, {} ... \n"
+        fmt = "{}" + ", {}" * (len(args) - 1)
+        value_args = args
+
     with ip or InsertionPoint.current:
-        return _gpu.printf(format_str, unwrapped_args, loc=loc, ip=ip)
+        # Process all value arguments
+        processed = [_process_printf_arg(a, loc=loc, ip=ip) for a in value_args]
+
+        # --- split fmt on ``{}`` to figure out where compound types go -------
+        parts = fmt.split("{}")
+        n_placeholders = len(parts) - 1
+
+        # ---- fast path: no ``{}`` placeholders (pure C format string) -------
+        # When the user writes e.g. ``flir.printf("val=%lld\n", x)`` with
+        # explicit C specifiers, pass the format string + args directly to
+        # gpu.printf (only scalars are supported in this mode).
+        if n_placeholders == 0 and len(processed) > 0:
+            scalar_args = [v for v, is_compound in processed if not is_compound]
+            final_fmt = fmt if fmt.endswith("\n") else fmt + "\n"
+            _gpu.printf(final_fmt, scalar_args, loc=loc, ip=ip)
+            return
+
+        # Validate argument count
+        if len(processed) < n_placeholders:
+            raise ValueError(
+                f"printf: format string has {n_placeholders} placeholder(s) "
+                f"but only {len(processed)} argument(s) were given"
+            )
+
+        # If there are *more* args than placeholders (and a format string was
+        # given), the extras are silently ignored (matches C printf behaviour).
+
+        # Build chunks:  each chunk is either
+        #   ("literal", text)           – emitted with gpu.printf(text, [])
+        #   ("scalar",  text, [vals])   – emitted with gpu.printf(text, vals)
+        #   ("flir",    label, val)     – emitted via _emit_flir_printf
+        #
+        # We greedily merge consecutive scalar placeholders into one call to
+        # reduce the number of gpu.printf ops.
+
+        cur_fmt = ""          # accumulated format string fragment
+        cur_args: list = []   # accumulated scalar MLIR values
+        arg_idx = 0
+
+        def _flush():
+            nonlocal cur_fmt, cur_args
+            if cur_fmt:
+                _gpu.printf(cur_fmt, cur_args, loc=loc, ip=ip)
+                cur_fmt = ""
+                cur_args = []
+
+        for i, part in enumerate(parts):
+            cur_fmt += part
+            if i < n_placeholders:
+                val, is_compound = processed[arg_idx]
+                arg_idx += 1
+                if is_compound:
+                    # Flush any buffered scalar text first
+                    _flush()
+                    _emit_flir_printf("", val, loc=loc, ip=ip)
+                else:
+                    spec = _type_to_format_specifier(val.type)
+                    cur_fmt += spec
+                    cur_args.append(val)
+
+        # Append trailing newline if user didn't include one
+        if not cur_fmt.endswith("\n"):
+            cur_fmt += "\n"
+        _flush()
+
+
+def printf_if(predicate, *args, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Predicated device printf – prints only when *predicate* is true.
+
+    Wraps ``printf`` inside ``scf.if(predicate)``.  Useful for limiting output
+    to a single thread::
+
+        flir.printf_if(tid == 0, "result = {}", val)
+
+    Args:
+        predicate: An i1 MLIR value (e.g. result of ``arith.cmpi``).
+        *args:     Forwarded to :func:`printf`.
+        loc:       Optional MLIR source location.
+        ip:        Optional MLIR insertion point.
+    """
+    loc = _get_location(loc)
+    pred_val = _unwrap_value(predicate)
+    with ip or InsertionPoint.current:
+        if_op = scf.IfOp(pred_val, [], loc=loc)
+        with InsertionPoint(if_op.then_block):
+            printf(*args, loc=loc)
+            scf.YieldOp([])
+
+
+def printf_once(*args, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
+    """Device printf from thread 0 only.
+
+    Convenience wrapper equivalent to::
+
+        flir.printf_if(flir.thread_idx("x") == 0, ...)
+
+    Args:
+        *args: Forwarded to :func:`printf`.
+        loc:   Optional MLIR source location.
+        ip:    Optional MLIR insertion point.
+    """
+    loc = _get_location(loc)
+    with ip or InsertionPoint.current:
+        tidx = _unwrap_value(gpu.thread_id(gpu.Dimension.x, loc=loc))
+        zero = _unwrap_value(arith.ConstantOp(
+            IndexType.get(), IntegerAttr.get(IndexType.get(), 0), loc=loc
+        ).result)
+        pred = _unwrap_value(arith.CmpIOp(
+            arith.CmpIPredicate.eq, tidx, zero, loc=loc
+        ).result)
+        printf_if(pred, *args, loc=loc)
 
 
 __all__ = [
@@ -3144,4 +3446,6 @@ __all__ = [
     # Printing operations
     "print",
     "printf",
+    "printf_if",
+    "printf_once",
 ]
