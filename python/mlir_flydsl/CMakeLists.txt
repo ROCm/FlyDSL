@@ -25,6 +25,13 @@ declare_mlir_dialect_python_bindings(
   GEN_ENUM_BINDINGS
 )
 
+# NOTE: Do NOT link MLIRFlyDialect/MLIRFlyROCDLDialect here via PRIVATE_LINK_LIBS.
+# These symbols are already provided by FlyPythonCAPI.so (via MLIRCPIFly's transitive
+# dependencies in EMBED_CAPI_LINK_LIBS). Statically linking them here creates DUPLICATE
+# TypeID static variables, causing "storage uniquer isn't initialized" errors at runtime.
+# The COMMON_CAPI_LINK_LIBS FlyPythonCAPI in add_mlir_python_modules ensures _fly.so
+# links to FlyPythonCAPI.so, which provides all needed symbols.
+
 declare_mlir_python_extension(FlyPythonSources.Core.fly
   MODULE_NAME _fly
   ADD_TO_PARENT FlyPythonSources
@@ -32,9 +39,9 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly
   PYTHON_BINDINGS_LIBRARY nanobind
   SOURCES
     FlyExtension.cpp
+    DLTensorAdaptor.h
   PRIVATE_LINK_LIBS
     LLVMSupport
-    MLIRFlyDialect
 )
 
 declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
@@ -46,9 +53,19 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
     FlyROCDLExtension.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
-    MLIRFlyROCDLDialect
 )
 
+# NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
+# Doing so statically embeds a copy of MLIRPass (and its pass registry) into
+# _mlirRegisterEverything.so. Passes registered via registerFlyPasses() then
+# go into that LOCAL registry, while PassManager.parse() queries the GLOBAL
+# registry in FlyPythonCAPI.so → "does not refer to a registered pass".
+#
+# Instead, pass registration is done through CAPI functions
+# (mlirRegisterFlyPasses, mlirRegisterFlyToROCDLConversionPass) defined in
+# the CAPI libraries (MLIRCPIFly, MLIRCPIFlyROCDL). These are already in
+# FlyPythonCAPI.so, so ::mlir::registerPass() resolves to the correct
+# global instance.
 declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   MODULE_NAME _mlirRegisterEverything
   ADD_TO_PARENT FlyPythonSources
@@ -57,7 +74,6 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     FlyRegisterEverything.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
-    MLIRFlyToROCDL
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
     MLIRCPIFly
@@ -107,6 +123,9 @@ set(FlyPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INST
 add_mlir_python_modules(FlyPythonModules
   ROOT_PREFIX "${FlyPythonModules_ROOT_PREFIX}"
   INSTALL_PREFIX "${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}"
+  # Use "mlir" domain so Fly types are compatible with upstream IR types.
+  # The package is self-contained under flydsl._mlir (no upstream mlir loaded).
+  MLIR_BINDINGS_PYTHON_NB_DOMAIN "mlir"
   DECLARED_SOURCES "${MLIRFlyDSLSources}"
   COMMON_CAPI_LINK_LIBS
     FlyPythonCAPI
@@ -147,6 +166,13 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${PROJECT_SOURCE_DIR}/python/flydsl"
     "${MLIR_BINARY_DIR}/python_packages/flydsl"
+  # Copy auto-generated Python bindings from mlir-tblgen to the correct location
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ops_gen.py"
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_ops_gen.py"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_enum_gen.py"
+    "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_enum_gen.py"
   COMMENT "Copying python/flydsl sources to build/python_packages/flydsl"
   DEPENDS FlyPythonModules
 )

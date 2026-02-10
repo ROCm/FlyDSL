@@ -396,8 +396,28 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     // Only handle MFMA F32 16x16x4 F32 atom for now.
 
-    auto mmaAtomTy = dyn_cast<fly::MmaAtomTypeInterface>(adaptor.getMmaAtom().getType());
-    assert(mmaAtomTy);
+    // WORKAROUND for ODR TypeID mismatch:
+    // The MmaAtomCDNA3_MFMAType TypeID in this library (via MLIRFlyToROCDL static lib)
+    // differs from the one in _fly_rocdl.so (via MLIRCPIFlyROCDL). Both link
+    // MLIRFlyROCDLDialect statically, so each has its own TypeID instance.
+    // 
+    // Using string-based type matching is a robust workaround that doesn't require
+    // changes to the build system (e.g., converting to shared libraries).
+    Type opMmaAtomType = op.getMmaAtom().getType();
+    
+    // Check if the type is from fly_rocdl dialect and is the MFMA atom type
+    std::string typeStr;
+    llvm::raw_string_ostream typeStrStream(typeStr);
+    opMmaAtomType.print(typeStrStream);
+    
+    // The type prints as: !fly_rocdl.atom.cdna3.mfma<...>
+    if (typeStr.find("fly_rocdl.atom.cdna3.mfma") == std::string::npos) {
+      return rewriter.notifyMatchFailure(op, 
+          "expected fly_rocdl.atom.cdna3.mfma type for mmaAtom operand, got: " + typeStr);
+    }
+    
+    // For now, we only support the MFMA F32 16x16x4 F32 configuration
+    // TODO: Parse from type string to select the correct intrinsic
 
     Location loc = op.getLoc();
 
@@ -411,6 +431,7 @@ public:
     auto aPtrTy = dyn_cast<LLVM::LLVMPointerType>(aPtr.getType());
     auto bPtrTy = dyn_cast<LLVM::LLVMPointerType>(bPtr.getType());
     auto cPtrTy = dyn_cast<LLVM::LLVMPointerType>(cPtr.getType());
+    
     if (!dPtrTy || !aPtrTy || !bPtrTy || !cPtrTy)
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
@@ -422,12 +443,15 @@ public:
     Value b = LLVM::LoadOp::create(rewriter, loc, f32Ty, bPtr);
     Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
 
-    // MFMA control operands (cbsz, abid, blgp). Default to 0.
-    Value zeroI32 = arith::ConstantIntOp::create(rewriter, loc, /*value=*/0, /*width=*/32);
+    // MFMA control attributes (cbsz, abid, blgp). Default to 0.
+    // Note: These are I32Attr attributes, not Value operands!
+    auto zeroAttr = rewriter.getI32IntegerAttr(0);
 
-    // rocdl.mfma.f32.16x16x4f32 : (f32, f32, vector<4xf32>, i32, i32, i32) -> vector<4xf32>
-    SmallVector<Value, 6> args{a, b, c, zeroI32, zeroI32, zeroI32};
-    Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, args).getResult();
+    // rocdl.mfma.f32.16x16x4f32 : (f32, f32, vector<4xf32>) -> vector<4xf32>
+    // with attributes: cbsz, abid, blgp
+    Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, 
+                                                   a, b, c, 
+                                                   zeroAttr, zeroAttr, zeroAttr).getResult();
 
     // Store result back to D pointer.
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);
@@ -518,7 +542,7 @@ public:
 
     target.addLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
                            gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
-                           ROCDL::ROCDLDialect>();
+                           ROCDL::ROCDLDialect, fly_rocdl::FlyROCDLDialect>();
     target.addIllegalDialect<fly::FlyDialect>();
 
     target.addLegalOp<MakeIntTupleOp, MakeLayoutOp, MakeTileOp>();
