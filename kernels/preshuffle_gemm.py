@@ -199,7 +199,8 @@ def compile_preshuffle_gemm_a8(
             if int(lds_stage) == 2:
                 # Separate ping/pong buffers for no-alias guarantee
                 # Size each buffer to fit max(A_tile, CShuffle_output) to enable reuse
-                buffer_size_bytes = max(lds_tile_bytes, lds_out_bytes)
+                assert lds_out_bytes % 2 == 0, "lds_out_bytes should be mutiple of 2"
+                buffer_size_bytes = max(lds_tile_bytes, lds_out_bytes // lds_stage)
                 # Convert bytes to element count based on element size
                 buffer_size_elems = buffer_size_bytes if elem_bytes == 1 else (buffer_size_bytes // 2)
                 _state["lds_a_pong"] = allocator_pong.allocate_array(_elem_type(), buffer_size_elems)
