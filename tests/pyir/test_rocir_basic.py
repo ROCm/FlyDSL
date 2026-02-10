@@ -1,8 +1,8 @@
 """Tests for core Flir operations: make_shape, make_stride, make_layout, size, rank."""
 
 import pytest
-from _mlir.ir import Context, Location, Module, InsertionPoint, IndexType
-from _mlir.dialects import arith
+from flydsl._mlir.ir import Context, Location, Module, InsertionPoint, IndexType
+from flydsl._mlir.dialects import arith
 
 # Import Flir wrappers
 import flydsl.dialects.ext.flir as flir

@@ -69,7 +69,7 @@ from flydsl.dialects.ext.gpu import lds_space
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils import SmemAllocator
 from flydsl.dialects.ext import vector, memref
-import _mlir.extras.types as T
+import flydsl._mlir.extras.types as T
 from tests.test_common import run_perftest
 
 class KernelCompilationCache:

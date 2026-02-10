@@ -112,10 +112,22 @@ if(UNIX AND NOT APPLE)
   )
 endif()
 
-# Output to python_packages directory
+# Output to python_packages directory (under flydsl/_mlir/_mlir_libs)
+set(_flir_ir_output_dir "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs")
+
 set_target_properties(_flir_ir PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}/_mlir_libs"
+  LIBRARY_OUTPUT_DIRECTORY "${_flir_ir_output_dir}"
   CXX_VISIBILITY_PRESET hidden
   C_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON
+)
+
+# Copy __init__.py to output directory
+# (Full Python package setup is done by setup_python_package.sh in build.sh)
+add_custom_command(
+  TARGET _flir_ir POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy
+    "${CMAKE_CURRENT_SOURCE_DIR}/__init__.py"
+    "${_flir_ir_output_dir}/__init__.py"
+  COMMENT "Copying _flir_ir __init__.py"
 )

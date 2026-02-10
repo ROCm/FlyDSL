@@ -3,8 +3,8 @@ from __future__ import annotations
 import inspect
 from typing import Optional
 
-from _mlir import ir
-from _mlir.dialects import func as mlir_func
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import func as mlir_func
 
 from flydsl.compiler.context import ensure_flir_python_extensions
 from flydsl.dialects.ext import gpu
@@ -103,8 +103,8 @@ def _unwrap_return_value(v):
     # If a plain Python int is returned, materialize it as an index constant.
     # (This matches existing behavior in `flydsl.dialects.ext.flir._unwrap_value`.)
     if isinstance(v, int):
-        from _mlir.dialects import arith as mlir_arith
-        from _mlir.ir import IndexType, IntegerAttr
+        from flydsl._mlir.dialects import arith as mlir_arith
+        from flydsl._mlir.ir import IndexType, IntegerAttr
 
         try:
             loc = get_user_code_loc()

@@ -26,5 +26,9 @@ my_ir_dumps*/
 *.egg-info/
 flydsl/src/*.egg-info/
 
+# Build-generated symlink (created by setup_python_package.sh / setup.py)
+flydsl/src/flydsl/_mlir
+flydsl/src/flydsl/kernels
+
 # Wheels / packaging outputs
 dist/

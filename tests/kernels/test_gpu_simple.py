@@ -5,8 +5,8 @@ Vector addition test with clean, readable syntax
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, memref, arith
-from _mlir import ir
-import _mlir.extras.types as T
+from flydsl._mlir import ir
+import flydsl._mlir.extras.types as T
 
 
 def test_vector_add():

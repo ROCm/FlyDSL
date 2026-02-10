@@ -28,7 +28,7 @@ class SharedLibs:
 
 def _default_mlir_lib_dir() -> Optional[Path]:
     try:
-        spec = importlib.util.find_spec("_mlir._mlir_libs")
+        spec = importlib.util.find_spec("flydsl._mlir._mlir_libs")
         if spec:
             if spec.submodule_search_locations:
                 embedded_lib_dir = Path(next(iter(spec.submodule_search_locations)))
@@ -87,7 +87,7 @@ class ExecutionEngineExecutor:
         opt_level: int = 3,
         shared_libs: Optional[Sequence[str]] = None,
     ):
-        from _mlir._mlir_libs._mlirExecutionEngine import ExecutionEngine  # type: ignore
+        from flydsl._mlir._mlir_libs._mlirExecutionEngine import ExecutionEngine  # type: ignore
 
         if shared_libs is None:
             shared_libs = default_shared_libs().as_list()

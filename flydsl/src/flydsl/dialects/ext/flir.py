@@ -7,7 +7,7 @@ from Python code.
 
 from typing import List, Optional, Sequence, Union, Tuple
 
-from _mlir.ir import (
+from flydsl._mlir.ir import (
     Type,
     Value,
     Location,
@@ -17,10 +17,10 @@ from _mlir.ir import (
     IntegerType,
     MemRefType,
 )
-from _mlir.dialects import memref, arith, scf, gpu, vector, math, llvm
-from _mlir.extras import types as T
+from flydsl._mlir.dialects import memref, arith, scf, gpu, vector, math, llvm
+from flydsl._mlir.extras import types as T
 from flydsl.lang.ir.module import MlirModule, kernel, jit
-from _mlir.dialects import flir as flir_ops
+from flydsl._mlir.dialects import flir as flir_ops
 
 # Also expose FLIR "extended" wrappers (like test_eltwise_add.py uses) so
 # tests can route everything through `flir.*` without importing `mlir.*`.
@@ -71,8 +71,8 @@ def _get_location(loc: Optional[Location] = None) -> Location:
 def _unwrap_value(v):
     """Unwrap ArithValue or other value wrappers to get underlying MLIR Value."""
     if isinstance(v, int):
-        from _mlir.dialects import arith
-        from _mlir.ir import IndexType, IntegerAttr
+        from flydsl._mlir.dialects import arith
+        from flydsl._mlir.ir import IndexType, IntegerAttr
         # Prefer a non-unknown location for implicit constant materialization so IR dumps
         # remain actionable.
         loc = _get_location(None)
@@ -258,7 +258,7 @@ def _extract_tuple_spec_from_flir_type(type_str: str) -> Optional[str]:
 
 def _require_index_value(v: Value, what: str) -> Value:
     """Ensure v is an index-typed Value. Raise a clear error otherwise."""
-    from _mlir.ir import IndexType
+    from flydsl._mlir.ir import IndexType
     if not isinstance(v, Value):
         raise TypeError(f"{what} must be an MLIR Value (got {type(v)})")
     if v.type != IndexType.get():
@@ -459,7 +459,7 @@ def const_index(value, loc: Optional[Location] = None, ip: Optional[InsertionPoi
     with ip or InsertionPoint.current:
         # If `value` is already an MLIR value (or a wrapper around one), just cast.
         try:
-            from _mlir.ir import Value as _MlirValue  # local import to avoid import cycles
+            from flydsl._mlir.ir import Value as _MlirValue  # local import to avoid import cycles
             if isinstance(value, _MlirValue) or (hasattr(value, "value") and isinstance(value.value, _MlirValue)):
                 return _unwrap_value(_to_index_value(value, loc))
         except Exception:
@@ -523,7 +523,7 @@ class ShapeType(Type):
         rank is encoded by a tuple-pattern of N leaves:
           !flir.shape<(?,?,...)>
         """
-        from _mlir.ir import Context
+        from flydsl._mlir.ir import Context
         if context is None:
             context = Context.current
         if rank < 0:
@@ -539,7 +539,7 @@ class StrideType(Type):
     @staticmethod
     def get(rank: int, context=None):
         """Create a rank-N stride type (pattern-mode)."""
-        from _mlir.ir import Context
+        from flydsl._mlir.ir import Context
         if context is None:
             context = Context.current
         if rank < 0:
@@ -558,7 +558,7 @@ class LayoutType(Type):
         Layout syntax is:
           !flir.layout<shape_pattern:stride_pattern>
         """
-        from _mlir.ir import Context
+        from flydsl._mlir.ir import Context
         if context is None:
             context = Context.current
         if rank < 0:
@@ -573,7 +573,7 @@ class CoordType(Type):
     @staticmethod
     def get(rank: int, context=None):
         """Create a rank-N coordinate type (pattern-mode)."""
-        from _mlir.ir import Context
+        from flydsl._mlir.ir import Context
         if context is None:
             context = Context.current
         if rank < 0:
@@ -1665,7 +1665,7 @@ def coalesce(layout: Value, loc: Optional[Location] = None, ip: Optional[Inserti
         >>> layout = flir.make_layout((c2, (c1, c6)), stride=(c1, (c6, c2)))
         >>> coalesced = flir.coalesce(layout)  # Simplifies to 12:1
     """
-    from _mlir import ir as _ir
+    from flydsl._mlir import ir as _ir
     
     loc = _get_location(loc)
     # Coalesce is currently a no-op placeholder in lowering; keep the input type.
@@ -2303,7 +2303,7 @@ def product_each(shape: Value, loc: Optional[Location] = None, ip: Optional[Inse
     loc = _get_location(loc)
     shape = _unwrap_value(shape)
     with _get_insertion_point(ip):
-        # from _mlir.dialects import flir as flir_ops  # Not available
+        # from flydsl._mlir.dialects import flir as flir_ops  # Not available
         op = flir_ops.ProductEachOp(shape, loc=loc)
         return op.result
 
@@ -2359,7 +2359,7 @@ def elem_less(a, b, loc: Optional[Location] = None, ip: Optional[InsertionPoint]
         >>> val = flir.elem_less(thrCrd[i], shape)
         >>> frgPred[i] = val
     """
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     loc = _get_location(loc)
 
     def _to_limits(b_val, rank):
@@ -2402,7 +2402,7 @@ def make_copy_atom(element_type: Type, vector_size: int = 8, is_coalesced: bool 
         CopyAtom descriptor
         
     Example:
-        >>> from _mlir.ir import F16Type
+        >>> from flydsl._mlir.ir import F16Type
         >>> atom = flir.make_copy_atom(F16Type.get(), vector_size=8)
     """
     return CopyAtom(element_type, vector_size, is_coalesced)
@@ -2537,7 +2537,7 @@ def partition_dst(tiled_copy, tensor, thread_id, loc: Optional[Location] = None,
 
 def fragment_load(fragment, index, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
     """Load an element from a register fragment."""
-    from _mlir.dialects import memref as memref_dialect
+    from flydsl._mlir.dialects import memref as memref_dialect
     loc = _get_location(loc)
     fragment = _unwrap_value(fragment)
     index = _unwrap_value(index)
@@ -2547,7 +2547,7 @@ def fragment_load(fragment, index, loc: Optional[Location] = None, ip: Optional[
 
 def fragment_store(value, fragment, index, loc: Optional[Location] = None, ip: Optional[InsertionPoint] = None):
     """Store an element to a register fragment."""
-    from _mlir.dialects import memref as memref_dialect
+    from flydsl._mlir.dialects import memref as memref_dialect
     loc = _get_location(loc)
     value = _unwrap_value(value)
     fragment = _unwrap_value(fragment)
@@ -2571,7 +2571,7 @@ def _normalize_indices_to_memref(memref_val: Value, indices: List[Value], stride
     Returns:
         List of index Values matching the memref's rank
     """
-    from _mlir.ir import MemRefType
+    from flydsl._mlir.ir import MemRefType
     
     memref_type = memref_val.type
     if not isinstance(memref_type, MemRefType):
@@ -2665,7 +2665,7 @@ def copy(copy_desc, src, dst,
     Example:
         >>> flir.copy(atom, src, dst, src_indices=[i,j], dst_indices=[k])
     """
-    from _mlir.dialects import memref as memref_dialect
+    from flydsl._mlir.dialects import memref as memref_dialect
     loc = _get_location(loc)
 
     # If return_vector=True, we capture the last vector value loaded by the vectorized path.
@@ -2696,8 +2696,8 @@ def copy(copy_desc, src, dst,
         return out
 
     def emit_tensor_copy(copy_shape, src_view: TensorView, dst_view: TensorView, pred_view: Optional[Union[TensorView, Value]]):
-        from _mlir.dialects import vector
-        from _mlir.ir import VectorType
+        from flydsl._mlir.dialects import vector
+        from flydsl._mlir.ir import VectorType
 
         # Attempt vectorization if copy_desc has vector_size
         vector_size = 1
@@ -2882,8 +2882,8 @@ def copy(copy_desc, src, dst,
         - return_vector=True
         - extent == vector_size
         """
-        from _mlir.dialects import vector
-        from _mlir.ir import VectorType
+        from flydsl._mlir.dialects import vector
+        from flydsl._mlir.ir import VectorType
 
         if not return_vector:
             raise ValueError("copy(load-only) requires return_vector=True when dst is None")
@@ -2972,13 +2972,13 @@ def copy(copy_desc, src, dst,
 
     # Vector store path: src is a vector Value and dst is a TensorView.
     try:
-        from _mlir.ir import VectorType as _VectorType
+        from flydsl._mlir.ir import VectorType as _VectorType
     except Exception:
         _VectorType = None  # type: ignore
     if isinstance(dst, TensorView):
         v = _unwrap_value(src)
         if _VectorType is not None and isinstance(getattr(v, "type", None), _VectorType):
-            from _mlir.dialects import vector as vector_dialect
+            from flydsl._mlir.dialects import vector as vector_dialect
             # Use TensorView base indices as the store address.
             d_idx = [_unwrap_value(i) for i in dst.base_indices]
             d_idx2 = _maybe_swizzle_dst_indices(d_idx)
@@ -3069,7 +3069,7 @@ def printf(format_str: str, *args, loc: Optional[Location] = None, ip: Optional[
         - Use `flir.printf` for runtime/dynamic values
         - Format strings use "{}" as placeholders (similar to Python f-strings)
     """
-    from _mlir.dialects import gpu as _gpu
+    from flydsl._mlir.dialects import gpu as _gpu
     
     loc = _get_location(loc)
     

@@ -42,7 +42,7 @@ if _embedded_pkg_dir.exists():
 import pytest
 
 from flydsl.compiler.context import ensure_flir_python_extensions
-from _mlir.ir import Context, Location, Module, InsertionPoint
+from flydsl._mlir.ir import Context, Location, Module, InsertionPoint
 
 
 @pytest.fixture

@@ -24,11 +24,11 @@ from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import arith
 from flydsl.dialects.ext.arith import Index
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
-from _mlir.ir import F16Type, F32Type, IntegerType
-from _mlir.dialects import arith
+from flydsl._mlir import ir
+from flydsl._mlir.ir import F16Type, F32Type, IntegerType
+from flydsl._mlir.dialects import arith
 from flydsl.dialects.ext import arith as arith_ext
-import _mlir.extras.types as T
+import flydsl._mlir.extras.types as T
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 from tests.test_common import run_perftest

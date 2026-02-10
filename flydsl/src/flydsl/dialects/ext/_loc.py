@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from _mlir.ir import Location
+from flydsl._mlir.ir import Location
 
 
 def maybe_default_loc(loc: Optional[Location]) -> Optional[Location]:

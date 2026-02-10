@@ -14,7 +14,7 @@ Example:
     >>> rocdl.barrier()
 """
 
-from _mlir.dialects.rocdl import *  # noqa: F401,F403
+from flydsl._mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
@@ -50,7 +50,7 @@ def _unwrap_mfma_operand(v, *, loc=None):
 
     Accept Python ints and materialize them as i32 signless constants.
     """
-    from _mlir.ir import IntegerType
+    from flydsl._mlir.ir import IntegerType
     from . import arith as _arith_ext
 
     if isinstance(v, int):

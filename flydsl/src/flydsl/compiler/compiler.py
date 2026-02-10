@@ -9,8 +9,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Optional, Sequence, Union
 
-from _mlir import ir
-from _mlir.passmanager import PassManager
+from flydsl._mlir import ir
+from flydsl._mlir.passmanager import PassManager
 
 from flydsl.compiler.context import ensure_flir_python_extensions
 from flydsl.runtime.device import get_rocm_arch

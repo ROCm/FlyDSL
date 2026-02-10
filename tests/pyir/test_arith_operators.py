@@ -1,7 +1,7 @@
 """Test operator overloading for elegant Pythonic syntax."""
 
 import pytest
-from _mlir.ir import Context, Location, Module, InsertionPoint
+from flydsl._mlir.ir import Context, Location, Module, InsertionPoint
 
 try:
     from flydsl.dialects.ext import arith, flir

@@ -13,7 +13,7 @@ from flydsl.compiler.context import RAIIMLIRContextModule
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, arith
 from flydsl.dialects.ext.arith import Index
-from _mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
+from flydsl._mlir.ir import IntegerAttr, IntegerType, BoolAttr, IndexType, BlockArgument
 
 def flatten_nested_list(nested):
     """Flatten a nested list/tuple structure into a flat list."""
@@ -86,7 +86,7 @@ def run_lowering_test(ctx, test_name, expected_val=None, expected_vals=None,
                     is_dynamic = isinstance(operand, BlockArgument)
                     if not is_dynamic:
                         try:
-                            from _mlir.ir import Block
+                            from flydsl._mlir.ir import Block
                             is_dynamic = isinstance(operand.owner, Block)
                         except:
                             pass

@@ -13,8 +13,8 @@ import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.dialects.ext import arith, memref
-import _mlir.extras.types as T
-from _mlir import ir
+import flydsl._mlir.extras.types as T
+from flydsl._mlir import ir
 import pytest
 import torch
 if not torch.cuda.is_available():

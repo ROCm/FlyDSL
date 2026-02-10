@@ -9,8 +9,8 @@ import time
 
 import numpy as np
 import pytest
-import _mlir.extras.types as T
-from _mlir import ir
+import flydsl._mlir.extras.types as T
+from flydsl._mlir import ir
 
 import flydsl
 import torch

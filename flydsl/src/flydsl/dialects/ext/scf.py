@@ -8,14 +8,14 @@ insertion points and terminators so callers don't need to use
 from typing import Optional, Sequence
 from contextlib import contextmanager
 
-from _mlir.ir import (
+from flydsl._mlir.ir import (
     Value,
     Location,
     InsertionPoint,
     Block,
 )
-from _mlir.dialects import scf as _scf
-from _mlir.dialects import arith as _arith
+from flydsl._mlir.dialects import scf as _scf
+from flydsl._mlir.dialects import arith as _arith
 
 from .arith import constant
 
@@ -489,7 +489,7 @@ def yield_(
 
 
 # Re-export common scf operations
-from _mlir.dialects.scf import (
+from flydsl._mlir.dialects.scf import (
     WhileOp,
     YieldOp,
     ExecuteRegionOp,

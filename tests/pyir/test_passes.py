@@ -1,7 +1,7 @@
 """Test pass pipelines and lowering transformations."""
 
 import pytest
-from _mlir.ir import Context, Module
+from flydsl._mlir.ir import Context, Module
 
 try:
     from flydsl.passes import (

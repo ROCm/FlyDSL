@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from _mlir import ir
+from flydsl._mlir import ir
 
 _PASSES_MODULE = None
 
@@ -19,7 +19,7 @@ def ensure_flir_python_extensions(context: ir.Context):
         # If that is not available (common in dev builds), fall back to importing
         # the extension directly from our build tree without shadowing `_mlir`.
         try:
-            from _mlir._mlir_libs import _flirPasses as _PASSES_MODULE
+            from flydsl._mlir._mlir_libs import _flirPasses as _PASSES_MODULE
         except Exception:
             flir_root = Path(__file__).resolve().parents[3]
             ext_dir = flir_root / "build" / "python_packages" / "flir" / "_mlir" / "_mlir_libs"
@@ -30,7 +30,7 @@ def ensure_flir_python_extensions(context: ir.Context):
             import _flirPasses as _PASSES_MODULE
     
     # Register dialects using the new nanobind interface
-    from _mlir import ir as mlir_ir
+    from flydsl._mlir import ir as mlir_ir
     dialect_registry = mlir_ir.DialectRegistry()
     _PASSES_MODULE.register_dialects(dialect_registry._CAPIPtr)
     context.append_dialect_registry(dialect_registry)

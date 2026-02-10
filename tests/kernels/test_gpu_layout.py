@@ -8,8 +8,8 @@ import sys
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, memref, arith
-import _mlir.extras.types as T
-from _mlir import ir
+import flydsl._mlir.extras.types as T
+from flydsl._mlir import ir
 
 
 def test_layout_based_transpose():

@@ -7,8 +7,8 @@ runtime availability.
 
 import sys
 
-from _mlir import ir
-import _mlir.extras.types as T
+from flydsl._mlir import ir
+import flydsl._mlir.extras.types as T
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import arith, flir, memref

@@ -6,8 +6,8 @@ for Flir dialect lowering and optimization.
 
 from typing import Optional, Union, List
 
-from _mlir.ir import Module as ir_Module, Context
-from _mlir.passmanager import PassManager
+from flydsl._mlir.ir import Module as ir_Module, Context
+from flydsl._mlir.passmanager import PassManager
 
 from flydsl.compiler.context import ensure_flir_python_extensions
 

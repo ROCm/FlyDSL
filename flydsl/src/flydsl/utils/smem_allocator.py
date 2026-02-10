@@ -3,9 +3,9 @@ import math
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Union, Type, Tuple, Any, Optional, Callable, Dict
 
-from _mlir import ir
-from _mlir.dialects import arith, memref, gpu
-import _mlir.extras.types as T
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import arith, memref, gpu
+import flydsl._mlir.extras.types as T
 from flydsl.dialects.ext.gpu import lds_space
 
 # ==============================================================================

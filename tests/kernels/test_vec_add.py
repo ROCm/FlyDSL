@@ -10,9 +10,9 @@ import flydsl
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, arith
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
-from _mlir.ir import F32Type, IntegerType
-import _mlir.extras.types as T
+from flydsl._mlir import ir
+from flydsl._mlir.ir import F32Type, IntegerType
+import flydsl._mlir.extras.types as T
 import numpy as np
 import pytest
 

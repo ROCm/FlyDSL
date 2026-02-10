@@ -2,7 +2,7 @@
 
 import pytest
 
-from _mlir.ir import IntegerAttr
+from flydsl._mlir.ir import IntegerAttr
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import flir, arith

@@ -14,10 +14,10 @@ from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.dialects.ext import gpu, flir, arith
 from flydsl.dialects.ext.python_control_flow import lower_range_for_loops, range_constexpr
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
+from flydsl._mlir import ir
 from flydsl.dialects.ext import memref, vector
-from _mlir.ir import F32Type, IntegerType
-import _mlir.extras.types as T
+from flydsl._mlir.ir import F32Type, IntegerType
+import flydsl._mlir.extras.types as T
 import numpy as np
 import torch
 

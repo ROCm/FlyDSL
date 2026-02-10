@@ -23,7 +23,7 @@ try:
     class bdist_wheel(_bdist_wheel):  # type: ignore
         def finalize_options(self):
             super().finalize_options()
-            # `_mlir` ships CPython extension modules and shared libraries.
+            # `flydsl._mlir` ships CPython extension modules and shared libraries.
             self.root_is_pure = False
 
         def run(self):
@@ -85,7 +85,7 @@ if BUILD_DIR_REL.is_absolute():
     )
 
 EMBEDDED_MLIR_ROOT_REL = BUILD_DIR_REL / "python_packages" / "flydsl"
-EMBEDDED__MLIR_REL = EMBEDDED_MLIR_ROOT_REL / "_mlir"
+EMBEDDED__MLIR_REL = EMBEDDED_MLIR_ROOT_REL / "flydsl" / "_mlir"
 
 PY_SRC = REPO_ROOT / PY_SRC_REL
 EMBEDDED_MLIR_ROOT = REPO_ROOT / EMBEDDED_MLIR_ROOT_REL
@@ -163,7 +163,7 @@ def _assert_embedded_mlir_exists() -> None:
     if os.environ.get("FLIR_IN_BUILD_SH") == "1":
         return
 
-    # For runtime, FLIR expects the embedded MLIR runtime under `_mlir/`.
+    # For runtime, FLIR expects the embedded MLIR runtime under `flydsl/_mlir/`.
     # This is built by the repo build (CMake) and staged under build/python_packages/flydsl.
     # Default to build if missing, but don't force rebuild by default to allow
     # packaging from a pre-built state (e.g. when building a wheel from an sdist).
@@ -197,7 +197,7 @@ def _assert_embedded_mlir_exists() -> None:
             "Embedded MLIR python runtime not found at "
             f"{EMBEDDED__MLIR}.\n\n"
             "Build it first (e.g. `./flir/build.sh`), or run the CMake build that "
-            "produces `build/python_packages/flydsl/_mlir`.\n\n"
+            "produces `build/python_packages/flydsl/flydsl/_mlir`.\n\n"
             "Controls:\n"
             "  - FLIR_REBUILD=auto (default): build iff missing\n"
             "  - FLIR_REBUILD=1:              always rebuild\n"
@@ -224,15 +224,6 @@ def _strip_embedded_shared_libs() -> None:
     if not strip_bin:
         print("Warning: strip not found; skipping binary stripping.")
         return
-
-    # Drop the non-versioned CAPI .so which is typically a symlink/copy of the versioned lib.
-    capi = EMBEDDED__MLIR / "_mlir_libs" / "libFlirPythonCAPI.so"
-    try:
-        capi.unlink()
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"Warning: failed to remove {capi}: {e}")
 
     # Strip shared libraries (extensions + runtime deps).
     so_files: list[Path] = [
@@ -329,46 +320,16 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     shutil.rmtree(wheelhouse, ignore_errors=True)
 
 def _ensure_python_embedded_mlir_package() -> None:
-    """Make `_mlir` importable for editable installs.
+    """No-op: MLIR is now under flydsl._mlir (not bare _mlir).
 
-    pip's PEP660 editable install mode does not reliably honor multi-root
-    `package_dir` mappings. To keep `pip install -e .` and `setup.py develop`
-    working, we create a `_mlir` package entry under `flydsl/src/_mlir` by
-    symlinking to the embedded runtime produced by the CMake build.
+    The build output at .flir/build/python_packages/flydsl/flydsl/_mlir/ is
+    discovered automatically via flydsl.__init__.py's _ensure_build_output_on_path().
+    No symlink needed.
     """
-    dst = PY_SRC / "_mlir"
-    # `Path.exists()` follows symlinks; for a broken symlink it returns False.
-    # We want to repair broken/outdated symlinks automatically.
-    target = Path("..") / Path("..") / EMBEDDED__MLIR_REL
-
-    if dst.is_symlink():
-        try:
-            current_target = Path(os.readlink(dst))
-        except Exception:
-            current_target = None
-        # If it's already correct and resolves, keep it.
-        if current_target == target and dst.exists():
-            return
-        # Otherwise replace it (covers broken links and moved build dirs).
-        dst.unlink()
-
-    if dst.exists():
-        # A real directory/file exists here; don't overwrite silently.
-        return
-
-    if os.path.lexists(dst):
-        # Path exists but is neither a working directory nor a symlink we can manage.
-        raise RuntimeError(f"{dst} exists but is not a usable symlink/directory; please remove it and retry.")
-    # Prefer a relative symlink so the repo remains relocatable.
-    try:
-        dst.symlink_to(target, target_is_directory=True)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to create symlink {dst} -> {target}.\n"
-            "Either create it manually, or install with PYTHONPATH pointing at "
-            "`build/python_packages/flydsl`.\n"
-            f"Original error: {e}"
-        ) from e
+    # Clean up legacy symlink if present
+    legacy = PY_SRC / "_mlir"
+    if legacy.is_symlink():
+        legacy.unlink()
 
 
 def _ensure_kernels_package() -> None:
@@ -413,10 +374,10 @@ def _ensure_kernels_package() -> None:
 if not IS_WHEEL_BUILD:
     _ensure_python_embedded_mlir_package()
     _ensure_kernels_package()
-    # Editable/dev installs: single-root under `flydsl/src/` (includes `_mlir` via symlink).
+    # Editable/dev installs: single-root under `flydsl/src/`.
+    # flydsl._mlir is discovered at runtime via _ensure_build_output_on_path().
 
     flydsl_packages = set(find_namespace_packages(where=str(PY_SRC_REL), include=["flydsl*"]))
-    mlir_packages = set(find_namespace_packages(where=str(PY_SRC_REL), include=["_mlir*"]))
     kernels_packages = find_packages(where=str(PY_SRC_REL), include=["kernels", "kernels.*"])
 
     # Remap kernels.* to flydsl.kernels.*
@@ -426,20 +387,19 @@ if not IS_WHEEL_BUILD:
             kernels_packages_remapped.add("flydsl.kernels")
         elif pkg.startswith("kernels."):
             kernels_packages_remapped.add(pkg.replace("kernels.", "flydsl.kernels.", 1))
-    all_packages = sorted(flydsl_packages | mlir_packages | kernels_packages_remapped)
+    all_packages = sorted(flydsl_packages | kernels_packages_remapped)
 
     package_dir = {
         "": str(PY_SRC_REL),
     }
 else:
-    # Wheel/sdist builds: take `_mlir` from the embedded build output directly,
-    # so the wheel can include the CPython extension modules.
+    # Wheel/sdist builds: include flydsl._mlir from the embedded build output.
     py_packages = find_packages(where=str(PY_SRC_REL))
-    embedded_packages = find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["_mlir*"])
+    embedded_packages = find_namespace_packages(where=str(EMBEDDED_MLIR_ROOT_REL), include=["flydsl*"])
     all_packages = sorted(set(py_packages + embedded_packages))
     package_dir = {
         "": str(PY_SRC_REL),
-        "_mlir": str(EMBEDDED__MLIR_REL),
+        "flydsl._mlir": str(EMBEDDED__MLIR_REL),
     }
 
     # Optional: include kernels/ and tests/ in wheel
@@ -484,11 +444,9 @@ setup(
     # IMPORTANT: we must include versioned shared libraries (e.g. *.so.22.0git),
     # otherwise the wheel will miss required runtime deps and be unusable.
     package_data={
-        "_mlir": [
+        "flydsl._mlir": [
             # Python extension modules
             "_mlir_libs/_*.so",
-            # CAPI library
-            "_mlir_libs/libFlirPythonCAPI.so.*",
             # JIT runtime: include all versioned shared libraries.
             "_mlir_libs/lib/*.so",
             "_mlir_libs/lib/*.so.*",

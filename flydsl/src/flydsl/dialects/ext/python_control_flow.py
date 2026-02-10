@@ -76,7 +76,7 @@ class _RangeForLowerer(ast.NodeTransformer):
         # Inject imports and helpers at function entry so the transformed code is self-contained.
         injected = [
             ast.ImportFrom(
-                module="_mlir.ir",
+                module="flydsl._mlir.ir",
                 names=[ast.alias(name="Value", asname=self.opts.value_alias)],
                 level=0,
             ),

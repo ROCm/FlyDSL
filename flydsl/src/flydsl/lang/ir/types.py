@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from _mlir import ir
-from _mlir.extras.types import *
+from flydsl._mlir import ir
+from flydsl._mlir.extras.types import *
 
 from flydsl.runtime.device import get_rocm_arch
 

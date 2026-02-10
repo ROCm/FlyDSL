@@ -1,4 +1,4 @@
-from _mlir.dialects import builtin, gpu as _gpu
+from flydsl._mlir.dialects import builtin, gpu as _gpu
 from flydsl.dialects.ext import buffer_ops
 
 

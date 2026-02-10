@@ -5,14 +5,14 @@ embedded in `tests/kernels/test_rmsnorm.py` (before factoring) to preserve
 codegen and performance. Only test-only helpers/imports are removed.
 """
 
-from _mlir import ir
+from flydsl._mlir import ir
 
 from flydsl.dialects.ext import flir, arith
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from . import reduce as reduce_utils
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator
-import _mlir.extras.types as T
+import flydsl._mlir.extras.types as T
 
 
 KERNEL_NAME = "rmsnorm"

@@ -39,18 +39,17 @@ if _repo_root is None:
     # Fallback: best-effort guess (keeps installed/wheel layouts working).
     _repo_root = _this.parents[2]
 
-# IMPORTANT:
-# Do not blindly prepend build/python_packages/flydsl to sys.path.
-# That directory contains an embedded `_mlir` package which can conflict with an
-# external MLIR python runtime (mlir_core), leading to crashes like:
-#   LLVM ERROR: Option 'basic' already exists!
-#
 _flir_root = _repo_root
 
-def _resolve_embedded_python_packages_dir() -> Path | None:
-    """Return the repo build's python_packages/<project> directory, if it exists."""
-    # Default build layout: `.flir/build` (see flir/build.sh/setup.py), with fallback to legacy `build/`.
-    _build_dir = os.environ.get("FLIR_BUILD_DIR") or os.environ.get("FLIR_BUILD_DIR")
+
+def _ensure_build_output_on_path() -> None:
+    """Add the build output directory to sys.path so flydsl._mlir can be imported.
+
+    The build produces `flydsl/_mlir/_mlir_libs/_flir_ir.so` under
+    `.flir/build/python_packages/flydsl/`. This function prepends that directory
+    to sys.path so that the `flydsl._mlir` sub-package can be resolved.
+    """
+    _build_dir = os.environ.get("FLIR_BUILD_DIR")
     if _build_dir is None:
         _build_dir_path = _flir_root / ".flir" / "build"
         if not _build_dir_path.exists():
@@ -60,40 +59,16 @@ def _resolve_embedded_python_packages_dir() -> Path | None:
         if not _build_dir_path.is_absolute():
             _build_dir_path = _flir_root / _build_dir_path
 
-    # New layout: python_packages/flydsl (and legacy python_packages/flir).
     for _name in ("flydsl", "flir"):
         _p = _build_dir_path / "python_packages" / _name
         if _p.exists():
-            return _p
-    return None
+            _p_str = str(_p)
+            if _p_str not in sys.path:
+                sys.path.insert(0, _p_str)
+            return
 
 
-def _ensure_mlir_runtime_on_path(force: bool) -> None:
-    """Make `_mlir` importable by prepending the embedded runtime path when needed.
-
-    We avoid *always* prepending the embedded runtime to prevent conflicts with
-    an external MLIR python runtime. However, in many dev/test environments the
-    external runtime is absent; in that case, importing `flydsl` would fail
-    early (`from _mlir import ir`). This fallback keeps direct script runs working.
-    """
-    # If a `_mlir` runtime is already discoverable, do nothing (prevents conflicts).
-    if not force:
-        try:
-            if importlib.util.find_spec("_mlir") is not None:
-                return
-        except Exception:
-            # Best-effort; proceed to attempt embedded fallback.
-            pass
-
-    _python_packages_dir = _resolve_embedded_python_packages_dir()
-    if _python_packages_dir is None:
-        return
-    _python_packages_str = str(_python_packages_dir)
-    if _python_packages_str not in sys.path:
-        sys.path.insert(0, _python_packages_str)
-
-
-_ensure_mlir_runtime_on_path(force=True)
+_ensure_build_output_on_path()
 
 # Lazy import dialects and passes to avoid requiring MLIR when only using runtime
 def __getattr__(name):

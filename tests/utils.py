@@ -2,7 +2,7 @@
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
+from flydsl._mlir import ir
 import os
 import torch
 import functools

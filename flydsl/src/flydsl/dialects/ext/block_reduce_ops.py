@@ -11,8 +11,8 @@ Example:
 """
 
 from typing import Optional, Callable
-from _mlir.ir import Value, InsertionPoint
-from _mlir.dialects import gpu as mlir_gpu, memref, scf
+from flydsl._mlir.ir import Value, InsertionPoint
+from flydsl._mlir.dialects import gpu as mlir_gpu, memref, scf
 
 try:
     from flydsl.dialects.ext import arith

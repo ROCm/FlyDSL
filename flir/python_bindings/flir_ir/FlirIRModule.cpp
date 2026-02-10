@@ -378,40 +378,6 @@ NB_MODULE(_flir_ir, m) {
   ::mlir::registerFlirToStandardPass();
   ::mlir::registerFlirTrivialDCEPass();
 
-  //=========================================================================
-  // Register module aliases in sys.modules for _mlir_libs level
-  // 
-  // The Python package structure is:
-  //   _mlir/              <- Python package with ir.py, dialects/, etc.
-  //     _mlir_libs/       <- Contains C++ extension modules
-  //       _mlir.so        <- Originally separate, now part of _flir_ir
-  //       _mlirDialectsGPU.so  <- etc.
-  //
-  // We register aliases at _mlir._mlir_libs level so the Python wrappers
-  // (ir.py, dialects/*.py) continue to work with their relative imports.
-  //=========================================================================
-  nb::module_ sys = nb::module_::import_("sys");
-  nb::dict modules = sys.attr("modules");
-  
-  // Register at _mlir._mlir_libs level (what ir.py imports from)
-  modules["_mlir._mlir_libs._mlir"] = mlirMod;
-  modules["_mlir._mlir_libs._mlir.ir"] = irModule;
-  modules["_mlir._mlir_libs._mlir.rewrite"] = rewriteModule;
-  modules["_mlir._mlir_libs._mlir.passmanager"] = passModule;
-  
-  // Register dialect modules at _mlir._mlir_libs level (for gpu/__init__.py etc.)
-  modules["_mlir._mlir_libs._mlirDialectsGPU"] = gpuDialectMod;
-  modules["_mlir._mlir_libs._mlirDialectsLLVM"] = llvmDialectMod;
-  modules["_mlir._mlir_libs._mlirGPUPasses"] = gpuPassesMod;
-  modules["_mlir._mlir_libs._mlirExecutionEngine"] = execEngineMod;
-  modules["_mlir._mlir_libs._mlirRegisterEverything"] = regEverythingMod;
-  modules["_mlir._mlir_libs._flirPasses"] = flirPassesMod;
-  
-  // Also register top-level for direct imports
-  modules["_mlirDialectsGPU"] = gpuDialectMod;
-  modules["_mlirDialectsLLVM"] = llvmDialectMod;
-  modules["_mlirGPUPasses"] = gpuPassesMod;
-  modules["_mlirExecutionEngine"] = execEngineMod;
-  modules["_mlirRegisterEverything"] = regEverythingMod;
-  modules["_flirPasses"] = flirPassesMod;
+  // NOTE: sys.modules aliases are registered in Python __init__.py, not here.
+  // The Python side handles all three groups (C++ capsule, LLVM wrappers, local).
 }
