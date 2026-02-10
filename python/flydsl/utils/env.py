@@ -203,6 +203,8 @@ class DebugEnvManager(EnvManager):
     dump_ir = OptBool(False, description="Dump IR to file")
     dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), description="Directory for dumping IR")
 
+    ast_diff = OptBool(False, description="Print AST diff during rewrite")
+
     # Logging options
     log_level = OptStr("WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"], description="Logging level")
     log_to_file = OptStr("", description="Log file path, empty to disable file logging")
