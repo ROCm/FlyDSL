@@ -126,7 +126,18 @@ DimValueType = Union[int, ir.Value]
 DimType = Union[int, ir.Value, Tuple[DimValueType, ...], List[DimValueType]]
 
 
+def _unwrap_to_raw(val):
+    if isinstance(val, ir.Value):
+        return val
+    if hasattr(val, "__extract_ir_values__"):
+        values = val.__extract_ir_values__()
+        if len(values) == 1:
+            return values[0]
+    return val
+
+
 def _to_index_value(val: DimValueType) -> ir.Value:
+    val = _unwrap_to_raw(val)
     if isinstance(val, ir.Value):
         if val.type == ir.IndexType.get():
             return val
@@ -257,7 +268,7 @@ class KernelLauncher:
             elif smem > 0:
                 smem_val = arith.constant(ir.IntegerType.get_signless(32), smem)
 
-            async_object = stream
+            async_object = _unwrap_to_raw(stream) if stream is not None else None
 
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
