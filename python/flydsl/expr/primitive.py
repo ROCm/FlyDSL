@@ -201,6 +201,11 @@ def complement(layout, codomain_size, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def right_inverse(layout, loc=None, ip=None):
+    return fly.right_inverse(layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def coalesce(layout, pattern=None, loc=None, ip=None):
     return fly.coalesce(layout, pattern=pattern, loc=loc, ip=ip)
 

@@ -58,6 +58,12 @@ def : Pat<(Fly_LogicalDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]
             (Fly_GetIterOp $mem),
             (Fly_LogicalDivideOp (Fly_GetLayoutOp $mem), $divisor)
         )>;
+
+def : Pat<(Fly_RightInverseOp Fly_MemRef:$mem),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_RightInverseOp (Fly_GetLayoutOp $mem))
+        )>;
         
 def : Pat<(Fly_ZippedDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
           (Fly_MakeViewOp
