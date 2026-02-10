@@ -55,6 +55,17 @@ declare_mlir_python_extension(FlyPythonSources.Core.fly_rocdl
     LLVMSupport
 )
 
+# NOTE: Do NOT link MLIRFlyToROCDL or other C++ libs via PRIVATE_LINK_LIBS.
+# Doing so statically embeds a copy of MLIRPass (and its pass registry) into
+# _mlirRegisterEverything.so. Passes registered via registerFlyPasses() then
+# go into that LOCAL registry, while PassManager.parse() queries the GLOBAL
+# registry in FlyPythonCAPI.so → "does not refer to a registered pass".
+#
+# Instead, pass registration is done through CAPI functions
+# (mlirRegisterFlyPasses, mlirRegisterFlyToROCDLConversionPass) defined in
+# the CAPI libraries (MLIRCPIFly, MLIRCPIFlyROCDL). These are already in
+# FlyPythonCAPI.so, so ::mlir::registerPass() resolves to the correct
+# global instance.
 declare_mlir_python_extension(FlyPythonSources.RegisterEverything
   MODULE_NAME _mlirRegisterEverything
   ADD_TO_PARENT FlyPythonSources
@@ -63,7 +74,6 @@ declare_mlir_python_extension(FlyPythonSources.RegisterEverything
     FlyRegisterEverything.cpp
   PRIVATE_LINK_LIBS
     LLVMSupport
-    MLIRFlyToROCDL
   EMBED_CAPI_LINK_LIBS
     MLIRCAPIIR
     MLIRCPIFly
