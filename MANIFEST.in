@@ -4,11 +4,11 @@ include pyproject.toml
 include setup.py
 recursive-include scripts *.sh
 
-recursive-include flydsl *
-recursive-include kernels *
+recursive-include python/flydsl *.py
+recursive-include python requirements.txt
+recursive-include examples *.py
 recursive-include tests *
 
 recursive-exclude * __pycache__
 recursive-exclude * *.py[co]
-recursive-exclude .flir *
 recursive-exclude build *
