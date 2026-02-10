@@ -32,10 +32,6 @@ ValueT = TypeVar("ValueT")
 
 
 class Constexpr(Generic[ValueT]):
-    """
-    Constexpr is transparent for mlir, it will be replaced by the actual value at compile time.
-    """
-
     pass
 
 
