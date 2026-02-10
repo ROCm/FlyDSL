@@ -143,6 +143,45 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
     return sources
 
 
+def _get_underlying_func(obj):
+    if isinstance(obj, KernelFunction):
+        return obj._func
+    if isinstance(obj, JitFunction):
+        return obj.func
+    if isinstance(obj, types.FunctionType):
+        return obj
+    return None
+
+
+def _is_user_function(func, rootFile):
+    try:
+        funcFile = inspect.getfile(func)
+    except (TypeError, OSError):
+        return False
+    return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
+
+
+def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
+    if visited is None:
+        visited = set()
+    sources = []
+    for name in func.__code__.co_names:
+        obj = func.__globals__.get(name)
+        underlying = _get_underlying_func(obj)
+        if underlying is None or id(underlying) in visited:
+            continue
+        if not _is_user_function(underlying, rootFile):
+            continue
+        visited.add(id(underlying))
+        try:
+            src = inspect.getsource(underlying)
+        except OSError:
+            src = underlying.__code__.co_code.hex()
+        sources.append(f"{name}:{src}")
+        sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+    return sources
+
+
 def _jit_function_cache_key(func: Callable) -> str:
     parts = []
     parts.append(_flydsl_key())
