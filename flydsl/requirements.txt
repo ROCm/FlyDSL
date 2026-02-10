@@ -1,4 +1,5 @@
 # FLIR Python package runtime dependencies.
 
 numpy
+setuptools
 
