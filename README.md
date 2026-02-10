@@ -29,15 +29,11 @@ FlyDSL/
 ├── flir/                      # C++ sources + build scripts (CMake, embedded python bindings)
 │   ├── CMakeLists.txt
 │   ├── build.sh               # build FLIR + python bindings (recommended)
-│   ├── include/flir/          # dialect headers + TableGen definitions
-│   ├── lib/                   # dialect implementation (Dialect/, Transforms/)
-│   ├── python_bindings/       # MLIR python bindings + runtime wrappers
-│   └── tools/flir-opt/        # flir-opt CLI tool
+│   ├── include/
+│   ├── lib/
+│   └── tools/
 ├── flydsl/                    # Python sources (src/flydsl) + python-only docs/reqs
 ├── tests/                     # mlir + python tests/benchmarks
-│   ├── mlir/                  # MLIR file tests
-│   ├── pyir/                  # Python IR tests (no GPU required)
-│   └── kernels/               # GPU execution tests
 └── kernels/                   # Python kernels (importable as `kernels.*`)
 ```
 
@@ -127,6 +123,16 @@ For the test folder organization, see `tests/` (`mlir/`, `pyir/`, `kernels/`).
   - Add MLIR build lib dir to the loader path:
     - `export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH`
 
+## Documentation
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
+| Layout System | FLIR layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
+| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
+
 ## 📐 FLIR Layout System
 
 > FLIR = **F**lexible **L**ayout **I**ntermediate **R**epresentation.
@@ -157,21 +163,17 @@ Formula: `Index = dot(Coord, Stride) = sum(c_i * s_i)`
 ### Example (MLIR)
 
 ```mlir
-func.func @layout_example(%i: index, %j: index) -> index {
-  %c8 = arith.constant 8 : index
-  %c16 = arith.constant 16 : index
-  %c1 = arith.constant 1 : index
-
+func.func @layout_example(%i: !flir.int, %j: !flir.int) -> !flir.int {
   // Create 2D layout (8, 16) with column-major stride (1, 8)
-  %shape = flir.make_shape %c8, %c16 : (index, index) -> !flir.shape<(8,16)>
-  %stride = flir.make_stride %c1, %c8 : (index, index) -> !flir.stride<(1,8)>
-  %layout = flir.make_layout %shape, %stride : (!flir.shape<(8,16)>, !flir.stride<(1,8)>) -> !flir.layout<(8,16):(1,8)>
+  %shape = flir.make_shape %c8, %c16 : (!flir.int, !flir.int) -> !flir.shape<2>
+  %stride = flir.make_stride %c1, %c8 : (!flir.int, !flir.int) -> !flir.stride<2>
+  %layout = flir.make_layout %shape, %stride : (!flir.shape<2>, !flir.stride<2>) -> !flir.layout<2>
 
   // Convert coordinate (i, j) to linear index
-  %coord = flir.make_coord %i, %j : (index, index) -> !flir.coord<(?,?)>
-  %idx = flir.crd2idx %coord, %layout : (!flir.coord<(?,?)>, !flir.layout<(8,16):(1,8)>) -> index
+  %coord = flir.make_coord %i, %j : (!flir.int, !flir.int) -> !flir.coord<2>
+  %idx = flir.crd2idx %coord, %layout : (!flir.coord<2>, !flir.layout<2>) -> !flir.int
 
-  return %idx : index
+  return %idx : !flir.int
 }
 ```
 
@@ -184,20 +186,20 @@ FLIR provides a high-level Python API for generating kernels.
 ### Layout Construction
 
 ```python
-from flydsl.dialects.ext import flir
+from flydsl.dialects.ext import flir, arith
 
-class _LayoutExample(flir.MlirModule):
-    @flir.jit
-    def layout_ops(self: flir.T.i64):
-        # Create Layout (8x16, column-major)
-        shape = flir.make_shape(8, 16)
-        stride = flir.make_stride(1, 8)
-        layout = flir.make_layout(shape, stride)
+# Create constants
+c8 = arith.constant(8, index=True)
+c16 = arith.constant(16, index=True)
 
-        # Query layout properties
-        total_size = flir.size(shape)
-        layout_rank = flir.rank(layout)
-        return total_size
+# Create Layout
+shape = flir.make_shape(c8, c16)
+stride = flir.make_stride(arith.constant(1, index=True), c8)
+layout = flir.make_layout(shape, stride)
+
+# Coordinate to Index
+coord = flir.make_coord(i, j)
+idx = flir.crd2idx(coord, layout)
 ```
 
 ### Pipeline API
@@ -226,76 +228,79 @@ binary_module = pipeline.run(module)
 
 ## ⚙️ Hierarchical Kernel Control
 
-FLIR keeps the tiling hierarchy explicit across block, warp, thread, and instruction scopes:
+FLIR keeps the tiling hierarchy explicit across cluster, block, warp, thread, and instruction scopes. Declare tile shapes at each level, derive layouts, and partition tensors deterministically:
 
 ```python
-# Define thread and value layouts
+THR_M, THR_N = 4, 32
+VAL_M, VAL_N = 4, 4
+CLUSTER_M, CLUSTER_N = 2, 2
+
 thr_layout = flir.make_ordered_layout((THR_M, THR_N), order=(1, 0))
 val_layout = flir.make_ordered_layout((VAL_M, VAL_N), order=(1, 0))
 
-# Create tiled copy with vectorized atoms
 copy_atom = flir.make_copy_atom(T.f32(), vector_size=8)
-tiled = flir.make_tiled_copy_tv(copy_atom, thr_layout, val_layout,
-                                thr_shape=(THR_M, THR_N), val_shape=(VAL_M, VAL_N))
+tiled = flir.make_tiled_copy_tv(
+    copy_atom, thr_layout, val_layout,
+    thr_shape=(THR_M, THR_N),
+    val_shape=(VAL_M, VAL_N),
+)
 
-# Partition tensor across blocks and threads
 tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
-tiles = flir.zipped_divide(tensor_A, (THR_M * VAL_M, THR_N * VAL_N))
-blk_tile = tiles[(flir.block_idx("y"), flir.block_idx("x"))]
-thr_tile = tiled.get_slice(tid_linear).partition_S(blk_tile)
+cluster_tiles = flir.zipped_divide(
+    tensor_A,
+    (CLUSTER_M * THR_M * VAL_M, CLUSTER_N * THR_N * VAL_N),
+)
+
+blk_coord = (flir.block_idx("y"), flir.block_idx("x"))
+blkA = cluster_tiles[blk_coord]
+tid_linear = (flir.thread_idx("y") * flir.block_dim("x") + flir.thread_idx("x")).value
+thr_tiles = tiled.get_slice(tid_linear).partition_S(blkA)
 ```
 
-With per-level partitions, you can allocate register fragments, emit predicate masks, and schedule MFMA/vector instructions while retaining full knowledge of the execution hierarchy.
+With the per-level partitions in hand, you can allocate register fragments, emit predicate masks, and schedule MFMA/vector instructions while the compiler retains full knowledge of the execution hierarchy.
 
 ## 🧮 Minimal VecAdd Example
 
-This condensed snippet mirrors `tests/kernels/test_vec_add.py`, showing how to define GPU kernels with tiled copies and fragments:
+This condensed snippet mirrors `tests/kernels/test_vec_add.py`, highlighting how tiled copies, fragments, and benchmarking fit together:
 
 ```python
-import flydsl
-from flydsl.dialects.ext import flir
+from flydsl.compiler.context import RAIIMLIRContextModule
+from flydsl.dialects.ext import gpu, flir
 import _mlir.extras.types as T
 
-THREADS, TILE, VEC = 256, 8, 4
+THREADS = 256
+TILE = 8
+VEC = 4
 
-class VecAddKernel(flir.MlirModule):
-    GPU_MODULE_NAME = "vec_kernels"
-    GPU_MODULE_TARGETS = ['#rocdl.target<chip = "gfx942">']
+ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
+gpu.set_container_module(ctx.module)
 
-    @flir.kernel
-    def vec_add(self: flir.T.i64,
-                A: lambda: T.memref(T.dynamic(), T.f32()),
-                B: lambda: T.memref(T.dynamic(), T.f32()),
-                C: lambda: T.memref(T.dynamic(), T.f32()),
-                n: lambda: T.index()):
-        tid = flir.thread_idx("x")
-        bid = flir.block_idx("x")
+@gpu.module("vec_kernels", ["#rocdl.target<abi = \"500\">"])
+def mod():
+    pass
 
-        # Define thread/value layouts for tiled copy
-        thr_layout = flir.make_ordered_layout((THREADS,), order=(0,))
-        val_layout = flir.make_ordered_layout((TILE,), order=(0,))
-        copy_atom = flir.make_copy_atom(T.f32(), vector_size=VEC)
-        tiled = flir.make_tiled_copy_tv(copy_atom, thr_layout, val_layout,
-                                        thr_shape=(THREADS,), val_shape=(TILE,))
-
-        # Partition tensors across blocks and threads
-        tensor_A = flir.make_tensor(A, shape=(n,), strides=(1,))
-        tiles_A = flir.zipped_divide(tensor_A, (THREADS * TILE,))
-        blkA = tiles_A[(bid,)]
-        thrA = tiled.get_slice(tid).partition_S(blkA)
-
-        # Load to registers, compute, store
-        frgA = flir.make_fragment_like(thrA, T.f32())
-        flir.copy(tiled, thrA, frgA)
-        # ... repeat for B/C, add, store results
-
-# Compile and run
-module = VecAddKernel().module
-exe = flydsl.compile(module)
-exe(a_dev, b_dev, c_dev, size)
+@flir.kernel
+def vecAdd(A: T.memref(20480000, T.f32()),
+           B: T.memref(20480000, T.f32()),
+           C: T.memref(20480000, T.f32())):
+    tid_linear = (flir.thread_idx("y") * flir.block_dim("x") +
+                  flir.thread_idx("x")).value
+    thr_layout = flir.make_ordered_layout((THREADS,), order=(0,))
+    val_layout = flir.make_ordered_layout((TILE,), order=(0,))
+    copy_atom = flir.make_copy_atom(T.f32(), vector_size=VEC)
+    tiled = flir.make_tiled_copy_tv(copy_atom, thr_layout, val_layout,
+                                     thr_shape=(THREADS,), val_shape=(TILE,))
+    tensor_A = flir.make_tensor(A, shape=(20480000,), strides=(1,))
+    tiles_A = flir.zipped_divide(tensor_A, (THREADS * TILE,))
+    blkA = tiles_A[(flir.block_idx("x"),)]
+    thrA = tiled.get_slice(tid_linear).partition_S(blkA)
+    frgA = flir.make_fragment_like(thrA, T.f32())
+    flir.copy(tiled, thrA, frgA)
+    # repeat for B/C fragments, add, then store results
 ```
 
-See `tests/kernels/test_vec_add.py` for the complete implementation with benchmarking.
+Compile the module with the pipeline, set up HIP device buffers, and invoke the helper utilities
+in `tests/kernels/` for timing—just like the full benchmark.
 
 ## ✅ Testing Status
 
@@ -312,12 +317,15 @@ See `tests/kernels/test_vec_add.py` for the complete implementation with benchma
 
 ## 🙏 Acknowledgements
 
-FLIR's design is inspired by ideas from several projects:
+We would like to thank Colfax Research for their foundational work on categorical layout algebra,
+which provides a rigorous mathematical framework for understanding and manipulating CuTe layouts.
+Their work has been instrumental in shaping the design of FLIR's layout system.
 
-- [Categorical Foundations for CuTe Layouts](https://arxiv.org/abs/2601.05972) – mathematical framework for layout algebra ([companion code](https://github.com/ColfaxResearch/layout-categories))
-- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) – CuTe layout algebra concepts (BSD-3-Clause parts only; no EULA-licensed code was referenced)
-- [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) – tile-based kernel design patterns for AMD GPUs
-- [Triton](https://github.com/triton-lang/triton) – Python DSL for GPU kernel authoring
+## 📚 References
+
+[1] J. van de Ven, Y. Goldfarb, V. Krakovna, T. Ben-Nun, "Categorical Foundations for CuTe Layouts", arXiv:2601.05972, 2025. https://arxiv.org/abs/2601.05972
+
+[2] Colfax Research, "layout-categories" - Companion software for the Categorical Foundations for CuTe Layouts paper. https://github.com/ColfaxResearch/layout-categories
 
 ## 📄 License
 
