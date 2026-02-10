@@ -4,13 +4,13 @@
 
 #include "flydsl-c/FlyDialect.h"
 #include "flydsl-c/FlyROCDLDialect.h"
-#include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
-#include "flydsl/Dialect/Fly/Transforms/Passes.h"
 
-namespace mlir {
-#define GEN_PASS_REGISTRATION
-#include "flydsl/Conversion/Passes.h.inc"
-} // namespace mlir
+// NOTE: Pass registration uses CAPI functions (mlirRegisterFlyPasses,
+// mlirRegisterFlyToROCDLConversionPass) defined in the CAPI libraries
+// (MLIRCPIFly, MLIRCPIFlyROCDL) rather than inline C++ functions.
+// This ensures ::mlir::registerPass() calls resolve to the SAME pass
+// registry instance in FlyPythonCAPI.so, avoiding ODR violations from
+// statically-linked duplicate MLIRPass copies.
 
 NB_MODULE(_mlirRegisterEverything, m) {
   m.doc() = "MLIR All Upstream Dialects, Translations and Passes Registration";
@@ -27,9 +27,9 @@ NB_MODULE(_mlirRegisterEverything, m) {
         [](MlirContext context) { mlirRegisterAllLLVMTranslations(context); });
 
   // Register all passes on load.
+  // Use CAPI functions so pass registration goes into FlyPythonCAPI.so's
+  // global pass registry (not a local copy in _mlirRegisterEverything.so).
   mlirRegisterAllPasses();
-
-  mlir::fly::registerFlyPasses();
-  // Register Fly to ROCDL conversion pass
-  mlir::registerFlyToROCDLConversionPass();
+  mlirRegisterFlyPasses();
+  mlirRegisterFlyToROCDLConversionPass();
 }
