@@ -360,10 +360,13 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+        raise ValueError(
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+        )
     is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int4")
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
     if in_dtype == "fp8":
@@ -379,6 +382,28 @@ def run_moe_stage1(
         scale_w1 = None
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int8smooth":
+        # "SmoothQuant" emulation for MoE stage1:
+        # - Create a per-expert smooth scale S[e, k] (k=model_dim)
+        # - Expand X into per-route rows: X_route[t, slot, k] = X[t, k] * S[topk_ids[t,slot], k]
+        # - Per-(t,slot) dynamic quant: int8 + scale_x[t,slot]
+        #
+        # This matches the kernel contract in kernels/moe_gemm_2stage.py for in_dtype="int8smooth",
+        # where X/scale_x are indexed by (t*topk + slot).
+        smooth_scale = (0.75 + 0.5 * torch.rand((experts, model_dim), device=device, dtype=torch.float32))
+        x_route = x_fp32[:, None, :].expand(tokens, topk, model_dim)
+        x_route = x_route * smooth_scale[topk_ids.to(torch.int64)]
+        amax = torch.amax(torch.abs(x_route), dim=-1, keepdim=True)
+        scale_x = amax / 127.0
+        scale_x[scale_x == 0] = 1.0
+        x_q = (x_route / scale_x).to(torch.int8)
+        # Match CK moe_smoothquant layout: slot-major [topk*tokens, K].
+        x_q = x_q.permute(1, 0, 2).contiguous()
+        scale_x = scale_x.permute(1, 0, 2).contiguous()
+        # W quantization is unchanged for this harness (same as aiter perf tests: smooth scales
+        # exercise the API rather than implementing the exact SQ calibration workflow).
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
     else:
@@ -397,7 +422,11 @@ def run_moe_stage1(
     scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
 
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
-    x_q = x_q.contiguous().view(tokens, model_dim)
+    x_q = (
+        x_q.contiguous().view(tokens * topk, model_dim)
+        if is_int8smooth
+        else x_q.contiguous().view(tokens, model_dim)
+    )
     w_kernel = (
         _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
     ).contiguous()
@@ -408,7 +437,7 @@ def run_moe_stage1(
     if scale_x is None:
         scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
-        scale_x_1d = scale_x.view(-1).contiguous()  # [tokens]
+        scale_x_1d = scale_x.view(-1).contiguous()  # [tokens] or [tokens*topk] for int8smooth
     if scale_w1_flat is None:
         scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
@@ -468,10 +497,17 @@ def run_moe_stage1(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
+        if is_int8smooth:
+            # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
+            x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
+            sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
+        else:
+            x_ref = x_q
+            sx_ref = scale_x
         ref = torch_moe_gemm1(
-            x_q,
+            x_ref,
             w1_q_flat,
-            scale_x,
+            sx_ref,
             scale_w1_flat,
             topk_ids.to(torch.int64),
             topk_weights,
@@ -489,10 +525,10 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    bytes_moved += tokens * model_dim * 1  # x fp8
+    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * 1  # x int8/fp8
     bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
-    bytes_moved += tokens * 4  # scale_x f32 (1D)
+    bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
     bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
@@ -713,10 +749,13 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4'), got {in_dtype!r}")
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+        raise ValueError(
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+        )
     is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int4")
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
     if in_dtype == "fp8":
@@ -731,6 +770,12 @@ def run_moe_stage2(
         scale_w1 = None
         scale_w2 = None
     elif in_dtype == "int8":
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int8smooth":
+        # Stage2 uses token-slot activations (A2) already, so we keep the same W8A8 kernel path.
+        # We optionally apply a per-expert smooth scale to A2 *before* quantization below.
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
@@ -773,6 +818,10 @@ def run_moe_stage2(
             a2_q = out1_ref.to(torch.float16)
             a2_scale = None
         else:
+            if is_int8smooth:
+                # Apply a per-expert smooth scale to A2 before W8A8 quantization.
+                smooth_scale2 = (0.75 + 0.5 * torch.rand((experts, inter_dim), device=device, dtype=torch.float32))
+                out1_ref = out1_ref * smooth_scale2[topk_ids.to(torch.int64)]
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
     # Flatten weights/scales for the kernel.
@@ -823,6 +872,8 @@ def run_moe_stage2(
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
+        # For non-EP mode tests, pass None for valid_mask
+        valid_mask = None
         exe(
             o,
             x,
@@ -837,6 +888,7 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
+            valid_mask,
             stream_ptr,
         )
  
@@ -1008,7 +1060,7 @@ def run_moe_stage2(
         pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
@@ -1032,7 +1084,9 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
+    compile_fn=None,
     w_fp4_kernel: bool = False,
+    gemm2_mode: Optional[str] = None,
     test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
@@ -1074,6 +1128,16 @@ def test_moe_gemm_2stage(
     if compare_aiter_ck is None:
         compare_aiter_ck = False
 
+    # Handle gemm2_mode selection
+    if compile_fn is None and gemm2_mode is not None:
+        mode_str = str(gemm2_mode).strip().lower()
+        if mode_str == "atomic":
+            compile_fn = None
+        elif mode_str == "reduce":
+            compile_fn = lambda **kw: compile_moe_gemm2_ex(**kw, mode=MoeGemm2Mode.REDUCE)
+        else:
+            raise ValueError(f"Invalid gemm2_mode={gemm2_mode!r}, expected 'atomic' or 'reduce'")
+
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
         model_dim=model_dim,
@@ -1099,6 +1163,7 @@ def test_moe_gemm_2stage(
         return_outputs=True,
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
+        test_graph=test_graph,
     )
 
     if w_fp4_kernel:
@@ -1114,6 +1179,13 @@ def test_moe_gemm_2stage(
         a2_scale = None
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
+        if in_dtype == "int8smooth":
+            smooth_scale2 = (
+                0.75
+                + 0.5
+                * torch.rand((experts, inter_dim), device=out1_fp32.device, dtype=torch.float32)
+            )
+            out1_fp32 = out1_fp32 * smooth_scale2[topk_ids.to(torch.int64)]
         a2_q, a2_scale = pertoken_quant(out1_fp32, quant_dtype=torch.int8)
 
     _out2_fp32, _us2 = run_moe_stage2(
@@ -1142,7 +1214,9 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
+        compile_fn=compile_fn,
         use_reduce=bool(use_reduce),
+        test_graph=test_graph,
     )
 
 
@@ -1486,8 +1560,9 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int4", "all"],
-        help="Kernel input dtype: fp8 / int8 / int4 / all (default: all). "
+        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / all (default: all). "
+        "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
         "int4 means W4A8: A int8, W packed int4.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
@@ -1508,6 +1583,7 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
+    parser.add_argument("--gemm2_mode", type=str, default=None, choices=["atomic", "reduce"], help="Stage2 mode: 'atomic' (default) or 'reduce' (GEMM+reduce kernel).")
     parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
 
     # Benchmark knobs
@@ -1560,6 +1636,8 @@ if __name__ == "__main__":
             moe_sort_mode=args.moe_sort_mode,
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
+            w_fp4_kernel=args.wfp4,
+            gemm2_mode=args.gemm2_mode,
             use_reduce=bool(args.reduce),
             test_graph=bool(args.test_graph),
         )
