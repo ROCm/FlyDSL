@@ -319,22 +319,8 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
 
     shutil.rmtree(wheelhouse, ignore_errors=True)
 
-def _ensure_python_embedded_mlir_package() -> None:
-    """No-op: MLIR is now under flydsl._mlir (not bare _mlir).
-
-    The build output at .flir/build/python_packages/flydsl/flydsl/_mlir/ is
-    discovered automatically via flydsl.__init__.py's _ensure_build_output_on_path().
-    No symlink needed.
-    """
-    # Clean up legacy symlink if present
-    legacy = PY_SRC / "_mlir"
-    if legacy.is_symlink():
-        legacy.unlink()
-
-
 def _ensure_kernels_package() -> None:
-    """Make `flydsl.kernels` importable for editable installs as _ensure_python_embedded_mlir_package
-    """
+    """Make `flydsl.kernels` importable for editable installs."""
 
     dst = PY_SRC / "flydsl" / "kernels"
     # `Path.exists()` follows symlinks; for a broken symlink it returns False.
@@ -372,7 +358,6 @@ def _ensure_kernels_package() -> None:
 
 
 if not IS_WHEEL_BUILD:
-    _ensure_python_embedded_mlir_package()
     _ensure_kernels_package()
     # Editable/dev installs: single-root under `flydsl/src/`.
     # flydsl._mlir is discovered at runtime via _ensure_build_output_on_path().
