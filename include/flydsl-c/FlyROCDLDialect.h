@@ -34,6 +34,13 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirTy
 // CopyAtom_CDNA3_BufferLSAType
 //===----------------------------------------------------------------------===//
 
+//===----------------------------------------------------------------------===//
+// Pass Registration
+//===----------------------------------------------------------------------===//
+
+/// Register the FlyToROCDL conversion pass.
+MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
+
 #ifdef __cplusplus
 }
 #endif
