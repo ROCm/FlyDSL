@@ -17,6 +17,9 @@ from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
 
 __all__ = [
+    # Maybe remove it in the future
+    "T",
+    "arith",
     # Enum Attributes
     "AddressSpace",
     "CachePolicy",
@@ -33,6 +36,7 @@ __all__ = [
     "range_constexpr",
     "rank",
     "depth",
+    "static",
     "int_tuple_add",
     "int_tuple_sub",
     "int_tuple_mul",
@@ -83,6 +87,8 @@ __all__ = [
     "make_view",
     "add_offset",
     "cooperative_copy",
+    "gemm",
+    "copy",
     "printf",
 ]
 
@@ -109,6 +115,11 @@ def rank(int_or_tuple):
 
 def depth(int_or_tuple):
     return fly.depth(int_or_tuple)
+
+
+@dsl_api_wrapper
+def static(result_type, loc=None, ip=None):
+    return fly.static(result_type, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -409,6 +420,16 @@ def cooperative_copy(tiled_copy, partition_idx, src, dst, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
+
+
+@dsl_api_wrapper
+def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
+    return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def copy(copy_atom, src, dst, loc=None, ip=None):
+    return fly.copy(copy_atom, src, dst, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
