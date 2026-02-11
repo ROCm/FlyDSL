@@ -1123,9 +1123,7 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
-    compile_fn=None,
     w_fp4_kernel: bool = False,
-    gemm2_mode: Optional[str] = None,
     test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
@@ -1168,18 +1166,6 @@ def test_moe_gemm_2stage(
         moe_sort_mode = "torch"
     if compare_aiter_ck is None:
         compare_aiter_ck = False
-
-    # Handle gemm2_mode selection
-    if compile_fn is None and gemm2_mode is not None:
-        mode_str = str(gemm2_mode).strip().lower()
-        if mode_str == "atomic":
-            compile_fn = None
-        elif mode_str == "reduce":
-            compile_fn = lambda **kw: compile_moe_gemm2_ex(
-                **kw, mode=MoeGemm2Mode.REDUCE, valid_mask=(True if bool(use_valid_mask) else None)
-            )
-        else:
-            raise ValueError(f"Invalid gemm2_mode={gemm2_mode!r}, expected 'atomic' or 'reduce'")
 
     out1_fp16, _us1 = run_moe_stage1(
         tokens=tokens,
@@ -1257,7 +1243,6 @@ def test_moe_gemm_2stage(
         a2_scale_in=a2_scale,
         return_outputs=True,
         skip_ref=bool(skip_ref),
-        compile_fn=compile_fn,
         use_reduce=bool(use_reduce),
         use_valid_mask=use_valid_mask,
         test_graph=test_graph,
@@ -1584,7 +1569,7 @@ def test_moe_stage2_standalone(
         kernel_name="moe_gemm2_reduce_flydsl",
     )
 
-    # Run reduce mode with FlyDSL kernel (production path)
+    # Run reduce mode and use valid mask with FlyDSL kernel
     run_moe_stage2(
         **common_args,
         compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
@@ -1646,7 +1631,6 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
-    parser.add_argument("--gemm2_mode", type=str, default=None, choices=["atomic", "reduce"], help="Stage2 mode: 'atomic' (default) or 'reduce' (GEMM+reduce kernel).")
     parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
@@ -1701,7 +1685,6 @@ if __name__ == "__main__":
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
             w_fp4_kernel=args.wfp4,
-            gemm2_mode=args.gemm2_mode,
             use_reduce=bool(args.reduce),
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
