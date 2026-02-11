@@ -9,8 +9,9 @@ def _unwrap_dsl_value(obj):
         return obj
     if hasattr(obj, "__extract_ir_values__"):
         values = obj.__extract_ir_values__()
-        if len(values) == 1:
-            return values[0]
+        if len(values) != 1:
+            raise ValueError(f"Primitive function expects 1 value, got {len(values)}")
+        return values[0]
     if isinstance(obj, tuple):
         return tuple(_unwrap_dsl_value(e) for e in obj)
     if isinstance(obj, list):
