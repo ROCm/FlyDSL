@@ -31,11 +31,15 @@ def dsl_api_wrapper(op):
         if loc is None:
             frame = inspect.currentframe().f_back
             frameInfo = inspect.getframeinfo(frame)
-            file_loc = ir.Location.file(
-                frameInfo.filename,
-                frameInfo.positions.lineno,
-                frameInfo.positions.col_offset,
-            )
+            # Python 3.11+ has frameInfo.positions with fine-grained location;
+            # fall back to frameInfo.lineno / col 0 on older versions.
+            if hasattr(frameInfo, "positions") and frameInfo.positions is not None:
+                line = frameInfo.positions.lineno
+                col = frameInfo.positions.col_offset or 0
+            else:
+                line = frameInfo.lineno
+                col = 0
+            file_loc = ir.Location.file(frameInfo.filename, line, col)
             loc = ir.Location.name(
                 (
                     "".join([c.strip() for c in frameInfo.code_context])
