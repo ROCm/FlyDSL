@@ -392,9 +392,7 @@ def compile_moe_gemm1(
                     sorted_row_i = bx_m + row_local
                     # NOTE: rows beyond `num_valid_ids` can contain garbage (within the allocated
                     # buffer). That's OK as long as we never use an out-of-range token id to index X.
-                    fused_i = buffer_ops.buffer_load(
-                        sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32
-                    )
+                    fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
                     t_raw = arith.andi(fused_i, mask24)
                     # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
                     # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
@@ -929,9 +927,7 @@ def compile_moe_gemm1(
                         lds_out,
                     ):
                         # `row` is the sorted-row index (bx_m + row_in_tile).
-                        fused2 = buffer_ops.buffer_load(
-                            sorted_rsrc, row, vec_width=1, dtype=i32
-                        )
+                        fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> arith.i32(24)
                         # aiter moe_sorting uses sentinel token_id == tokens for padding.

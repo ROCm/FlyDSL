@@ -888,16 +888,46 @@ def run_moe_stage2(
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
-        args = [o, x, w, sx, sw, st, eids, sw_sorted,
-                num_valid_ids, tokens, model_dim, inter_dim, int(blocks)]
+        valid_mask = None
+        if is_reduce_exe and bool(use_valid_mask):
+            # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
+            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
         if is_reduce_exe:
-            # non-EP default: all ones (expert_mask=None).
-            valid_mask = None
-            if bool(use_valid_mask):
-                valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
-            args.append(valid_mask)
-        args.append(stream_ptr)
-        exe(*args)
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                valid_mask,
+                stream_ptr,
+            )
+        else:
+            # Atomic mode does not take valid_mask.
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                stream_ptr,
+            )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
