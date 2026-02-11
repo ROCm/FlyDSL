@@ -114,10 +114,10 @@ cmake --build . --target FlirPythonModules.sources.FlirPythonSources.flir.ops_ge
 cmake --build . --target FlirPythonModules.sources.MLIRPythonSources.Dialects.rocdl -j$(nproc) || true
 cmake --build . --target FlirPythonModules.sources.MLIRPythonSources.Dialects.rocdl.ops_gen -j$(nproc) || true
 
-# Set up PYTHONPATH for the embedded Python package root (contains `_mlir/` and `flydsl/`)
+# Set up PYTHONPATH for the embedded Python package root (contains `_mlir/`)
 PYTHON_PACKAGE_DIR="${BUILD_DIR}/python_packages/flydsl"
 
-# Ensure the python package root contains the embedded MLIR package (_mlir) and our sources (flydsl, mlir shim).
+# Ensure the python package root contains the embedded MLIR package (_mlir).
 if [ ! -d "${PYTHON_PACKAGE_DIR}" ]; then
     echo "Error: expected python package root not found: ${PYTHON_PACKAGE_DIR}"
     echo "   (Did the build generate embedded MLIR python modules?)"
@@ -125,13 +125,12 @@ if [ ! -d "${PYTHON_PACKAGE_DIR}" ]; then
 fi
 
 # Clean any previously overlaid sources at the root (keep embedded _mlir and include/).
+# NOTE: We no longer copy flydsl sources here. Use `pip install -e .` instead,
+# which reads flydsl directly from flydsl/src/ and _mlir from the build output.
 find "${PYTHON_PACKAGE_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name "_mlir" \
     ! -name "include" \
     -exec rm -rf {} +
-
-# Copy flydsl python package into the package root as flydsl/
-cp -r "${REPO_ROOT}/flydsl/src/flydsl" "${PYTHON_PACKAGE_DIR}/" || { echo "Failed to copy flydsl/src/flydsl"; exit 1; }
 
 cd "${REPO_ROOT}"
 

@@ -46,6 +46,12 @@ from _mlir.ir import (
 
 from ._loc import maybe_default_loc
 
+
+def gpu_async_token():
+    """Get the !gpu.async.token type."""
+    return gpu.AsyncTokenType.get()
+
+
 # -----------------------------------------------------------------------------
 # Debug location defaults for common GPU builtins
 # -----------------------------------------------------------------------------

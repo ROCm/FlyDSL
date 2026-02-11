@@ -172,6 +172,67 @@ fi
 
 
 #=============================================================================
+# Part 5: GPU Execution Tests With HIPGraph Mode (Real GPU kernels)
+#=============================================================================
+echo "========================================================================"
+echo "Part 5: GPU Execution Tests With HIPGraph Mode (Compile + Run on GPU)"
+echo "========================================================================"
+echo ""
+
+if command -v rocm-smi &> /dev/null; then
+    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
+    if [ -n "$GPU_NAME" ]; then
+        echo "GPU detected: $GPU_NAME"
+    else
+        echo "GPU detected (ROCm available)"
+    fi
+    echo ""
+    
+    GPU_GRAPH_TEST_COUNT=0
+    GPU_GRAPH_PASS_COUNT=0
+    
+    GPU_GRAPH_TEST_FILES=(
+        tests/kernels/test_preshuffle_gemm.py
+        tests/kernels/test_moe_gemm.py
+    )
+    for test_file in "${GPU_GRAPH_TEST_FILES[@]}"; do
+        if [ -f "$test_file" ]; then
+            GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
+            test_name=$(basename "$test_file" .py)
+            echo "Running: $test_name"
+            python3 "$test_file" -tg > /tmp/${test_name}.log 2>&1
+            if [ $? -eq 0 ]; then
+                echo "   PASS"
+                GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
+                # Show key metrics if available
+                if grep -q "TFLOPS" /tmp/${test_name}.log; then
+                    grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+                fi
+                if grep -q "Bandwidth:" /tmp/${test_name}.log; then
+                    grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+                fi
+            else
+                echo "   FAIL"
+                echo "      Log: /tmp/${test_name}.log"
+            fi
+        fi
+    done
+    
+    echo ""
+    echo "GPU HIPGraph Tests: $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
+    
+    ALL_GPU_GRAPH_PASSED=$((GPU_GRAPH_PASS_COUNT == GPU_GRAPH_TEST_COUNT))
+else
+    echo "No GPU detected (ROCm not found)"
+    echo "   Install ROCm to run GPU HIPGraph execution tests"
+    echo ""
+    ALL_GPU_GRAPH_PASSED=0
+    GPU_GRAPH_TEST_COUNT=0
+    GPU_GRAPH_PASS_COUNT=0
+fi
+
+
+#=============================================================================
 # Final Summary
 #=============================================================================
 echo "========================================================================"
@@ -183,8 +244,10 @@ echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 
 if command -v rocm-smi >/dev/null 2>&1; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
+    echo "GPU HIPGraph Execution Tests:    $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
 else
     echo "GPU Execution Tests:             Skipped (no GPU)"
+    echo "GPU HIPGraph Execution Tests:    Skipped (no GPU)"
 fi
 
 if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then

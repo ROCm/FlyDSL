@@ -14,6 +14,7 @@ import logging
 import torch
 import torch.nn.functional as F
 import pytest
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 # -----------------------------------------------------------------------------
 # Ensure we use the repo-local `flydsl` when running this file directly.
@@ -104,6 +105,7 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
         (5133, 5120, 8320, 64, 256, 128),
     ]
 )
+@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
 def test_mfma_a8_flir_preshuffle(
     a_dtype,
     b_dtype,
@@ -114,12 +116,16 @@ def test_mfma_a8_flir_preshuffle(
     tile_n,
     tile_k,
     *,
+    use_async_copy,
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
+    if use_async_copy and get_hip_arch() != "gfx950":
+        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {a_dtype.upper()}/{b_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -143,8 +149,9 @@ def test_mfma_a8_flir_preshuffle(
         out_dtype="f16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage})")
+    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
 
     size_c = M * N
     size_a = M * K
@@ -228,7 +235,9 @@ def test_mfma_a8_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
@@ -242,6 +251,7 @@ def test_mfma_a8_flir_preshuffle(
         scale_b,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -261,7 +271,7 @@ def test_mfma_a8_flir_preshuffle(
             def launch_aiter(a, b, sa, sb):
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
             verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
             tflops_aiter = flops / (us1 / 1e6) / 1e12
@@ -310,6 +320,7 @@ def test_mfma_w4_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
@@ -396,7 +407,9 @@ def test_mfma_w4_flir_preshuffle(
             sa = torch.empty((0,), device=c.device, dtype=torch.float32)
         if sb is None:
             sb = torch.empty((0,), device=c.device, dtype=torch.float32)
-        exe(c, a, b, sa, sb, M, N, K)
+        # Pass current PyTorch stream pointer at runtime
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        exe(c, a, b, sa, sb, M, N, K, stream_ptr)
 
     # `run_perftest` requires num_iters > 1.
     bench_iters = max(2, int(bench_iters))
@@ -410,6 +423,7 @@ def test_mfma_w4_flir_preshuffle(
         scale_b_shuffled,
         num_iters=2,
         num_warmup=1,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
@@ -488,16 +502,31 @@ if __name__ == "__main__":
         help="Enable LDS cshuffle epilogue (A/B perf experiment). Default: off.",
     )
     parser.add_argument(
+        "--use_async_copy",
+        action="store_true",
+        default=False,
+        help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
+    )
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="Run the perf harness with CUDA graph mode.",
+    )
+    parser.add_argument(
         "--wfp4",
         action="store_true",
         default=False,
-        help="Use weight fp4 gemm.",
+        help="Run weight-fp4 (MXFP4) preshuffle GEMM test.",
     )
     
     args = parser.parse_args()
     
     torch.set_default_device("cuda")
     if not args.wfp4:
+        if args.in_dtype == "fp4":
+            raise ValueError("--in_dtype fp4 requires --wfp4")
         test_mfma_a8_flir_preshuffle(
             args.a_dtype, 
             args.b_dtype,
@@ -512,6 +541,8 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            use_async_copy=bool(args.use_async_copy),
+            test_graph=bool(args.test_graph),
         )
     else:
         pack_M = 2
@@ -529,5 +560,6 @@ if __name__ == "__main__":
             bench_warmup=args.num_warmup,
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            test_graph=bool(args.test_graph),
         )
 

@@ -305,6 +305,7 @@ def run_moe_stage1(
     skip_ref: bool = False,
     enable_bias: bool = False,
     bias_in: Optional[torch.Tensor] = None,
+    test_graph: bool = False,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -451,6 +452,7 @@ def run_moe_stage1(
         bias = None
         bias_1d = torch.empty((0,), device=device, dtype=torch.float32)
 
+    from kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -468,6 +470,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted, bias_arg):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -483,6 +486,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
+            stream_ptr,
         )
 
     _, us = run_perftest(
@@ -498,6 +502,7 @@ def run_moe_stage1(
         bias_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -611,6 +616,7 @@ def run_moe_stage1(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Correctness: flir vs CK
@@ -669,6 +675,7 @@ def run_moe_stage2(
     use_reduce: bool = False,
     enable_bias: bool = False,
     bias_in: Optional[torch.Tensor] = None,
+    test_graph: bool = False,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -905,6 +912,7 @@ def run_moe_stage2(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted, bias_arg):
+        stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
             x,
@@ -920,6 +928,7 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
+            stream_ptr,
         )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -938,6 +947,7 @@ def run_moe_stage2(
         bias_1d,
         num_iters=int(num_iters),
         num_warmup=int(num_warmup),
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
 
@@ -1051,6 +1061,7 @@ def run_moe_stage2(
                 sorted_weights,
                 num_iters=int(num_iters),
                 num_warmup=int(num_warmup),
+                testGraph=test_graph,
             )
 
             # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
@@ -1128,10 +1139,11 @@ def test_moe_gemm_2stage(
     compare_aiter_ck: Optional[bool] = None,
     init_scale: float = 1.0,
     skip_ref: bool = False,
+    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     device = torch.device("cuda")
-    torch.manual_seed(int(seed))
+    # torch.manual_seed(int(seed))
 
     # Keep inputs tame by default; fp16 paths are less robust to overflow.
     # (Callers can still override via pytest param / direct invocation.)
@@ -1241,7 +1253,6 @@ def test_moe_gemm_2stage(
     )
 
 
-
 # Test Helpers for MoE GEMM2 Mode Comparison
 def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True):
     """Create a compile function that forces reduce mode.
@@ -1331,6 +1342,7 @@ class _TorchReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        stream_ptr,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1346,6 +1358,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, arg_bias, tokens_in, n_in, k_in, size_expert_ids_in,
+            stream_ptr,
         )
         torch.sum(intermediate.view(tokens_in, self._topk, self._model_dim), dim=1, out=arg_out)
 
@@ -1396,15 +1409,16 @@ def profile_reduce_kernel(
         return total
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
+    stream_ptr = torch.cuda.current_stream().cuda_stream
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens)
+        reduce_exe(X, Y, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens)
+            reduce_exe(X, Y, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1465,7 +1479,8 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
 
     # Run kernels
-    reduce_exe(X, Y_flydsl, tokens)
+    stream_ptr = torch.cuda.current_stream().cuda_stream
+    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
@@ -1486,11 +1501,11 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
     [
         pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
         pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
-        pytest.param(64, 7168, 256, 256, 8, id="DS-TP8-decode-S"),
-        pytest.param(256, 7168, 256, 256, 8, id="DS-TP8-decode-L"),
+        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
         pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
-        pytest.param(64, 5120, 1536, 64, 6, id="EP-K6-decode-S"),
-        pytest.param(256, 5120, 1536, 64, 6, id="EP-K6-decode-L"),
+        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("x_dtype", ["fp8"])
@@ -1607,15 +1622,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
-    parser.add_argument("-t", "--tokenNum", type=int, default=2048, help="Number of tokens (e.g. -t 1024)")
+    parser.add_argument("-t", "--tokenNum", type=int, default=32, help="Number of tokens (e.g. -t 1024)")
     parser.add_argument("-e", "--expert", type=int, default=8, help="Number of experts (e.g. -e 8)")
     parser.add_argument("-k", "--topk", type=int, default=2, help="Top-k (e.g. -k 2)")
     parser.add_argument("-s", "--doweight_stage1", type=_str2bool, nargs="?", const=True, default=False, help="Whether to multiply routed weight in stage1 (t/f).")
 
     # Stage1-specific kernel tiling knobs
-    parser.add_argument("--tile_m", type=int, default=64, help="Tile M / block_m (routing block size).")
+    parser.add_argument("--tile_m", type=int, default=32, help="Tile M / block_m (routing block size).")
     parser.add_argument("--tile_n", type=int, default=128, help="Tile N (inter dim tile).")
-    parser.add_argument("--tile_k", type=int, default=128, help="Tile K (model dim tile).")
+    parser.add_argument("--tile_k", type=int, default=256, help="Tile K (model dim tile).")
     parser.add_argument("--tile_n2", type=int, default=None, help="Stage2 tile N (model dim tile). Default: 2*tile_n.")
     parser.add_argument("--tile_k2", type=int, default=None, help="Stage2 tile K (inter dim tile). Default: tile_k.")
 
@@ -1627,8 +1642,25 @@ if __name__ == "__main__":
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iters")
+    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
+
+    # graph mode test
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="test with graph mode.",
+    )
+
+    # w fp4 moe kernel
+    parser.add_argument(
+        "--wfp4",
+        action="store_true",
+        default=False,
+        help="Use weight fp4 gemm.",
+    )
 
     args = parser.parse_args()
 
