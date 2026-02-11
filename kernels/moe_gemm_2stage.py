@@ -1007,12 +1007,33 @@ def compile_moe_gemm1(
                 rocdl.sched_barrier(0)
     
                 def hot_loop_scheduler():
-                    mfma_group = num_acc_n * 2
-                    # K64 micro-step: 2x K32 MFMA per gemm.
-                    mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                    mfma_per_iter = 2 * mfma_group
-                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                    # mfma_group = num_acc_n * 2
+                    # # K64 micro-step: 2x K32 MFMA per gemm.
+                    # mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                    # mfma_per_iter = 2 * mfma_group
+                    # sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
     
+                    # rocdl.sched_dsrd(2)
+                    # rocdl.sched_mfma(2)
+                    # rocdl.sched_dsrd(1)
+                    # rocdl.sched_mfma(1)
+                    # rocdl.sched_dsrd(1)
+                    # rocdl.sched_mfma(1)
+    
+                    # # DS-write hints near the end: match total X LDS-store micro-ops per thread.
+                    # dswr_tail = num_x_loads
+                    # if dswr_tail > sche_iters:
+                    #     dswr_tail = sche_iters
+                    # dswr_start = sche_iters - dswr_tail
+                    # for sche_i in range_constexpr(sche_iters):
+                    #     rocdl.sched_vmem(1)
+                    #     rocdl.sched_mfma(mfma_group)
+                    #     rocdl.sched_dsrd(1)
+                    #     rocdl.sched_mfma(mfma_group)
+                    #     if sche_i >= dswr_start - 1:
+                    #         rocdl.sched_dswr(1)
+                    # rocdl.sched_barrier(0)
+
                     rocdl.sched_dsrd(2)
                     rocdl.sched_mfma(2)
                     rocdl.sched_dsrd(1)
@@ -1021,17 +1042,17 @@ def compile_moe_gemm1(
                     rocdl.sched_mfma(1)
     
                     # DS-write hints near the end: match total X LDS-store micro-ops per thread.
-                    dswr_tail = num_x_loads
-                    if dswr_tail > sche_iters:
-                        dswr_tail = sche_iters
-                    dswr_start = sche_iters - dswr_tail
-                    for sche_i in range_constexpr(sche_iters):
-                        rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(mfma_group)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(mfma_group)
+                    dswr_start = 12 - 2
+                    for sche_i in range_constexpr(12):
+                        if sche_i < 10:
+                            rocdl.sched_vmem(1)
+                        if sche_i <= 10:
+                            rocdl.sched_dsrd(1)
+
+                        rocdl.sched_mfma(1)
                         if sche_i >= dswr_start - 1:
                             rocdl.sched_dswr(1)
+
                     rocdl.sched_barrier(0)
     
                 # ================ Unified Pipeline (FP4 / Standard) for gemm1 ================
@@ -1073,6 +1094,7 @@ def compile_moe_gemm1(
                 # Unrolled ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
                 c2_tile_k = arith.constant(tile_k * 2, index=True)
                 c_k_main2 = k_in - c2_tile_k
+                rocdl.sched_barrier(0)
     
                 for k_iv in range(arith.index(0), c_k_main2, c2_tile_k):
                     # ---- stage 0: prefetch+store ping, compute pong ----
@@ -1439,7 +1461,7 @@ def compile_moe_gemm1(
                     k_in,
                     size_expert_ids_in,
                 ],
-                # async_dependencies=[stream_token],
+                async_dependencies=[stream_token],
             )
 
     m = _MOE1()
@@ -3239,7 +3261,8 @@ def compile_moe_gemm2_ex(
             tile_n=tile_n,
             tile_k=tile_k,
             doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
+            x_dtype=x_dtype,
+            w_dtype=w_dtype,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             enable_bias=enable_bias,
