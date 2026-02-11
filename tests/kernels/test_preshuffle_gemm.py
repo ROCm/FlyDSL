@@ -256,8 +256,6 @@ def test_mfma_a8_flir_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
-    # Store sample position for consistent comparison across kernel and aiter
-    c_aiter_f32 = None
 
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
@@ -473,7 +471,8 @@ def test_mfma_w4_flir_preshuffle(
         print("-" * 40)
 
     print("Verifying Kernel Output...")
-    verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+    # FP4 has lower precision, use relaxed logits_diff threshold (0.1)
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1, logits_diff_threshold=0.1), "Kernel output verification failed"
 
 
 if __name__ == "__main__":

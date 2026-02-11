@@ -191,32 +191,56 @@ if command -v rocm-smi &> /dev/null; then
     GPU_GRAPH_TEST_COUNT=0
     GPU_GRAPH_PASS_COUNT=0
     
-    GPU_GRAPH_TEST_FILES=(
-        tests/kernels/test_preshuffle_gemm.py
-        tests/kernels/test_moe_gemm.py
-    )
-    for test_file in "${GPU_GRAPH_TEST_FILES[@]}"; do
-        if [ -f "$test_file" ]; then
-            GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
-            test_name=$(basename "$test_file" .py)
-            echo "Running: $test_name"
-            python3 "$test_file" -tg > /tmp/${test_name}.log 2>&1
-            if [ $? -eq 0 ]; then
-                echo "   PASS"
-                GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
-                # Show key metrics if available
-                if grep -q "TFLOPS" /tmp/${test_name}.log; then
-                    grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-                if grep -q "Bandwidth:" /tmp/${test_name}.log; then
-                    grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-            else
-                echo "   FAIL"
-                echo "      Log: /tmp/${test_name}.log"
-            fi
+    # Test 1: Preshuffle GEMM FP8
+    test_name="preshuffle_gemm_fp8"
+    echo "Running: $test_name"
+    GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
+    python3 tests/kernels/test_preshuffle_gemm.py -tg > /tmp/${test_name}.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
+        if grep -q "TFLOPS" /tmp/${test_name}.log; then
+            grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
         fi
-    done
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/${test_name}.log"
+    fi
+    
+    # Test 2: Preshuffle GEMM A4W4 (FP4)
+    test_name="preshuffle_gemm_a4w4"
+    echo "Running: $test_name"
+    GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
+    python3 tests/kernels/test_preshuffle_gemm.py --wfp4 --in_dtype fp4 \
+        -M 8192 -N 8192 -K 8192 \
+        --tile_m 64 --tile_n 128 --tile_k 256 \
+        -tg > /tmp/${test_name}.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
+        if grep -q "TFLOPS" /tmp/${test_name}.log; then
+            grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+        fi
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/${test_name}.log"
+    fi
+    
+    # Test 3: MoE GEMM
+    test_name="moe_gemm"
+    echo "Running: $test_name"
+    GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
+    python3 tests/kernels/test_moe_gemm.py -tg > /tmp/${test_name}.log 2>&1
+    if [ $? -eq 0 ]; then
+        echo "   PASS"
+        GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
+        if grep -q "TFLOPS" /tmp/${test_name}.log; then
+            grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
+        fi
+    else
+        echo "   FAIL"
+        echo "      Log: /tmp/${test_name}.log"
+    fi
     
     echo ""
     echo "GPU HIPGraph Tests: $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
