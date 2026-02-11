@@ -49,9 +49,8 @@ struct IntTupleAttrBuilder {
       return ::mlir::fly::IntTupleAttr::getLeafNone(ctx);
     } else {
       if (!nb::hasattr(args, "_CAPIPtr")) {
-        throw std::invalid_argument(
-            "Expected I32, got: " +
-            std::string(nb::str(nb::type_name(args)).c_str()));
+        throw std::invalid_argument("Expected I32, got: " +
+                                    std::string(nb::str(nb::type_name(args)).c_str()));
       }
       dyncElems.push_back(args);
       return ::mlir::fly::IntTupleAttr::get(::mlir::fly::IntAttr::getDynamic(ctx));
@@ -536,9 +535,8 @@ NB_MODULE(_fly, m) {
   using DLTensorAdaptor = utils::DLTensorAdaptor;
 
   nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
-      .def(nb::init<nb::object, std::optional<int32_t>, bool>(),
-           "dlpack_capsule"_a, "alignment"_a = nb::none(),
-           "use_32bit_stride"_a = false,
+      .def(nb::init<nb::object, std::optional<int32_t>, bool>(), "dlpack_capsule"_a,
+           "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
            "Create a DLTensorAdaptor from a DLPack capsule. "
            "If alignment is None, defaults to element size in bytes (minimum "
            "1). ")
@@ -547,19 +545,16 @@ NB_MODULE(_fly, m) {
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
       .def_prop_ro("address_space", &DLTensorAdaptor::getAddressSpace,
                    "Get address space (0=host, 1=device)")
-      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes,
-           "Get total size in bytes")
+      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes")
       .def("build_memref_desc", &DLTensorAdaptor::buildMemRefDesc,
            "Build memref descriptor based on current dynamic marks")
       .def("get_memref_type", &DLTensorAdaptor::getMemRefType,
            "Get fly.memref MLIR type based on current dynamic marks")
-      .def("get_c_pointers", &DLTensorAdaptor::getCPointers,
-           "Get list of c pointers")
-      .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic,
-           "leading_dim"_a = -1, "divisibility"_a = 1,
-           "Mark entire layout as dynamic except leading dim stride")
-      .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride,
-           "use_32bit_stride"_a, "Decide whether to use 32-bit stride");
+      .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
+      .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
+           "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
+      .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
+           "Decide whether to use 32-bit stride");
 
   // -------------------------------------------------------------------------
   // Module-level helper functions
@@ -578,14 +573,10 @@ NB_MODULE(_fly, m) {
       // clang-format on
       "infer IntTupleType for given input");
 
-  m.def(
-      "rank", &rank, "int_or_tuple"_a,
-      nb::sig("def rank(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME(
-          "ir.Value") ") -> int"));
-  m.def(
-      "depth", &depth, "int_or_tuple"_a,
-      nb::sig("def depth(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME(
-          "ir.Value") ") -> int"));
+  m.def("rank", &rank, "int_or_tuple"_a,
+        nb::sig("def rank(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> int"));
+  m.def("depth", &depth, "int_or_tuple"_a,
+        nb::sig("def depth(int_or_tuple: " MAKE_MLIR_PYTHON_QUALNAME("ir.Value") ") -> int"));
 
   // -------------------------------------------------------------------------
   // Bind Fly dialect types (PyConcreteType pattern)
