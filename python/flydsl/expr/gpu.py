@@ -9,3 +9,12 @@ grid_dim = Tuple3D(gpu.grid_dim)
 
 class SharedAllocator:
     pass
+
+
+__all__ = [
+    "thread_idx",
+    "block_idx",
+    "block_dim",
+    "grid_dim",
+    "SharedAllocator",
+]
