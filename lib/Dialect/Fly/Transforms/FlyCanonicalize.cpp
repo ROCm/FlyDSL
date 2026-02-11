@@ -75,8 +75,7 @@ public:
   }
 };
 
-class FlyCanonicalizePass
-    : public mlir::fly::impl::FlyCanonicalizePassBase<FlyCanonicalizePass> {
+class FlyCanonicalizePass : public mlir::fly::impl::FlyCanonicalizePassBase<FlyCanonicalizePass> {
 public:
   using mlir::fly::impl::FlyCanonicalizePassBase<FlyCanonicalizePass>::FlyCanonicalizePassBase;
 
