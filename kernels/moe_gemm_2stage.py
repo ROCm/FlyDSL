@@ -9,6 +9,7 @@ It is extracted from `tests/kernels/test_moe_gemm.py` so that:
 - `tests/` holds correctness/perf harnesses
 """
 
+import logging
 import os
 import functools
 
@@ -36,8 +37,6 @@ from kernels.mfma_preshuffle_pipeline import (
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.kernels_common import stream_ptr_to_async_token
-
-
 
 
 @functools.lru_cache(maxsize=1024)
@@ -2427,7 +2426,6 @@ def compile_moe_reduction(
             thr_copy_X = tiled_copy_X.get_slice(tid)
             thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-            step = BLOCK_SIZE * VEC_WIDTH
             thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
 
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
@@ -2514,7 +2512,7 @@ def compile_moe_reduction(
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
             valid_mask: lambda: T.memref(DYN, topk, T.i8()),
             m_tokens: lambda: T.index(),
-            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer (runtime)
+            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
             from flydsl.dialects.ext import arith as arith_ext
             c1 = arith.as_value(arith_ext.index(1))
@@ -2569,11 +2567,6 @@ class _MoeGemm2ReduceWrapper:
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
         
-        # Lazy-allocated intermediate buffer
-        self._intermediate = None
-        self._intermediate_capacity = 0
-        # print("init _MoeGemm2ReduceWrapper")
-
     def _get_torch_dtype(self):
         """Convert dtype string to torch dtype."""
         import torch
@@ -2628,6 +2621,8 @@ class _MoeGemm2ReduceWrapper:
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
         if not self._use_mask:
+            if valid_mask is not None:
+                logging.warning("valid_mask provided but use_mask=False; ignoring valid_mask")
             valid_mask = torch.empty(
                 (0, self._topk), device=arg_out.device, dtype=torch.uint8)
         self._reduce_exe(X, Y, valid_mask, tokens_in, stream_ptr)

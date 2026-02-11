@@ -888,46 +888,16 @@ def run_moe_stage2(
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
-        valid_mask = None
-        if is_reduce_exe and bool(use_valid_mask):
-            # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
-            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
+        args = [o, x, w, sx, sw, st, eids, sw_sorted,
+                num_valid_ids, tokens, model_dim, inter_dim, int(blocks)]
         if is_reduce_exe:
-            exe(
-                o,
-                x,
-                w,
-                sx,
-                sw,
-                st,
-                eids,
-                sw_sorted,
-                num_valid_ids,
-                tokens,
-                model_dim,
-                inter_dim,
-                int(blocks),
-                valid_mask,
-                stream_ptr,
-            )
-        else:
-            # Atomic mode does not take valid_mask.
-            exe(
-                o,
-                x,
-                w,
-                sx,
-                sw,
-                st,
-                eids,
-                sw_sorted,
-                num_valid_ids,
-                tokens,
-                model_dim,
-                inter_dim,
-                int(blocks),
-                stream_ptr,
-            )
+            # non-EP default: all ones (expert_mask=None).
+            valid_mask = None
+            if bool(use_valid_mask):
+                valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).contiguous()
+            args.append(valid_mask)
+        args.append(stream_ptr)
+        exe(*args)
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
@@ -1573,6 +1543,7 @@ def test_moe_stage2_standalone(
     run_moe_stage2(
         **common_args,
         compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
+        use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
 
