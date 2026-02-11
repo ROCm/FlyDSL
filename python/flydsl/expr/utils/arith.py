@@ -46,7 +46,7 @@ def arith_const(value, ty=None, *, loc=None, ip=None):
         else:
             raise ValueError(f"unsupported constant type: {type(value)}")
 
-    if ir.VectorType.isinstance(ty):
+    if isinstance(ty, ir.VectorType):
         elem_ty = element_type(ty)
         if isinstance(elem_ty, ir.IntegerType):
             attr = ir.IntegerAttr.get(elem_ty, int(value))
