@@ -207,7 +207,7 @@ if command -v rocm-smi &> /dev/null; then
         echo "      Log: /tmp/${test_name}.log"
     fi
     
-    # Test 2: Preshuffle GEMM A4W4 (FP4)
+    # Test 2: Preshuffle GEMM A4W4 (FP4) - only on gfx950
     test_name="preshuffle_gemm_a4w4"
     echo "Running: $test_name"
     GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
@@ -216,7 +216,12 @@ if command -v rocm-smi &> /dev/null; then
         --tile_m 64 --tile_n 128 --tile_k 256 \
         -tg > /tmp/${test_name}.log 2>&1
     if [ $? -eq 0 ]; then
-        echo "   PASS"
+        # Check if test was skipped due to architecture
+        if grep -q "Skipping FP4 GEMM test" /tmp/${test_name}.log; then
+            echo "   SKIP (requires gfx950)"
+        else
+            echo "   PASS"
+        fi
         GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
         if grep -q "TFLOPS" /tmp/${test_name}.log; then
             grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'

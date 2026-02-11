@@ -322,6 +322,11 @@ def test_mfma_w4_flir_preshuffle(
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
 ):
+    # FP4 GEMM is only supported on gfx950 (MI350)
+    if get_hip_arch() != "gfx950":
+        print(f"Skipping FP4 GEMM test: requires gfx950, got {get_hip_arch()}")
+        return
+    
     print("=" * 80)
     print(
         f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
