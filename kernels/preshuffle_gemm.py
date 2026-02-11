@@ -113,8 +113,8 @@ def compile_preshuffle_gemm_a8(
 
     gpu_arch = get_hip_arch()
 
-    allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_pong")
-    allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem_ping")
+    allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem0")
+    allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name = "smem1")
     _state = {}
 
     # Default-on: cross-tile (tile_k) A0 LDS prefetch in the ping-pong pipeline (lds_stage=2).
