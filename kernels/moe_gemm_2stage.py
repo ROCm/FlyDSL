@@ -980,7 +980,7 @@ def compile_moe_gemm1(
                                             b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                                             acc_idx = mi_idx * num_acc_n_packed + (ni_idx // 2)
-                                            rocdl.sched_barrier(0)
+
                                             current_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                                 mfma_res_ty,
                                                 [
@@ -1037,8 +1037,10 @@ def compile_moe_gemm1(
                     rocdl.sched_dsrd(2)
                     rocdl.sched_mfma(2)
                     rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
                     rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
     
                     # DS-write hints near the end: match total X LDS-store micro-ops per thread.
@@ -1938,6 +1940,7 @@ def compile_moe_gemm2(
                         return_vector=True,
                         src_buffer_resource=x_rsrc,
                         src_buffer_offset_in_bytes=True,
+                        nontemporal=True,
                     )
     
                 # decode routed token once (per thread's M-slice) and build a base offset.
@@ -2292,7 +2295,6 @@ def compile_moe_gemm2(
                                                 b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                                                 acc_idx = mi_idx * num_acc_n + ni_idx
-                                                rocdl.sched_barrier(0)
                                                 acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                                     mfma_res_ty,
                                                     [
@@ -2397,43 +2399,87 @@ def compile_moe_gemm2(
                     # - MFMA group size per "slot": num_acc_n
                     # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                     # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
-                    mfma_group = num_acc_n
-                    mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                    mfma_per_iter = 2 * mfma_group
-                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                    # mfma_group = num_acc_n
+                    # mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                    # mfma_per_iter = 2 * mfma_group
+                    # sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
     
+                    # rocdl.sched_dsrd(2)
+                    # rocdl.sched_mfma(1)
+                    # if tile_m == 16:
+                    #     rocdl.sched_vmem(1)
+                    # rocdl.sched_mfma(1)
+                    # if tile_m == 16:
+                    #     rocdl.sched_vmem(1)
+                    # if num_acc_n < 4:
+                    #     rocdl.sched_dsrd(1)
+                    #     rocdl.sched_mfma(1)
+                    #     if tile_m == 16:
+                    #         rocdl.sched_vmem(1)
+                    #     rocdl.sched_dsrd(1)
+                    #     rocdl.sched_mfma(1)
+                    #     if tile_m == 16:
+                    #         rocdl.sched_vmem(1)
+                    #     rocdl.sched_mfma(1)
+    
+                    # # DS-write hints near the end: match total A LDS-store micro-ops per thread.
+                    # dswr_tail = num_x_loads
+                    # if dswr_tail > sche_iters:
+                    #     dswr_tail = sche_iters
+                    # dswr_start = sche_iters - dswr_tail
+    
+                    # for sche_i in range_constexpr(sche_iters):
+                    #     rocdl.sched_vmem(1)
+                    #     rocdl.sched_mfma(mfma_group)
+                    #     rocdl.sched_dsrd(1)
+                    #     rocdl.sched_mfma(mfma_group)
+                    #     if sche_i >= dswr_start - 1:
+                    #         rocdl.sched_dswr(1)
+    
+                    # rocdl.sched_barrier(0)
                     rocdl.sched_dsrd(2)
+                    rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
-                    if tile_m == 16:
-                        rocdl.sched_vmem(1)
+
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
-                    if tile_m == 16:
-                        rocdl.sched_vmem(1)
-                    if num_acc_n < 4:
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(1)
-                        if tile_m == 16:
-                            rocdl.sched_vmem(1)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(1)
-                        if tile_m == 16:
-                            rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(1)
+
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
+
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
+
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
+
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dswr(1)
+                    rocdl.sched_vmem(1)
+
+                    rocdl.sched_mfma(1)
+                    rocdl.sched_dswr(1)
+
+                    rocdl.sched_mfma(1)
     
-                    # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                    dswr_tail = num_x_loads
-                    if dswr_tail > sche_iters:
-                        dswr_tail = sche_iters
-                    dswr_start = sche_iters - dswr_tail
-    
-                    for sche_i in range_constexpr(sche_iters):
-                        rocdl.sched_vmem(1)
-                        rocdl.sched_mfma(mfma_group)
-                        rocdl.sched_dsrd(1)
-                        rocdl.sched_mfma(mfma_group)
-                        if sche_i >= dswr_start - 1:
-                            rocdl.sched_dswr(1)
-    
+                    # DS-write hints near the end: match total X LDS-store micro-ops per thread.
+                    # dswr_start = 12 - 2
+                    # for sche_i in range_constexpr(12):
+                    #     if sche_i < 10:
+                    #         rocdl.sched_vmem(1)
+                    #     if sche_i <= 10:
+                    #         rocdl.sched_dsrd(1)
+
+                    #     rocdl.sched_mfma(1)
+                    #     if sche_i >= dswr_start - 1:
+                    #         rocdl.sched_dswr(1)
+
                     rocdl.sched_barrier(0)
 
                 # ================ Unified Pipeline (FP4 / Standard) ================
