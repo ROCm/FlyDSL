@@ -114,6 +114,9 @@ def range_constexpr(*args):
     return range(*args)
 
 __all__ = [
+    # Maybe remove it in the future
+    "T",
+    "arith",
     # Enum Attributes
     "AddressSpace",
     "CachePolicy",
@@ -130,6 +133,7 @@ __all__ = [
     "range_constexpr",
     "rank",
     "depth",
+    "static",
     "int_tuple_add",
     "int_tuple_sub",
     "int_tuple_mul",
@@ -180,6 +184,8 @@ __all__ = [
     "make_view",
     "add_offset",
     "cooperative_copy",
+    "gemm",
+    "copy",
     "printf",
 ]
 
