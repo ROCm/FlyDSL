@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# Default to downloading llvm-project in the parent directory of flir
+# Default to downloading llvm-project in the parent directory of flydsl
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
-LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
-LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
+LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_BUILD_DIR/mlir_install}"
+LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_BUILD_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # Read LLVM commit hash from cmake/llvm-hash.txt
@@ -91,8 +91,16 @@ cmake -G "$GENERATOR" \
     -DLLVM_LINK_LLVM_DYLIB=OFF 
 
 # 4. Build
-echo "Starting build with $(nproc) parallel jobs..."
-cmake --build . -j$(nproc)
+PARALLEL_JOBS=$(( $(nproc) / 2 ))
+for arg in "$@"; do
+    if [[ "$arg" =~ ^-j([0-9]+)$ ]]; then
+        PARALLEL_JOBS="${BASH_REMATCH[1]}"
+    elif [[ "$arg" == "--no-install" ]]; then
+        LLVM_PACKAGE_INSTALL=0
+    fi
+done
+echo "Starting build with ${PARALLEL_JOBS} parallel jobs..."
+cmake --build . -j${PARALLEL_JOBS}
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo "=============================================="
@@ -113,7 +121,7 @@ fi
 echo "=============================================="
 echo "LLVM/MLIR build completed successfully!"
 echo ""
-echo "To configure flir, use:"
+echo "To configure flydsl, use:"
 echo "cmake .. -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir"
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo ""
