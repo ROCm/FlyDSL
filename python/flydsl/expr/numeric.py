@@ -562,6 +562,10 @@ class Boolean(Integer, metaclass=NumericMeta, width=1, signed=True, ir_type=T.bo
         raise TypeError("negation is not supported for boolean type")
 
 
+class Int4(Integer, metaclass=NumericMeta, width=4, signed=True, ir_type=lambda: T.IntegerType.get_signless(4)):
+    pass
+
+
 class Int8(Integer, metaclass=NumericMeta, width=8, signed=True, ir_type=T.i8):
     pass
 
