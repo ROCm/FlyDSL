@@ -3133,6 +3133,7 @@ class _MoeGemm2ReduceWrapper:
         arg_expert_ids,
         arg_sorted_weights,
         arg_num_valid_ids,
+        arg_bias,
         tokens_in,
         n_in,
         k_in,
@@ -3150,7 +3151,7 @@ class _MoeGemm2ReduceWrapper:
             intermediate.view(-1),
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
-            arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
+            arg_num_valid_ids, arg_bias, tokens_in, n_in, k_in, size_expert_ids_in,
             stream_ptr,
         )
         # Phase 2: Reduce over topk -> [tokens, model_dim]
@@ -3174,9 +3175,11 @@ def compile_moe_gemm2_ex(
     tile_n: int,
     tile_k: int,
     doweight_stage2: bool,
-    in_dtype: str = "fp8",
+    x_dtype: str = "fp8",
+    w_dtype: str = "fp8",
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    enable_bias: bool = False,
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.AUTO,
     tokens_hint: int | None = None,
@@ -3229,9 +3232,11 @@ def compile_moe_gemm2_ex(
             tile_n=tile_n,
             tile_k=tile_k,
             doweight_stage2=doweight_stage2,
-            in_dtype=in_dtype,
+            x_dtype=x_dtype,
+            w_dtype=w_dtype,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
+            enable_bias=enable_bias,
             accumulate=False,
         )
         # Compile reduction kernel
@@ -3268,6 +3273,7 @@ def compile_moe_gemm2_ex(
             in_dtype=in_dtype,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
+            enable_bias=enable_bias,
             accumulate=True,
         )
 
