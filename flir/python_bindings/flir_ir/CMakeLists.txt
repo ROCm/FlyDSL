@@ -42,8 +42,11 @@ set(MLIR_PYTHON_CORE_SOURCES
   ${MLIR_PYTHON_BINDINGS_DIR}/Rewrite.cpp
 )
 
-# Define MLIR_PYTHON_PACKAGE_PREFIX to match our module structure
-add_compile_definitions(MLIR_PYTHON_PACKAGE_PREFIX=_flir_ir.)
+# Define MLIR_PYTHON_PACKAGE_PREFIX to match nanobind's auto-registered paths.
+# C++ does nb::module_::import_(PREFIX "ir") — this must resolve to a module
+# that nanobind has already put in sys.modules. With "_flir_ir._mlir.", C++ will
+# look for "_flir_ir._mlir.ir" which nanobind auto-registers as a submodule.
+add_compile_definitions(MLIR_PYTHON_PACKAGE_PREFIX=_flir_ir._mlir.)
 
 # Create the unified module
 nanobind_add_module(_flir_ir
@@ -106,9 +109,13 @@ target_link_libraries(_flir_ir PRIVATE
 
 # Symbol hiding (Linux only) - same approach as triton-lang/triton
 if(UNIX AND NOT APPLE)
+  # Version script: only export PyInit__flir_ir, hide everything else
+  set(_version_script "${CMAKE_CURRENT_BINARY_DIR}/flir_ir_exports.lds")
+  file(WRITE "${_version_script}" "{ global: PyInit__flir_ir; local: *; };\n")
   target_link_options(_flir_ir PRIVATE
     # Hide all symbols from static libraries
     "LINKER:--exclude-libs,ALL"
+    "LINKER:--version-script,${_version_script}"
   )
 endif()
 

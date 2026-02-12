@@ -24,50 +24,29 @@ def get_include_dirs() -> Sequence[str]:
 # Load unified module FIRST - before any other MLIR imports
 from . import _flir_ir
 
-# Register the module for direct imports
+# Register the module under its short name for direct imports.
+# Also mirror nanobind's auto-registered submodules under the short prefix,
+# because C++ capsule code uses MLIR_PYTHON_PACKAGE_PREFIX=_flir_ir._mlir.
+# to call nb::module_::import_("_flir_ir._mlir.ir"), etc.
+# Nanobind registers them under the full package path (flydsl._mlir._mlir_libs._flir_ir._mlir.ir),
+# so we add short-name aliases automatically.
 sys.modules['_flir_ir'] = _flir_ir
+_full = _flir_ir.__name__  # e.g. flydsl._mlir._mlir_libs._flir_ir
+for _key in list(sys.modules):
+    if _key.startswith(_full + '.'):
+        _short = '_flir_ir' + _key[len(_full):]
+        if _short not in sys.modules:
+            sys.modules[_short] = sys.modules[_key]
+del _full
 
 # Set up dialect search to find our dialect wrappers
 # Without this, iterating operations won't return the correct OpView subclasses
 _flir_ir._mlir.globals.append_dialect_search_prefix('flydsl._mlir.dialects')
 
-# Register submodules for C++ code that imports _flir_ir.ir, etc.
-# (required because MLIR_PYTHON_PACKAGE_PREFIX=_flir_ir. in the build)
-sys.modules['_flir_ir.ir'] = _flir_ir._mlir.ir
-sys.modules['_flir_ir.rewrite'] = _flir_ir._mlir.rewrite
-sys.modules['_flir_ir.passmanager'] = _flir_ir._mlir.passmanager
-sys.modules['_flir_ir.dialects.gpu'] = _flir_ir._mlirDialectsGPU
-sys.modules['_flir_ir.dialects.llvm'] = _flir_ir._mlirDialectsLLVM
-sys.modules['_flir_ir.execution_engine'] = _flir_ir._mlirExecutionEngine
+# LLVM wrapper imports: proxy modules in _mlir_libs/ (_mlir/, _mlirDialectsGPU.py,
+# etc.) re-export from _flir_ir, so LLVM's original wrapper files work unmodified.
 
-# Store reference to the internal _mlir module
 _mlir_internal = _flir_ir._mlir
-
-# Register flydsl._mlir._mlir_libs.* aliases for LLVM Python wrappers compatibility
-# These aliases allow LLVM's gpu/__init__.py to do:
-#   from ..._mlir_libs._mlirDialectsGPU import *
-# Now scoped to flydsl namespace - won't conflict with other libraries
-sys.modules['flydsl._mlir._mlir_libs'] = sys.modules[__name__]
-sys.modules['flydsl._mlir._mlir_libs._mlir'] = _flir_ir._mlir
-sys.modules['flydsl._mlir._mlir_libs._mlirDialectsGPU'] = _flir_ir._mlirDialectsGPU
-sys.modules['flydsl._mlir._mlir_libs._mlirDialectsLLVM'] = _flir_ir._mlirDialectsLLVM
-sys.modules['flydsl._mlir._mlir_libs._mlirExecutionEngine'] = _flir_ir._mlirExecutionEngine
-
-
-# Register submodules in this package's namespace
-sys.modules[__name__ + '._mlir'] = _mlir_internal
-sys.modules[__name__ + '._mlir.ir'] = _mlir_internal.ir
-sys.modules[__name__ + '._mlir.rewrite'] = _mlir_internal.rewrite
-sys.modules[__name__ + '._mlir.passmanager'] = _mlir_internal.passmanager
-sys.modules[__name__ + '._mlirDialectsGPU'] = _flir_ir._mlirDialectsGPU
-sys.modules[__name__ + '._mlirDialectsLLVM'] = _flir_ir._mlirDialectsLLVM
-sys.modules[__name__ + '._mlirGPUPasses'] = _flir_ir._mlirGPUPasses
-sys.modules[__name__ + '._mlirExecutionEngine'] = _flir_ir._mlirExecutionEngine
-sys.modules[__name__ + '._mlirRegisterEverything'] = _flir_ir._mlirRegisterEverything
-sys.modules[__name__ + '._flirPasses'] = _flir_ir._flirPasses
-
-# Expose _mlir in module namespace
-_mlir = _mlir_internal
 
 
 
@@ -102,29 +81,16 @@ def get_load_on_create_dialects():
 
 
 def _site_initialize():
-    import importlib
-    import itertools
     import logging
 
     ir = _mlir_internal.ir
     logger = logging.getLogger(__name__)
     post_init_hooks = []
     disable_multithreading = False
-    disable_load_all_available_dialects = False
 
-    def process_initializer_module(module_name):
+    def process_initializer(m):
+        """Process a _flir_ir submodule for dialect/pass registration."""
         nonlocal disable_multithreading
-        nonlocal disable_load_all_available_dialects
-        try:
-            m = importlib.import_module(f".{module_name}", __name__)
-        except ModuleNotFoundError:
-            return False
-        except ImportError:
-            logger.warning(
-                f"Error importing mlir initializer {module_name}", exc_info=True
-            )
-            return False
-
         if hasattr(m, "register_dialects"):
             m.register_dialects(get_dialect_registry())
         if hasattr(m, "context_init_hook"):
@@ -132,21 +98,16 @@ def _site_initialize():
         if hasattr(m, "disable_multithreading"):
             if bool(m.disable_multithreading):
                 disable_multithreading = True
-        if hasattr(m, "disable_load_all_available_dialects"):
-            disable_load_all_available_dialects = True
-        return True
 
-    init_module = None
-    if process_initializer_module("_mlirRegisterEverything"):
-        init_module = importlib.import_module("._mlirRegisterEverything", __name__)
+    # Access submodules directly from _flir_ir instead of importlib.import_module.
+    # This avoids needing sys.modules aliases for package-relative imports.
+    init_module = getattr(_flir_ir, '_mlirRegisterEverything', None)
+    if init_module is not None:
+        process_initializer(init_module)
 
-    # Also process _flirPasses for FLIR dialect registration
-    process_initializer_module("_flirPasses")
-
-    for i in itertools.count():
-        module_name = f"_site_initialize_{i}"
-        if not process_initializer_module(module_name):
-            break
+    flir_passes = getattr(_flir_ir, '_flirPasses', None)
+    if flir_passes is not None:
+        process_initializer(flir_passes)
 
     class Context(ir._BaseContext):
         def __init__(
@@ -170,12 +131,7 @@ def _site_initialize():
                 for dialect in load_on_create_dialects:
                     _ = self.dialects[dialect]
             else:
-                if disable_load_all_available_dialects:
-                    dialects = get_load_on_create_dialects()
-                    for dialect in dialects:
-                        _ = self.dialects[dialect]
-                else:
-                    self.load_all_available_dialects()
+                self.load_all_available_dialects()
             if init_module:
                 init_module.register_llvm_translations(self)
 

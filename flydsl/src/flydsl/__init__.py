@@ -65,6 +65,11 @@ def _ensure_build_output_on_path() -> None:
             _p_str = str(_p)
             if _p_str not in sys.path:
                 sys.path.insert(0, _p_str)
+            # Also add the flydsl subdir to __path__ so subpackages
+            # like flydsl._mlir are discoverable without a symlink.
+            _flydsl_dir = str(_p / "flydsl")
+            if os.path.isdir(_flydsl_dir) and _flydsl_dir not in __path__:
+                __path__.insert(0, _flydsl_dir)  # type: ignore[name-defined]
             return
 
 
