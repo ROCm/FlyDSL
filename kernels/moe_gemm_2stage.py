@@ -1988,14 +1988,18 @@ def compile_moe_gemm2(
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
 
-                e_vec = 2 if bool(accumulate) else 8
-                if not bool(accumulate):
+                if bool(accumulate):
+                    e_vec = 2
+                else:
+                    # Reduce mode: e_vec must satisfy tile_n % (cshuffle_nlane * e_vec) == 0.
+                    # Pick the largest power-of-2 e_vec (up to 8) that divides tile_n/32.
                     cshuffle_nlane = 32
-                    cshuffle_stride = cshuffle_nlane * e_vec
-                    if (int(tile_n) % cshuffle_stride) != 0:
-                        raise ValueError(
-                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
-                        )
+                    _tn = int(tile_n) // cshuffle_nlane
+                    e_vec = 1
+                    for _ev in (8, 4, 2):
+                        if _tn % _ev == 0:
+                            e_vec = _ev
+                            break
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(

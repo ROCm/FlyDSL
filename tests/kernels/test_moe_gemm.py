@@ -156,6 +156,7 @@ def moe_sorting_torch_native(
     "tokens,model_dim,inter_dim,experts,topk,doweight_stage1",
     [
         (256, 1024, 256, 4, 2, False),
+        (10240, 1024, 256, 128, 8, False),
     ],
 )
 def _maybe_aiter_moe_sorting(
@@ -1001,11 +1002,11 @@ def run_moe_stage2(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
     [
         # Small smoke (fast compile + run) for all in_dtype.
-        pytest.param(64, 256, 128, 4, 2, 32, 64, 128, 64, 128, False, id="S"),
+        pytest.param(64, 256, 128, 4, 2, 16, 64, 128, 64, 128, False, id="S"),
         # Medium (more realistic) for all in_dtype (skip_ref will auto-enable).
-        pytest.param(128, 1024, 256, 8, 2, 64, 128, 128, 128, 128, False, id="M"),
+        pytest.param(129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, id="M"),
         # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
-        pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
+        pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int4"])
@@ -1343,11 +1344,10 @@ def print_reduce_profile(results: dict):
 @pytest.mark.parametrize(
     "tokens, topk, model_dim",
     [
-        pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
-        pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
+        pytest.param(32769, 8, 7168, id="DS-TP8-prefill-L"),
         pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
         pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
-        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
+        pytest.param(16384, 6, 5120, id="EP-K6-prefill"),
         pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
         pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
     ],
@@ -1383,15 +1383,14 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
 
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
-        pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
-        pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
-        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
-        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
-        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
-        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
-        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
+        pytest.param(8192, 7168, 256, 128, 8, 64, 256, 128, id="DS-TP8-prefill-S"),
+        pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
+        pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill"),
+        pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1401,11 +1400,11 @@ def test_moe_stage2_standalone(
     inter_dim: int,
     experts: int,
     topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
     in_dtype: str,
     *,
-    tile_m: int = 64,   # Common block size for M
-    tile_n: int = 256,  # Common block size for N2
-    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
