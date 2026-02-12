@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Flash Attention V4.3 kernel test and benchmark for FlyDSL.
+"""Flash Attention V4.4 kernel test and benchmark for FlyDSL.
 
-Tests V4.3 (LDS overlay) against PyTorch SDPA.
-Optionally compares with V4.2.
+Tests V4.4 (CK-aligned, BLOCK_N=64) against PyTorch SDPA.
+Optionally compares with V4.3.
 
 Usage:
-    python tests/kernels/test_flash_attention_v4_3.py
-    python tests/kernels/test_flash_attention_v4_3.py --seq_len 512 --head_dim 128
-    python tests/kernels/test_flash_attention_v4_3.py --compare-v42
+    python tests/kernels/test_flash_attention_v4_4.py
+    python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attention_v4_4.py --compare-v43
 """
 
 import sys
@@ -36,7 +36,7 @@ if not torch.cuda.is_available():
     sys.exit(1)
 
 import flydsl
-from kernels.flash_attention_v4_3 import build_flash_attention_v4_3_module, KERNEL_NAME
+from kernels.flash_attention_v4_4 import build_flash_attention_v4_4_module, KERNEL_NAME
 from tests.test_common import run_perftest
 
 # Tensor initialization range (uniform distribution)
@@ -172,7 +172,7 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
         return results
 
     try:
-        m = build_flash_attention_v4_3_module(
+        m = build_flash_attention_v4_4_module(
             num_heads=num_heads, head_dim=head_dim,
             causal=causal, dtype_str="f16",
         )
@@ -241,7 +241,6 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
 
     try:
         def kernel_fn():
-            # o_flat.zero_()
             exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
@@ -257,7 +256,6 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
         try:
             o_prev = torch.zeros_like(q_flat)
             def prev_fn():
-                # o_prev.zero_()
                 prev_exe(q_flat, k_flat, v_flat, o_prev, B, S)
             _, prev_us = run_perftest(prev_fn, num_iters=iters, num_warmup=warmup)
             prev_tflops = flops / (prev_us * 1e-6) / 1e12
@@ -271,7 +269,7 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Flash Attention V4.3 FlyDSL Test/Benchmark"
+        description="Flash Attention V4.4 FlyDSL Test/Benchmark"
     )
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq_len", type=int, default=None)
@@ -280,8 +278,8 @@ def main():
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--compare-v42", action="store_true",
-                        help="Also benchmark V4.2 for comparison")
+    parser.add_argument("--compare-v43", action="store_true",
+                        help="Also benchmark V4.3 for comparison")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
@@ -290,9 +288,9 @@ def main():
     dtype = torch.float16
 
     print("=" * 130)
-    print(f"FlyDSL Flash Attention V4.3 ({'causal' if causal else 'non-causal'}, fp16)")
-    print(f"  LDS overlay: Q space reused for KV+P (16KB vs 29KB)")
-    print(f"  BLOCK_M=64, BLOCK_N=32, 4 waves (256 threads), mfma_f32_16x16x16f16")
+    print(f"FlyDSL Flash Attention V4.4 ({'causal' if causal else 'non-causal'}, fp16)")
+    print(f"  CK-aligned: BLOCK_M=64, BLOCK_N=64, 4 waves (256 threads), mfma_f32_16x16x16f16")
+    print(f"  Vectorized output via LDS, softmax over 64 positions")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print("=" * 130)
 
@@ -313,13 +311,13 @@ def main():
         ]
 
     prev_exes = {}
-    if args.compare_v42:
-        from kernels.flash_attention_v4_2 import build_flash_attention_v4_2_module
+    if args.compare_v43:
+        from kernels.flash_attention_v4_3 import build_flash_attention_v4_3_module
         for _, _, nh, hd in configs:
             key = (nh, hd)
             if key not in prev_exes:
                 try:
-                    m = build_flash_attention_v4_2_module(
+                    m = build_flash_attention_v4_3_module(
                         num_heads=nh, head_dim=hd,
                         causal=causal, dtype_str="f16",
                     )
@@ -327,11 +325,11 @@ def main():
                 except Exception:
                     prev_exes[key] = None
 
-    if args.compare_v42:
+    if args.compare_v43:
         hdr = (
             f"{'Config':>38s} | {'Status':>6s} | {'MaxErr':>8s} "
-            f"{'MinCos':>8s} | {'V4.3(us)':>10s} {'V4.3 TF':>9s} | "
-            f"{'V4.2(us)':>10s} {'V4.2 TF':>9s} | {'Speedup':>7s}"
+            f"{'MinCos':>8s} | {'V4.4(us)':>10s} {'V4.4 TF':>9s} | "
+            f"{'V4.3(us)':>10s} {'V4.3 TF':>9s} | {'Speedup':>7s}"
         )
     else:
         hdr = (
@@ -345,7 +343,7 @@ def main():
     for batch, seq_len, nh, hd in configs:
         tag = f"B={batch} S={seq_len} H={nh} D={hd}"
         try:
-            prev_exe = prev_exes.get((nh, hd)) if args.compare_v42 else None
+            prev_exe = prev_exes.get((nh, hd)) if args.compare_v43 else None
             r = run_config(
                 batch, seq_len, nh, hd, dtype, causal,
                 warmup=args.warmup, iters=args.iters,
@@ -363,7 +361,7 @@ def main():
             us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
             tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
 
-            if args.compare_v42 and "prev_us" in r:
+            if args.compare_v43 and "prev_us" in r:
                 p_us = f"{r['prev_us']:>10.1f}"
                 p_tf = f"{r['prev_tflops']:>9.3f}"
                 speedup = r["prev_us"] / r["us"] if r.get("us") else 0

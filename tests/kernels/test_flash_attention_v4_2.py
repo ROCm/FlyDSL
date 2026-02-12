@@ -12,7 +12,13 @@ Usage:
 
 import sys
 import argparse
+import hashlib
+import random
 from pathlib import Path
+import logging
+
+# Configure logging to show INFO level messages (required for kernel name display)
+logging.basicConfig(level=logging.INFO)
 
 _repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_repo))
@@ -20,6 +26,7 @@ sys.path.insert(0, str(_repo))
 try:
     import torch
     import torch.nn.functional as F
+    import numpy as np
 except ImportError:
     print("PyTorch not available")
     sys.exit(1)
@@ -30,6 +37,19 @@ if not torch.cuda.is_available():
 
 import flydsl
 from kernels.flash_attention_v4_2 import build_flash_attention_v4_2_module, KERNEL_NAME
+from tests.test_common import run_perftest
+
+# Tensor initialization range (uniform distribution)
+UNIFORM_RANGE = (-1, 1)
+DEFAULT_SEED = 123
+
+
+def setup_seed(seed: int) -> None:
+    """Set random seed for reproducibility across all RNG sources."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
 
 
 def pytorch_ref_attention(q, k, v, causal=True):
@@ -40,22 +60,107 @@ def pytorch_ref_attention(q, k, v, causal=True):
     return out.transpose(1, 2)
 
 
-def bench_gpu_us(fn, warmup=10, iters=50):
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
-    for _ in range(iters):
-        fn()
-    end.record()
-    torch.cuda.synchronize()
-    return (start.elapsed_time(end) / iters) * 1000
+def compute_md5(tensor: torch.Tensor) -> str:
+    """Compute MD5 hash of a tensor's raw bytes."""
+    return hashlib.md5(
+        tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()
+    ).hexdigest()
+
+
+def compare_arrays(
+    arr1: np.ndarray,
+    arr2: np.ndarray,
+    k: int = 5,
+    thresholds: list = None,
+) -> dict:
+    """Compare two numpy arrays and compute various difference metrics.
+
+    Args:
+        arr1: First input array (result), will be cast to float32.
+        arr2: Second input array (reference), will be cast to float32.
+        k: Number of top differences to report.
+        thresholds: Difference magnitude buckets for histogram.
+
+    Returns:
+        Dictionary with top_k_diff, threshold_stats, nan_info, max_diff, max_diff_thr.
+    """
+    if thresholds is None:
+        thresholds = [0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1]
+
+    if arr1.shape != arr2.shape:
+        raise ValueError(
+            f"Shape mismatch: arr1 {arr1.shape} vs arr2 {arr2.shape}"
+        )
+
+    arr1 = arr1.astype(np.float32)
+    arr2 = arr2.astype(np.float32)
+
+    result = {"top_k_diff": [], "threshold_stats": [], "nan_info": {}}
+
+    # Check for NaN values
+    nan_mask1 = np.isnan(arr1)
+    nan_mask2 = np.isnan(arr2)
+    if np.any(nan_mask1):
+        result["nan_info"]["arr1_nan_count"] = int(np.sum(nan_mask1))
+        print(f"  Warning: result contains {result['nan_info']['arr1_nan_count']} NaN values")
+    if np.any(nan_mask2):
+        result["nan_info"]["arr2_nan_count"] = int(np.sum(nan_mask2))
+        print(f"  Warning: reference contains {result['nan_info']['arr2_nan_count']} NaN values")
+
+    # Compute absolute differences
+    diff = np.abs(arr1 - arr2)
+    total_elements = arr1.size
+
+    max_diff_thr = (diff / (1.0 + np.abs(arr2))).max()
+    result["max_diff"] = float(diff.max())
+    result["max_diff_thr"] = float(max_diff_thr)
+
+    print(f"  diff.abs.max = {diff.max():.6f}")
+    print(f"  diff.abs.mean = {diff.mean():.6f}")
+    print(f"  max_diff_thr (rel) = {max_diff_thr:.6e}")
+
+    # Find top k differences
+    flat_diff = diff.flatten()
+    actual_k = min(k, len(flat_diff))
+    top_k_indices = np.argpartition(flat_diff, -actual_k)[-actual_k:]
+    top_k_indices = top_k_indices[np.argsort(-flat_diff[top_k_indices])]
+
+    orig_indices = np.unravel_index(top_k_indices, diff.shape)
+    print(f"  Top-{actual_k} differences:")
+    for i in range(actual_k):
+        idx = tuple(dim[i] for dim in orig_indices)
+        entry = {
+            "value": float(diff[idx]),
+            "position": idx,
+            "arr1_value": float(arr1[idx]),
+            "arr2_value": float(arr2[idx]),
+        }
+        result["top_k_diff"].append(entry)
+        print(f"    [{idx}] result={arr1[idx]:.6f}, ref={arr2[idx]:.6f}, diff={diff[idx]:.6f}")
+
+    # Compute threshold statistics
+    print(f"  Threshold distribution ({total_elements} elements):")
+    for i in range(len(thresholds) - 1):
+        lower, upper = thresholds[i], thresholds[i + 1]
+        count = int(np.sum((diff >= lower) & (diff < upper)))
+        pct = 100.0 * count / total_elements
+        result["threshold_stats"].append(
+            {"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct}
+        )
+        print(f"    [{lower:.0e}, {upper:.0e}): {count:>8d} ({pct:6.2f}%)")
+
+    count = int(np.sum(diff >= thresholds[-1]))
+    pct = 100.0 * count / total_elements
+    result["threshold_stats"].append(
+        {"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct}
+    )
+    print(f"    >={thresholds[-1]:.0e}       : {count:>8d} ({pct:6.2f}%)")
+
+    return result
 
 
 def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
-               warmup, iters, prev_exe=None):
+               warmup, iters, prev_exe=None, seed=DEFAULT_SEED):
     device = "cuda"
     results = {}
 
@@ -79,9 +184,10 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
         return results
 
     B, S, H, D = batch, seq_len, num_heads, head_dim
-    q_4d = torch.randn(B, S, H, D, dtype=dtype, device=device)
-    k_4d = torch.randn(B, S, H, D, dtype=dtype, device=device)
-    v_4d = torch.randn(B, S, H, D, dtype=dtype, device=device)
+    setup_seed(seed)
+    q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    k_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    v_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
 
     q_flat = q_4d.contiguous().view(-1)
     k_flat = k_4d.contiguous().view(-1)
@@ -115,12 +221,30 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
     results["min_cos"] = min_cos
     results["passed"] = max_err < 1e-2 and min_cos > 0.99
 
+    # Compute and print MD5 hashes
+    tag = f"B={B} S={S} H={H} D={D}"
+    result_md5 = compute_md5(o_flat)
+    ref_md5 = compute_md5(ref_flat)
+    print(f"  [{tag}] result_md5 = {result_md5}")
+    print(f"  [{tag}] ref_md5    = {ref_md5}")
+    if result_md5 == ref_md5:
+        print(f"  [{tag}] MD5 match: EXACT (bit-identical)")
+    else:
+        print(f"  [{tag}] MD5 match: DIFFER (not bit-identical)")
+
+    # Detailed comparison using compare_arrays
+    print(f"  [{tag}] --- compare_arrays ---")
+    compare_arrays(
+        o_flat.to(torch.float32).detach().cpu().numpy(),
+        ref_flat.to(torch.float32).detach().cpu().numpy(),
+    )
+
     try:
         def kernel_fn():
             o_flat.zero_()
             exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
-        us = bench_gpu_us(kernel_fn, warmup=warmup, iters=iters)
+        _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
         flops = 4.0 * S * s_eff * D * H * B
         tflops = flops / (us * 1e-6) / 1e12
@@ -135,7 +259,7 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal,
             def prev_fn():
                 o_prev.zero_()
                 prev_exe(q_flat, k_flat, v_flat, o_prev, B, S)
-            prev_us = bench_gpu_us(prev_fn, warmup=warmup, iters=iters)
+            _, prev_us = run_perftest(prev_fn, num_iters=iters, num_warmup=warmup)
             prev_tflops = flops / (prev_us * 1e-6) / 1e12
             results["prev_us"] = prev_us
             results["prev_tflops"] = prev_tflops
@@ -158,6 +282,8 @@ def main():
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--compare-v41", action="store_true",
                         help="Also benchmark V4.1 for comparison")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})")
     args = parser.parse_args()
 
     causal = not args.no_causal
@@ -223,7 +349,7 @@ def main():
             r = run_config(
                 batch, seq_len, nh, hd, dtype, causal,
                 warmup=args.warmup, iters=args.iters,
-                prev_exe=prev_exe,
+                prev_exe=prev_exe, seed=args.seed,
             )
             if "err" in r:
                 print(f"{tag:>38s} | {'ERROR':>6s} | {r['err'][:60]}")
