@@ -130,10 +130,6 @@ def test_mfma_a8_flir_preshuffle(
 ):
     if use_async_copy and get_hip_arch() != "gfx950":
         pytest.skip("async copy is only supported in gfx950")
-    # Known issue: bf16/fp16 kernel crashes when M is not a multiple of tile_m.
-    # Buffer resource OOB fix helps fp8/int8 but bf16 has deeper issues (MFMA/LDS path).
-    if in_dtype in ("bf16", "fp16") and M % tile_m != 0:
-        pytest.skip("bf16/fp16 M%tile_m!=0 crash (needs kernel-level OOB guards)")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"

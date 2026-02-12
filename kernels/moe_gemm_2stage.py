@@ -432,6 +432,7 @@ def compile_moe_gemm1(
                             atom_g2r16=atom_x_g2r16,
                             rsrc=x_rsrc,
                             vec_elems=vec16_elems,
+                            elem_bytes=elem_bytes,
                         )
                     idx_bytes = idx_i32 * arith.index(4)
                     atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -475,12 +476,12 @@ def compile_moe_gemm1(
                 lane_div_16 = flir.get(coord_l16, 0)
                 lane_mod_16 = flir.get(coord_l16, 1)
     
-                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16 * kpack_elems.
-                # kpack_elems = kpack_bytes / elem_bytes (e.g., 16 for fp8, 8 for fp16/bf16).
-                # This ensures the K-group stride in LDS matches the B-side preshuffle kpack stride.
+                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16 * a_kpack_elems.
+                # A-side kpack is always 16 bytes (activation elements); B-side kpack_bytes
+                # may differ (e.g. 8 for int4 weights), but that only affects B preshuffle.
                 row_a_lds = lane_mod_16
-                kpack_elems = kpack_bytes // elem_bytes
-                col_offset_base = lane_div_16 * arith.constant(int(kpack_elems), index=True)
+                a_kpack_elems = 16 // elem_bytes
+                col_offset_base = lane_div_16 * arith.constant(int(a_kpack_elems), index=True)
                 col_offset_base_bytes = (
                     col_offset_base
                     if elem_bytes == 1
@@ -1562,6 +1563,7 @@ def compile_moe_gemm2(
                             atom_g2r16=atom_x_g2r16,
                             rsrc=x_rsrc,
                             vec_elems=vec16_elems,
+                            elem_bytes=elem_bytes,
                         )
                     idx_bytes = idx_i32 * arith.index(4)
                     atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -1630,8 +1632,9 @@ def compile_moe_gemm2(
                 lane_mod_16 = flir.get(coord_l16, 1)
     
                 row_a_lds = lane_mod_16
-                kpack_elems = kpack_bytes // elem_bytes
-                col_offset_base = lane_div_16 * arith.constant(int(kpack_elems), index=True)
+                # A-side kpack is always 16 bytes; kpack_bytes is B-side (may be 8 for int4).
+                a_kpack_elems = 16 // elem_bytes
+                col_offset_base = lane_div_16 * arith.constant(int(a_kpack_elems), index=True)
                 col_offset_base_bytes = (
                     col_offset_base
                     if elem_bytes == 1

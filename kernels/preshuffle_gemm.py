@@ -304,9 +304,7 @@ def compile_preshuffle_gemm_a8(
                     else None
                 )
 
-            # Note: We assume N is aligned (no N-tail support in this kernel).
             # Use runtime byte sizes for hardware OOB protection (M may not be a multiple of tile_m).
-            # Dynamic memrefs can't infer size statically, so we pass num_records_bytes explicitly.
             _i32 = T.i32
             c_m_i32 = arith.index_cast(_i32, c_m)
             c_n_i32 = arith.index_cast(_i32, c_n)
@@ -527,6 +525,7 @@ def compile_preshuffle_gemm_a8(
                     atom_g2r16=atom_a_g2r16,
                     rsrc=a_rsrc,
                     vec_elems=(16 if elem_bytes == 1 else 8),
+                    elem_bytes=elem_bytes,
                 )
 
             def a_tile_chunk_coord_i32(i: int, tx_i32_base: int, chunk_i32: int = 4):
