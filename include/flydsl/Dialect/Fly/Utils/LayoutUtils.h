@@ -12,10 +12,22 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
-#include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 namespace mlir::fly {
 
+// -----------------------------------------------------------------------------
+// Recast helpers
+//
+// External callers (used by other translation units):
+//   - getTypeBitWidth()
+//   - layoutUpcast()
+//   - layoutDowncast()
+//   - layoutRecast()
+//
+// Internal helpers (intended for use only by this header's implementation):
+//   - layoutUpcastImpl()
+//   - layoutDowncastImpl()
+// -----------------------------------------------------------------------------
 inline std::optional<int64_t> getTypeBitWidth(Type type) {
   if (auto intTy = dyn_cast<IntegerType>(type)) {
     return intTy.getWidth();
@@ -613,8 +625,9 @@ Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
   return layoutCoalesce(builder, resultLayout);
 }
 
-namespace detail {
+template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
 
+// Internal helper for layoutUpcast(): recursively rewrites (shape, stride).
 template <class Layout>
 std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
 layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
@@ -624,15 +637,11 @@ layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>:
   if (shape.isLeaf()) {
     ArithValue shapeVal = builder.getArithValue(shape);
     ArithValue strideVal = builder.getArithValue(stride);
-    if (builder.isNone(strideVal)) {
+    if (builder.isNone(strideVal) || builder.isStaticValue(strideVal, 0)) {
       return {shape, stride};
     }
 
     ArithValue factorVal = builder.materializeConstantArith(factor);
-    if (builder.isStaticValue(strideVal, 0)) {
-      return {shape, stride};
-    }
-
     if (!builder.isStatic(strideVal)) {
       return {shape, builder.makeInt(builder.safeDiv(strideVal, factorVal))};
     }
@@ -661,6 +670,7 @@ layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>:
   return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
 }
 
+// Internal helper for layoutDowncast(): recursively rewrites (shape, stride).
 template <class Layout>
 std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
 layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
@@ -691,28 +701,34 @@ layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout
   return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
 }
 
-} // namespace detail
-
+// Public API: upcast layout by element-size factor.
 template <class Layout>
 Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
   if (factor == 1) {
     return layout;
   }
   auto [newShape, newStride] =
-      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+      layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
+// Public API: downcast layout by element-size factor.
 template <class Layout>
 Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
   if (factor == 1) {
     return layout;
   }
-  auto [newShape, newStride] = detail::layoutDowncastImpl(
-      builder, builder.getShape(layout), builder.getStride(layout), factor);
+  auto [newShape, newStride] =
+      layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
+// Public API: recast layout from oldTypeBits to newTypeBits.
+// This follows the same branch structure as cutlass::recast_layout:
+//   - equal ratio: identity
+//   - numerator 1: downcast
+//   - denominator 1: upcast
+//   - otherwise: upcast then downcast
 template <class Layout>
 Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int64_t oldTypeBits,
                     int64_t newTypeBits) {
@@ -735,7 +751,6 @@ Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int64_t oldTy
   return layoutDowncast(builder, layoutUpcast(builder, layout, static_cast<int32_t>(num)),
                         static_cast<int32_t>(den));
 }
-template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
 
 template <class Layout>
 Layout layoutLogicalDivide(LayoutBuilder<Layout> &builder, Layout layout, Layout divisorLayout) {
