@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""Blockscale Preshuffle GEMM Test (FP8 A8W8 with per-block scales).
-
-Reference: aiter/op_tests/test_gemm_a8w8_blockscale.py
-
-This test verifies the blockscale preshuffle GEMM kernel against a torch
-reference that applies per-block scales to FP8 A and B matrices.
-
-Scale tensors:
-- scale_a: [M, scale_k], scale_k = ceil(K / 128)
-- scale_b: [scale_n, scale_k], scale_n = ceil(N / 128)
-
-The kernel expects scale_a transposed to [scale_k, M] for vectorized loading.
-"""
+"""Blockscale Preshuffle GEMM Test (FP8 A8W8, per-block scales)."""
 
 import os
 import sys
@@ -23,7 +11,6 @@ import pytest
 
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
-# Ensure repo-local flydsl is on the path.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
@@ -36,7 +23,6 @@ from tests.test_common import run_perftest, verify_output
 from tests.utils import shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
 
-
 logging.basicConfig(level=logging.INFO)
 
 if not torch.cuda.is_available():
@@ -47,7 +33,6 @@ DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 
 BLOCK_SHAPE = (128, 128)  # (block_n, block_k)
 
-# Aiter imports (optional)
 try:
     import aiter
     from aiter import dtypes as aiter_dtypes
@@ -57,22 +42,18 @@ try:
 except ImportError:
     HAS_AITER = False
 
-
 def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
                          dtype=torch.bfloat16):
-    """Torch reference for blockscale GEMM (from aiter test_gemm_a8w8_blockscale.py)."""
+    """Torch reference for blockscale GEMM."""
     block_shape_n, block_shape_k = block_shape
     m, k = x.shape
     n = weight.shape[0]
     scale_n = (n + block_shape_n - 1) // block_shape_n
     scale_k = (k + block_shape_k - 1) // block_shape_k
 
-    # Dequantize A: apply per-row per-K-block scale
     x_f32 = x.to(x_scale.dtype).view(m, k // block_shape_k, block_shape_k) * x_scale.unsqueeze(-1)
     x_f32 = x_f32.view(m, k)
 
-    # Dequantize B: apply per-N-block per-K-block scale
-    # Expand block scales to full weight shape: [sn, sk, bn, bk] -> [sn*bn, sk*bk]
     w_scale_expanded = (
         w_scale.view(-1, 1)
         .repeat(1, block_shape_n * block_shape_k)
@@ -85,7 +66,6 @@ def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
 
     out = F.linear(x_f32.to(torch.float32), weight_f32.to(torch.float32))
     return out.to(dtype)
-
 
 @pytest.mark.parametrize(
     "M, N, K",
@@ -105,14 +85,13 @@ def test_blockscale_preshuffle_gemm(
     bench_iters=20,
     bench_warmup=3,
 ):
-    """Test blockscale preshuffle GEMM kernel against torch reference."""
+
     block_shape_n, block_shape_k = BLOCK_SHAPE
     scale_k = (K + block_shape_k - 1) // block_shape_k
     scale_n = (N + block_shape_n - 1) // block_shape_n
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
-    # Auto-select tile config
     tile_m, tile_n, tile_k = select_tile_config(M, N, K, scale_block_k=block_shape_k)
 
     print("=" * 80)
@@ -122,7 +101,6 @@ def test_blockscale_preshuffle_gemm(
     )
     print("=" * 80)
 
-    # Compile kernel
     exe = compile_blockscale_preshuffle_gemm(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
@@ -133,28 +111,20 @@ def test_blockscale_preshuffle_gemm(
 
     device = torch.device("cuda")
 
-    # Generate FP8 inputs
     x = (torch.rand((M, K), dtype=torch.float16, device=device) / 10).to(DTYPE_FP8)
     weight = (torch.rand((N, K), dtype=torch.float16, device=device) / 10).to(DTYPE_FP8)
 
-    # Generate random block scales
     x_scale = torch.rand([M, scale_k], dtype=torch.float32, device=device)
     w_scale = torch.rand([scale_n, scale_k], dtype=torch.float32, device=device)
 
-    # Torch reference
     c_ref = run_torch_blockscale(x, weight, x_scale, w_scale, dtype=torch.float32)
 
-    # Prepare kernel inputs:
-    # 1. Preshuffle B
     b_shuffled = shuffle_weight(weight, layout=(16, 16))
 
-    # 2. Transpose scale_a to [scale_k, M] for vectorized M-axis loading
     x_scale_t = x_scale.transpose(0, 1).contiguous().view(-1)
 
-    # 3. Flatten scale_b
     w_scale_flat = w_scale.contiguous().view(-1)
 
-    # Output buffer
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
@@ -172,10 +142,8 @@ def test_blockscale_preshuffle_gemm(
     torch.cuda.synchronize()
     c_out_f32 = c_out.to(torch.float32)
 
-    # Verify
     passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=0.01)
 
-    # Performance stats
     flops = 2 * M * N * K
     elem_bytes = 1  # fp8
     bytes_moved = (M * K * elem_bytes) + (N * K * elem_bytes) + (M * N * 2) + (M * scale_k + scale_n * scale_k) * 4
@@ -185,7 +153,6 @@ def test_blockscale_preshuffle_gemm(
         f"  Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s"
     )
 
-    # Optional: compare with aiter
     if HAS_AITER:
         try:
             def launch_aiter(a, b, sa, sb):
@@ -211,7 +178,6 @@ def test_blockscale_preshuffle_gemm(
 
     assert passed, "Kernel output verification failed"
 
-
 if __name__ == "__main__":
     import argparse
 
@@ -228,7 +194,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
-    # Auto-select tiles if not specified
     if args.tile_m is None or args.tile_n is None or args.tile_k is None:
         auto_tm, auto_tn, auto_tk = select_tile_config(args.M, args.N, args.K)
         tile_m = args.tile_m or auto_tm

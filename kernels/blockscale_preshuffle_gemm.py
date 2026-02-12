@@ -1,27 +1,7 @@
 """Blockscale Preshuffle GEMM kernel (FLIR MFMA FP8).
 
-Block-scale quantization applies per-block scales to A and B during the GEMM.
-This matches the CK ``gemm_a8w8_blockscale`` kernel semantics:
-
-- ScaleBlockM = 1  (per-row for A)
-- ScaleBlockN = 128
-- ScaleBlockK = 128
-
-Scale tensor layouts expected by this kernel:
-- scale_a: [scale_k, M] flattened (K-major / transposed), where scale_k = K / scale_block_k.
-  In Python: ``scale_a = scale_a_orig.T.contiguous().view(-1)``
-  This allows vectorized loading of 4 consecutive rows' scales.
-- scale_b: [scale_n, scale_k] row-major flattened, where scale_n = ceil(N / scale_block_k).
-
-Math:
-  C[m,n] = sum_kb( scale_a[m, kb] * scale_b[n//128, kb]
-                    * sum_{k in block_kb}( A[m,k] * B[n,k] ) )
-
-Pipeline:
-- 2-stage ping-pong LDS (same as preshuffle_gemm).
-- Within each tile, K-loop is split into scale-block-sized chunks (128 elems).
-  After each chunk, block accumulators are multiplied by the per-block scales
-  and accumulated into global accumulators.
+Per-block scaling (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128).
+Scale layouts: scale_a [scale_k, M] transposed, scale_b [scale_n, scale_k] row-major.
 """
 
 import flydsl
@@ -47,7 +27,6 @@ from kernels.mfma_preshuffle_pipeline import (
 )
 from kernels.mfma_epilogues import mfma_epilog
 
-
 def compile_blockscale_preshuffle_gemm(
     *,
     M: int,
@@ -61,16 +40,7 @@ def compile_blockscale_preshuffle_gemm(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = None,
 ):
-    """Compile the blockscale preshuffle GEMM kernel.
-
-    Args:
-        M, N, K: GEMM sizes (A[M,K] fp8, B[N,K] fp8 preshuffled, C[M,N]).
-        tile_m, tile_n, tile_k: block tile sizes.
-        scale_block_k: K-dimension block size for scales (default 128, matching CK).
-        out_dtype: Output dtype, "fp16" or "bf16".
-        use_cshuffle_epilog: Enable cross-shuffle epilogue.
-        waves_per_eu: Occupancy hint (None = default).
-    """
+    """Compile blockscale preshuffle GEMM. FP8 input, per-block scales, bf16/fp16 output."""
     if out_dtype not in ("fp16", "bf16"):
         raise ValueError(f"out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}")
     if tile_k % scale_block_k != 0:
@@ -166,10 +136,8 @@ def compile_blockscale_preshuffle_gemm(
             c_n: lambda: T.index,
             c_k: lambda: T.index,
         ):
-            # ---- Accumulator init ----
             acc_init = arith.unwrap(arith.constant_vector(0.0, T.f32x4))
 
-            # ---- Layouts ----
             layout_c = flir.make_layout((c_m, c_n), stride=(c_n, 1))
 
             c_k_div4bytes = c_k / 4
@@ -224,7 +192,6 @@ def compile_blockscale_preshuffle_gemm(
             bx_m = bx * tile_m
             by_n = by * tile_n
 
-            # ---- Thread mapping ----
             wave_size = 64
             layout_wave_lane = flir.make_layout((4, wave_size), stride=(64, 1))
             coord_wave_lane = flir.idx2crd(tx, layout_wave_lane)
@@ -263,7 +230,6 @@ def compile_blockscale_preshuffle_gemm(
                 n_blk_list.append(flir.get(coord_n, 0))
                 n_intra_list.append(flir.get(coord_n, 1))
 
-            # ---- B load helpers ----
             def load_b_pack(base_k, ki_step, ni):
                 return load_b_pack_k32(
                     buffer_ops, flir, arith, vector,
@@ -310,7 +276,6 @@ def compile_blockscale_preshuffle_gemm(
                     b_tile.append((packs0, packs1))
                 return b_tile
 
-            # ---- A LDS helpers ----
             def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
                 col_base_swz_bytes = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                 col_base_swz = col_base_swz_bytes
@@ -325,7 +290,6 @@ def compile_blockscale_preshuffle_gemm(
                 a1_i64 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
                 return a0_i64, a1_i64
 
-            # ---- A global load / LDS store ----
             num_a_loads = bytes_per_thread_a // a_load_bytes
             tile_k_dwords = tile_k // 4
             layout_a_tile_div4 = flir.make_layout(
@@ -379,7 +343,6 @@ def compile_blockscale_preshuffle_gemm(
             def prefetch_b_tile(base_k):
                 return load_b_tile(base_k)
 
-            # ---- MFMA ops ----
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
             mfma_res_ty = T.f32x4
 
@@ -390,27 +353,18 @@ def compile_blockscale_preshuffle_gemm(
                 acc_mid = mfma_step(acc_in, a0, b0)
                 return mfma_step(acc_mid, a1, b1)
 
-            # ---- Scale constants ----
             c_scale_block_k = arith.constant(scale_block_k, index=True)
             c_scale_k = arith.constant(scale_k, index=True)
             c_128 = arith.constant(128, index=True)
             row_off_base = lane_div_16 * 4
 
-            # ---- Blockscale compute tile (optimized) ----
             def compute_tile_blockscale(
                 global_accs, b_tile_in, lds_buffer, k_base, *, a0_prefetch=None
             ):
-                """Compute one tile's MFMA with per-block scale application.
-
-                Optimizations vs naive element-wise approach:
-                1. Scale loads issued BEFORE MFMA to overlap memory latency with compute.
-                2. Combined scale vectors (sa * broadcast(sb)) pre-computed before accumulate.
-                3. Vector-level ArithValue ops: 3 vector ops replace 16+ scalar extract/insert.
-                """
+                """Blockscale compute_tile: per-K-block scale application with vector ArithValue ops."""
                 current_global = list(global_accs)
 
                 for sb in range_constexpr(sb_per_tile):
-                    # ---- STEP 1: Load scales FIRST (hide VMEM latency behind MFMA) ----
                     kb = k_base / c_scale_block_k + arith.constant(sb, index=True)
 
                     sa_base_offset = kb * c_m
@@ -434,9 +388,6 @@ def compile_blockscale_preshuffle_gemm(
                         )
                         s_b_vals.append(s_b_val)
 
-                    # ---- STEP 2: Pre-compute combined scale vectors ----
-                    # combined[mi][ni] = sa_vec[mi] * broadcast(sb[ni])
-                    # Broadcast sb scalar to vec4, then vec4 * vec4 multiply.
                     vec4_f32 = ir.VectorType.get([4], ir.F32Type.get())
                     s_b_vecs = []
                     for ni in range_constexpr(num_acc_n):
@@ -450,7 +401,6 @@ def compile_blockscale_preshuffle_gemm(
                             mi_combined.append(combined)
                         combined_scales.append(mi_combined)
 
-                    # ---- STEP 3: MFMA for this scale block ----
                     block_accs = [acc_init] * (num_acc_n * m_repeat)
 
                     for ku_local in range_constexpr(ku_per_sb):
@@ -483,22 +433,17 @@ def compile_blockscale_preshuffle_gemm(
                                     b_packs0[ni], b_packs1[ni],
                                 )
 
-                    # ---- STEP 4: Accumulate with vector ops ----
-                    # global_acc += block_acc * combined_scale
-                    # Uses ArithValue for vec4 multiply + add (3 vector ops per accumulator).
                     for mi in range_constexpr(m_repeat):
                         for ni in range_constexpr(num_acc_n):
                             acc_idx = mi * num_acc_n + ni
                             block_w = ArithValue(block_accs[acc_idx])
                             global_w = ArithValue(current_global[acc_idx])
                             combined = combined_scales[mi][ni]
-                            # vec4 multiply + vec4 add
                             new_global = global_w + block_w * combined
                             current_global[acc_idx] = arith.unwrap(new_global)
 
                 return current_global
 
-            # ---- Epilogue: convert and store (no scale application) ----
             vec1_out = _out_vec1_type()
 
             def store_output(final_accs):
@@ -583,7 +528,6 @@ def compile_blockscale_preshuffle_gemm(
                     bx_m=bx_m, body_row=body_row,
                 )
 
-            # ---- Scheduling hints ----
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
@@ -624,7 +568,6 @@ def compile_blockscale_preshuffle_gemm(
                         rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
 
-            # ---- 2-stage ping-pong pipeline ----
             def prefetch_a0_pack(lds_buffer):
                 return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
 
@@ -775,17 +718,8 @@ def compile_blockscale_preshuffle_gemm(
         use_bare_pointers_for_kernels=False,
     )
 
-
 def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
-    """Select a good tile config (tile_m, tile_n, tile_k) for the given GEMM shape.
-
-    Heuristic based on CK's tuned kernel selection patterns:
-    - Small M: use smaller tile_m (16-32) with larger tile_k for latency hiding.
-    - Medium M: balanced tile_m=32-64 for occupancy vs register trade-off.
-    - Large M: tile_m=64 maximizes compute density.
-    - tile_n=128 is the universal sweet-spot (4 waves * 32 cols each).
-    """
-    # All candidate tiles (matching CK's kernel instance set)
+    """Auto-select tile config based on CK tuning heuristics."""
     candidates = [
         (16, 64, 256), (16, 128, 256),
         (32, 64, 128), (32, 64, 256), (32, 128, 128), (32, 128, 256),
@@ -806,25 +740,17 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
     if not valid:
         return (64, 128, 128)  # fallback
 
-    # Score: based on actual benchmark results across shapes.
-    # Key findings:
-    #   M<=128: tile_m=32 best (m_repeat=2, good MFMA utilization)
-    #   M=256-384: tile_m=32 (balance register/occupancy)
-    #   M>=512: tile_m=64 (maximize compute density)
-    #   tile_n=128 universally good; tile_k=128 usually beats 256
     def _score(tm, tn, tk):
         s = 0
         grid_m = (M + tm - 1) // tm
         grid_n = N // tn
         total_blocks = grid_m * grid_n
-        # Need enough blocks to fill GPU (304 CUs on MI300X)
         if total_blocks >= 256:
             s += 15
         elif total_blocks >= 128:
             s += 10
         elif total_blocks >= 64:
             s += 5
-        # tile_m selection by M size
         if M <= 48:
             s += 12 if tm == 16 else (8 if tm == 32 else 0)
         elif M <= 256:
@@ -835,8 +761,6 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
             s += 12 if tm == 64 else 0
         # tile_n: 128 is universal best; only prefer 64 when total_blocks is very low
         s += 8 if tn == 128 else (4 if tn == 64 else (2 if tn == 256 else 0))
-        # tile_k: 128 generally better (less register pressure, more K-tiles for pipelining)
-        # Exception: small M benefits from tile_k=256 (more compute per tile)
         if M <= 128:
             s += 4 if tk == 256 else 2
         else:
@@ -844,6 +768,5 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
         return s
 
     return max(valid, key=lambda t: _score(*t))
-
 
 __all__ = ["compile_blockscale_preshuffle_gemm", "select_tile_config"]
