@@ -246,7 +246,6 @@ def compile_moe_gemm1(
             vec4_i32 = I.vec(4, i32)
             vec1_f16 = I.vec(1, f16)
             vec4_f16 = I.vec(4, f16)
-            vec4_bf16 = I.vec(4, bf16)
             vec4_i16 = I.vec(4, i16)  # For bf16 MFMA (expects v4i16 bit-pattern)
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
@@ -1528,7 +1527,6 @@ def compile_moe_gemm2(
             vec4_f32 = I.vec(4, f32)
             vec4_i32 = I.vec(4, i32)
             vec1_f16 = I.vec(1, f16)
-            vec4_bf16 = I.vec(4, bf16)
             vec4_i16 = I.vec(4, i16)  # For bf16 MFMA (expects v4i16 bit-pattern)
             vec2_f16 = I.vec(2, f16)
             vec4_f16 = I.vec(4, f16)
