@@ -29,7 +29,7 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm_multistage import compile_preshuffle_gemm_a8
 from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
@@ -131,9 +131,9 @@ def test_mfma_a8_flir_preshuffle(
     print("=" * 80)
 
     lds_stage = int(lds_stage)
-    if lds_stage not in (1, 2):
+    if lds_stage not in (1, 2, 3):
         raise ValueError(
-            f"lds_stage must be 1 or 2, got {lds_stage!r}"
+            f"lds_stage must be 1, 2, or 3, got {lds_stage!r}"
         )
     exe = compile_preshuffle_gemm_a8(
         M=M,
@@ -325,9 +325,9 @@ def test_mfma_w4_flir_preshuffle(
     print("=" * 80)
 
     lds_stage = int(lds_stage)
-    if lds_stage not in (1, 2):
+    if lds_stage not in (1, 2, 3):
         raise ValueError(
-            f"lds_stage must be 1 or 2, got {lds_stage!r}"
+            f"lds_stage must be 1, 2, or 3, got {lds_stage!r}"
         )
     exe = compile_mxfp4_preshuffle_gemm(
         M=M,
@@ -456,8 +456,8 @@ if __name__ == "__main__":
         "--lds_stage",
         type=int,
         default=DEFAULT_LDS_STAGE,
-        choices=[1, 2],
-        help="LDS staging: 2=ping-pong (default), 1=single.",
+        choices=[1, 2, 3],
+        help="LDS staging: 3=3-stage (A prefetch 2 tiles ahead), 2=2-stage (A prefetch 1 tile ahead), 1=single.",
     )
     parser.add_argument(
         "--num_iters",
