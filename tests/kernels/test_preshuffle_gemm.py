@@ -101,12 +101,16 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     "M, N, K, tile_m, tile_n, tile_k", 
     [
         (16, 5120, 8192, 16, 64, 512), 
-        (5120, 5120, 8320, 64, 256, 128), 
-        (9728, 8192, 8320, 128, 128, 128),
-        (5133, 5120, 8320, 64, 256, 128),
+        (33, 1024, 2048, 32, 64, 512), 
+        pytest.param(5120, 2048, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(5133, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
     ]
 )
 @pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph", marks=pytest.mark.large_shape),
+])
 def test_mfma_a8_flir_preshuffle(
     in_dtype,
     M,
@@ -117,12 +121,12 @@ def test_mfma_a8_flir_preshuffle(
     tile_k,
     *,
     use_async_copy,
+    test_graph,
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
-    test_graph: bool = False,
 ):
     if use_async_copy and get_hip_arch() != "gfx950":
         pytest.skip("async copy is only supported in gfx950")
@@ -300,9 +304,9 @@ def test_mfma_a8_flir_preshuffle(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
         (32, 5120, 8192, 32, 64, 512), 
-        (5120, 5120, 8320, 64, 256, 128), 
-        (9728, 8192, 8320, 128, 128, 128),
-        (5133, 5120, 8320, 64, 256, 128),
+        pytest.param(5120, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
+        pytest.param(6666, 1024, 2048, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(5133, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
     ]
 )
 def test_mfma_w4_flir_preshuffle(
