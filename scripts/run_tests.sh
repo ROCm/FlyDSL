@@ -138,19 +138,10 @@ if command -v rocm-smi &> /dev/null; then
         # - Additional per-file -k filters can be added below for correctness issues (e.g. fp16).
         pytest_extra_args=()
         pytest_k_filter=""
+
+        # Speed filters (local only; CI runs everything via RUN_TESTS_FULL=1).
         if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
             pytest_extra_args+=(-m "not large_shape")
-            case "$test_name" in
-                test_moe_gemm)
-                    # Skip fp16 (known precision issue). Run both atomic & reduce.
-                    # Only run eager mode by default; graph mode doubles the test count.
-                    pytest_k_filter="not fp16 and eager"
-                    ;;
-                test_preshuffle_gemm)
-                    # Only run eager mode by default; graph mode doubles the test count.
-                    pytest_k_filter="eager"
-                    ;;
-            esac
         fi
 
         if [ -n "$pytest_k_filter" ]; then

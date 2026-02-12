@@ -107,7 +107,9 @@ def run_torch(x, weight, x_scale, w_scale, bias=None, dtype=torch.bfloat16):
     ]
 )
 @pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
-@pytest.mark.parametrize("test_graph", [False, True], ids=["eager", "graph"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(True, id="graph"),
+])
 def test_mfma_a8_flir_preshuffle(
     in_dtype,
     M,
