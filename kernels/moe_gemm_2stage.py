@@ -2422,7 +2422,7 @@ def compile_moe_reduction(
             thr_copy_X = tiled_copy_X.get_slice(tid)
             thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+            thread_offset_base = arith.ArithValue(tid) * VEC_WIDTH
 
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
@@ -2431,7 +2431,7 @@ def compile_moe_reduction(
 
             tile_n_idx = arith.ArithValue(flir.block_idx("y"))
             c_base = tile_n_idx * BLOCK_SIZE * VEC_WIDTH
-            curr_idx = (c_base + thread_offset_base).value
+            curr_idx = c_base + thread_offset_base
 
             if use_mask:
                 # OPTIMIZATION: Load all masks once before model_dim loop
@@ -2445,7 +2445,7 @@ def compile_moe_reduction(
                     mask_values.append(is_valid)
             
             # Bounds check
-            c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+            c_end_idx = (curr_idx + arith.index(VEC_WIDTH)).value
             in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
 
             _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
@@ -2470,17 +2470,12 @@ def compile_moe_reduction(
                         vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
                     else:
                         vec_val = vec_val_e
-                    return (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+                    return acc + vec_val
 
                 for k in range_constexpr(topk):
                     if use_mask:
-                        is_valid = mask_values[k]
-                        if_op = scf.IfOp(arith.as_value(is_valid), [vec_type_f32], hasElse=True)
-                        with ir.InsertionPoint(if_op.then_block):
-                            scf.YieldOp([arith.as_value(_load_and_acc(acc, k))])
-                        with ir.InsertionPoint(if_op.else_block):
-                            scf.YieldOp([arith.as_value(acc)])
-                        acc = if_op.results[0]
+                        if mask_values[k]:
+                            acc = _load_and_acc(acc, k)
                     else:
                         acc = _load_and_acc(acc, k)
 
@@ -2555,6 +2550,7 @@ class _MoeGemm2ReduceWrapper:
         model_dim: int,
         out_dtype_str: str = "f16",
         use_mask: bool = False,
+        zero_intermediate: bool = True,
     ):
         self._gemm2_exe = gemm2_exe
         self._reduce_exe = reduce_exe
@@ -2562,6 +2558,7 @@ class _MoeGemm2ReduceWrapper:
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
+        self._zero_intermediate = zero_intermediate
         
     def _get_torch_dtype(self):
         """Convert dtype string to torch dtype."""
@@ -2603,7 +2600,7 @@ class _MoeGemm2ReduceWrapper:
                 device=arg_out.device,
                 dtype=self._get_torch_dtype()
             )
-        if not self._use_mask:
+        if self._zero_intermediate and not self._use_mask:
             intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
@@ -2645,6 +2642,7 @@ def compile_moe_gemm2_ex(
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
+    zero_intermediate: bool = True,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -2654,6 +2652,9 @@ def compile_moe_gemm2_ex(
         mode: Execution mode selection:
             - "atomic": Use atomic accumulation (original behavior)
             - "reduce": Use non-atomic write + reduce kernel
+        
+        zero_intermediate: If all output slots are valid, 
+            set False to increase performance
 
     Returns:
         Compiled executable (either wrapped or raw depending on mode).
@@ -2699,6 +2700,7 @@ def compile_moe_gemm2_ex(
             model_dim=model_dim,
             out_dtype_str=dtype_str,
             use_mask=use_mask,
+            zero_intermediate=zero_intermediate,
         )
     else:
         # Compile GEMM2 with accumulate=True (atomic mode)
