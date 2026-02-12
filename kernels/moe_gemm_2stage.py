@@ -2300,6 +2300,9 @@ def compile_moe_gemm2(
                 e_vec = 2 if bool(accumulate) else 8
                 if not bool(accumulate):
                     cshuffle_nlane = 32
+                    # backoff to 2
+                    if int(tile_n) % (cshuffle_nlane * e_vec) != 0:
+                        e_vec = 2
                     cshuffle_stride = cshuffle_nlane * e_vec
                     if (int(tile_n) % cshuffle_stride) != 0:
                         raise ValueError(
