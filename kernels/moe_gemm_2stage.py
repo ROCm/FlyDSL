@@ -2945,7 +2945,6 @@ def compile_moe_gemm2_ex(
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
             group_size=group_size,
-            total_thread_size=total_thread_size,
         )
         # Compile reduction kernel with masking support
         out_s = str(out_dtype).strip().lower()
@@ -2985,5 +2984,4 @@ def compile_moe_gemm2_ex(
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=True,
             group_size=group_size,
-            total_thread_size=total_thread_size,
         )
