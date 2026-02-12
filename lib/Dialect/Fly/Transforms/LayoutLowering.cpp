@@ -1345,6 +1345,37 @@ public:
   }
 };
 
+class RecastLayoutOpLowering : public OpRewritePattern<RecastLayoutOp> {
+public:
+  using OpRewritePattern<RecastLayoutOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(RecastLayoutOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value layoutValue = op.getSrc();
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+
+    auto newTypeAttr = op->getAttrOfType<TypeAttr>("new_type");
+    auto oldTypeAttr = op->getAttrOfType<TypeAttr>("old_type");
+    if (!newTypeAttr || !oldTypeAttr)
+      return failure();
+    auto newTypeBits = getTypeBitWidth(newTypeAttr.getValue());
+    auto oldTypeBits = getTypeBitWidth(oldTypeAttr.getValue());
+    if (!newTypeBits || !oldTypeBits)
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
+    LayoutValueAdaptor result =
+        layoutRecast(layoutBuilder, layoutAdaptor, *oldTypeBits, *newTypeBits);
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
 class PrintOpLowering : public OpRewritePattern<PrintOp> {
 public:
   using OpRewritePattern<PrintOp>::OpRewritePattern;
@@ -1531,7 +1562,7 @@ public:
 
     // Layout algebra lowerings
     patterns.add<LogicalDivideOpLowering, ZippedDivideOpLowering, TiledDivideOpLowering,
-                 FlatDivideOpLowering, RightInverseOpLowering>(context);
+                 FlatDivideOpLowering, RightInverseOpLowering, RecastLayoutOpLowering>(context);
 
     populateWithGenerated(patterns);
 

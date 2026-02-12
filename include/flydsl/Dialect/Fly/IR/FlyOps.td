@@ -333,11 +333,11 @@ def Fly_LeftInverseOp : Fly_Op<"left_inverse", [Pure, DeclareOpInterfaceMethods<
 }
 
 def Fly_RecastLayoutOp : Fly_Op<"recast_layout", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyTypeOf<[I32, I64]>:$new_type_bits,
-                       AnyTypeOf<[I32, I64]>:$old_type_bits,
+  let arguments = (ins TypeAttr:$new_type,
+                       TypeAttr:$old_type,
                        Fly_Layout:$src);
   let results = (outs Fly_Layout:$result);
-  let assemblyFormat = "`(` $new_type_bits `,` $old_type_bits `,` $src `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $new_type `,` $old_type `,` $src `)` attr-dict `:` functional-type(operands, results)";
 }
 
 class Fly_LayoutDivideOp<string mnemonic>

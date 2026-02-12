@@ -57,6 +57,7 @@ __all__ = [
     "complement",
     "right_inverse",
     "coalesce",
+    "recast_layout",
     "zip",
     "select",
     "group",
@@ -236,6 +237,15 @@ def right_inverse(layout, loc=None, ip=None):
 @dsl_api_wrapper
 def coalesce(layout, pattern=None, loc=None, ip=None):
     return fly.coalesce(layout, pattern=pattern, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def recast_layout(layout, old_type, new_type, loc=None, ip=None):
+    if isinstance(old_type, ir.Type):
+        old_type = ir.TypeAttr.get(old_type)
+    if isinstance(new_type, ir.Type):
+        new_type = ir.TypeAttr.get(new_type)
+    return fly.recast_layout(new_type=new_type, old_type=old_type, src=layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper

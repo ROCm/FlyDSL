@@ -2,8 +2,11 @@
 #define FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
 
 #include <algorithm>
+#include <numeric>
+#include <optional>
 
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LogicalResult.h"
 
@@ -12,6 +15,16 @@
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 namespace mlir::fly {
+
+inline std::optional<int64_t> getTypeBitWidth(Type type) {
+  if (auto intTy = dyn_cast<IntegerType>(type)) {
+    return intTy.getWidth();
+  }
+  if (auto floatTy = dyn_cast<FloatType>(type)) {
+    return floatTy.getWidth();
+  }
+  return std::nullopt;
+}
 
 namespace detail {
 
@@ -598,6 +611,129 @@ Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
   Layout resultLayout =
       builder.makeLayout(builder.makeTuple(resultShape), builder.makeTuple(resultStride));
   return layoutCoalesce(builder, resultLayout);
+}
+
+namespace detail {
+
+template <class Layout>
+std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
+layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+                 typename LayoutBuilder<Layout>::IntTuple stride, int32_t factor) {
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  if (shape.isLeaf()) {
+    ArithValue shapeVal = builder.getArithValue(shape);
+    ArithValue strideVal = builder.getArithValue(stride);
+    if (builder.isNone(strideVal)) {
+      return {shape, stride};
+    }
+
+    ArithValue factorVal = builder.materializeConstantArith(factor);
+    if (builder.isStaticValue(strideVal, 0)) {
+      return {shape, stride};
+    }
+
+    if (!builder.isStatic(strideVal)) {
+      return {shape, builder.makeInt(builder.safeDiv(strideVal, factorVal))};
+    }
+
+    int32_t staticStride = builder.getStaticValue(strideVal);
+    int32_t absStride = std::abs(staticStride);
+    int32_t sign = staticStride < 0 ? -1 : 1;
+
+    ArithValue absStrideVal = builder.materializeConstantArith(absStride);
+    ArithValue strideShapeScale = builder.ceilDiv(factorVal, absStrideVal);
+    ArithValue newShapeVal = builder.ceilDiv(shapeVal, strideShapeScale);
+    ArithValue newStrideAbs = builder.ceilDiv(absStrideVal, factorVal);
+    ArithValue newStrideVal =
+        sign > 0 ? newStrideAbs : builder.sub(builder.materializeConstantArith(0), newStrideAbs);
+    return {builder.makeInt(newShapeVal), builder.makeInt(newStrideVal)};
+  }
+
+  typename LayoutBuilder<Layout>::ElemCollector outShape;
+  typename LayoutBuilder<Layout>::ElemCollector outStride;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [childShape, childStride] =
+        layoutUpcastImpl(builder, builder.at(shape, i), builder.at(stride, i), factor);
+    outShape.push_back(childShape);
+    outStride.push_back(childStride);
+  }
+  return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
+}
+
+template <class Layout>
+std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
+layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+                   typename LayoutBuilder<Layout>::IntTuple stride, int32_t factor) {
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  if (shape.isLeaf()) {
+    ArithValue shapeVal = builder.getArithValue(shape);
+    ArithValue strideVal = builder.getArithValue(stride);
+    if (builder.isNone(strideVal)) {
+      return {shape, stride};
+    }
+    ArithValue factorVal = builder.materializeConstantArith(factor);
+    if (builder.isStaticValue(strideVal, 1) || builder.isStaticValue(strideVal, -1)) {
+      return {builder.makeInt(builder.mul(shapeVal, factorVal)), stride};
+    }
+    return {shape, builder.makeInt(builder.mul(strideVal, factorVal))};
+  }
+
+  typename LayoutBuilder<Layout>::ElemCollector outShape;
+  typename LayoutBuilder<Layout>::ElemCollector outStride;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [childShape, childStride] =
+        layoutDowncastImpl(builder, builder.at(shape, i), builder.at(stride, i), factor);
+    outShape.push_back(childShape);
+    outStride.push_back(childStride);
+  }
+  return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
+}
+
+} // namespace detail
+
+template <class Layout>
+Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
+  if (factor == 1) {
+    return layout;
+  }
+  auto [newShape, newStride] =
+      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  return builder.makeLayout(newShape, newStride);
+}
+
+template <class Layout>
+Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
+  if (factor == 1) {
+    return layout;
+  }
+  auto [newShape, newStride] = detail::layoutDowncastImpl(
+      builder, builder.getShape(layout), builder.getStride(layout), factor);
+  return builder.makeLayout(newShape, newStride);
+}
+
+template <class Layout>
+Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int64_t oldTypeBits,
+                    int64_t newTypeBits) {
+  if (oldTypeBits <= 0 || newTypeBits <= 0) {
+    return layout;
+  }
+  int64_t g = std::gcd(oldTypeBits, newTypeBits);
+  int64_t num = newTypeBits / g;
+  int64_t den = oldTypeBits / g;
+
+  if (num == 1 && den == 1) {
+    return layout;
+  }
+  if (num == 1) {
+    return layoutDowncast(builder, layout, static_cast<int32_t>(den));
+  }
+  if (den == 1) {
+    return layoutUpcast(builder, layout, static_cast<int32_t>(num));
+  }
+  return layoutDowncast(builder, layoutUpcast(builder, layout, static_cast<int32_t>(num)),
+                        static_cast<int32_t>(den));
 }
 template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
 
