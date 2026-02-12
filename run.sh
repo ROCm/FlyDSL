@@ -33,9 +33,13 @@ function run_flydsl_op {
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
-    python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
-    python tests/kernels/test_simple_gemm.py --size NA4
-    python tests/kernels/test_simple_gemm.py --size all --dtype all
+    # python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
+    # python tests/kernels/test_simple_gemm.py --size NA4
+    # python tests/kernels/test_simple_gemm.py --size all --dtype all
+
+    # python tests/kernels/test_flash_attention_v4_2.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attention_v4_3.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v42
+
 }
 
 

@@ -318,6 +318,21 @@ class _KernelDescriptor:
                                 k.qualname = instance_self.GPU_MODULE_NAME
                             except Exception:
                                 pass
+                            # Set known_block_size if GPU_BLOCK_SIZE is defined on the module class.
+                            # This tells convert-gpu-to-rocdl the workgroup size so that
+                            # max_flat_workgroup_size is set correctly in the ISA.
+                            block_size = getattr(instance_self, "GPU_BLOCK_SIZE", None)
+                            if block_size is not None:
+                                try:
+                                    if isinstance(block_size, int):
+                                        block_size = (block_size, 1, 1)
+                                    func_op = k._func_op if hasattr(k, "_func_op") else k
+                                    op = getattr(func_op, "operation", func_op)
+                                    op.attributes["known_block_size"] = ir.DenseI32ArrayAttr.get(
+                                        list(block_size)
+                                    )
+                                except Exception:
+                                    pass
                             instance_self.kernel_func_op[fn.__name__] = k
 
                 self._wrapper = wrapper

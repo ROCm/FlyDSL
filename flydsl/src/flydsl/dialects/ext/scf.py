@@ -20,6 +20,33 @@ from _mlir.dialects import arith as _arith
 from .arith import constant
 
 
+def _as_value(v):
+    """Unwrap various 'Value-like' wrappers (ArithValue, etc.) to a raw MLIR Value.
+
+    This is needed because generated op builders (like ``_scf.YieldOp``) check
+    ``isinstance(v, Value)`` which fails for ``ArithValue`` wrappers created by
+    ``register_value_caster``.
+    """
+    seen = set()
+    while True:
+        if isinstance(v, Value):
+            return v
+        obj_id = id(v)
+        if obj_id in seen:
+            return v
+        seen.add(obj_id)
+        if hasattr(v, "_value"):
+            v = v._value
+            continue
+        if hasattr(v, "value"):
+            v = v.value
+            continue
+        if hasattr(v, "result"):
+            v = v.result
+            continue
+        return v
+
+
 def _normalize_if_condition(condition):
     """Best-effort normalization for scf.if conditions.
 
@@ -183,34 +210,10 @@ def range_(
 
     start, stop, step = canonicalize_range(start, stop, step)
 
-    # Unwrap various "Value-like" wrappers down to a real `_mlir.ir.Value`.
-    # We need this because our arithmetic helpers often return wrapper objects
-    # (e.g. `ArithValue`) which are not accepted as operands by generated op
-    # builders (like `_scf.ForOp`).
-    def _as_value(v):
-        seen = set()
-        while True:
-            if isinstance(v, Value):
-                return v
-            obj_id = id(v)
-            if obj_id in seen:
-                return v
-            seen.add(obj_id)
-            if hasattr(v, "_value"):
-                v = v._value
-                continue
-            if hasattr(v, "value"):
-                v = v.value
-                continue
-            if hasattr(v, "result"):
-                v = v.result
-                continue
-            return v
-
     start = _as_value(start)
     stop = _as_value(stop)
     step = _as_value(step)
-    
+
     iter_args = iter_args or []
     iter_args = [_as_value(a) for a in iter_args]
     for_op = _scf.ForOp(start, stop, step, iter_args, loc=loc, ip=ip)
@@ -227,7 +230,8 @@ def range_(
             # Ensure scf.for body is terminated.
             block = for_op.body
             if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
-                _scf.YieldOp(list(for_op.inner_iter_args))
+                # Unwrap ArithValue wrappers before passing to YieldOp
+                _scf.YieldOp([_as_value(a) for a in for_op.inner_iter_args])
 
 
 @contextmanager
@@ -282,26 +286,6 @@ def for_(
         return
 
     start, stop, step = canonicalize_range(start, stop, step)
-    # Unwrap various "Value-like" wrappers down to a real `_mlir.ir.Value`.
-    def _as_value(v):
-        seen = set()
-        while True:
-            if isinstance(v, Value):
-                return v
-            obj_id = id(v)
-            if obj_id in seen:
-                return v
-            seen.add(obj_id)
-            if hasattr(v, "_value"):
-                v = v._value
-                continue
-            if hasattr(v, "value"):
-                v = v.value
-                continue
-            if hasattr(v, "result"):
-                v = v.result
-                continue
-            return v
 
     start = _as_value(start)
     stop = _as_value(stop)
@@ -316,7 +300,8 @@ def for_(
         finally:
             block = for_op.body
             if (not block.operations) or not isinstance(block.operations[-1], _scf.YieldOp):
-                _scf.YieldOp(list(for_op.inner_iter_args))
+                # Unwrap ArithValue wrappers before passing to YieldOp
+                _scf.YieldOp([_as_value(a) for a in for_op.inner_iter_args])
 
 
 @contextmanager  
@@ -475,16 +460,20 @@ def yield_(
     ip: InsertionPoint = None,
 ):
     """Create an scf.yield operation.
-    
+
+    Automatically unwraps ArithValue wrappers so callers don't need
+    ``arith.as_value()`` on every yielded operand.
+
     Args:
-        operands: Values to yield
-        loc: Location for the operation
-        ip: Insertion point
+        operands: Values to yield (accepts ArithValue wrappers).
+        loc: Location for the operation.
+        ip: Insertion point.
     """
     if loc is None:
         loc = Location.unknown()
-    
+
     operands = operands or []
+    operands = [_as_value(o) for o in operands]
     return _scf.YieldOp(operands, loc=loc, ip=ip)
 
 
