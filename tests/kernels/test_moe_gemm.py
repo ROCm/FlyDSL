@@ -1134,6 +1134,9 @@ def test_moe_gemm_2stage(
 
     When in_dtype='int4_bf16' and group_size>0, uses groupwise scale (W4A16 with per-group dequant).
     """
+    # Reduce path requires tile_n2 divisible by cshuffle_stride (32*8=256).
+    if bool(use_reduce) and (tile_n2 % 256 != 0):
+        pytest.skip(f"reduce mode requires tile_n2 divisible by 256, got {tile_n2}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
