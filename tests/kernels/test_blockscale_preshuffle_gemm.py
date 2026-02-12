@@ -20,7 +20,6 @@ import logging
 import torch
 import torch.nn.functional as F
 import pytest
-from einops import rearrange
 
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
@@ -73,11 +72,13 @@ def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
     x_f32 = x_f32.view(m, k)
 
     # Dequantize B: apply per-N-block per-K-block scale
-    w_scale_expanded = rearrange(
+    # Expand block scales to full weight shape: [sn, sk, bn, bk] -> [sn*bn, sk*bk]
+    w_scale_expanded = (
         w_scale.view(-1, 1)
         .repeat(1, block_shape_n * block_shape_k)
-        .view(scale_n, scale_k, block_shape_n, block_shape_k),
-        "num_blk_n num_blk_k blk_n blk_k -> (num_blk_n blk_n) (num_blk_k blk_k)",
+        .view(scale_n, scale_k, block_shape_n, block_shape_k)
+        .permute(0, 2, 1, 3)
+        .reshape(scale_n * block_shape_n, scale_k * block_shape_k)
     )
     w_scale_expanded = w_scale_expanded[:n, :k]
     weight_f32 = weight.to(w_scale_expanded.dtype) * w_scale_expanded

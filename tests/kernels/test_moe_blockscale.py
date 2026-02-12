@@ -16,7 +16,6 @@ import math
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
@@ -82,15 +81,22 @@ def torch_moe_blockscale_ref(
     nblk_k_w2 = inter_dim // blk_k
 
     if fc1_scale is not None:
-        fc1_s = rearrange(
+        # fc1_scale: [E, nblk_n_w1 * nblk_k] -> expand to [E, 2*inter_dim, model_dim]
+        # "e n k bn bk -> e (n bn) (k bk)" = permute(0,1,3,2,4).reshape
+        nblk_n_w1 = (2 * inter_dim) // blk_n
+        fc1_s = (
             fc1_scale.view(-1, 1).repeat(1, blk_n * blk_k)
-            .view(expert, -1, nblk_k, blk_n, blk_k),
-            "e n k bn bk -> e (n bn) (k bk)",
+            .view(expert, nblk_n_w1, nblk_k, blk_n, blk_k)
+            .permute(0, 1, 3, 2, 4)
+            .reshape(expert, 2 * inter_dim, model_dim)
         )
-        fc2_s = rearrange(
+        # fc2_scale: [E, nblk_k_w2 * nblk_n_w2] -> expand to [E, model_dim, inter_dim]
+        # "e k n bk bn -> e (n bn) (k bk)" = permute(0,2,4,1,3).reshape
+        fc2_s = (
             fc2_scale.view(-1, 1).repeat(1, blk_n * blk_k)
-            .view(expert, nblk_k_w2, nblk_n_w2, blk_k, blk_n),
-            "e k n bk bn -> e (n bn) (k bk)",
+            .view(expert, nblk_k_w2, nblk_n_w2, blk_k, blk_n)
+            .permute(0, 2, 4, 1, 3)
+            .reshape(expert, model_dim, inter_dim)
         )
         w1 = w1 * fc1_s
         w2 = w2 * fc2_s
