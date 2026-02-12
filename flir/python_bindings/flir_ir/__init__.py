@@ -48,7 +48,14 @@ _flir_ir._mlir.globals.append_dialect_search_prefix('flydsl._mlir.dialects')
 
 _mlir_internal = _flir_ir._mlir
 
-
+# Expose _flir_ir submodules as attributes of this package so that
+# `from flydsl._mlir._mlir_libs import _flirPasses` (and similar) works.
+_flirPasses = getattr(_flir_ir, '_flirPasses', None)
+_mlirRegisterEverything = getattr(_flir_ir, '_mlirRegisterEverything', None)
+_mlirGPUPasses = getattr(_flir_ir, '_mlirGPUPasses', None)
+_mlirDialectsGPU = getattr(_flir_ir, '_mlirDialectsGPU', None)
+_mlirDialectsLLVM = getattr(_flir_ir, '_mlirDialectsLLVM', None)
+_mlirExecutionEngine = getattr(_flir_ir, '_mlirExecutionEngine', None)
 
 # ---------------------------------------------------------------------------
 # Dialect registry and Context initialization (from MLIR's _mlir_libs)
