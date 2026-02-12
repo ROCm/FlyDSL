@@ -127,6 +127,16 @@ For the test folder organization, see `tests/` (`mlir/`, `pyir/`, `kernels/`).
   - Add MLIR build lib dir to the loader path:
     - `export LD_LIBRARY_PATH=$MLIR_PATH/lib:$LD_LIBRARY_PATH`
 
+## Documentation
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
+| Layout System | FLIR layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
+| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
+
 ## 📐 FLIR Layout System
 
 > FLIR = **F**lexible **L**ayout **I**ntermediate **R**epresentation.
