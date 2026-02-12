@@ -23,14 +23,19 @@ import torch
 # ---------------------------------------------------------------------------
 # sglang mock setup (needed when running outside sglang server)
 # ---------------------------------------------------------------------------
-from sglang.srt import server_args
-from unittest.mock import MagicMock
+try:
+    from sglang.srt import server_args
+    from unittest.mock import MagicMock
 
-mock_args = MagicMock()
-mock_args.enable_deterministic_inference = False
-server_args._global_server_args = mock_args
+    mock_args = MagicMock()
+    mock_args.enable_deterministic_inference = False
+    server_args._global_server_args = mock_args
 
-from sglang.srt.layers.moe.fused_moe_triton.fused_moe import inplace_fused_experts
+    from sglang.srt.layers.moe.fused_moe_triton.fused_moe import inplace_fused_experts
+    HAS_SGLANG = True
+except ImportError:
+    HAS_SGLANG = False
+    inplace_fused_experts = None
 
 # ---------------------------------------------------------------------------
 # FlyDSL imports
@@ -242,12 +247,16 @@ def main():
     gc.collect()
 
     # --- sglang ---
-    print(f"Running sglang {dtype_name}...")
-    sglang_ms = benchmark_sglang(
-        tokens, model_dim, inter_dim, experts, topk,
-        w4a16=w4a16, group_size=group_size,
-        num_warmup=args.num_warmup, num_iters=args.num_iters,
-    )
+    if not HAS_SGLANG:
+        print("sglang not installed; skipping sglang benchmark.")
+        sglang_ms = float("nan")
+    else:
+        print(f"Running sglang {dtype_name}...")
+        sglang_ms = benchmark_sglang(
+            tokens, model_dim, inter_dim, experts, topk,
+            w4a16=w4a16, group_size=group_size,
+            num_warmup=args.num_warmup, num_iters=args.num_iters,
+        )
     torch.cuda.empty_cache()
     gc.collect()
 

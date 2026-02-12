@@ -52,21 +52,6 @@ def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch
     return out.view(-1).to(torch.int8)
 
 
-def _pack_int8_to_packed_int4_sequential(x_shuf_i8: torch.Tensor) -> torch.Tensor:
-    """Pack int8 tensor (values in [-8, 7]) into packed int4 bytes sequentially.
-
-    Each contiguous 2-value pair [v0,v1] -> 1 byte: (v1<<4)|v0.
-    So for 8 values [v0..v7] -> 4 bytes: [(v1<<4)|v0, (v3<<4)|v2, (v5<<4)|v4, (v7<<4)|v6].
-
-    This sequential layout is suitable for W4A16 (bf16 activations) where the kernel
-    loads 2 bytes at a time and expects v0,v1,v2,v3 in little-endian order.
-    """
-    flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
-    assert flat.numel() % 2 == 0
-    u = (flat & 0xF).to(torch.uint8).view(-1, 2)
-    out = u[:, 0] | (u[:, 1] << 4)
-    return out.view(-1).to(torch.int8)
-
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -1194,6 +1179,7 @@ def run_moe_stage2(
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4", "int4_bf16"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
+@pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1209,8 +1195,8 @@ def test_moe_gemm_2stage(
     in_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
+    group_size: int,
     *,
-    group_size: int = -1,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -1227,6 +1213,8 @@ def test_moe_gemm_2stage(
     """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
+    if group_size > 0 and in_dtype != "int4_bf16":
+        pytest.skip("groupwise scale only applies to int4_bf16")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
