@@ -75,7 +75,17 @@ cmake --build . --target FlirPythonSources.flir.ops_gen -j$(nproc) || true
 
 # Set up Python package structure
 echo "Setting up Python package structure..."
-bash "${SCRIPT_DIR}/python_bindings/setup_python_package.sh" "${BUILD_DIR}" "${MLIR_PATH}/../buildmlir"
+# Derive MLIR source and build directories from MLIR_PATH.
+# MLIR_PATH is the install prefix (e.g. llvm-project/mlir_install).
+# Convention: source at ../mlir/python/mlir, build at ../buildmlir.
+_MLIR_SRC_DIR="${MLIR_PATH}/../mlir/python/mlir"
+_MLIR_BUILD_DIR="${MLIR_PATH}/../buildmlir"
+if [ ! -d "${_MLIR_SRC_DIR}" ]; then
+    echo "Warning: MLIR Python sources not found at ${_MLIR_SRC_DIR}" >&2
+    echo "         Set MLIR_SRC_DIR env var to override." >&2
+fi
+export MLIR_SRC_DIR="${MLIR_SRC_DIR:-${_MLIR_SRC_DIR}}"
+bash "${SCRIPT_DIR}/python_bindings/setup_python_package.sh" "${BUILD_DIR}" "${_MLIR_BUILD_DIR}" "${MLIR_SRC_DIR}"
 
 # Set up PYTHONPATH for the embedded Python package root (contains `flydsl/_mlir/`)
 PYTHON_PACKAGE_DIR="${BUILD_DIR}/python_packages/flydsl"

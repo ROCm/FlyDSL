@@ -18,13 +18,25 @@ list(APPEND CMAKE_PREFIX_PATH "${NB_CMAKE_DIR}")
 find_package(nanobind CONFIG REQUIRED)
 
 # MLIR Python binding internal sources path
-# Try multiple possible locations
-if(DEFINED LLVM_MAIN_SRC_DIR AND EXISTS "${LLVM_MAIN_SRC_DIR}/../mlir/lib/Bindings/Python")
-  set(MLIR_PYTHON_BINDINGS_DIR "${LLVM_MAIN_SRC_DIR}/../mlir/lib/Bindings/Python")
-elseif(EXISTS "/data/felix/llvm-project/mlir/lib/Bindings/Python")
-  set(MLIR_PYTHON_BINDINGS_DIR "/data/felix/llvm-project/mlir/lib/Bindings/Python")
-else()
-  message(FATAL_ERROR "Cannot find MLIR Python bindings source directory")
+# Resolution order:
+#   1. Explicit cache variable MLIR_PYTHON_BINDINGS_DIR (cmake -D...)
+#   2. LLVM_MAIN_SRC_DIR (set by LLVM/MLIR CMake when building in-tree)
+#   3. MLIR_PATH env var (set by build.sh) -> derive llvm-project source root
+set(MLIR_PYTHON_BINDINGS_DIR "" CACHE PATH
+  "Path to MLIR Python bindings source directory (mlir/lib/Bindings/Python)")
+
+if(NOT MLIR_PYTHON_BINDINGS_DIR)
+  if(DEFINED LLVM_MAIN_SRC_DIR AND EXISTS "${LLVM_MAIN_SRC_DIR}/../mlir/lib/Bindings/Python")
+    set(MLIR_PYTHON_BINDINGS_DIR "${LLVM_MAIN_SRC_DIR}/../mlir/lib/Bindings/Python")
+  elseif(DEFINED ENV{MLIR_PATH} AND EXISTS "$ENV{MLIR_PATH}/../mlir/lib/Bindings/Python")
+    set(MLIR_PYTHON_BINDINGS_DIR "$ENV{MLIR_PATH}/../mlir/lib/Bindings/Python")
+  else()
+    message(FATAL_ERROR
+      "Cannot find MLIR Python bindings source directory.\n"
+      "Please set -DMLIR_PYTHON_BINDINGS_DIR=<path> to "
+      "<llvm-project>/mlir/lib/Bindings/Python, or ensure LLVM_MAIN_SRC_DIR "
+      "or the MLIR_PATH environment variable is set correctly.")
+  endif()
 endif()
 message(STATUS "MLIR Python bindings dir: ${MLIR_PYTHON_BINDINGS_DIR}")
 
@@ -129,12 +141,15 @@ set_target_properties(_flir_ir PROPERTIES
   VISIBILITY_INLINES_HIDDEN ON
 )
 
-# Copy __init__.py to output directory
+# Copy _mlir_libs_init.py -> __init__.py in the output directory.
+# This file is the real package initializer for flydsl._mlir._mlir_libs.
+# It lives here as _mlir_libs_init.py (not __init__.py) to make it clear that
+# flir_ir/ is a CMake source directory, NOT a runtime Python package.
 # (Full Python package setup is done by setup_python_package.sh in build.sh)
 add_custom_command(
   TARGET _flir_ir POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy
-    "${CMAKE_CURRENT_SOURCE_DIR}/__init__.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/_mlir_libs_init.py"
     "${_flir_ir_output_dir}/__init__.py"
-  COMMENT "Copying _flir_ir __init__.py"
+  COMMENT "Copying _mlir_libs __init__.py"
 )
