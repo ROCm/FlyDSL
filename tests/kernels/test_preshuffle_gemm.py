@@ -392,7 +392,7 @@ def test_mfma_w4_flir_preshuffle(
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
-    
+
     if a_dtype == "fp4":
         c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
     else:
@@ -556,10 +556,7 @@ if __name__ == "__main__":
         default=False,
         help="Run weight-fp4 (MXFP4) preshuffle GEMM test.",
     )
-
-    
     args = parser.parse_args()
-    
     torch.set_default_device("cuda")
     if not args.wfp4:
         if args.in_dtype == "fp4":

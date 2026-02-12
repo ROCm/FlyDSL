@@ -619,7 +619,7 @@ def compile_mxfp4_preshuffle_gemm(
                                                 a128,
                                                 b128,
                                                 current_accs_list[acc_idx],
-                                                # cbsz, blgp
+                                                # MFMA control parameters: cluster size (cbsz) and barrier group (blgp)
                                                 cbsz,
                                                 blgp,
                                                 # op_sel_a + scale_a (per-block quant)
