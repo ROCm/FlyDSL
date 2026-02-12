@@ -145,7 +145,7 @@ def compile_moe_gemm1(
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi3"  # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
+        f"_abi4"  # handle >4GB X via flat loads; mask sentinel token ids for safe loads
     ).replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -296,6 +296,11 @@ def compile_moe_gemm1(
                 x_rsrc = buffer_ops.create_buffer_resource(
                     arg_x, max_size=False, num_records_bytes=x_nbytes_i32
                 )
+                # Buffer descriptors clamp size to 0xFFFFFFFF bytes. For very large X (e.g. int8smooth
+                # with tokens*topk*K > 4GB), buffer ops would treat valid addresses as OOB and return 0.
+                # Detect this and fall back to flat (non-buffer) loads for X only.
+                c_u32max_idx = arith.constant(0xFFFFFFFF, index=True)
+                use_buffer_x = arith.cmpu(x_nbytes_idx, c_u32max_idx, "ule")
 
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
 
@@ -426,34 +431,79 @@ def compile_moe_gemm1(
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                     """
                     if x_load_bytes == 16:
-                        idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
-                        return buffer_copy_gmem16_dwordx4(
-                            flir,
-                            arg=arg_x,
-                            elem_type=x_elem,
-                            idx_i32=idx_elem,
-                            atom_g2r16=atom_x_g2r16,
-                            rsrc=x_rsrc,
-                            vec_elems=vec16_elems,
-                        )
+                        # Buffer-load path uses dword offsets; flat-load path uses element offsets.
+                        _if_buf = scf.IfOp(use_buffer_x, results=[vec16_x], hasElse=True)
+                        with _if_buf.then():
+                            idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
+                            v = buffer_copy_gmem16_dwordx4(
+                                flir,
+                                arg=arg_x,
+                                elem_type=x_elem,
+                                idx_i32=idx_elem,
+                                atom_g2r16=atom_x_g2r16,
+                                rsrc=x_rsrc,
+                                vec_elems=vec16_elems,
+                            )
+                            scf.YieldOp([arith.as_value(v)])
+                        with _if_buf.else_():
+                            idx_bytes = idx_i32 * arith.index(4)
+                            idx_elem = idx_bytes if elem_bytes == 1 else (idx_bytes / arith.index(2))
+                            view = flir.TensorView(
+                                arg_x,
+                                (int(vec16_elems),),
+                                strides=(1,),
+                                base_indices=(idx_elem,),
+                                element_type=x_elem,
+                            )
+                            v = flir.copy(
+                                atom_x_g2r16,
+                                view,
+                                None,
+                                alignment=16,
+                                return_vector=True,
+                            )
+                            scf.YieldOp([arith.as_value(v)])
+                        return _if_buf.results[0]
                     idx_bytes = idx_i32 * arith.index(4)
                     atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
-                    view = flir.TensorView(
-                        arg_x,
-                        (x_load_bytes,),
-                        strides=(1,),
-                        base_indices=(idx_bytes,),
-                        element_type=x_elem,
-                    )
-                    return flir.copy(
-                        atom,
-                        view,
-                        None,
-                        alignment=x_load_bytes,
-                        return_vector=True,
-                        src_buffer_resource=x_rsrc,
-                        src_buffer_offset_in_bytes=True,
-                    )
+                    extent_elems = (8 if elem_bytes == 1 else 4) if x_load_bytes == 8 else (4 if elem_bytes == 1 else 2)
+                    _if_buf = scf.IfOp(use_buffer_x, results=[I.vec(extent_elems, x_elem)], hasElse=True)
+                    with _if_buf.then():
+                        view = flir.TensorView(
+                            arg_x,
+                            (x_load_bytes,),
+                            strides=(1,),
+                            base_indices=(idx_bytes,),
+                            element_type=x_elem,
+                        )
+                        v = flir.copy(
+                            atom,
+                            view,
+                            None,
+                            alignment=x_load_bytes,
+                            return_vector=True,
+                            src_buffer_resource=x_rsrc,
+                            src_buffer_offset_in_bytes=True,
+                        )
+                        scf.YieldOp([arith.as_value(v)])
+                    with _if_buf.else_():
+                        idx_elem = idx_bytes if elem_bytes == 1 else (idx_bytes / arith.index(2))
+                        view = flir.TensorView(
+                            arg_x,
+                            (int(extent_elems),),
+                            strides=(1,),
+                            base_indices=(idx_elem,),
+                            element_type=x_elem,
+                        )
+                        v = flir.copy(
+                            atom,
+                            view,
+                            None,
+                            alignment=x_load_bytes,
+                            return_vector=True,
+                        )
+                        scf.YieldOp([arith.as_value(v)])
+                    return _if_buf.results[0]
     
                 def load_x_tile(base_k):
                     """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
@@ -941,25 +991,22 @@ def compile_moe_gemm1(
                         if x_is_token_slot:
                             # slot-major: slot*tokens + token
                             ts2 = s2 * tokens_i32_v + t2
-                            sx = (
+                            # IMPORTANT: `arith.select` is not short-circuit; avoid OOB loads by masking index first.
+                            ts2_safe = arith.select(t_valid, ts2, arith.i32(0))
+                            sx_loaded = (
                                 arith.f32(1.0)
                                 if is_f16
-                                else arith.select(
-                                    t_valid,
-                                    buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
-                                    arith.f32(0.0),
-                                )
+                                else buffer_ops.buffer_load(sx_rsrc, ts2_safe, vec_width=1, dtype=f32)
                             )
+                            sx = arith.select(t_valid, sx_loaded, arith.f32(0.0))
                         else:
-                            sx = (
+                            t2_safe = arith.select(t_valid, t2, arith.i32(0))
+                            sx_loaded = (
                                 arith.f32(1.0)
                                 if is_f16
-                                else arith.select(
-                                    t_valid,
-                                    buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
-                                    arith.f32(0.0),
-                                )
+                                else buffer_ops.buffer_load(sx_rsrc, t2_safe, vec_width=1, dtype=f32)
                             )
+                            sx = arith.select(t_valid, sx_loaded, arith.f32(0.0))
     
                         # Sorted weight aligned with `row` (matches aiter moe_sorting output).
                         if doweight_stage1:
@@ -1052,25 +1099,22 @@ def compile_moe_gemm1(
                     if x_is_token_slot:
                         # slot-major: slot*tokens + token
                         ts2 = s2 * tokens_i32_v + t2
-                        sx0 = (
+                        # IMPORTANT: `arith.select` is not short-circuit; avoid OOB loads by masking index first.
+                        ts2_safe = arith.select(t_valid, ts2, arith.i32(0))
+                        sx_loaded = (
                             arith.f32(1.0)
                             if is_f16
-                            else arith.select(
-                                t_valid,
-                                buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
-                                arith.f32(0.0),
-                            )
+                            else buffer_ops.buffer_load(sx_rsrc, ts2_safe, vec_width=1, dtype=f32)
                         )
+                        sx0 = arith.select(t_valid, sx_loaded, arith.f32(0.0))
                     else:
-                        sx0 = (
+                        t2_safe = arith.select(t_valid, t2, arith.i32(0))
+                        sx_loaded = (
                             arith.f32(1.0)
                             if is_f16
-                            else arith.select(
-                                t_valid,
-                                buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
-                                arith.f32(0.0),
-                            )
+                            else buffer_ops.buffer_load(sx_rsrc, t2_safe, vec_width=1, dtype=f32)
                         )
+                        sx0 = arith.select(t_valid, sx_loaded, arith.f32(0.0))
                     sx = sx0
                     zero_out = arith.constant(0.0, type=out_mlir())
     

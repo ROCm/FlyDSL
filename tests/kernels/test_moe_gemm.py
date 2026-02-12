@@ -872,25 +872,44 @@ def run_moe_stage2(
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
-        # For non-EP mode tests, pass None for valid_mask
-        valid_mask = None
-        exe(
-            o,
-            x,
-            w,
-            sx,
-            sw,
-            st,
-            eids,
-            sw_sorted,
-            num_valid_ids,
-            tokens,
-            model_dim,
-            inter_dim,
-            int(blocks),
-            valid_mask,
-            stream_ptr,
-        )
+        # NOTE: `compile_moe_gemm2` (atomic mode) does NOT take a valid_mask argument.
+        # Only the reduce-wrapper path (compile_moe_gemm2_ex(mode=reduce)) accepts it.
+        if use_reduce:
+            valid_mask = None  # non-EP mode tests
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                valid_mask,
+                stream_ptr,
+            )
+        else:
+            exe(
+                o,
+                x,
+                w,
+                sx,
+                sw,
+                st,
+                eids,
+                sw_sorted,
+                num_valid_ids,
+                tokens,
+                model_dim,
+                inter_dim,
+                int(blocks),
+                stream_ptr,
+            )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
