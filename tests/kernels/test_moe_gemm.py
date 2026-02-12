@@ -990,7 +990,7 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} | "
+        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
@@ -1632,7 +1632,13 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
-    parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
+    parser.add_argument(
+        "--gemm2_mode",
+        type=str,
+        default="both",
+        choices=["both", "atomic", "reduce"],
+        help="Stage2 accumulation mode: 'atomic', 'reduce', or 'both' (default: both).",
+    )
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
     # Benchmark knobs
@@ -1664,29 +1670,38 @@ if __name__ == "__main__":
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
 
+    # Determine which gemm2 modes to run.
+    if args.gemm2_mode == "both":
+        reduce_flags = [False, True]
+    elif args.gemm2_mode == "reduce":
+        reduce_flags = [True]
+    else:  # "atomic"
+        reduce_flags = [False]
+
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
     for dt in args.in_dtype.split(","):
-        test_moe_gemm_2stage(
-            tokens=int(args.tokenNum),
-            model_dim=int(model_dim),
-            inter_dim=int(inter_dim),
-            experts=int(args.expert),
-            topk=int(args.topk),
-            tile_m=int(args.tile_m),
-            tile_n1=int(args.tile_n),
-            tile_k1=int(args.tile_k),
-            tile_n2=tile_n2,
-            tile_k2=tile_k2,
-            doweight_stage1=bool(args.doweight_stage1),
-            in_dtype=dt,
-            seed=int(args.seed),
-            num_iters=int(args.num_iters),
-            num_warmup=int(args.num_warmup),
-            moe_sort_mode=args.moe_sort_mode,
-            compare_aiter_ck=args.compare_aiter_ck,
-            skip_ref=bool(args.skip_ref),
-            w_fp4_kernel=args.wfp4,
-            use_reduce=bool(args.reduce),
-            use_valid_mask=bool(args.use_valid_mask),
-            test_graph=bool(args.test_graph),
-        )
+        for use_reduce in reduce_flags:
+            test_moe_gemm_2stage(
+                tokens=int(args.tokenNum),
+                model_dim=int(model_dim),
+                inter_dim=int(inter_dim),
+                experts=int(args.expert),
+                topk=int(args.topk),
+                tile_m=int(args.tile_m),
+                tile_n1=int(args.tile_n),
+                tile_k1=int(args.tile_k),
+                tile_n2=tile_n2,
+                tile_k2=tile_k2,
+                doweight_stage1=bool(args.doweight_stage1),
+                in_dtype=dt,
+                seed=int(args.seed),
+                num_iters=int(args.num_iters),
+                num_warmup=int(args.num_warmup),
+                moe_sort_mode=args.moe_sort_mode,
+                compare_aiter_ck=args.compare_aiter_ck,
+                skip_ref=bool(args.skip_ref),
+                w_fp4_kernel=args.wfp4,
+                use_reduce=use_reduce,
+                use_valid_mask=bool(args.use_valid_mask),
+                test_graph=bool(args.test_graph),
+            )
