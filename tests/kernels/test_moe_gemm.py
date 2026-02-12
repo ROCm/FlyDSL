@@ -1227,9 +1227,6 @@ def test_moe_gemm_2stage(
     """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
-    # Reduce path requires tile_n2 divisible by cshuffle_stride (32*8=256).
-    if bool(use_reduce) and (tile_n2 % 256 != 0):
-        pytest.skip(f"reduce mode requires tile_n2 divisible by 256, got {tile_n2}")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
