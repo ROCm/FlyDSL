@@ -10,6 +10,7 @@ NOTE:
 import os
 import sys
 import logging
+import random
 
 import torch
 import torch.nn.functional as F
@@ -75,6 +76,7 @@ DEFAULT_LDS_STAGE = 2
 DEFAULT_BENCH_ITERS = 20
 DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
+
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -254,11 +256,6 @@ def test_mfma_a8_flir_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
@@ -268,7 +265,8 @@ def test_mfma_a8_flir_preshuffle(
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
             c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
-            verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+            c_aiter_f32 = c_aiter.to(torch.float32)
+            verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
 
             tflops_aiter = flops / (us1 / 1e6) / 1e12
             bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
@@ -288,6 +286,12 @@ def test_mfma_a8_flir_preshuffle(
         print("-" * 40)
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
+
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
@@ -318,6 +322,11 @@ def test_mfma_w4_flir_preshuffle(
     use_cshuffle_epilog: bool = False,
     test_graph: bool = False,
 ):
+    # FP4 GEMM is only supported on gfx950 (MI350)
+    if get_hip_arch() != "gfx950":
+        print(f"Skipping FP4 GEMM test: requires gfx950, got {get_hip_arch()}")
+        return
+    
     print("=" * 80)
     print(
         f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -338,6 +347,7 @@ def test_mfma_w4_flir_preshuffle(
         tile_k=tile_k,
         a_dtype=a_dtype,
         b_dtype=b_dtype,
+        out_dtype="bf16",
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
     )
@@ -369,32 +379,32 @@ def test_mfma_w4_flir_preshuffle(
     b_fp32_padded[:N] = b_fp32[:N]
 
     if a_dtype == "fp4":
-        a_q, scale_a, a_convert = fp4_utils.per_1x32_f4_quant(a_fp32_padded)  # (M, K)
+        a_q, scale_a_orig, a_convert = fp4_utils.per_1x32_f4_quant(a_fp32_padded)  # (M, K)
         a_q = a_q[:M]
-        scale_a = fp4_utils.shuffle_scale_w4(scale_a, 1, False)
+        # Use quantized scales (no longer forcing to 1.0)
+        scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
     else:
         a_q = a_fp32.to(DTYPE_FP8)
         a_convert = a_fp32
-        scale_a = torch.ones([M, K // 32], dtype=fp4_utils.fp8_e8m0, device=device)
+        scale_a_orig = torch.full([M, K // 32], 1.0, dtype=fp4_utils.fp8_e8m0, device=device)
+        scale_a = scale_a_orig
 
 
     b_q, scale_b, b_convert = fp4_utils.per_1x32_f4_quant(b_fp32_padded)  # (N, K)
     b_q = b_q[:N]
+
     if a_dtype == "fp4":
         c_ref = run_torch_w4(a_q, b_q, scale_a, scale_b, torch.float32)
     else:
         c_ref = run_torch(a_fp32, b_fp32, 1, 1, bias=None, dtype=torch.float32)
 
-    # Keep tensors contiguous for predictable buffer descriptor shapes.
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
-    # Preshuffle B to CK/aiter layout.
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
-    # Run kernel (f16 output, in-kernel scaling).
-    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
+    c_out_raw = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
         # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
@@ -423,13 +433,51 @@ def test_mfma_w4_flir_preshuffle(
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
-    verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+    # Aiter A4W4 benchmark - uses same b_shuffled as kernel
+    if HAS_AITER and bool(run_aiter_bench):
+        print("-" * 40)
+        print("Running Aiter A4W4 Benchmark...")
+        try:
+            if hasattr(aiter, 'gemm_a4w4'):
+                # Use same b_shuffled as kernel (already shuffled with aiter's shuffle_weight above)
+                # bpreshuffle=True means B is already preshuffled
+                def launch_aiter(a, b, sa, sb):
+                    return aiter.gemm_a4w4(a, b, sa, sb, None, torch.bfloat16, bpreshuffle=True)
+                
+                # Use same inputs as kernel: a_q, b_shuffled, scale_a_orig, scale_b
+                c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a_orig, scale_b, testGraph=test_graph)
+                verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+                tflops_aiter = flops / (us1 / 1e6) / 1e12
+                bw_aiter = bytes_moved / 1e9 / (us1 / 1e6)
+                print(
+                    f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
+                )
+                print(
+                    f"Speedup vs Aiter: {tflops / tflops_aiter:.2f}x, Tflops {tflops:.1f} vs {tflops_aiter:.1f}"
+                )
+            else:
+                print("Aiter does not have gemm_a4w4 function")
+            print("-" * 40)
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else repr(e)
+            print(f"Skipping Aiter benchmark (error): {msg}")
+            print("-" * 40)
+    elif HAS_AITER and (not bool(run_aiter_bench)):
+        print("-" * 40)
+        print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
+        print("-" * 40)
+
+    print("Verifying Kernel Output...")
+    # FP4 has lower precision, use relaxed logits_diff threshold (0.1)
+    assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1, logits_diff_threshold=0.1), "Kernel output verification failed"
 
 
 if __name__ == "__main__":
@@ -508,9 +556,7 @@ if __name__ == "__main__":
         default=False,
         help="Run weight-fp4 (MXFP4) preshuffle GEMM test.",
     )
-    
     args = parser.parse_args()
-    
     torch.set_default_device("cuda")
     if not args.wfp4:
         if args.in_dtype == "fp4":

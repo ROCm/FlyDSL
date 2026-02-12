@@ -47,6 +47,7 @@ def compile_mxfp4_preshuffle_gemm(
     tile_k: int,
     a_dtype: str = "fp8",
     b_dtype: str = "fp4",
+    out_dtype: str = "f16",
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = True,
@@ -73,6 +74,7 @@ def compile_mxfp4_preshuffle_gemm(
     is_fp4_a = a_dtype == "fp4"
     is_fp8_a = a_dtype == "fp8"
     is_fp4_b = b_dtype == "fp4"
+    is_bf16_out = out_dtype == "bf16"
 
     a_elem_vec_pack = 2 if is_fp4_a else  1
     b_elem_vec_pack = 2
@@ -164,10 +166,13 @@ def compile_mxfp4_preshuffle_gemm(
             return T.i16x4
         return T.i64
 
+    def _out_elem_type():
+        return T.bf16 if is_bf16_out else T.f16
+
     # GEMM epilogue toggle: optional LDS CShuffle + vectorized stores.
     # Default: off (current measured cases show no benefit).
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_preshuffle_{lds_stage}stages_a{a_dtype}_b{b_dtype}_{epilog_tag}".replace("-", "_")
+    module_name = f"mfma_preshuffle_{lds_stage}stages_a{a_dtype}_b{b_dtype}_out{out_dtype}_{epilog_tag}".replace("-", "_")
 
     class _GEMM(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -194,7 +199,7 @@ def compile_mxfp4_preshuffle_gemm(
         @flir.kernel
         def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_elem_type()),
             arg_a: lambda: memref(DYN, _a_elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, _scale_elem_type()),
@@ -240,7 +245,10 @@ def compile_mxfp4_preshuffle_gemm(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             # CK-style XOR16 swizzle parameter (const).
-            k_blocks16 = arith.index(tile_k_bytes // 16)
+            # For FP4, LDS K dimension is tile_k_bytes // a_elem_vec_pack (128 bytes)
+            # k_blocks16 must match actual LDS size to avoid swizzle address overflow
+            lds_k_bytes = tile_k_bytes // a_elem_vec_pack
+            k_blocks16 = arith.index(lds_k_bytes // 16)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -587,9 +595,14 @@ def compile_mxfp4_preshuffle_gemm(
                                     else:
                                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                                    col_base1 = col_base + 64
-                                    a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                    a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    if is_fp8_a:
+                                        # FP8: load full 32 bytes (2 x 16B)
+                                        col_base1 = col_base + 64
+                                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    else:
+                                        # FP4: only 16 bytes, pad with zeros (same as mixed_moe_gemm_2stage.py)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
                                     for inxdl in range_constexpr(pack_N):
                                         ni_idx = ni * pack_N + inxdl
@@ -606,14 +619,13 @@ def compile_mxfp4_preshuffle_gemm(
                                                 a128,
                                                 b128,
                                                 current_accs_list[acc_idx],
-                                                # cbsz, abid, blgp
+                                                # MFMA control parameters: cluster size (cbsz) and barrier group (blgp)
                                                 cbsz,
                                                 blgp,
-                                                # op_sel_a + scale_a (1.0f as i32 bits)
+                                                # op_sel_a + scale_a (per-block quant)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
-                                                #
-                                                # op_sel_b + scale_b (1.0f as i32 bits)
+                                                # op_sel_b + scale_b
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],
@@ -782,9 +794,12 @@ def compile_mxfp4_preshuffle_gemm(
                         #     val = arith.sitofp(T.f32, val)
 
                         # val_s = (val * s_a) * s_b_vals[ni]
-                        val_f16 = arith.trunc_f(T.f16, val)
+                        if is_bf16_out:
+                            val_out = arith.trunc_f(T.bf16, val)
+                        else:
+                            val_out = arith.trunc_f(T.f16, val)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                        buffer_ops.buffer_store(val_out, c_rsrc, idx_out)
 
                 mfma_epilog(
                     use_cshuffle=False,
@@ -1043,7 +1058,7 @@ def compile_mxfp4_preshuffle_gemm(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_elem_type()),
             arg_a: lambda: memref(DYN, _a_elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, _scale_elem_type()),
