@@ -7,7 +7,7 @@ Aggressive V4.4 path:
 - GEMM1 uses `K @ Q^T` so S/P live in MFMA32 register layout.
 - Online softmax over KV dimension is done in registers.
 - P is kept in registers and fed directly to GEMM2 (`V^T @ P`) without LDS roundtrip.
-- K uses LDS ping-pong prefetch between adjacent iterations.
+- K and V^T use separate LDS regions (single-buffered per iteration).
 
 Layout: Q/K/V/O are 1D flattened from BSHD (batch, seq_len, num_heads, head_dim).
 Grid:   (batch * num_q_tiles * num_heads,) where num_q_tiles = seq_len / BLOCK_M.

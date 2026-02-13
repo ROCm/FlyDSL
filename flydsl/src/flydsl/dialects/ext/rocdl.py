@@ -29,6 +29,8 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
 _ods_readlane = readlane
 _ods_readfirstlane = readfirstlane
 _ods_ds_swizzle = ds_swizzle
+_ods_permlane16_swap = permlane16_swap
+_ods_permlane32_swap = permlane32_swap
 _ods_raw_ptr_buffer_atomic_fadd = raw_ptr_buffer_atomic_fadd
 
 mask_mfma = 0x008
@@ -153,6 +155,73 @@ def ds_swizzle(result_type, src, offset, *, loc=None, ip=None):
     return _ods_ds_swizzle(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(offset), loc=loc, ip=ip)
 
 
+def _unwrap_i32_lane_operand(v, *, loc=None):
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+
+    return _arith_ext.unwrap(v, type=IntegerType.get_signless(32), loc=loc)
+
+
+def _permlane_i32x2_struct_type():
+    from _mlir import ir as _ir
+
+    # Some Python bindings accept optional spaces in LLVM type parser; keep both.
+    try:
+        return _ir.Type.parse("!llvm.struct<(i32, i32)>")
+    except Exception:
+        return _ir.Type.parse("!llvm.struct<(i32,i32)>")
+
+
+def _extract_permlane_lane_i32(pair_val, *, loc=None, ip=None):
+    from _mlir.dialects import llvm as _llvm
+    from _mlir.ir import IntegerType
+
+    i32 = IntegerType.get_signless(32)
+    return _llvm.extractvalue(i32, pair_val, [0], loc=loc, ip=ip)
+
+
+def permlane16_swap_pair(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane16 swap wrapper returning the raw i32x2 struct."""
+    return _ods_permlane16_swap(
+        _permlane_i32x2_struct_type(),
+        _unwrap_i32_lane_operand(old, loc=loc),
+        _unwrap_i32_lane_operand(src, loc=loc),
+        fi,
+        bound_control,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def permlane16_swap_i32(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane16 swap wrapper returning the swapped i32 lane value."""
+    pair_val = permlane16_swap_pair(
+        old, src, fi=fi, bound_control=bound_control, loc=loc, ip=ip
+    )
+    return _extract_permlane_lane_i32(pair_val, loc=loc, ip=ip)
+
+
+def permlane32_swap_pair(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane32 swap wrapper returning the raw i32x2 struct."""
+    return _ods_permlane32_swap(
+        _permlane_i32x2_struct_type(),
+        _unwrap_i32_lane_operand(old, loc=loc),
+        _unwrap_i32_lane_operand(src, loc=loc),
+        fi,
+        bound_control,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def permlane32_swap_i32(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane32 swap wrapper returning the swapped i32 lane value."""
+    pair_val = permlane32_swap_pair(
+        old, src, fi=fi, bound_control=bound_control, loc=loc, ip=ip
+    )
+    return _extract_permlane_lane_i32(pair_val, loc=loc, ip=ip)
+
+
 def raw_ptr_buffer_atomic_fadd(val, rsrc, voffset, soffset, cache, *, loc=None, ip=None):
     """Atomic fadd that accepts `ArithValue` / wrappers (no explicit `arith.unwrap(...)` needed).
 
@@ -213,6 +282,8 @@ __all__ = [
     # Shuffle and permutation
     'ds_swizzle', 'ds_bpermute',
     'permlanex16', 'permlane16_swap', 'permlane32_swap',
+    'permlane16_swap_pair', 'permlane16_swap_i32',
+    'permlane32_swap_pair', 'permlane32_swap_i32',
     'readlane', 'readfirstlane',
     'update_dpp',
     'ballot',
