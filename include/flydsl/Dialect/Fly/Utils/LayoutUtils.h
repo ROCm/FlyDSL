@@ -627,6 +627,8 @@ Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
 
 template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
 
+namespace detail {
+
 // Internal helper for layoutUpcast(): recursively rewrites (shape, stride).
 template <class Layout>
 std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
@@ -701,6 +703,8 @@ layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout
   return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
 }
 
+} // namespace detail
+
 // Public API: upcast layout by element-size factor.
 template <class Layout>
 Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
@@ -708,7 +712,7 @@ Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t facto
     return layout;
   }
   auto [newShape, newStride] =
-      layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
@@ -719,7 +723,7 @@ Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t fac
     return layout;
   }
   auto [newShape, newStride] =
-      layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+      detail::layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
