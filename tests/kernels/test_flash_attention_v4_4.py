@@ -40,7 +40,7 @@ DEFAULT_SEED = 123
 V4_4_COMPILE_KWARGS = {
     "unsafe_fp_math": True,
     "fast_fp_math": True,
-    "waves_per_eu": 4,
+    "waves_per_eu": 3,
     "flat_work_group_size": 256,
 }
 
@@ -162,11 +162,11 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters
     device = "cuda"
     results = {}
 
-    if seq_len % 64 != 0:
-        results["err"] = f"seq_len ({seq_len}) must be divisible by 64 for V4.4"
+    if seq_len % 128 != 0:
+        results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for V4.4"
         return results
-    if head_dim % 16 != 0 or head_dim < 64:
-        results["err"] = f"head_dim ({head_dim}) must be >= 64 and divisible by 16"
+    if head_dim % 32 != 0 or head_dim < 64:
+        results["err"] = f"head_dim ({head_dim}) must be >= 64 and divisible by 32"
         return results
 
     try:
@@ -283,8 +283,8 @@ def main():
 
     print("=" * 130)
     print(f"FlyDSL Flash Attention V4.4 ({'causal' if causal else 'non-causal'}, fp16)")
-    print("  Tile: BLOCK_M=64, BLOCK_N=32, 4 waves (256 threads), mfma_f32_16x16x16f16")
-    print("  Strategy: Q-load-once + KV streaming + online softmax over 32 positions")
+    print("  Tile: BLOCK_M=128, BLOCK_N=32, 4 waves (256 threads), mfma_f32_32x32x8f16")
+    print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"  Compile opts: {V4_4_COMPILE_KWARGS}")
     print("=" * 130)
