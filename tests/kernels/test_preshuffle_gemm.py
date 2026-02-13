@@ -122,10 +122,9 @@ def test_mfma_a8_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    waves_per_eu: int = 0,
     test_graph: bool = False,
 ):
-    if use_async_copy and get_hip_arch() != "gfx950":
-        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -137,6 +136,8 @@ def test_mfma_a8_flir_preshuffle(
         raise ValueError(
             f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
+    waves_per_eu = int(waves_per_eu) if waves_per_eu is not None else 0
+    waves_per_eu = None if waves_per_eu <= 0 else waves_per_eu
     exe = compile_preshuffle_gemm_a8(
         M=M,
         N=N,
@@ -147,9 +148,12 @@ def test_mfma_a8_flir_preshuffle(
         in_dtype=in_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        waves_per_eu=waves_per_eu,
         use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
+    print(
+        f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={waves_per_eu})"
+    )
 
     size_c = M * N
     size_a = M * K
@@ -541,6 +545,13 @@ if __name__ == "__main__":
         help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
     )
     parser.add_argument(
+        "--waves_per_eu",
+        type=int,
+        default=0,
+        choices=[0, 1, 2, 3, 4],
+        help="Occupancy hint (waves per EU). 0 means 'no hint' (default).",
+    )
+    parser.add_argument(
         "--test_graph",
         "-tg",
         action="store_true",
@@ -572,6 +583,7 @@ if __name__ == "__main__":
             run_aiter_bench=bool(args.run_aiter_bench),
             use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
             use_async_copy=bool(args.use_async_copy),
+            waves_per_eu=int(args.waves_per_eu),
             test_graph=bool(args.test_graph),
         )
     else:
