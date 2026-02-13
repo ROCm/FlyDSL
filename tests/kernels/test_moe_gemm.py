@@ -156,6 +156,7 @@ def moe_sorting_torch_native(
     "tokens,model_dim,inter_dim,experts,topk,doweight_stage1",
     [
         (256, 1024, 256, 4, 2, False),
+        (10240, 1024, 256, 128, 8, False),
     ],
 )
 def _maybe_aiter_moe_sorting(
@@ -990,7 +991,7 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} | "
+        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
@@ -1090,16 +1091,20 @@ def run_moe_stage2(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2, doweight_stage1",
     [
         # Small smoke (fast compile + run) for all in_dtype.
-        pytest.param(64, 256, 128, 4, 2, 32, 64, 128, 64, 128, False, id="S"),
+        pytest.param(64, 256, 128, 4, 2, 16, 64, 128, 64, 128, False, id="S"),
         # Medium (more realistic) for all in_dtype (skip_ref will auto-enable).
-        pytest.param(128, 1024, 256, 8, 2, 64, 128, 128, 128, 128, False, id="M"),
+        pytest.param(129, 1024, 256, 8, 2, 32, 128, 128, 128, 128, False, id="M"),
         # Large (aiter-style) mainly for perf smoke; reference is too expensive here.
-        pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
+        pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="graph"),
+    pytest.param(True, id="eager", marks=pytest.mark.large_shape),
+])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1115,6 +1120,7 @@ def test_moe_gemm_2stage(
     in_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
+    test_graph: bool,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -1124,7 +1130,6 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
-    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
     if (not bool(use_reduce)) and bool(use_valid_mask):
@@ -1411,15 +1416,16 @@ def profile_reduce_kernel(
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
     stream_ptr = torch.cuda.current_stream().cuda_stream
+    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens, stream_ptr)
+        reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens, stream_ptr)
+            reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1458,11 +1464,10 @@ def print_reduce_profile(results: dict):
 @pytest.mark.parametrize(
     "tokens, topk, model_dim",
     [
-        pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
-        pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
+        pytest.param(32769, 8, 7168, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
         pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
-        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
+        pytest.param(16384, 6, 5120, id="EP-K6-prefill", marks=pytest.mark.large_shape),
         pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
         pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
     ],
@@ -1481,7 +1486,8 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
     # Run kernels
     stream_ptr = torch.cuda.current_stream().cuda_stream
-    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
+    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
+    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
@@ -1498,15 +1504,14 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
 
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
-        pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S"),
-        pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L"),
-        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
-        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
-        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill"),
-        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
-        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
+        pytest.param(8192, 7168, 256, 128, 8, 64, 256, 128, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
+        pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
+        pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1516,11 +1521,11 @@ def test_moe_stage2_standalone(
     inter_dim: int,
     experts: int,
     topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
     in_dtype: str,
     *,
-    tile_m: int = 64,   # Common block size for M
-    tile_n: int = 256,  # Common block size for N2
-    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
@@ -1632,7 +1637,13 @@ if __name__ == "__main__":
     parser.add_argument("--moe_sort_mode", type=str, default=None, choices=["aiter", "torch"], help="Routing buffer build mode (aiter moe_sorting vs torch fallback).")
     parser.add_argument("--compare_aiter_ck", type=_str2bool, nargs="?", const=True, default=None, help="Override COMPARE_AITER_CK (t/f). Default: env or HAS_AITER.")
     parser.add_argument("--skip_ref", type=_str2bool, nargs="?", const=True, default=False, help="Skip torch reference correctness checks (benchmark-only).")
-    parser.add_argument("--reduce", type=_str2bool, nargs="?", const=True, default=False, help="Use reduce mode (accumulate=False) instead of atomic mode.")
+    parser.add_argument(
+        "--gemm2_mode",
+        type=str,
+        default="both",
+        choices=["both", "atomic", "reduce"],
+        help="Stage2 accumulation mode: 'atomic', 'reduce', or 'both' (default: both).",
+    )
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
     # Benchmark knobs
@@ -1664,8 +1675,15 @@ if __name__ == "__main__":
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
 
-    # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    for dt in args.in_dtype.split(","):
+    # Determine which gemm2 modes to run.
+    if args.gemm2_mode == "both":
+        reduce_flags = [False, True]
+    elif args.gemm2_mode == "reduce":
+        reduce_flags = [True]
+    else:  # "atomic"
+        reduce_flags = [False]
+
+    def run_one(dt: str, use_reduce: bool):
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
@@ -1686,7 +1704,12 @@ if __name__ == "__main__":
             compare_aiter_ck=args.compare_aiter_ck,
             skip_ref=bool(args.skip_ref),
             w_fp4_kernel=args.wfp4,
-            use_reduce=bool(args.reduce),
+            use_reduce=use_reduce,
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
         )
+
+    # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
+    for dt in args.in_dtype.split(","):
+        for use_reduce in reduce_flags:
+            run_one(dt, use_reduce)

@@ -321,10 +321,20 @@ def compile_preshuffle_gemm_a8(
                     else None
                 )
 
-            # Note: We assume N is aligned (no N-tail support in this kernel).
-            a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-            c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-            scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+            # Use runtime byte sizes for hardware OOB protection (M may not be a multiple of tile_m).
+            _i32 = T.i32
+            c_m_i32 = arith.index_cast(_i32, c_m)
+            c_n_i32 = arith.index_cast(_i32, c_n)
+            c_k_i32 = arith.index_cast(_i32, c_k)
+            a_bytes = c_m_i32 * c_k_i32 * arith.i32(int(elem_bytes))
+            c_bytes = c_m_i32 * c_n_i32 * arith.i32(2)  # f16 output = 2B
+            a_rsrc = buffer_ops.create_buffer_resource(arg_a, num_records_bytes=a_bytes)
+            c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_bytes)
+            if is_f16_or_bf16:
+                scale_a_rsrc = None
+            else:
+                scale_a_bytes = c_m_i32 * arith.i32(4)  # f32 scale = 4B
+                scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, num_records_bytes=scale_a_bytes)
 
             b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
             scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
@@ -528,6 +538,7 @@ def compile_preshuffle_gemm_a8(
                     atom_g2r16=atom_a_g2r16,
                     rsrc=a_rsrc,
                     vec_elems=(16 if elem_bytes == 1 else 8),
+                    elem_bytes=elem_bytes,
                 )
 
             def a_tile_chunk_coord_i32(i: int, tx_i32_base: int, chunk_i32: int = 4):
