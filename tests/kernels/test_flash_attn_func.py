@@ -2,7 +2,6 @@
 """flash_attn_func kernel test and benchmark for FlyDSL.
 
 Tests flash_attn_func against PyTorch SDPA.
-Optionally compares with V4.3.
 """
 
 import sys
@@ -162,7 +161,9 @@ def compare_arrays(
     return result
 
 
-def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters, prev_exe=None, seed=DEFAULT_SEED):
+def run_config(
+    batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters, seed=DEFAULT_SEED
+):
     device = "cuda"
     results = {}
     active_path = select_flash_attn_func_path(
@@ -255,20 +256,6 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters
     except Exception as e:
         results["bench_err"] = str(e)
 
-    if prev_exe is not None:
-        try:
-            o_prev = torch.zeros_like(q_flat)
-
-            def prev_fn():
-                prev_exe(q_flat, k_flat, v_flat, o_prev, B, S)
-
-            _, prev_us = run_perftest(prev_fn, num_iters=iters, num_warmup=warmup)
-            prev_tflops = flops / (prev_us * 1e-6) / 1e12
-            results["prev_us"] = prev_us
-            results["prev_tflops"] = prev_tflops
-        except Exception as e:
-            results["prev_bench_err"] = str(e)
-
     return results
 
 
@@ -281,7 +268,6 @@ def main():
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--compare-v43", action="store_true", help="Also benchmark V4.3 for comparison")
     parser.add_argument(
         "--seed", type=int, default=DEFAULT_SEED, help=f"Random seed for reproducibility (default: {DEFAULT_SEED})"
     )
@@ -309,32 +295,10 @@ def main():
             (1, 8192, 64, 128),
         ]
 
-    prev_exes = {}
-    if args.compare_v43:
-        from kernels.flash_attention_v4_3 import build_flash_attention_v4_3_module
-
-        for _, _, nh, hd in configs:
-            key = (nh, hd)
-            if key not in prev_exes:
-                try:
-                    m = build_flash_attention_v4_3_module(
-                        num_heads=nh, head_dim=hd, causal=causal, dtype_str="f16"
-                    )
-                    prev_exes[key] = flydsl.compile(m)
-                except Exception:
-                    prev_exes[key] = None
-
-    if args.compare_v43:
-        hdr = (
-            f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
-            f"{'MinCos':>8s} | {'Func(us)':>10s} {'Func TF':>9s} | "
-            f"{'V4.3(us)':>10s} {'V4.3 TF':>9s} | {'Speedup':>7s}"
-        )
-    else:
-        hdr = (
-            f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
-            f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
-        )
+    hdr = (
+        f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
+        f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
+    )
     print(f"\n{hdr}")
     print("-" * len(hdr))
 
@@ -342,7 +306,6 @@ def main():
     for batch, seq_len, nh, hd in configs:
         tag = f"B={batch} S={seq_len} H={nh} D={hd}"
         try:
-            prev_exe = prev_exes.get((nh, hd)) if args.compare_v43 else None
             r = run_config(
                 batch,
                 seq_len,
@@ -352,7 +315,6 @@ def main():
                 causal,
                 warmup=args.warmup,
                 iters=args.iters,
-                prev_exe=prev_exe,
                 seed=args.seed,
             )
             if "err" in r:
@@ -368,22 +330,11 @@ def main():
 
             us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
             tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
-
-            if args.compare_v43 and "prev_us" in r:
-                p_us = f"{r['prev_us']:>10.1f}"
-                p_tf = f"{r['prev_tflops']:>9.3f}"
-                speedup = r["prev_us"] / r["us"] if r.get("us") else 0
-                print(
-                    f"{cfg_path:>56s} | {status:>6s} | "
-                    f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-                    f"{us_s} {tf_s} | {p_us} {p_tf} | {speedup:>6.2f}x"
-                )
-            else:
-                print(
-                    f"{cfg_path:>56s} | {status:>6s} | "
-                    f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-                    f"{us_s} {tf_s}"
-                )
+            print(
+                f"{cfg_path:>56s} | {status:>6s} | "
+                f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
+                f"{us_s} {tf_s}"
+            )
         except Exception as e:
             print(f"{tag:>56s} | {'ERROR':>6s} | {str(e)[:60]}")
             all_passed = False
