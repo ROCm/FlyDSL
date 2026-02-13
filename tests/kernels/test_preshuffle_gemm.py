@@ -303,12 +303,14 @@ def test_mfma_a8_flir_preshuffle(
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
-        # MXFP4 constraints: tile_k >= 256 (pack_K=2), tile_n >= 128 (pack_N=2 with 4 waves)
-        # K must be a multiple of tile_k (kernel does not handle K tail)
-        (32, 5120, 8192, 32, 128, 512), 
-        pytest.param(5120, 5120, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
-        pytest.param(6666, 1024, 2048, 128, 128, 256, marks=pytest.mark.large_shape),
-        pytest.param(5133, 5120, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+        # MXFP4 constraints (same as CK: KPerBlock=256 fp4, NPerBlock>=128):
+        #   tile_k >= 256 (pack_K=2), tile_n >= 128 (pack_N=2 with 4 waves)
+        #   K must be a multiple of tile_k
+        # Tile configs aligned with CK kernels (see aiter gemm_a4w4_blockscale_common.py)
+        (32, 8192, 8192, 32, 128, 256),                                                      # decode, ~1.03x CK
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill, ~0.78x CK
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill, ~0.98x CK
+        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # non-aligned M, ~0.79x CK
     ]
 )
 def test_mfma_w4_flir_preshuffle(
@@ -569,41 +571,44 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     torch.set_default_device("cuda")
-    if not args.wfp4:
-        if args.in_dtype == "fp4":
-            raise ValueError("--in_dtype fp4 requires --wfp4")
-        test_mfma_a8_flir_preshuffle(
-            args.in_dtype,
-            M=args.M,
-            N=args.N,
-            K=args.K,
-            tile_m=args.tile_m,
-            tile_n=args.tile_n,
-            tile_k=args.tile_k,
-            lds_stage=args.lds_stage,
-            bench_iters=args.num_iters,
-            bench_warmup=args.num_warmup,
-            run_aiter_bench=bool(args.run_aiter_bench),
-            use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
-            use_async_copy=bool(args.use_async_copy),
-            test_graph=bool(args.test_graph),
-        )
-    else:
-        pack_M = 2
-        test_mfma_w4_flir_preshuffle(
-            args.in_dtype if args.in_dtype == "fp8" else "fp4",
-            "fp4",
-            M=args.M,
-            N=args.N,
-            K=args.K,
-            tile_m=args.tile_m * pack_M,
-            tile_n=args.tile_n,
-            tile_k=args.tile_k,
-            lds_stage=args.lds_stage,
-            bench_iters=args.num_iters,
-            bench_warmup=args.num_warmup,
-            run_aiter_bench=bool(args.run_aiter_bench),
-            use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
-            test_graph=bool(args.test_graph),
-        )
+    try:
+        if not args.wfp4:
+            if args.in_dtype == "fp4":
+                raise ValueError("--in_dtype fp4 requires --wfp4")
+            test_mfma_a8_flir_preshuffle(
+                args.in_dtype,
+                M=args.M,
+                N=args.N,
+                K=args.K,
+                tile_m=args.tile_m,
+                tile_n=args.tile_n,
+                tile_k=args.tile_k,
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+                run_aiter_bench=bool(args.run_aiter_bench),
+                use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+                use_async_copy=bool(args.use_async_copy),
+                test_graph=bool(args.test_graph),
+            )
+        else:
+            pack_M = 2
+            test_mfma_w4_flir_preshuffle(
+                args.in_dtype if args.in_dtype == "fp8" else "fp4",
+                "fp4",
+                M=args.M,
+                N=args.N,
+                K=args.K,
+                tile_m=args.tile_m * pack_M,
+                tile_n=args.tile_n,
+                tile_k=args.tile_k,
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+                run_aiter_bench=bool(args.run_aiter_bench),
+                use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+                test_graph=bool(args.test_graph),
+            )
+    except pytest.skip.Exception as e:
+        print(f"Skipped: {e}")
 
