@@ -61,7 +61,7 @@ def _pipeline_fragments(
         "cse",
         "gpu-kernel-outlining{data-layout-str=}",
         "gpu.module(convert-scf-to-cf)",
-        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown "
+        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=HIP "
         + f"use-bare-ptr-memref-call-conv={rocdl_bare_ptr_opt}"
         + "})",
         "gpu.module(reconcile-unrealized-casts)",
@@ -396,6 +396,55 @@ def _apply_flat_work_group_size_on_llvm_funcs(module: ir.Module, max_workgroup_s
         pass
 
 
+def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
+    """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
+
+    This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
+    attribute to gpu.func operations marked as kernels.
+
+    Args:
+        mlir_module: MLIR module containing GPU kernels
+        waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
+    """
+    if waves_per_eu is None:
+        return
+
+    w = int(waves_per_eu)
+    if w < 1:
+        raise ValueError(f"waves_per_eu must be >= 1, got {w}")
+
+    try:
+        # Get the context from the module
+        with mlir_module.context:
+            # Navigate MLIR module structure: module -> gpu.module -> gpu.func
+            for op in mlir_module.body.operations:
+                # Look for gpu.module operations
+                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                    continue
+
+                # gpu.module has a single region with a single block
+                gpu_module_region = op.regions[0]
+
+                # Within gpu.module, find gpu.func operations with gpu.kernel attribute
+                for inner_op in gpu_module_region.blocks[0].operations:
+                    if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
+                        continue
+
+                    # Only apply to kernel functions (not device functions)
+                    if "gpu.kernel" not in inner_op.attributes:
+                        continue
+
+                    # Add or append to the 'rocdl.waves_per_eu' attribute
+                    # This attribute is read by the ROCDL conversion pass
+                    inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                        ir.IntegerType.get_signless(32), w
+                    )
+    except Exception as e:
+        # Best-effort: if attribute injection fails, log and continue
+        # This prevents breaking existing functionality
+        import warnings
+        warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
+
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
     *,
@@ -411,10 +460,17 @@ def compile(
     flat_work_group_size: Optional[int] = None,
     unsafe_fp_math: bool = False,
     fast_fp_math: bool = False,
-) -> Executor:
+) -> Optional["Executor"]:
     """Compile a FLIR module to an Executor.
 
-    Returns an MLIR ExecutionEngine-backed executor.
+    Returns an MLIR ExecutionEngine-backed executor, or None if COMPILE_ONLY=1.
+
+    Environment Variables:
+        COMPILE_ONLY: If set to "1", only compile the module without creating
+            an executor. Returns None instead of an Executor. Useful for
+            offline compilation or verifying compilation without a GPU.
+        ARCH: Override the target GPU architecture. Supported values: "gfx942",
+            "gfx950". If not set, auto-detects from the current GPU.
     """
 
     # Accept `flir.lang.MlirModule` instances.
@@ -427,6 +483,7 @@ def compile(
     ctx = mlir_module.context
     ensure_flir_python_extensions(ctx)
 
+    compile_only = _env_truthy("COMPILE_ONLY", "0")
     dump_enabled = _env_truthy("FLIR_DUMP_IR", "0")
     dump_root_dir = Path(os.environ.get("FLIR_DUMP_DIR", "my_ir_dumps")).resolve()
     dump_prefix_base = (
@@ -459,7 +516,8 @@ def compile(
             except Exception:
                 module = mlir_module
 
-    chip = get_rocm_arch()
+    # Allow overriding target arch via env var (useful for cross-compilation or COMPILE_ONLY mode)
+    chip = os.environ.get("ARCH", "").strip() or get_rocm_arch()
 
     pipeline = _build_pipeline_str(
         chip=chip,
@@ -503,6 +561,10 @@ def compile(
                         cached_mod = ir.Module.parse(cached_asm, context=ctx)
                         if dump_enabled:
                             print(f"[flir.compile] cache hit key={cache_key}")
+                        if compile_only:
+                            if dump_enabled or print_final_module:
+                                print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+                            return None
                         from .executor import ExecutionEngineExecutor as Executor
                         if shared_libs is None:
                             shared_libs = default_shared_libs().as_list()
@@ -637,6 +699,12 @@ def compile(
                         print(f"[flir.compile] cache put key={cache_key}")
                 except Exception:
                     pass
+
+    # In compile-only mode, skip executor creation and return None
+    if compile_only:
+        if dump_enabled or print_final_module:
+            print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+        return None
 
     from .executor import ExecutionEngineExecutor as Executor
 

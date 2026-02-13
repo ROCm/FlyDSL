@@ -14,7 +14,12 @@ This script:
   - Relies on setup.py's built-in strip + auditwheel repair (manylinux tagging)
 
 Usage:
-  bash scripts/build_wheels.sh [--skip-build] [--install-deps]
+  bash scripts/build_wheels.sh [--skip-build] [--install-deps] [--pypi]
+
+Options:
+  --pypi          Build PyPI-compatible version (numeric dev suffix instead of +commit)
+  --skip-build    Skip the C++ build step
+  --install-deps  Attempt to install missing dependencies via apt
 
 Required env:
   MLIR_PATH=/path/to/llvm-project/build   (defaults to ./llvm-project/buildmlir if present)
@@ -28,12 +33,15 @@ EOF
 
 SKIP_BUILD=0
 INSTALL_DEPS=0
+PYPI_MODE=0
+INCLUDE_EXTRAS=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --install-deps) INSTALL_DEPS=1; shift ;;
+    --pypi) PYPI_MODE=1; shift ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -221,6 +229,8 @@ build_one() {
   MLIR_PATH="${MLIR_PATH}" \
   FLIR_BUILD_DIR="${build_dir_rel}" \
   FLIR_REBUILD="${FLIR_REBUILD}" \
+  FLYDSL_PYPI_VERSION="${PYPI_MODE}" \
+  FLYDSL_INCLUDE_EXTRAS="${INCLUDE_EXTRAS}" \
   "${venv}/bin/python" setup.py bdist_wheel
 
   # Validate artifact
@@ -238,6 +248,10 @@ main() {
   ensure_host_deps
   ensure_glibc
   ensure_python_bins
+
+  echo ""
+  echo "[config] PYPI_MODE=${PYPI_MODE} (--pypi: PyPI-compatible version)"
+  echo ""
 
   mkdir -p dist
 

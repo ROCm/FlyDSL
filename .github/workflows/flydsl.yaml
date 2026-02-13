@@ -23,7 +23,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runners: [ 'flydsl-mi325-1gpu', 'flydsl-mi355-1gpu' ]
+        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1' ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -64,6 +64,7 @@ jobs:
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_test bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl-test && cd /flydsl-test && git log"
     
       # Cache MLIR install tarball across workflow runs.
@@ -128,7 +129,7 @@ jobs:
         
       - name: Run tests
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_tests.sh"
+          docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
       - name: Show tests logs
         if: failure()

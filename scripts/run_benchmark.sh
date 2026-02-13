@@ -44,6 +44,11 @@ fp8,9728,8192,8320,64,256,128
 int8,9728,8192,8320,64,256,128
 '
 
+# FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
+GEMM_FP4_SHAPES='
+8192,8192,8192,64,128,256
+'
+
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
 MOE_SHAPES='
 32768,8192,8192,16,4,64,128,128,256,128
@@ -364,6 +369,44 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+  
+  # FP4 GEMM (gfx950 only)
+  for shape in $GEMM_FP4_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    dtype="fp4"
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --wfp4 \
+      --in_dtype fp4 \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" >"${log}" 2>&1; then
+      # Check if test was skipped due to architecture
+      if grep -q "Skipping FP4 GEMM test" "${log}"; then
+        _emit_row "gemm" "${M}x${N}x${K}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+        set -- $row
+        _emit_row "$1" "$2" "$3" "$4" "$5"
+      fi
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "gemm fp4 failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "gemm_fp4"
+    fi
   done
 fi
 

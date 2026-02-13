@@ -327,29 +327,45 @@ def buffer_copy_gmem16_dwordx4(
     atom_g2r16,
     rsrc,
     vec_elems: int = 16,
+    elem_bytes: int = 1,
 ):
-    """Copy 16 bytes from global memory into regs via buffer-load dwordx4 lowering.
+    """Load 16 bytes from global memory via RawPtrBufferLoadOp (dwordx4).
 
-    `idx_i32` is a dword element offset (not bytes), so `src_buffer_offset_in_bytes=False`.
+    Always uses buffer instruction for all element types, ensuring hardware OOB
+    protection via the buffer resource's `num_records`.
+
+    Args:
+        idx_i32: Element offset (in units of `elem_type`).
+                 For 1B types this equals the dword offset (layout_*_div4).
+                 For 2B types the caller multiplies the dword offset by 2.
+        elem_bytes: Size of one element in bytes (1 or 2).
+        vec_elems: Number of elements in the returned vector (16 for 1B, 8 for 2B).
     """
+    from flydsl.dialects.ext import buffer_ops as _bops
+    from flydsl.dialects.ext import arith as _arith
+    from _mlir.dialects import vector as _vec
+
     if int(vec_elems) <= 0:
         raise ValueError(f"vec_elems must be > 0, got {vec_elems!r}")
-    view = flir.TensorView(
-        arg,
-        (int(vec_elems),),
-        strides=(1,),
-        base_indices=(idx_i32,),
-        element_type=elem_type,
-    )
-    return flir.copy(
-        atom_g2r16,
-        view,
-        None,
-        alignment=16,
-        return_vector=True,
-        src_buffer_resource=rsrc,
-        src_buffer_offset_in_bytes=False,
-    )
+
+    i32_ty = ir.IntegerType.get_signless(32)
+
+    # Convert element offset → dword offset for the i32×4 buffer load.
+    if int(elem_bytes) == 1:
+        dword_offset = idx_i32  # 1B element: offset IS the dword offset (layout_*_div4)
+    elif int(elem_bytes) == 2:
+        # 2B element: idx = dword_offset * 2 → divide back.
+        dword_offset = idx_i32 / _arith.constant(2, index=True)
+    else:
+        raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes}")
+
+    # Load 16 bytes as 4×i32 via buffer instruction (always respects num_records OOB).
+    result_i32x4 = _bops.buffer_load(rsrc, dword_offset, vec_width=4, dtype=i32_ty)
+
+    # Bitcast to the caller's expected vector type (e.g., fp8×16 or bf16×8).
+    target_vec_ty = ir.VectorType.get([int(vec_elems)], elem_type)
+    raw = _arith.unwrap(result_i32x4)
+    return _vec.bitcast(target_vec_ty, raw)
 
 
 def lds_store_16b_xor16(
