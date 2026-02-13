@@ -106,6 +106,27 @@ def compile_mxfp4_preshuffle_gemm(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
 
+    # MXFP4 packing constraints:
+    # - k_unroll_packed = (tile_k_bytes // 128) // pack_K must be >= 1 => tile_k >= 256
+    # - num_acc_n_packed = (tile_n // 4 // 16) // pack_N must be >= 1 => tile_n >= 128
+    num_waves = 4
+    k_unroll_check = tile_k_bytes // 128
+    k_unroll_packed_check = k_unroll_check // pack_K
+    n_per_wave_check = int(tile_n) // num_waves
+    num_acc_n_check = n_per_wave_check // 16
+    num_acc_n_packed_check = num_acc_n_check // pack_N
+    if k_unroll_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_k >= {128 * pack_K} (pack_K={pack_K}), got tile_k={tile_k} "
+            f"(k_unroll={k_unroll_check}, k_unroll_packed={k_unroll_packed_check})"
+        )
+    if num_acc_n_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_n >= {num_waves * 16 * pack_N} (pack_N={pack_N}, num_waves={num_waves}), "
+            f"got tile_n={tile_n} (n_per_wave={n_per_wave_check}, num_acc_n={num_acc_n_check}, "
+            f"num_acc_n_packed={num_acc_n_packed_check})"
+        )
+
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
@@ -612,7 +633,12 @@ def compile_mxfp4_preshuffle_gemm(
                                         b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                                         acc_idx = mi_idx * num_acc_n + ni_idx
-                                        rocdl.sched_barrier(0)
+                                        # For small tiles (no scheduler), keep per-MFMA fence
+                                        # to prevent excessive register pressure from reordering.
+                                        # For large tiles (scheduler enabled), let the scheduler
+                                        # control interleaving instead.
+                                        if not _use_scheduler:
+                                            rocdl.sched_barrier(0)
                                         current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                             mfma_res_ty,
                                             [
@@ -729,6 +755,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                             lds_idx = row_base_lds + col_even
                             v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
+                            vector.store_op(v2, lds_out, [lds_idx])
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
@@ -816,49 +843,52 @@ def compile_mxfp4_preshuffle_gemm(
             # similarly to CK's tuned pipelines.
             rocdl.sched_barrier(0)
 
-            # def hot_loop_scheduler():
-            #     # - MFMA group size per "slot": num_acc_n
-            #     # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
-            #     # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
-            #     mfma_group = num_acc_n
-            #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-            #     mfma_per_iter = 2 * mfma_group
-            #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-            #
-            #     # DS-read preload (CK default is 2).
-            #     rocdl.sched_dsrd(2)
-            #     rocdl.sched_mfma(1)
-            #     if tile_m == 16:
-            #         rocdl.sched_vmem(1)
-            #     rocdl.sched_mfma(1)
-            #     if tile_m == 16:
-            #         rocdl.sched_vmem(1)
-            #     if num_acc_n < 4:
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(1)
-            #         if tile_m == 16:
-            #             rocdl.sched_vmem(1)
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(1)
-            #         if tile_m == 16:
-            #             rocdl.sched_vmem(1)
-            #         rocdl.sched_mfma(1)
-            #
-            #     # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-            #     dswr_tail = num_a_loads
-            #     if dswr_tail > sche_iters:
-            #         dswr_tail = sche_iters
-            #     dswr_start = sche_iters - dswr_tail
-            #
-            #     for sche_i in range_constexpr(sche_iters):
-            #         rocdl.sched_vmem(1)
-            #         rocdl.sched_mfma(mfma_group)
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(mfma_group)
-            #         if sche_i >= dswr_start - 1:
-            #             rocdl.sched_dswr(1)
-            #
-            #     rocdl.sched_barrier(0)
+            # Scheduling is beneficial for compute-bound shapes (larger tiles with many MFMAs).
+            # For small tile_m (bandwidth-bound), the compiler's default scheduling is near-optimal.
+            _use_scheduler = (tile_m >= 64)
+
+            def hot_loop_scheduler():
+                """CK-style intrawave scheduler adapted from preshuffle_gemm.py.
+
+                Pattern: preload DS reads, then interleave VMEM/MFMA/DSRD/DSWR groups
+                so the MFMA pipeline stays fed while memory operations complete.
+
+                For MXFP4 with mfma_scale_f32_16x16x128_f8f6f4:
+                  - Each DS_read feeds pack_N=2 MFMAs (same A, different B/inxdl)
+                  - mfma_group = pack_N = 2
+                  - mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed
+                                 * pack_K * pack_M * pack_N
+                """
+                if not _use_scheduler:
+                    return
+
+                # MFMA grouping: pack_N MFMAs share one A DS_read
+                mfma_group = pack_N
+                mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed * pack_K * pack_M * pack_N
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+
+                # DS-read preload (CK default is 2 ds_read_b128).
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(1)
+
+                # DS-write tail: spread num_a_loads DS writes across the last iterations.
+                dswr_tail = num_a_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+
+                # Main interleave loop: VMEM + MFMA_group + DSRD + MFMA_group [+ DSWR]
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
+
+                rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
@@ -913,7 +943,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_pong = None
                 
                         store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         # Cross-tile prefetch for the ping tile we are about to compute.
@@ -934,7 +964,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_ping = None
                 
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         # Cross-tile prefetch for the next pong tile.
@@ -966,7 +996,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_pong = None
                 
                         store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
@@ -986,7 +1016,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_ping = None
                 
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
@@ -1007,7 +1037,7 @@ def compile_mxfp4_preshuffle_gemm(
                     a0_prefetch_pong = None
                 
                     store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                    # hot_loop_scheduler()
+                    hot_loop_scheduler()
                     gpu.barrier()
                 
                     a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
