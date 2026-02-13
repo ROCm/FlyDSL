@@ -39,10 +39,11 @@ function run_flydsl_op {
 
     # python tests/kernels/test_flash_attention_v4_2.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_attention_v4_3.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v42
-    python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
+    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
+    python tests/kernels/test_flash_attn_func.py --iters 100 --compare-v43
 
-    # rocprof -i perf_counters1.txt -o prof_v44_p1.csv python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
-    # rocprof -i perf_counters2.txt -o prof_v44_p2.csv python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
+    # rocprof -i perf_counters1.txt -o prof_v44_p1.csv python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
+    # rocprof -i perf_counters2.txt -o prof_v44_p2.csv python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
 
 }
 

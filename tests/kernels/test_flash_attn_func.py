@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Flash Attention V4.4 kernel test and benchmark for FlyDSL.
+"""flash_attn_func kernel test and benchmark for FlyDSL.
 
-Tests V4.4 against PyTorch SDPA.
+Tests flash_attn_func against PyTorch SDPA.
 Optionally compares with V4.3.
 """
 
@@ -31,17 +31,17 @@ if not torch.cuda.is_available():
     sys.exit(1)
 
 import flydsl
-from kernels.flash_attention_v4_4 import (
+from kernels.flash_attn_func import (
     KERNEL_NAME,
-    build_flash_attention_v4_4_module,
-    select_v4_4_path,
+    build_flash_attn_func_module,
+    select_flash_attn_func_path,
 )
 from tests.test_common import run_perftest
 
 # Tensor initialization range (uniform distribution)
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
-V4_4_COMPILE_KWARGS = {
+FLASH_ATTN_FUNC_COMPILE_KWARGS = {
     "unsafe_fp_math": True,
     "fast_fp_math": True,
     "waves_per_eu": 3,
@@ -165,23 +165,23 @@ def compare_arrays(
 def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters, prev_exe=None, seed=DEFAULT_SEED):
     device = "cuda"
     results = {}
-    active_path = select_v4_4_path(
+    active_path = select_flash_attn_func_path(
         num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str="f16"
     )
     results["active_path"] = active_path
 
     if seq_len % 128 != 0:
-        results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for V4.4"
+        results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for flash_attn_func"
         return results
     if head_dim % 32 != 0 or head_dim < 64:
         results["err"] = f"head_dim ({head_dim}) must be >= 64 and divisible by 32"
         return results
 
     try:
-        m = build_flash_attention_v4_4_module(
+        m = build_flash_attn_func_module(
             num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str="f16"
         )
-        exe = flydsl.compile(m, **V4_4_COMPILE_KWARGS)
+        exe = flydsl.compile(m, **FLASH_ATTN_FUNC_COMPILE_KWARGS)
     except Exception as e:
         results["err"] = f"compile: {e}"
         import traceback
@@ -273,7 +273,7 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Flash Attention V4.4 FlyDSL Test/Benchmark")
+    parser = argparse.ArgumentParser(description="flash_attn_func FlyDSL Test/Benchmark")
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq_len", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
@@ -291,11 +291,11 @@ def main():
     dtype = torch.float16
 
     print("=" * 130)
-    print(f"FlyDSL Flash Attention V4.4 ({'causal' if causal else 'non-causal'}, fp16)")
+    print(f"FlyDSL flash_attn_func ({'causal' if causal else 'non-causal'}, fp16)")
     print("  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)")
     print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"  Compile opts: {V4_4_COMPILE_KWARGS}")
+    print(f"  Compile opts: {FLASH_ATTN_FUNC_COMPILE_KWARGS}")
     print("=" * 130)
 
     if args.seq_len or args.head_dim or args.batch:
@@ -306,6 +306,7 @@ def main():
             (1, 256, 32, 128),
             (1, 512, 32, 128),
             (2, 128, 8, 128),
+            (1, 8192, 64, 128),
         ]
 
     prev_exes = {}
@@ -326,7 +327,7 @@ def main():
     if args.compare_v43:
         hdr = (
             f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
-            f"{'MinCos':>8s} | {'V4.4(us)':>10s} {'V4.4 TF':>9s} | "
+            f"{'MinCos':>8s} | {'Func(us)':>10s} {'Func TF':>9s} | "
             f"{'V4.3(us)':>10s} {'V4.3 TF':>9s} | {'Speedup':>7s}"
         )
     else:

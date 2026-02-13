@@ -1,6 +1,6 @@
-"""Flash Attention V4.4 kernel builder for FlyDSL.
+"""flash_attn_func kernel builder for FlyDSL.
 
-Aggressive V4.4 path:
+Aggressive flash_attn_func path:
 - True MFMA32 remap: `mfma_f32_32x32x8f16` for both GEMM stages.
 - Tile shape: BLOCK_M=128, BLOCK_N=32, 4 waves (256 threads).
 - Per-wave Q rows: 32.
@@ -30,18 +30,18 @@ from _mlir import ir
 import _mlir.extras.types as T
 
 
-KERNEL_NAME = "flash_attention_v4_4_kernel"
+KERNEL_NAME = "flash_attn_func_kernel"
 
 
-def select_v4_4_path(num_heads, head_dim, causal=True, dtype_str="f16"):
-    """Select active V4.4 path tag for build-time specialization."""
-    override = os.getenv("FLYDSL_FA_V44_PATH", "auto").strip().lower()
+def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16"):
+    """Select active flash_attn_func path tag for build-time specialization."""
+    override = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PATH", "auto").strip().lower()
     if override in ("fallback", "fallback_n32", "n32"):
         return "fallback_n32"
     if override in ("fastpath", "ck_n128_fastpath", "n128"):
         return "ck_n128_fastpath"
     # Keep N128 path feature-gated by default due current occupancy/perf risk.
-    enable_n128 = os.getenv("FLYDSL_FA_V44_ENABLE_N128", "0") == "1"
+    enable_n128 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_N128", "0") == "1"
     if (
         enable_n128
         and dtype_str == "f16"
@@ -53,14 +53,14 @@ def select_v4_4_path(num_heads, head_dim, causal=True, dtype_str="f16"):
     return "fallback_n32"
 
 
-def build_flash_attention_v4_4_module_primary(
+def build_flash_attn_func_module_primary(
     num_heads,
     head_dim,
     causal=True,
     dtype_str="f16",
     sm_scale=None,
 ):
-    """Build a FlyDSL Flash Attention V4.4 module."""
+    """Build a FlyDSL flash_attn_func module."""
     gpu_arch = get_hip_arch()
     DYN = ir.ShapedType.get_dynamic_size()
 
@@ -71,12 +71,16 @@ def build_flash_attention_v4_4_module_primary(
     WARP_SIZE = 64
     BLOCK_SIZE = NUM_WAVES * WARP_SIZE  # 256
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES  # 32
-    PATH_TAG = select_v4_4_path(num_heads, head_dim, causal=causal, dtype_str=dtype_str)
+    PATH_TAG = select_flash_attn_func_path(
+        num_heads, head_dim, causal=causal, dtype_str=dtype_str
+    )
     BLOCK_N_OUT = 128 if PATH_TAG == "ck_n128_fastpath" else BLOCK_N
     N_SUBTILES = BLOCK_N_OUT // BLOCK_N
-    ENABLE_PREFETCH_3BUF = os.getenv("FLYDSL_FA_V44_ENABLE_PREFETCH3", "0") == "1"
-    ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FA_V44_ENABLE_LDS_VEC16", "1") == "1"
-    REDUCE_MODE = os.getenv("FLYDSL_FA_V44_REDUCE_MODE", "xor").strip().lower()
+    ENABLE_PREFETCH_3BUF = (
+        os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_PREFETCH3", "0") == "1"
+    )
+    ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
+    REDUCE_MODE = os.getenv("FLYDSL_FLASH_ATTN_FUNC_REDUCE_MODE", "xor").strip().lower()
     if REDUCE_MODE not in ("xor", "ds_bpermute"):
         REDUCE_MODE = "xor"
     NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else 1
@@ -95,7 +99,7 @@ def build_flash_attention_v4_4_module_primary(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert dtype_str == "f16", "V4.4 currently only supports f16"
+    assert dtype_str == "f16", "flash_attn_func currently only supports f16"
     assert BLOCK_N % 32 == 0
     assert BLOCK_N_OUT % BLOCK_N == 0
 
@@ -137,8 +141,8 @@ def build_flash_attention_v4_4_module_primary(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    class _FlashAttentionV4_4(flir.MlirModule):
-        GPU_MODULE_NAME = f"flash_attn_v4_4_{dtype_str}_{PATH_TAG}"
+    class _FlashAttnFunc(flir.MlirModule):
+        GPU_MODULE_NAME = f"flash_attn_func_{dtype_str}_{PATH_TAG}"
         KERNEL_VARIANT = PATH_TAG
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
@@ -149,7 +153,7 @@ def build_flash_attention_v4_4_module_primary(
             allocator.finalize()
 
         @flir.kernel
-        def flash_attention_v4_4_kernel(
+        def flash_attn_func_kernel(
             self: flir.T.i64,
             Q: lambda: T.memref(DYN, _state["elem_type"]),
             K: lambda: T.memref(DYN, _state["elem_type"]),
@@ -628,13 +632,13 @@ def build_flash_attention_v4_4_module_primary(
                 kernel_operands=[Q, K, V, O, seq_len],
             )
 
-    return _FlashAttentionV4_4()
+    return _FlashAttnFunc()
 
 
-build_flash_attention_v4_4_module = build_flash_attention_v4_4_module_primary
-"""Flash Attention V4.4 kernel builder for FlyDSL.
+build_flash_attn_func_module = build_flash_attn_func_module_primary
+"""flash_attn_func kernel builder for FlyDSL.
 
-Aggressive V4.4 path:
+Aggressive flash_attn_func path:
 - True MFMA32 remap: `mfma_f32_32x32x8f16` for both GEMM stages.
 - Tile shape: BLOCK_M=128, BLOCK_N=32, 4 waves (256 threads).
 - Per-wave Q rows: 32.
@@ -663,17 +667,17 @@ from _mlir import ir
 import _mlir.extras.types as T
 
 
-KERNEL_NAME = "flash_attention_v4_4_kernel"
+KERNEL_NAME = "flash_attn_func_kernel"
 
 
-def _legacy_copy_build_flash_attention_v4_4_module_2(
+def _legacy_copy_build_flash_attn_func_module_2(
     num_heads,
     head_dim,
     causal=True,
     dtype_str="f16",
     sm_scale=None,
 ):
-    """Build a FlyDSL Flash Attention V4.4 module."""
+    """Build a FlyDSL flash_attn_func module."""
     gpu_arch = get_hip_arch()
     DYN = ir.ShapedType.get_dynamic_size()
 
@@ -697,7 +701,7 @@ def _legacy_copy_build_flash_attention_v4_4_module_2(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert dtype_str == "f16", "V4.4 currently only supports f16"
+    assert dtype_str == "f16", "flash_attn_func currently only supports f16"
     assert BLOCK_N % 32 == 0
 
     if sm_scale is None:
@@ -733,8 +737,8 @@ def _legacy_copy_build_flash_attention_v4_4_module_2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    class _FlashAttentionV4_4(flir.MlirModule):
-        GPU_MODULE_NAME = f"flash_attn_v4_4_{dtype_str}"
+    class _FlashAttnFunc(flir.MlirModule):
+        GPU_MODULE_NAME = f"flash_attn_func_{dtype_str}"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
         def init_gpu_module(self):
@@ -744,7 +748,7 @@ def _legacy_copy_build_flash_attention_v4_4_module_2(
             allocator.finalize()
 
         @flir.kernel
-        def flash_attention_v4_4_kernel(
+        def flash_attn_func_kernel(
             self: flir.T.i64,
             Q: lambda: T.memref(DYN, _state["elem_type"]),
             K: lambda: T.memref(DYN, _state["elem_type"]),
@@ -1193,10 +1197,10 @@ def _legacy_copy_build_flash_attention_v4_4_module_2(
                 kernel_operands=[Q, K, V, O, seq_len],
             )
 
-    return _FlashAttentionV4_4()
-"""Flash Attention V4.4 kernel builder for FlyDSL.
+    return _FlashAttnFunc()
+"""flash_attn_func kernel builder for FlyDSL.
 
-V4.4 design (CK-aligned direction, rewritten from V4.3):
+flash_attn_func design (CK-aligned direction, rewritten from V4.3):
 - CK-aligned baseline tile family: BLOCK_M=64, BLOCK_N=32.
 - Q loaded once from global memory into MFMA A-operand packs (register-resident).
 - K/V streamed tile-by-tile through LDS.
@@ -1223,17 +1227,17 @@ from _mlir import ir
 import _mlir.extras.types as T
 
 
-KERNEL_NAME = "flash_attention_v4_4_kernel"
+KERNEL_NAME = "flash_attn_func_kernel"
 
 
-def _legacy_copy_build_flash_attention_v4_4_module_3(
+def _legacy_copy_build_flash_attn_func_module_3(
     num_heads,
     head_dim,
     causal=True,
     dtype_str="f16",
     sm_scale=None,
 ):
-    """Build a FlyDSL Flash Attention V4.4 module.
+    """Build a FlyDSL flash_attn_func module.
 
     Args:
         num_heads: Number of attention heads.
@@ -1261,7 +1265,7 @@ def _legacy_copy_build_flash_attention_v4_4_module_3(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 16 == 0, f"head_dim ({head_dim}) must be divisible by 16"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert dtype_str == "f16", "V4.4 currently only supports f16"
+    assert dtype_str == "f16", "flash_attn_func currently only supports f16"
     assert BLOCK_N % 16 == 0, f"BLOCK_N ({BLOCK_N}) must be divisible by 16"
 
     if sm_scale is None:
@@ -1301,8 +1305,8 @@ def _legacy_copy_build_flash_attention_v4_4_module_3(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    class _FlashAttentionV4_4(flir.MlirModule):
-        GPU_MODULE_NAME = f"flash_attn_v4_4_{dtype_str}"
+    class _FlashAttnFunc(flir.MlirModule):
+        GPU_MODULE_NAME = f"flash_attn_func_{dtype_str}"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
         def init_gpu_module(self):
@@ -1313,7 +1317,7 @@ def _legacy_copy_build_flash_attention_v4_4_module_3(
             allocator.finalize()
 
         @flir.kernel
-        def flash_attention_v4_4_kernel(
+        def flash_attn_func_kernel(
             self: flir.T.i64,
             Q: lambda: T.memref(DYN, _state["elem_type"]),
             K: lambda: T.memref(DYN, _state["elem_type"]),
@@ -1776,4 +1780,4 @@ def _legacy_copy_build_flash_attention_v4_4_module_3(
                 kernel_operands=[Q, K, V, O, seq_len],
             )
 
-    return _FlashAttentionV4_4()
+    return _FlashAttnFunc()
