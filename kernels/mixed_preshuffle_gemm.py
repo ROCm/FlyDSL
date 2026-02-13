@@ -106,6 +106,27 @@ def compile_mxfp4_preshuffle_gemm(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
 
+    # MXFP4 packing constraints:
+    # - k_unroll_packed = (tile_k_bytes // 128) // pack_K must be >= 1 => tile_k >= 256
+    # - num_acc_n_packed = (tile_n // 4 // 16) // pack_N must be >= 1 => tile_n >= 128
+    num_waves = 4
+    k_unroll_check = tile_k_bytes // 128
+    k_unroll_packed_check = k_unroll_check // pack_K
+    n_per_wave_check = int(tile_n) // num_waves
+    num_acc_n_check = n_per_wave_check // 16
+    num_acc_n_packed_check = num_acc_n_check // pack_N
+    if k_unroll_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_k >= {128 * pack_K} (pack_K={pack_K}), got tile_k={tile_k} "
+            f"(k_unroll={k_unroll_check}, k_unroll_packed={k_unroll_packed_check})"
+        )
+    if num_acc_n_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_n >= {num_waves * 16 * pack_N} (pack_N={pack_N}, num_waves={num_waves}), "
+            f"got tile_n={tile_n} (n_per_wave={n_per_wave_check}, num_acc_n={num_acc_n_check}, "
+            f"num_acc_n_packed={num_acc_n_packed_check})"
+        )
+
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
@@ -729,6 +750,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                             lds_idx = row_base_lds + col_even
                             v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
+                            vector.store_op(v2, lds_out, [lds_idx])
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
