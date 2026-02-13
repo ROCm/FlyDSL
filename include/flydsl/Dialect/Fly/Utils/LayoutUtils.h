@@ -650,6 +650,8 @@ layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>:
 
     int32_t staticStride = builder.getStaticValue(strideVal);
     int32_t absStride = std::abs(staticStride);
+    assert((absStride % factor == 0 || factor % absStride == 0) &&
+           "layoutUpcast: divisibility condition failed between factor and stride");
     int32_t sign = staticStride < 0 ? -1 : 1;
 
     ArithValue absStrideVal = builder.materializeConstantArith(absStride);
