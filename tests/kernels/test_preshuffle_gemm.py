@@ -255,8 +255,12 @@ def test_mfma_a8_flir_preshuffle(
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-
-
+    
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
@@ -264,7 +268,7 @@ def test_mfma_a8_flir_preshuffle(
             def launch_aiter(a, b, sa, sb):
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, num_iters= bench_iters, testGraph=test_graph)
             c_aiter_f32 = c_aiter.to(torch.float32)
             verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
 
@@ -286,13 +290,6 @@ def test_mfma_a8_flir_preshuffle(
         print("-" * 40)
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
-
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
-
 
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
