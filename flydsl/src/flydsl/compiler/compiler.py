@@ -349,6 +349,53 @@ def _apply_waves_per_eu_on_llvm_funcs(module: ir.Module, waves_per_eu: int) -> N
         pass
 
 
+def _apply_flat_work_group_size_on_llvm_funcs(module: ir.Module, max_workgroup_size: int) -> None:
+    """Apply AMDGPU flat-work-group-size hint to GPU kernel llvm.func ops.
+
+    LLVM expects a string value in the form "min,max". We set min=1 and max to
+    the requested workgroup size.
+    """
+    attr_key = ir.StringAttr.get("amdgpu-flat-work-group-size")
+    attr_value = ir.StringAttr.get(f"1,{max_workgroup_size}")
+    new_entry = ir.ArrayAttr.get([attr_key, attr_value])
+    new_entry_str = f"amdgpu-flat-work-group-size=1,{max_workgroup_size}"
+
+    def _append_passthrough(func_op):
+        try:
+            existing = func_op.attributes["passthrough"]
+        except KeyError:
+            existing = None
+
+        if existing is None:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        try:
+            existing_entries = list(existing)
+        except TypeError:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        if any(str(a).strip('"') == new_entry_str for a in existing_entries):
+            return
+        func_op.attributes["passthrough"] = ir.ArrayAttr.get(existing_entries + [new_entry])
+
+    try:
+        for op in module.body.operations:
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            gpu_module_body = op.regions[0].blocks[0] if hasattr(op, 'regions') else op.body
+            for inner_op in gpu_module_body.operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                    continue
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                _append_passthrough(inner_op)
+    except Exception:
+        # Best-effort only.
+        pass
+
+
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
     *,
@@ -361,6 +408,7 @@ def compile(
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
     waves_per_eu: Optional[int] = None,
+    flat_work_group_size: Optional[int] = None,
     unsafe_fp_math: bool = False,
     fast_fp_math: bool = False,
 ) -> Executor:
@@ -500,6 +548,9 @@ def compile(
                         # Apply waves_per_eu if specified (BEFORE saving asm_for_isa)
                         if waves_per_eu is not None:
                             _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                        # Apply flat work-group-size hint if specified.
+                        if flat_work_group_size is not None:
+                            _apply_flat_work_group_size_on_llvm_funcs(module, flat_work_group_size)
                         # Apply unsafe-fp-math function attributes for fast exp2/math
                         if unsafe_fp_math:
                             _apply_unsafe_fp_math_on_llvm_funcs(module)
@@ -521,7 +572,11 @@ def compile(
                         isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
                         print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
             else:
-                need_split = (waves_per_eu is not None) or unsafe_fp_math
+                need_split = (
+                    (waves_per_eu is not None)
+                    or (flat_work_group_size is not None)
+                    or unsafe_fp_math
+                )
                 if need_split:
                     # Need to split the pipeline to apply function attributes
                     # after LLVM lowering but before binary generation.
@@ -545,6 +600,9 @@ def compile(
                     # Apply waves_per_eu
                     if waves_per_eu is not None:
                         _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                    # Apply flat work-group-size hint
+                    if flat_work_group_size is not None:
+                        _apply_flat_work_group_size_on_llvm_funcs(module, flat_work_group_size)
                     # Apply unsafe-fp-math function attributes for fast exp2/math
                     if unsafe_fp_math:
                         _apply_unsafe_fp_math_on_llvm_funcs(module)
