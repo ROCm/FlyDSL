@@ -188,6 +188,12 @@ def compile_preshuffle_gemm_a8(
             return T.i16x4
         return T.i64
 
+    def _is_gfx950():
+        return str(gpu_arch).startswith("gfx950")
+
+    def _is_gfx942():
+        return str(gpu_arch).startswith("gfx942")
+
     # GEMM epilogue toggle: optional LDS CShuffle + vectorized stores.
     # Default: off (current measured cases show no benefit).
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
@@ -943,9 +949,9 @@ def compile_preshuffle_gemm_a8(
                 # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
                 # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
                 mfma_group = num_acc_n
-                mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-                mfma_per_iter = 2 * mfma_group
-                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                bytes_k_per_mfma = 128 if _is_gfx950() else 32
+                num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
+                mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
 
                 # # DS-read preload (CK default is 2).
                 # rocdl.sched_dsrd(2)
@@ -973,8 +979,8 @@ def compile_preshuffle_gemm_a8(
                 # dswr_start = sche_iters - dswr_tail
                 # print(sche_iters, num_b_loads, num_a_async_loads)
                 num_gmem_loads = num_b_loads + (num_a_async_loads if use_async_copy else num_a_loads)
-                for sche_i in range_constexpr(sche_iters):
-                    if (sche_iters < num_gmem_loads):
+                for mfma_idx in range_constexpr(mfma_total):
+                    if (mfma_idx < num_gmem_loads):
                         rocdl.sched_vmem(1)
                     rocdl.sched_mfma(mfma_group)
                 rocdl.sched_barrier(0)
