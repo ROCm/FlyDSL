@@ -31,7 +31,11 @@ if not torch.cuda.is_available():
     sys.exit(1)
 
 import flydsl
-from kernels.flash_attention_v4_4 import build_flash_attention_v4_4_module, KERNEL_NAME
+from kernels.flash_attention_v4_4 import (
+    KERNEL_NAME,
+    build_flash_attention_v4_4_module,
+    select_v4_4_path,
+)
 from tests.test_common import run_perftest
 
 # Tensor initialization range (uniform distribution)
@@ -161,6 +165,10 @@ def compare_arrays(
 def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters, prev_exe=None, seed=DEFAULT_SEED):
     device = "cuda"
     results = {}
+    active_path = select_v4_4_path(
+        num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str="f16"
+    )
+    results["active_path"] = active_path
 
     if seq_len % 128 != 0:
         results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for V4.4"
@@ -218,6 +226,7 @@ def run_config(batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters
 
     # Compute and print MD5 hashes
     tag = f"B={B} S={S} H={H} D={D}"
+    print(f"  [{tag}] active_path = {active_path}")
     result_md5 = compute_md5(o_flat)
     ref_md5 = compute_md5(ref_flat)
     print(f"  [{tag}] result_md5 = {result_md5}")
@@ -283,7 +292,7 @@ def main():
 
     print("=" * 130)
     print(f"FlyDSL Flash Attention V4.4 ({'causal' if causal else 'non-causal'}, fp16)")
-    print("  Tile: BLOCK_M=128, BLOCK_N=32, 4 waves (256 threads), mfma_f32_32x32x8f16")
+    print("  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)")
     print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"  Compile opts: {V4_4_COMPILE_KWARGS}")
@@ -316,13 +325,13 @@ def main():
 
     if args.compare_v43:
         hdr = (
-            f"{'Config':>38s} | {'Status':>6s} | {'MaxErr':>8s} "
+            f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
             f"{'MinCos':>8s} | {'V4.4(us)':>10s} {'V4.4 TF':>9s} | "
             f"{'V4.3(us)':>10s} {'V4.3 TF':>9s} | {'Speedup':>7s}"
         )
     else:
         hdr = (
-            f"{'Config':>38s} | {'Status':>6s} | {'MaxErr':>8s} "
+            f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
             f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
         )
     print(f"\n{hdr}")
@@ -346,13 +355,15 @@ def main():
                 seed=args.seed,
             )
             if "err" in r:
-                print(f"{tag:>38s} | {'ERROR':>6s} | {r['err'][:60]}")
+                cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
+                print(f"{cfg_path:>56s} | {'ERROR':>6s} | {r['err'][:60]}")
                 all_passed = False
                 continue
 
             status = "PASS" if r["passed"] else "FAIL"
             if not r["passed"]:
                 all_passed = False
+            cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
 
             us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
             tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
@@ -362,18 +373,18 @@ def main():
                 p_tf = f"{r['prev_tflops']:>9.3f}"
                 speedup = r["prev_us"] / r["us"] if r.get("us") else 0
                 print(
-                    f"{tag:>38s} | {status:>6s} | "
+                    f"{cfg_path:>56s} | {status:>6s} | "
                     f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
                     f"{us_s} {tf_s} | {p_us} {p_tf} | {speedup:>6.2f}x"
                 )
             else:
                 print(
-                    f"{tag:>38s} | {status:>6s} | "
+                    f"{cfg_path:>56s} | {status:>6s} | "
                     f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
                     f"{us_s} {tf_s}"
                 )
         except Exception as e:
-            print(f"{tag:>38s} | {'ERROR':>6s} | {str(e)[:60]}")
+            print(f"{tag:>56s} | {'ERROR':>6s} | {str(e)[:60]}")
             all_passed = False
 
     print("=" * 130)
