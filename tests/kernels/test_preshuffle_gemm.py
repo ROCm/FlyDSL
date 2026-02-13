@@ -128,7 +128,6 @@ def test_mfma_a8_flir_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = 0,
-    test_graph: bool = False,
 ):
     print("=" * 80)
     print(
