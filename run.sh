@@ -38,8 +38,8 @@ function run_flydsl_op {
     # python tests/kernels/test_simple_gemm.py --size all --dtype all
 
     # python tests/kernels/test_flash_attention_v4_2.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_attention_v4_3.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v42
-    python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
+    python tests/kernels/test_flash_attention_v4_3.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v42
+    # python tests/kernels/test_flash_attention_v4_4.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
 
 }
 
