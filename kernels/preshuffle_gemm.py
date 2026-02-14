@@ -993,7 +993,7 @@ def compile_preshuffle_gemm_a8(
                 for mfma_idx in range_constexpr(mfma_total):
                     if (mfma_idx < num_gmem_loads):
                         rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_mfma(1)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
