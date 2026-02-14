@@ -453,19 +453,23 @@ def test_mfma_w4_flir_preshuffle(
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
-    # Aiter A4W4 benchmark - uses same b_shuffled as kernel
+    # Aiter A4W4 benchmark - use aiter's own quantization for fair comparison
     if HAS_AITER and bool(run_aiter_bench):
         print("-" * 40)
         print("Running Aiter A4W4 Benchmark...")
         try:
             if hasattr(aiter, 'gemm_a4w4'):
-                # Use same b_shuffled as kernel (already shuffled with aiter's shuffle_weight above)
-                # bpreshuffle=True means B is already preshuffled
+                # Use aiter's quantization so scales are in the correct shuffled format
+                from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
+                aiter_quant = aiter.get_triton_quant(aiter.QuantType.per_1x32)
+                a_q_aiter, sa_aiter = aiter_quant(a_fp32.to(torch.bfloat16), shuffle=True)
+                w_q_aiter, sw_aiter = aiter_quant(b_fp32.to(torch.bfloat16), shuffle=True)
+                w_shuf_aiter = aiter_shuffle_weight(w_q_aiter, layout=(16, 16))
+
                 def launch_aiter(a, b, sa, sb):
                     return aiter.gemm_a4w4(a, b, sa, sb, None, torch.bfloat16, bpreshuffle=True)
                 
-                # Use same inputs as kernel: a_q, b_shuffled, scale_a_orig, scale_b
-                c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a_orig, scale_b, testGraph=test_graph)
+                c_aiter, us1 = run_perftest(launch_aiter, a_q_aiter, w_shuf_aiter, sa_aiter, sw_aiter, testGraph=test_graph)
                 verify_output(c_aiter.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
                 tflops_aiter = flops / (us1 / 1e6) / 1e12

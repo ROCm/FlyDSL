@@ -63,13 +63,20 @@ def _pipeline_fragments(
         "gpu.module(reconcile-unrealized-casts)",
         # Keep this as a formatted string so the chip is visible in dumps and matches
         # the non-dump compilation pipeline.
-        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+        f"rocdl-attach-target{{O=3 abi=600 chip={chip} correct-sqrt=true daz=true fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
         "gpu-to-llvm{intersperse-sizes-for-kernels=false "
         + f"use-bare-pointers-for-host={llvm_bare_host_opt} "
         + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
         + "}",
         "reconcile-unrealized-casts",
-        "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
+        # LLVM backend opts matching CK/aiter's hipcc flags for optimal MFMA scheduling:
+        # --amdgpu-enable-max-ilp-scheduling-strategy=1 : max ILP scheduling (reduces waitcnts)
+        # -enable-post-misched=0 : disable post-RA scheduling (reduces accvgpr shuffling)
+        # --lsr-drop-solution=1 : loop strength reduction optimization
+        # --amdgpu-kernarg-preload-count=16 : preload kernel arguments
+        "gpu-module-to-binary{format=fatbin"
+        " opts=--amdgpu-enable-max-ilp-scheduling-strategy=1,-enable-post-misched=0,--lsr-drop-solution=1,--amdgpu-kernarg-preload-count=16"
+        " section= toolkit=}",
     ]
 
 
@@ -151,7 +158,20 @@ def _dump_isa_from_rocdl_module_asm(*, dump_dir: Path, ctx: ir.Context, asm: str
     try:
         # Parse a fresh clone so we don't mutate the main compilation module.
         mod = ir.Module.parse(asm, context=ctx)
-        pm = PassManager.parse("builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})", context=ctx)
+        # Dump LLVM IR first (best-effort)
+        try:
+            mod_ll = ir.Module.parse(asm, context=ctx)
+            pm_ll = PassManager.parse("builtin.module(gpu-module-to-binary{format=llvm opts= section= toolkit=})", context=ctx)
+            pm_ll.enable_verifier(bool(verify))
+            pm_ll.run(mod_ll.operation)
+            ll_bytes = get_compile_object_bytes(mod_ll)
+            ll_out = dump_dir / "15_llvm_ir.ll"
+            ll_out.write_bytes(ll_bytes)
+        except Exception:
+            pass
+        pm = PassManager.parse("builtin.module(gpu-module-to-binary{format=isa"
+            " opts=--amdgpu-enable-max-ilp-scheduling-strategy=1,-enable-post-misched=0,--lsr-drop-solution=1,--amdgpu-kernarg-preload-count=16"
+            " section= toolkit=})", context=ctx)
         pm.enable_verifier(bool(verify))
         pm.run(mod.operation)
         isa_bytes = get_compile_object_bytes(mod)

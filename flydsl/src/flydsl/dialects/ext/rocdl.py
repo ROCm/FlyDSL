@@ -35,14 +35,72 @@ mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
 
+def _sched_group_barrier_llvm(mask, cnt, group_id):
+    """Emit @llvm.amdgcn.sched.group.barrier via llvm.call_intrinsic.
+
+    The ROCDL sched.group.barrier op doesn't lower to LLVM intrinsics
+    in the current MLIR build (the ops get silently dropped). Using
+    llvm.call_intrinsic via Operation.create ensures the intrinsic
+    reaches the LLVM backend and generates s_sched_group_barrier in ISA.
+    """
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+    from _mlir import ir as _ir
+    _i32 = IntegerType.get_signless(32)
+    args = [
+        _arith_ext.constant(mask, type=_i32)._value,
+        _arith_ext.constant(cnt, type=_i32)._value,
+        _arith_ext.constant(group_id, type=_i32)._value,
+    ]
+    _ir.Operation.create(
+        'llvm.call_intrinsic',
+        results=[],
+        operands=args,
+        attributes={
+            'intrin': _ir.StringAttr.get('llvm.amdgcn.sched.group.barrier'),
+            'op_bundle_sizes': _ir.DenseI32ArrayAttr.get([]),
+            'operandSegmentSizes': _ir.DenseI32ArrayAttr.get([3, 0]),  # 3 args, 0 bundle operands
+        },
+    )
+
+def _sched_barrier_llvm(mask):
+    """Emit @llvm.amdgcn.sched.barrier via llvm.call_intrinsic."""
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+    from _mlir import ir as _ir
+    _i32 = IntegerType.get_signless(32)
+    args = [
+        _arith_ext.constant(mask, type=_i32)._value,
+    ]
+    _ir.Operation.create(
+        'llvm.call_intrinsic',
+        results=[],
+        operands=args,
+        attributes={
+            'intrin': _ir.StringAttr.get('llvm.amdgcn.sched.barrier'),
+            'op_bundle_sizes': _ir.DenseI32ArrayAttr.get([]),
+            'operandSegmentSizes': _ir.DenseI32ArrayAttr.get([1, 0]),  # 1 arg, 0 bundle operands
+        },
+    )
+
+# Override sched_barrier and sched_group_barrier with LLVM intrinsic versions.
+# The ROCDL ops don't lower to LLVM intrinsics in the current MLIR build
+# (they get silently dropped). Using llvm.call_intrinsic directly ensures
+# the scheduling hints reach the ISA.
+def sched_barrier(mask):
+    _sched_barrier_llvm(mask)
+
+def sched_group_barrier(mask, cnt, group_id):
+    _sched_group_barrier_llvm(mask, cnt, group_id)
+
 def sched_mfma(cnt):
-    sched_group_barrier(mask_mfma, cnt, 0)
+    _sched_group_barrier_llvm(mask_mfma, cnt, 0)
 def sched_vmem(cnt):
-    sched_group_barrier(mask_vmem_rd, cnt, 0)
+    _sched_group_barrier_llvm(mask_vmem_rd, cnt, 0)
 def sched_dsrd(cnt):
-    sched_group_barrier(mask_dsrd, cnt, 0)
+    _sched_group_barrier_llvm(mask_dsrd, cnt, 0)
 def sched_dswr(cnt):
-    sched_group_barrier(mask_dswr, cnt, 0)
+    _sched_group_barrier_llvm(mask_dswr, cnt, 0)
 
 
 def _unwrap_mfma_operand(v, *, loc=None):
