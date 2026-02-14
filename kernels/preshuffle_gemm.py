@@ -127,6 +127,7 @@ def compile_preshuffle_gemm_a8(
 
     # Vector width calc (assume full tiles / no tail guards).
     total_threads = 256
+    wave_size = 64
     bytes_a_per_tile = int(tile_m) * int(tile_k) * int(elem_bytes)
     bytes_b_per_tile = int(tile_n) * int(tile_k) * int(elem_bytes)
     if bytes_a_per_tile % total_threads != 0:
@@ -159,6 +160,7 @@ def compile_preshuffle_gemm_a8(
     num_a_loads = bytes_per_thread_a // a_load_bytes
     num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
     num_b_loads = bytes_per_thread_b // b_load_bytes
+    num_a_lds_load = bytes_a_per_tile // wave_size
 
     # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
@@ -349,7 +351,6 @@ def compile_preshuffle_gemm_a8(
             by_n = by * tile_n
 
             # (thread_id.x) -> (wave_id, lane_id) via FLIR.
-            wave_size = 64
             layout_wave_lane = flir.make_layout((4, wave_size), stride=(64, 1))
             coord_wave_lane = flir.idx2crd(tx, layout_wave_lane)
             wave_id = flir.get(coord_wave_lane, 0)
@@ -956,44 +957,58 @@ def compile_preshuffle_gemm_a8(
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
-                # - MFMA group size per "slot": num_acc_n
-                # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
-                # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
-                mfma_group = num_acc_n
-                bytes_k_per_mfma = 128 if _is_gfx950() else 32
-                num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
-                mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
 
-                # # DS-read preload (CK default is 2).
-                # rocdl.sched_dsrd(2)
-                # rocdl.sched_mfma(1)
-                # if tile_m == 16:
-                #     rocdl.sched_vmem(1)
-                # rocdl.sched_mfma(1)
-                # if tile_m == 16:
-                #     rocdl.sched_vmem(1)
-                # if num_acc_n < 4:
-                #     rocdl.sched_dsrd(1)
-                #     rocdl.sched_mfma(1)
-                #     if tile_m == 16:
-                #         rocdl.sched_vmem(1)
-                #     rocdl.sched_dsrd(1)
-                #     rocdl.sched_mfma(1)
-                #     if tile_m == 16:
-                #         rocdl.sched_vmem(1)
-                #     rocdl.sched_mfma(1)
+                if _is_gfx942():
+                    mfma_group = num_acc_n
+                    mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                    mfma_per_iter = 2 * mfma_group
+                    sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-                # dswr_tail = num_a_loads
-                # if dswr_tail > sche_iters:
-                #     dswr_tail = sche_iters
-                # dswr_start = sche_iters - dswr_tail
-                # print(sche_iters, num_b_loads, num_a_async_loads)
-                num_gmem_loads = num_b_loads + (num_a_async_loads if use_async_copy else num_a_loads)
-                for mfma_idx in range_constexpr(mfma_total):
-                    if (mfma_idx < num_gmem_loads):
+                    # DS-read preload (CK default is 2).
+                    rocdl.sched_dsrd(2)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
                         rocdl.sched_vmem(1)
                     rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    if num_acc_n < 4:
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(1)
+                        if tile_m == 16:
+                            rocdl.sched_vmem(1)
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(1)
+                        if tile_m == 16:
+                            rocdl.sched_vmem(1)
+                        rocdl.sched_mfma(1)
+
+                    # DS-write hints near the end: match total A LDS-store micro-ops per thread.
+                    dswr_tail = num_a_loads
+                    if dswr_tail > sche_iters:
+                        dswr_tail = sche_iters
+                    dswr_start = sche_iters - dswr_tail
+
+                    for sche_i in range_constexpr(sche_iters):
+                        rocdl.sched_vmem(1)
+                        rocdl.sched_mfma(mfma_group)
+                        rocdl.sched_dsrd(1)
+                        rocdl.sched_mfma(mfma_group)
+                        if (not use_async_copy) and (sche_i >= dswr_start - 1):
+                            rocdl.sched_dswr(1)
+                else:
+                    mfma_group = num_acc_n
+                    bytes_k_per_mfma = 128 if _is_gfx950() else 32
+                    num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
+                    mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
+                    num_ds_load = num_a_lds_load
+                    num_ds_write = num_a_loads
+
+                    num_gmem_loads = num_b_loads + (num_a_async_loads if use_async_copy else num_a_loads)
+                    for mfma_idx in range_constexpr(mfma_total):
+                        if (mfma_idx < num_gmem_loads):
+                            rocdl.sched_vmem(1)
+                        rocdl.sched_mfma(1)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
