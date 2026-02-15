@@ -204,8 +204,18 @@ def _replace_ocml_exp2_with_intrinsic(module: ir.Module) -> ir.Module:
     """Replace __ocml_exp2_f32 library calls with llvm.intr.exp2 intrinsics.
 
     The convert-gpu-to-rocdl pass lowers math.exp2 to __ocml_exp2_f32 which
-    generates a safe but slow 6-instruction pattern. By replacing with
-    llvm.intr.exp2 + fast math flags, we get bare v_exp_f32 (1 instruction).
+    generates a safe but slow 6-instruction pattern (range reduction + v_exp_f32
+    + v_ldexp_f32). By replacing with llvm.intr.exp2 + fast math flags, we get
+    bare v_exp_f32 (1 instruction).
+
+    Why text replacement instead of using math.exp2 directly:
+        The MLIR convert-gpu-to-rocdl pass unconditionally lowers math.exp2 to
+        the __ocml_exp2_f32 library call. There is no pass-level option to emit
+        the LLVM intrinsic instead, so we do a post-lowering text replacement
+        on the LLVM IR assembly.
+
+    TODO: Replace this text-based approach with a proper MLIR rewrite pass
+    when upstream MLIR adds an option to lower math.exp2 to llvm.intr.exp2.
 
     Returns a new module (or the original if replacement fails).
     """
@@ -396,54 +406,6 @@ def _apply_flat_work_group_size_on_llvm_funcs(module: ir.Module, max_workgroup_s
         pass
 
 
-def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
-    """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
-
-    This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
-    attribute to gpu.func operations marked as kernels.
-
-    Args:
-        mlir_module: MLIR module containing GPU kernels
-        waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
-    """
-    if waves_per_eu is None:
-        return
-
-    w = int(waves_per_eu)
-    if w < 1:
-        raise ValueError(f"waves_per_eu must be >= 1, got {w}")
-
-    try:
-        # Get the context from the module
-        with mlir_module.context:
-            # Navigate MLIR module structure: module -> gpu.module -> gpu.func
-            for op in mlir_module.body.operations:
-                # Look for gpu.module operations
-                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
-                    continue
-
-                # gpu.module has a single region with a single block
-                gpu_module_region = op.regions[0]
-
-                # Within gpu.module, find gpu.func operations with gpu.kernel attribute
-                for inner_op in gpu_module_region.blocks[0].operations:
-                    if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
-                        continue
-
-                    # Only apply to kernel functions (not device functions)
-                    if "gpu.kernel" not in inner_op.attributes:
-                        continue
-
-                    # Add or append to the 'rocdl.waves_per_eu' attribute
-                    # This attribute is read by the ROCDL conversion pass
-                    inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                        ir.IntegerType.get_signless(32), w
-                    )
-    except Exception as e:
-        # Best-effort: if attribute injection fails, log and continue
-        # This prevents breaking existing functionality
-        import warnings
-        warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
 
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
