@@ -110,7 +110,7 @@ echo "========================================================================"
 echo ""
 
 if command -v rocm-smi &> /dev/null; then
-    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
+    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'Version' | head -1)
     if [ -n "$GPU_NAME" ]; then
         echo "GPU detected: $GPU_NAME"
     else
