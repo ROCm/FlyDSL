@@ -1,12 +1,13 @@
-# the dependencies to run tests
+# The dependencies to run tests
 
 # Include base requirements
 -r requirements.txt
 
+# PyTorch ROCm index (for ROCm-specific builds)
+--extra-index-url https://download.pytorch.org/whl/rocm7.1
+
 # Test-specific dependencies
 pytest
 pandas
+torch
 
-# Note: torch is installed separately by install_test_requirements.sh
-# The script checks if torch is already installed and only installs from
-# ROCm index (https://download.pytorch.org/whl/rocm7.1) if needed

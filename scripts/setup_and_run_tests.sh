@@ -26,7 +26,7 @@ VENV_NAME="${1:-flydsl_venv}"
 VENV_BASE_PATH="${2:-${HOME}}"
 VENV_PATH="${VENV_BASE_PATH}/${VENV_NAME}"
 
-INSTALL_TEST_REQ_SCRIPT="${PROJECT_ROOT}/flydsl/install_test_requirements.sh"
+REQUIREMENTS_TEST_FILE="${PROJECT_ROOT}/flydsl/requirements_tests.txt"
 RUN_TESTS_SCRIPT="${SCRIPT_DIR}/run_tests.sh"
 
 # Function to print error and exit
@@ -106,16 +106,11 @@ success_msg "  flydsl package installed successfully"
 
 # Step 4: Install torch and test requirements
 info_msg "[4/5] Installing torch and test requirements..."
-if [ ! -f "${INSTALL_TEST_REQ_SCRIPT}" ]; then
-    error_exit "install_test_requirements.sh not found at ${INSTALL_TEST_REQ_SCRIPT}"
+if [ ! -f "${REQUIREMENTS_TEST_FILE}" ]; then
+    error_exit "requirements_tests.txt not found at ${REQUIREMENTS_TEST_FILE}"
 fi
 
-if [ ! -x "${INSTALL_TEST_REQ_SCRIPT}" ]; then
-    info_msg "  Making install_test_requirements.sh executable..."
-    chmod +x "${INSTALL_TEST_REQ_SCRIPT}"
-fi
-
-if ! bash "${INSTALL_TEST_REQ_SCRIPT}"; then
+if ! pip install --no-cache-dir -r "${REQUIREMENTS_TEST_FILE}"; then
     error_exit "Failed to install test requirements"
 fi
 success_msg "  Test requirements installed successfully"
