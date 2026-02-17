@@ -160,7 +160,7 @@ def compile_preshuffle_gemm_a8(
     num_a_loads = bytes_per_thread_a // a_load_bytes
     num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
     num_b_loads = bytes_per_thread_b // b_load_bytes
-    num_a_lds_load = bytes_a_per_tile // wave_size
+    num_a_lds_load = bytes_a_per_tile // wave_size // a_load_bytes
 
     # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
@@ -615,12 +615,12 @@ def compile_preshuffle_gemm_a8(
 
             # DMA async version: direct global-to-LDS transfer
             def dma_a_tile_to_lds(base_k_div4, lds_buffer):
-                from _mlir.dialects import llvm, memref as memref_dialect
+                flir.print("dma_a_tile_to_lds: base_k_div4=%d, lds_buffer=%s\n", base_k_div4, lds_buffer)
+                from _mlir.dialects import memref as memref_dialect
 
                 dma_bytes = a_async_load_bytes
                 bytes_per_dword = 4
                 chunk_i32 = dma_bytes // bytes_per_dword
-
                 for i in range_constexpr(num_a_async_loads):
                     row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_async_base, chunk_i32=chunk_i32)
                     col_a_local_sw = flir.swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
@@ -628,12 +628,19 @@ def compile_preshuffle_gemm_a8(
                     coord_a_g = flir.make_coord(row_a_global, base_k_div4 * c4 + col_a_local_sw)
                     global_offset = arith.index_cast(T.i32, flir.crd2idx(coord_a_g, layout_a))
 
-                    if i == 0:
-                        lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * wave_size * dma_bytes
-                        lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
-                    else:
-                        lds_ptr_i64_lane0 += total_threads * dma_bytes
-                    lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_i64_lane0, address_space=3)
+                    # Keep subview, but use index-typed offsets/sizes and correct offset math.
+                    per_wave_offset = wave_id * arith.constant(wave_size * dma_bytes, index=True)
+                    bytes_per_tg_load = arith.constant(dma_bytes * total_threads, index=True)
+                    per_load_offset = arith.constant(i * total_threads * dma_bytes, index=True)
+                    # flir.print("per_load_offset=%d, bytes_per_tg_load=%d\n", per_load_offset, bytes_per_tg_load)
+                    lds_wave_view = memref_dialect.subview(
+                        lds_buffer,
+                        offsets=[arith.unwrap(per_load_offset + per_wave_offset)],
+                        sizes=[arith.unwrap(bytes_per_tg_load)],
+                        strides=[arith.unwrap(arith.constant(1, index=True))],
+                    )
+                    lds_ptr_idx = memref_dialect.extract_aligned_pointer_as_index(lds_wave_view)
+                    lds_ptr = buffer_ops.create_llvm_ptr(lds_ptr_idx, address_space=3)
 
                     # DMA from global to LDS using buffer_load_lds
                     size_i32 = arith.constant(dma_bytes, type=T.i32)
@@ -958,7 +965,14 @@ def compile_preshuffle_gemm_a8(
 
             def hot_loop_scheduler():
 
-                if _is_gfx942():
+                def calculate_ratio(num_ds_load, num_mfma):
+                    import math
+                    g = math.gcd(num_ds_load, num_mfma)
+                    return (num_ds_load // g, num_mfma // g)
+
+                # if _is_gfx942():
+                if False:
+                    print("gfx942")
                     mfma_group = num_acc_n
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                     mfma_per_iter = 2 * mfma_group
@@ -985,9 +999,10 @@ def compile_preshuffle_gemm_a8(
 
                     # DS-write hints near the end: match total A LDS-store micro-ops per thread.
                     dswr_tail = num_a_loads
+                    dstr_advance = 2
                     if dswr_tail > sche_iters:
                         dswr_tail = sche_iters
-                    dswr_start = sche_iters - dswr_tail
+                    dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
 
                     for sche_i in range_constexpr(sche_iters):
                         rocdl.sched_vmem(1)
@@ -1003,12 +1018,33 @@ def compile_preshuffle_gemm_a8(
                     mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                     num_ds_load = num_a_lds_load
                     num_ds_write = num_a_loads
-
+                    dswr_tail = num_a_loads
+                    dstr_advance = 2
+                    if dswr_tail > mfma_total:
+                        dswr_tail = mfma_total
                     num_gmem_loads = num_b_loads + (num_a_async_loads if use_async_copy else num_a_loads)
+                    dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
+                    a, b = calculate_ratio(num_ds_load, mfma_total)
+                    c, d = calculate_ratio(num_gmem_loads, mfma_total)
+                    idx_ds_read = 0
+                    idx_gmem_load = 0
+                    # rocdl.sched_dsrd(2)
+                    # idx_ds_read += 2
+                    # print(num_gmem_loads, mfma_total,c, d)
                     for mfma_idx in range_constexpr(mfma_total):
-                        if (mfma_idx < num_gmem_loads):
-                            rocdl.sched_vmem(1)
                         rocdl.sched_mfma(1)
+                        if (mfma_idx % b == 0) and (idx_ds_read < num_ds_load):
+                            rocdl.sched_dsrd(a)
+                        #     idx_ds_read += a
+                        # if (mfma_idx % d == 0) and (idx_gmem_load < num_gmem_loads):
+                        #     rocdl.sched_vmem(c)
+                        #     idx_gmem_load += c
+                        if (mfma_idx % 2 == 0) and (idx_gmem_load < num_gmem_loads):
+                            rocdl.sched_vmem(1)
+                            idx_gmem_load += 1                    
+                        if (not use_async_copy) and (mfma_idx >= dswr_start - 2):
+                            rocdl.sched_dswr(1)
+                    print(idx_ds_read, idx_gmem_load)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
