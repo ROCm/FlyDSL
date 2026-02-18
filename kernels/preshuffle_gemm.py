@@ -657,6 +657,7 @@ def compile_preshuffle_gemm_a8(
                         arith.unwrap(offset_imm),
                         arith.unwrap(aux),
                     )
+                
 
             def prefetch_a_to_lds(base_k, lds_buffer):
                 """Load A tile from global memory to LDS via DMA.

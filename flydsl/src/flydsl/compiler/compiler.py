@@ -68,6 +68,14 @@ def _pipeline_fragments(
         + f"use-bare-pointers-for-host={llvm_bare_host_opt} "
         + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
         + "}",
+        # Complete lowering to a module suitable for binary emission.
+        # This is required for kernels that mix memref types with raw LLVM pointers
+        # (e.g. async LDS DMA paths), which otherwise leave unrealized casts.
+        "expand-strided-metadata",
+        "finalize-memref-to-llvm",
+        "convert-index-to-llvm",
+        "convert-arith-to-llvm",
+        "convert-func-to-llvm",
         "reconcile-unrealized-casts",
         "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
     ]

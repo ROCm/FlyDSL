@@ -1,5 +1,6 @@
 import sys
 import math
+import os
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Union, Type, Tuple, Any, Optional, Callable, Dict
 
@@ -7,6 +8,32 @@ from _mlir import ir
 from _mlir.dialects import arith, memref, gpu
 import _mlir.extras.types as T
 from flydsl.dialects.ext.gpu import lds_space
+
+
+def _use_int_lds_addrspace() -> bool:
+    """Whether to encode LDS memory space as an integer address space.
+
+    MLIR can represent GPU shared/LDS memory space as an attribute
+    (`#gpu.address_space<workgroup>`). Some lowering paths (notably when crossing
+    into raw LLVM pointer/intrinsic APIs) require an integer address space
+    encoding (AMD LDS is addrspace 3).
+
+    Default is enabled to avoid gpu-to-llvm failures like:
+      'conversion of memref memory space #gpu.address_space<workgroup> to integer address space failed'
+    """
+    v = os.environ.get("FLIR_LDS_INT_ADDRSPACE", "1")
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _lds_mem_space():
+    # IMPORTANT: MLIR's `gpu.AddressSpace.Workgroup` integer value is *not*
+    # necessarily the same as LLVM AMDGPU's LDS address space encoding.
+    #
+    # For ROCm codegen/intrinsics we need the LLVM integer addrspace for LDS:
+    #   LDS (workgroup/shared) = addrspace(3) on AMDGPU.
+    if _use_int_lds_addrspace():
+        return 3
+    return lds_space(int=False)
 
 # ==============================================================================
 # Type Utilities
@@ -98,7 +125,7 @@ class SmemPtr:
         else:
             target_shape = (1,) # Scalar treated as 1-element array for view simplicity
             
-        target_type = T.memref(*target_shape, self.element_type, memory_space=lds_space())
+        target_type = T.memref(*target_shape, self.element_type, memory_space=_lds_mem_space())
         
         # memref.view(source, byte_shift, sizes)
         # sizes are needed for dynamic dimensions. Since we use static shapes here, sizes=[]
@@ -351,7 +378,7 @@ class SmemAllocator:
         if total_size == 0: total_size = 128
         
         # Create Global
-        memref_type = T.memref(total_size, T.i8(), memory_space=lds_space())
+        memref_type = T.memref(total_size, T.i8(), memory_space=_lds_mem_space())
         self.global_op = memref.global_(
             sym_name=self.global_sym_name,
             type_=memref_type,
@@ -369,7 +396,7 @@ class SmemAllocator:
         total_size = self._align(self.ptr, 128)
         if total_size == 0: total_size = 128
         
-        memref_type = T.memref(total_size, T.i8(), memory_space=lds_space())
+        memref_type = T.memref(total_size, T.i8(), memory_space=_lds_mem_space())
         op = memref.get_global(memref_type, self.global_sym_name)
         return get_op_result_or_value(op)
 
