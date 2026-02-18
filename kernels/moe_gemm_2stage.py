@@ -16,7 +16,11 @@ import functools
 import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import (
+    get_rocm_arch as get_hip_arch,
+    supports_bf16_global_atomics,
+    bf16_global_atomics_arch_description,
+)
 from flydsl.utils import SmemAllocator, SmemPtr
 
 from _mlir import ir
@@ -1265,8 +1269,10 @@ def compile_moe_gemm2(
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
     if out_is_bf16:
-        if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
-            raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
+        if not supports_bf16_global_atomics(gpu_arch):
+            raise ValueError(
+                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
+            )
 
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
