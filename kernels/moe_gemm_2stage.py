@@ -16,7 +16,11 @@ import functools
 import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import (
+    get_rocm_arch as get_hip_arch,
+    supports_bf16_global_atomics,
+    bf16_global_atomics_arch_description,
+)
 from flydsl.utils import SmemAllocator, SmemPtr
 
 from _mlir import ir
@@ -432,6 +436,7 @@ def compile_moe_gemm1(
                             atom_g2r16=atom_x_g2r16,
                             rsrc=x_rsrc,
                             vec_elems=vec16_elems,
+                            elem_bytes=elem_bytes,
                         )
                     idx_bytes = idx_i32 * arith.index(4)
                     atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -475,9 +480,12 @@ def compile_moe_gemm1(
                 lane_div_16 = flir.get(coord_l16, 0)
                 lane_mod_16 = flir.get(coord_l16, 1)
     
-                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16*16.
+                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16 * a_kpack_elems.
+                # A-side kpack is always 16 bytes (activation elements); B-side kpack_bytes
+                # may differ (e.g. 8 for int4 weights), but that only affects B preshuffle.
                 row_a_lds = lane_mod_16
-                col_offset_base = flir.crd2idx(flir.make_coord(lane_div_16, 0), layout_lane16)
+                a_kpack_elems = 16 // elem_bytes
+                col_offset_base = lane_div_16 * arith.constant(int(a_kpack_elems), index=True)
                 col_offset_base_bytes = (
                     col_offset_base
                     if elem_bytes == 1
@@ -1261,8 +1269,10 @@ def compile_moe_gemm2(
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
     if out_is_bf16:
-        if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
-            raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
+        if not supports_bf16_global_atomics(gpu_arch):
+            raise ValueError(
+                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
+            )
 
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
@@ -1559,6 +1569,7 @@ def compile_moe_gemm2(
                             atom_g2r16=atom_x_g2r16,
                             rsrc=x_rsrc,
                             vec_elems=vec16_elems,
+                            elem_bytes=elem_bytes,
                         )
                     idx_bytes = idx_i32 * arith.index(4)
                     atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
@@ -1627,7 +1638,9 @@ def compile_moe_gemm2(
                 lane_mod_16 = flir.get(coord_l16, 1)
     
                 row_a_lds = lane_mod_16
-                col_offset_base = flir.crd2idx(flir.make_coord(lane_div_16, 0), layout_lane16)
+                # A-side kpack is always 16 bytes; kpack_bytes is B-side (may be 8 for int4).
+                a_kpack_elems = 16 // elem_bytes
+                col_offset_base = lane_div_16 * arith.constant(int(a_kpack_elems), index=True)
                 col_offset_base_bytes = (
                     col_offset_base
                     if elem_bytes == 1
@@ -2039,9 +2052,13 @@ def compile_moe_gemm2(
                 c2_i32 = arith.i32(2)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.i32(0xFFFFFFFE)  # align element index to even for half2 atomics
 
-                e_vec = 2 if bool(accumulate) else 8
-                if not bool(accumulate):
+                if bool(accumulate):
+                    e_vec = 2
+                else:
+                    # Reduce mode: e_vec must satisfy tile_n % (cshuffle_nlane * e_vec) == 0.
+                    # Pick the largest power-of-2 e_vec (up to 8) that divides tile_n/32.
                     cshuffle_nlane = 32
+                    e_vec = 8
                     # backoff to 2
                     if int(tile_n) % (cshuffle_nlane * e_vec) != 0:
                         e_vec = 2

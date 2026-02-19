@@ -332,3 +332,8 @@ FLIR's design is inspired by ideas from several projects:
 ## 📄 License
 
 Apache License 2.0
+
+## Disclaimer
+
+This is an experimental feature/tool and is not part of the official ROCm distribution. It is provided for evaluation and testing purposes only.
+For further usage or inquiries, please initiate a discussion thread with the original authors.

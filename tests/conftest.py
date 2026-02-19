@@ -78,6 +78,14 @@ def insert_point(ctx):
         yield InsertionPoint.current
 
 
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers",
+        "large_shape: marks tests with large shapes that are slow to run (deselect with '-m \"not large_shape\"')",
+    )
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Prevent pytest from erroring on empty test files."""
     if exitstatus == 5:

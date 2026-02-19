@@ -34,3 +34,18 @@ def get_rocm_arch() -> str:
     return "gfx942"
 
 
+# Arch prefixes that support bf16 global atomics (single source for checks and error messages).
+_BF16_GLOBAL_ATOMICS_ARCH_PREFIXES = ("gfx942", "gfx950", "gfx12")
+
+
+def supports_bf16_global_atomics(arch: str) -> bool:
+    """True if the given ROCm arch supports bf16 global atomics (e.g. for MoE reduction)."""
+    arch = str(arch).strip()
+    return any(arch.startswith(prefix) for prefix in _BF16_GLOBAL_ATOMICS_ARCH_PREFIXES)
+
+
+def bf16_global_atomics_arch_description() -> str:
+    """Human-readable list of archs that support bf16 global atomics (for error messages)."""
+    return "/".join(_BF16_GLOBAL_ATOMICS_ARCH_PREFIXES)
+
+
