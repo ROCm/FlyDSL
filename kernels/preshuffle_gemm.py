@@ -977,9 +977,24 @@ def compile_preshuffle_gemm_a8(
                     g = math.gcd(num_ds_load, num_mfma)
                     return (num_ds_load // g, num_mfma // g)
 
-                # if _is_gfx942():
-                if False:
-                    print("gfx942")
+                # Convert a ratio (numerator/denominator) into a per-round schedule list.
+                # Example: 3/2 -> [2, 1] (even spread, avoids "3 at once").
+                def build_scheduler(numer: int, denom: int):
+                    if denom <= 0:
+                        return []
+                    if numer <= 0:
+                        return [0] * denom
+                    out = []
+                    prev = 0
+                    # Use ceil-prefix differences:
+                    # out[i] = ceil((i+1)*numer/denom) - ceil(i*numer/denom)
+                    for i in range_constexpr(denom):
+                        cur = ((i + 1) * numer + (denom - 1)) // denom
+                        out.append(cur - prev)
+                        prev = cur
+                    return out
+
+                if _is_gfx942() and not use_async_copy:
                     mfma_group = num_acc_n
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                     mfma_per_iter = 2 * mfma_group
@@ -1016,7 +1031,7 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_mfma(mfma_group)
                         rocdl.sched_dsrd(1)
                         rocdl.sched_mfma(mfma_group)
-                        if (not use_async_copy) and (sche_i >= dswr_start - 1):
+                        if sche_i >= dswr_start - 1:
                             rocdl.sched_dswr(1)
                 else:
                     mfma_group = num_acc_n
@@ -1031,27 +1046,38 @@ def compile_preshuffle_gemm_a8(
                         dswr_tail = mfma_total
                     num_gmem_loads = num_b_loads + (num_a_async_loads if use_async_copy else num_a_loads)
                     dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
-                    a, b = calculate_ratio(num_ds_load, mfma_total)
-                    c, d = calculate_ratio(num_gmem_loads, mfma_total)
-                    idx_ds_read = 0
+                    # evenly distribute ds/vmem ops across mfma rounds to avoid bursty groups.
+                    dsrd_preload = 2
+                    if dsrd_preload > num_ds_load:
+                        dsrd_preload = num_ds_load
+                    dsrd_schedule = build_scheduler(num_ds_load - dsrd_preload, mfma_total)
+                    vmem_schedule = build_scheduler(num_gmem_loads, mfma_total)
+
+                    idx_ds_read = dsrd_preload
                     idx_gmem_load = 0
-                    rocdl.sched_dsrd(2)
-                    # idx_ds_read += 2
-                    # print(num_gmem_loads, mfma_total,c, d)
+                    if dsrd_preload:
+                        rocdl.sched_dsrd(dsrd_preload)
                     for mfma_idx in range_constexpr(mfma_total):
                         rocdl.sched_mfma(1)
-                        if (mfma_idx % b == 0) and (idx_ds_read < num_ds_load):
-                            rocdl.sched_dsrd(a)
-                        #     idx_ds_read += a
-                        # if (mfma_idx % d == 0) and (idx_gmem_load < num_gmem_loads):
-                        #     rocdl.sched_vmem(c)
-                        #     idx_gmem_load += c
-                        if (mfma_idx % 1 == 0) and (idx_gmem_load < num_gmem_loads):
-                            rocdl.sched_vmem(1)
-                            idx_gmem_load += 1                    
+                        n_dsrd = dsrd_schedule[mfma_idx]
+                        if n_dsrd and (idx_ds_read < num_ds_load):
+                            # Clamp in case of any mismatch (should be exact).
+                            if idx_ds_read + n_dsrd > num_ds_load:
+                                n_dsrd = num_ds_load - idx_ds_read
+                            if n_dsrd:
+                                rocdl.sched_dsrd(n_dsrd)
+                                idx_ds_read += n_dsrd
+
+                        n_vmem = vmem_schedule[mfma_idx]
+                        if n_vmem and (idx_gmem_load < num_gmem_loads):
+                            if idx_gmem_load + n_vmem > num_gmem_loads:
+                                n_vmem = num_gmem_loads - idx_gmem_load
+                            if n_vmem:
+                                rocdl.sched_vmem(n_vmem)
+                                idx_gmem_load += n_vmem
+
                         if (not use_async_copy) and (mfma_idx >= dswr_start - 2):
                             rocdl.sched_dswr(1)
-                    print(idx_ds_read, idx_gmem_load)
                 rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
