@@ -993,7 +993,7 @@ def compile_preshuffle_gemm_a8(
                         prev = cur
                     return out
 
-                if _is_gfx942() and not use_async_copy:
+                if _is_gfx942() or (not use_async_copy):
                     mfma_group = num_acc_n
                     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                     mfma_per_iter = 2 * mfma_group
