@@ -615,7 +615,7 @@ def compile_preshuffle_gemm_a8(
 
             # DMA async version: direct global-to-LDS transfer
             def dma_a_tile_to_lds(base_k_div4, lds_buffer):
-                flir.print("dma_a_tile_to_lds: base_k_div4=%d, lds_buffer=%s\n", base_k_div4, lds_buffer)
+                # flir.print("dma_a_tile_to_lds: base_k_div4=%d, lds_buffer=%s\n", base_k_div4, lds_buffer)
                 from _mlir.dialects import memref as memref_dialect
 
                 dma_bytes = a_async_load_bytes
@@ -624,10 +624,10 @@ def compile_preshuffle_gemm_a8(
                 wave_offset = wave_id * arith.constant(wave_size * dma_bytes, index=True)
                 for i in range_constexpr(num_a_async_loads):
                     row_a_local, col_a_local = a_tile_chunk_coord_i32(i, tx_i32_async_base, chunk_i32=chunk_i32)
-                    if i == 0:
-                        row_a_local, col_a_local = a_tile_chunk_coord_i32(i, tx_i32_async_base, chunk_i32=chunk_i32)
-                    else:
-                        row_a_local = row_a_local + total_threads * dma_bytes // (tile_k * elem_bytes)
+                    # if i == 0:
+                    #     row_a_local, col_a_local = a_tile_chunk_coord_i32(i, tx_i32_async_base, chunk_i32=chunk_i32)
+                    # else:
+                    #     row_a_local = row_a_local + total_threads * dma_bytes // (tile_k * elem_bytes)
 
                     col_a_local_sw = flir.swizzle_xor16(row_a_local, col_a_local * c4, k_blocks16)
                     row_a_global = bx_m + row_a_local
@@ -663,7 +663,6 @@ def compile_preshuffle_gemm_a8(
                         arith.unwrap(offset_imm),
                         arith.unwrap(aux),
                     )
-                
 
             def prefetch_a_to_lds(base_k, lds_buffer):
                 """Load A tile from global memory to LDS via DMA.
