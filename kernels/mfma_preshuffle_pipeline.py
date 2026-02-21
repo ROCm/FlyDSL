@@ -152,6 +152,9 @@ def load_b_pack_k32(
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
     unpack_int4: bool = False,
+    unpack_uint4: bool = False,
+    uint4_qs: "ir.Value | None" = None,
+    uint4_qz_bcast: "ir.Value | None" = None,
 ) -> ir.Value:
     """Load one B pack for one MFMA(x32) micro-step.
 
@@ -161,11 +164,24 @@ def load_b_pack_k32(
       this micro-step.
     - For packed INT4 (W4A8): loads 4 bytes (8 int4 values) and unpacks to 8 int8 bytes
       using the 7-op sequence (no v_perm).
+    - For packed UINT4 (W4A8 zero-point): loads 4 bytes (8 uint4 values) and unpacks to
+      8 uint8 bytes (3 ops). When ``uint4_qs`` / ``uint4_qz_bcast`` are provided, applies
+      in-place dequant ``int8 = (uint8 * qs + qz) ^ 0x80808080`` directly on the i32
+      halves, avoiding any i64 split/rejoin overhead.
+
+      ``uint4_qz_bcast`` can be either pre-broadcast (all 4 byte lanes identical) or a
+      raw scalar — in the latter case the broadcast is computed here, AFTER the weight
+      data is loaded, so that the qzero buffer_load latency overlaps with the weight
+      load instead of forcing an early s_waitcnt.
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
     if unpack_int4 and kpack_bytes != 8:
         raise ValueError("unpack_int4 requires kpack_bytes=8 (packed int4 layout)")
+    if unpack_uint4 and kpack_bytes != 8:
+        raise ValueError("unpack_uint4 requires kpack_bytes=8 (packed uint4 layout)")
+    if unpack_int4 and unpack_uint4:
+        raise ValueError("unpack_int4 and unpack_uint4 are mutually exclusive")
 
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
@@ -225,6 +241,60 @@ def load_b_pack_k32(
         t = packed32 >> c_4_i32
         s1 = (t & c_08080808) * c_1e
         odd = (t & c_0f0f0f0f) | s1
+
+        vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+        v2 = vector.from_elements(vec2_i32, [even, odd])
+        vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+        v64 = vector.bitcast(vec1_i64, v2)
+        return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+    if unpack_uint4:
+        # Load 4 bytes -> i32 -> unpack to 2 x i32 (8 unsigned u8 bytes).
+        atom = flir.make_copy_atom(elem_type, vector_size=4)
+        idx_bytes = idx_pack + k2_base
+        b_view = flir.TensorView(
+            arg_b,
+            (4,),
+            strides=(1,),
+            base_indices=(idx_bytes,),
+            element_type=elem_type,
+        )
+        b4 = flir.copy(
+            atom,
+            b_view,
+            None,
+            alignment=4,
+            return_vector=True,
+            src_buffer_resource=b_rsrc,
+            src_buffer_offset_in_bytes=True,
+        )
+        vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
+        packed32 = vector.extract(
+            vector.bitcast(vec1_i32, b4),
+            static_position=[0],
+            dynamic_position=[],
+        )
+
+        # 3-op UINT4 unpack: bytes [(v4<<4)|v0, ...] → even=low nibbles, odd=high nibbles
+        c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
+        c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
+
+        even = packed32 & c_0f0f0f0f
+        odd = (packed32 >> c_4_i32) & c_0f0f0f0f
+
+        # In-place dequant: int8 = (uint8 * qscale + qzero) ^ 0x80808080
+        # Works without inter-byte carries because 15*qscale + qzero <= 255 by construction.
+        # The qzero broadcast is computed HERE (after the weight buffer_load has been issued)
+        # so that the qzero load latency overlaps with the weight load + unpack, avoiding
+        # premature s_waitcnt vmcnt(0) stalls.
+        if uint4_qs is not None:
+            c_sign_flip = arith.constant(0x80808080, type=ir.IntegerType.get_signless(32))
+            c_8 = arith.constant(8, type=ir.IntegerType.get_signless(32))
+            c_16 = arith.constant(16, type=ir.IntegerType.get_signless(32))
+            qz1 = uint4_qz_bcast | (uint4_qz_bcast << c_8)
+            qz_bc = qz1 | (qz1 << c_16)
+            even = ((even * uint4_qs) + qz_bc) ^ c_sign_flip
+            odd = ((odd * uint4_qs) + qz_bc) ^ c_sign_flip
 
         vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
         v2 = vector.from_elements(vec2_i32, [even, odd])

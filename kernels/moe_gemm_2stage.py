@@ -66,15 +66,18 @@ def compile_moe_gemm1(
         quant scales (used to emulate MoE smoothquant behavior where each (token,slot)->expert route can
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
+      - "uint4": W4A8 zero-point path: X is int8, W is packed uint4 (2 values per byte) with
+        per-block qscale/qzero dequant to int8 in-kernel
     """
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    if in_dtype not in _valid_dtypes:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
@@ -90,11 +93,15 @@ def compile_moe_gemm1(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
     is_int4 = in_dtype == "int4"
-    # INT4 here means W4A8: X is int8, W is packed int4 and unpacked to int8 in-kernel.
-    is_int8 = (in_dtype == "int8") or is_int4
+    is_uint4 = in_dtype == "uint4"
+    is_w4 = is_int4 or is_uint4
+    # INT4/UINT4 means W4A8: X is int8, W is packed 4-bit and dequantized to int8 in-kernel.
+    is_int8 = (in_dtype == "int8") or is_w4
     x_is_token_slot = in_dtype == "int8smooth"
     # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
     is_int8 = is_int8 or x_is_token_slot
+    # UINT4 per-block dequant block size (number of K elements per qscale/qzero value).
+    uint4_scale_block_k = 64
 
     mfma_i32_k32 = None
     if is_int8:
@@ -110,8 +117,12 @@ def compile_moe_gemm1(
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
     size_x = DYN
-    # W is packed int4 for W4A8: 2 values per byte.
-    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_int4 else (experts * (2 * inter_dim) * model_dim)
+    # W is packed 4-bit for W4A8: 2 values per byte.
+    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_w4 else (experts * (2 * inter_dim) * model_dim)
+    # UINT4 qscale/qzero: [experts * 2*inter_dim, model_dim // uint4_scale_block_k] stored as i32.
+    num_k_blocks_stage1 = model_dim // uint4_scale_block_k if is_uint4 else 0
+    size_qscale_w = experts * (2 * inter_dim) * num_k_blocks_stage1 if is_uint4 else 0
+    size_qzero_w = size_qscale_w
     size_sorted = DYN
     size_expert_ids = DYN
 
@@ -176,6 +187,8 @@ def compile_moe_gemm1(
             arg_w: lambda: T.memref(DYN, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w if is_uint4 else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w if is_uint4 else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
@@ -229,7 +242,7 @@ def compile_moe_gemm1(
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
-            kpack_bytes = 8 if is_int4 else 16
+            kpack_bytes = 8 if is_w4 else 16
             b_layout = make_preshuffle_b_layout(
                 flir, arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
@@ -320,6 +333,13 @@ def compile_moe_gemm1(
                         arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
                     )
                     sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+
+                # UINT4 per-block qscale/qzero buffer resources.
+                qs_rsrc = None
+                qz_rsrc = None
+                if is_uint4:
+                    qs_rsrc = buffer_ops.create_buffer_resource(arg_qscale_w, max_size=False)
+                    qz_rsrc = buffer_ops.create_buffer_resource(arg_qzero_w, max_size=False)
 
                 sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
                 sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
@@ -502,6 +522,7 @@ def compile_moe_gemm1(
                 n_intra_up = []
                 n_blk_up = []
                 col_g_list = []
+                col_u_list = []
                 inter_idx = arith.constant(inter_dim, index=True)
                 # layout for (row -> (blk,intra)) where intra is 0..15
                 c_n0 = c_n_total / arith.index(16)
@@ -512,6 +533,7 @@ def compile_moe_gemm1(
                     col_g = col_g + offset
                     col_g = col_g + lane_mod_16
                     col_g_list.append(col_g)
+                    col_u_list.append(col_g + inter_idx)
     
                     row_gate = expert_off_idx + col_g
                     row_up = row_gate + inter_idx
@@ -529,7 +551,22 @@ def compile_moe_gemm1(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
-                def load_b_pack(base_k, ki_step, ni, blk_list, intra_list):
+                c_num_k_blocks = arith.constant(num_k_blocks_stage1, index=True) if is_uint4 else None
+
+                def _load_uint4_qs_qz(base_k, ku, ni, col_list):
+                    """Issue qscale/qzero buffer_loads for one (ku, ni) pair.
+
+                    Returns raw (qs, qz) values — broadcast is deferred to
+                    load_b_pack_k32 to avoid premature s_waitcnt vmcnt(0).
+                    """
+                    k_block = base_k / arith.constant(uint4_scale_block_k, index=True) + arith.constant(ku, index=True)
+                    n_global = expert_off_idx + col_list[ni]
+                    qs_idx = k_block * c_n_total + n_global
+                    qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    return qs_val, qz_val
+
+                def load_b_pack(base_k, ki_step, ni, blk_list, intra_list, qs_val=None, qz_bcast=None):
                     return load_b_pack_k32(
                         buffer_ops,
                         flir,
@@ -542,28 +579,43 @@ def compile_moe_gemm1(
                         ki_step=ki_step,
                         n_blk=blk_list[ni],
                         n_intra=intra_list[ni],
-                        lane_div_16=lane_div_16,  # 0..3
+                        lane_div_16=lane_div_16,
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
                         elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
+                        unpack_uint4=is_uint4,
+                        uint4_qs=qs_val,
+                        uint4_qz_bcast=qz_bcast,
                     )
     
-                def load_b_tile(base_k, blk_list, intra_list):
+                def load_b_tile(base_k, blk_list, intra_list, col_list):
                     """Prefetch the entire per-thread B tile (gmem -> regs) for a given K base.
-    
-                    Returns a list of length `k_unroll`, where each entry is a tuple:
-                      (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
+
+                    For UINT4: pre-loads qscale/qzero per (ku, ni) so that:
+                    - loads are co-issued with weight loads (latency hidden by pipeline)
+                    - ki_step=0 and ki_step=1 share the same qscale/qzero (no redundant loads)
+                    - qzero broadcast is computed once per (ku, ni)
                     """
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
+                        # Pre-load qscale/qzero for all ni at this ku
+                        qs_list = []
+                        qz_list = []
+                        if is_uint4:
+                            for ni in range_constexpr(num_acc_n):
+                                qs, qz = _load_uint4_qs_qz(base_k, ku, ni, col_list)
+                                qs_list.append(qs)
+                                qz_list.append(qz)
                         packs0 = []
                         packs1 = []
                         for ni in range_constexpr(num_acc_n):
                             ki0 = (ku * 2) + 0
                             ki1 = (ku * 2) + 1
-                            b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list)
-                            b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list)
+                            qs = qs_list[ni] if is_uint4 else None
+                            qz = qz_list[ni] if is_uint4 else None
+                            b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list, qs_val=qs, qz_bcast=qz)
+                            b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list, qs_val=qs, qz_bcast=qz)
                             packs0.append(b0)
                             packs1.append(b1)
                         b_tile.append((packs0, packs1))
@@ -776,8 +828,8 @@ def compile_moe_gemm1(
                 # Prologue: prefetch tile0, store to LDS(cur), sync.
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
-                b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate)
-                b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up)
+                b_gate_cur = load_b_tile(k0, n_blk_gate, n_intra_gate, col_g_list)
+                b_up_cur = load_b_tile(k0, n_blk_up, n_intra_up, col_u_list)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
     
@@ -797,8 +849,8 @@ def compile_moe_gemm1(
                     # ---- stage 0: prefetch+store ping, compute pong ----
                     next_k1 = k_iv + tile_k
                     x_regs_ping = load_x_tile(next_k1)
-                    b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate)
-                    b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up)
+                    b_gate_ping = load_b_tile(next_k1, n_blk_gate, n_intra_gate, col_g_list)
+                    b_up_ping = load_b_tile(next_k1, n_blk_up, n_intra_up, col_u_list)
     
                     acc_gate, acc_up, _ = compute_tile(
                         acc_gate,
@@ -819,8 +871,8 @@ def compile_moe_gemm1(
                     # ---- stage 1: prefetch+store pong, compute ping ----
                     next_k2 = k_iv + c2_tile_k
                     x_regs_pong = load_x_tile(next_k2)
-                    b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate)
-                    b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up)
+                    b_gate_next = load_b_tile(next_k2, n_blk_gate, n_intra_gate, col_g_list)
+                    b_up_next = load_b_tile(next_k2, n_blk_up, n_intra_up, col_u_list)
     
                     acc_gate, acc_up, _ = compute_tile(
                         acc_gate,
@@ -845,8 +897,8 @@ def compile_moe_gemm1(
                 # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
                 k_tail1 = k_in - tile_k
                 x_regs_ping = load_x_tile(k_tail1)
-                b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
-                b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up)
+                b_gate_ping = load_b_tile(k_tail1, n_blk_gate, n_intra_gate, col_g_list)
+                b_up_ping = load_b_tile(k_tail1, n_blk_up, n_intra_up, col_u_list)
     
                 acc_gate, acc_up, _ = compute_tile(
                     acc_gate,
@@ -1128,6 +1180,8 @@ def compile_moe_gemm1(
             arg_w: lambda: T.memref(DYN, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w if is_uint4 else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w if is_uint4 else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
@@ -1155,6 +1209,8 @@ def compile_moe_gemm1(
                     arg_w,
                     arg_scale_x,
                     arg_scale_w,
+                    arg_qscale_w,
+                    arg_qzero_w,
                     arg_sorted_token_ids,
                     arg_expert_ids,
                     arg_sorted_weights,
@@ -1198,6 +1254,8 @@ def compile_moe_gemm2(
       - "fp16": A2/W are fp16
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
+      - "uint4": W4A8 zero-point path: A2 is int8, W is packed uint4 with per-block
+        qscale/qzero dequant to int8 in-kernel
 
     Stage2 output supports:
       - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
@@ -1210,9 +1268,10 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    if in_dtype not in _valid_dtypes:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2 if is_f16 else 1
@@ -1224,8 +1283,11 @@ def compile_moe_gemm2(
     if (not bool(accumulate)) and out_is_f32:
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
-    # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
-    is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
+    is_uint4 = in_dtype == "uint4"
+    is_w4 = is_int4 or is_uint4
+    # INT4/UINT4 means W4A8: A2 is int8, W is packed 4-bit and dequantized to int8 in-kernel.
+    is_int8 = (in_dtype in ("int8", "int8smooth")) or is_w4
+    uint4_scale_block_k = 64
 
     mfma_i32_k32 = None
     if is_int8:
@@ -1244,8 +1306,12 @@ def compile_moe_gemm2(
     size_sorted = DYN
     size_expert_ids_shape = DYN
     size_scale_x = DYN
-    # W is packed int4 for W4A8: 2 values per byte.
-    size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
+    # W is packed 4-bit for W4A8: 2 values per byte.
+    size_w = (experts * model_dim * inter_dim) // 2 if is_w4 else (experts * model_dim * inter_dim)
+    # UINT4 qscale/qzero: [experts * model_dim, inter_dim // uint4_scale_block_k] stored as i32.
+    num_k_blocks_stage2 = inter_dim // uint4_scale_block_k if is_uint4 else 0
+    size_qscale_w2 = experts * model_dim * num_k_blocks_stage2 if is_uint4 else 0
+    size_qzero_w2 = size_qscale_w2
 
     total_threads = 256
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -1333,6 +1399,8 @@ def compile_moe_gemm2(
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_uint4 else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_uint4 else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
@@ -1343,7 +1411,7 @@ def compile_moe_gemm2(
             size_expert_ids_in: lambda: T.index(),
         ):
             x_elem = I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
-            # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
+            # For int4/uint4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
             w_elem = I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
             f16 = I.f16
             f32 = I.f32
@@ -1375,7 +1443,7 @@ def compile_moe_gemm2(
 
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.constant(experts * model_dim, index=True)
-            kpack_bytes = 8 if is_int4 else 16
+            kpack_bytes = 8 if is_w4 else 16
             b_layout = make_preshuffle_b_layout(
                 flir, arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
@@ -1461,6 +1529,13 @@ def compile_moe_gemm2(
                 )
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
+
+            # UINT4 per-block qscale/qzero buffer resources.
+            qs_rsrc = None
+            qz_rsrc = None
+            if is_uint4:
+                qs_rsrc = buffer_ops.create_buffer_resource(arg_qscale_w, max_size=False)
+                qz_rsrc = buffer_ops.create_buffer_resource(arg_qzero_w, max_size=False)
 
             # sorted_token_ids / sorted_weights: [blocks*tile_m] (CK-style padded length)
             sorted_nbytes_idx = (
@@ -1668,7 +1743,17 @@ def compile_moe_gemm2(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) ---
-                def load_b_pack(base_k, ki_step, ni):
+                c_num_k_blocks_s2 = arith.constant(num_k_blocks_stage2, index=True) if is_uint4 else None
+
+                def _load_uint4_qs_qz_s2(base_k, ku, ni):
+                    k_block = base_k / arith.constant(uint4_scale_block_k, index=True) + arith.constant(ku, index=True)
+                    n_global = expert_off_idx + col_g_list[ni]
+                    qs_idx = k_block * c_n_total + n_global
+                    qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    return qs_val, qz_val
+
+                def load_b_pack(base_k, ki_step, ni, qs_val=None, qz_bcast=None):
                     return load_b_pack_k32(
                         buffer_ops,
                         flir,
@@ -1681,28 +1766,39 @@ def compile_moe_gemm2(
                         ki_step=ki_step,
                         n_blk=n_blk_list[ni],
                         n_intra=n_intra_list[ni],
-                        lane_div_16=lane_div_16,  # 0..3
+                        lane_div_16=lane_div_16,
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
                         elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
+                        unpack_uint4=is_uint4,
+                        uint4_qs=qs_val,
+                        uint4_qz_bcast=qz_bcast,
                     )
     
                 def load_b_tile(base_k):
                     """Prefetch the entire per-thread B tile (gmem -> regs) for a given K base.
-    
-                    Returns a list of length `k_unroll`, where each entry is a tuple:
-                      (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
+
+                    For UINT4: pre-loads qscale/qzero per (ku, ni) alongside weight loads.
                     """
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
+                        qs_list = []
+                        qz_list = []
+                        if is_uint4:
+                            for ni in range_constexpr(num_acc_n):
+                                qs, qz = _load_uint4_qs_qz_s2(base_k, ku, ni)
+                                qs_list.append(qs)
+                                qz_list.append(qz)
                         packs0 = []
                         packs1 = []
                         for ni in range_constexpr(num_acc_n):
                             ki0 = (ku * 2) + 0
                             ki1 = (ku * 2) + 1
-                            b0 = load_b_pack(base_k, ki0, ni)
-                            b1 = load_b_pack(base_k, ki1, ni)
+                            qs = qs_list[ni] if is_uint4 else None
+                            qz = qz_list[ni] if is_uint4 else None
+                            b0 = load_b_pack(base_k, ki0, ni, qs_val=qs, qz_bcast=qz)
+                            b1 = load_b_pack(base_k, ki1, ni, qs_val=qs, qz_bcast=qz)
                             packs0.append(b0)
                             packs1.append(b1)
                         b_tile.append((packs0, packs1))
@@ -2292,6 +2388,8 @@ def compile_moe_gemm2(
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_uint4 else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_uint4 else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
@@ -2317,6 +2415,8 @@ def compile_moe_gemm2(
                     arg_w,
                     arg_scale_x,
                     arg_scale_w,
+                    arg_qscale_w,
+                    arg_qzero_w,
                     arg_sorted_token_ids,
                     arg_expert_ids,
                     arg_sorted_weights,
@@ -2760,6 +2860,8 @@ class _MoeGemm2ReduceWrapper:
         arg_w,
         arg_scale_x,
         arg_scale_w,
+        arg_qscale_w,
+        arg_qzero_w,
         arg_sorted_token_ids,
         arg_expert_ids,
         arg_sorted_weights,
@@ -2768,8 +2870,8 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
-        valid_mask,
         stream_ptr,
+        valid_mask=None,
     ):
         """Execute GEMM2 + reduce.
 
@@ -2781,6 +2883,7 @@ class _MoeGemm2ReduceWrapper:
         self._gemm2_exe(
             intermediate.view(-1),
             arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_qscale_w, arg_qzero_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
             stream_ptr,

@@ -51,6 +51,61 @@ def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch
     out[:, 3] = u[:, 3] | (u[:, 7] << 4)
     return out.view(-1).to(torch.int8)
 
+
+def _uint4_quantize_and_pack(w_int8_shuffled: torch.Tensor, K: int, scale_block_k: int = 64):
+    """Quantize preshuffled INT8 weights to UINT4 with per-block qscale/qzero, then pack.
+
+    The dequant formula (in-kernel): int8 = (uint4 * qscale + qzero) ^ 0x80
+
+    Args:
+        w_int8_shuffled: [N, K] INT8 tensor (already preshuffled)
+        K: original K dimension (before shuffle)
+        scale_block_k: number of K elements per qscale/qzero block (default 64)
+
+    Returns:
+        w_packed: packed UINT4 bytes (flattened)
+        qscale: [K // scale_block_k, N] INT32 tensor, K-major for coalesced GPU access
+        qzero: [K // scale_block_k, N] INT32 tensor, K-major for coalesced GPU access
+    """
+    N = w_int8_shuffled.shape[0]
+    assert K % scale_block_k == 0
+    num_blocks = K // scale_block_k
+
+    # Convert signed INT8 → unsigned UINT8: u8 = int8 XOR 0x80
+    w_u8 = (w_int8_shuffled.to(torch.int16) + 128).to(torch.float32)
+    # Reshape to blocks for per-block min/max computation.
+    # NOTE: after preshuffle, consecutive K elements in storage map to consecutive
+    # K elements in the original matrix within each KPack. We compute min/max over
+    # scale_block_k contiguous storage elements, which is correct for the kernel's
+    # per-k0-block addressing (one k0 step = 64 K elements).
+    w_blocks = w_u8.reshape(N, num_blocks, scale_block_k)
+
+    block_min = w_blocks.amin(dim=-1)  # [N, num_blocks]
+    block_max = w_blocks.amax(dim=-1)
+
+    # Compute qscale and qzero (UINT8 range)
+    scale_f = (block_max - block_min) / 15.0
+    scale_f = scale_f.clamp(min=1.0)
+    qscale = scale_f.round().clamp(1, 255).to(torch.int32)
+    qzero = block_min.round().clamp(0, 255).to(torch.int32)
+
+    # Quantize: uint4 = round((u8 - qzero) / qscale), clamped to [0, 15]
+    qs_f = qscale.to(torch.float32).unsqueeze(-1)
+    qz_f = qzero.to(torch.float32).unsqueeze(-1)
+    w_q = ((w_blocks - qz_f) / qs_f).round().clamp(0, 15).to(torch.uint8)
+    w_q = w_q.reshape(N, K)
+
+    # Pack UINT4 pairs into bytes (same packing as INT4)
+    w_packed = _pack_shuffled_int8_to_packed_int4_no_perm(w_q.to(torch.int8))
+
+    # Transpose to K-major [K/block, N] for coalesced GPU access:
+    # adjacent lanes (differing in N) access consecutive i32 elements.
+    qscale = qscale.t().contiguous()  # [N, K/block] → [K/block, N]
+    qzero = qzero.t().contiguous()
+
+    return w_packed, qscale, qzero
+
+
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -360,12 +415,15 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    if in_dtype not in _valid_dtypes:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_uint4 = in_dtype == "uint4"
+    is_w4 = is_int4 or is_uint4
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "uint4")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
@@ -406,6 +464,11 @@ def run_moe_stage1(
         # exercise the API rather than implementing the exact SQ calibration workflow).
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "uint4":
+        # W4A8 zero-point: X is int8, W is uint4 packed with per-block qscale/qzero.
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
@@ -427,10 +490,22 @@ def run_moe_stage1(
         if is_int8smooth
         else x_q.contiguous().view(tokens, model_dim)
     )
-    w_kernel = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
-    ).contiguous()
-    if not is_int4:
+
+    # UINT4 quantization with per-block qscale/qzero
+    qscale_w1_1d = torch.empty((0,), device=device, dtype=torch.int32)
+    qzero_w1_1d = torch.empty((0,), device=device, dtype=torch.int32)
+    if is_uint4:
+        w_packed, qscale_w1, qzero_w1 = _uint4_quantize_and_pack(
+            w1_shuffled_flat, K=model_dim, scale_block_k=64
+        )
+        w_kernel = w_packed.contiguous()
+        qscale_w1_1d = qscale_w1.view(-1).contiguous()
+        qzero_w1_1d = qzero_w1.view(-1).contiguous()
+    elif is_int4:
+        w_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat).contiguous()
+    else:
+        w_kernel = w1_shuffled_flat.contiguous()
+    if not is_w4:
         w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -461,7 +536,7 @@ def run_moe_stage1(
         use_cshuffle_epilog=False,
     )
 
-    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+    def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
         exe(
             o,
@@ -469,6 +544,8 @@ def run_moe_stage1(
             w,
             sx,
             sw,
+            qs,
+            qz,
             st,
             eids,
             sw_sorted,
@@ -487,6 +564,8 @@ def run_moe_stage1(
         w_kernel,
         scale_x_1d,
         scale_w1_1d,
+        qscale_w1_1d,
+        qzero_w1_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -515,8 +594,8 @@ def run_moe_stage1(
             doweight_stage1=doweight_stage1,
         )
 
-        rtol = 0.5 if is_int4 else 0.25
-        atol = 0.5 if is_int4 else 0.25
+        rtol = 0.5 if is_w4 else 0.25
+        atol = 0.5 if is_w4 else 0.25
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -526,7 +605,7 @@ def run_moe_stage1(
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * 1  # x int8/fp8
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
+    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_w4 else 1)  # w (packed for int4/uint4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
@@ -749,12 +828,15 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    _valid_dtypes2 = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    if in_dtype not in _valid_dtypes2:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes2}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
+    is_uint4 = in_dtype == "uint4"
+    is_w4 = is_int4 or is_uint4
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "uint4")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
@@ -774,8 +856,11 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
     elif in_dtype == "int8smooth":
-        # Stage2 uses token-slot activations (A2) already, so we keep the same W8A8 kernel path.
-        # We optionally apply a per-expert smooth scale to A2 *before* quantization below.
+        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "uint4":
+        # W4A8 zero-point: A2 is int8, W2 is uint4 packed with per-block qscale/qzero.
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
@@ -828,14 +913,24 @@ def run_moe_stage2(
     w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
     scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
-    w2_kernel = w2_shuffled_flat
-    if is_int4:
-        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
+    # For W4A8, pack preshuffled int8 weights into packed 4-bit bytes.
+    qscale_w2_1d = torch.empty((0,), device=device, dtype=torch.int32)
+    qzero_w2_1d = torch.empty((0,), device=device, dtype=torch.int32)
+    if is_uint4:
+        w2_packed, qscale_w2, qzero_w2 = _uint4_quantize_and_pack(
+            w2_shuffled_flat, K=inter_dim, scale_block_k=64
+        )
+        w2_kernel = w2_packed.contiguous()
+        qscale_w2_1d = qscale_w2.view(-1).contiguous()
+        qzero_w2_1d = qzero_w2.view(-1).contiguous()
+    elif is_int4:
+        w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat).contiguous()
+    else:
+        w2_kernel = w2_shuffled_flat.contiguous()
 
     w2_flat = w2_kernel.contiguous().view(-1)
     w2_kernel = w2_flat
-    if not is_int4:
+    if not is_w4:
         w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -870,16 +965,16 @@ def run_moe_stage2(
         doweight_stage2=bool(doweight_stage2),
     )
 
-    def launch(o, x, w, sx, sw, st, eids, sw_sorted):
+    def launch(o, x, w, sx, sw, qs, qz, st, eids, sw_sorted):
         stream_ptr = torch.cuda.current_stream().cuda_stream
-        # For non-EP mode tests, pass None for valid_mask
-        valid_mask = None
         exe(
             o,
             x,
             w,
             sx,
             sw,
+            qs,
+            qz,
             st,
             eids,
             sw_sorted,
@@ -888,7 +983,6 @@ def run_moe_stage2(
             model_dim,
             inter_dim,
             int(blocks),
-            valid_mask,
             stream_ptr,
         )
  
@@ -902,6 +996,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
+        qscale_w2_1d,
+        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -919,6 +1015,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
+        qscale_w2_1d,
+        qzero_w2_1d,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -944,7 +1042,7 @@ def run_moe_stage2(
 
     bytes_moved = 0
     bytes_moved += tokens * topk * inter_dim * 1  # a2 fp8 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_w4 else 1)  # w2 (packed for int4/uint4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
@@ -1060,7 +1158,7 @@ def run_moe_stage2(
         pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L"),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4", "uint4"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 def test_moe_gemm_2stage(
     tokens: int,
@@ -1560,10 +1658,11 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "all"],
-        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / all (default: all). "
+        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "uint4", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / uint4 / all (default: all). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
-        "int4 means W4A8: A int8, W packed int4.",
+        "int4 means W4A8: A int8, W packed int4. "
+        "uint4 means W4A8 with per-block qscale/qzero zero-point dequant.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
