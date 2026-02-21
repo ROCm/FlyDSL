@@ -2135,9 +2135,13 @@ def compile_moe_gemm2(
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
                             if tw_pf is not None:
-                                tw = tw_pf[tw_idx]
+                                tw = arith.select(ts_ok, tw_pf[tw_idx], arith.f32(0.0))
                             else:
-                                tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
+                                tw = arith.select(
+                                    ts_ok,
+                                    buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32),
+                                    arith.f32(0.0),
+                                )
 
                         idx0 = t2_safe * model_i32  # i32 element index base (safe for sentinel rows)
 
