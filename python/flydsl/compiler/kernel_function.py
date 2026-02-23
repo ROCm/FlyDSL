@@ -294,8 +294,8 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
-    def __init__(self, func: Callable, some_args=None):
-        self._func = ASTRewriter.transform(func)
+    def __init__(self, func: Callable, some_args=None, rewrite_ast=True):
+        self._func = ASTRewriter.transform(func) if rewrite_ast else func
         self._some_args = some_args
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
@@ -379,7 +379,7 @@ class KernelFunction:
 # =============================================================================
 
 
-def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction:
+def kernel(func: Optional[Callable] = None, *, some_args=None, rewrite_ast=True) -> KernelFunction:
     """Decorator for GPU kernel functions.
 
     Usage:
@@ -393,16 +393,15 @@ def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction
         def my_kernel(a: Tensor):
             ...
 
-    The decorated function can be called inside a @jit function to
-    define the kernel, then .launch(config) is called to emit the launch op.
-
     Args:
         func: Function to decorate
         some_args: Optional kernel-specific arguments
+        rewrite_ast: If False, skip the AST rewriter (for kernels that
+            manage their own control flow with Python-level if/else).
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args)
-    return KernelFunction(func, some_args=some_args)
+        return lambda f: KernelFunction(f, some_args=some_args, rewrite_ast=rewrite_ast)
+    return KernelFunction(func, some_args=some_args, rewrite_ast=rewrite_ast)

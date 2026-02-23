@@ -258,21 +258,31 @@ def _invert_op(self, *, loc=None, ip=None):
     return arith.xori(self, arith.constant(self.type, -1))
 
 
-@ir.register_value_caster(ir.Float4E2M1FNType.static_typeid)
-@ir.register_value_caster(ir.Float6E2M3FNType.static_typeid)
-@ir.register_value_caster(ir.Float6E3M2FNType.static_typeid)
-@ir.register_value_caster(ir.Float8E4M3FNType.static_typeid)
-@ir.register_value_caster(ir.Float8E4M3B11FNUZType.static_typeid)
-@ir.register_value_caster(ir.Float8E5M2Type.static_typeid)
-@ir.register_value_caster(ir.Float8E4M3Type.static_typeid)
-@ir.register_value_caster(ir.Float8E8M0FNUType.static_typeid)
-@ir.register_value_caster(ir.BF16Type.static_typeid)
-@ir.register_value_caster(ir.F16Type.static_typeid)
-@ir.register_value_caster(ir.F32Type.static_typeid)
-@ir.register_value_caster(ir.F64Type.static_typeid)
-@ir.register_value_caster(ir.IntegerType.static_typeid)
-@ir.register_value_caster(ir.IndexType.static_typeid)
-@ir.register_value_caster(ir.VectorType.static_typeid)
+def _safe_register(typeid):
+    """Register value caster, silently skipping if already registered."""
+    def decorator(cls):
+        try:
+            ir.register_value_caster(typeid)(cls)
+        except RuntimeError:
+            pass
+        return cls
+    return decorator
+
+@_safe_register(ir.Float4E2M1FNType.static_typeid)
+@_safe_register(ir.Float6E2M3FNType.static_typeid)
+@_safe_register(ir.Float6E3M2FNType.static_typeid)
+@_safe_register(ir.Float8E4M3FNType.static_typeid)
+@_safe_register(ir.Float8E4M3B11FNUZType.static_typeid)
+@_safe_register(ir.Float8E5M2Type.static_typeid)
+@_safe_register(ir.Float8E4M3Type.static_typeid)
+@_safe_register(ir.Float8E8M0FNUType.static_typeid)
+@_safe_register(ir.BF16Type.static_typeid)
+@_safe_register(ir.F16Type.static_typeid)
+@_safe_register(ir.F32Type.static_typeid)
+@_safe_register(ir.F64Type.static_typeid)
+@_safe_register(ir.IntegerType.static_typeid)
+@_safe_register(ir.IndexType.static_typeid)
+@_safe_register(ir.VectorType.static_typeid)
 class ArithValue(ir.Value):
     def __init__(self, v, signed=None, *, loc=None, ip=None):
         super().__init__(v)

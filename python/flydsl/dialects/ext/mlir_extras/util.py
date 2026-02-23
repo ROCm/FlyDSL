@@ -1,0 +1,526 @@
+import contextlib
+import ctypes
+import inspect
+import platform
+import re
+import sys
+import warnings
+from dataclasses import dataclass
+from functools import wraps
+from pathlib import Path
+from typing import Callable, List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+
+from .meta import op_region_builder
+from ..extras import types as T
+from ..ir import (
+    Block,
+    Context,
+    F32Type,
+    F64Type,
+    InsertionPoint,
+    IntegerType,
+    Location,
+    MemRefType,
+    Module,
+    OpView,
+    Operation,
+    RankedTensorType,
+    SymbolTable,
+    Type,
+    Value,
+    VectorType,
+    _GlobalDebug,
+)
+
+try:
+    from ..ir import TypeID
+except ImportError:
+    warnings.warn(
+        f"TypeID not supported by host bindings; value casting won't work correctly"
+    )
+    TypeID = object
+
+
+def is_relative_to(self, other):
+    return other == self or other in self.parents
+
+
+def get_user_code_loc(user_base: Optional[Path] = None):
+    from .. import extras
+    import importlib
+    import linecache
+
+    if Context.current is None:
+        return
+
+    mlir_extras_root_path = Path(extras.__path__[0])
+
+    def _pkg_root(pkg_name: str) -> Optional[Path]:
+        try:
+            m = importlib.import_module(pkg_name)
+            p = getattr(m, "__file__", None)
+            if not p:
+                return None
+            return Path(p).resolve().parent
+        except Exception:
+            return None
+
+    skip_roots = [mlir_extras_root_path, Path(sys.prefix)]
+
+    prev_frame = inspect.currentframe().f_back
+    # Back-compat: user_base historically was a *file* path used to skip frames in
+    # that exact file. Keep accepting it.
+    user_base_file = Path(user_base).resolve() if user_base is not None else None
+
+    def _should_skip(filename: str) -> bool:
+        try:
+            p = Path(filename).resolve()
+        except Exception:
+            return True
+        if user_base_file is not None and p == user_base_file:
+            return True
+        return any(is_relative_to(p, r) for r in skip_roots)
+
+    # Collect candidate "user" frames and prefer a non-<module> frame when available.
+    candidates = []
+    while prev_frame:
+        if not _should_skip(prev_frame.f_code.co_filename):
+            candidates.append(prev_frame)
+        prev_frame = prev_frame.f_back
+
+    if not candidates:
+        return Location.unknown()
+
+    best = None
+
+    # Prefer a frame that appears to be a direct DSL call site in user code.
+    for f in candidates:
+        try:
+            if f.f_code.co_name == "<module>":
+                continue
+            filename = f.f_code.co_filename
+            lineno = int(getattr(f, "f_lineno", 0) or 0)
+            if not filename or lineno <= 0:
+                continue
+            src = (linecache.getline(filename, lineno) or "").strip()
+            if not src:
+                continue
+            if any(tok in src for tok in ("flir.", "arith.", "scf.", "gpu.", "memref.", "vector.")):
+                best = f
+                break
+        except Exception:
+            continue
+
+    # Fallback: first non-<module> user frame.
+    if best is None:
+        for f in candidates:
+            try:
+                if f.f_code.co_name != "<module>":
+                    best = f
+                    break
+            except Exception:
+                continue
+    if best is None:
+        best = candidates[0]
+
+    frame_info = inspect.getframeinfo(best)
+    if sys.version_info.minor >= 11:
+        col = 0
+        line = frame_info.lineno
+        try:
+            pos = getattr(frame_info, "positions", None)
+            if pos is not None:
+                line = int(getattr(pos, "lineno", line) or line)
+                col = int(getattr(pos, "col_offset", 0) or 0)
+        except Exception:
+            pass
+        return Location.file(frame_info.filename, line, col)
+    else:
+        return Location.file(frame_info.filename, getattr(best, "f_lineno", frame_info.lineno), col=0)
+
+
+@contextlib.contextmanager
+def enable_debug():
+    _GlobalDebug.flag = True
+    yield
+    _GlobalDebug.flag = False
+
+
+def shlib_ext():
+    if platform.system() == "Darwin":
+        shlib_ext = "dylib"
+    elif platform.system() in {"Linux", "Emscripten"}:
+        shlib_ext = "so"
+    elif platform.system() == "Windows":
+        shlib_ext = "lib"
+    else:
+        raise NotImplementedError(f"unknown platform {platform.system()}")
+
+    return shlib_ext
+
+
+def shlib_prefix():
+    if platform.system() in {"Darwin", "Linux", "Emscripten"}:
+        shlib_pref = "lib"
+    elif platform.system() == "Windows":
+        shlib_pref = ""
+    else:
+        raise NotImplementedError(f"unknown platform {platform.system()}")
+
+    return shlib_pref
+
+
+def find_ops(op, pred: Callable[[OpView, Operation, Module], bool], single=False):
+    if isinstance(op, (OpView, Module)):
+        op = op.operation
+
+    matching = []
+
+    def find(op: Operation):
+        if single and len(matching):
+            return
+        for r in op.regions:
+            for b in r.blocks:
+                for o in b.operations:
+                    if pred(o):
+                        matching.append(o)
+                    find(o)
+
+    find(op)
+    if single and matching:
+        matching = matching[0]
+    return matching
+
+
+_np_dtype_to_mlir_type_ctor = {
+    np.int8: T.i8,
+    np.int16: T.i16,
+    np.int32: T.i32,
+    # windows
+    np.intc: T.i32,
+    np.int64: T.i64,
+    # is technically wrong i guess but numpy by default casts python scalars to this
+    # so to support passing lists of ints we map to index type
+    np.longlong: T.index,
+    np.uintp: T.index,
+    np.float16: T.f16,
+    np.float32: T.f32,
+    np.float64: T.f64,
+}
+
+_mlir_type_ctor_to_np_dtype = lambda: {
+    v: k for k, v in _np_dtype_to_mlir_type_ctor.items()
+}
+
+
+def np_dtype_to_mlir_type(np_dtype):
+    if typ := _np_dtype_to_mlir_type_ctor.get(np_dtype):
+        return typ()
+
+
+def mlir_type_to_np_dtype(mlir_type):
+    _mlir_type_to_np_dtype = {v(): k for k, v in _np_dtype_to_mlir_type_ctor.items()}
+    return _mlir_type_to_np_dtype.get(mlir_type)
+
+
+_mlir_type_to_ctype = {
+    T.bool: ctypes.c_bool,
+    T.i8: ctypes.c_byte,
+    T.i64: ctypes.c_int,
+    T.f32: ctypes.c_float,
+    T.f64: ctypes.c_double,
+}
+
+
+def mlir_type_to_ctype(mlir_type):
+    __mlir_type_to_ctype = {k(): v for k, v in _mlir_type_to_ctype.items()}
+    return _mlir_type_to_ctype.get(mlir_type)
+
+
+def infer_mlir_type(
+    py_val: Union[int, float, bool, np.ndarray], memref=False, vector=False
+) -> Union[IntegerType, F32Type, F64Type, RankedTensorType]:
+    """Infer MLIR type (`ir.Type`) from supported python values.
+
+    Note ints and floats are mapped to 64-bit types.
+
+    Args:
+      py_val: Python value that's either a numerical value or numpy array.
+
+    Returns:
+      MLIR type corresponding to py_val.
+    """
+    if isinstance(py_val, bool):
+        return T.bool()
+    elif isinstance(py_val, int):
+        if -(2**31) <= py_val < 2**31:
+            return T.i32()
+        elif 2**31 <= py_val < 2**32:
+            return T.ui32()
+        elif -(2**63) <= py_val < 2**63:
+            return T.i64()
+        elif 2**63 <= py_val < 2**64:
+            return T.ui64()
+        else:
+            raise RuntimeError(f"Nonrepresentable integer {py_val}.")
+    elif isinstance(py_val, float):
+        if (
+            abs(py_val) == float("inf")
+            or abs(py_val) == 0.0
+            or py_val != py_val  # NaN
+            or np.finfo(np.float32).min <= abs(py_val) <= np.finfo(np.float32).max
+        ):
+            return T.f32()
+        else:
+            return T.f64()
+    elif isinstance(py_val, np.ndarray):
+        dtype = np_dtype_to_mlir_type(py_val.dtype.type)
+        if memref:
+            return MemRefType.get(py_val.shape, dtype)
+        elif vector:
+            return VectorType.get(py_val.shape, dtype)
+        else:
+            return RankedTensorType.get(py_val.shape, dtype)
+    else:
+        raise NotImplementedError(
+            f"Unsupported Python value {py_val=} with type {type(py_val)}"
+        )
+
+
+def memref_type_to_np_dtype(memref_type):
+    _memref_type_to_np_dtype = {
+        T.memref(element_type=T.f16()): np.float16,
+        T.memref(element_type=T.f32()): np.float32,
+        T.memref(T.f64()): np.float64,
+        T.memref(element_type=T.bool()): np.bool_,
+        T.memref(T.i8()): np.int8,
+        T.memref(T.i32()): np.int32,
+        T.memref(T.i64()): np.int64,
+    }
+    return _memref_type_to_np_dtype.get(memref_type)
+
+
+def _get_previous_frame_idents(val, previous_frame):
+    return [
+        var_name
+        for var_name, var_val in previous_frame.f_locals.items()
+        if var_val is val
+    ]
+
+
+def _update_caller_vars(previous_frame, args: Sequence, replacements: Sequence):
+    """Update caller vars passed as args.
+
+    This function uses CPython API  to update the values
+    of the caller's args (not the caller of this function but the caller of caller of this function).
+    It does this by searching for a match in the caller's f_locals based on identity (A is A) and then
+    updating all corresponding values in the f_locals dict. Finally, it uses PyFrame_LocalsToFast to signal
+    to the CPython runtime that an update has been made to f_locals.
+
+    Args:
+      previous_frame: The frame in which vars will be updated.
+      args: The args to the callee.
+      replacements: The values that should replace the values of the vars in the caller.
+    """
+
+    if len(args) != len(replacements):
+        raise ValueError(f"updates must be 1-1: {args=} {replacements=}")
+    # find the name of the iter args in the previous frame
+    var_names = [_get_previous_frame_idents(arg, previous_frame) for arg in args]
+    for i, var_names in enumerate(var_names):
+        for var_name in var_names:
+            previous_frame.f_locals[var_name] = replacements[i]
+            # signal to update
+            # for some reason you can only update one at a time?
+            ctypes.pythonapi.PyFrame_LocalsToFast(
+                ctypes.py_object(previous_frame), ctypes.c_int(1)
+            )
+
+
+def make_maybe_no_args_decorator(decorator):
+    """
+    a decorator decorator, allowing the decorator to be used as:
+    @decorator(with, arguments, and=kwargs)
+    or
+    @decorator
+    """
+
+    @wraps(decorator)
+    def new_dec(*args, **kwargs):
+        if len(args) == 1 and len(kwargs) == 0 and callable(args[0]):
+            # actual decorated function
+            return decorator(args[0])
+        else:
+            # decorator arguments
+            return lambda realf: decorator(realf, *args, **kwargs)
+
+    return new_dec
+
+
+@dataclass
+class Successor:
+    op: Union[OpView, Operation]
+    operands: List[Value]
+    block: Block
+    pos: int
+
+    def __enter__(self):
+        self.bb_ctx_manager = bb(self)
+        return self.bb_ctx_manager.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.bb_ctx_manager.__exit__(exc_type, exc_val, exc_tb)
+
+
+@contextlib.contextmanager
+def bb(*preds: Tuple[Union[Successor, OpView]]):
+    current_ip = InsertionPoint.current
+    op = current_ip.block.owner
+    op_region = op.regions[0]
+    args = []
+    if len(preds):
+        if isinstance(preds[0], (OpView, Successor)):
+            args = preds[0].operands
+        else:
+            raise NotImplementedError(f"{preds[0]=} not supported.")
+    arg_locs = list(filter(None, [get_user_code_loc()] * len(args)))
+    if len(arg_locs) == 0:
+        arg_locs = None
+    block = op_region.blocks.append(*[a.type for a in args], arg_locs=arg_locs)
+    for p in preds:
+        if isinstance(p, OpView):
+            p.operation.successors[0] = block
+        elif isinstance(p, Successor):
+            for i, b in enumerate(p.block.owner.successors):
+                if i == p.pos:
+                    p.op.successors[i] = block
+                    p.block = block
+                    break
+    with InsertionPoint(block):
+        yield block, list(block.arguments)
+
+
+def region_adder(terminator=None):
+    def wrapper(op_region_adder):
+        def region_adder_decorator(op, *args, **kwargs):
+            if isinstance(op, Value):
+                op = op.owner.opview
+            region = op_region_adder(op, *args, **kwargs)
+
+            return op_region_builder(op, region, terminator)
+
+        return region_adder_decorator
+
+    return wrapper
+
+
+class ModuleMeta(type):
+    def __new__(cls, name, bases, classdict, **kwargs):
+        ip = classdict.pop("ip")
+        new = super().__new__(cls, name, bases, classdict)
+        for k, v in classdict.items():
+            if callable(v):
+                v.qualname = name
+        ip.__exit__(None, None, None)
+        return new
+
+
+def find_parent_of_type(test_cb, operation=None):
+    if isinstance(operation, OpView):
+        operation = operation.operation
+    if operation is None:
+        parent = InsertionPoint.current.block.owner
+    else:
+        parent = operation.parent
+    for _ in range(10):
+        if test_cb(parent):
+            return parent
+        else:
+            parent = parent.parent
+
+    raise RuntimeError("Couldn't matching parent of type")
+
+
+def is_symbol_table(operation):
+    try:
+        SymbolTable(operation)
+        return True
+    except RuntimeError:
+        return False
+
+
+def _get_sym_name(previous_frame, check_func_call=None):
+    try:
+        with open(inspect.getfile(previous_frame)) as src_file:
+            src_lines = src_file.readlines()
+            src_line = src_lines[previous_frame.f_lineno - 1].strip()
+            ident, func_call = map(lambda x: x.strip(), src_line.split("=", maxsplit=1))
+            if check_func_call is not None:
+                assert re.match(check_func_call, func_call)
+        maybe_unique_sym_name = ident
+        symbol_table = SymbolTable(find_parent_of_type(is_symbol_table).operation)
+        while maybe_unique_sym_name in symbol_table:
+            if re.match(r".*_(\d+)$", maybe_unique_sym_name):
+                maybe_unique_sym_name = re.sub(
+                    r"(\d+)$", lambda m: str(int(m.group(0)) + 1), maybe_unique_sym_name
+                )
+            else:
+                maybe_unique_sym_name = f"{maybe_unique_sym_name}_0"
+        return maybe_unique_sym_name
+    except:
+        return None
+
+
+def _unpack_sizes_element_type(sizes_element_type):
+    if sizes_element_type[-1] is None:
+        sizes_element_type = sizes_element_type[:-1]
+    assert isinstance(sizes_element_type[-1], Type)
+    element_type = sizes_element_type[-1]
+    sizes = sizes_element_type[:-1]
+    return sizes, element_type
+
+
+class getitemproperty:
+    def __init__(self, f):
+        self.f = f
+        self.instance = None
+
+    def __get__(self, instance, _class):
+        self.instance = instance
+        return self
+
+    def __getitem__(self, item):
+        kwargs = {}
+        if len(item) > 2:
+            # not sure how but you don't need two backs here
+            previous_frame = inspect.currentframe().f_back
+            for kwarg in item[2:]:
+                k = _get_previous_frame_idents(kwarg, previous_frame)
+                assert len(k) == 1, f"{len(k)=}"
+                kwargs[k[0]] = kwarg
+            item = item[:2]
+
+        # f is not a bound method since it was decorated...
+        return self.f(self.instance, item, **kwargs)
+
+
+# stolen from https://web.archive.org/web/20220528202902/https://code.activestate.com/recipes/384122/
+class Infix:
+    def __init__(self, function):
+        self.function = function
+
+    def __rmatmul__(self, other):
+        def l(x, self=self, other=other):
+            return self.function(other, x, *self.args, **self.kwargs)
+
+        return Infix(l)
+
+    def __matmul__(self, other):
+        return self.function(other)
+
+    def __call__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        self.args = args
+        return self

@@ -23,6 +23,13 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
+
+# HandleLLVMOptions appends -Wl,-z,defs to CMAKE_SHARED_LINKER_FLAGS, which
+# breaks nanobind domain libraries (they have unresolved Python symbols that are
+# provided by the interpreter at load time). Remove it here; individual targets
+# that need strict linking re-add it via target_link_options().
+string(REPLACE "-Wl,-z,defs" "" CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS}")
+
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
 

@@ -101,44 +101,97 @@ def _jit_function_cache_key(func: Callable) -> str:
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 
-class MlirCompiler:
-    PIPELINE = (
-        "builtin.module("
-        "gpu-kernel-outlining{data-layout-str=},"
-        "fly-canonicalize,"
-        "fly-layout-lowering,"
-        "convert-fly-to-rocdl,"
-        "canonicalize,"
-        "gpu.module("
-        "convert-scf-to-cf,"
-        "convert-vector-to-llvm,"
-        "canonicalize,"
-        "convert-gpu-to-rocdl{chipset=gfx942 index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}"
-        "),"
-        "rocdl-attach-target{O=2 abi=600 chip=gfx942 correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true},"
-        "convert-scf-to-cf,"
-        "convert-cf-to-llvm,"
-        "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true},"
-        "convert-arith-to-llvm,"
-        "convert-func-to-llvm,"
-        "reconcile-unrealized-casts,"
-        "gpu-module-to-binary{format=fatbin}"
-        ")"
-    )
+def _detect_gpu_chip() -> str:
+    try:
+        from flydsl.runtime.device import get_rocm_arch
+        return get_rocm_arch()
+    except Exception:
+        pass
+    return os.environ.get("FLYDSL_GPU_CHIP", "gfx942")
 
+
+def _build_pipeline(
+    *,
+    chip: str = "gfx942",
+    use_bare_ptr: bool = True,
+    include_flir_lowering: bool = False,
+) -> str:
+    bare = "true" if use_bare_ptr else "false"
+    parts = [
+        "gpu-kernel-outlining{data-layout-str=}",
+    ]
+    if include_flir_lowering:
+        parts.append("flir-to-standard")
+        parts.append("trivial-dce")
+    parts += [
+        "fly-canonicalize",
+        "fly-layout-lowering",
+        "convert-fly-to-rocdl",
+        "canonicalize",
+        "cse",
+        f"gpu.module(convert-scf-to-cf)",
+        f"gpu.module(convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP "
+        f"use-bare-ptr-memref-call-conv={bare}}})",
+        f"gpu.module(reconcile-unrealized-casts)",
+        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false "
+        f"fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa "
+        f"unsafe-math=false wave64=true}}",
+        "convert-scf-to-cf",
+        "convert-cf-to-llvm",
+        f"gpu-to-llvm{{intersperse-sizes-for-kernels=false "
+        f"use-bare-pointers-for-host={bare} "
+        f"use-bare-pointers-for-kernels={bare}}}",
+        "convert-arith-to-llvm",
+        "convert-func-to-llvm",
+        "reconcile-unrealized-casts",
+        "gpu-module-to-binary{format=fatbin}",
+    ]
+    return f"builtin.module({','.join(parts)})"
+
+
+class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module) -> ir.Module:
+    def compile(
+        cls,
+        module: ir.Module,
+        *,
+        chip: str = None,
+        use_bare_ptr: bool = True,
+        include_flir_lowering: bool = False,
+    ) -> ir.Module:
         module.operation.verify()
 
-        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        pm = PassManager.parse(cls.PIPELINE)
+        if chip is None:
+            chip = _detect_gpu_chip()
+
+        pipeline = _build_pipeline(
+            chip=chip,
+            use_bare_ptr=use_bare_ptr,
+            include_flir_lowering=include_flir_lowering,
+        )
+
+        asm = module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info)
+        ctx = ir.Context.current
+        if ctx is not None:
+            ctx.load_all_available_dialects()
+        module = ir.Module.parse(asm)
+        pm = PassManager.parse(pipeline)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
         pm.enable_verifier(env.debug.enable_verifier)
         pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-        pm.run(module.operation)
+        try:
+            pm.run(module.operation)
+        except Exception as e:
+            import os
+            dump = os.environ.get("FLYDSL_DUMP_ON_FAIL", "")
+            if dump:
+                with open(dump, "w") as f:
+                    f.write(f"// Pipeline: {pipeline}\n")
+                    f.write(asm)
+            raise
 
         return module
 
@@ -207,10 +260,13 @@ class JitCacheManager:
 
 
 class JitFunction:
-    def __init__(self, func: Callable):
+    def __init__(self, func: Callable, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False):
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
+        self.use_bare_ptr = use_bare_ptr
+        self.include_flir_lowering = include_flir_lowering
+        self.use_standard_memref = use_standard_memref
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -257,7 +313,10 @@ class JitFunction:
                 return cached_func(*jit_args)
 
         with ir.Context() as ctx:
+            from .jit_argument import TensorAdaptor
+            TensorAdaptor._default_use_standard_memref = self.use_standard_memref
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+            TensorAdaptor._default_use_standard_memref = False
             ir_types = get_ir_types(jit_args)
             loc = ir.Location.unknown(ctx)
 
@@ -270,7 +329,8 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                gpu_module = create_gpu_module("kernels", targets=['#rocdl.target<chip = "gfx942">'])
+                chip = _detect_gpu_chip()
+                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -291,7 +351,12 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module)
+            compiled_module = MlirCompiler.compile(
+                module,
+                chip=chip,
+                use_bare_ptr=self.use_bare_ptr,
+                include_flir_lowering=self.include_flir_lowering,
+            )
 
             compiled_func = JitCompiledFunction(
                 compiled_module,
@@ -305,7 +370,15 @@ class JitFunction:
             return compiled_func(*jit_args)
 
 
-def jit(func: Optional[Callable] = None) -> JitFunction:
+def jit(func: Optional[Callable] = None, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False) -> JitFunction:
+    """JIT decorator for host launcher functions.
+
+    Args:
+        use_bare_ptr: Use bare pointer calling convention (default True, matching vectorAdd).
+        include_flir_lowering: Add flir-to-standard pass for kernels using old flir dialect ops.
+        use_standard_memref: Convert fly.memref tensor args to standard memref<?xT> for kernels
+            that use memref.extract_aligned_pointer_as_index (e.g. buffer_ops).
+    """
     if func is None:
-        return lambda f: JitFunction(f)
-    return JitFunction(func)
+        return lambda f: JitFunction(f, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref)
+    return JitFunction(func, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref)
