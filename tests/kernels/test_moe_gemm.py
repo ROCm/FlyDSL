@@ -1216,6 +1216,10 @@ def run_moe_stage2(
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="graph"),
+    pytest.param(True, id="eager", marks=pytest.mark.large_shape),
+])
 @pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
     tokens: int,
@@ -1232,6 +1236,7 @@ def test_moe_gemm_2stage(
     in_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
+    test_graph: bool,
     group_size: int,
     *,
     seed: int = 0,
@@ -1242,7 +1247,6 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
-    test_graph: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
