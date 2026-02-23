@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pass management for FLIR compiler.
 
 This module provides the main interface for defining and running

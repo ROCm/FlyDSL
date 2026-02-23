@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """ROCDL dialect extension for ROCm/AMD GPU programming.
 
 This module provides access to ROCm-specific GPU operations including:

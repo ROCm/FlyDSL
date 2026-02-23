@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared memory matmul - correctness smoke test.
 
 This used to execute at import time; it is now a proper pytest test and is

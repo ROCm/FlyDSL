@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared MLIR IR type helpers for flydsl kernels."""
 
 from __future__ import annotations

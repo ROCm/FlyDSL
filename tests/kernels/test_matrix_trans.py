@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Matrix Transpose Benchmark - GPU kernel with Shared Memory + Vec2 Vectorization"""
 
 import sys

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extended dialect wrappers for more Pythonic MLIR programming.
 
 This package is intentionally **lazy-imported** to keep import side effects small.

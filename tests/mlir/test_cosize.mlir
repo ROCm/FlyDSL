@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Test flir.cosize operation
 func.func @test_cosize() -> index {
   %c8 = arith.constant 8 : index

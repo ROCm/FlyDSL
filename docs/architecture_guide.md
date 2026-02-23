@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Architecture & Compilation Pipeline Guide
 
 > FlyDSL project structure, compilation stages, key abstractions, and configuration.

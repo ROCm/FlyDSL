@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # FLIR Layout Algebra Guide
 
 > Core types, construction, coordinate mapping, algebra operations, and swizzling in the FLIR layout system.

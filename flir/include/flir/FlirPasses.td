@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirPasses.td - Layout IR Lowering Passes ----------*- tablegen -*-===//
 //
 // Lowering passes for Flir IR dialects

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Test partial pass lowering (crd2idx only)
 module {
   func.func @test_crd2idx_simple(%c: !flir.coord<(?,?)>, %l: !flir.layout<(?,?):(?,?)>) {

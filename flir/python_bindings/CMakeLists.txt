@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 include(AddMLIRPython)
 
 # Use the embedded MLIR package name prefix (`_mlir.*`), matching the install

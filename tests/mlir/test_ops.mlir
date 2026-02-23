@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 module {
   func.func @test_flir_ops(%i1: index, %i2: index, %i3: index) {
     %s = flir.make_shape %i1, %i2, %i3 : (index, index, index) -> !flir.shape<(?,?,?)>

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Preshuffle GEMM kernel implementations (FLIR MFMA FP8/INT8).
 
 This module intentionally contains the **kernel builder code** for the preshuffle GEMM,

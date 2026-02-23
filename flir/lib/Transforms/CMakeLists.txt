@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 add_mlir_library(FlirTransforms
   FlirToStandard.cpp
   FlirDCE.cpp

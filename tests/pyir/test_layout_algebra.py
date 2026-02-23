@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Complete tests for Flir layout algebra operations.
 These tests follow a reference notebook for layout-algebra behavior.

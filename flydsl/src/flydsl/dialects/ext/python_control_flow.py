@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Python control-flow lowering helpers.
 
 FLIR executes Python code to build MLIR IR. A plain Python loop like:

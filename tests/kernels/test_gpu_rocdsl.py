@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """GPU kernel tests demonstrating Flir layout/coord concepts.
 
 These are compilation-focused tests: they emit GPU kernels with flir ops and

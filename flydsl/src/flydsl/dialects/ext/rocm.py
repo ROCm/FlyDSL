@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Python bindings for Flir ROCm dialect operations.
 
 This module provides Python wrappers for AMD GPU-specific operations

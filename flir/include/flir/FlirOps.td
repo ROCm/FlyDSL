@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirOps.td - flir operation definitions ------------*- tablegen -*-===//
 
 #ifndef FLIR_OPS

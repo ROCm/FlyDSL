@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Simple on-disk cache for compiled FLIR modules (inspired by Triton cache).
 
 This is intentionally minimal:

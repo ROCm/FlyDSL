@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // RUN: flir-opt %s --flir-to-standard | FileCheck %s
 
 // Comprehensive test covering all layout operations and lowering

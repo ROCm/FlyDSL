@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Extended scf dialect with convenience wrappers.
 
 This module intentionally provides context-manager wrappers that manage

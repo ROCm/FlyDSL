@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Softmax Operator Test with Manual Vectorization and Register Buffering
 Implementation based on high-performance C++ kernel logic:

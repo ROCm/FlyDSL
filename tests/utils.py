@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline

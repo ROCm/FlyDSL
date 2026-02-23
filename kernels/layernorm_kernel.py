@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """LayerNorm kernel builder used by tests.
 
 This file intentionally keeps the kernel builder logic identical to the version

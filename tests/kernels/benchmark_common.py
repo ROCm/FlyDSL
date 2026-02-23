@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared helpers for optional perf comparison in GPU operator tests.
 
 These tests are primarily correctness tests. Performance comparison (FLIR vs AIter)

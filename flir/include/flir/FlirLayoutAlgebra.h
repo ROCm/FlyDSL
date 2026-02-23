@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 //===- FlirLayoutAlgebra.h - Type-level layout algebra helpers -----------===//
 //
 //

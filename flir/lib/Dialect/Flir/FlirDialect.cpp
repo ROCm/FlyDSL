@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirDialect.cpp - Flir Dialect Implementation --------------------===//
 
 #include "llvm/ADT/SmallVector.h"

@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Vector dialect helpers with better default debug locations.
 
 This module exists so tests can import vector ops through `flydsl.dialects.ext`

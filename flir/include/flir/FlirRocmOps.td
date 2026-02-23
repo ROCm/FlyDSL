@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirRocmOps.td - Flir ROCm Operations Definition --*- tablegen -*-===//
 //
 // Flir AMD GPU operations for GFX942

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Sanity test: MlirModule + @kernel/@jit re-exported under `flir.*`."""
 
 from flydsl.dialects.ext import flir, memref

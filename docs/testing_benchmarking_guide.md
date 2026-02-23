@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Testing & Benchmarking Guide
 
 > Test infrastructure, running tests, benchmark harness, writing new tests, and performance comparison with AIter.

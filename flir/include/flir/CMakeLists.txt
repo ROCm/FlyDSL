@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Simplified CMakeLists for modern MLIR
 
 set(LLVM_TARGET_DEFINITIONS FlirDialect.td)

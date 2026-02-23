@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Helper utilities to run Flir lowering via the MLIR Python API.
 
 This module is maintained for backward compatibility. New code should use

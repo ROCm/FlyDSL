@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Elementwise Addition Example using FLIR
 This example demonstrates the FLIR API pattern
 - make_ordered_layout, make_layout_tv

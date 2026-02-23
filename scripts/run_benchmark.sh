@@ -1,4 +1,9 @@
 #!/bin/sh
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # POSIX sh compatible (also works in bash).
 set -eu
 # Enable pipefail when supported (bash/ksh/zsh); ignore if unavailable (dash/posix sh).

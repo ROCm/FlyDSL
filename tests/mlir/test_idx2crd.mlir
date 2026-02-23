@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 // Test flir.idx2crd operation (inverse of crd2idx)
 func.func @test_idx2crd() {
   %c50 = arith.constant 50 : index

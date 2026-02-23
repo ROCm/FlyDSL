@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 from _mlir.dialects import builtin, gpu as _gpu
 from flydsl.dialects.ext import buffer_ops
 

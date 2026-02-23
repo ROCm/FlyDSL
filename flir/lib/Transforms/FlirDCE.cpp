@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirDCE.cpp - Trivial DCE (standalone) ----------------------------===//
 //
 // Provides a general dead-code elimination pass for our embedded MLIR

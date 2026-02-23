@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """MemRef dialect helpers with better default debug locations.
 
 When IR dumping is enabled, it is useful for common ops like `memref.load/store/view`

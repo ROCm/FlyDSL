@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """MoE GEMM stage1/stage2 kernel implementations (FLIR MFMA FP8).
 
 This module intentionally contains the **kernel builder code** for:

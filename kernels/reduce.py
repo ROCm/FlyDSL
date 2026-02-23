@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared reduction helpers for FLIR example kernels.
 
 These helpers build MLIR ops (flir/gpu/scf/vector/etc). They are extracted from

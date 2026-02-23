@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """FLIR - ROCm Domain Specific Language for layout algebra"""
 
 # Base version - git commit is appended at build time by setup.py

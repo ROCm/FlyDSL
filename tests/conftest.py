@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pytest configuration for FLIR tests.
 
 This test suite now uses FLIR's embedded MLIR Python bindings (the `_mlir`

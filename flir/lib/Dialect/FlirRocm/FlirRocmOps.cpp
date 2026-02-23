@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirRocmOps.cpp - Flir ROCm Operations Implementation -----------===//
 //
 // Implementation of Flir ROCm dialect operations

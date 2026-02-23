@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Arith dialect extensions with operator overloading for Pythonic syntax."""
 
 from functools import partialmethod

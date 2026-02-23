@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline

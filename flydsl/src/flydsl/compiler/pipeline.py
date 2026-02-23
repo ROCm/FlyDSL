@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Pass pipeline builder for FLIR compiler transformations.
 
 This module provides a fluent API for constructing MLIR pass pipelines

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared MFMA preshuffle helpers (used by preshuffle GEMM + MoE kernels).
 
 This module consolidates the common building blocks that were previously duplicated

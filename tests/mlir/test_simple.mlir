@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 func.func @test_idx2crd() {
   %c50 = arith.constant 50 : index
   %c8 = arith.constant 8 : index

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """LLVM dialect re-export for FLIR tests."""
 
 from _mlir.dialects.llvm import *  # noqa: F401,F403

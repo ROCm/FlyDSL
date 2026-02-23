@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Pre-built Kernel Library Guide
 
 > Available FlyDSL kernels: Normalization, Softmax, GEMM, Mixed-precision GEMM, MoE GEMM -- configuration, data types, pipelines, and shared utilities.

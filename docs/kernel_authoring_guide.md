@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Kernel Authoring Guide
 
 > Writing GPU kernels with FlyDSL: MlirModule, thread hierarchy, TensorView, tiled copies, MFMA, shared memory, and synchronization.

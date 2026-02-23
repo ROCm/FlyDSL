@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Test the new flir coordinate operations (make_coord, crd2idx, idx2crd)"""
 
 from flydsl.dialects.ext import arith, flir

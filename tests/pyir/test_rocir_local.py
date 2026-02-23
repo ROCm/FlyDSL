@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 from flydsl.dialects.ext import flir, arith
 from flydsl.dialects.ext.arith import Index
 

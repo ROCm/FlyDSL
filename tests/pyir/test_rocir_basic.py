@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for core Flir operations: make_shape, make_stride, make_layout, size, rank."""
 
 import pytest

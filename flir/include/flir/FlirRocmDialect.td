@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirRocmDialect.td - Flir ROCm Dialect Definition -*- tablegen -*-===//
 //
 // Flir AMD GPU Hardware-Aware Dialect for GFX942

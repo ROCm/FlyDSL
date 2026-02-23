@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared location utilities for FLIR/Python wrappers.
 
 We want IR dumps to be debuggable, but also avoid paying stack-inspection costs

@@ -1,4 +1,9 @@
 #!/bin/bash
+
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # Flir Test Suite - Organized by test type
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef FLIR_DIALECT_H
 #define FLIR_DIALECT_H
 

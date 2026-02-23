@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //===- FlirOps.td - Entry point for Flir python bindings -*- tablegen -*-===//
 //
 // This file is the entry point for generating Python op bindings for the Flir

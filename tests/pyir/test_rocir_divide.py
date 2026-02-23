@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Advanced Micro Devices, Inc. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Flir divide operations (partitioning)."""
 
 import flydsl.dialects.ext.flir as flir
