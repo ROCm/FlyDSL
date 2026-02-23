@@ -174,6 +174,7 @@ class MlirCompiler:
         ctx = ir.Context.current
         if ctx is not None:
             ctx.load_all_available_dialects()
+
         module = ir.Module.parse(asm)
         pm = PassManager.parse(pipeline)
 
@@ -302,7 +303,9 @@ class JitFunction:
 
         self._ensure_cache_manager()
 
-        sig = inspect.signature(self.func)
+        if not hasattr(self, '_sig'):
+            self._sig = inspect.signature(self.func)
+        sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
