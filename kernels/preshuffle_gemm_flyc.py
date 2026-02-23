@@ -783,7 +783,7 @@ def compile_preshuffle_gemm_a8(
     # OLD: @flir.jit def __call__(self, ...) + flir.gpu_ext.LaunchFuncOp(...)
     # NEW: @flyc.jit def launch_gemm(...) + kernel_gemm(...).launch(...)
 
-    @flyc.jit(use_bare_ptr=False, use_standard_memref=True)
+    @flyc.jit(use_bare_ptr=False, use_standard_memref=True, enable_cache=False)
     def launch_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
@@ -792,6 +792,8 @@ def compile_preshuffle_gemm_a8(
         arg_scale_b: fx.Tensor,
     ):
         # Insert SmemAllocator globals into the gpu.module body.
+        # Reset finalized flag so re-compilation creates a fresh memref.global.
+        allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()

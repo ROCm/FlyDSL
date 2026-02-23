@@ -260,15 +260,18 @@ class JitCacheManager:
 
 
 class JitFunction:
-    def __init__(self, func: Callable, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False):
+    def __init__(self, func: Callable, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False, enable_cache: bool = True):
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
         self.use_bare_ptr = use_bare_ptr
         self.include_flir_lowering = include_flir_lowering
         self.use_standard_memref = use_standard_memref
+        self.enable_cache = enable_cache
 
     def _ensure_cache_manager(self):
+        if not self.enable_cache:
+            return
         if self.manager_key is not None:
             return
         self.manager_key = _jit_function_cache_key(self.func)
@@ -304,12 +307,23 @@ class JitFunction:
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
-        cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
 
-        if cached_func is not None and env.runtime.enable_cache:
-            log().info(f"Cache hit for {self.func.__name__}")
-            with ir.Context():
+        # In-memory compiled function cache (survives across calls, avoids re-compilation)
+        if not hasattr(self, '_mem_cache'):
+            self._mem_cache = {}
+        compiled_func = self._mem_cache.get(cache_key)
+        if compiled_func is None:
+            cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+        else:
+            cached_func = compiled_func
+
+        if cached_func is not None:
+            with ir.Context() as _ctx:
+                _ctx.load_all_available_dialects()
+                from .jit_argument import TensorAdaptor
+                TensorAdaptor._default_use_standard_memref = self.use_standard_memref
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
+                TensorAdaptor._default_use_standard_memref = False
                 return cached_func(*jit_args)
 
         with ir.Context() as ctx:
@@ -364,13 +378,14 @@ class JitFunction:
                 original_ir,
             )
 
+            self._mem_cache[cache_key] = compiled_func
             if self.cache_manager:
                 self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
 
 
-def jit(func: Optional[Callable] = None, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False) -> JitFunction:
+def jit(func: Optional[Callable] = None, *, use_bare_ptr: bool = True, include_flir_lowering: bool = False, use_standard_memref: bool = False, enable_cache: bool = True) -> JitFunction:
     """JIT decorator for host launcher functions.
 
     Args:
@@ -378,7 +393,9 @@ def jit(func: Optional[Callable] = None, *, use_bare_ptr: bool = True, include_f
         include_flir_lowering: Add flir-to-standard pass for kernels using old flir dialect ops.
         use_standard_memref: Convert fly.memref tensor args to standard memref<?xT> for kernels
             that use memref.extract_aligned_pointer_as_index (e.g. buffer_ops).
+        enable_cache: Enable JIT compilation caching. Disable for closure-based kernels
+            where the same function source has different compile-time constants.
     """
     if func is None:
-        return lambda f: JitFunction(f, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref)
-    return JitFunction(func, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref)
+        return lambda f: JitFunction(f, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref, enable_cache=enable_cache)
+    return JitFunction(func, use_bare_ptr=use_bare_ptr, include_flir_lowering=include_flir_lowering, use_standard_memref=use_standard_memref, enable_cache=enable_cache)
