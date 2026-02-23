@@ -146,7 +146,7 @@ def benchmark_flydsl(
     device = "cuda"
 
     # FlyDSL only supports group_size=32 for W4A16; fall back to per-row otherwise.
-    if in_dtype == "int4_bf16" and group_size == 32:
+    if in_dtype in ("int4_bf16", "int8_bf16") and group_size == 32:
         flydsl_group_size = 32
     else:
         flydsl_group_size = -1  # per-row scale (also used for bf16 and fp8_bf16)
@@ -173,7 +173,7 @@ def benchmark_flydsl(
     )
 
     # Prepare stage2 input: bf16 activations for bf16-based dtypes, fp16 otherwise.
-    if in_dtype in ("int4_bf16", "bf16", "fp8_bf16"):
+    if in_dtype in ("int4_bf16", "int8_bf16", "bf16", "fp8_bf16"):
         a2 = out1.to(torch.bfloat16)
     else:
         a2 = out1.to(torch.float16)
@@ -277,6 +277,8 @@ def main():
     dtype_group.add_argument("--bf16", action="store_true", help="Benchmark pure bf16 instead of W4A16")
     dtype_group.add_argument("--fp8-bf16", action="store_true",
                              help="Benchmark fp8_bf16 (fp8 per-channel weights, bf16 activations, epilogue scale)")
+    dtype_group.add_argument("--w8a16", action="store_true",
+                             help="Benchmark W8A16 (int8 weights, bf16 activations)")
     dtype_group.add_argument("--hybrid-w2-bf16", action="store_true",
                              help="Benchmark hybrid: stage1 W4A16, stage2 bf16 (compare vs pure W4A16)")
     parser.add_argument("--tokens", type=int, default=5231)
@@ -303,6 +305,10 @@ def main():
         flydsl_in_dtype = "fp8_bf16"
         dtype_name = "fp8_bf16"
         sglang_w4a16 = True
+    elif args.w8a16:
+        flydsl_in_dtype = "int8_bf16"
+        dtype_name = "W8A16"
+        sglang_w4a16 = True  # use w4a16 sglang path as placeholder
     elif args.bf16:
         flydsl_in_dtype = "bf16"
         dtype_name = "bf16"
@@ -416,3 +422,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ain()

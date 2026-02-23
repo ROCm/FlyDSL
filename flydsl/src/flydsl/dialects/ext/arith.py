@@ -428,6 +428,22 @@ def shli(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, i
     result = _arith.ShLIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
+def bitcast(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+    """Reinterpret-cast bits between types of the same width (e.g. f32 <-> i32).
+
+    Args:
+        result_type: Target type (must have same bit-width as source)
+        value: Value to bitcast
+        loc: Optional source location
+
+    Returns:
+        ArithValue wrapping the bitcast result
+    """
+    loc = maybe_default_loc(loc)
+    val = _unwrap_value(value)
+    result = _arith.BitcastOp(result_type, val, loc=loc).result
+    return ArithValue(result)
+
 def index_cast(target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
     """Cast between index and integer types.
     
@@ -905,7 +921,7 @@ from _mlir.dialects.arith import (
 __all__ = [
     "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
     "maximum", "minimum", "select", "extf", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
-    "andi", "ori", "xori", "shrui", "shli", "index_cast", "index_cast_ui", "trunc_f",
+    "andi", "ori", "xori", "shrui", "shli", "bitcast", "index_cast", "index_cast_ui", "trunc_f",
     "ArithValue",
     "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
     "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",
