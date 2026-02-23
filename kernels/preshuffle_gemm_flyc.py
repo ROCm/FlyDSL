@@ -215,11 +215,15 @@ def compile_preshuffle_gemm_a8(
         )
 
         # ---- Buffer resources ----
-        a_rsrc = buffer_ops.create_buffer_resource(arg_a_v, max_size=False)
-        c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False)
-        scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_a_v, max_size=False)
+        a_rsrc = buffer_ops.create_buffer_resource(arg_a_v, max_size=False,
+                                                   num_records_bytes=M * K * elem_bytes)
+        c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False,
+                                                   num_records_bytes=M * N * 2)
+        scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
+            arg_scale_a_v, max_size=False, num_records_bytes=M * 4)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b_v, max_size=True)
-        scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(arg_scale_b_v, max_size=True)
+        scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
+            arg_scale_b_v, max_size=True)
 
         bx_m = bx * tile_m
         by_n = by * tile_n

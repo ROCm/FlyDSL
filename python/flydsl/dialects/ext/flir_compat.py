@@ -2929,19 +2929,28 @@ def copy(copy_desc, src, dst,
             try:
                 is_i8 = IntegerType.isinstance(elem_ty) and (IntegerType(elem_ty).width == 8)
             except Exception:
-                # Best-effort fallback for older bindings.
                 is_i8 = (elem_ty_str == "i8")
+            is_f16 = ("f16" in elem_ty_str) or ("Float16" in elem_ty_str)
+            is_bf16 = ("bf16" in elem_ty_str) or ("BFloat16" in elem_ty_str)
+            is_1byte = is_f8 or is_i8
+            is_2byte = is_f16 or is_bf16
+            use_buffer_fast = (is_1byte or is_2byte) and extent in (8, 16) and (extent % 4 == 0)
 
-            if (is_f8 or is_i8) and extent in (8, 16) and (extent % 4 == 0):
+            if use_buffer_fast:
                 i32_ty = IntegerType.get_signless(32)
-                vec_width = extent // 4  # 8B -> dwordx2, 16B -> dwordx4
+                elem_size = 2 if is_2byte else 1
+                load_bytes = extent * elem_size
+                vec_width = load_bytes // 4
                 base0 = src_view.base_indices[0] if len(src_view.base_indices) else _to_index_value(0, loc)
                 if src_buffer_offset_in_bytes:
-                    # base index is in bytes (1-byte elements). Convert to i32 element offset.
                     c4 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 4), loc=loc).result
                     idx_i32 = arith.DivSIOp(_unwrap_value(base0), _unwrap_value(c4), loc=loc).result
+                elif is_2byte:
+                    c2 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 2), loc=loc).result
+                    byte_idx = arith.MulIOp(_unwrap_value(base0), _unwrap_value(c2), loc=loc).result
+                    c4 = arith.ConstantOp(IndexType.get(), IntegerAttr.get(IndexType.get(), 4), loc=loc).result
+                    idx_i32 = arith.DivSIOp(_unwrap_value(byte_idx), _unwrap_value(c4), loc=loc).result
                 else:
-                    # base index is already an i32-element offset for dtype=i32 loads.
                     idx_i32 = _unwrap_value(base0)
                 mask = _unwrap_value(pred_val) if pred_val is not None else None
                 i32_vec = _buffer_ops.buffer_load(
