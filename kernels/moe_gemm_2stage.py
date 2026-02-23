@@ -30,7 +30,6 @@ from flydsl.lang.ir.types import T as I
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
 from kernels.mfma_preshuffle_pipeline import (
-    load_b_pack_w4a16_groupwise,
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
@@ -38,9 +37,7 @@ from kernels.mfma_preshuffle_pipeline import (
     lds_store_16b_xor16,
     make_preshuffle_b_layout,
     load_b_pack_k32,
-    load_b_pack_w4a16,
     tile_chunk_coord_i32,
-    # Opt 1: split load/unpack for W4A16 latency hiding
     load_b_raw_w4a16,
     unpack_b_w4a16,
     load_b_raw_w4a16_groupwise,
@@ -800,7 +797,7 @@ def compile_moe_gemm1(
                             col_g = col_g_list[ni]
                             row_gate_idx = expert_off_pf + col_g
                             row_up_idx = row_gate_idx + inter_idx
-                            # For W4A16 with groupwise scale, scale is already applied in load_b_pack_w4a16_groupwise
+                            # For W4A16 with groupwise scale, scale is already applied during dequant
                             # so epilogue should use 1.0 to avoid double-scaling
                             sw_gate_pf.append(
                                 arith.f32(1.0)
@@ -1028,7 +1025,7 @@ def compile_moe_gemm1(
                         col_g = col_g_list[ni]
                         row_gate_idx = expert_off + col_g
                         row_up_idx = row_gate_idx + inter_idx
-                        # For W4A16 with groupwise scale, scale is already applied in load_b_pack_w4a16_groupwise
+                        # For W4A16 with groupwise scale, scale is already applied during dequant
                         # so epilogue should use 1.0 to avoid double-scaling
                         sw_gate_vals.append(
                             arith.f32(1.0)
@@ -2049,7 +2046,7 @@ def compile_moe_gemm2(
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
                             row_w_idx = expert_off_pf + col_g
-                            # For W4A16 with groupwise scale, scale is already applied in load_b_pack_w4a16_groupwise
+                            # For W4A16 with groupwise scale, scale is already applied during dequant
                             # so epilogue should use 1.0 to avoid double-scaling
                             sw_pf.append(
                                 arith.f32(1.0)
@@ -2341,7 +2338,7 @@ def compile_moe_gemm2(
                     for ni in range_constexpr(num_acc_n):
                         col_g = col_g_list[ni]
                         row_w_idx = expert_off + col_g
-                        # For W4A16 with groupwise scale, scale is already applied in load_b_pack_w4a16_groupwise
+                        # For W4A16 with groupwise scale, scale is already applied during dequant
                         # so epilogue should use 1.0 to avoid double-scaling
                         sw_vals.append(
                             arith.f32(1.0)

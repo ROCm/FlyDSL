@@ -284,6 +284,53 @@ def load_b_pack_k32(
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
+def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
+    """Convert one i32 (4 signed int8 bytes) → 4 bf16 packed as i64.
+
+    Uses shift-based f32→bf16 truncation (``v_lshrrev_b32 dst, 16, src``)
+    instead of ``arith.truncf`` which on gfx942 expands to ~5 VALU per
+    element (software RNE).  The shift is exact for unscaled int8 values
+    and introduces <0.5 ULP error for scaled values — negligible for
+    inference.
+
+    If *scale_val* (an f32 SSA value) is provided, each f32 is multiplied
+    by the scale before truncation (groupwise path).
+    """
+    i8 = ir.IntegerType.get_signless(8)
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+    vec1_i32_t = ir.VectorType.get([1], i32)
+    vec2_i32 = ir.VectorType.get([2], i32)
+    vec4_i8 = ir.VectorType.get([4], i8)
+    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+
+    v1 = vector.from_elements(vec1_i32_t, [val_i32])
+    i8x4 = vector.bitcast(vec4_i8, v1)
+
+    f32_vals = []
+    for i in range(4):
+        val_i8 = vector.extract(i8x4, static_position=[i], dynamic_position=[])
+        v = arith.sitofp(f32, val_i8)
+        if scale_val is not None:
+            v = v * scale_val
+        f32_vals.append(v)
+
+    # Shift-based f32→bf16: take upper 16 bits of each f32 (truncation toward zero).
+    # ~3 VALU per pair vs ~10 VALU for software RNE truncf on gfx942.
+    c16 = arith.constant(16, type=i32)
+    c_ffff0000 = arith.constant(0xFFFF0000, type=i32)
+    bits0 = arith.bitcast(i32, f32_vals[0])
+    bits1 = arith.bitcast(i32, f32_vals[1])
+    bits2 = arith.bitcast(i32, f32_vals[2])
+    bits3 = arith.bitcast(i32, f32_vals[3])
+    i32_lo = arith.ori(arith.shrui(bits0, c16), arith.andi(bits1, c_ffff0000))
+    i32_hi = arith.ori(arith.shrui(bits2, c16), arith.andi(bits3, c_ffff0000))
+
+    v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
+    v64 = vector.bitcast(vec1_i64, v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
 def tile_chunk_coord_i32(
     flir,
     arith,
@@ -546,353 +593,14 @@ __all__ = [
     "unpack_b_w4a16_groupwise",
 ]
 
-def load_b_pack_w4a16(
-    buffer_ops,
-    flir,
-    arith,
-    vector,
-    *,
-    arg_b,
-    b_rsrc,
-    layout_b,
-    base_k: ir.Value,
-    ku: int,
-    n_blk: ir.Value,
-    n_intra: ir.Value,
-    lane_div_16: ir.Value,
-    elem_type: ir.Type,
-    kpack_bytes: int = 8,
-    act_elem_bytes: int = 2,
-) -> tuple[ir.Value, ir.Value]:
-    """Load B pack for W4A16: returns (b0, b1) for two MFMA_BF16_K16 micro-steps.
-
-    For W4A16 (bf16 activations, packed int4 weights):
-    - K64 bytes of activation = 32 bf16 elements = 2x MFMA_BF16_K16
-    - Each MFMA needs 4 bf16 per thread
-    - One 4-byte load provides 8 int4 -> 8 bf16 -> (even=4, odd=4)
-
-    The preshuffle layout was designed for int8 MFMA (K=32), where each k1
-    (lane_div_16) group covers 16 K elements. For bf16 MFMA (K=16), we need
-    to remap addresses so B provides the same K positions that A reads.
-
-    Args:
-        ku: K unroll index (0, 1, 2, ...), NOT ki_step.
-            Each ku corresponds to one K64-byte block (in activation bytes).
-        act_elem_bytes: Activation element bytes (2 for bf16).
-
-    Returns:
-        (b0, b1): Two i64 values, each containing 4 bf16 for one MFMA.
-    """
-    if kpack_bytes != 8:
-        raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
-
-    # Address calculation with K-dimension remapping for bf16 MFMA.
-    #
-    # The preshuffle layout shape: (N0, K0, KLane=4, NLane=16, KPackBytes=8)
-    # - K0 = K_elements / 64 (w_elem_bytes=1 for packed int4)
-    # - Each (k0, k1) covers a specific range of K elements
-    #
-    # Mapping for bf16 (K=16 per MFMA, 4 k1_mfma groups of 4 elements each):
-    #   total_k1 = ku * 2 + lane_div_16 // 2
-    #   k0_bf16  = k0_base + total_k1 // 4
-    #   k1_local = total_k1 % 4
-    #   k2_base  = (lane_div_16 % 2) * 4   (selects first or second 4 bytes)
-    #
-    # The even/odd nibble selection (for b0 vs b1) is done after loading.
-    c64 = arith.constant(64, index=True)
-    half_bytes = kpack_bytes // 2  # = 4
-
-    # k0_base from base_k (B layout uses w_elem_bytes=1)
-    k0_base = base_k / c64
-
-    # Remap addresses based on ku and lane_div_16
-    k1_layout_offset = ku * 2  # compile-time
-    c2_idx = arith.constant(2, index=True)
-    c4_idx = arith.constant(4, index=True)
-
-    # lane_div_16 // 2: maps lanes 0,1 -> 0 and lanes 2,3 -> 1
-    lane_div_32 = lane_div_16 / c2_idx
-    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
-
-    k0 = k0_base + (total_k1 / c4_idx)
-    k1_local = total_k1 % c4_idx
-
-    # (lane_div_16 % 2): selects first or second 4 bytes within KPack
-    lane_odd = lane_div_16 % c2_idx
-    k2_base = lane_odd * arith.constant(half_bytes, index=True)
-
-    coord_pack = flir.make_coord(n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
-    idx_pack = flir.crd2idx(coord_pack, layout_b)
-    idx_bytes = idx_pack + k2_base
-
-    # Load 4 bytes (8 packed int4)
-    atom = flir.make_copy_atom(elem_type, vector_size=4)
-    b_view = flir.TensorView(
-        arg_b,
-        (4,),
-        strides=(1,),
-        base_indices=(idx_bytes,),
-        element_type=elem_type,
-    )
-    b4 = flir.copy(
-        atom,
-        b_view,
-        None,
-        alignment=4,
-        return_vector=True,
-        src_buffer_resource=b_rsrc,
-        src_buffer_offset_in_bytes=True,
-    )
-    vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
-    packed32 = vector.extract(
-        vector.bitcast(vec1_i32, b4),
-        static_position=[0],
-        dynamic_position=[],
-    )
-
-    # 7-op unpack to get 8 signed int8 values
-    # Output layout: even=[v0,v1,v2,v3], odd=[v4,v5,v6,v7]
-    c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
-    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
-    c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
-    c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
-
-    s0 = (packed32 & c_08080808) * c_1e
-    even = (packed32 & c_0f0f0f0f) | s0
-
-    t = packed32 >> c_4_i32
-    s1 = (t & c_08080808) * c_1e
-    odd = (t & c_0f0f0f0f) | s1
-
-    # Convert int8 to bf16: each i32 contains 4 int8 -> 4 bf16
-    i8 = ir.IntegerType.get_signless(8)
-    i32 = ir.IntegerType.get_signless(32)
-    f32 = ir.F32Type.get()
-    bf16 = ir.BF16Type.get()
-
-    vec1_i32_t = ir.VectorType.get([1], i32)
-    vec4_i8 = ir.VectorType.get([4], i8)
-    vec4_bf16 = ir.VectorType.get([4], bf16)
-
-    # Unpack even (4 int8) -> 4 bf16
-    even_v1 = vector.from_elements(vec1_i32_t, [even])
-    even_i8x4 = vector.bitcast(vec4_i8, even_v1)
-    even_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(even_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_bf16 = arith.trunc_f(bf16, val_f32)
-        even_bf16_list.append(val_bf16)
-    even_bf16x4 = vector.from_elements(vec4_bf16, even_bf16_list)
-
-    # Unpack odd (4 int8) -> 4 bf16
-    odd_v1 = vector.from_elements(vec1_i32_t, [odd])
-    odd_i8x4 = vector.bitcast(vec4_i8, odd_v1)
-    odd_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(odd_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_bf16 = arith.trunc_f(bf16, val_f32)
-        odd_bf16_list.append(val_bf16)
-    odd_bf16x4 = vector.from_elements(vec4_bf16, odd_bf16_list)
-
-    # Return both as i64
-    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-    
-    v64_even = vector.bitcast(vec1_i64, even_bf16x4)
-    b0 = vector.extract(v64_even, static_position=[0], dynamic_position=[])
-    
-    v64_odd = vector.bitcast(vec1_i64, odd_bf16x4)
-    b1 = vector.extract(v64_odd, static_position=[0], dynamic_position=[])
-
-    return (b0, b1)
-
-
-
-def load_b_pack_w4a16_groupwise(
-    buffer_ops,
-    flir,
-    arith,
-    vector,
-    *,
-    arg_b,
-    b_rsrc,
-    layout_b,
-    base_k: "ir.Value",
-    ku: int,
-    n_blk: "ir.Value",
-    n_intra: "ir.Value",
-    lane_div_16: "ir.Value",
-    elem_type: "ir.Type",
-    # Group-wise scale parameters
-    scale_rsrc,
-    expert_offset: "ir.Value",  # expert_id * N_per_expert (runtime SSA value)
-    num_groups: int,  # K // group_size
-    group_size: int,
-    n_per_expert: int,  # N per expert (2*inter_dim for stage1, model_dim for stage2)
-    kpack_bytes: int = 8,
-    act_elem_bytes: int = 2,
-) -> tuple:
-    """Load B pack for W4A16 with group-wise scale applied in-kernel.
-
-    Similar to load_b_pack_w4a16 but applies per-group scale during dequant.
-
-    For W4A16 with group_size=G:
-    - scale layout: [E, K//G, N] (Opt 0: cache-friendly, adjacent threads read adjacent N)
-    - Flat index = expert_offset*(G-1) + n_global + group_idx * N_per_expert
-    - For each loaded int4, compute k_pos // G to index the correct scale group
-
-    Args:
-        scale_rsrc: Buffer resource for scale tensor (flattened [E, K//G, N])
-        expert_offset: expert_id * N_per_expert (SSA value for index computation)
-        num_groups: K // group_size (compile-time constant)
-        group_size: Number of K elements sharing one scale value
-        n_per_expert: N dimension per expert (compile-time constant)
-
-    Returns:
-        (b0, b1): Two i64 values, each containing 4 scaled bf16 for one MFMA.
-    """
-    if kpack_bytes != 8:
-        raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
-
-    # Same address calculation as load_b_pack_w4a16
-    c64 = arith.constant(64, index=True)
-    half_bytes = kpack_bytes // 2
-
-    k0_base = base_k / c64
-    k1_layout_offset = ku * 2
-    c2_idx = arith.constant(2, index=True)
-    c4_idx = arith.constant(4, index=True)
-
-    lane_div_32 = lane_div_16 / c2_idx
-    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
-
-    k0 = k0_base + (total_k1 / c4_idx)
-    k1_local = total_k1 % c4_idx
-
-    lane_odd = lane_div_16 % c2_idx
-    k2_base = lane_odd * arith.constant(half_bytes, index=True)
-
-    coord_pack = flir.make_coord(n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
-    idx_pack = flir.crd2idx(coord_pack, layout_b)
-    idx_bytes = idx_pack + k2_base
-
-    # Load 4 bytes (8 packed int4)
-    atom = flir.make_copy_atom(elem_type, vector_size=4)
-    b_view = flir.TensorView(
-        arg_b,
-        (4,),
-        strides=(1,),
-        base_indices=(idx_bytes,),
-        element_type=elem_type,
-    )
-    b4 = flir.copy(
-        atom,
-        b_view,
-        None,
-        alignment=4,
-        return_vector=True,
-        src_buffer_resource=b_rsrc,
-        src_buffer_offset_in_bytes=True,
-    )
-    vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
-    packed32 = vector.extract(
-        vector.bitcast(vec1_i32, b4),
-        static_position=[0],
-        dynamic_position=[],
-    )
-
-    # 7-op unpack to get 8 signed int8 values
-    c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
-    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
-    c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
-    c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
-
-    s0 = (packed32 & c_08080808) * c_1e
-    even = (packed32 & c_0f0f0f0f) | s0
-
-    t = packed32 >> c_4_i32
-    s1 = (t & c_08080808) * c_1e
-    odd = (t & c_0f0f0f0f) | s1
-
-    # Type definitions
-    i8 = ir.IntegerType.get_signless(8)
-    i32 = ir.IntegerType.get_signless(32)
-    f32 = ir.F32Type.get()
-    bf16 = ir.BF16Type.get()
-
-    vec1_i32_t = ir.VectorType.get([1], i32)
-    vec4_i8 = ir.VectorType.get([4], i8)
-    vec4_bf16 = ir.VectorType.get([4], bf16)
-
-    # Calculate K position for group index
-    # NOTE: base_k is already element count (not bytes)
-    c_ku_elems = arith.constant(ku * 32, index=True)  # 32 bf16 per ku
-    k_pos_base = base_k + c_ku_elems
-
-    # Group index = k_pos // group_size
-    c_group_size = arith.constant(group_size, index=True)
-    group_idx = k_pos_base / c_group_size
-
-    # N position for scale indexing (includes expert offset)
-    c16 = arith.constant(16, index=True)
-    n_global = n_blk * c16 + n_intra
-
-    # Scale index for [E, K//G, N] layout (Opt 0):
-    #   flat_idx = expert_offset * (G-1) + n_global + group_idx * N_per_expert
-    # Proof: e*N*(G-1) + (e*N+n) + g*N = e*G*N + g*N + n  (correct for [E,G,N] flat)
-    c_gm1 = arith.constant(num_groups - 1, index=True)
-    c_npe = arith.constant(n_per_expert, index=True)
-    scale_idx = expert_offset * c_gm1 + n_global + group_idx * c_npe
-    scale_idx_i32 = arith.index_cast(i32, scale_idx)
-    scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=f32)
-
-    # Convert even int8x4 to bf16x4 with scale
-    even_v1 = vector.from_elements(vec1_i32_t, [even])
-    even_i8x4 = vector.bitcast(vec4_i8, even_v1)
-    even_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(even_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_f32_scaled = val_f32 * scale_val
-        val_bf16 = arith.trunc_f(bf16, val_f32_scaled)
-        even_bf16_list.append(val_bf16)
-    even_bf16x4 = vector.from_elements(vec4_bf16, even_bf16_list)
-
-    # Convert odd int8x4 to bf16x4 with scale
-    odd_v1 = vector.from_elements(vec1_i32_t, [odd])
-    odd_i8x4 = vector.bitcast(vec4_i8, odd_v1)
-    odd_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(odd_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_f32_scaled = val_f32 * scale_val
-        val_bf16 = arith.trunc_f(bf16, val_f32_scaled)
-        odd_bf16_list.append(val_bf16)
-    odd_bf16x4 = vector.from_elements(vec4_bf16, odd_bf16_list)
-
-    # Return both as i64
-    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-    
-    v64_even = vector.bitcast(vec1_i64, even_bf16x4)
-    b0 = vector.extract(v64_even, static_position=[0], dynamic_position=[])
-    
-    v64_odd = vector.bitcast(vec1_i64, odd_bf16x4)
-    b1 = vector.extract(v64_odd, static_position=[0], dynamic_position=[])
-
-    return (b0, b1)
-
 
 # ---------------------------------------------------------------------------
-# Opt 1: Split load / unpack for W4A16 latency hiding
+# Split load / unpack for W4A16 latency hiding
 # ---------------------------------------------------------------------------
-# The fused functions above (load_b_pack_w4a16, load_b_pack_w4a16_groupwise)
-# issue a buffer_load and immediately unpack+dequant in the same call, causing
-# a VMEM stall before the VALU work begins.  The split versions below separate
-# the buffer_load (Phase 1) from the unpack/dequant (Phase 2) so that the
-# caller can issue ALL loads first and then unpack, overlapping VMEM latency.
+# The buffer_load and unpack/dequant are separated so that the caller can
+# issue ALL loads first (Phase 1) and then unpack (Phase 2), overlapping
+# VMEM latency with VALU work.
 # ---------------------------------------------------------------------------
-
 
 def load_b_raw_w4a16(
     buffer_ops,
@@ -968,6 +676,8 @@ def unpack_b_w4a16(packed32, arith, vector):
 
     Takes the raw ``packed32`` from :func:`load_b_raw_w4a16` and produces
     ``(b0, b1)`` -- two i64 values each containing 4 bf16 for one MFMA.
+
+    Uses shift-based f32→bf16 truncation (<0.5 ULP, fine for inference).
     """
     c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
@@ -981,40 +691,8 @@ def unpack_b_w4a16(packed32, arith, vector):
     s1 = (t & c_08080808) * c_1e
     odd = (t & c_0f0f0f0f) | s1
 
-    i8 = ir.IntegerType.get_signless(8)
-    i32 = ir.IntegerType.get_signless(32)
-    f32 = ir.F32Type.get()
-    bf16 = ir.BF16Type.get()
-
-    vec1_i32_t = ir.VectorType.get([1], i32)
-    vec4_i8 = ir.VectorType.get([4], i8)
-    vec4_bf16 = ir.VectorType.get([4], bf16)
-
-    even_v1 = vector.from_elements(vec1_i32_t, [even])
-    even_i8x4 = vector.bitcast(vec4_i8, even_v1)
-    even_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(even_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_bf16 = arith.trunc_f(bf16, val_f32)
-        even_bf16_list.append(val_bf16)
-    even_bf16x4 = vector.from_elements(vec4_bf16, even_bf16_list)
-
-    odd_v1 = vector.from_elements(vec1_i32_t, [odd])
-    odd_i8x4 = vector.bitcast(vec4_i8, odd_v1)
-    odd_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(odd_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_bf16 = arith.trunc_f(bf16, val_f32)
-        odd_bf16_list.append(val_bf16)
-    odd_bf16x4 = vector.from_elements(vec4_bf16, odd_bf16_list)
-
-    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-    v64_even = vector.bitcast(vec1_i64, even_bf16x4)
-    b0 = vector.extract(v64_even, static_position=[0], dynamic_position=[])
-    v64_odd = vector.bitcast(vec1_i64, odd_bf16x4)
-    b1 = vector.extract(v64_odd, static_position=[0], dynamic_position=[])
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector)
 
     return (b0, b1)
 
@@ -1118,6 +796,8 @@ def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
 
     Takes ``(packed32, scale_val)`` from :func:`load_b_raw_w4a16_groupwise`
     and produces ``(b0, b1)`` -- two i64 values each containing 4 scaled bf16.
+
+    Uses shift-based f32→bf16 truncation (<0.5 ULP, fine for inference).
     """
     c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
@@ -1131,42 +811,8 @@ def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
     s1 = (t & c_08080808) * c_1e
     odd = (t & c_0f0f0f0f) | s1
 
-    i8 = ir.IntegerType.get_signless(8)
-    i32 = ir.IntegerType.get_signless(32)
-    f32 = ir.F32Type.get()
-    bf16 = ir.BF16Type.get()
-
-    vec1_i32_t = ir.VectorType.get([1], i32)
-    vec4_i8 = ir.VectorType.get([4], i8)
-    vec4_bf16 = ir.VectorType.get([4], bf16)
-
-    even_v1 = vector.from_elements(vec1_i32_t, [even])
-    even_i8x4 = vector.bitcast(vec4_i8, even_v1)
-    even_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(even_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_f32_scaled = val_f32 * scale_val
-        val_bf16 = arith.trunc_f(bf16, val_f32_scaled)
-        even_bf16_list.append(val_bf16)
-    even_bf16x4 = vector.from_elements(vec4_bf16, even_bf16_list)
-
-    odd_v1 = vector.from_elements(vec1_i32_t, [odd])
-    odd_i8x4 = vector.bitcast(vec4_i8, odd_v1)
-    odd_bf16_list = []
-    for i in range(4):
-        val_i8 = vector.extract(odd_i8x4, static_position=[i], dynamic_position=[])
-        val_f32 = arith.sitofp(f32, val_i8)
-        val_f32_scaled = val_f32 * scale_val
-        val_bf16 = arith.trunc_f(bf16, val_f32_scaled)
-        odd_bf16_list.append(val_bf16)
-    odd_bf16x4 = vector.from_elements(vec4_bf16, odd_bf16_list)
-
-    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-    v64_even = vector.bitcast(vec1_i64, even_bf16x4)
-    b0 = vector.extract(v64_even, static_position=[0], dynamic_position=[])
-    v64_odd = vector.bitcast(vec1_i64, odd_bf16x4)
-    b1 = vector.extract(v64_odd, static_position=[0], dynamic_position=[])
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
 
     return (b0, b1)
 
