@@ -318,8 +318,10 @@ class JitFunction:
             cached_func = compiled_func
 
         if cached_func is not None:
-            with ir.Context() as _ctx:
-                _ctx.load_all_available_dialects()
+            if not hasattr(self, '_cached_ctx'):
+                self._cached_ctx = ir.Context()
+                self._cached_ctx.load_all_available_dialects()
+            with self._cached_ctx:
                 from .jit_argument import TensorAdaptor
                 TensorAdaptor._default_use_standard_memref = self.use_standard_memref
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)

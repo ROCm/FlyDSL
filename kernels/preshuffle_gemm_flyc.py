@@ -22,6 +22,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import scf
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
@@ -687,6 +688,73 @@ def compile_preshuffle_gemm_a8(
         lds_base0 = arith.constant(0, index=True)
         lds_base1 = lds_tile_elems
 
+        def _flatten_b_tile(bt):
+            flat = []
+            for packs0, packs1 in bt:
+                flat.extend(packs0)
+                flat.extend(packs1)
+            return flat
+
+        def _unflatten_b_tile(flat):
+            bt = []
+            idx = 0
+            for _ in range_constexpr(k_unroll):
+                p0 = [flat[idx + ni] for ni in range_constexpr(num_acc_n)]
+                idx += num_acc_n
+                p1 = [flat[idx + ni] for ni in range_constexpr(num_acc_n)]
+                idx += num_acc_n
+                bt.append((p0, p1))
+            return bt
+
+        n_accs = num_acc_n * m_repeat
+        n_btile = k_unroll * 2 * num_acc_n
+        n_a0pf = 2
+
+        def _unwrap_val(v):
+            if hasattr(v, 'value') and isinstance(v.value, ir.Value):
+                return v.value
+            if isinstance(v, ir.Value):
+                return v
+            return v
+
+        def _pack_state(accs_l, bt_flat, a0pf):
+            return ([_unwrap_val(a) for a in accs_l]
+                    + [_unwrap_val(b) for b in bt_flat]
+                    + [_unwrap_val(a0pf[0]), _unwrap_val(a0pf[1])])
+
+        def _unpack_state(vals):
+            accs_l = list(vals[:n_accs])
+            bt_flat = list(vals[n_accs:n_accs + n_btile])
+            a0pf = (vals[n_accs + n_btile], vals[n_accs + n_btile + 1])
+            return accs_l, bt_flat, a0pf
+
+        def _build_pingpong_body(k_iv, inner_state):
+            accs_in, bt_flat_in, a0pf_in = _unpack_state(inner_state)
+            b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
+
+            c_tile_k = arith.constant(tile_k, index=True)
+            c_tile_k2 = arith.constant(tile_k * 2, index=True)
+            next_k1 = k_iv + c_tile_k
+            a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
+            accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_base_pong,
+                                      a0_prefetch=a0pf_in)
+            store_a_tile_to_lds(a_regs_ping, lds_base_ping)
+            hot_loop_scheduler()
+            gpu.barrier()
+            a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
+
+            next_k2 = k_iv + c_tile_k2
+            a_regs_pong, b_tile_pong_new = prefetch_ab_tile(next_k2)
+            accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_base_ping,
+                                      a0_prefetch=a0_prefetch_ping)
+            store_a_tile_to_lds(a_regs_pong, lds_base_pong)
+            hot_loop_scheduler()
+            gpu.barrier()
+            a0_prefetch_pong_new = prefetch_a0_pack(lds_base_pong)
+
+            return _pack_state(accs_in, _flatten_b_tile(b_tile_pong_new),
+                               a0_prefetch_pong_new)
+
         if lds_stage == 2:
             def prefetch_a0_pack(lds_base):
                 return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base)
@@ -695,59 +763,57 @@ def compile_preshuffle_gemm_a8(
             a_regs0, b_tile0 = prefetch_ab_tile(k0)
             store_a_tile_to_lds(a_regs0, lds_base0)
             gpu.barrier()
-            accs = [acc_init] * (num_acc_n * m_repeat)
+            accs = [acc_init] * n_accs
             lds_base_pong = lds_base0
             lds_base_ping = lds_base1
-            b_tile_pong = b_tile0
-            c_k_main = K - tile_k
             a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
             num_tiles = K // tile_k
             if (num_tiles % 2) == 1:
-                for k_iv in range(0, c_k_main, tile_k * 2):
-                    next_k1 = k_iv + tile_k
-                    a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                    accs, _ = compute_tile(accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                    a0_prefetch_pong = None
-                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
-                    next_k2 = k_iv + tile_k * 2
-                    a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                    accs, _ = compute_tile(accs, b_tile_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping)
-                    a0_prefetch_ping = None
-                    store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
+                c_k_main = K - tile_k
+                init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
+                                         a0_prefetch_pong)
+                c_start = _unwrap_val(arith.constant(0, index=True))
+                c_stop = _unwrap_val(arith.constant(c_k_main, index=True))
+                c_step = _unwrap_val(arith.constant(tile_k * 2, index=True))
+
+                for_op = scf.ForOp(c_start, c_stop, c_step, init_state)
+                with ir.InsertionPoint(for_op.body):
+                    iv = for_op.induction_variable
+                    inner = list(for_op.inner_iter_args)
+                    updated = _build_pingpong_body(iv, inner)
+                    scf.YieldOp(updated)
+
+                results = list(for_op.results)
+                accs, bt_flat, a0pf = _unpack_state(results)
+                b_tile_pong_final = _unflatten_b_tile(bt_flat)
                 final_accs, scales = compute_tile(
-                    accs, b_tile_pong, lds_base_pong,
-                    is_last_tile=True, a0_prefetch=a0_prefetch_pong,
+                    accs, b_tile_pong_final, lds_base_pong,
+                    is_last_tile=True, a0_prefetch=a0pf,
                 )
             else:
                 c_k_stop = K - (tile_k * 3)
-                for k_iv in range(0, c_k_stop, tile_k * 2):
-                    next_k1 = k_iv + tile_k
-                    a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                    accs, _ = compute_tile(accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                    a0_prefetch_pong = None
-                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
-                    next_k2 = k_iv + tile_k * 2
-                    a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                    accs, _ = compute_tile(accs, b_tile_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping)
-                    a0_prefetch_ping = None
-                    store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
-                last_k = K - tile_k
+                init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
+                                         a0_prefetch_pong)
+                c_start = _unwrap_val(arith.constant(0, index=True))
+                c_stop_val = _unwrap_val(arith.constant(c_k_stop, index=True))
+                c_step = _unwrap_val(arith.constant(tile_k * 2, index=True))
+
+                for_op = scf.ForOp(c_start, c_stop_val, c_step, init_state)
+                with ir.InsertionPoint(for_op.body):
+                    iv = for_op.induction_variable
+                    inner = list(for_op.inner_iter_args)
+                    updated = _build_pingpong_body(iv, inner)
+                    scf.YieldOp(updated)
+
+                results = list(for_op.results)
+                accs, bt_flat, a0pf = _unpack_state(results)
+                b_tile_pong_ep = _unflatten_b_tile(bt_flat)
+
+                last_k = arith.constant(K - tile_k, index=True)
                 a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
-                accs, _ = compute_tile(accs, b_tile_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong)
-                a0_prefetch_pong = None
+                accs, _ = compute_tile(accs, b_tile_pong_ep, lds_base_pong,
+                                       a0_prefetch=a0pf)
                 store_a_tile_to_lds(a_regs_ping, lds_base_ping)
                 hot_loop_scheduler()
                 gpu.barrier()
@@ -762,20 +828,39 @@ def compile_preshuffle_gemm_a8(
             a_regs0, b_tile0 = prefetch_ab_tile(k0)
             store_a_tile_to_lds(a_regs0, lds_base0)
             gpu.barrier()
-            accs = [acc_init] * (num_acc_n * m_repeat)
+            accs = [acc_init] * n_accs
             lds_base = lds_base0
-            b_tile_cur = b_tile0
-            for k_base in range(0, K - tile_k, tile_k):
-                next_k = k_base + tile_k
+            bt_flat0 = _flatten_b_tile(b_tile0)
+            init_state = [_unwrap_val(a) for a in accs] + [_unwrap_val(b) for b in bt_flat0]
+            c_start = _unwrap_val(arith.constant(0, index=True))
+            c_stop = _unwrap_val(arith.constant(K - tile_k, index=True))
+            c_step_1 = _unwrap_val(arith.constant(tile_k, index=True))
+
+            for_op = scf.ForOp(c_start, c_stop, c_step_1, init_state)
+            with ir.InsertionPoint(for_op.body):
+                iv = for_op.induction_variable
+                inner = list(for_op.inner_iter_args)
+                accs_in = list(inner[:n_accs])
+                bt_flat_in = list(inner[n_accs:])
+                b_tile_in = _unflatten_b_tile(bt_flat_in)
+
+                c_tile_k_s1 = arith.constant(tile_k, index=True)
+                next_k = iv + c_tile_k_s1
                 a_next, b_next = prefetch_ab_tile(next_k)
-                accs, _ = compute_tile(accs, b_tile_cur, lds_base)
+                accs_in, _ = compute_tile(accs_in, b_tile_in, lds_base)
                 gpu.barrier()
                 store_a_tile_to_lds(a_next, lds_base)
                 hot_loop_scheduler()
                 gpu.barrier()
-                b_tile_cur = b_next
+                out_state = ([_unwrap_val(a) for a in accs_in]
+                             + [_unwrap_val(b) for b in _flatten_b_tile(b_next)])
+                scf.YieldOp(out_state)
+
+            results = list(for_op.results)
+            accs_final = list(results[:n_accs])
+            bt_final = _unflatten_b_tile(list(results[n_accs:]))
             final_accs, scales = compute_tile(
-                accs, b_tile_cur, lds_base, is_last_tile=True
+                accs_final, bt_final, lds_base, is_last_tile=True
             )
             store_output(final_accs, scales)
 

@@ -28,7 +28,10 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+try:
+    from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+except ImportError:
+    compile_preshuffle_gemm_a8 = None
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
