@@ -130,7 +130,10 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
     if op == "div":
         if self.is_float:
             return arith.divf(self, other, loc=loc, ip=ip)
-        fp_ty = T.f64() if element_type(self.type).width > 32 else T.f32()
+        et = element_type(self.type)
+        if isinstance(et, ir.IndexType):
+            return arith.divui(self, other, loc=loc, ip=ip)
+        fp_ty = T.f64() if et.width > 32 else T.f32()
         lhs = int_to_fp(self, self.signed, fp_ty, loc=loc, ip=ip)
         rhs = int_to_fp(other, other.signed, fp_ty, loc=loc, ip=ip)
         return arith.divf(lhs, rhs, loc=loc, ip=ip)
