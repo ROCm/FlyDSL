@@ -97,6 +97,19 @@ def _jit_function_cache_key(func: Callable) -> str:
     depSources = _collect_dependency_sources(func, rootFile)
     depSources.sort()
     parts.extend(depSources)
+
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        closure_vals = []
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+                if isinstance(val, (int, float, bool, str, type(None), tuple)):
+                    closure_vals.append(f"{name}={val!r}")
+            except ValueError:
+                pass
+        if closure_vals:
+            parts.append("closure:" + ",".join(closure_vals))
+
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 

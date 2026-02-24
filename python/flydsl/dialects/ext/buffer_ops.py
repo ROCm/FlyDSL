@@ -211,10 +211,10 @@ class BufferResourceDescriptor:
                     nbytes = 0xFFFFFFFF
                 num_records = _create_i64_constant(nbytes)
             else:
-                # Value path: cast to i32 if needed.
                 v = _unwrap_value(num_records_bytes)
-                if not isinstance(v.type, ir.IntegerType) or v.type.width != 32:
-                    op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), v)
+                i64_type = ir.IntegerType.get_signless(64)
+                if not isinstance(v.type, ir.IntegerType) or v.type.width != 64:
+                    op = std_arith.IndexCastOp(i64_type, v)
                     v = _unwrap_value(op.result)
                 num_records = v
         elif max_size:

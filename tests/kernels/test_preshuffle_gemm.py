@@ -392,6 +392,7 @@ def test_mfma_a8_flyc_preshuffle(
             _as_i8(b.contiguous().view(-1)),
             sa.contiguous().view(-1) if sa.numel() > 0 else sa,
             sb.contiguous().view(-1) if sb.numel() > 0 else sb,
+            M, N,
         )
 
     bench_iters = max(2, int(bench_iters))

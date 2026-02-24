@@ -23,8 +23,16 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import arith as _raw_arith
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
+
+
+def _raw(v):
+    """Unwrap ArithValue → raw ir.Value that nanobind MLIR ops accept."""
+    if isinstance(v, ir.Value):
+        return v
+    return ir.Value._CAPICreate(v._CAPIPtr)
 from flydsl.lang.ir.types import T, memref
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -40,8 +48,8 @@ from kernels.mfma_epilogues import mfma_epilog
 
 def compile_preshuffle_gemm_a8(
     *,
-    M: int,
-    N: int,
+    M: int = 0,
+    N: int = 0,
     K: int,
     tile_m: int,
     tile_n: int,
@@ -53,8 +61,10 @@ def compile_preshuffle_gemm_a8(
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
     Returns a JitFunction that auto-compiles and executes when called.
-    Signature:  launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b)
-    (M, N, K are baked in as compile-time constants.)
+    Signature:  launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, M, N)
+
+    Compile-time constants: K, tile_m/n/k, in_dtype (determine loop structure).
+    Runtime parameters: M, N (passed as i32 kernel args).
     """
     if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16"):
         raise ValueError(
@@ -154,10 +164,12 @@ def compile_preshuffle_gemm_a8(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        i32_m: fx.Int32,
+        i32_n: fx.Int32,
     ):
-        # M, N, K are compile-time constants (closure capture).
-        c_m = arith.constant(M, index=True)
-        c_n = arith.constant(N, index=True)
+        # M, N are runtime i32 args; K is compile-time (determines loop structure).
+        c_m = _raw_arith.IndexCastOp(ir.IndexType.get(), i32_m.ir_value()).result
+        c_n = _raw_arith.IndexCastOp(ir.IndexType.get(), i32_n.ir_value()).result
         c_k = arith.constant(K, index=True)
 
         # Unwrap fx.Tensor → raw ir.Value for low-level dialect ops.
@@ -175,23 +187,20 @@ def compile_preshuffle_gemm_a8(
         )
 
         # ---- Layouts (all static Python ints for fully-static fly.layout types) ----
-        layout_c = fx.make_layout((M, N), (N, 1))
-
         _k_div4_factor = (K * elem_bytes) // 4
-        layout_a_div4 = fx.make_layout((M, _k_div4_factor), (_k_div4_factor, 1))
 
         kpack_bytes = 8 if is_int4 else 16
         kpack_elems = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
         k_bytes = K * elem_bytes
         n0_val = N // 16
         k0_val = k_bytes // 64
-        stride_nlane = kpack_elems
-        stride_klane = 16 * stride_nlane
-        stride_k0 = 4 * stride_klane
-        stride_n0 = k0_val * stride_k0
+        _stride_nlane = kpack_elems
+        _stride_klane = 16 * _stride_nlane
+        _stride_k0 = 4 * _stride_klane
+        _stride_n0 = k0_val * _stride_k0
         layout_b = fx.make_layout(
             (n0_val, k0_val, 4, 16, kpack_elems),
-            (stride_n0, stride_k0, stride_klane, stride_nlane, 1),
+            (_stride_n0, _stride_k0, _stride_klane, _stride_nlane, 1),
         )
 
         shape_lds = fx.make_shape(tile_m, tile_k)
@@ -215,12 +224,17 @@ def compile_preshuffle_gemm_a8(
         )
 
         # ---- Buffer resources ----
+        _i64 = ir.IntegerType.get_signless(64)
+        _a_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * (K * elem_bytes))).result
+        _c_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * c_n * 2)).result
         a_rsrc = buffer_ops.create_buffer_resource(arg_a_v, max_size=False,
-                                                   num_records_bytes=M * K * elem_bytes)
+                                                   num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False,
-                                                   num_records_bytes=M * N * 2)
+                                                   num_records_bytes=_c_nrec)
+        if not is_f16_or_bf16:
+            _sa_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * 4)).result
         scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
-            arg_scale_a_v, max_size=False, num_records_bytes=M * 4)
+            arg_scale_a_v, max_size=False, num_records_bytes=_sa_nrec)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b_v, max_size=True)
         scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
             arg_scale_b_v, max_size=True)
@@ -258,17 +272,13 @@ def compile_preshuffle_gemm_a8(
         c_n_per_wave = arith.constant(n_per_wave, index=True)
         n_tile_base = wave_id * c_n_per_wave
 
-        c_n0 = c_n / 16
-        layout_n_blk_intra = fx.make_layout((c_n0, 16), (16, 1))
         n_intra_list = []
         n_blk_list = []
         for i in range_constexpr(num_acc_n):
-            offset = i * 16
-            c_offset = arith.constant(offset, index=True)
+            c_offset = arith.constant(i * 16, index=True)
             global_n = by_n + n_tile_base + c_offset + lane_mod_16
-            coord_n = fx.idx2crd(global_n, layout_n_blk_intra)
-            n_blk_list.append(fx.get(coord_n, 0))
-            n_intra_list.append(fx.get(coord_n, 1))
+            n_blk_list.append(global_n / 16)
+            n_intra_list.append(global_n % 16)
 
         # ── B load helpers (unchanged logic, using old dialect ops) ────────
         def load_b_pack(base_k, ki_step, ni):
@@ -389,8 +399,7 @@ def compile_preshuffle_gemm_a8(
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                 row_a_global = bx_m + row_a_local
-                coord_a_g = fx.make_coord(row_a_global, base_k_div4 + col_a_local_i32)
-                idx_i32 = fx.crd2idx(coord_a_g, layout_a_div4)
+                idx_i32 = row_a_global * _k_div4_factor + (base_k_div4 + col_a_local_i32)
                 idx_elem = (
                     idx_i32 if elem_bytes == 1
                     else (idx_i32 * arith.constant(2, index=True))
@@ -602,7 +611,7 @@ def compile_preshuffle_gemm_a8(
                         vector.store(v2, lds_out, [lds_idx], alignment=4)
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                    idx_out = fx.crd2idx(fx.make_coord(row, col_g0), layout_c)
+                    idx_out = row * c_n + col_g0
                     byte_off = idx_out * arith.constant(2, index=True)
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
                     if e_vec == 4:
@@ -629,7 +638,7 @@ def compile_preshuffle_gemm_a8(
                     s_a_vec4 = s_a_vecs[mi]
                     s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
                 col_base = by_n + n_tile_base + lane_mod_16
-                idx_base = fx.crd2idx(fx.make_coord(row, col_base), layout_c)
+                idx_base = row * c_n + col_base
                 for ni in range_constexpr(num_acc_n):
                     acc_idx = mi * num_acc_n + ni
                     acc = final_accs[acc_idx]
@@ -872,25 +881,30 @@ def compile_preshuffle_gemm_a8(
     # OLD: @flir.jit def __call__(self, ...) + flir.gpu_ext.LaunchFuncOp(...)
     # NEW: @flyc.jit def launch_gemm(...) + kernel_gemm(...).launch(...)
 
-    @flyc.jit(use_bare_ptr=False, use_standard_memref=True, enable_cache=False)
+    _cache_tag = (in_dtype, K, lds_stage, use_cshuffle_epilog)
+
+    @flyc.jit(use_bare_ptr=False, use_standard_memref=True)
     def launch_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        i32_m: fx.Int32,
+        i32_n: fx.Int32,
     ):
-        # Insert SmemAllocator globals into the gpu.module body.
-        # Reset finalized flag so re-compilation creates a fresh memref.global.
+        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        gx = (M + tile_m - 1) // tile_m
-        gy = N // tile_n
+        idx_m = arith.index_cast(T.index, i32_m.ir_value())
+        idx_n = arith.index_cast(T.index, i32_n.ir_value())
+        gx = _raw((idx_m + (tile_m - 1)) / tile_m)
+        gy = _raw(idx_n / tile_n)
 
-        kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b).launch(
+        kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n).launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
         )
