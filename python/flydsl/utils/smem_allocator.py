@@ -6,7 +6,7 @@ from typing import Union, Type, Tuple, Any, Optional, Callable, Dict
 from .._mlir import ir
 from .._mlir.dialects import arith, memref, gpu
 from .._mlir.extras import types as T
-from flydsl.dialects.ext.gpu import lds_space
+from flydsl._mlir_helpers.gpu import lds_space
 
 # ==============================================================================
 # Type Utilities

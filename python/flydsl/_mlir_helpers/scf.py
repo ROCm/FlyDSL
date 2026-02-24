@@ -8,14 +8,14 @@ insertion points and terminators so callers don't need to use
 from typing import Optional, Sequence
 from contextlib import contextmanager
 
-from ..._mlir.ir import (
+from .._mlir.ir import (
     Value,
     Location,
     InsertionPoint,
     Block,
 )
-from ..._mlir.dialects import scf as _scf
-from ..._mlir.dialects import arith as _arith
+from .._mlir.dialects import scf as _scf
+from .._mlir.dialects import arith as _arith
 
 from .arith import constant
 
@@ -122,7 +122,7 @@ def range_(
     if loc is None:
         # Prefer a file/line location pointing at user code for better IR dumps.
         try:
-            from flydsl.dialects.ext.func import get_user_code_loc
+            from flydsl._mlir_helpers.func import get_user_code_loc
 
             loc = get_user_code_loc()
         except Exception:
@@ -489,7 +489,7 @@ def yield_(
 
 
 # Re-export common scf operations
-from ..._mlir.dialects.scf import (
+from .._mlir.dialects.scf import (
     WhileOp,
     YieldOp,
     ExecuteRegionOp,

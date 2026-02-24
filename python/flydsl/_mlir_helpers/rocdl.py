@@ -9,12 +9,12 @@ This module provides access to ROCm-specific GPU operations including:
 - Type conversion operations
 
 Example:
-    >>> from flydsl.dialects.ext import rocdl
+    >>> from flydsl._mlir_helpers import rocdl
     >>> tid_x = rocdl.workitem_id_x()
     >>> rocdl.barrier()
 """
 
-from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
+from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16

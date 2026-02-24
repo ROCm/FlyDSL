@@ -6,12 +6,12 @@ import weakref
 import os
 import numpy as np
 
-from ..._mlir.ir import (
+from .._mlir.ir import (
     Type, Value, IntegerType, IndexType, F32Type, F64Type, F16Type,
     DenseElementsAttr, Location, InsertionPoint, ShapedType, VectorType
 )
-from ..._mlir.dialects import arith as _arith
-from ..._mlir.dialects._ods_common import get_op_result_or_op_results
+from .._mlir.dialects import arith as _arith
+from .._mlir.dialects._ods_common import get_op_result_or_op_results
 
 from ._loc import maybe_default_loc
 
@@ -85,7 +85,7 @@ def constant(
     if loc is None:
         # Prefer a file/line location pointing at user code for better IR dumps.
         try:
-            from flydsl.dialects.ext.func import get_user_code_loc
+            from flydsl._mlir_helpers.func import get_user_code_loc
 
             loc = get_user_code_loc()
         except Exception:
@@ -875,7 +875,7 @@ class ArithValue:
         return _unwrap_value(self)
 
 # Re-export commonly used arith operations
-from ..._mlir.dialects.arith import (
+from .._mlir.dialects.arith import (
     AddIOp, AddFOp, SubIOp, SubFOp, MulIOp, MulFOp,
     DivSIOp, DivFOp, RemSIOp, RemFOp,
     CmpIOp, CmpFOp, CmpIPredicate, CmpFPredicate,

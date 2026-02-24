@@ -4,8 +4,8 @@ This module provides high-level Python wrappers for AMD CDNA3/CDNA4 buffer opera
 Buffer operations use a scalar base pointer and per-thread offsets for efficient memory access.
 
 Example:
-    >>> from flydsl.dialects.ext import buffer_ops
-    >>> from flydsl.dialects.ext import arith
+    >>> from flydsl._mlir_helpers import buffer_ops
+    >>> from flydsl._mlir_helpers import arith
     >>> import _mlir.extras.types as T
     >>> 
     >>> # Create buffer resource from memref
@@ -21,9 +21,9 @@ Example:
     >>> buffer_ops.buffer_store(data, rsrc, offset)
 """
 
-from ..._mlir import ir
-from ..._mlir.dialects import llvm, rocdl, arith as std_arith, memref
-from ..._mlir.extras import types as T
+from .._mlir import ir
+from .._mlir.dialects import llvm, rocdl, arith as std_arith, memref
+from .._mlir.extras import types as T
 from typing import Optional, Union
 
 __all__ = [

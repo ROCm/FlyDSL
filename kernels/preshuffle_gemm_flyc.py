@@ -16,8 +16,8 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.dialects.ext import flir_compat as flir
-from flydsl.dialects.ext.python_control_flow import range_constexpr
+from flydsl._mlir_helpers import flir_compat as flir
+from flydsl._mlir_helpers.python_control_flow import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -25,7 +25,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 from flydsl._mlir.dialects import arith as _raw_arith
 
-from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
+from flydsl._mlir_helpers import arith, gpu, buffer_ops, vector, rocdl
 
 
 def _raw(v):

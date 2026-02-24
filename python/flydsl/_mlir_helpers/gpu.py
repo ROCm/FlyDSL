@@ -6,10 +6,10 @@ from functools import wraps
 from typing import Any, List, Optional, Tuple, Union, Callable
 
 
-from ..._mlir import ir
-from ..._mlir.dialects.arith import AffineConstantExpr
-from ..._mlir.extras import types as T
-from ..._mlir.extras.meta import (
+from .._mlir import ir
+from .._mlir.dialects.arith import AffineConstantExpr
+from .._mlir.extras import types as T
+from .._mlir.extras.meta import (
     region_op,
 )
 
@@ -22,17 +22,17 @@ from .python_control_flow import lower_range_for_loops
 #     # make_maybe_no_args_decorator,
 # )
 
-from ..._mlir.dialects._gpu_ops_gen import _Dialect
-from ..._mlir.dialects._ods_common import (
+from .._mlir.dialects._gpu_ops_gen import _Dialect
+from .._mlir.dialects._ods_common import (
     _cext,
     get_default_loc_context,
     get_op_result_or_op_results,
 )
-from ..._mlir.dialects import gpu
-from ..._mlir.dialects._gpu_ops_gen import _Dialect
-from ..._mlir.dialects._gpu_ops_gen import *
+from .._mlir.dialects import gpu
+from .._mlir.dialects._gpu_ops_gen import _Dialect
+from .._mlir.dialects._gpu_ops_gen import *
 
-from ..._mlir.ir import (
+from .._mlir.ir import (
     ArrayAttr,
     AttrBuilder,
     Attribute,

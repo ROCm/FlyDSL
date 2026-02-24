@@ -5,7 +5,7 @@ for GFX942 (MI300 series), including MFMA, copy operations, and LDS management.
 """
 
 from typing import Optional
-from ..._mlir.ir import Type, Value, Location, InsertionPoint
+from .._mlir.ir import Type, Value, Location, InsertionPoint
 
 
 #===----------------------------------------------------------------------===//

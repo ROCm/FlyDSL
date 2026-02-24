@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from ..._mlir.dialects import memref as _memref
+from .._mlir.dialects import memref as _memref
 
 from ._loc import maybe_default_loc
 
 
 # Re-export everything from the upstream dialect module for convenience.
-from ..._mlir.dialects.memref import *  # noqa: F401,F403,E402
+from .._mlir.dialects.memref import *  # noqa: F401,F403,E402
 
 
 def load(memref: Any, indices: Sequence[Any], *, loc=None, ip=None):

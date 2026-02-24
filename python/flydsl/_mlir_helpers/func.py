@@ -8,13 +8,13 @@ from functools import update_wrapper
 from typing import Optional, List, Union, TypeVar
 
 
-from ..._mlir import ir
-from ..._mlir.extras.meta import op_region_builder
-from ..._mlir.extras import types as T
+from .._mlir import ir
+from .._mlir.extras.meta import op_region_builder
+from .._mlir.extras import types as T
 
-from ..._mlir.dialects._ods_common import get_op_result_or_op_results
-from ..._mlir.dialects.func import *
-from ..._mlir.ir import (
+from .._mlir.dialects._ods_common import get_op_result_or_op_results
+from .._mlir.dialects.func import *
+from .._mlir.ir import (
     FlatSymbolRefAttr,
     FunctionType,
     InsertionPoint,

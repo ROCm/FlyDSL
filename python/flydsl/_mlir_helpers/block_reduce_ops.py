@@ -6,16 +6,16 @@ combine multiple low-level GPU primitives (shuffle, shared memory, barriers)
 into commonly used patterns for parallel reductions and communication.
 
 Example:
-    >>> from flydsl.dialects.ext import collective_ops
+    >>> from flydsl._mlir_helpers import collective_ops
     >>> max_val = collective_ops.block_reduce_max(val, smem, tid, num_warps=4)
 """
 
 from typing import Optional, Callable
-from ..._mlir.ir import Value, InsertionPoint
-from ..._mlir.dialects import gpu as mlir_gpu, memref, scf
+from .._mlir.ir import Value, InsertionPoint
+from .._mlir.dialects import gpu as mlir_gpu, memref, scf
 
 try:
-    from flydsl.dialects.ext import arith
+    from flydsl._mlir_helpers import arith
 except ImportError:
     from . import arith
 
