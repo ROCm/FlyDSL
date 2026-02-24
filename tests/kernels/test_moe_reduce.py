@@ -138,6 +138,80 @@ def print_reduce_profile(results: Dict) -> None:
         print(f"speedup: {results['speedup']:.2f}x")
 
 
+def run_reduce_test(
+    tokens: int,
+    topk: int,
+    model_dim: int,
+    dtype_str: str = "f16",
+    use_mask: bool = False,
+    check_correctness: bool = True,
+    profile: bool = False,
+    num_iters: int = 20,
+    num_warmup: int = 5,
+    compare_torch: bool = True,
+):
+    """Run reduce kernel test: correctness and/or performance."""
+    dtype_map = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
+    dtype = dtype_map[dtype_str]
+
+    print(
+        f"=== MoE Reduce Kernel: tokens={tokens}, topk={topk}, model_dim={model_dim}, "
+        f"use_mask={use_mask}, dtype={dtype_str} ==="
+    )
+
+    reduce_exe = compile_moe_reduction(
+        topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask
+    )
+
+    # Create test data
+    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
+    Y_flydsl = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
+    Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
+
+    if use_mask:
+        # Create a random mask
+        valid_mask = torch.randint(0, 2, (tokens, topk), device="cuda", dtype=torch.uint8)
+    else:
+        valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
+
+    if check_correctness:
+        # Reference execution
+        if use_mask:
+            mask_bool = valid_mask.to(torch.bool).unsqueeze(-1)  # [tokens, topk, 1]
+            X_ref = X * mask_bool
+        else:
+            X_ref = X
+        
+        torch.sum(X_ref, dim=1, out=Y_ref)
+
+    # Run FlyDSL kernel
+    stream_ptr = torch.cuda.current_stream().cuda_stream
+    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
+    torch.cuda.synchronize()
+
+    if check_correctness:
+        ok = verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
+        if not ok:
+            print("FAIL: correctness check failed!")
+            # Raise assertion error for pytest, or exit for script
+            assert ok, "Correctness check failed"
+            sys.exit(1)
+        print("PASS: correctness check passed.")
+
+    if profile:
+        results = profile_reduce_kernel(
+            tokens=tokens,
+            topk=topk,
+            model_dim=model_dim,
+            dtype=dtype,
+            num_iters=num_iters,
+            num_warmup=num_warmup,
+            compare_torch=compare_torch,
+            use_mask=use_mask,
+        )
+        print_reduce_profile(results)
+
+
 @pytest.mark.parametrize(
     "tokens, topk, model_dim, use_mask",
     [
@@ -150,93 +224,36 @@ def print_reduce_profile(results: Dict) -> None:
         pytest.param(5, 6, 5120, False, id="EP-K6-decode-M"),
         pytest.param(65, 6, 5120, False, id="EP-K6-decode-L"),
         # Masked tests
-        pytest.param(128, 8, 7168, True, id="DS-TP8-masked"),
-        pytest.param(128, 6, 5120, True, id="EP-K6-masked"),
+        pytest.param(129, 8, 7168, True, id="DS-TP8-masked"),
+        pytest.param(129, 6, 5120, True, id="EP-K6-masked"),
     ],
 )
 def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int, use_mask: bool):
     """Test reduce kernel correctness and performance vs torch.sum."""
-    dtype = torch.float16
-    dtype_str = "f16"
-
-    reduce_exe = compile_moe_reduction(
-        topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask
-    )
-
-    # Create test data
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y_flydsl = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-
-    # Run kernels
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    
-    if use_mask:
-        # Create a random boolean mask (0 or 1), shape [tokens, topk]
-        valid_mask = torch.randint(0, 2, (tokens, topk), device="cuda", dtype=torch.uint8)
-        # Reference: we need to mask X before summing.
-        mask_bool = valid_mask.to(torch.bool).unsqueeze(-1)  # [tokens, topk, 1]
-        X_ref = X * mask_bool
-        torch.sum(X_ref, dim=1, out=Y_ref)
-    else:
-        valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-        torch.sum(X, dim=1, out=Y_ref)
-
-    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
-    torch.cuda.synchronize()
-
-    # Correctness check using verify_output
-    assert verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
-
-    # Performance profiling
-    results = profile_reduce_kernel(
-        tokens=tokens, topk=topk, model_dim=model_dim,
-        num_iters=20, num_warmup=5, compare_torch=True,
+    run_reduce_test(
+        tokens=tokens,
+        topk=topk,
+        model_dim=model_dim,
         use_mask=use_mask,
+        check_correctness=True,
+        profile=True
     )
-    print_reduce_profile(results)
 
 
 def _run_from_args(args: argparse.Namespace) -> None:
     """Run reduce kernel test/benchmark from parsed CLI args."""
-    tokens = args.tokens
-    topk = args.topk
-    model_dim = args.model_dim
-    dtype_map = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}
-    dtype = dtype_map[args.dtype]
-    dtype_str = args.dtype
-
-    print(f"=== MoE Reduce Kernel: tokens={tokens}, topk={topk}, model_dim={model_dim}, dtype={dtype_str} ===")
-
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-
-    # Correctness
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y_flydsl = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
-    torch.sum(X, dim=1, out=Y_ref)
-    torch.cuda.synchronize()
-
-    ok = verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
-    if not ok:
-        print("FAIL: correctness check failed!")
-        raise SystemExit(1)
-    print("PASS: correctness check passed.")
-
-    # Performance
-    results = profile_reduce_kernel(
-        tokens=tokens,
-        topk=topk,
-        model_dim=model_dim,
-        dtype=dtype,
+    run_reduce_test(
+        tokens=args.tokens,
+        topk=args.topk,
+        model_dim=args.model_dim,
+        dtype_str=args.dtype,
+        use_mask=args.use_mask,
+        check_correctness=True,
+        profile=True,
         num_iters=args.num_iters,
         num_warmup=args.num_warmup,
         compare_torch=args.compare_torch,
     )
-    print_reduce_profile(results)
 
 
 if __name__ == "__main__":
@@ -261,6 +278,12 @@ if __name__ == "__main__":
         default="f16",
         choices=["f16", "bf16", "f32"],
         help="Element dtype (default: f16)",
+    )
+    parser.add_argument(
+        "--use_mask",
+        action="store_true",
+        default=False,
+        help="Whether to use a random valid mask (default: False).",
     )
     parser.add_argument("--num_iters", type=int, default=20, help="Benchmark iterations (default: 20)")
     parser.add_argument("--num_warmup", type=int, default=5, help="Benchmark warmup iterations (default: 5)")
