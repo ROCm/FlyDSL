@@ -213,6 +213,7 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
 }
 
 def Fly_CopyAtomUniversalCopy : Fly_Type<"CopyAtomUniversalCopy", "atom.universal_copy", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
   DeclareTypeInterfaceMethods<Fly_CopyAtomTypeInterface>
 ]> {
   let parameters = (ins
@@ -222,6 +223,7 @@ def Fly_CopyAtomUniversalCopy : Fly_Type<"CopyAtomUniversalCopy", "atom.universa
 }
 
 def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "atom.universal_fma", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
   DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
 ]> {
   let parameters = (ins "Type":$elemTy);
