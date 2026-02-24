@@ -32,6 +32,12 @@ bool mlirFlyIntTupleTypeIsStatic(MlirType type) {
   return cast<IntTupleType>(unwrap(type)).isStatic();
 }
 
+int32_t mlirFlyIntTupleTypeGetStaticValue(MlirType type) {
+  auto intTupleTy = cast<IntTupleType>(unwrap(type));
+  assert(intTupleTy.isLeaf() && intTupleTy.isStatic());
+  return intTupleTy.getAttr().getLeafAsInt().getValue();
+}
+
 //===----------------------------------------------------------------------===//
 // LayoutType
 //===----------------------------------------------------------------------===//

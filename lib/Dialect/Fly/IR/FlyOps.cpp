@@ -7,6 +7,7 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
 
 #include <mlir/IR/Attributes.h>
 #include <mlir/IR/BuiltinAttributes.h>
@@ -130,8 +131,9 @@ FLY_INFER_RETURN_TYPES(MakeViewOp) {
   auto layoutTy = dyn_cast<LayoutType>(operands[1].getType());
   if (!ptrTy || !layoutTy)
     return failure();
-  inferredReturnTypes.assign({MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(),
-                                              layoutTy.getAttr(), ptrTy.getAlignment())});
+  inferredReturnTypes.assign(
+      {MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(), layoutTy.getAttr(),
+                       ptrTy.getAlignment(), ptrTy.getSwizzle())});
   return success();
 }
 
@@ -269,7 +271,8 @@ FLY_INFER_RETURN_TYPES(GetIterOp) {
   auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
   if (!memrefTy)
     return failure();
-  inferredReturnTypes.assign({PointerType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace())});
+  inferredReturnTypes.assign({PointerType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(),
+                                               memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
@@ -573,7 +576,8 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
     IntTupleAttr newStride = intTupleSlice(builder, layoutAttr.getStride(), coordAttr);
     auto newLayoutAttr = LayoutAttr::get(context, newShape, newStride);
     inferredReturnTypes.assign(
-        {MemRefType::get(srcMemRefTy.getElemTy(), srcMemRefTy.getAddressSpace(), newLayoutAttr)});
+        {MemRefType::get(srcMemRefTy.getElemTy(), srcMemRefTy.getAddressSpace(), newLayoutAttr,
+                         srcMemRefTy.getAlignment(), srcMemRefTy.getSwizzle())});
     return success();
   }
 
@@ -783,7 +787,8 @@ FLY_INFER_RETURN_TYPES(LogicalDivideOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -818,7 +823,8 @@ FLY_INFER_RETURN_TYPES(ZippedDivideOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -853,7 +859,8 @@ FLY_INFER_RETURN_TYPES(TiledDivideOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -888,7 +895,8 @@ FLY_INFER_RETURN_TYPES(FlatDivideOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -917,7 +925,8 @@ FLY_INFER_RETURN_TYPES(LogicalProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -953,7 +962,8 @@ FLY_INFER_RETURN_TYPES(ZippedProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -991,7 +1001,8 @@ FLY_INFER_RETURN_TYPES(TiledProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -1029,7 +1040,8 @@ FLY_INFER_RETURN_TYPES(FlatProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -1058,7 +1070,8 @@ FLY_INFER_RETURN_TYPES(BlockedProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -1087,7 +1100,8 @@ FLY_INFER_RETURN_TYPES(RakedProductOp) {
 
   if (memrefTy) {
     inferredReturnTypes.assign(
-        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred)});
+        {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), inferred,
+                         memrefTy.getAlignment(), memrefTy.getSwizzle())});
   } else {
     inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   }
@@ -1117,34 +1131,80 @@ FLY_INFER_RETURN_TYPES(MakeTiledCopyOp) {
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
+  auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
   auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
-  if (!memrefTy)
+  auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
+  if (!tiledCopyTy || !memrefTy || !thrIdxTy)
     return failure();
-  inferredReturnTypes.assign({memrefTy});
+
+  auto copyAtom = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+  if (!copyAtom)
+    return failure();
+
+  LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+  TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+  IntTupleAttr thrIdx = thrIdxTy.getAttr();
+  LayoutAttr srcLayout = memrefTy.getLayout();
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  LayoutAttr thrValView =
+      layoutTiledCopyThrValViewSrc(builder, copyAtom, tiledLayoutThrVal, tileMN, srcLayout);
+
+  SmallVector<Attribute> coordElems;
+  coordElems.push_back(thrIdx);
+  coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  for (int i = 0; i < srcLayout.rank(); ++i)
+    coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(context, coordElems));
+
+  IntTupleAttr resultShape =
+      intTupleSlice(builder, intTupleExpand(builder, thrValView.getShape(), {2}), sliceCoord);
+  IntTupleAttr resultStride =
+      intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
+  LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
+
+  inferredReturnTypes.assign(
+      {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
+                       memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
+  auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
   auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
-  if (!memrefTy)
+  auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
+  if (!tiledCopyTy || !memrefTy || !thrIdxTy)
     return failure();
-  inferredReturnTypes.assign({memrefTy});
-  return success();
-}
 
-FLY_INFER_RETURN_TYPES(TiledCopyPartitionDOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
-  if (!memrefTy)
+  auto copyAtom = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+  if (!copyAtom)
     return failure();
-  inferredReturnTypes.assign({memrefTy});
-  return success();
-}
 
-FLY_INFER_RETURN_TYPES(TiledCopyPartitionSOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
-  if (!memrefTy)
-    return failure();
-  inferredReturnTypes.assign({memrefTy});
+  LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+  TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+  IntTupleAttr thrIdx = thrIdxTy.getAttr();
+  LayoutAttr dstLayout = memrefTy.getLayout();
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  LayoutAttr thrValView =
+      layoutTiledCopyThrValViewDst(builder, copyAtom, tiledLayoutThrVal, tileMN, dstLayout);
+
+  SmallVector<Attribute> coordElems;
+  coordElems.push_back(thrIdx);
+  coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  for (int i = 0; i < dstLayout.rank(); ++i)
+    coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(context, coordElems));
+
+  IntTupleAttr resultShape =
+      intTupleSlice(builder, intTupleExpand(builder, thrValView.getShape(), {2}), sliceCoord);
+  IntTupleAttr resultStride =
+      intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
+  LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
+
+  inferredReturnTypes.assign(
+      {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
+                       memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
@@ -1157,18 +1217,65 @@ FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
 }
 
 FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[2].getType());
-  if (!memrefTy)
+  auto operandId = properties.as<Properties *>()->operand_id.getValue();
+  auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
+  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  if (!tiledMmaTy || !memrefTy)
     return failure();
-  inferredReturnTypes.assign({memrefTy});
+
+  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  if (!mmaAtom)
+    return failure();
+
+  LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
+  TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
+  LayoutAttr inputLayout = memrefTy.getLayout();
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
+                                                          permutationMNK, operandId, inputLayout);
+
+  SmallVector<Attribute> coordElems;
+  coordElems.push_back(IntTupleAttr::getLeafStatic(context, 0));
+  coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(context, coordElems));
+
+  IntTupleAttr resultShape = intTupleSlice(builder, thrValView.getShape(), sliceCoord);
+  IntTupleAttr resultStride = intTupleSlice(builder, thrValView.getStride(), sliceCoord);
+  LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
+
+  inferredReturnTypes.assign(
+      {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
+                       memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
 FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[2].getType());
-  if (!memrefTy)
+  auto operandId = properties.as<Properties *>()->operand_id.getValue();
+  auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
+  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  if (!tiledMmaTy || !memrefTy)
     return failure();
-  inferredReturnTypes.assign({IntTupleType::get(memrefTy.getLayout().getShape())});
+
+  auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  if (!mmaAtom)
+    return failure();
+
+  LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
+  TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
+  LayoutAttr inputLayout = memrefTy.getLayout();
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
+                                                          permutationMNK, operandId, inputLayout);
+
+  SmallVector<Attribute> coordElems;
+  coordElems.push_back(IntTupleAttr::getLeafStatic(context, 0));
+  coordElems.push_back(IntTupleAttr::getLeafNone(context));
+  IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(context, coordElems));
+
+  IntTupleAttr resultShape = intTupleSlice(builder, thrValView.getShape(), sliceCoord);
+  inferredReturnTypes.assign({IntTupleType::get(resultShape)});
   return success();
 }
 

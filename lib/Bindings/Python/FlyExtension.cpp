@@ -147,6 +147,9 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
                   [](PyIntTupleType &self) -> bool { return mlirFlyIntTupleTypeIsLeaf(self); });
     c.def_prop_ro("is_static",
                   [](PyIntTupleType &self) -> bool { return mlirFlyIntTupleTypeIsStatic(self); });
+    c.def_prop_ro("static_value", [](PyIntTupleType &self) -> int32_t {
+      return mlirFlyIntTupleTypeGetStaticValue(self);
+    });
   }
 };
 
@@ -346,6 +349,31 @@ struct PyCopyAtomUniversalCopyType : PyConcreteType<PyCopyAtomUniversalCopyType>
     c.def_prop_ro("bit_size", [](PyCopyAtomUniversalCopyType &self) -> int32_t {
       return mlirFlyCopyAtomUniversalCopyTypeGetBitSize(self);
     });
+
+    c.def_prop_ro("thr_size", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getThrSize());
+      return wrap(::mlir::fly::IntTupleType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_src", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutSrc());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_dst", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutDst());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_ref", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutRef());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
   }
 };
 
@@ -371,6 +399,37 @@ struct PyMmaAtomUniversalFMAType : PyConcreteType<PyMmaAtomUniversalFMAType> {
 
     c.def_prop_ro("elem_ty", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
       return mlirFlyMmaAtomUniversalFMATypeGetElemTy(self);
+    });
+
+    c.def_prop_ro("thr_size", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getThrSize());
+      return wrap(::mlir::fly::IntTupleType::get(attr));
+    });
+    c.def_prop_ro("shape_mnk", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getShapeMNK());
+      return wrap(::mlir::fly::IntTupleType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_a", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutA());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_b", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutB());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_c", [](PyMmaAtomUniversalFMAType &self) -> MlirType {
+      auto ty =
+          ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutC());
+      return wrap(::mlir::fly::LayoutType::get(attr));
     });
   }
 };

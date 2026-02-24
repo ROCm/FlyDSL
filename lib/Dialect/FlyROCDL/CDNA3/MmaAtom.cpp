@@ -33,7 +33,14 @@ namespace cdna4 {}
 
 namespace mlir::fly_rocdl {
 
+bool MmaAtomCDNA3_MFMAType::isStatic() const { return true; }
+
 Attribute MmaAtomCDNA3_MFMAType::getThrSize() const { return FxC(64); }
+
+Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {
+  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
+}
+
 Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
