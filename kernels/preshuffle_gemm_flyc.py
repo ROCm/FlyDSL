@@ -4,8 +4,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl.expr import flir_compat as flir
-from flydsl.expr.python_control_flow import range_constexpr
+from flydsl.expr import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -27,6 +26,8 @@ from kernels.mfma_preshuffle_pipeline import (
     make_preshuffle_b_layout,
     load_b_pack_k32,
     tile_chunk_coord_i32,
+    swizzle_xor16,
+    _buffer_load_vec,
 )
 from kernels.mfma_epilogues import mfma_epilog
 
@@ -142,7 +143,7 @@ def compile_preshuffle_gemm_a8(
     # NEW: @flyc.kernel def kernel_gemm(arg_c: fx.Tensor, …)
     #      M, N, K captured from enclosing scope as compile-time constants.
 
-    @flyc.kernel(rewrite_ast=False)
+    @flyc.kernel
     def kernel_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
@@ -268,7 +269,7 @@ def compile_preshuffle_gemm_a8(
         # ── B load helpers (unchanged logic, using old dialect ops) ────────
         def load_b_pack(base_k, ki_step, ni):
             return load_b_pack_k32(
-                buffer_ops, flir, arith, vector,
+                buffer_ops, arith, vector,
                 arg_b=arg_b_v, b_rsrc=b_rsrc, layout_b=layout_b,
                 base_k=base_k, ki_step=ki_step,
                 n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
@@ -277,7 +278,6 @@ def compile_preshuffle_gemm_a8(
                 elem_bytes=elem_bytes, unpack_int4=is_int4,
             )
 
-        atom_b_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=16)
         c64_b = 64
         c0_idx = 0
 
@@ -294,16 +294,18 @@ def compile_preshuffle_gemm_a8(
             coord_pack = fx.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
             idx_pack = fx.crd2idx(coord_pack, layout_b)
             vec_elems = 16 if elem_bytes == 1 else 8
-            b_view = flir.TensorView(
-                arg_b_v, (vec_elems,), strides=(1,),
-                base_indices=(idx_pack,), element_type=_elem_type(),
-            )
-            b16 = flir.copy(
-                flir.make_copy_atom(_elem_type(), vector_size=vec_elems),
-                b_view, None, alignment=8, return_vector=True,
-                src_buffer_resource=(b_rsrc if elem_bytes == 1 else None),
-                src_buffer_offset_in_bytes=(elem_bytes == 1),
-            )
+            if elem_bytes == 1:
+                b16 = _buffer_load_vec(
+                    buffer_ops, vector, b_rsrc, idx_pack,
+                    elem_type=_elem_type(), vec_elems=vec_elems,
+                    elem_bytes=elem_bytes, offset_in_bytes=True,
+                )
+            else:
+                b16 = _buffer_load_vec(
+                    buffer_ops, vector, b_rsrc, idx_pack,
+                    elem_type=_elem_type(), vec_elems=vec_elems,
+                    elem_bytes=elem_bytes, offset_in_bytes=False,
+                )
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
@@ -330,9 +332,9 @@ def compile_preshuffle_gemm_a8(
                 b_tile.append((packs0, packs1))
             return b_tile
 
-        # ── A LDS load/store helpers (swizzle uses flir.swizzle_xor16) ────
+        # ── A LDS load/store helpers ────────────────────────────────────────
         def lds_load_16b(curr_row_a_lds, col_base, lds_base):
-            col_base_swz_bytes = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
+            col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
             coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
             idx_a16 = fx.crd2idx(coord_a16, layout_lds)
@@ -364,18 +366,19 @@ def compile_preshuffle_gemm_a8(
         layout_a_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
         c4 = arith.constant(4, index=True)
         tx_i32_base = tx * c4
-        atom_a_g2r16 = flir.make_copy_atom(_elem_type(), vector_size=(16 if elem_bytes == 1 else 8))
 
         def load_a_16(idx_elem):
             return buffer_copy_gmem16_dwordx4(
-                flir, arg=arg_a_v, elem_type=_elem_type(),
-                idx_i32=idx_elem, atom_g2r16=atom_a_g2r16,
+                buffer_ops, vector,
+                elem_type=_elem_type(),
+                idx_i32=idx_elem,
                 rsrc=a_rsrc, vec_elems=(16 if elem_bytes == 1 else 8),
+                elem_bytes=elem_bytes,
             )
 
         def a_tile_chunk_coord_i32(i: int):
             return tile_chunk_coord_i32(
-                flir, arith, tx_i32_base=tx_i32_base, i=i,
+                arith, tx_i32_base=tx_i32_base, i=i,
                 total_threads=total_threads, layout_tile_div4=layout_a_tile_div4,
             )
 
@@ -397,9 +400,8 @@ def compile_preshuffle_gemm_a8(
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                 lds_store_16b_xor16(
-                    flir, arith, vector,
+                    arith, vector,
                     lds_memref=lds_a, vec16_ty=_vec16_type(),
-                    elem_type=_elem_type(), atom_s16=atom_a_g2r16,
                     layout_lds=layout_lds, row_local=row_a_local,
                     col_local_i32=col_a_local_i32, tx_c4=c4,
                     k_blocks16=k_blocks16, lds_base=lds_base,

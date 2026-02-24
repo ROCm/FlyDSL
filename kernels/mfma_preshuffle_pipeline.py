@@ -13,6 +13,51 @@ Key primitives:
 from __future__ import annotations
 from dataclasses import dataclass
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import arith as _raw_arith
+import flydsl.expr as fx
+
+
+def swizzle_xor16(row, col, k_blocks16):
+    """XOR-with-row swizzle on the K dimension at 16B granularity.
+
+    Computes: col XOR ((row % k_blocks16) * 16)
+    """
+    from flydsl.expr.utils.arith import unwrap
+    r = unwrap(row)
+    c = unwrap(col)
+    kb = unwrap(k_blocks16)
+    idx_ty = ir.IndexType.get()
+    rem = _raw_arith.RemUIOp(r, kb).result
+    c16 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 16)).result
+    mul = _raw_arith.MulIOp(rem, c16).result
+    return _raw_arith.XOrIOp(c, mul).result
+
+
+def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, elem_bytes, offset_in_bytes):
+    """Load vec_elems elements via buffer_load dwordx[1,2,4] + bitcast."""
+    from flydsl.expr.utils.arith import unwrap
+    elem_size = int(elem_bytes)
+    load_bytes = int(vec_elems) * elem_size
+    vec_width = load_bytes // 4
+    i32_ty = ir.IntegerType.get_signless(32)
+    idx_ty = ir.IndexType.get()
+
+    raw_idx = unwrap(idx)
+    if offset_in_bytes:
+        c4 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 4)).result
+        idx_i32 = _raw_arith.DivSIOp(raw_idx, c4).result
+    elif elem_bytes == 2:
+        c2 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 2)).result
+        byte_idx = _raw_arith.MulIOp(raw_idx, c2).result
+        c4 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 4)).result
+        idx_i32 = _raw_arith.DivSIOp(byte_idx, c4).result
+    else:
+        idx_i32 = raw_idx
+
+    i32_vec = buffer_ops.buffer_load(unwrap(rsrc), idx_i32, vec_width=vec_width, dtype=i32_ty)
+    vec_elem_ty = ir.VectorType.get((int(vec_elems),), elem_type)
+    return vector.bitcast(vec_elem_ty, i32_vec)
+
 
 @dataclass(frozen=True)
 class PreshuffleBLayout:
@@ -23,7 +68,6 @@ class PreshuffleBLayout:
 
 
 def make_preshuffle_b_layout(
-    flir,
     arith,
     *,
     c_n: ir.Value,
@@ -31,14 +75,7 @@ def make_preshuffle_b_layout(
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
 ) -> PreshuffleBLayout:
-    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels.
-
-    Shape: (N0, K0, KLane, NLane, KPackBytes) = (N/16, K/64, 4, 16, kpack_bytes)
-
-    Notes:
-    - For FP8/INT8: kpack_bytes=16 (one byte per element).
-    - For packed INT4 (W4A8): kpack_bytes=8 (two 4-bit values per byte).
-    """
+    """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels."""
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
 
@@ -47,45 +84,26 @@ def make_preshuffle_b_layout(
     c4 = arith.constant(4, index=True)
     c_kpack = arith.constant(kpack_bytes, index=True)
 
-    # This layout is fundamentally byte-addressed along K:
-    # - For 1B types (fp8/i8): KBytes == K
-    # - For 2B types (fp16/bf16): KBytes == 2*K
-    #
-    # We keep the same 64B K0 "macro-step" used by CK/aiter preshuffle.
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
     c_k0 = c_k_bytes / c64
     n0 = c_n / c16
 
-    # Layout is expressed in ELEMENT units (not bytes). Convert KPackBytes -> KPackElems.
     c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack / arith.constant(int(elem_bytes), index=True))
 
-    # Strides derived from the layout shape:
-    # - KPack stride = 1
-    # - NLane stride = KPackElems
-    # - KLane stride = NLane * KPackElems = 16 * KPackElems
-    # - K0   stride = KLane * NLane * KPackElems = 4 * 16 * KPackElems
-    stride_nlane = c_kpack
     stride_nlane = c_kpack_elems
     stride_klane = c16 * stride_nlane
     stride_k0 = c4 * stride_klane
     stride_n0 = c_k0 * stride_k0
 
-    stride_b = (
-        stride_n0,      # n0
-        stride_k0,      # k0
-        stride_klane,   # k1 (KLane)
-        stride_nlane,   # n1
-        arith.constant(1, index=True),  # k2
-    )
-    layout_b = flir.make_layout((n0, c_k0, c4, c16, c_kpack_elems), stride=stride_b)
+    stride_b = (stride_n0, stride_k0, stride_klane, stride_nlane, arith.constant(1, index=True))
+    layout_b = fx.make_layout((n0, c_k0, c4, c16, c_kpack_elems), stride_b)
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
 def load_b_pack_k32(
     buffer_ops,
-    flir,
     arith,
     vector,
     *,
@@ -105,17 +123,11 @@ def load_b_pack_k32(
     """Load one B pack for one MFMA(x32) micro-step.
 
     Returns an i64 Value containing 8 bytes consumed by MFMA.
-
-    - For FP8/INT8: loads 16 bytes (one full KPack) and extracts the 8 bytes used by
-      this micro-step.
-    - For packed INT4 (W4A8): loads 4 bytes (8 int4 values) and unpacks to 8 int8 bytes
-      using the 7-op sequence (no v_perm).
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
     if unpack_int4 and kpack_bytes != 8:
         raise ValueError("unpack_int4 requires kpack_bytes=8 (packed int4 layout)")
-
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
 
@@ -127,32 +139,14 @@ def load_b_pack_k32(
     half_bytes = kpack_bytes // 2
     k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
-    # Always compute the *pack base* index (k2=0). Layout is in ELEMENT units.
-    # add/sub on the address path and keeps the load address stable across the
-    # two half-steps.
-    coord_pack = flir.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
-    idx_pack = flir.crd2idx(coord_pack, layout_b)
+    coord_pack = fx.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
+    idx_pack = fx.crd2idx(coord_pack, layout_b)
 
     if unpack_int4:
-        # Load 4 bytes -> i32 -> unpack to i64 (8 i8 bytes).
-        atom = flir.make_copy_atom(elem_type, vector_size=4)
-        # packed int4 is byte-addressed (elem_bytes==1)
         idx_bytes = idx_pack + k2_base
-        b_view = flir.TensorView(
-            arg_b,
-            (4,),
-            strides=(1,),
-            base_indices=(idx_bytes,),
-            element_type=elem_type,
-        )
-        b4 = flir.copy(
-            atom,
-            b_view,
-            None,
-            alignment=4,
-            return_vector=True,
-            src_buffer_resource=b_rsrc,
-            src_buffer_offset_in_bytes=True,
+        b4 = _buffer_load_vec(
+            buffer_ops, vector, b_rsrc, idx_bytes,
+            elem_type=elem_type, vec_elems=4, elem_bytes=1, offset_in_bytes=True,
         )
         vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
         packed32 = vector.extract(
@@ -161,8 +155,6 @@ def load_b_pack_k32(
             dynamic_position=[],
         )
 
-        # 7-op unpack (and + mul + and_or + shifts). Requires prepacked nibble layout:
-        # bytes: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
         c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
         c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
         c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
@@ -181,38 +173,13 @@ def load_b_pack_k32(
         v64 = vector.bitcast(vec1_i64, v2)
         return vector.extract(v64, static_position=[0], dynamic_position=[])
 
-    # FP8/INT8: load 16 bytes (one full KPack) and extract half (8B) as i64.
-    #
-    # This keeps the original semantics (return the same 8B i64 used by MFMA for
-    # this `ki_step`), but makes the intended 16B buffer-load (dwordx4) explicit
-    # in the IR instead of relying on backend vectorization.
     vec_elems = kpack_bytes // int(elem_bytes)
-    atom = flir.make_copy_atom(elem_type, vector_size=vec_elems)
-    b_view = flir.TensorView(
-        arg_b,
-        (vec_elems,),
-        strides=(1,),
-        base_indices=(idx_pack,),
-        element_type=elem_type,
+    b16 = _buffer_load_vec(
+        buffer_ops, vector, b_rsrc, idx_pack,
+        elem_type=elem_type, vec_elems=vec_elems, elem_bytes=elem_bytes,
+        offset_in_bytes=(elem_bytes == 1),
     )
-    b16 = flir.copy(
-        atom,
-        b_view,
-        None,
-        # Keep conservative alignment here: some layouts/launchers may only guarantee 8B.
-        # This is still compatible with 16B buffer loads; it just avoids overstating
-        # alignment to the compiler.
-        alignment=8,
-        return_vector=True,
-        src_buffer_resource=b_rsrc,
-        # Only 1B element types can safely treat the base index as bytes.
-        src_buffer_offset_in_bytes=(elem_bytes == 1),
-    )
-    # Extract the needed 8B half as an i64 while keeping the other half dead.
-    #
-    # NOTE: We intentionally build the i64 from the selected 2 dwords, instead of
-    # `bitcast -> i64x2 -> extract`, to help the backend shorten live ranges and
-    # avoid unnecessary VGPR pressure on some schedules.
+
     i32 = ir.IntegerType.get_signless(32)
     i64 = ir.IntegerType.get_signless(64)
     vec4_i32 = ir.VectorType.get([4], i32)
@@ -234,7 +201,6 @@ def load_b_pack_k32(
 
 
 def tile_chunk_coord_i32(
-    flir,
     arith,
     *,
     tx_i32_base: ir.Value,
@@ -243,73 +209,43 @@ def tile_chunk_coord_i32(
     layout_tile_div4,
     chunk_i32: int = 4,
 ):
-    """Map (thread, chunk_id) -> (row_local, col_local_i32) for X/A loads.
-
-    General form (dword-granularity):
-      chunk_linear   = tx + i*total_threads
-      chunk_i32_base = chunk_linear * chunk_i32
-
-    Where chunk_i32 is the number of dwords per chunk:
-      - 4  -> 16B (dwordx4)
-      - 2  ->  8B (dwordx2)
-      - 1  ->  4B (dword)
-
-    NOTE: `layout_tile_div4` is expressed in dword elements along K (K/4),
-    matching the existing GEMM/MoE mapping.
-    """
+    """Map (thread, chunk_id) -> (row_local, col_local_i32) for X/A loads."""
     if chunk_i32 not in (1, 2, 4):
         raise ValueError(f"chunk_i32 must be one of (1,2,4), got {chunk_i32!r}")
     chunk_off_i32 = arith.constant(i * total_threads * chunk_i32, index=True)
     tile_idx_i32 = tx_i32_base + chunk_off_i32
-    coord_local = flir.idx2crd(tile_idx_i32, layout_tile_div4)
-    row_local = flir.get(coord_local, 0)
-    col_local_i32 = flir.get(coord_local, 1)
+    coord_local = fx.idx2crd(tile_idx_i32, layout_tile_div4)
+    row_local = fx.get(coord_local, 0)
+    col_local_i32 = fx.get(coord_local, 1)
     return row_local, col_local_i32
 
 
 def buffer_copy_gmem16_dwordx4(
-    flir,
+    buffer_ops,
+    vector,
     *,
-    arg,
     elem_type,
     idx_i32: ir.Value,
-    atom_g2r16,
     rsrc,
     vec_elems: int = 16,
+    elem_bytes: int = 1,
 ):
-    """Copy 16 bytes from global memory into regs via buffer-load dwordx4 lowering.
-
-    `idx_i32` is a dword element offset (not bytes), so `src_buffer_offset_in_bytes=False`.
-    """
+    """Copy 16 bytes from global memory into regs via buffer-load dwordx4 lowering."""
     if int(vec_elems) <= 0:
         raise ValueError(f"vec_elems must be > 0, got {vec_elems!r}")
-    view = flir.TensorView(
-        arg,
-        (int(vec_elems),),
-        strides=(1,),
-        base_indices=(idx_i32,),
-        element_type=elem_type,
-    )
-    return flir.copy(
-        atom_g2r16,
-        view,
-        None,
-        alignment=16,
-        return_vector=True,
-        src_buffer_resource=rsrc,
-        src_buffer_offset_in_bytes=False,
+    return _buffer_load_vec(
+        buffer_ops, vector, rsrc, idx_i32,
+        elem_type=elem_type, vec_elems=vec_elems, elem_bytes=elem_bytes,
+        offset_in_bytes=False,
     )
 
 
 def lds_store_16b_xor16(
-    flir,
     arith,
     vector,
     *,
     lds_memref,
     vec16_ty,
-    elem_type,
-    atom_s16,
     layout_lds,
     row_local: ir.Value,
     col_local_i32: ir.Value,
@@ -323,32 +259,21 @@ def lds_store_16b_xor16(
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
-    col_swz_bytes = flir.swizzle_xor16(row_local, col_local_bytes, k_blocks16)
+    col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
-    coord_store = flir.make_coord(row_local, col_swz)
-    idx0 = flir.crd2idx(coord_store, layout_lds)
+    coord_store = fx.make_coord(row_local, col_swz)
+    idx0 = fx.crd2idx(coord_store, layout_lds)
     idx0 = idx0 + lds_base
     v16 = vector.bitcast(vec16_ty, vec_part_i32x4)
-    extent_elems = 16 if elem_bytes == 1 else 8
-    s_view = flir.TensorView(
-        lds_memref,
-        (extent_elems,),
-        strides=(1,),
-        base_indices=(idx0,),
-        element_type=elem_type,
-    )
-    flir.copy(atom_s16, v16, s_view, alignment=16)
+    vector.store(v16, lds_memref, [idx0])
 
 
 def lds_store_8b_xor16(
-    flir,
     arith,
     vector,
     *,
     lds_memref,
     vec8_ty,
-    elem_type,
-    atom_s8,
     layout_lds,
     row_local: ir.Value,
     col_local_i32: ir.Value,
@@ -362,32 +287,21 @@ def lds_store_8b_xor16(
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
-    col_swz_bytes = flir.swizzle_xor16(row_local, col_local_bytes, k_blocks16)
+    col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
-    coord_store = flir.make_coord(row_local, col_swz)
-    idx0 = flir.crd2idx(coord_store, layout_lds)
+    coord_store = fx.make_coord(row_local, col_swz)
+    idx0 = fx.crd2idx(coord_store, layout_lds)
     idx0 = idx0 + lds_base
     v8 = vector.bitcast(vec8_ty, vec_part_i32x2)
-    extent_elems = 8 if elem_bytes == 1 else 4
-    s_view = flir.TensorView(
-        lds_memref,
-        (extent_elems,),
-        strides=(1,),
-        base_indices=(idx0,),
-        element_type=elem_type,
-    )
-    flir.copy(atom_s8, v8, s_view, alignment=8)
+    vector.store(v8, lds_memref, [idx0])
 
 
 def lds_store_4b_xor16(
-    flir,
     arith,
     vector,
     *,
     lds_memref,
     vec4_ty,
-    elem_type,
-    atom_s4,
     layout_lds,
     row_local: ir.Value,
     col_local_i32: ir.Value,
@@ -401,25 +315,16 @@ def lds_store_4b_xor16(
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
-    col_swz_bytes = flir.swizzle_xor16(row_local, col_local_bytes, k_blocks16)
+    col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
-    coord_store = flir.make_coord(row_local, col_swz)
-    idx0 = flir.crd2idx(coord_store, layout_lds)
+    coord_store = fx.make_coord(row_local, col_swz)
+    idx0 = fx.crd2idx(coord_store, layout_lds)
     idx0 = idx0 + lds_base
     v4 = vector.bitcast(vec4_ty, vec_part_i32x1)
-    extent_elems = 4 if elem_bytes == 1 else 2
-    s_view = flir.TensorView(
-        lds_memref,
-        (extent_elems,),
-        strides=(1,),
-        base_indices=(idx0,),
-        element_type=elem_type,
-    )
-    flir.copy(atom_s4, v4, s_view, alignment=4)
+    vector.store(v4, lds_memref, [idx0])
 
 
 def lds_load_pack_k32(
-    flir,
     arith,
     vector,
     *,
@@ -436,23 +341,19 @@ def lds_load_pack_k32(
     vec2_i64_ty,
     vec1_i64_ty,
 ):
-    """Load one i64 A-pack for an MFMA K32 micro-step from LDS.
-
-    - ck_lds128=True: load 16B and extract half (8B) as i64
-    - ck_lds128=False: load 8B directly as i64
-    """
-    col_base_swz = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
+    """Load one i64 A-pack for an MFMA K32 micro-step from LDS."""
+    col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
     if ck_lds128:
-        coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swz)
-        idx_a16 = flir.crd2idx(coord_a16, layout_lds)
+        coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
+        idx_a16 = fx.crd2idx(coord_a16, layout_lds)
         idx_a16 = idx_a16 + lds_base
         loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
         col_swizzled = col_base_swz + arith.constant(int(half) * 8, index=True)
-        coord_a = flir.make_coord(curr_row_a_lds, col_swizzled)
-        idx_a = flir.crd2idx(coord_a, layout_lds)
+        coord_a = fx.make_coord(curr_row_a_lds, col_swizzled)
+        idx_a = fx.crd2idx(coord_a, layout_lds)
         idx_a = idx_a + lds_base
         loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
@@ -468,6 +369,6 @@ __all__ = [
     "lds_store_16b_xor16",
     "make_preshuffle_b_layout",
     "load_b_pack_k32",
+    "swizzle_xor16",
     "tile_chunk_coord_i32",
 ]
-
