@@ -46,6 +46,7 @@ def profile_reduce_kernel(
     num_iters: int = 20,
     num_warmup: int = 5,
     compare_torch: bool = True,
+    use_mask: bool = False,
 ) -> Dict:
     """Profile reduce kernel bandwidth and latency.
 
@@ -64,12 +65,10 @@ def profile_reduce_kernel(
     import torch.profiler as tpf
 
     dtype_str = {torch.float16: "f16", torch.bfloat16: "bf16", torch.float32: "f32"}[dtype]
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-
+    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask)
     # Create test tensors
     X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
     Y = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-
     # Calculate theoretical bandwidth
     elem_bytes = X.element_size()
     read_bytes = tokens * topk * model_dim * elem_bytes
@@ -86,15 +85,20 @@ def profile_reduce_kernel(
 
     results: Dict = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
     stream_ptr = torch.cuda.current_stream().cuda_stream
+    
+    if use_mask:
+        valid_mask = torch.randint(0, 2, (tokens, topk), device="cuda", dtype=torch.uint8)
+    else:
+        valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, tokens, stream_ptr)
+        reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, tokens, stream_ptr)
+            reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -135,23 +139,29 @@ def print_reduce_profile(results: Dict) -> None:
 
 
 @pytest.mark.parametrize(
-    "tokens, topk, model_dim",
+    "tokens, topk, model_dim, use_mask",
     [
-        pytest.param(16384, 8, 7168, id="DS-TP8-prefill-S"),
-        pytest.param(32768, 8, 7168, id="DS-TP8-prefill-L"),
-        pytest.param(1, 8, 7168, id="DS-TP8-decode-bs1"),
-        pytest.param(8, 8, 7168, id="DS-TP8-decode-bs8"),
-        pytest.param(32768, 6, 5120, id="EP-K6-prefill"),
-        pytest.param(1, 6, 5120, id="EP-K6-decode-bs1"),
-        pytest.param(8, 6, 5120, id="EP-K6-decode-bs8"),
+        pytest.param(32769, 8, 7168, False, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
+        pytest.param(1, 8, 7168, False, id="DS-TP8-decode-S"),
+        pytest.param(5, 8, 7168, False, id="DS-TP8-decode-M"),
+        pytest.param(65, 8, 7168, False, id="DS-TP8-decode-L"),
+        pytest.param(16384, 6, 5120, False, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(1, 6, 5120, False, id="EP-K6-decode-S"),
+        pytest.param(5, 6, 5120, False, id="EP-K6-decode-M"),
+        pytest.param(65, 6, 5120, False, id="EP-K6-decode-L"),
+        # Masked tests
+        pytest.param(128, 8, 7168, True, id="DS-TP8-masked"),
+        pytest.param(128, 6, 5120, True, id="EP-K6-masked"),
     ],
 )
-def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
+def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int, use_mask: bool):
     """Test reduce kernel correctness and performance vs torch.sum."""
     dtype = torch.float16
     dtype_str = "f16"
 
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
+    reduce_exe = compile_moe_reduction(
+        topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask
+    )
 
     # Create test data
     X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
@@ -160,21 +170,29 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
     # Run kernels
     stream_ptr = torch.cuda.current_stream().cuda_stream
-    reduce_exe(X, Y_flydsl, tokens, stream_ptr)
-    torch.sum(X, dim=1, out=Y_ref)
+    
+    if use_mask:
+        # Create a random boolean mask (0 or 1), shape [tokens, topk]
+        valid_mask = torch.randint(0, 2, (tokens, topk), device="cuda", dtype=torch.uint8)
+        # Reference: we need to mask X before summing.
+        mask_bool = valid_mask.to(torch.bool).unsqueeze(-1)  # [tokens, topk, 1]
+        X_ref = X * mask_bool
+        torch.sum(X_ref, dim=1, out=Y_ref)
+    else:
+        valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
+        torch.sum(X, dim=1, out=Y_ref)
+
+    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
     torch.cuda.synchronize()
 
-    # Correctness check
-    assert verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[moe reduce kernel]")
+    # Correctness check using verify_output
+    assert verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
 
     # Performance profiling
     results = profile_reduce_kernel(
-        tokens=tokens,
-        topk=topk,
-        model_dim=model_dim,
-        num_iters=20,
-        num_warmup=5,
-        compare_torch=True,
+        tokens=tokens, topk=topk, model_dim=model_dim,
+        num_iters=20, num_warmup=5, compare_torch=True,
+        use_mask=use_mask,
     )
     print_reduce_profile(results)
 

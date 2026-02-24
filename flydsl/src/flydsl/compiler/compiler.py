@@ -57,7 +57,7 @@ def _pipeline_fragments(
         "cse",
         "gpu-kernel-outlining{data-layout-str=}",
         "gpu.module(convert-scf-to-cf)",
-        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=unknown "
+        "gpu.module(convert-gpu-to-rocdl{chipset=gfx000 index-bitwidth=0 runtime=HIP "
         + f"use-bare-ptr-memref-call-conv={rocdl_bare_ptr_opt}"
         + "})",
         "gpu.module(reconcile-unrealized-casts)",
@@ -191,6 +191,55 @@ def _infer_kernel_names_from_asm(asm: str) -> list[str]:
             names.append(name)
     return names
 
+
+def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
+    """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
+
+    This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
+    attribute to gpu.func operations marked as kernels.
+
+    Args:
+        mlir_module: MLIR module containing GPU kernels
+        waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
+    """
+    if waves_per_eu is None:
+        return
+
+    w = int(waves_per_eu)
+    if w < 1:
+        raise ValueError(f"waves_per_eu must be >= 1, got {w}")
+
+    try:
+        # Get the context from the module
+        with mlir_module.context:
+            # Navigate MLIR module structure: module -> gpu.module -> gpu.func
+            for op in mlir_module.body.operations:
+                # Look for gpu.module operations
+                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                    continue
+
+                # gpu.module has a single region with a single block
+                gpu_module_region = op.regions[0]
+
+                # Within gpu.module, find gpu.func operations with gpu.kernel attribute
+                for inner_op in gpu_module_region.blocks[0].operations:
+                    if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
+                        continue
+
+                    # Only apply to kernel functions (not device functions)
+                    if "gpu.kernel" not in inner_op.attributes:
+                        continue
+
+                    # Add or append to the 'rocdl.waves_per_eu' attribute
+                    # This attribute is read by the ROCDL conversion pass
+                    inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                        ir.IntegerType.get_signless(32), w
+                    )
+    except Exception as e:
+        # Best-effort: if attribute injection fails, log and continue
+        # This prevents breaking existing functionality
+        import warnings
+        warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
 
 def compile(
     flir_module_or_ir: Union[object, ir.Module],

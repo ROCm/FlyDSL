@@ -1,19 +1,22 @@
 """MoE Reduction Kernel — reduce-sum over the topk dimension.
 
-Performs:  Y[t, d] = sum(X[t, :, d])  for all t, d.
+Performs: Y[t, d] = sum(X[t, :, d]) for all t, d, optionally masked.
+              valid_mask [tokens, topk]     (optional, if use_mask=True)
 
 Input shape:  X [tokens, topk, model_dim]   (3-D, contiguous, row-major)
-Output shape: Y [tokens, model_dim]          (2-D, contiguous, row-major)
+Output shape: Y [tokens, model_dim]          (2-D, contiguous, row-major)              
 
 Design constraints (inherited from MoE stage-2 use-case):
   - ``topk`` is compile-time constant and typically small.
     The kernel fully unrolls the topk loop, so large topk values will
     increase code size without benefit.
-  - ``model_dim`` must be a multiple of ``VEC_WIDTH * BLOCK_SIZE``
-    (currently 8 * 256 = 2048) for full utilisation; shorter tails are
-    handled by a bounds check but waste threads.
-  - ``model_dim`` should be at least 2048 for the vectorized loads to be
-    worthwhile.  For very small model_dim, ``torch.sum`` may be faster.
+  - ``model_dim`` must be a multiple of ``VEC_WIDTH`` (currently 8)
+  - ``model_dim`` should be at least 2048 for vectorized loads to be worthwhile.
+
+When use_mask=True, only accumulates values where valid_mask[t, k] != 0,
+avoiding atomic contention when used with accumulate=False.
+
+Performs:  Y[t, d] = sum(X[t, :, d])  for all t, d.
 
 Typical shapes (DeepSeek-V3 style):
   - (tokens, 8, 7168)  — TP8 dense-shared-expert config
@@ -41,22 +44,26 @@ def compile_moe_reduction(
     topk: int,
     model_dim: int,
     dtype_str: str = "f16",
+    use_mask: bool = False,
 ):
     """Compile a reduction kernel that sums over the topk dimension.
 
     Input:  X [tokens, topk, model_dim]
+            valid_mask [tokens, topk] (optional, if use_mask=True)
     Output: Y [tokens, model_dim]
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
+    When use_mask=True, only sums slots where valid_mask[t,k]=1.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
 
     Args:
         topk: Number of expert slots to reduce.
         model_dim: Hidden dimension (should be large and aligned; see module docstring).
         dtype_str: Element type — ``"f16"`` | ``"bf16"`` | ``"f32"``.
+        use_mask: If True, applies valid_mask to filter which values are accumulated.
 
     Returns:
-        A compiled executable callable as ``exe(X, Y, m_tokens, stream_ptr)``.
+        A compiled executable callable as ``exe(X, Y, valid_mask, m_tokens, stream_ptr)``.
     """
     gpu_arch = get_hip_arch()
     DYN = ir.ShapedType.get_dynamic_size()
@@ -70,9 +77,10 @@ def compile_moe_reduction(
     assert model_dim % VEC_WIDTH == 0, f"Unsupported model_dim: {model_dim} (must be divisible by {VEC_WIDTH})"
 
     _state = {}
+    masked = "masked" if use_mask else ""
 
     class _MoeReduction(flir.MlirModule):
-        GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}"
+        GPU_MODULE_NAME = f"moe_reduction_{topk}_{model_dim}_{dtype_str}_{masked}"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
         def init_gpu_module(self):
@@ -94,6 +102,7 @@ def compile_moe_reduction(
             self: flir.T.i64,
             X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+            valid_mask: lambda: T.memref(DYN, topk, T.i8()),
             m_tokens: lambda: T.index(),
         ):
             from _mlir.dialects import vector as mlir_vector
@@ -132,7 +141,7 @@ def compile_moe_reduction(
             thr_copy_X = tiled_copy_X.get_slice(tid)
             thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+            thread_offset_base = arith.ArithValue(tid) * VEC_WIDTH
 
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
@@ -141,10 +150,21 @@ def compile_moe_reduction(
 
             tile_n_idx = arith.ArithValue(flir.block_idx("y"))
             c_base = tile_n_idx * BLOCK_SIZE * VEC_WIDTH
-            curr_idx = (c_base + thread_offset_base).value
+            curr_idx = c_base + thread_offset_base
 
+            if use_mask:
+                # OPTIMIZATION: Load all masks once before model_dim loop
+                # Masks don't depend on model_dim, so we can hoist them out
+                c_zero_i8 = arith.constant(0, type=T.i8())
+                mask_values = []
+                for k in range_constexpr(topk):
+                    k_idx = arith.constant(k, index=True)
+                    mask_val_i8 = flir.memref.load(valid_mask, [token_idx, arith.as_value(k_idx)])
+                    is_valid = arith.cmpu(mask_val_i8, c_zero_i8, "ne")
+                    mask_values.append(is_valid)
+            
             # Bounds check
-            c_end_idx = (arith.ArithValue(curr_idx) + arith.index(VEC_WIDTH)).value
+            c_end_idx = (curr_idx + arith.index(VEC_WIDTH)).value
             in_bounds = arith.CmpIOp(arith.CmpIPredicate.sle, c_end_idx, c_model_dim)
 
             _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
@@ -152,7 +172,8 @@ def compile_moe_reduction(
                 c_zero_f32 = arith.constant(0.0, type=compute_type)
                 acc = mlir_vector.splat(vec_type_f32, arith.as_value(c_zero_f32))
 
-                for k in range_constexpr(topk):
+                def _load_and_acc(acc, k):
+                    """Load X[token, k, tile] and accumulate into acc."""
                     blkX = gX[(token_idx, k, tile_n_idx)]
                     thrX = thr_copy_X.partition_S(blkX)
                     frgX = flir.make_fragment_like(thrX, elem_type)
@@ -168,7 +189,14 @@ def compile_moe_reduction(
                         vec_val = flir.arith.extf(vec_type_f32, arith.as_value(vec_val_e))
                     else:
                         vec_val = vec_val_e
-                    acc = (arith.ArithValue(acc) + arith.ArithValue(vec_val)).value
+                    return acc + vec_val
+
+                for k in range_constexpr(topk):
+                    if use_mask:
+                        if mask_values[k]:
+                            acc = _load_and_acc(acc, k)
+                    else:
+                        acc = _load_and_acc(acc, k)
 
                 if dtype_str in ("f16", "bf16"):
                     out_vec = flir.arith.truncf(vec_type_e, arith.as_value(acc))
@@ -192,6 +220,7 @@ def compile_moe_reduction(
             self: flir.T.i64,
             X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
+            valid_mask: lambda: T.memref(DYN, topk, T.i8()),
             m_tokens: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
@@ -204,10 +233,10 @@ def compile_moe_reduction(
 
             stream_token = stream_ptr_to_async_token(stream_ptr)
             flir.gpu_ext.LaunchFuncOp(
-                [f"moe_reduction_{topk}_{model_dim}_{dtype_str}", "moe_reduction_kernel"],
+                [f"moe_reduction_{topk}_{model_dim}_{dtype_str}_{masked}", "moe_reduction_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[X, Y, m_tokens],
+                kernel_operands=[X, Y, valid_mask, m_tokens],
                 async_dependencies=[stream_token],
             )
 
