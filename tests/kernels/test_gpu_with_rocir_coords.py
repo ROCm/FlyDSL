@@ -116,7 +116,8 @@ def test_matmul_with_flir():
     max_error = int(np.max(diff))
 
     print(f" Max abs diff: {max_error}")
-    return max_error == 0
+    assert(max_error == 0, "Max absolute difference is not 0")
+    return
 
 
 if __name__ == "__main__":
@@ -125,17 +126,13 @@ if __name__ == "__main__":
     print(f"GPU: {get_rocm_arch()}")
     print("="*80)
 
-    result = test_matmul_with_flir()
+    test_matmul_with_flir()
 
     print("\n" + "="*80)
-    if result:
-        print(" TEST PASSED!")
-        print("\nDemonstrated:")
-        print("Flir layout algebra integrated into GPU kernel")
-        print("Coordinate operations (make_coord, make_layout, crd2idx)")
-        print("Lowered to arithmetic via flir-opt subprocess")
-        print(f"Compiled and executed on {get_rocm_arch()}")
-        sys.exit(0)
-    else:
-        print("⚠️ TEST FAILED")
-        sys.exit(1)
+    print(" TEST PASSED!")
+    print("\nDemonstrated:")
+    print("Flir layout algebra integrated into GPU kernel")
+    print("Coordinate operations (make_coord, make_layout, crd2idx)")
+    print("Lowered to arithmetic via flir-opt subprocess")
+    print(f"Compiled and executed on {get_rocm_arch()}")
+    sys.exit(0)

@@ -156,14 +156,14 @@ class SmemStructInstance:
 # ==============================================================================
 
 class SmemAllocator:
-    def __init__(self, ctx, arch: Optional[str] = None):
+    def __init__(self, ctx, arch: Optional[str] = None, global_sym_name: Optional[str] = None):
         self.ctx = ctx
         self.ptr = 0
         self.max_size = 0
         self.alignment = 128 # Base alignment for the whole buffer
         self.finalized = False
         self.base_buffer_val = None 
-        self.global_sym_name = "smem_storage"
+        self.global_sym_name = global_sym_name if global_sym_name else "smem_storage"
         self.arch = arch
         
     def init_tracker(self):

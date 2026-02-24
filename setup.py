@@ -92,13 +92,56 @@ EMBEDDED_MLIR_ROOT = REPO_ROOT / EMBEDDED_MLIR_ROOT_REL
 EMBEDDED__MLIR = REPO_ROOT / EMBEDDED__MLIR_REL
 
 
+def _get_git_commit() -> str:
+    """Get short git commit hash, return empty string if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(REPO_ROOT),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _read_version() -> str:
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
+    base_version = "0.0.0"
     for line in init_py.splitlines():
         if line.startswith("__version__"):
             # __version__ = "0.1.0"
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "0.0.0"
+            base_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+            break
+
+    # Append git commit hash for dev versions.
+    # PyPI does not allow local version identifiers (+xxx), so we have two modes:
+    #   FLYDSL_PYPI_VERSION=1: Convert commit hash to numeric .devN suffix (PyPI compatible)
+    #   Default: Use +commit format (local builds only)
+    git_commit = _get_git_commit()
+    if not git_commit or "+" in base_version:
+        return base_version
+
+    pypi_mode = os.environ.get("FLYDSL_PYPI_VERSION", "0").strip().lower() in {"1", "true", "yes"}
+    if pypi_mode:
+        # Convert git commit (hex) to integer for PyPI-compatible .devN suffix
+        # e.g., "d1bad08" -> 219922952 -> "0.0.1.dev219922952"
+        try:
+            commit_num = int(git_commit, 16)
+            # Remove trailing ".dev" if present in base version, then add .devN
+            if base_version.endswith(".dev"):
+                return f"{base_version}{commit_num}"
+            else:
+                return f"{base_version}.dev{commit_num}"
+        except ValueError:
+            return base_version
+    else:
+        # Local version format (not allowed on PyPI)
+        return f"{base_version}+{git_commit}"
 
 
 def _load_requirements() -> list[str]:
@@ -165,6 +208,11 @@ def _assert_embedded_mlir_exists() -> None:
 _assert_embedded_mlir_exists()
 
 IS_WHEEL_BUILD = any(a in {"bdist_wheel", "sdist"} for a in os.sys.argv[1:])
+
+# Optional: include kernels and tests in wheel packages.
+# Set environment variable to enable:
+#   FLYDSL_INCLUDE_EXTRAS=1  - include kernels/ as flydsl.kernels and tests/ as flydsl_tests
+INCLUDE_EXTRAS = os.environ.get("FLYDSL_INCLUDE_EXTRAS", "0").strip().lower() in {"1", "true", "yes"}
 
 def _strip_embedded_shared_libs() -> None:
     """Reduce wheel size by stripping debug symbols from embedded shared libraries.
@@ -394,6 +442,33 @@ else:
         "_mlir": str(EMBEDDED__MLIR_REL),
     }
 
+    # Optional: include kernels/ and tests/ in wheel
+    if INCLUDE_EXTRAS:
+        # Include kernels/ as flydsl.kernels
+        kernels_packages = find_packages(where=".", include=["kernels", "kernels.*"])
+        for pkg in kernels_packages:
+            if pkg == "kernels":
+                all_packages.append("flydsl.kernels")
+                package_dir["flydsl.kernels"] = "kernels"
+            elif pkg.startswith("kernels."):
+                remapped = pkg.replace("kernels.", "flydsl.kernels.", 1)
+                all_packages.append(remapped)
+                package_dir[remapped] = pkg.replace(".", "/")
+
+        # Include tests/ as flydsl_tests
+        tests_packages = find_packages(where=".", include=["tests", "tests.*"])
+        for pkg in tests_packages:
+            if pkg == "tests":
+                all_packages.append("flydsl_tests")
+                package_dir["flydsl_tests"] = "tests"
+            elif pkg.startswith("tests."):
+                remapped = pkg.replace("tests.", "flydsl_tests.", 1)
+                all_packages.append(remapped)
+                package_dir[remapped] = pkg.replace(".", "/")
+
+        all_packages = sorted(set(all_packages))
+        print(f"[setup.py] Including extras: kernels/ ({len(kernels_packages)} packages), tests/ ({len(tests_packages)} packages)")
+
 setup(
     name="flydsl",
     version=_read_version(),
@@ -420,6 +495,11 @@ setup(
             "*.pyi",
         ],
         "flydsl.kernels": ["*.py"],
+        # Include test data files when tests are packaged
+        "flydsl_tests": ["*.py", "*.mlir"],
+        "flydsl_tests.mlir": ["*.mlir"],
+        "flydsl_tests.kernels": ["*.py"],
+        "flydsl_tests.pyir": ["*.py"],
     },
     install_requires=_load_requirements(),
     cmdclass=({"bdist_wheel": bdist_wheel} if bdist_wheel is not None else {}),

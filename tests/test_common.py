@@ -422,7 +422,7 @@ def checkAllclose(
         return percent
 
 
-def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg=''):
+def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_threshold=2e-3):
     if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
         return True
     
@@ -443,10 +443,9 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg=''):
 
     logits_diff = calc_diff(c_out, c_ref)
     print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")
-    # Relax threshold for FP8 due to quantization error and NaN masking
-    if logits_diff > 2e-3:
-        print(f"✗ Check failed: logits_diff {logits_diff} > 1e-3")
-        logging.error(f"logits_diff: {logits_diff} is too large, please check the implementation")
+    if logits_diff > logits_diff_threshold:
+        print(f"✗ Check failed: logits_diff {logits_diff} > {logits_diff_threshold}")
+        logging.error(f"logits_diff: {logits_diff} is too large (threshold: {logits_diff_threshold})")
         return False
     print(f"{msg} ✓ Check passed")
     return True

@@ -47,6 +47,7 @@ def compile_mxfp4_preshuffle_gemm(
     tile_k: int,
     a_dtype: str = "fp8",
     b_dtype: str = "fp4",
+    out_dtype: str = "f16",
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = True,
@@ -73,6 +74,7 @@ def compile_mxfp4_preshuffle_gemm(
     is_fp4_a = a_dtype == "fp4"
     is_fp8_a = a_dtype == "fp8"
     is_fp4_b = b_dtype == "fp4"
+    is_bf16_out = out_dtype == "bf16"
 
     a_elem_vec_pack = 2 if is_fp4_a else  1
     b_elem_vec_pack = 2
@@ -102,6 +104,27 @@ def compile_mxfp4_preshuffle_gemm(
         raise ValueError(
             f"tile_k_bytes must be divisible by 64, got tile_k_bytes={tile_k_bytes} "
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
+        )
+
+    # MXFP4 packing constraints:
+    # - k_unroll_packed = (tile_k_bytes // 128) // pack_K must be >= 1 => tile_k >= 256
+    # - num_acc_n_packed = (tile_n // 4 // 16) // pack_N must be >= 1 => tile_n >= 128
+    num_waves = 4
+    k_unroll_check = tile_k_bytes // 128
+    k_unroll_packed_check = k_unroll_check // pack_K
+    n_per_wave_check = int(tile_n) // num_waves
+    num_acc_n_check = n_per_wave_check // 16
+    num_acc_n_packed_check = num_acc_n_check // pack_N
+    if k_unroll_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_k >= {128 * pack_K} (pack_K={pack_K}), got tile_k={tile_k} "
+            f"(k_unroll={k_unroll_check}, k_unroll_packed={k_unroll_packed_check})"
+        )
+    if num_acc_n_packed_check < 1:
+        raise ValueError(
+            f"MXFP4 requires tile_n >= {num_waves * 16 * pack_N} (pack_N={pack_N}, num_waves={num_waves}), "
+            f"got tile_n={tile_n} (n_per_wave={n_per_wave_check}, num_acc_n={num_acc_n_check}, "
+            f"num_acc_n_packed={num_acc_n_packed_check})"
         )
 
     gpu_arch = get_hip_arch()
@@ -164,10 +187,13 @@ def compile_mxfp4_preshuffle_gemm(
             return T.i16x4
         return T.i64
 
+    def _out_elem_type():
+        return T.bf16 if is_bf16_out else T.f16
+
     # GEMM epilogue toggle: optional LDS CShuffle + vectorized stores.
     # Default: off (current measured cases show no benefit).
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_preshuffle_{lds_stage}stages_a{a_dtype}_b{b_dtype}_{epilog_tag}".replace("-", "_")
+    module_name = f"mfma_preshuffle_{lds_stage}stages_a{a_dtype}_b{b_dtype}_out{out_dtype}_{epilog_tag}".replace("-", "_")
 
     class _GEMM(flir.MlirModule):
         GPU_MODULE_NAME = module_name
@@ -194,7 +220,7 @@ def compile_mxfp4_preshuffle_gemm(
         @flir.kernel
         def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_elem_type()),
             arg_a: lambda: memref(DYN, _a_elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, _scale_elem_type()),
@@ -240,7 +266,10 @@ def compile_mxfp4_preshuffle_gemm(
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
             # CK-style XOR16 swizzle parameter (const).
-            k_blocks16 = arith.index(tile_k_bytes // 16)
+            # For FP4, LDS K dimension is tile_k_bytes // a_elem_vec_pack (128 bytes)
+            # k_blocks16 must match actual LDS size to avoid swizzle address overflow
+            lds_k_bytes = tile_k_bytes // a_elem_vec_pack
+            k_blocks16 = arith.index(lds_k_bytes // 16)
 
             tx = gpu.thread_id("x")
             bx = gpu.block_id("x")
@@ -587,9 +616,14 @@ def compile_mxfp4_preshuffle_gemm(
                                     else:
                                         a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                                    col_base1 = col_base + 64
-                                    a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                    a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    if is_fp8_a:
+                                        # FP8: load full 32 bytes (2 x 16B)
+                                        col_base1 = col_base + 64
+                                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                    else:
+                                        # FP4: only 16 bytes, pad with zeros (same as mixed_moe_gemm_2stage.py)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
                                     for inxdl in range_constexpr(pack_N):
                                         ni_idx = ni * pack_N + inxdl
@@ -599,21 +633,25 @@ def compile_mxfp4_preshuffle_gemm(
                                         b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
                                         acc_idx = mi_idx * num_acc_n + ni_idx
-                                        rocdl.sched_barrier(0)
+                                        # For small tiles (no scheduler), keep per-MFMA fence
+                                        # to prevent excessive register pressure from reordering.
+                                        # For large tiles (scheduler enabled), let the scheduler
+                                        # control interleaving instead.
+                                        if not _use_scheduler:
+                                            rocdl.sched_barrier(0)
                                         current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                             mfma_res_ty,
                                             [
                                                 a128,
                                                 b128,
                                                 current_accs_list[acc_idx],
-                                                # cbsz, abid, blgp
+                                                # MFMA control parameters: cluster size (cbsz) and barrier group (blgp)
                                                 cbsz,
                                                 blgp,
-                                                # op_sel_a + scale_a (1.0f as i32 bits)
+                                                # op_sel_a + scale_a (per-block quant)
                                                 ikxdl * pack_M + imxdl,
                                                 a_scale_val,
-                                                #
-                                                # op_sel_b + scale_b (1.0f as i32 bits)
+                                                # op_sel_b + scale_b
                                                 ikxdl * pack_N + inxdl,
                                                 b_scale_val,
                                             ],
@@ -717,6 +755,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                             lds_idx = row_base_lds + col_even
                             v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
+                            vector.store_op(v2, lds_out, [lds_idx])
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                         # Store vector<EVecxf16> to C at (row, col_g0).
@@ -782,9 +821,12 @@ def compile_mxfp4_preshuffle_gemm(
                         #     val = arith.sitofp(T.f32, val)
 
                         # val_s = (val * s_a) * s_b_vals[ni]
-                        val_f16 = arith.trunc_f(T.f16, val)
+                        if is_bf16_out:
+                            val_out = arith.trunc_f(T.bf16, val)
+                        else:
+                            val_out = arith.trunc_f(T.f16, val)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                        buffer_ops.buffer_store(val_out, c_rsrc, idx_out)
 
                 mfma_epilog(
                     use_cshuffle=False,
@@ -801,49 +843,52 @@ def compile_mxfp4_preshuffle_gemm(
             # similarly to CK's tuned pipelines.
             rocdl.sched_barrier(0)
 
-            # def hot_loop_scheduler():
-            #     # - MFMA group size per "slot": num_acc_n
-            #     # - Total MFMA per tile: (2*K32 per K64) * k_unroll * m_repeat * num_acc_n
-            #     # - We emit (mfma_group + dsrd + mfma_group) per scheduler iteration.
-            #     mfma_group = num_acc_n
-            #     mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-            #     mfma_per_iter = 2 * mfma_group
-            #     sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-            #
-            #     # DS-read preload (CK default is 2).
-            #     rocdl.sched_dsrd(2)
-            #     rocdl.sched_mfma(1)
-            #     if tile_m == 16:
-            #         rocdl.sched_vmem(1)
-            #     rocdl.sched_mfma(1)
-            #     if tile_m == 16:
-            #         rocdl.sched_vmem(1)
-            #     if num_acc_n < 4:
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(1)
-            #         if tile_m == 16:
-            #             rocdl.sched_vmem(1)
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(1)
-            #         if tile_m == 16:
-            #             rocdl.sched_vmem(1)
-            #         rocdl.sched_mfma(1)
-            #
-            #     # DS-write hints near the end: match total A LDS-store micro-ops per thread.
-            #     dswr_tail = num_a_loads
-            #     if dswr_tail > sche_iters:
-            #         dswr_tail = sche_iters
-            #     dswr_start = sche_iters - dswr_tail
-            #
-            #     for sche_i in range_constexpr(sche_iters):
-            #         rocdl.sched_vmem(1)
-            #         rocdl.sched_mfma(mfma_group)
-            #         rocdl.sched_dsrd(1)
-            #         rocdl.sched_mfma(mfma_group)
-            #         if sche_i >= dswr_start - 1:
-            #             rocdl.sched_dswr(1)
-            #
-            #     rocdl.sched_barrier(0)
+            # Scheduling is beneficial for compute-bound shapes (larger tiles with many MFMAs).
+            # For small tile_m (bandwidth-bound), the compiler's default scheduling is near-optimal.
+            _use_scheduler = (tile_m >= 64)
+
+            def hot_loop_scheduler():
+                """CK-style intrawave scheduler adapted from preshuffle_gemm.py.
+
+                Pattern: preload DS reads, then interleave VMEM/MFMA/DSRD/DSWR groups
+                so the MFMA pipeline stays fed while memory operations complete.
+
+                For MXFP4 with mfma_scale_f32_16x16x128_f8f6f4:
+                  - Each DS_read feeds pack_N=2 MFMAs (same A, different B/inxdl)
+                  - mfma_group = pack_N = 2
+                  - mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed
+                                 * pack_K * pack_M * pack_N
+                """
+                if not _use_scheduler:
+                    return
+
+                # MFMA grouping: pack_N MFMAs share one A DS_read
+                mfma_group = pack_N
+                mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed * pack_K * pack_M * pack_N
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+
+                # DS-read preload (CK default is 2 ds_read_b128).
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(1)
+
+                # DS-write tail: spread num_a_loads DS writes across the last iterations.
+                dswr_tail = num_a_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+
+                # Main interleave loop: VMEM + MFMA_group + DSRD + MFMA_group [+ DSWR]
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
+
+                rocdl.sched_barrier(0)
 
             # ---------------- Pipeline ----------------
             # LDS base offsets are in *elements* of `_elem_type()`.
@@ -898,7 +943,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_pong = None
                 
                         store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         # Cross-tile prefetch for the ping tile we are about to compute.
@@ -919,7 +964,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_ping = None
                 
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         # Cross-tile prefetch for the next pong tile.
@@ -951,7 +996,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_pong = None
                 
                         store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
@@ -971,7 +1016,7 @@ def compile_mxfp4_preshuffle_gemm(
                         a0_prefetch_ping = None
                 
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
-                        # hot_loop_scheduler()
+                        hot_loop_scheduler()
                         gpu.barrier()
                 
                         a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
@@ -992,7 +1037,7 @@ def compile_mxfp4_preshuffle_gemm(
                     a0_prefetch_pong = None
                 
                     store_a_tile_to_lds(a_regs_ping, lds_base_ping)
-                    # hot_loop_scheduler()
+                    hot_loop_scheduler()
                     gpu.barrier()
                 
                     a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
@@ -1043,7 +1088,7 @@ def compile_mxfp4_preshuffle_gemm(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_elem_type()),
             arg_a: lambda: memref(DYN, _a_elem_type()),
             arg_b: lambda: memref(DYN, _b_elem_type()),
             arg_scale_a: lambda: memref(DYN, _scale_elem_type()),
