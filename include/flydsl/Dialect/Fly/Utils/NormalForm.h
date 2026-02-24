@@ -13,12 +13,15 @@ namespace mlir::fly {
 bool isNormalForm(TypedValue<IntTupleType> value);
 bool isNormalForm(TypedValue<BasisType> value);
 bool isNormalForm(TypedValue<LayoutType> value);
+bool isNormalForm(TypedValue<SwizzleType> value);
 bool isNormalForm(TypedValue<ComposedLayoutType> value);
 bool isNormalForm(TypedValue<TileType> value);
 bool isNormalForm(TypedValue<CoordTensorType> value);
 
 bool isNormalForm(TypedValue<PointerType> value);
 bool isNormalForm(TypedValue<MemRefType> value);
+bool isNormalForm(TypedValue<TiledCopyType> value);
+bool isNormalForm(TypedValue<TiledMmaType> value);
 
 } // namespace mlir::fly
 

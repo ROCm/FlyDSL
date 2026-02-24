@@ -1,5 +1,8 @@
 
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -18,8 +21,69 @@ namespace fly {
 
 namespace {
 
+bool isStaticArg(Type ty) {
+  if (auto mayStatic = dyn_cast<MayStaticTypeInterface>(ty))
+    return mayStatic.isStatic();
+  return false;
+}
+
+void removeStaticArgsFromFunc(FunctionOpInterface funcOp) {
+  ArrayRef<Type> argTypes = funcOp.getArgumentTypes();
+  if (argTypes.empty())
+    return;
+
+  bool hasBody = !funcOp.getFunctionBody().empty();
+  Block *entry = hasBody ? &funcOp.getFunctionBody().front() : nullptr;
+  OpBuilder builder(funcOp.getContext());
+  if (hasBody)
+    builder.setInsertionPointToStart(entry);
+  Location loc = funcOp.getLoc();
+
+  SmallVector<unsigned> staticArgIndices;
+  SmallVector<Type> newArgTypes;
+  for (unsigned i = 0; i < argTypes.size(); ++i) {
+    if (isStaticArg(argTypes[i])) {
+      staticArgIndices.push_back(i);
+      if (hasBody) {
+        BlockArgument arg = entry->getArgument(i);
+        Value staticVal = StaticOp::create(builder, loc, arg.getType());
+        arg.replaceAllUsesWith(staticVal);
+      }
+    } else {
+      newArgTypes.push_back(argTypes[i]);
+    }
+  }
+  if (staticArgIndices.empty())
+    return;
+
+  funcOp.setType(FunctionType::get(funcOp.getContext(), newArgTypes, funcOp.getResultTypes()));
+
+  if (hasBody) {
+    for (int i = staticArgIndices.size() - 1; i >= 0; --i)
+      entry->eraseArgument(staticArgIndices[i]);
+  }
+}
+
+void removeStaticOperandsFromLaunchFunc(gpu::LaunchFuncOp launchOp) {
+  SmallVector<Value> oldOperands(launchOp.getKernelOperands().begin(),
+                                 launchOp.getKernelOperands().end());
+  SmallVector<Value> newOperands;
+  bool changed = false;
+
+  for (auto operand : oldOperands) {
+    if (isStaticArg(operand.getType())) {
+      changed = true;
+      continue;
+    }
+    newOperands.push_back(operand);
+  }
+
+  if (changed)
+    launchOp.getKernelOperandsMutable().assign(newOperands);
+}
+
 template <typename IntTupleLikeOp>
-struct RewriteToMakeIntTuple final : public OpRewritePattern<IntTupleLikeOp> {
+class RewriteToMakeIntTuple final : public OpRewritePattern<IntTupleLikeOp> {
   using OpRewritePattern<IntTupleLikeOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(IntTupleLikeOp op, PatternRewriter &rewriter) const override {
@@ -37,7 +101,7 @@ public:
 
   LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
     // Skip ops that are already in normal form
-    if (isa<MakeIntTupleOp>(op))
+    if (isa<MakeIntTupleOp, MakeAtomOp>(op))
       return failure();
     if (auto makeLayoutOp = dyn_cast<MakeLayoutOp>(op)) {
       if (makeLayoutOp.getShape().getDefiningOp<MakeIntTupleOp>() &&
@@ -46,7 +110,6 @@ public:
       }
     }
 
-    // Must have exactly one result
     if (op->getNumResults() != 1)
       return failure();
     Type resultType = op->getResult(0).getType();
@@ -69,6 +132,12 @@ public:
           MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(layoutAttr.getStride()), {});
       rewriter.replaceOpWithNewOp<MakeLayoutOp>(op, layoutTy, shape, stride);
       return success();
+    } else if (isa<CopyAtomTypeInterface, MmaAtomTypeInterface>(resultType)) {
+      auto mayStatic = cast<MayStaticTypeInterface>(resultType);
+      if (!mayStatic.isStatic())
+        return failure();
+      rewriter.replaceOpWithNewOp<MakeAtomOp>(op, resultType);
+      return success();
     }
 
     return failure();
@@ -80,6 +149,10 @@ public:
   using mlir::fly::impl::FlyCanonicalizePassBase<FlyCanonicalizePass>::FlyCanonicalizePassBase;
 
   void runOnOperation() override {
+    getOperation()->walk(
+        [&](gpu::LaunchFuncOp launchOp) { removeStaticOperandsFromLaunchFunc(launchOp); });
+    getOperation()->walk([&](FunctionOpInterface funcOp) { removeStaticArgsFromFunc(funcOp); });
+
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
 

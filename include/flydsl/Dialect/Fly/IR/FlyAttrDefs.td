@@ -29,6 +29,17 @@ def Fly_AddressSpace : I32EnumAttr<"AddressSpace", "", [
 }
 def Fly_AddressSpaceAttr : EnumAttr<Fly_Dialect, Fly_AddressSpace, "address_space"> {}
 
+def Fly_MmaOperand : I32EnumAttr<"MmaOperand", "", [
+  I32EnumAttrCase<"A", 0, "a">,
+  I32EnumAttrCase<"B", 1, "b">,
+  I32EnumAttrCase<"C", 2, "c">,
+  I32EnumAttrCase<"D", 3, "d">
+]> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = Fly_Dialect.cppNamespace;
+}
+def Fly_MmaOperandAttr : EnumAttr<Fly_Dialect, Fly_MmaOperand, "mma_operand"> {}
+
 //===----------------------------------------------------------------------===//
 // Type attributes
 //===----------------------------------------------------------------------===//
