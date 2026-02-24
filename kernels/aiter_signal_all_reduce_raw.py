@@ -503,6 +503,10 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
     - `run_1stage(rank, grid_x, self_sg, sg0..sg7, in0..in7, out)`
     - `run_2stage(rank, grid_x, self_sg, sg0..sg7, in0..in7, tmp0..tmp7, out)`
     - `run_2stage_ptr(rank, grid_x, self_sg, sg0..sg7, in0_ptr..in7_ptr, tmp0_ptr..tmp7_ptr, out_ptr)`
+
+    NOTE: Unlike the default MLIR ROCm runtime (which creates/synchronizes/destroys a HIP stream per call),
+    our host wrappers accept a `stream_ptr` argument and bind kernel launches to the caller-provided stream
+    (e.g. PyTorch current stream). This avoids per-launch stream create/destroy/synchronize overhead.
     """
     if world_size not in {2, 4, 6, 8}:
         raise ValueError("world_size must be one of {2,4,6,8}")
@@ -512,7 +516,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
         raise ValueError("N must be > 0")
 
     from flydsl.compiler.compiler import ensure_flir_python_extensions
+    from kernels.kernels_common import stream_ptr_to_async_token
     from _mlir.dialects import arith, func, gpu, memref, scf, vector
+    from flydsl.dialects.ext import flir as flir_ext
 
     ctx = ir.Context()
     ensure_flir_python_extensions(ctx)
@@ -1104,13 +1110,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                     gpu.ReturnOp([])
 
             # ---- host entrypoints (llvm.emit_c_interface) ----
-            # kernel symbol refs
-            k1_ref = ir.SymbolRefAttr.get(["aiter_signal", f"aiter_signal_all_reduce_1stage_ws{world_size}"])
-            k2_ref = ir.SymbolRefAttr.get(["aiter_signal", f"aiter_signal_all_reduce_2stage_ws{world_size}"])
-            k2p_ref = ir.SymbolRefAttr.get(["aiter_signal", f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}"])
 
             # run_1stage
-            run1_args = [i32, i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_out_ty]
+            run1_args = [i32, i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_out_ty] + [i64]
             run1_fty = ir.FunctionType.get(run1_args, [])
             run1 = func.FuncOp("run_1stage", run1_fty)
             run1.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1122,27 +1124,24 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 sgs = list(b.arguments[3:11])
                 ins = list(b.arguments[11:19])
                 out = b.arguments[19]
+                stream_ptr = b.arguments[20]
 
                 gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in ins] + [_res(out)]
-                gpu.LaunchFuncOp(
-                    None,
-                    [],
-                    k1_ref,
-                    _res(gx),
-                    _res(one),
-                    _res(one),
-                    _res(bx),
-                    _res(one),
-                    _res(one),
-                    kops,
+                stream_token = stream_ptr_to_async_token(stream_ptr)
+                flir_ext.gpu_ext.LaunchFuncOp(
+                    ["aiter_signal", f"aiter_signal_all_reduce_1stage_ws{world_size}"],
+                    grid_size=(gx, one, one),
+                    block_size=(bx, one, one),
+                    kernel_operands=kops,
+                    async_dependencies=[stream_token],
                 )
                 func.ReturnOp([])
 
             # run_2stage
-            run2_args = [i32, i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_tmp_ty] * 8 + [mem_out_ty]
+            run2_args = [i32, i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_tmp_ty] * 8 + [mem_out_ty] + [i64]
             run2_fty = ir.FunctionType.get(run2_args, [])
             run2 = func.FuncOp("run_2stage", run2_fty)
             run2.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1155,16 +1154,24 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 ins = list(b2.arguments[11:19])
                 tmps = list(b2.arguments[19:27])
                 out = b2.arguments[27]
+                stream_ptr = b2.arguments[28]
                 gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in ins] + [_res(x) for x in tmps] + [_res(out)]
-                gpu.LaunchFuncOp(None, [], k2_ref, _res(gx), _res(one), _res(one), _res(bx), _res(one), _res(one), kops)
+                stream_token = stream_ptr_to_async_token(stream_ptr)
+                flir_ext.gpu_ext.LaunchFuncOp(
+                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_ws{world_size}"],
+                    grid_size=(gx, one, one),
+                    block_size=(bx, one, one),
+                    kernel_operands=kops,
+                    async_dependencies=[stream_token],
+                )
                 func.ReturnOp([])
 
             # run_2stage_ptr
-            # New signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base, tmp_offset, out_ptr
-            run2p_args = [i32, i32, i64, i64, i64, i64, i64]
+            # New signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base, tmp_offset, out_ptr, stream_ptr
+            run2p_args = [i32, i32, i64, i64, i64, i64, i64, i64]
             run2p_fty = ir.FunctionType.get(run2p_args, [])
             run2p = func.FuncOp("run_2stage_ptr", run2p_fty)
             run2p.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1177,6 +1184,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 in_ptrs_array_base = b2p.arguments[4]
                 tmp_offset = b2p.arguments[5]
                 out_ptr_i64 = b2p.arguments[6]
+                stream_ptr = b2p.arguments[7]
                 
                 # Load 8 sg_ptrs from device memory array
                 sgs = []
@@ -1207,7 +1215,14 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in in_ptrs] + [_res(x) for x in tmp_ptrs] + [_res(out_ptr_i64)]
-                gpu.LaunchFuncOp(None, [], k2p_ref, _res(gx), _res(one), _res(one), _res(bx), _res(one), _res(one), kops)
+                stream_token = stream_ptr_to_async_token(stream_ptr)
+                flir_ext.gpu_ext.LaunchFuncOp(
+                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}"],
+                    grid_size=(gx, one, one),
+                    block_size=(bx, one, one),
+                    kernel_operands=kops,
+                    async_dependencies=[stream_token],
+                )
                 func.ReturnOp([])
 
         return m

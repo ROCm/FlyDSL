@@ -158,7 +158,22 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     # Max size (bytes) for AIter.
     max_size = int(os.environ.get("FLYDSL_AITER_MAX_SIZE_BYTES", str(64 * 1024 * 1024)))
 
-    from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce  # type: ignore
+    # AIter has moved CustomAllreduce across versions:
+    # - old: aiter.dist.custom_all_reduce
+    # - mid: aiter.dist.device_communicators.custom_all_reduce
+    # Keep a compatibility import chain so tests don't depend on one exact layout.
+    try:
+        from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce  # type: ignore
+    except ModuleNotFoundError:
+        try:
+            from aiter.dist.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce  # type: ignore
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Cannot import AIter CustomAllreduce. Tried "
+                "'aiter.dist.device_communicators.custom_all_reduce' and "
+                "'aiter.dist.custom_all_reduce'. "
+                "Please ensure your aiter Python package/version is compatible."
+            ) from e
 
     aiter_ar = AIterCustomAllreduce(_FLYDSL_AITER_GLOO_GROUP, dev, max_size=max_size)  # type: ignore[arg-type,name-defined]
 
@@ -434,7 +449,8 @@ class FlyDSLAllreduce:
         from kernels.aiter_signal_all_reduce_raw import build_aiter_signal_allreduce_raw_module
         print("start compile ****************************")
 
-        key = (int(N), str(dtype_str), int(self.world_size))
+        # ABI tag: wrapper signatures include `stream_ptr` (avoid per-launch stream create/sync/destroy).
+        key = (int(N), str(dtype_str), int(self.world_size), "abi_stream_v1")
         exe = self._exe_cache.get(key)
         if exe is not None:
             return exe
@@ -483,6 +499,7 @@ class FlyDSLAllreduce:
         # Update index 0 of in_ptrs_array with current inp pointer
         self._gpu_in_ptrs_array[0] = int(inp.data_ptr())
         out_ptr = int(out.data_ptr())
+        stream_ptr = torch.cuda.current_stream().cuda_stream
 
         self._exe.run_2stage_ptr(
             int(self.rank),
@@ -492,5 +509,6 @@ class FlyDSLAllreduce:
             int(self._gpu_in_ptrs_array.data_ptr()),  # in_ptrs数组首地址
             int(self._tmp_offset),  # tmp_offset
             int(out_ptr),
+            int(stream_ptr),
         )
         return out
