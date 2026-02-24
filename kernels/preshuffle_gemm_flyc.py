@@ -4,23 +4,20 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 
-from flydsl._mlir_helpers import flir_compat as flir
-from flydsl._mlir_helpers.python_control_flow import range_constexpr
+from flydsl.expr import flir_compat as flir
+from flydsl.expr.python_control_flow import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
-from flydsl._mlir.dialects import arith as _raw_arith
 
-from flydsl._mlir_helpers import arith, gpu, buffer_ops, vector, rocdl
+import flydsl.expr.arith as arith
+from flydsl.expr import gpu
+from flydsl.expr import buffer_ops, vector, rocdl
 
 
-def _raw(v):
-    """Unwrap ArithValue → raw ir.Value that nanobind MLIR ops accept."""
-    if isinstance(v, ir.Value):
-        return v
-    return ir.Value._CAPICreate(v._CAPIPtr)
+from flydsl.expr.arith import _to_raw as _raw
 from flydsl.lang.ir.types import T, memref
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -156,8 +153,8 @@ def compile_preshuffle_gemm_a8(
         i32_n: fx.Int32,
     ):
         # M, N are runtime i32 args; K is compile-time (determines loop structure).
-        c_m = _raw_arith.IndexCastOp(ir.IndexType.get(), i32_m.ir_value()).result
-        c_n = _raw_arith.IndexCastOp(ir.IndexType.get(), i32_n.ir_value()).result
+        c_m = arith.index_cast(ir.IndexType.get(), i32_m.ir_value())
+        c_n = arith.index_cast(ir.IndexType.get(), i32_n.ir_value())
         c_k = arith.constant(K, index=True)
 
         # Unwrap fx.Tensor → raw ir.Value for low-level dialect ops.
@@ -213,14 +210,14 @@ def compile_preshuffle_gemm_a8(
 
         # ---- Buffer resources ----
         _i64 = ir.IntegerType.get_signless(64)
-        _a_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * (K * elem_bytes))).result
-        _c_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * c_n * 2)).result
+        _a_nrec = arith.index_cast(_i64, c_m * (K * elem_bytes))
+        _c_nrec = arith.index_cast(_i64, c_m * c_n * 2)
         a_rsrc = buffer_ops.create_buffer_resource(arg_a_v, max_size=False,
                                                    num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False,
                                                    num_records_bytes=_c_nrec)
         if not is_f16_or_bf16:
-            _sa_nrec = _raw_arith.IndexCastOp(_i64, _raw(c_m * 4)).result
+            _sa_nrec = arith.index_cast(_i64, c_m * 4)
         scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
             arg_scale_a_v, max_size=False, num_records_bytes=_sa_nrec)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b_v, max_size=True)

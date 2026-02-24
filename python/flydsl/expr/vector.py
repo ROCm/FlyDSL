@@ -1,4 +1,4 @@
-"""Vector dialect helpers with better default debug locations.
+"""Vector dialect helpers.
 
 This module exists so tests can import vector ops through `flydsl._mlir_helpers`
 instead of directly importing from `_mlir.dialects.*`.
@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from .._mlir.dialects import vector as _vector
 
-from ._loc import maybe_default_loc
 
 # Re-export everything from the upstream dialect module for convenience.
 from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
@@ -25,9 +24,9 @@ def from_elements(*args, loc=None, ip=None, **kwargs):
         elems = args[1]
         if isinstance(elems, (list, tuple)):
             args[1] = [_arith_ext.unwrap(v) for v in elems]
-        return _vector.from_elements(*args, loc=maybe_default_loc(loc), ip=ip, **kwargs)
+        return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
 
-    return _vector.from_elements(*args, loc=maybe_default_loc(loc), ip=ip, **kwargs)
+    return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
 
 
 def load(memref, indices, *, loc=None, ip=None, **kwargs):
@@ -37,7 +36,7 @@ def load(memref, indices, *, loc=None, ip=None, **kwargs):
     return _vector.load(
         _arith_ext.unwrap(memref),
         [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
         **kwargs,
     )
@@ -51,7 +50,7 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
         _arith_ext.unwrap(value),
         _arith_ext.unwrap(memref),
         [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
         **kwargs,
     )
@@ -75,7 +74,7 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
         _arith_ext.unwrap(vector, loc=loc),
         static_position=static_position,
         dynamic_position=dynamic_position,
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 
@@ -88,7 +87,7 @@ def load_op(result_type, memref, indices, *, loc=None, ip=None):
         result_type,
         _arith_ext.unwrap(memref),
         [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 
@@ -104,7 +103,7 @@ def transfer_read(result_type, source, indices, permutation_map, padding, in_bou
         permutation_map,
         _arith_ext.unwrap(padding),
         in_bounds,
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 
@@ -116,7 +115,7 @@ def bitcast(result_type, source, *, loc=None, ip=None):
     return _vector.BitCastOp(
         result_type,
         _arith_ext.unwrap(source, loc=loc),
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 
@@ -129,7 +128,7 @@ def shuffle(v1, v2, mask, *, loc=None, ip=None):
         _arith_ext.unwrap(v1, loc=loc),
         _arith_ext.unwrap(v2, loc=loc),
         mask,
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 
@@ -141,7 +140,7 @@ def broadcast(result_type, source, *, loc=None, ip=None):
     return _vector.BroadcastOp(
         result_type,
         _arith_ext.unwrap(source, loc=loc),
-        loc=maybe_default_loc(loc),
+        loc=loc,
         ip=ip,
     ).result
 

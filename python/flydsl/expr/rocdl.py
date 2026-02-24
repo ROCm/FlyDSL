@@ -54,7 +54,7 @@ def _unwrap_mfma_operand(v, *, loc=None):
     from . import arith as _arith_ext
 
     if isinstance(v, int):
-        return _arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc)._value
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc), loc=loc)
     return _arith_ext.unwrap(v, loc=loc)
 
 
