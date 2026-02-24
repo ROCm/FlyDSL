@@ -1,16 +1,4 @@
-"""Preshuffle GEMM kernel — ported to @flyc.kernel / @flyc.jit API.
-
-API mapping from the old flir.MlirModule pattern:
-    OLD                              NEW
-    ──────────────────────────────── ────────────────────────────────
-    class _GEMM(flir.MlirModule)     standalone functions
-    @flir.kernel (method)            @flyc.kernel (function)
-    @flir.jit    (method)            @flyc.jit(...)  (function)
-    flir.gpu_ext.LaunchFuncOp(...)   kernel(...).launch(grid=, block=)
-    flydsl.compile(m, ...)           auto-compile via @flyc.jit
-    flir.make_layout / idx2crd / … → fx.make_layout / fx.idx2crd / …
-    c_m, c_n, c_k as parameters     captured from closure as constants
-"""
+"""Preshuffle GEMM kernel using the @flyc.kernel API."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
