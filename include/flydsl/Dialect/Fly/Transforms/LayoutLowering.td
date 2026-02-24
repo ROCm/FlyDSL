@@ -4,10 +4,10 @@
 include "mlir/IR/PatternBase.td"
 include "flydsl/Dialect/Fly/IR/FlyOps.td"
 
-def : Pat<(Fly_GetLeafOp Fly_Layout:$layout, I32Attr:$leaf_idx), 
+def : Pat<(Fly_GetLeafOp Fly_Layout:$layout, I32Attr:$leafIdx), 
           (Fly_MakeLayoutOp  
-            (Fly_GetLeafOp (Fly_GetShapeOp $layout), $leaf_idx),
-            (Fly_GetLeafOp (Fly_GetStrideOp $layout), $leaf_idx)
+            (Fly_GetLeafOp (Fly_GetShapeOp $layout), $leafIdx),
+            (Fly_GetLeafOp (Fly_GetStrideOp $layout), $leafIdx)
         )>;
 
 def : Pat<(Fly_GetShapeOp Fly_MemRef:$memref), 
@@ -45,30 +45,70 @@ def : Pat<(Fly_GroupOp Fly_Layout:$layout, I32Attr:$begin, I32Attr:$end),
             (Fly_GroupOp (Fly_GetStrideOp $layout), $begin, $end)
         )>;
 
-def : Pat<(Fly_LogicalDivideOp Fly_ComposedLayout:$layout, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
-          (Fly_MakeComposedLayoutOp
-            (Fly_ComposedGetInnerOp $layout),
-            (Fly_ComposedGetOffsetOp $layout),
-            (Fly_LogicalDivideOp (Fly_ComposedGetOuterOp $layout), $divisor)
-        )>;
-        
-        
-def : Pat<(Fly_LogicalDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
-          (Fly_MakeViewOp
-            (Fly_GetIterOp $mem),
-            (Fly_LogicalDivideOp (Fly_GetLayoutOp $mem), $divisor)
-        )>;
-
 def : Pat<(Fly_RightInverseOp Fly_MemRef:$mem),
           (Fly_MakeViewOp
             (Fly_GetIterOp $mem),
             (Fly_RightInverseOp (Fly_GetLayoutOp $mem))
         )>;
         
+def : Pat<(Fly_LogicalDivideOp Fly_ComposedLayout:$layout, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
+          (Fly_MakeComposedLayoutOp
+            (Fly_ComposedGetInnerOp $layout),
+            (Fly_ComposedGetOffsetOp $layout),
+            (Fly_LogicalDivideOp (Fly_ComposedGetOuterOp $layout), $divisor)
+        )>;
+def : Pat<(Fly_LogicalDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_LogicalDivideOp (Fly_GetLayoutOp $mem), $divisor)
+        )>;
+
 def : Pat<(Fly_ZippedDivideOp Fly_MemRef:$mem, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$divisor),
           (Fly_MakeViewOp
             (Fly_GetIterOp $mem),
             (Fly_ZippedDivideOp (Fly_GetLayoutOp $mem), $divisor)
+        )>;
+
+def : Pat<(Fly_LogicalProductOp Fly_ComposedLayout:$layout, Fly_Layout:$tile),
+          (Fly_MakeComposedLayoutOp
+            (Fly_ComposedGetInnerOp $layout),
+            (Fly_ComposedGetOffsetOp $layout),
+            (Fly_LogicalProductOp (Fly_ComposedGetOuterOp $layout), $tile)
+        )>;
+def : Pat<(Fly_LogicalProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_LogicalProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_ZippedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_ZippedProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_TiledProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_TiledProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_FlatProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_FlatProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_BlockedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_BlockedProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_RakedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_RakedProductOp (Fly_GetLayoutOp $mem), $tile)
         )>;
 
 #endif // FLY_TRANSFORMS_LAYOUT_LOWERING

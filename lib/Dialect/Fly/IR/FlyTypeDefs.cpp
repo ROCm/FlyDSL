@@ -79,16 +79,25 @@ CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
+bool CopyAtomUniversalCopyType::isStatic() const { return true; }
+
 Attribute CopyAtomUniversalCopyType::getThrSize() const { return FxC(1); }
 
+// TODO: Back to getBitSize() when recast_layout is ready.
 Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyAtomUniversalCopyType::getThrValLayoutDst() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
 }
 Attribute CopyAtomUniversalCopyType::getThrValLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+}
+
+bool MmaAtomUniversalFMAType::isStatic() const { return true; }
+
+Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
+  return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
 }
 
 Attribute MmaAtomUniversalFMAType::getThrSize() const { return FxC(1); }

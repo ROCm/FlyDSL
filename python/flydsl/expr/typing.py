@@ -25,6 +25,35 @@ from .numeric import (
     as_numeric,
 )
 
+__all__ = [
+    # DSL Type
+    "Boolean",
+    "Float",
+    "BFloat16",
+    "Float8E4M3",
+    "Float8E4M3FN",
+    "Float8E5M2",
+    "Float16",
+    "Float32",
+    "Float64",
+    "Int4",
+    "Int8",
+    "Int16",
+    "Int32",
+    "Int64",
+    "Uint8",
+    "Uint16",
+    "Uint32",
+    "Uint64",
+    "Constexpr",
+    "Tensor",
+    "Stream",
+    "Tuple3D",
+    # Utility functions
+    "as_numeric",
+]
+
+
 ValueT = TypeVar("ValueT")
 
 
@@ -32,9 +61,36 @@ class Constexpr(Generic[ValueT]):
     pass
 
 
+class IntTuple:
+    pass
+
+
+class Basis:
+    pass
+
+
+class Layout:
+    pass
+
+
+class ComposedLayout:
+    pass
+
+
+class CoordTensor:
+    pass
+
+
+class Swizzle:
+    pass
+
+
 class Tensor:
     def __init__(self, value: ir.Value):
         self.value = value
+
+    def __str__(self):
+        return f"Tensor({self.value})"
 
     @classmethod
     def __new_from_ir_values__(cls, values):
@@ -77,32 +133,3 @@ class Tuple3D:
 
     def __iter__(self):
         return iter((self.x, self.y, self.z))
-
-
-__all__ = [
-    # DSL Type
-    "Boolean",
-    "Float",
-    "BFloat16",
-    "Float8E4M3",
-    "Float8E4M3FN",
-    "Float8E5M2",
-    "Float16",
-    "Float32",
-    "Float64",
-    "Int4",
-    "Int8",
-    "Int16",
-    "Int32",
-    "Int64",
-    "Uint8",
-    "Uint16",
-    "Uint32",
-    "Uint64",
-    "Constexpr",
-    "Tensor",
-    "Stream",
-    "Tuple3D",
-    # Utility functions
-    "as_numeric",
-]

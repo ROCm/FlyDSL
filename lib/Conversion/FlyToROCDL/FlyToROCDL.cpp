@@ -138,7 +138,6 @@ static FailureOr<Value> materializeScalarIndex(Value intTuple, Location loc,
   return failure();
 }
 
-/// Lower `fly.get_iter`: convert a Fly memref to a dynamic 1-D memref "pointer view".
 class GetIterOpLowering : public OpConversionPattern<GetIterOp> {
 public:
   GetIterOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
@@ -158,7 +157,6 @@ public:
   }
 };
 
-/// Lower `fly.add_offset`: produce a subview of the dynamic memref "pointer view".
 class AddOffsetOpLowering : public OpConversionPattern<AddOffsetOp> {
 public:
   AddOffsetOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
@@ -197,7 +195,6 @@ public:
   }
 };
 
-/// Lower `fly.make_view`: take a dynamic pointer view and produce a sized 1-D memref view.
 class MakeViewOpLowering : public OpConversionPattern<MakeViewOp> {
 public:
   MakeViewOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
@@ -335,9 +332,9 @@ public:
 
   LogicalResult matchAndRewrite(CopyAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // Only handle the universal memref-to-memref copy atom here.
-    if (!isa<CopyAtomUniversalCopyType>(adaptor.getCopyAtom().getType()))
-      return rewriter.notifyMatchFailure(op, "unsupported copy atom (expected universal_copy)");
+    auto copyAtomTy = dyn_cast<CopyAtomTypeInterface>(op.getCopyAtom().getType());
+    if (!copyAtomTy)
+      return rewriter.notifyMatchFailure(op, "copyAtom does not implement CopyAtomTypeInterface");
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
@@ -347,8 +344,6 @@ public:
     if (!srcPtrTy || !dstPtrTy)
       return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr after conversion");
 
-    // Determine element type + total size from the *original* Fly memref type to avoid
-    // losing layout information in the lowered pointer type.
     auto srcFlyTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
     auto dstFlyTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
     if (!srcFlyTy || !dstFlyTy)
@@ -357,30 +352,31 @@ public:
     if (srcFlyTy.getElemTy() != dstFlyTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
-    LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
-    IntTupleAttr totalSize = layoutCosize(builder, srcFlyTy.getLayout());
+    LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
 
-    if (totalSize != layoutCosize(builder, dstFlyTy.getLayout()))
-      return rewriter.notifyMatchFailure(op, "src/dst shapes mismatch");
+    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
+    if (!thrValLayoutSrc)
+      return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
+    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    if (!numValSrcAttr.isStatic())
+      return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
+    int64_t numValSrc = numValSrcAttr.getValue();
 
-    // Lower to LLVM memcpy intrinsic to keep GPU kernel fully in LLVM dialect
-    // (GpuModuleToBinary requires no SCF/arith/unrealized casts inside the module).
     Location loc = op.getLoc();
     Type elemTy = srcFlyTy.getElemTy();
-    int64_t elemBytes = 0;
+    int64_t elemBits = 0;
     if (auto ft = dyn_cast<FloatType>(elemTy))
-      elemBytes = ft.getWidth() / 8;
+      elemBits = ft.getWidth();
     else if (auto it = dyn_cast<IntegerType>(elemTy))
-      elemBytes = it.getWidth() / 8;
+      elemBits = it.getWidth();
     else
       return rewriter.notifyMatchFailure(op, "unsupported element type for memcpy sizing");
-    if (elemBytes <= 0)
-      return rewriter.notifyMatchFailure(op, "invalid element byte width");
+    if (elemBits <= 0)
+      return rewriter.notifyMatchFailure(op, "invalid element bit width");
 
-    int64_t totalBytes = totalSize.getLeafAsInt().getValue() * elemBytes;
-    Value len = arith::ConstantIntOp::create(rewriter, loc, totalBytes, /*width=*/64).getResult();
-
-    // llvm.intr.memcpy(dst, src, len, isVolatile=false)
+    // TODO: using copyAtom bitSize when layout_recast is ready.
+    int64_t copyBytes = numValSrc * elemBits / 8;
+    Value len = arith::ConstantIntOp::create(rewriter, loc, copyBytes, /*width=*/64).getResult();
     LLVM::MemcpyOp::create(rewriter, loc, dst, src, len, /*isVolatile=*/false);
 
     rewriter.eraseOp(op);
@@ -396,32 +392,14 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     // Only handle MFMA F32 16x16x4 F32 atom for now.
 
-    // WORKAROUND for ODR TypeID mismatch:
-    // The MmaAtomCDNA3_MFMAType TypeID in this library (via MLIRFlyToROCDL static lib)
-    // differs from the one in _fly_rocdl.so (via MLIRCPIFlyROCDL). Both link
-    // MLIRFlyROCDLDialect statically, so each has its own TypeID instance.
-    // 
-    // Using string-based type matching is a robust workaround that doesn't require
-    // changes to the build system (e.g., converting to shared libraries).
-    Type opMmaAtomType = op.getMmaAtom().getType();
-    
-    // Check if the type is from fly_rocdl dialect and is the MFMA atom type
-    std::string typeStr;
-    llvm::raw_string_ostream typeStrStream(typeStr);
-    opMmaAtomType.print(typeStrStream);
-    
-    // The type prints as: !fly_rocdl.atom.cdna3.mfma<...>
-    if (typeStr.find("fly_rocdl.atom.cdna3.mfma") == std::string::npos) {
-      return rewriter.notifyMatchFailure(op, 
-          "expected fly_rocdl.atom.cdna3.mfma type for mmaAtom operand, got: " + typeStr);
-    }
-    
-    // For now, we only support the MFMA F32 16x16x4 F32 configuration
-    // TODO: Parse from type string to select the correct intrinsic
+    Type mmaAtomType = op.getMmaAtom().getType();
+    if (!isa<MmaAtomTypeInterface>(mmaAtomType))
+      return rewriter.notifyMatchFailure(op,
+                                         "expected MmaAtomTypeInterface type for mmaAtom operand");
 
     Location loc = op.getLoc();
 
-    // After Fly type conversion, memrefs are lowered to `!llvm.ptr<addrspace>`.
+    // After type conversion, memrefs are lowered to `!llvm.ptr<addrspace>`.
     Value dPtr = adaptor.getD();
     Value aPtr = adaptor.getA();
     Value bPtr = adaptor.getB();
@@ -431,7 +409,7 @@ public:
     auto aPtrTy = dyn_cast<LLVM::LLVMPointerType>(aPtr.getType());
     auto bPtrTy = dyn_cast<LLVM::LLVMPointerType>(bPtr.getType());
     auto cPtrTy = dyn_cast<LLVM::LLVMPointerType>(cPtr.getType());
-    
+
     if (!dPtrTy || !aPtrTy || !bPtrTy || !cPtrTy)
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
@@ -449,9 +427,9 @@ public:
 
     // rocdl.mfma.f32.16x16x4f32 : (f32, f32, vector<4xf32>) -> vector<4xf32>
     // with attributes: cbsz, abid, blgp
-    Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, 
-                                                   a, b, c, 
-                                                   zeroAttr, zeroAttr, zeroAttr).getResult();
+    Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, a, b, c, zeroAttr,
+                                                   zeroAttr, zeroAttr)
+                    .getResult();
 
     // Store result back to D pointer.
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);

@@ -17,6 +17,7 @@
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
+#include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
 
 #include <mlir/IR/Attributes.h>
 #include <mlir/IR/PatternMatch.h>
@@ -661,7 +662,7 @@ static bool lowerFuncIntTupleArgs(FunctionOpInterface op) {
       Value layout = MakeLayoutOp::create(builder, loc, layoutTy, shape, stride);
 
       // Create the MakeViewOp with fly.ptr directly
-      Value view = MakeViewOp::create(builder, loc, memrefTy, ptrArg, layout);
+      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
 
       // Replace uses of the ptr arg
       llvm::SmallPtrSet<Operation *, 8> except;
@@ -722,7 +723,7 @@ static bool lowerFuncIntTupleArgs(FunctionOpInterface op) {
       Value layout = MakeLayoutOp::create(builder, loc, layoutTy, shape, stride);
 
       // Create the MakeViewOp with fly.ptr directly
-      Value view = MakeViewOp::create(builder, loc, memrefTy, ptrArg, layout);
+      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
 
       // Replace uses of the ptr arg (which was the original memref arg)
       // Must exclude: extractOps (which use layoutStructArg), and view's defining op (which uses
@@ -994,6 +995,21 @@ public:
 
     if (auto makeViewOp = memref.getDefiningOp<MakeViewOp>()) {
       rewriter.replaceOp(op, makeViewOp.getLayout());
+      return success();
+    }
+    return failure();
+  }
+};
+
+class GetIterLowering : public OpRewritePattern<GetIterOp> {
+public:
+  using OpRewritePattern<GetIterOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GetIterOp op, PatternRewriter &rewriter) const override {
+    Value memref = op.getMemref();
+
+    if (auto makeViewOp = memref.getDefiningOp<MakeViewOp>()) {
+      rewriter.replaceOp(op, makeViewOp.getIter());
       return success();
     }
     return failure();
@@ -1324,6 +1340,52 @@ using FlatDivideOpLowering =
     LayoutDivideOpLowering<FlatDivideOp, layoutFlatDivide<LayoutValueAdaptor>,
                            layoutFlatDivide<LayoutValueAdaptor>>;
 
+template <typename OpTy, LayoutValueAdaptor (*ProductFunc)(LayoutBuilder<LayoutValueAdaptor> &,
+                                                           LayoutValueAdaptor, LayoutValueAdaptor)>
+class LayoutProductOpLowering : public OpRewritePattern<OpTy> {
+public:
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(OpTy op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value layoutValue = op.getLayout();
+    Value tileValue = op.getTile();
+
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+
+    auto tileTy = dyn_cast<LayoutType>(tileValue.getType());
+    if (!tileTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(tileValue)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
+    LayoutValueAdaptor tileAdaptor(tileValue, tileTy.getAttr());
+    LayoutValueAdaptor result = ProductFunc(layoutBuilder, layoutAdaptor, tileAdaptor);
+
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
+using LogicalProductOpLowering =
+    LayoutProductOpLowering<LogicalProductOp, layoutLogicalProduct<LayoutValueAdaptor>>;
+using ZippedProductOpLowering =
+    LayoutProductOpLowering<ZippedProductOp, layoutZippedProduct<LayoutValueAdaptor>>;
+using TiledProductOpLowering =
+    LayoutProductOpLowering<TiledProductOp, layoutTiledProduct<LayoutValueAdaptor>>;
+using FlatProductOpLowering =
+    LayoutProductOpLowering<FlatProductOp, layoutFlatProduct<LayoutValueAdaptor>>;
+using BlockedProductOpLowering =
+    LayoutProductOpLowering<BlockedProductOp, layoutBlockedProduct<LayoutValueAdaptor>>;
+using RakedProductOpLowering =
+    LayoutProductOpLowering<RakedProductOp, layoutRakedProduct<LayoutValueAdaptor>>;
+
 class RightInverseOpLowering : public OpRewritePattern<RightInverseOp> {
 public:
   using OpRewritePattern<RightInverseOp>::OpRewritePattern;
@@ -1499,6 +1561,285 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+// TiledCopy/TiledMma Partition Lowering
+//===----------------------------------------------------------------------===//
+
+static std::pair<Value, Value> getMemRefPtrAndLayout(OpBuilder &builder, Location loc,
+                                                     Value memref) {
+  if (auto makeViewOp = memref.getDefiningOp<MakeViewOp>()) {
+    return {makeViewOp.getIter(), makeViewOp.getLayout()};
+  }
+  return {GetIterOp::create(builder, loc, memref), GetLayoutOp::create(builder, loc, memref)};
+}
+
+template <typename OpTy, LayoutValueAdaptor (*ThrValViewFunc)(LayoutBuilder<LayoutValueAdaptor> &,
+                                                              CopyAtomTypeInterface, LayoutAttr,
+                                                              TileAttr, LayoutValueAdaptor)>
+class TiledCopyPartitionOpLowering : public OpRewritePattern<OpTy> {
+public:
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(OpTy op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    Value memref = op->getOperand(1);
+    Value coord = op.getCoord();
+
+    auto tiledCopyTy = dyn_cast<TiledCopyType>(op.getTiledCopy().getType());
+    auto memrefTy = dyn_cast<fly::MemRefType>(memref.getType());
+    auto coordTy = dyn_cast<IntTupleType>(coord.getType());
+    if (!tiledCopyTy || !memrefTy || !coordTy)
+      return failure();
+
+    auto [ptr, layoutValue] = getMemRefPtrAndLayout(rewriter, loc, memref);
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy || !isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(coord)))
+      return failure();
+
+    auto copyAtom = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+    if (!copyAtom)
+      return failure();
+
+    LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+    TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+    LayoutAttr layout = memrefTy.getLayout();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layout);
+    LayoutValueAdaptor thrValView =
+        ThrValViewFunc(layoutBuilder, copyAtom, tiledLayoutThrVal, tileMN, layoutAdaptor);
+
+    auto thrValShape = layoutBuilder.getShape(thrValView);
+    auto thrValStride = layoutBuilder.getStride(thrValView);
+    auto expandedShape = intTupleExpand(layoutBuilder, thrValShape, {2});
+    auto expandedStride = intTupleExpand(layoutBuilder, thrValStride, {2});
+    LayoutValueAdaptor expandedLayout = layoutBuilder.makeLayout(expandedShape, expandedStride);
+
+    Value expandedMemref =
+        MakeViewOp::create(rewriter, loc, ptr, layoutBuilder.getValue(expandedLayout));
+
+    auto coordDefOp = coord.getDefiningOp<MakeIntTupleOp>();
+    SmallVector<Value> dynElems(coordDefOp.getDyncElems());
+    SmallVector<Attribute> sliceCoordElems;
+    sliceCoordElems.push_back(coordTy.getAttr());
+    sliceCoordElems.push_back(IntTupleAttr::getLeafNone(ctx));
+    for (int i = 0; i < layout.rank(); ++i)
+      sliceCoordElems.push_back(IntTupleAttr::getLeafNone(ctx));
+    IntTupleAttr sliceCoordAttr = IntTupleAttr::get(ArrayAttr::get(ctx, sliceCoordElems));
+
+    Value sliceCoord =
+        MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(sliceCoordAttr), dynElems);
+
+    Value result = SliceOp::create(rewriter, loc, expandedMemref, sliceCoord);
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+using TiledCopyPartitionSrcOpLowering =
+    TiledCopyPartitionOpLowering<TiledCopyPartitionSrcOp,
+                                 layoutTiledCopyThrValViewSrc<LayoutValueAdaptor>>;
+using TiledCopyPartitionDstOpLowering =
+    TiledCopyPartitionOpLowering<TiledCopyPartitionDstOp,
+                                 layoutTiledCopyThrValViewDst<LayoutValueAdaptor>>;
+
+class TiledMmaPartitionOpLowering : public OpRewritePattern<TiledMmaPartitionOp> {
+public:
+  using OpRewritePattern<TiledMmaPartitionOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TiledMmaPartitionOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    auto operandId = op.getOperandId();
+    Value input = op.getInput();
+    Value coord = op.getCoord();
+
+    auto tiledMmaTy = dyn_cast<TiledMmaType>(op.getTiledMma().getType());
+    auto memrefTy = dyn_cast<fly::MemRefType>(input.getType());
+    auto coordTy = dyn_cast<IntTupleType>(coord.getType());
+    if (!tiledMmaTy || !memrefTy || !coordTy)
+      return failure();
+
+    auto [inputPtr, inputLayoutValue] = getMemRefPtrAndLayout(rewriter, loc, input);
+    auto inputLayoutTy = dyn_cast<LayoutType>(inputLayoutValue.getType());
+    if (!inputLayoutTy || !isNormalForm(cast<TypedValue<LayoutType>>(inputLayoutValue)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(coord)))
+      return failure();
+
+    auto mmaAtom = dyn_cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+    if (!mmaAtom)
+      return failure();
+
+    LayoutAttr atomLayoutMNK = tiledMmaTy.getAtomLayout().getAttr();
+    TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
+    LayoutAttr inputLayout = memrefTy.getLayout();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor inputLayoutAdaptor(inputLayoutValue, inputLayout);
+    LayoutValueAdaptor thrValView = layoutTiledMmaThrValOperandView(
+        layoutBuilder, mmaAtom, atomLayoutMNK, permutationMNK, operandId, inputLayoutAdaptor);
+
+    Value thrValMemref =
+        MakeViewOp::create(rewriter, loc, inputPtr, layoutBuilder.getValue(thrValView));
+
+    auto coordDefOp = coord.getDefiningOp<MakeIntTupleOp>();
+    SmallVector<Value> dynElems(coordDefOp.getDyncElems());
+    SmallVector<Attribute> sliceCoordElems;
+    sliceCoordElems.push_back(coordTy.getAttr());
+    sliceCoordElems.push_back(IntTupleAttr::getLeafNone(ctx));
+    IntTupleAttr sliceCoordAttr = IntTupleAttr::get(ArrayAttr::get(ctx, sliceCoordElems));
+    Value sliceCoord =
+        MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(sliceCoordAttr), dynElems);
+
+    Value result = SliceOp::create(rewriter, loc, thrValMemref, sliceCoord);
+
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class ExpandCopyOpLowering : public OpRewritePattern<CopyOp> {
+public:
+  using OpRewritePattern<CopyOp>::OpRewritePattern;
+
+  static void emitCopyOrAtomCall(PatternRewriter &rewriter, Location loc, Value copyAtomVal,
+                                 CopyAtomTypeInterface copyAtomTy, Value srcPtr,
+                                 LayoutValueAdaptor valSrcLayout, Value dstPtr,
+                                 LayoutValueAdaptor valDstLayout,
+                                 LayoutBuilder<LayoutValueAdaptor> &layoutBuilder) {
+    auto *ctx = rewriter.getContext();
+    LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+    auto thrValLayoutSrc = cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
+    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    int64_t numValSrc = numValSrcAttr.getValue();
+
+    IntTupleAttr valSrcSizeAttr =
+        layoutSize(attrBuilder, layoutBuilder.getLayoutAttr(valSrcLayout));
+    int64_t valSize = valSrcSizeAttr.getLeafAsInt().getValue();
+
+    Value srcView = MakeViewOp::create(rewriter, loc, srcPtr, layoutBuilder.getValue(valSrcLayout));
+    Value dstView = MakeViewOp::create(rewriter, loc, dstPtr, layoutBuilder.getValue(valDstLayout));
+
+    if (valSize == numValSrc) {
+      CopyAtomCall::create(rewriter, loc, copyAtomVal, srcView, dstView);
+    } else {
+      CopyOp::create(rewriter, loc, copyAtomVal, srcView, dstView, /*pred=*/nullptr);
+    }
+  }
+
+  LogicalResult matchAndRewrite(CopyOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    Value copyAtomVal = op.getCopyAtom();
+    Value src = op.getSrc();
+    Value dst = op.getDst();
+
+    CopyAtomTypeInterface copyAtomTy;
+    if (auto tiledCopyTy = dyn_cast<TiledCopyType>(copyAtomVal.getType()))
+      copyAtomTy = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+    else
+      copyAtomTy = dyn_cast<CopyAtomTypeInterface>(copyAtomVal.getType());
+    if (!copyAtomTy)
+      return failure();
+
+    auto srcMemRefTy = dyn_cast<fly::MemRefType>(src.getType());
+    auto dstMemRefTy = dyn_cast<fly::MemRefType>(dst.getType());
+    if (!srcMemRefTy || !dstMemRefTy)
+      return failure();
+
+    LayoutAttr srcLayout = srcMemRefTy.getLayout();
+    LayoutAttr dstLayout = dstMemRefTy.getLayout();
+
+    int32_t srcRank = srcLayout.rank();
+    int32_t dstRank = dstLayout.rank();
+    if (srcRank != dstRank)
+      return failure();
+
+    auto [srcPtr, srcLayoutValue] = getMemRefPtrAndLayout(rewriter, loc, src);
+    auto [dstPtr, dstLayoutValue] = getMemRefPtrAndLayout(rewriter, loc, dst);
+
+    auto srcLayoutTy = dyn_cast<LayoutType>(srcLayoutValue.getType());
+    auto dstLayoutTy = dyn_cast<LayoutType>(dstLayoutValue.getType());
+    if (!srcLayoutTy || !dstLayoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(srcLayoutValue)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(dstLayoutValue)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor srcLayoutAdaptor(srcLayoutValue, srcLayout);
+    LayoutValueAdaptor dstLayoutAdaptor(dstLayoutValue, dstLayout);
+
+    if (srcRank == 1) {
+      emitCopyOrAtomCall(rewriter, loc, copyAtomVal, copyAtomTy, srcPtr, srcLayoutAdaptor, dstPtr,
+                         dstLayoutAdaptor, layoutBuilder);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    auto srcShapeAdaptor = layoutBuilder.getShape(srcLayoutAdaptor);
+    auto srcStrideAdaptor = layoutBuilder.getStride(srcLayoutAdaptor);
+    auto dstShapeAdaptor = layoutBuilder.getShape(dstLayoutAdaptor);
+    auto dstStrideAdaptor = layoutBuilder.getStride(dstLayoutAdaptor);
+
+    auto groupedSrcShape = intTupleGroup(layoutBuilder, srcShapeAdaptor, 1, srcRank);
+    auto groupedSrcStride = intTupleGroup(layoutBuilder, srcStrideAdaptor, 1, srcRank);
+    auto groupedDstShape = intTupleGroup(layoutBuilder, dstShapeAdaptor, 1, dstRank);
+    auto groupedDstStride = intTupleGroup(layoutBuilder, dstStrideAdaptor, 1, dstRank);
+
+    auto restSrcShape = layoutBuilder.at(groupedSrcShape, 1);
+    auto restSrcStride = layoutBuilder.at(groupedSrcStride, 1);
+    auto restDstShape = layoutBuilder.at(groupedDstShape, 1);
+    auto restDstStride = layoutBuilder.at(groupedDstStride, 1);
+
+    LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+    IntTupleAttr restDstShapeAttr = layoutBuilder.getAttr(restDstShape);
+    IntAttr restSize = intTupleProductImpl(attrBuilder, restDstShapeAttr);
+    if (!restSize.isStatic())
+      return failure();
+    int32_t numIter = restSize.getValue();
+
+    auto valSrcShape = layoutBuilder.at(groupedSrcShape, 0);
+    auto valSrcStride = layoutBuilder.at(groupedSrcStride, 0);
+    auto valDstShape = layoutBuilder.at(groupedDstShape, 0);
+    auto valDstStride = layoutBuilder.at(groupedDstStride, 0);
+
+    LayoutValueAdaptor valSrcLayoutAdaptor = layoutBuilder.makeLayout(valSrcShape, valSrcStride);
+    LayoutValueAdaptor valDstLayoutAdaptor = layoutBuilder.makeLayout(valDstShape, valDstStride);
+
+    for (int32_t i = 0; i < numIter; ++i) {
+      auto coordAdaptor = layoutBuilder.makeInt(layoutBuilder.materializeConstantArith(i));
+
+      auto srcOffsetAdaptor =
+          layoutCrd2idx(layoutBuilder, coordAdaptor, restSrcShape, restSrcStride);
+      auto dstOffsetAdaptor =
+          layoutCrd2idx(layoutBuilder, coordAdaptor, restDstShape, restDstStride);
+
+      Value srcOffsetValue = layoutBuilder.finalize(srcOffsetAdaptor);
+      Value dstOffsetValue = layoutBuilder.finalize(dstOffsetAdaptor);
+
+      Value srcIterPtr = AddOffsetOp::create(rewriter, loc, srcPtr, srcOffsetValue);
+      Value dstIterPtr = AddOffsetOp::create(rewriter, loc, dstPtr, dstOffsetValue);
+
+      emitCopyOrAtomCall(rewriter, loc, copyAtomVal, copyAtomTy, srcIterPtr, valSrcLayoutAdaptor,
+                         dstIterPtr, valDstLayoutAdaptor, layoutBuilder);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Generated patterns
 //===----------------------------------------------------------------------===//
 
@@ -1522,16 +1863,28 @@ public:
 
     RewritePatternSet patterns(context);
 
-    patterns.add<GetShapeLowering, GetStrideLowering, GetLayoutLowering>(context);
-    patterns.add<GetLeafOpLowering, GetScalarLowering, SizeOpLowering>(context);
+    patterns.add<GetLeafOpLowering, GetScalarLowering, GetShapeLowering, GetStrideLowering,
+                 GetLayoutLowering, GetIterLowering>(context);
+
+    patterns.add<SizeOpLowering>(context);
+
     patterns.add<SliceLowering, Crd2IdxLowering>(context);
+
     patterns.add<IntTupleAddOpLowering, IntTupleSubOpLowering, IntTupleMulOpLowering,
                  IntTupleDivOpLowering>(context);
+
     patterns.add<PrintOpLowering>(context);
 
     // Layout algebra lowerings
     patterns.add<LogicalDivideOpLowering, ZippedDivideOpLowering, TiledDivideOpLowering,
                  FlatDivideOpLowering, RightInverseOpLowering>(context);
+
+    patterns.add<LogicalProductOpLowering, ZippedProductOpLowering, TiledProductOpLowering,
+                 FlatProductOpLowering, BlockedProductOpLowering, RakedProductOpLowering>(context);
+
+    patterns.add<TiledCopyPartitionSrcOpLowering, TiledCopyPartitionDstOpLowering>(context);
+
+    patterns.add<ExpandCopyOpLowering>(context);
 
     populateWithGenerated(patterns);
 

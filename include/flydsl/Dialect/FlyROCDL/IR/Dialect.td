@@ -20,12 +20,18 @@ def FlyROCDL_Dialect : Dialect {
 }
 
 class FlyxROCL_MmaAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 
-    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>])> {
+    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
+        DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
+        DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
+      ])> {
   let mnemonic = typeMnemonic;
 }
 
 class FlyxROCL_CopyAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 
-    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [DeclareTypeInterfaceMethods<Fly_CopyAtomTypeInterface>])> {
+    : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
+        DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
+        DeclareTypeInterfaceMethods<Fly_CopyAtomTypeInterface>
+      ])> {
   let mnemonic = typeMnemonic;
 }
 
