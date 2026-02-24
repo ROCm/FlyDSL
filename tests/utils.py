@@ -2,7 +2,7 @@
 
 from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
+from flydsl._mlir import ir
 import os
 import torch
 import functools
@@ -203,7 +203,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
                 ir.Module.parse(str(llvm_lowered), context=llvm_lowered.context),
                 Pipeline().gpu_module_to_binary(format="isa")
             )
-            from flydsl.dialects.ext.gpu import get_compile_object_bytes
+            from flydsl._mlir_helpers.gpu import get_compile_object_bytes
             asm_bytes = get_compile_object_bytes(asm_module)
             asm_filename = os.path.join(dump_dir, f"{kernel_name}_09_assembly.s")
             with open(asm_filename, 'wb') as f:
@@ -219,7 +219,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
     )
     dump_stage(lowered, "10_binary_module")
     
-    from flydsl.dialects.ext.gpu import get_compile_object_bytes
+    from flydsl._mlir_helpers.gpu import get_compile_object_bytes
     hsaco_bytes = _timeit("11_get_compile_object_bytes", lambda: get_compile_object_bytes(lowered))
     
     # Save HSACO binary if dumping

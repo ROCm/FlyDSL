@@ -50,7 +50,7 @@ def _unwrap_mfma_operand(v, *, loc=None):
 
     Accept Python ints and materialize them as i32 signless constants.
     """
-    from _mlir.ir import IntegerType
+    from flydsl._mlir.ir import IntegerType
     from . import arith as _arith_ext
 
     if isinstance(v, int):

@@ -10,7 +10,7 @@ def call_intrinsic(*args, **kwargs):
     rewrite the `operands` positional argument (index 2) when present.
     """
     if len(args) >= 3:
-        from _mlir.dialects import llvm as _llvm
+        from flydsl._mlir.dialects import llvm as _llvm
         from . import arith as _arith_ext
 
         args = list(args)
@@ -20,7 +20,7 @@ def call_intrinsic(*args, **kwargs):
         return _llvm.call_intrinsic(*args, **kwargs)
 
     # Fallback: if upstream signature changes, just delegate.
-    from _mlir.dialects import llvm as _llvm
+    from flydsl._mlir.dialects import llvm as _llvm
 
     return _llvm.call_intrinsic(*args, **kwargs)
 

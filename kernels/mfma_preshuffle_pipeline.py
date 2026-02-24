@@ -12,7 +12,7 @@ Key primitives:
 
 from __future__ import annotations
 from dataclasses import dataclass
-from _mlir import ir
+from flydsl._mlir import ir
 
 @dataclass(frozen=True)
 class PreshuffleBLayout:

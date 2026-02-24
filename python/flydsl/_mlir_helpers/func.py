@@ -127,7 +127,7 @@ def is_relative_to(self, other):
 
 
 def get_user_code_loc(user_base: Optional[Path] = None):
-    from _mlir import extras
+    from flydsl._mlir import extras
     import sysconfig
     import importlib
     import linecache

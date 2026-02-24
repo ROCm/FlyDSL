@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from _mlir import ir
+from flydsl._mlir import ir
 
 
 def default_epilog(

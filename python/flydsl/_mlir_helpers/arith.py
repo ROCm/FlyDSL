@@ -289,7 +289,7 @@ def constant_vector(element_value: Union[int, float], vector_type: Type, *, loc:
         >>> vec_zero = arith.constant_vector(0.0, T.vector(32, T.f16()))
         >>> vec_ones = arith.constant_vector(1.0, T.vector(16, T.f32()))
     """
-    from _mlir.ir import FloatAttr, IntegerAttr, DenseElementsAttr
+    from flydsl._mlir.ir import FloatAttr, IntegerAttr, DenseElementsAttr
     
     # Get element type from vector type
     element_type = VectorType(vector_type).element_type
@@ -318,7 +318,7 @@ def absf(value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithVa
     Returns:
         Absolute value result wrapped in ArithValue
     """
-    from _mlir.dialects import math as _math
+    from flydsl._mlir.dialects import math as _math
     val = _unwrap_value(value)
     result = _math.AbsFOp(val, loc=loc).result
     return ArithValue(result)
@@ -474,7 +474,7 @@ def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optiona
     Returns:
         Reduced scalar value wrapped in ArithValue
     """
-    from _mlir.dialects import vector as _vector
+    from flydsl._mlir.dialects import vector as _vector
     
     val = _unwrap_value(value)
     
@@ -901,7 +901,7 @@ Index = index
 try:
     # Register `ArithValue` as an automatic wrapper for common scalar types so
     # op results can participate in Python operator overloading.
-    from _mlir._mlir_libs._mlir import register_value_caster
+    from flydsl._mlir._mlir_libs._mlir import register_value_caster
 
     # Also include VectorType so vector-typed op results participate in operator overloading.
     for t in [F32Type, F64Type, IndexType, IntegerType, VectorType]:
