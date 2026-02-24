@@ -396,33 +396,33 @@ def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
 }
 
 def Fly_MakeTiledCopyOp : Fly_Op<"make_tiled_copy", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyType:$copyAtom, Fly_Layout:$layoutTV, Fly_Tile:$tileMN);
+  let arguments = (ins AnyType:$copyAtom, Fly_Layout:$layoutThrVal, Fly_Tile:$tileMN);
   let results = (outs Fly_TiledCopy:$result);
-  let assemblyFormat = "`(` $copyAtom `,` $layoutTV  `,` $tileMN `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $copyAtom `,` $layoutThrVal  `,` $tileMN `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure]> {
-  let arguments = (ins AnyType:$atom);
+  let arguments = (ins AnyType:$mmaAtom, Fly_Layout:$atomLayout, Fly_Tile:$permutation);
   let results = (outs AnyType:$result);
-  let assemblyFormat = "`(` $atom `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $mmaAtom `,` $atomLayout `,` $permutation `)` attr-dict `:` functional-type(operands, results)";
 }
 
 
 def Fly_TiledCopyPartitionSrcOp : Fly_Op<"tiled_copy.partition_src", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let summary = "";
-  let description = [{}];
-
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$src);
+  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$src, Fly_IntTuple:$coord);
   let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $tiledCopy `,` $src `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $tiledCopy `,` $src `,` $coord `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_TiledCopyPartitionDstOp : Fly_Op<"tiled_copy.partition_dst", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let summary = "";
-  let description = [{}];
-
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$dst);
+  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$dst, Fly_IntTuple:$coord);
   let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $tiledCopy `,`  $dst `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $tiledCopy `,`  $dst `,` $coord `)` attr-dict `:` functional-type(operands, results)";
 }
+def Fly_TiledCopyRetileOp : Fly_Op<"tiled_copy.retile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$input);
+  let results = (outs Fly_MemRef:$result);
+  let assemblyFormat = "`(` $tiledCopy `,` $input `)` attr-dict `:` functional-type(operands, results)";
+}
+
 
 def Fly_CopyOp : Fly_Op<"copy"> {
   let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, OptionalAttr<I1Attr>:$pred);
@@ -445,45 +445,18 @@ def Fly_MmaMakeFragmentOp : Fly_Op<"mma_make_fragment", [Pure]> {
   let assemblyFormat = "`(` $operand_id `,` $atom `,` $input `)` attr-dict `:` functional-type(operands, results)";
 }
 
-def Fly_TiledCopyPartitionDOp : Fly_Op<"tiled_copy.partition_D", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$input, Fly_IntTuple:$coord);
-  let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $tiledCopy `,` $input `,` $coord `)` attr-dict `:` functional-type(operands, results)";
-}
 
-def Fly_TiledCopyPartitionSOp : Fly_Op<"tiled_copy.partition_S", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$input, Fly_IntTuple:$coord);
-  let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $tiledCopy `,` $input `,` $coord `)` attr-dict `:` functional-type(operands, results)";
-}
-
-def Fly_TiledCopyRetileOp : Fly_Op<"tiled_copy.retile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$input);
-  let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $tiledCopy `,` $input `)` attr-dict `:` functional-type(operands, results)";
-}
-
-def Fly_TiledMmaPartitionOp : Fly_Op<"tiled_mma_partition", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyTypeOf<[I32, I64]>:$operand_id, AnyType:$tiled_mma,
+def Fly_TiledMmaPartitionOp : Fly_Op<"tiled_mma.partition", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, AnyType:$tiled_mma,
                        Fly_MemRef:$input, Fly_IntTuple:$coord);
   let results = (outs Fly_MemRef:$result);
   let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input `,` $coord `)` attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma_partition_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyTypeOf<[I32, I64]>:$operand_id, AnyType:$tiled_mma, Fly_MemRef:$input);
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, AnyType:$tiled_mma, Fly_MemRef:$input);
   let results = (outs Fly_IntTuple:$result);
   let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input `)` attr-dict `:` functional-type(operands, results)";
-}
-
-
-def Fly_CooperativeCopyOp : Fly_Op<"cooperative_copy", []> {
-  let summary = "";
-  let description = [{}];
-
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_IntTuple:$partitionIdx, Fly_MemRef:$src, Fly_MemRef:$dst);
-  let results = (outs);
-  let assemblyFormat = "`(` $tiledCopy `,` $partitionIdx `,` $src  `,` $dst `)` attr-dict `:` functional-type(operands, results)";
 }
 
 

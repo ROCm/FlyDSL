@@ -65,6 +65,32 @@ struct PyMmaAtomCDNA3_MFMAType : PyConcreteType<PyMmaAtomCDNA3_MFMAType> {
     c.def_prop_ro("elem_ty_acc", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
       return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(self);
     });
+
+    c.def_prop_ro("thr_size", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+      auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getThrSize());
+      return wrap(::mlir::fly::IntTupleType::get(attr));
+    });
+    c.def_prop_ro("shape_mnk", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+      auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getShapeMNK());
+      return wrap(::mlir::fly::IntTupleType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_a", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+      auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutA());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_b", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+      auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutB());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
+    c.def_prop_ro("tv_layout_c", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+      auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutC());
+      return wrap(::mlir::fly::LayoutType::get(attr));
+    });
   }
 };
 

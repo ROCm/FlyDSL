@@ -9,6 +9,8 @@ using namespace mlir::fly;
 
 namespace mlir::fly_rocdl {
 
+bool CopyAtom_CDNA3_BufferLSAType::isStatic() const { return true; }
+
 Attribute CopyAtom_CDNA3_BufferLSAType::getThrSize() const {
   auto ctx = getContext();
   return FxC(1);

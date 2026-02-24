@@ -22,6 +22,7 @@ MLIR_CAPI_EXPORTED bool mlirFlyIntTupleTypeIsLeaf(MlirType type);
 MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetRank(MlirType type);
 MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetDepth(MlirType type);
 MLIR_CAPI_EXPORTED bool mlirFlyIntTupleTypeIsStatic(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetStaticValue(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // LayoutType
