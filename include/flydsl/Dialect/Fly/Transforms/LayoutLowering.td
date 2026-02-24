@@ -182,4 +182,46 @@ def : Pat<(Fly_TileToShapeOp Fly_ComposedLayout:$block, $trg_shape, $ord_shape),
                                     (Fly_ComposedGetOffsetOp $block),
                                     (Fly_TileToShapeOp (Fly_ComposedGetOuterOp $block), $trg_shape, $ord_shape))>;
 
+def : Pat<(Fly_LogicalProductOp Fly_ComposedLayout:$layout, Fly_Layout:$tile),
+          (Fly_MakeComposedLayoutOp
+            (Fly_ComposedGetInnerOp $layout),
+            (Fly_ComposedGetOffsetOp $layout),
+            (Fly_LogicalProductOp (Fly_ComposedGetOuterOp $layout), $tile)
+        )>;
+def : Pat<(Fly_LogicalProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_LogicalProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_ZippedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_ZippedProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_TiledProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_TiledProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_FlatProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_FlatProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_BlockedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_BlockedProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
+def : Pat<(Fly_RakedProductOp Fly_MemRef:$mem, Fly_Layout:$tile),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $mem),
+            (Fly_RakedProductOp (Fly_GetLayoutOp $mem), $tile)
+        )>;
+
 #endif // FLY_TRANSFORMS_LAYOUT_LOWERING

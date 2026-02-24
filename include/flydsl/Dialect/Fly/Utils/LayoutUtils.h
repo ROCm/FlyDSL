@@ -1434,6 +1434,36 @@ Layout layoutFlatProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Lay
 }
 
 template <class Layout>
+Layout layoutZippedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  Layout logicalProd = layoutLogicalProduct(builder, blockLayout, tilerLayout);
+
+  IntTupleAttr guide = builder.getLayoutAttr(tilerLayout).getShape();
+  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalProd), guide);
+  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalProd), guide);
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
+Layout layoutTiledProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  Layout zipped = layoutZippedProduct(builder, blockLayout, tilerLayout);
+  IntTuple retShape = intTupleExpand(builder, builder.getShape(zipped), {1});
+  IntTuple retStride = intTupleExpand(builder, builder.getStride(zipped), {1});
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
+Layout layoutFlatProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  Layout zipped = layoutZippedProduct(builder, blockLayout, tilerLayout);
+  IntTuple retShape = intTupleExpand(builder, builder.getShape(zipped), {0, 1});
+  IntTuple retStride = intTupleExpand(builder, builder.getStride(zipped), {0, 1});
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
 Layout layoutBlockedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout,
                             Layout tilerLayout) {
   auto blockShape = builder.getShape(blockLayout);
