@@ -1,6 +1,5 @@
 
 #include "mlir/IR/Builders.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Support/LogicalResult.h"
@@ -758,20 +757,12 @@ FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
   if (!layoutTy)
     return failure();
 
-  auto newTypeBitsOp = adaptor.getOperands()[0].template getDefiningOp<arith::ConstantOp>();
-  auto oldTypeBitsOp = adaptor.getOperands()[1].template getDefiningOp<arith::ConstantOp>();
-  if (!newTypeBitsOp || !oldTypeBitsOp)
-    return failure();
-
-  auto newTypeBitsAttr = dyn_cast<IntegerAttr>(newTypeBitsOp.getValue());
-  auto oldTypeBitsAttr = dyn_cast<IntegerAttr>(oldTypeBitsOp.getValue());
-  if (!newTypeBitsAttr || !oldTypeBitsAttr)
-    return failure();
+  IntegerAttr newTypeBits = adaptor.getNewTypeBitsAttr();
+  IntegerAttr oldTypeBits = adaptor.getOldTypeBitsAttr();
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   LayoutAttr inferred =
-      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBitsAttr.getInt(),
-                   newTypeBitsAttr.getInt());
+      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits.getInt(), newTypeBits.getInt());
   inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }

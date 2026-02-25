@@ -2,6 +2,7 @@
 #define FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <optional>
 
@@ -763,6 +764,12 @@ Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int64_t oldTy
   int64_t den = oldTypeBits / g;
 
   if (num == 1 && den == 1) {
+    return layout;
+  }
+  auto isInt32Factor = [](int64_t v) {
+    return v > 0 && v <= static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+  };
+  if (!isInt32Factor(num) || !isInt32Factor(den)) {
     return layout;
   }
   if (num == 1) {

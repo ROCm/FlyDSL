@@ -1420,21 +1420,13 @@ public:
     if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
       return failure();
 
-    auto newTypeBitsOp = op->getOperand(0).template getDefiningOp<arith::ConstantOp>();
-    auto oldTypeBitsOp = op->getOperand(1).template getDefiningOp<arith::ConstantOp>();
-    if (!newTypeBitsOp || !oldTypeBitsOp)
-      return failure();
-
-    auto newTypeBitsAttr = dyn_cast<IntegerAttr>(newTypeBitsOp.getValue());
-    auto oldTypeBitsAttr = dyn_cast<IntegerAttr>(oldTypeBitsOp.getValue());
-    if (!newTypeBitsAttr || !oldTypeBitsAttr)
-      return failure();
+    IntegerAttr newTypeBits = op.getNewTypeBitsAttr();
+    IntegerAttr oldTypeBits = op.getOldTypeBitsAttr();
 
     LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
     LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
     LayoutValueAdaptor result =
-        layoutRecast(layoutBuilder, layoutAdaptor, oldTypeBitsAttr.getInt(),
-                     newTypeBitsAttr.getInt());
+        layoutRecast(layoutBuilder, layoutAdaptor, oldTypeBits.getInt(), newTypeBits.getInt());
     rewriter.replaceOp(op, layoutBuilder.getValue(result));
     return success();
   }
