@@ -13,7 +13,7 @@ from .._mlir.dialects.fly import (
     PointerType,
     SwizzleType,
 )
-from .._mlir.extras import types as T
+from .._mlir.extras import types as _T
 from .meta import dsl_api_wrapper
 from .typing import Int32
 
@@ -91,9 +91,6 @@ def _unwrap_tuple(elems):
     return _conv(elems)
 
 __all__ = [
-    # Maybe remove it in the future
-    "T",
-    "arith",
     # Enum Attributes
     "AddressSpace",
     "CachePolicy",

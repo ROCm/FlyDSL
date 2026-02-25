@@ -9,7 +9,6 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf
 
 from flydsl.expr import arith, vector
 from flydsl.expr import gpu
@@ -17,7 +16,7 @@ from flydsl.expr import buffer_ops, rocdl
 
 
 from flydsl.expr.arith import _to_raw as _raw
-from flydsl.lang.ir.types import T, memref
+from flydsl.expr.typing import T
 
 from kernels.layout_utils import idx2crd, crd2idx, get as layout_get
 
@@ -340,7 +339,7 @@ def compile_preshuffle_gemm_a8(
         num_a_loads = bytes_per_thread_a // a_load_bytes
         tile_k_dwords = (tile_k * 2) // 4 if elem_bytes == 2 else tile_k // 4
         layout_a_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
-        c4 = arith.constant(4, index=True)
+        c4 = arith.index(4)
         tx_i32_base = tx * c4
 
         def load_a_16(idx_elem):
@@ -649,8 +648,8 @@ def compile_preshuffle_gemm_a8(
             rocdl.sched_barrier(0)
 
         # ── Main pipeline ─────────────────────────────────────────────────
-        lds_tile_elems = arith.constant(tile_m * tile_k, index=True)
-        lds_base0 = arith.constant(0, index=True)
+        lds_tile_elems = arith.index(tile_m * tile_k)
+        lds_base0 = arith.index(0)
         lds_base1 = lds_tile_elems
 
         def _flatten_b_tile(bt):
@@ -675,17 +674,8 @@ def compile_preshuffle_gemm_a8(
         n_btile = k_unroll * 2 * num_acc_n
         n_a0pf = 2
 
-        def _unwrap_val(v):
-            if hasattr(v, 'value') and isinstance(v.value, ir.Value):
-                return v.value
-            if isinstance(v, ir.Value):
-                return v
-            return v
-
         def _pack_state(accs_l, bt_flat, a0pf):
-            return ([_unwrap_val(a) for a in accs_l]
-                    + [_unwrap_val(b) for b in bt_flat]
-                    + [_unwrap_val(a0pf[0]), _unwrap_val(a0pf[1])])
+            return list(accs_l) + list(bt_flat) + [a0pf[0], a0pf[1]]
 
         def _unpack_state(vals):
             accs_l = list(vals[:n_accs])
@@ -722,8 +712,7 @@ def compile_preshuffle_gemm_a8(
             def prefetch_a0_pack(lds_base):
                 return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base)
 
-            k0 = arith.constant(0, index=True)
-            a_regs0, b_tile0 = prefetch_ab_tile(k0)
+            a_regs0, b_tile0 = prefetch_ab_tile(arith.index(0))
             store_a_tile_to_lds(a_regs0, lds_base0)
             gpu.barrier()
             accs = [acc_init] * n_accs
@@ -736,18 +725,8 @@ def compile_preshuffle_gemm_a8(
                 c_k_main = K - tile_k
                 init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
                                          a0_prefetch_pong)
-                c_start = _unwrap_val(arith.constant(0, index=True))
-                c_stop = _unwrap_val(arith.constant(c_k_main, index=True))
-                c_step = _unwrap_val(arith.constant(tile_k * 2, index=True))
-
-                for_op = scf.ForOp(c_start, c_stop, c_step, init_state)
-                with ir.InsertionPoint(for_op.body):
-                    iv = for_op.induction_variable
-                    inner = list(for_op.inner_iter_args)
-                    updated = _build_pingpong_body(iv, inner)
-                    scf.YieldOp(updated)
-
-                results = list(for_op.results)
+                for iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
+                    results = yield _build_pingpong_body(iv, inner)
                 accs, bt_flat, a0pf = _unpack_state(results)
                 b_tile_pong_final = _unflatten_b_tile(bt_flat)
                 final_accs, scales = compute_tile(
@@ -758,22 +737,12 @@ def compile_preshuffle_gemm_a8(
                 c_k_stop = K - (tile_k * 3)
                 init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
                                          a0_prefetch_pong)
-                c_start = _unwrap_val(arith.constant(0, index=True))
-                c_stop_val = _unwrap_val(arith.constant(c_k_stop, index=True))
-                c_step = _unwrap_val(arith.constant(tile_k * 2, index=True))
-
-                for_op = scf.ForOp(c_start, c_stop_val, c_step, init_state)
-                with ir.InsertionPoint(for_op.body):
-                    iv = for_op.induction_variable
-                    inner = list(for_op.inner_iter_args)
-                    updated = _build_pingpong_body(iv, inner)
-                    scf.YieldOp(updated)
-
-                results = list(for_op.results)
+                for iv, inner in range(0, c_k_stop, tile_k * 2, init=init_state):
+                    results = yield _build_pingpong_body(iv, inner)
                 accs, bt_flat, a0pf = _unpack_state(results)
                 b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
-                last_k = arith.constant(K - tile_k, index=True)
+                last_k = arith.index(K - tile_k)
                 a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
                 accs, _ = compute_tile(accs, b_tile_pong_ep, lds_base_pong,
                                        a0_prefetch=a0pf)
@@ -787,24 +756,17 @@ def compile_preshuffle_gemm_a8(
                 )
             store_output(final_accs, scales)
         else:
-            k0 = arith.constant(0, index=True)
-            a_regs0, b_tile0 = prefetch_ab_tile(k0)
+            a_regs0, b_tile0 = prefetch_ab_tile(arith.index(0))
             store_a_tile_to_lds(a_regs0, lds_base0)
             gpu.barrier()
             accs = [acc_init] * n_accs
             lds_base = lds_base0
             bt_flat0 = _flatten_b_tile(b_tile0)
-            init_state = [_unwrap_val(a) for a in accs] + [_unwrap_val(b) for b in bt_flat0]
-            c_start = _unwrap_val(arith.constant(0, index=True))
-            c_stop = _unwrap_val(arith.constant(K - tile_k, index=True))
-            c_step_1 = _unwrap_val(arith.constant(tile_k, index=True))
 
-            for_op = scf.ForOp(c_start, c_stop, c_step_1, init_state)
-            with ir.InsertionPoint(for_op.body):
-                iv = for_op.induction_variable
-                inner = list(for_op.inner_iter_args)
-                accs_in = list(inner[:n_accs])
-                bt_flat_in = list(inner[n_accs:])
+            init_state = list(accs) + list(bt_flat0)
+            for iv, state in range(0, K - tile_k, tile_k, init=init_state):
+                accs_in = list(state[:n_accs])
+                bt_flat_in = list(state[n_accs:])
                 b_tile_in = _unflatten_b_tile(bt_flat_in)
 
                 next_k = iv + tile_k
@@ -814,11 +776,8 @@ def compile_preshuffle_gemm_a8(
                 store_a_tile_to_lds(a_next, lds_base)
                 hot_loop_scheduler()
                 gpu.barrier()
-                out_state = ([_unwrap_val(a) for a in accs_in]
-                             + [_unwrap_val(b) for b in _flatten_b_tile(b_next)])
-                scf.YieldOp(out_state)
+                results = yield list(accs_in) + _flatten_b_tile(b_next)
 
-            results = list(for_op.results)
             accs_final = list(results[:n_accs])
             bt_final = _unflatten_b_tile(list(results[n_accs:]))
             final_accs, scales = compute_tile(

@@ -353,7 +353,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         return arith.ConstantOp(ir.IndexType.get(), val).result
 
     @staticmethod
-    def scf_range(start, stop=None, step=None):
+    def scf_range(start, stop=None, step=None, *, init=None):
         if stop is None:
             stop = start
             start = 0
@@ -362,9 +362,14 @@ class InsertEmptyYieldForSCFFor(Transformer):
         start_val = InsertEmptyYieldForSCFFor._to_index(start)
         stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
         step_val = InsertEmptyYieldForSCFFor._to_index(step)
-        for_op = scf.ForOp(start_val, stop_val, step_val)
-        with ir.InsertionPoint(for_op.body):
-            yield for_op.induction_variable
+        if init is not None:
+            for_op = scf.ForOp(start_val, stop_val, step_val, list(init))
+            with ir.InsertionPoint(for_op.body):
+                yield for_op.induction_variable, list(for_op.inner_iter_args)
+        else:
+            for_op = scf.ForOp(start_val, stop_val, step_val)
+            with ir.InsertionPoint(for_op.body):
+                yield for_op.induction_variable
 
     @classmethod
     def rewrite_globals(cls):
