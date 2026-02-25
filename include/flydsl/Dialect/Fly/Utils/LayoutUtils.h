@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
-#define FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
+#ifndef FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
+#define FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
 
 #include <algorithm>
 #include <numeric>
@@ -28,6 +28,26 @@ namespace mlir::fly {
 //   - layoutDowncastImpl()
 // -----------------------------------------------------------------------------
 namespace detail {
+
+template <class IntTuple>
+std::pair<IntTuple, IntTuple> canonicalizeStridePair(const IntTupleBuilder<IntTuple> &builder,
+                                                     IntTuple shape, IntTuple stride) {
+  if (shape.isLeaf()) {
+    auto shapeVal = builder.getArithValue(shape);
+    if (builder.isStaticValue(shapeVal, 1)) {
+      return {shape, builder.makeInt(builder.materializeConstantArith(0))};
+    }
+    return {shape, stride};
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector shapeElems;
+  typename IntTupleBuilder<IntTuple>::ElemCollector strideElems;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [cs, cd] = canonicalizeStridePair(builder, builder.at(shape, i), builder.at(stride, i));
+    shapeElems.push_back(cs);
+    strideElems.push_back(cd);
+  }
+  return {builder.makeTuple(shapeElems), builder.makeTuple(strideElems)};
+}
 
 template <class IntTuple>
 typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2idxTTT(IntTupleBuilder<IntTuple> &builder,
@@ -272,6 +292,10 @@ std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &buil
   }
 
   if (resultShape.empty()) {
+    if (builder.isStaticValue(currShapeInt, 1)) {
+      return {builder.makeInt(builder.materializeConstantArith(1)),
+              builder.makeInt(builder.materializeConstantArith(0))};
+    }
     return {builder.makeInt(currShapeInt), builder.makeInt(currStrideInt)};
   }
   resultShape.push_back(builder.makeInt(currShapeInt));
@@ -330,7 +354,8 @@ std::pair<IntTuple, IntTuple> compositionImpl(const IntTupleBuilder<IntTuple> &b
     return {rhsShape, rhsStride};
   }
   if (lhsShape.isLeaf()) {
-    return {rhsShape, builder.makeInt(builder.mul(builder.getArithValue(lhsStride), rhsStrideVal))};
+    ArithValue newStride = builder.mul(builder.getArithValue(lhsStride), rhsStrideVal);
+    return canonicalizeStridePair(builder, rhsShape, builder.makeInt(newStride));
   }
 
   ArithValue restShape = builder.getArithValue(rhsShape);
@@ -370,8 +395,8 @@ std::pair<IntTuple, IntTuple> compositionImpl(const IntTupleBuilder<IntTuple> &b
       assert(restShapeVal % newShapeVal == 0);
     }
 
-    IntTuple lastShapeElem = builder.makeInt(newShape);
-    IntTuple lastStrideElem = builder.makeInt(newStride);
+    lastShapeElem = builder.makeInt(newShape);
+    lastStrideElem = builder.makeInt(newStride);
     resultShape.push_back(lastShapeElem);
     resultStride.push_back(lastStrideElem);
     restShape = builder.div(restShape, newShape);
@@ -382,18 +407,22 @@ std::pair<IntTuple, IntTuple> compositionImpl(const IntTupleBuilder<IntTuple> &b
 
   ArithValue lhsLastStride = builder.getArithValue(builder.at(lhsStride, R - 1));
   if (resultCount == 0) {
-    return {builder.makeInt(restShape), builder.makeInt(builder.mul(restStride, lhsLastStride))};
+    IntTuple retShape = builder.makeInt(restShape);
+    IntTuple retStride = builder.makeInt(builder.mul(restStride, lhsLastStride));
+    return canonicalizeStridePair(builder, retShape, retStride);
   }
   if (builder.isStaticValue(restShape, 1)) {
     if (resultCount == 1) {
-      return {lastShapeElem, lastStrideElem};
+      return canonicalizeStridePair(builder, lastShapeElem, lastStrideElem);
     }
-    return {builder.makeTuple(resultShape), builder.makeTuple(resultStride)};
+    return canonicalizeStridePair(builder, builder.makeTuple(resultShape),
+                                  builder.makeTuple(resultStride));
   }
 
   resultShape.push_back(builder.makeInt(restShape));
   resultStride.push_back(builder.makeInt(builder.mul(restStride, lhsLastStride)));
-  return {builder.makeTuple(resultShape), builder.makeTuple(resultStride)};
+  return canonicalizeStridePair(builder, builder.makeTuple(resultShape),
+                                builder.makeTuple(resultStride));
 }
 
 template <class IntTuple>
@@ -544,16 +573,16 @@ Layout layoutComplement(
                                           builder.getShape(layout));
   auto filteredStride = builder.getStride(layout);
 
-  IntTuple codomain =
-      codomainSize ? *codomainSize
-                   : layoutCosize(builder, builder.makeLayout(filteredShape, filteredStride));
-  auto [retShape, retStride] =
-      detail::complementImpl(builder, filteredShape, filteredStride, codomain);
+  auto [coalShape, coalStride] = detail::coalesceImpl(builder, filteredShape, filteredStride);
+
+  IntTuple codomain = codomainSize
+                          ? *codomainSize
+                          : layoutCosize(builder, builder.makeLayout(coalShape, coalStride));
+  auto [retShape, retStride] = detail::complementImpl(builder, coalShape, coalStride, codomain);
   return builder.makeLayout(retShape, retStride);
 }
 
-template <class Layout>
-Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
+template <class Layout> Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
   using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
 
@@ -571,8 +600,7 @@ Layout layoutRightInverse(LayoutBuilder<Layout> &builder, Layout layout) {
   ArithValue one = builder.materializeConstantArith(1);
   prefixProducts.push_back(one);
   for (size_t i = 0; i < flatShapeLeaves.size(); ++i) {
-    ArithValue next =
-        builder.mul(prefixProducts.back(), builder.getArithValue(flatShapeLeaves[i]));
+    ArithValue next = builder.mul(prefixProducts.back(), builder.getArithValue(flatShapeLeaves[i]));
     prefixProducts.push_back(next);
   }
 
@@ -934,6 +962,36 @@ Layout layoutLogicalProduct(LayoutBuilder<Layout> &builder, Layout blockLayout,
 }
 
 template <class Layout>
+Layout layoutZippedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  Layout logicalProd = layoutLogicalProduct(builder, blockLayout, tilerLayout);
+
+  IntTupleAttr guide = builder.getLayoutAttr(tilerLayout).getShape();
+  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalProd), guide);
+  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalProd), guide);
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
+Layout layoutTiledProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  Layout zipped = layoutZippedProduct(builder, blockLayout, tilerLayout);
+  IntTuple retShape = intTupleExpand(builder, builder.getShape(zipped), {1});
+  IntTuple retStride = intTupleExpand(builder, builder.getStride(zipped), {1});
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
+Layout layoutFlatProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, Layout tilerLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  Layout zipped = layoutZippedProduct(builder, blockLayout, tilerLayout);
+  IntTuple retShape = intTupleExpand(builder, builder.getShape(zipped), {0, 1});
+  IntTuple retStride = intTupleExpand(builder, builder.getStride(zipped), {0, 1});
+  return builder.makeLayout(retShape, retStride);
+}
+
+template <class Layout>
 Layout layoutBlockedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout,
                             Layout tilerLayout) {
   auto blockShape = builder.getShape(blockLayout);
@@ -974,4 +1032,4 @@ Layout layoutRakedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, La
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_LAYOUTATTR_H
+#endif // FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
