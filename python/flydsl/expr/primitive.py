@@ -13,112 +13,88 @@ from .._mlir.dialects.fly import (
     PointerType,
     SwizzleType,
 )
-from .._mlir.extras import types as _T
+from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
 from .typing import Int32
 
-
-def _unwrap(v):
-    """Unwrap ArithValue or other wrappers to raw ir.Value or keep Python int/None."""
-    if v is None or isinstance(v, (int, float, bool)):
-        return v
-    if isinstance(v, ir.Value):
-        return v
-    if hasattr(v, "_value"):
-        return _unwrap(v._value)
-    if hasattr(v, "value") and isinstance(getattr(v, "value", None), ir.Value):
-        return v.value
-    return v
-
-
-
-
-def _unwrap_tuple(elems):
-    """Unwrap each element in a tuple/list that may contain ArithValue wrappers.
-    Also converts index-typed Values to i32 for fly dialect compatibility."""
-    def _conv(e):
-        v = _unwrap(e)
-        if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):
-            v = arith.IndexCastOp(ir.IntegerType.get_signless(32), v).result
-        return v
-    if isinstance(elems, (tuple, list)):
-        return type(elems)(_conv(e) for e in elems)
-    return _conv(elems)
-
-__all__ = [
-    # Enum Attributes
-    "AddressSpace",
-    "CachePolicy",
-    # Types
-    "CopyAtomUniversalCopyType",
-    "IntTupleType",
-    "LayoutType",
-    "MemRefType",
-    "MmaAtomUniversalFMAType",
-    "PointerType",
-    "SwizzleType",
-    # DSL functions
-    "const_expr",
-    "range_constexpr",
-    "rank",
-    "depth",
-    "static",
-    "int_tuple_add",
-    "int_tuple_sub",
-    "int_tuple_mul",
-    "int_tuple_div",
-    "int_tuple_product",
-    "idx2crd",
-    "get",
-    "make_identity_tensor",
-    "make_identity_layout",
-    "make_shape",
-    "make_stride",
-    "make_coord",
-    "make_int_tuple",
-    "make_layout",
-    "size",
-    "get_scalar",
-    "slice",
-    "crd2idx",
-    "composition",
-    "complement",
-    "right_inverse",
-    "coalesce",
-    "zip",
-    "select",
-    "group",
-    "append",
-    "prepend",
-    "logical_divide",
-    "zipped_divide",
-    "tiled_divide",
-    "flat_divide",
-    "logical_product",
-    "zipped_product",
-    "tiled_product",
-    "flat_product",
-    "block_product",
-    "raked_product",
-    "make_atom",
-    "make_tile",
-    "mma_atom_call",
-    "copy_atom_call",
-    "make_tiled_copy",
-    "memref_alloca",
-    "memref_load",
-    "memref_store",
-    "memref_load_vec",
-    "memref_store_vec",
-    "get_layout",
-    "get_iter",
-    "make_view",
-    "add_offset",
-    "cooperative_copy",
-    "gemm",
-    "copy",
-    "printf",
-]
+# __all__ = [
+#     # Maybe remove it in the future
+#     "T",
+#     "arith",
+#     # Enum Attributes
+#     "AddressSpace",
+#     "CachePolicy",
+#     # Types
+#     "CopyAtomUniversalCopyType",
+#     "IntTupleType",
+#     "LayoutType",
+#     "MemRefType",
+#     "MmaAtomUniversalFMAType",
+#     "PointerType",
+#     "SwizzleType",
+#     # DSL functions
+#     "const_expr",
+#     "range_constexpr",
+#     "rank",
+#     "depth",
+#     "static",
+#     "int_tuple_add",
+#     "int_tuple_sub",
+#     "int_tuple_mul",
+#     "int_tuple_div",
+#     "int_tuple_product",
+#     "int_tuple_product_each",
+#     "make_identity_tensor",
+#     "make_identity_layout",
+#     "make_shape",
+#     "make_stride",
+#     "make_coord",
+#     "make_int_tuple",
+#     "make_layout",
+#     "size",
+#     "get_scalar",
+#     "get_shape",
+#     "get_stride",
+#     "slice",
+#     "crd2idx",
+#     "composition",
+#     "complement",
+#     "right_inverse",
+#     "coalesce",
+#     "zip",
+#     "select",
+#     "group",
+#     "append",
+#     "prepend",
+#     "logical_divide",
+#     "zipped_divide",
+#     "tiled_divide",
+#     "flat_divide",
+#     "logical_product",
+#     "zipped_product",
+#     "tiled_product",
+#     "flat_product",
+#     "block_product",
+#     "raked_product",
+#     "make_copy_atom",
+#     "make_mma_atom",
+#     "make_tile",
+#     "mma_atom_call",
+#     "copy_atom_call",
+#     "make_tiled_copy",
+#     "memref_alloca",
+#     "memref_load",
+#     "memref_store",
+#     "memref_load_vec",
+#     "memref_store_vec",
+#     "get_layout",
+#     "get_iter",
+#     "make_view",
+#     "add_offset",
+#     "gemm",
+#     "copy",
+#     "printf",
+# ]
 
 
 def const_expr(x):
@@ -126,7 +102,7 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    return range(*args)
+    raise ValueError("range_constexpr should be process by AST rewriter")
 
 
 def make_int32(value):
@@ -176,6 +152,11 @@ def int_tuple_product(int_tuple, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def int_tuple_product_each(int_tuple, loc=None, ip=None):
+    return fly.int_tuple_product_each(int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def make_identity_tensor(shape, loc=None, ip=None):
     return fly.make_identity_tensor(shape, loc=loc, ip=ip)
 
@@ -187,66 +168,62 @@ def make_identity_layout(shape, loc=None, ip=None):
 
 @dsl_api_wrapper
 def make_shape(*shape, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(_unwrap_tuple(shape))
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(shape)
     return fly.make_shape(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_stride(*stride, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(_unwrap_tuple(stride))
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(stride)
     return fly.make_stride(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_coord(*coord, loc=None, ip=None):
-    return [_unwrap(c) for c in coord]
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(coord)
+    return fly.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_int_tuple(elems, loc=None, ip=None):
-    IntTupleTy, dyncElems = fly.infer_int_tuple_type(_unwrap_tuple(elems))
+    IntTupleTy, dyncElems = fly.infer_int_tuple_type(elems)
     return fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def make_layout(shape, stride, loc=None, ip=None):
     if not isinstance(shape, ir.Value):
-        shapeTy, dyncElems = fly.infer_int_tuple_type(_unwrap_tuple(shape))
+        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
         shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
-    else:
-        shape = _unwrap(shape)
     if not isinstance(stride, ir.Value):
-        strideTy, dyncElems = fly.infer_int_tuple_type(_unwrap_tuple(stride))
+        strideTy, dyncElems = fly.infer_int_tuple_type(stride)
         stride = fly.make_stride(strideTy, dyncElems, loc=loc, ip=ip)
-    else:
-        stride = _unwrap(stride)
     return fly.make_layout(shape, stride=stride, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def size(int_tuple, loc=None, ip=None):
-    return fly.size(int_tuple, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def get(int_tuple, mode, loc=None, ip=None):
-    """Extract element `mode` from a coordinate."""
-    if isinstance(int_tuple, (list, tuple)):
-        return int_tuple[mode]
-    v = _unwrap(int_tuple)
-    tp = str(v.type) if hasattr(v, 'type') else ''
-    if 'int_tuple' in tp:
-        selected = fly.select(v, indices=[mode], loc=loc, ip=ip)
-        result = fly.get_scalar(selected, loc=loc, ip=ip)
-        if hasattr(result, 'type') and not isinstance(result.type, ir.IndexType):
-            result = arith.IndexCastOp(ir.IndexType.get(), result).result
-        return result
-    return v
+    result = fly.size(int_tuple, loc=loc, ip=ip)
+    # If the int_tuple is static, return the static value
+    result_ty = IntTupleType(result.type)
+    if result_ty.is_leaf and result_ty.is_static:
+        return Int32(result_ty.static_value)
+    return result
 
 
 @dsl_api_wrapper
 def get_scalar(int_tuple, loc=None, ip=None):
     return fly.get_scalar(int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_shape(layout, loc=None, ip=None):
+    return fly.get_shape(layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_stride(layout, loc=None, ip=None):
+    return fly.get_stride(layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -258,13 +235,26 @@ def slice(src, coord, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def crd2idx(crd, layout, loc=None, ip=None):
+    return fly.crd2idx(crd, layout, loc=loc, ip=ip)
+
+@dsl_api_wrapper
 def idx2crd(idx, layout, loc=None, ip=None):
+    if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
+        idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
-def crd2idx(crd, layout, loc=None, ip=None):
-    return fly.crd2idx(crd, layout, loc=loc, ip=ip)
+def get(int_tuple, mode, loc=None, ip=None):
+    if isinstance(int_tuple, (list, tuple)):
+        return int_tuple[mode]
+    selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
+    result = fly.get_scalar(selected, loc=loc, ip=ip)
+    if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
+        result = arith.IndexCastOp(ir.IndexType.get(), result).result
+    return result
 
 
 @dsl_api_wrapper
@@ -366,31 +356,6 @@ def raked_product(layout, tiler, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def make_atom(atom_type, loc=None, ip=None):
-    return fly.make_atom(atom_type, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def make_tile(layouts, loc=None, ip=None):
-    return fly.make_tile(layouts, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
-    return fly.mma_atom_call(mma_atom, d, a, b, c, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def copy_atom_call(copy_atom, src, dst, loc=None, ip=None):
-    return fly.copy_atom_call(copy_atom, src, dst, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def make_tiled_copy(copy_atom, layout_tv, tile_mn, loc=None, ip=None):
-    return fly.make_tiled_copy(copy_atom, layout_tv, tile_mn, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
 def memref_alloca(memref_type, layout, loc=None, ip=None):
     return fly.memref_alloca(memref_type, layout, loc=loc, ip=ip)
 
@@ -463,25 +428,69 @@ def add_offset(ptr, offset, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def cooperative_copy(tiled_copy, partition_idx, src, dst, loc=None, ip=None):
-    return fly.cooperative_copy(
-        tiled_copy,
-        partition_idx,
-        src,
-        dst,
-        loc=loc,
-        ip=ip,
-    )
+def make_copy_atom(atom_type, loc=None, ip=None):
+    from .derived import CopyAtom
+
+    return CopyAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+
+
+@dsl_api_wrapper
+def make_mma_atom(atom_type, loc=None, ip=None):
+    from .derived import MmaAtom
+
+    return MmaAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+
+
+@dsl_api_wrapper
+def make_tile(layouts, loc=None, ip=None):
+    return fly.make_tile(layouts, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
+    return fly.mma_atom_call(mma_atom, d, a, b, c, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def copy_atom_call(copy_atom, src, dst, loc=None, ip=None):
+    return fly.copy_atom_call(copy_atom, src, dst, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=None, ip=None):
+    from .derived import TiledCopy
+
+    return TiledCopy(fly.make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=loc, ip=ip))
+
+
+@dsl_api_wrapper
+def tiled_copy_partition_src(tiled_copy, src, thr_int_tuple, loc=None, ip=None):
+    return fly.tiled_copy_partition_src(tiled_copy, src, thr_int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def tiled_copy_partition_dst(tiled_copy, dst, thr_int_tuple, loc=None, ip=None):
+    return fly.tiled_copy_partition_dst(tiled_copy, dst, thr_int_tuple, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def tiled_copy_retile(tiled_copy, t, loc=None, ip=None):
+    return fly.tiled_copy_retile(tiled_copy, t, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def tiled_mma_partition(operand_id, tiled_mma, t, coord, loc=None, ip=None):
+    return fly.tiled_mma_partition(operand_id, tiled_mma, t, coord, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def copy(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
+    return fly.copy(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def gemm(mma_atom, d, a, b, c, loc=None, ip=None):
     return fly.gemm(mma_atom, d, a, b, c, loc=loc, ip=ip)
-
-
-@dsl_api_wrapper
-def copy(copy_atom, src, dst, loc=None, ip=None):
-    return fly.copy(copy_atom, src, dst, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
