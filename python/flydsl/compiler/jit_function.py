@@ -24,7 +24,7 @@ from .kernel_function import (
     get_gpu_module_body,
 )
 from .protocol import get_ir_types, new_from_ir_values
-
+from flydsl.runtime.device import get_rocm_arch
 
 @lru_cache(maxsize=1)
 def _get_llvm_version() -> str:
@@ -97,14 +97,28 @@ def _jit_function_cache_key(func: Callable) -> str:
     depSources = _collect_dependency_sources(func, rootFile)
     depSources.sort()
     parts.extend(depSources)
+
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        closure_vals = []
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+                if isinstance(val, (int, float, bool, str, type(None), tuple)):
+                    closure_vals.append(f"{name}={val!r}")
+            except ValueError:
+                pass
+        if closure_vals:
+            parts.append("closure:" + ",".join(closure_vals))
+
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
+
 
 
 class MlirCompiler:
     PIPELINE = (
         "builtin.module("
-        "gpu-kernel-outlining{data-layout-str=},"
+        "gpu-kernel-outlining{{data-layout-str=}},"
         "fly-canonicalize,"
         "fly-layout-lowering,"
         "convert-fly-to-rocdl,"
@@ -113,25 +127,28 @@ class MlirCompiler:
         "convert-scf-to-cf,"
         "convert-vector-to-llvm,"
         "canonicalize,"
-        "convert-gpu-to-rocdl{chipset=gfx942 index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}"
+        "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
         "),"
-        "rocdl-attach-target{O=2 abi=600 chip=gfx942 correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true},"
+        "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
         "convert-scf-to-cf,"
         "convert-cf-to-llvm,"
-        "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true},"
+        "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
         "convert-arith-to-llvm,"
         "convert-func-to-llvm,"
         "reconcile-unrealized-casts,"
-        "gpu-module-to-binary{format=fatbin}"
+        "gpu-module-to-binary{{format=fatbin}}"
         ")"
     )
 
     @classmethod
-    def compile(cls, module: ir.Module) -> ir.Module:
+    def compile(cls, module: ir.Module, *, chip: str = None) -> ir.Module:
         module.operation.verify()
 
+        if chip is None:
+            chip = get_rocm_arch()
+
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        pm = PassManager.parse(cls.PIPELINE)
+        pm = PassManager.parse(cls.PIPELINE.format(chip=chip))
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -243,16 +260,28 @@ class JitFunction:
 
         self._ensure_cache_manager()
 
-        sig = inspect.signature(self.func)
+        if not hasattr(self, '_sig'):
+            self._sig = inspect.signature(self.func)
+        sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
-        cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
 
-        if cached_func is not None and env.runtime.enable_cache:
-            log().info(f"Cache hit for {self.func.__name__}")
-            with ir.Context():
+        # In-memory compiled function cache (survives across calls, avoids re-compilation)
+        if not hasattr(self, '_mem_cache'):
+            self._mem_cache = {}
+        compiled_func = self._mem_cache.get(cache_key)
+        if compiled_func is None:
+            cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+        else:
+            cached_func = compiled_func
+
+        if cached_func is not None:
+            if not hasattr(self, '_cached_ctx'):
+                self._cached_ctx = ir.Context()
+                self._cached_ctx.load_all_available_dialects()
+            with self._cached_ctx:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
                 return cached_func(*jit_args)
 
@@ -270,7 +299,8 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                gpu_module = create_gpu_module("kernels", targets=['#rocdl.target<chip = "gfx942">'])
+                chip = get_rocm_arch()
+                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -291,7 +321,7 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module)
+            compiled_module = MlirCompiler.compile(module, chip=chip)
 
             compiled_func = JitCompiledFunction(
                 compiled_module,
@@ -299,6 +329,7 @@ class JitFunction:
                 original_ir,
             )
 
+            self._mem_cache[cache_key] = compiled_func
             if self.cache_manager:
                 self.cache_manager.set(cache_key, compiled_func)
 
@@ -306,6 +337,7 @@ class JitFunction:
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
+    """JIT decorator for host launcher functions."""
     if func is None:
         return lambda f: JitFunction(f)
     return JitFunction(func)
