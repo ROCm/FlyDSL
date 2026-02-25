@@ -562,15 +562,38 @@ def compile_moe_gemm1(
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
                 c_num_k_blocks = arith.constant(num_k_blocks_stage1, index=True) if is_uint4 else None
 
-                def _load_uint4_qs_qz(base_k, ku, ni, col_list):
+                def _load_uint4_qs_qz(base_k, ku, ni, blk_list, intra_list):
                     """Issue qscale/qzero buffer_loads for one (ku, ni) pair.
 
-                    Returns raw (qs, qz) values — broadcast is deferred to
-                    load_b_pack_k32 to avoid premature s_waitcnt vmcnt(0).
+                    IMPORTANT: qscale/qzero are computed on the *preshuffled* weight tensor
+                    layout (the same 2D view that is later packed to uint4 bytes). Therefore,
+                    we must index qscale/qzero using the preshuffled (row, k_block) derived
+                    from the packed weight address, not the logical (n, k) coordinates.
                     """
-                    k_block = base_k / arith.constant(uint4_scale_block_k, index=True) + arith.constant(ku, index=True)
-                    n_global = expert_off_idx + col_list[ni]
-                    qs_idx = k_block * c_n_total + n_global
+                    # Compute the packed-weight byte offset for this (ku, ni) pack base (k2=0),
+                    # matching `load_b_pack_k32`'s `coord_pack` / `idx_pack`.
+                    base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+                    k0_base = base_k_bytes / arith.constant(64, index=True)
+                    k0 = k0_base + arith.constant(ku, index=True)
+                    coord_pack = flir.make_coord(
+                        blk_list[ni],
+                        k0,
+                        lane_div_16,
+                        intra_list[ni],
+                        arith.constant(0, index=True),
+                    )
+                    idx_pack = flir.crd2idx(coord_pack, layout_b)
+
+                    # Interpret the packed weight buffer as a row-major 2D tensor:
+                    #   [N_total, K_bytes] where K_bytes = K/2 for packed 4-bit weights.
+                    #
+                    # For uint4_scale_block_k weights per block (64), the block size in bytes is 32.
+                    row_stride_bytes = k_in / arith.constant(2, index=True)
+                    row_id = idx_pack / row_stride_bytes
+                    col_byte = idx_pack - (row_id * row_stride_bytes)
+                    k_block = col_byte / arith.constant(uint4_scale_block_k // 2, index=True)
+
+                    qs_idx = k_block * c_n_total + row_id
                     qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
                     qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
                     return qs_val, qz_val
@@ -613,7 +636,7 @@ def compile_moe_gemm1(
                         qz_list = []
                         if is_uint4:
                             for ni in range_constexpr(num_acc_n):
-                                qs, qz = _load_uint4_qs_qz(base_k, ku, ni, col_list)
+                                qs, qz = _load_uint4_qs_qz(base_k, ku, ni, blk_list, intra_list)
                                 qs_list.append(qs)
                                 qz_list.append(qz)
                         packs0 = []
@@ -1760,9 +1783,26 @@ def compile_moe_gemm2(
                 c_num_k_blocks_s2 = arith.constant(num_k_blocks_stage2, index=True) if is_uint4 else None
 
                 def _load_uint4_qs_qz_s2(base_k, ku, ni):
-                    k_block = base_k / arith.constant(uint4_scale_block_k, index=True) + arith.constant(ku, index=True)
-                    n_global = expert_off_idx + col_g_list[ni]
-                    qs_idx = k_block * c_n_total + n_global
+                    # Same rationale as stage1: qscale/qzero are produced from the preshuffled
+                    # weight buffer, so we index them via the packed address (preshuffled row,k_block).
+                    base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+                    k0_base = base_k_bytes / arith.constant(64, index=True)
+                    k0 = k0_base + arith.constant(ku, index=True)
+                    coord_pack = flir.make_coord(
+                        n_blk_list[ni],
+                        k0,
+                        lane_div_16,
+                        n_intra_list[ni],
+                        arith.constant(0, index=True),
+                    )
+                    idx_pack = flir.crd2idx(coord_pack, layout_b)
+
+                    row_stride_bytes = k_in / arith.constant(2, index=True)
+                    row_id = idx_pack / row_stride_bytes
+                    col_byte = idx_pack - (row_id * row_stride_bytes)
+                    k_block = col_byte / arith.constant(uint4_scale_block_k // 2, index=True)
+
+                    qs_idx = k_block * c_n_total + row_id
                     qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
                     qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
                     return qs_val, qz_val

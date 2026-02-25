@@ -106,6 +106,86 @@ def _uint4_quantize_and_pack(w_int8_shuffled: torch.Tensor, K: int, scale_block_
     return w_packed, qscale, qzero
 
 
+def _uint4_packed_w_to_unshuffled_int8(
+    w_packed_i8: torch.Tensor,
+    qscale_kn: torch.Tensor,  # [K//block, N] int32
+    qzero_kn: torch.Tensor,   # [K//block, N] int32
+    *,
+    N: int,
+    K: int,
+    experts: int,
+    rows_per_expert: int,
+    scale_block_k: int = 64,
+    layout=(16, 16),
+) -> torch.Tensor:
+    """Rebuild unshuffled int8 weights from packed uint4 + qscale/qzero.
+
+    Matches the kernel contract documented in `_uint4_quantize_and_pack`:
+      int8_bits = (uint4 * qscale + qzero) ^ 0x80
+    """
+
+    def _unshuffle_weight(x_shuf: torch.Tensor, layout=(16, 16), use_int4: bool = False) -> torch.Tensor:
+        # Inverse of tests.utils.shuffle_weight (same layout math, inverse permute).
+        x_type = x_shuf.dtype
+        if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+            x_shuf = x_shuf.view(torch.uint8)
+
+        IN, IK = layout
+        BK = IK * 2
+        Kpack = 16 // x_shuf.element_size() if not use_int4 else 32
+        BN = IN
+
+        assert x_shuf.shape[-2] % BN == 0, f"{x_shuf.shape[-2]} % {BN} != 0"
+        assert x_shuf.shape[-1] % BK == 0, f"{x_shuf.shape[-1]} % {BK} != 0"
+
+        x_ = x_shuf
+        # shuffle: view(-1, N/BN, BN, K/BK, BK/Kpack, Kpack).permute(0,1,3,4,2,5)
+        # inverse: view(-1, N/BN, K/BK, BK/Kpack, BN, Kpack).permute(0,1,4,2,3,5)
+        x_ = x_.view(-1, x_shuf.shape[-2] // BN, x_shuf.shape[-1] // BK, BK // Kpack, BN, Kpack)
+        x_ = x_.permute(0, 1, 4, 2, 3, 5).contiguous()
+        x_ = x_.view(*x_shuf.shape).view(x_type)
+        return x_
+
+    def _unpack_uint4_from_packed_int4_no_perm(packed_i8: torch.Tensor) -> torch.Tensor:
+        # Inverse of _pack_shuffled_int8_to_packed_int4_no_perm byte layout.
+        p = packed_i8.view(torch.uint8).contiguous().view(-1, 4)  # [blocks, 4 bytes]
+        out = torch.empty((p.shape[0], 8), device=p.device, dtype=torch.uint8)
+
+        b0, b1, b2, b3 = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
+        out[:, 0] = b0 & 0xF
+        out[:, 4] = b0 >> 4
+        out[:, 1] = b1 & 0xF
+        out[:, 5] = b1 >> 4
+        out[:, 2] = b2 & 0xF
+        out[:, 6] = b2 >> 4
+        out[:, 3] = b3 & 0xF
+        out[:, 7] = b3 >> 4
+
+        return out.view(-1)  # flat uint4 values in [0,15]
+
+    assert int(experts) > 0 and int(rows_per_expert) > 0
+    assert int(N) == int(experts) * int(rows_per_expert), f"N={N}, experts={experts}, rows_per_expert={rows_per_expert}"
+    assert K % scale_block_k == 0
+    num_blocks = K // scale_block_k
+    assert tuple(qscale_kn.shape) == (num_blocks, N), f"qscale_kn.shape={tuple(qscale_kn.shape)}"
+    assert tuple(qzero_kn.shape) == (num_blocks, N), f"qzero_kn.shape={tuple(qzero_kn.shape)}"
+
+    w_u4 = _unpack_uint4_from_packed_int4_no_perm(w_packed_i8).view(N, K).to(torch.int32)
+    w_u4 = w_u4.view(N, num_blocks, scale_block_k)
+
+    # qscale/qzero are stored K-major [num_blocks, N]; transpose for broadcast.
+    qs = qscale_kn.t().contiguous().to(torch.int32)  # [N, num_blocks]
+    qz = qzero_kn.t().contiguous().to(torch.int32)   # [N, num_blocks]
+
+    u8 = w_u4 * qs.unsqueeze(-1) + qz.unsqueeze(-1)
+    u8 = u8.clamp(0, 255).to(torch.uint8)
+    w_i8_shuf = (u8 ^ 0x80).view(torch.int8).view(experts, rows_per_expert, K)
+
+    # Convert shuffled-storage -> logical (unshuffled) layout for torch reference.
+    w_i8 = _unshuffle_weight(w_i8_shuf, layout=layout, use_int4=False)
+    return w_i8.view(N, K)
+
+
 # Optional: use aiter's exact routing/sorting implementation (matches `aiter/op_tests/test_moe_2stage.py`).
 # Some environments ship aiter python but miss required JIT .so dependencies; we fall back gracefully.
 try:
@@ -595,9 +675,22 @@ def run_moe_stage1(
         else:
             x_ref = x_q
             sx_ref = scale_x
+        w1_q_flat_ref = w1_q_flat
+        if is_uint4:
+            w1_q_flat_ref = _uint4_packed_w_to_unshuffled_int8(
+                w_packed,
+                qscale_w1,
+                qzero_w1,
+                N=experts * (2 * inter_dim),
+                K=model_dim,
+                experts=experts,
+                rows_per_expert=(2 * inter_dim),
+                scale_block_k=64,
+                layout=(16, 16),
+            )
         ref = torch_moe_gemm1(
             x_ref,
-            w1_q_flat,
+            w1_q_flat_ref,
             sx_ref,
             scale_w1_flat,
             topk_ids.to(torch.int64),
@@ -896,6 +989,22 @@ def run_moe_stage2(
     else:
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
         scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+        w1_q_flat_ref = w1_q_flat
+        if is_uint4:
+            # Match stage1 uint4 path: preshuffled int8 -> (uint4,qscale,qzero) -> int8.
+            w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
+            w1_packed, w1_qs, w1_qz = _uint4_quantize_and_pack(w1_shuffled_flat, K=model_dim, scale_block_k=64)
+            w1_q_flat_ref = _uint4_packed_w_to_unshuffled_int8(
+                w1_packed,
+                w1_qs,
+                w1_qz,
+                N=experts * (2 * inter_dim),
+                K=model_dim,
+                experts=experts,
+                rows_per_expert=(2 * inter_dim),
+                scale_block_k=64,
+                layout=(16, 16),
+            )
         # Build stage2 input via reference stage1 only when correctness is enabled.
         if bool(skip_ref):
             raise RuntimeError(
@@ -904,7 +1013,7 @@ def run_moe_stage2(
             )
         out1_ref = torch_moe_gemm1(
             x_q,
-            w1_q_flat,
+            w1_q_flat_ref,
             scale_x,
             scale_w1_flat,
             topk_ids.to(torch.int64),
@@ -1031,6 +1140,10 @@ def run_moe_stage2(
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
+    print(qscale_w2_1d.shape, qscale_w2_1d.dtype)
+    print(qzero_w2_1d.shape, qzero_w2_1d.dtype)
+    print(qscale_w2_1d.min(), qscale_w2_1d.max())
+    print(qzero_w2_1d.min(), qzero_w2_1d.max())
     _, us = run_perftest(
         launch,
         out_perf,
