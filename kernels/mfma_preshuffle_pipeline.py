@@ -12,7 +12,7 @@ from flydsl.expr.typing import T
 from flydsl.expr import arith as _arith
 import flydsl.expr as fx
 
-from kernels.layout_utils import idx2crd, crd2idx, get as layout_get
+from flydsl.expr import crd2idx, idx2crd, get as layout_get
 
 
 def swizzle_xor16(row, col, k_blocks16):
@@ -188,7 +188,7 @@ def tile_chunk_coord_i32(
         raise ValueError(f"chunk_i32 must be one of (1,2,4), got {chunk_i32!r}")
     chunk_off_i32 = arith.constant(i * total_threads * chunk_i32, index=True)
     tile_idx_i32 = tx_i32_base + chunk_off_i32
-    coord_local = idx2crd(tile_idx_i32, layout_tile_div4)
+    coord_local = idx2crd(fx.make_int_tuple(tile_idx_i32), layout_tile_div4)
     row_local = layout_get(coord_local, 0)
     col_local_i32 = layout_get(coord_local, 1)
     return row_local, col_local_i32
