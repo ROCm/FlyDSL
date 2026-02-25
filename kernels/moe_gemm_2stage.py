@@ -16,11 +16,7 @@ import functools
 import flydsl
 from flydsl.dialects.ext import flir
 from flydsl.dialects.ext.python_control_flow import range_constexpr
-from flydsl.runtime.device import (
-    get_rocm_arch as get_hip_arch,
-    supports_bf16_global_atomics,
-    bf16_global_atomics_arch_description,
-)
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils import SmemAllocator, SmemPtr
 
 from _mlir import ir
@@ -81,14 +77,13 @@ def compile_moe_gemm1(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp8_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    is_fp8_bf16 = in_dtype == "fp8_bf16"    # fp8 weights (pre-dequanted to bf16) + bf16 activations + per-channel epilogue scale
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or is_fp8_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
+    is_bf16 = is_int4_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
     is_f16_or_bf16 = is_f16 or is_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     if out_dtype not in ("f16", "bf16"):
@@ -113,10 +108,9 @@ def compile_moe_gemm1(
     # Scale flags for epilogue:
     # - fp16/bf16: no scales needed (pure float types)
     # - int4_bf16: scale_w needed (weight dequant), scale_x not needed (bf16 activations)
-    # - fp8_bf16: scale_w needed (per-channel fp8 weight scale in epilogue), scale_x not needed (bf16 activations)
     # - fp8/int8/int4: both scales needed
-    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16/fp8_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16 or is_fp8_bf16  # True for int4_bf16 and fp8_bf16 too
+    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16
+    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
     # Group-wise scale support for W4A16
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
     # The int4 preshuffle uses K=32 blocks, which aligns perfectly with group_size=32.
@@ -1349,14 +1343,13 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp8_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
-    is_fp8_bf16 = in_dtype == "fp8_bf16"    # fp8 weights (pre-dequanted to bf16) + bf16 activations + per-channel epilogue scale
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or is_fp8_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
+    is_bf16 = is_int4_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
     is_f16_or_bf16 = is_f16 or is_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     out_s = str(out_dtype).strip().lower()
@@ -1374,10 +1367,9 @@ def compile_moe_gemm2(
     # Scale flags for epilogue:
     # - fp16/bf16: no scales needed (pure float types)
     # - int4_bf16: scale_w needed (weight dequant), scale_x not needed (bf16 activations)
-    # - fp8_bf16: scale_w needed (per-channel fp8 weight scale in epilogue), scale_x not needed (bf16 activations)
     # - fp8/int8/int4: both scales needed
-    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16/fp8_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16 or is_fp8_bf16  # True for int4_bf16 and fp8_bf16 too
+    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16
+    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
     # Group-wise scale support for W4A16
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
     use_groupwise_scale = is_int4_bf16 and group_size > 0

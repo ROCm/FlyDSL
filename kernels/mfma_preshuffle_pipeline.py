@@ -584,9 +584,6 @@ __all__ = [
     "make_preshuffle_scale_layout",
     "load_b_pack_k32",
     "tile_chunk_coord_i32",
-    # W4A16 load functions
-    "load_b_pack_w4a16",
-    "load_b_pack_w4a16_groupwise",
     "load_b_raw_w4a16",
     "unpack_b_w4a16",
     "load_b_raw_w4a16_groupwise",

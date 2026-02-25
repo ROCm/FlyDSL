@@ -376,9 +376,9 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp8_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
@@ -403,17 +403,6 @@ def run_moe_stage1(
         w2_q = w2_fp32.to(torch.bfloat16)
         scale_x = None
         scale_w1 = None
-    elif in_dtype == "fp8_bf16":
-        # fp8_bf16: X is bf16 (no quant), W is quantized per-channel to fp8 then cast back to bf16.
-        # Per-channel scale_w is applied in the kernel epilogue.
-        x_q = x_fp32.to(torch.bfloat16)
-        # Quantize weights per-channel to fp8, producing per-row scale.
-        w1_fp8, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
-        w2_fp8, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
-        # Cast fp8 back to bf16 (introduces fp8 rounding error; this is the "simulated" approach).
-        w1_q = w1_fp8.to(torch.bfloat16)
-        w2_q = w2_fp8.to(torch.bfloat16)
-        scale_x = None
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -593,7 +582,7 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16", "fp8_bf16")) else 1  # bf16/fp16 activations
+    x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else 1  # bf16/fp16 activations
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
     bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
@@ -824,9 +813,9 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp8_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
@@ -852,15 +841,6 @@ def run_moe_stage2(
         scale_x = None
         scale_w1 = None
         scale_w2 = None
-    elif in_dtype == "fp8_bf16":
-        # fp8_bf16: X is bf16 (no quant), W is quantized per-channel to fp8 then cast back to bf16.
-        # Per-channel scale_w is applied in the kernel epilogue.
-        x_q = x_fp32.to(torch.bfloat16)
-        w1_fp8, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
-        w2_fp8, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
-        w1_q = w1_fp8.to(torch.bfloat16)
-        w2_q = w2_fp8.to(torch.bfloat16)
-        scale_x = None
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -905,8 +885,8 @@ def run_moe_stage2(
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
-    # For int4_bf16/fp8_bf16, A2 is bf16 (same as fp16 for scale handling).
-    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16", "fp8_bf16")):
+    # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
+    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
     else:
@@ -936,8 +916,8 @@ def run_moe_stage2(
         elif in_dtype == "bf16":
             a2_q = out1_ref.to(torch.bfloat16)
             a2_scale = None
-        elif in_dtype in ("int4_bf16", "fp8_bf16"):
-            # W4A16 / fp8_bf16: A2 is bf16 (no quant).
+        elif in_dtype == "int4_bf16":
+            # W4A16: A2 is bf16 (no quant).
             a2_q = out1_ref.to(torch.bfloat16)
             a2_scale = None
         else:
@@ -1095,7 +1075,7 @@ def run_moe_stage2(
     tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
-    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16", "fp8_bf16") else 1  # bf16/fp16 activations
+    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
@@ -1213,7 +1193,7 @@ def run_moe_stage2(
         pytest.param(256, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp8_bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
@@ -1337,8 +1317,8 @@ def test_moe_gemm_2stage(
     elif in_dtype == "bf16":
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
-    elif in_dtype in ("int4_bf16", "fp8_bf16"):
-        # W4A16 / fp8_bf16: A2 is bf16 (no quant)
+    elif in_dtype == "int4_bf16":
+        # W4A16: A2 is bf16 (no quant)
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
     else:
@@ -1717,156 +1697,6 @@ def test_moe_stage2_standalone(
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
-
-
-##############################################################################
-# fp8 precision analysis: per-channel vs groupwise vs activation-only
-##############################################################################
-
-def test_fp8_groupwise_precision():
-    """Measure precision gap between per-channel fp8 and groupwise fp8.
-
-    Computes 4 approaches for the same random int4 MoE weights:
-    1. Ground truth (f32): int4 dequant with groupwise scale, bf16 activations, matmul in f32
-    2. Per-channel fp8: int4 -> dequant -> fp8 per-channel requant -> fp8 matmul -> scale
-    3. Groupwise fp8: int4 -> fp8 lossless -> fp8 matmul per group -> scale partial sums
-    4. Activation-only fp8: activations quantized to fp8, weights kept as f32
-
-    This is a pure PyTorch test -- no kernel compilation needed.
-    """
-    torch.manual_seed(42)
-    device = "cuda"
-
-    # Realistic single-GPU slice shapes
-    E = 8        # experts
-    M = 128      # tokens
-    N = 256      # inter_dim (output dim of stage1)
-    K = 7168     # model_dim
-    group_size = 32
-    num_groups = K // group_size
-    fp8_dtype = DTYPE_FP8
-    fp8_max = torch.finfo(fp8_dtype).max
-
-    print(f"\n=== fp8 precision analysis (E={E}, M={M}, N={N}, K={K}, group_size={group_size}) ===")
-
-    def cosine_sim(a, b):
-        a_flat = a.flatten().float()
-        b_flat = b.flatten().float()
-        return torch.nn.functional.cosine_similarity(a_flat.unsqueeze(0), b_flat.unsqueeze(0)).item()
-
-    def max_abs_err(a, b):
-        return (a.float() - b.float()).abs().max().item()
-
-    def rel_err(a, b):
-        diff = (a.float() - b.float()).abs()
-        denom = b.float().abs().clamp(min=1e-8)
-        return (diff / denom).mean().item()
-
-    # Generate random int4 weights [-8, 7] and groupwise scales
-    w_int4 = torch.randint(-8, 8, (E, N, K), dtype=torch.int8, device=device)  # [E, N, K]
-    # Groupwise scale: [E, N, num_groups] -- realistic range
-    w_scale_group = torch.randn(E, N, num_groups, device=device).abs() * 0.1 + 0.01  # positive, ~0.01-0.11
-
-    # Random bf16 activations
-    x_bf16 = torch.randn(M, K, device=device, dtype=torch.bfloat16)
-
-    # =========================================================================
-    # 1. Ground truth (f32): full-precision dequant + matmul
-    # =========================================================================
-    # Dequant: w_f32[e, n, k] = int4[e, n, k] * scale[e, n, k // group_size]
-    group_idx = torch.arange(K, device=device) // group_size  # [K]
-    w_f32 = w_int4.float() * w_scale_group[:, :, group_idx]   # [E, N, K]
-    x_f32 = x_bf16.float()                                    # [M, K]
-
-    # out_ref[e, m, n] = x_f32[m, :] @ w_f32[e, n, :].T  =>  x_f32 @ w_f32^T
-    # For each expert: [M, K] @ [K, N] = [M, N]
-    out_ref = torch.bmm(
-        x_f32.unsqueeze(0).expand(E, -1, -1),    # [E, M, K]
-        w_f32.transpose(1, 2)                      # [E, K, N]
-    )  # [E, M, N]
-
-    # =========================================================================
-    # 2. Per-channel fp8: int4 -> dequant -> fp8 per-channel -> fp8 matmul
-    # =========================================================================
-    # Per-channel requant: one scale per (expert, row)
-    w_dequant_f32 = w_f32  # already computed above
-    amax_perchannel = w_dequant_f32.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)  # [E, N, 1]
-    scale_perchannel = amax_perchannel / fp8_max  # [E, N, 1]
-    w_fp8_perchannel = (w_dequant_f32 / scale_perchannel).clamp(-fp8_max, fp8_max).to(fp8_dtype)
-
-    # Simulate fp8 matmul: cast back to f32 for computation (simulates MFMA accumulator)
-    # Also quantize activations to fp8 per-token (like QuantType.per_Token)
-    x_amax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)  # [M, 1]
-    x_scale = x_amax / fp8_max
-    x_fp8 = (x_f32 / x_scale).clamp(-fp8_max, fp8_max).to(fp8_dtype)
-
-    # fp8 matmul: x_fp8 @ w_fp8^T, then apply scales
-    out_perchannel = torch.bmm(
-        x_fp8.float().unsqueeze(0).expand(E, -1, -1),          # [E, M, K]
-        w_fp8_perchannel.float().transpose(1, 2)                # [E, K, N]
-    )  # [E, M, N]  (f32 accumulator)
-    # Apply scales: out *= scale_x[m] * scale_w[n]
-    out_perchannel = out_perchannel * x_scale.unsqueeze(0) * scale_perchannel.transpose(1, 2)
-
-    # =========================================================================
-    # 3. Groupwise fp8: int4 -> fp8 lossless, matmul per group, scale partial sums
-    # =========================================================================
-    # int4 [-8, 7] fits exactly in fp8 (lossless conversion)
-    w_fp8_raw = w_int4.float().to(fp8_dtype)  # [E, N, K] -- lossless
-
-    # Simulate groupwise accumulation:
-    # For each group g: partial[e,m,n] += scale_w[e,n,g] * (x_fp8[m, g*gs:(g+1)*gs] @ w_fp8[e,n, g*gs:(g+1)*gs])
-    out_groupwise = torch.zeros(E, M, N, device=device, dtype=torch.float32)
-    for g in range(num_groups):
-        k_start = g * group_size
-        k_end = k_start + group_size
-        # fp8 partial matmul for this group
-        x_slice = x_fp8[:, k_start:k_end].float()          # [M, gs]
-        w_slice = w_fp8_raw[:, :, k_start:k_end].float()    # [E, N, gs]
-        partial = torch.bmm(
-            x_slice.unsqueeze(0).expand(E, -1, -1),          # [E, M, gs]
-            w_slice.transpose(1, 2)                           # [E, gs, N]
-        )  # [E, M, N]
-        # Apply scales: x_scale[m] * w_group_scale[e, n, g]
-        scale_g = w_scale_group[:, :, g]                      # [E, N]
-        partial = partial * x_scale.unsqueeze(0) * scale_g.unsqueeze(1)  # broadcast
-        out_groupwise += partial
-
-    # =========================================================================
-    # 4. Activation-only fp8: only activations quantized, weights in f32
-    # =========================================================================
-    out_act_only = torch.bmm(
-        x_fp8.float().unsqueeze(0).expand(E, -1, -1),    # [E, M, K]
-        w_f32.transpose(1, 2)                              # [E, K, N]
-    )  # [E, M, N]
-    out_act_only = out_act_only * x_scale.unsqueeze(0)    # apply activation scale
-
-    # =========================================================================
-    # 5. Weight-only fp8 per-channel (no activation quant): isolates weight error
-    # =========================================================================
-    out_weight_only = torch.bmm(
-        x_f32.unsqueeze(0).expand(E, -1, -1),                  # [E, M, K]
-        w_fp8_perchannel.float().transpose(1, 2)                # [E, K, N]
-    )  # [E, M, N]
-    out_weight_only = out_weight_only * scale_perchannel.transpose(1, 2)
-
-    # =========================================================================
-    # Report
-    # =========================================================================
-    results = [
-        ("per-channel fp8 (W+A quant)", out_perchannel),
-        ("groupwise fp8 (W+A quant)",   out_groupwise),
-        ("activation-only fp8",          out_act_only),
-        ("weight-only perchannel fp8",   out_weight_only),
-    ]
-    print(f"{'method':<35s} {'cosine':>10s} {'max_err':>12s} {'rel_err':>10s}")
-    print("-" * 70)
-    for name, out in results:
-        cos = cosine_sim(out, out_ref)
-        mae = max_abs_err(out, out_ref)
-        re = rel_err(out, out_ref)
-        print(f"{name:<35s} {cos:>10.6f} {mae:>12.4f} {re:>10.6f}")
-    print()
 
 
 if __name__ == "__main__":
