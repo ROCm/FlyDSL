@@ -1,4 +1,5 @@
 from .._mlir import ir
+from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .primitive import *
 from .typing import Layout, Tensor
 
@@ -96,7 +97,21 @@ class TiledCopy:
         return self.get_slice(thr_idx)
 
 
-class TiledMma(MmaAtom):
+class TiledMma:
+    def __init__(self, value):
+        self.value = value
+        self.tiled_mma_ty = self.value.type
+
+    @classmethod
+    def __new_from_ir_values__(cls, values):
+        return cls(values[0])
+
+    def __extract_ir_values__(self):
+        return [self.value]
+
+    def __str__(self):
+        return f"TiledMma({self.tiled_mma_ty})"
+
     def get_slice(self, thr_idx):
         return ThrMma(self, thr_idx)
 
@@ -128,21 +143,23 @@ class ThrCopy(TiledCopy):
 
 class ThrMma(TiledMma):
     def __init__(self, tiled_mma: TiledMma, thr_idx):
+        super().__init__(tiled_mma.value)
         self.tiled_mma = tiled_mma
         self._thr_idx = thr_idx
+        self._thr_idx_int = make_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
         return self._thr_idx
 
     def partition_A(self, a: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.A, self.tiled_mma.value, a, self._thr_idx_int)
 
     def partition_B(self, b: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.B, self.tiled_mma.value, b, self._thr_idx_int)
 
     def partition_C(self, c: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.C, self.tiled_mma.value, c, self._thr_idx_int)
 
 
 def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
@@ -155,3 +172,15 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
     tiler_mn = int_tuple_product_each(get_shape(layout_mn))
     return (tiler_mn, layout_tv)
+
+
+def make_tiled_copy_A(copy_atom, tiled_mma):
+    pass
+
+
+def make_tiled_copy_B(copy_atom, tiled_mma):
+    pass
+
+
+def make_tiled_copy_C(copy_atom, tiled_mma):
+    pass
