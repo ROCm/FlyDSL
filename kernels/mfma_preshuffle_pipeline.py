@@ -1,9 +1,4 @@
-"""Shared MFMA preshuffle helpers (used by preshuffle GEMM + MoE kernels).
-
-This module consolidates the common building blocks that were previously duplicated
-across:
-- `kernels/preshuffle_gemm.py`
-- `kernels/moe_gemm_2stage.py`
+"""Shared MFMA preshuffle helpers for preshuffle GEMM kernels.
 
 Key primitives:
 - B preshuffle layout builder (supports byte-packed element types, incl. packed int4)
@@ -13,7 +8,8 @@ Key primitives:
 from __future__ import annotations
 from dataclasses import dataclass
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import arith as _raw_arith
+from flydsl.expr.typing import T
+from flydsl.expr import arith as _arith
 import flydsl.expr as fx
 
 from kernels.layout_utils import idx2crd, crd2idx, get as layout_get
@@ -24,41 +20,25 @@ def swizzle_xor16(row, col, k_blocks16):
 
     Computes: col XOR ((row % k_blocks16) * 16)
     """
-    from flydsl.expr.utils.arith import unwrap
-    r = unwrap(row)
-    c = unwrap(col)
-    kb = unwrap(k_blocks16)
-    idx_ty = ir.IndexType.get()
-    rem = _raw_arith.RemUIOp(r, kb).result
-    c16 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 16)).result
-    mul = _raw_arith.MulIOp(rem, c16).result
-    return _raw_arith.XOrIOp(c, mul).result
+    rem = row % k_blocks16
+    return col ^ (rem * 16)
 
 
 def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, elem_bytes, offset_in_bytes):
     """Load vec_elems elements via buffer_load dwordx[1,2,4] + bitcast."""
-    from flydsl.expr.utils.arith import unwrap
     elem_size = int(elem_bytes)
     load_bytes = int(vec_elems) * elem_size
     vec_width = load_bytes // 4
-    i32_ty = ir.IntegerType.get_signless(32)
-    idx_ty = ir.IndexType.get()
 
-    raw_idx = unwrap(idx)
     if offset_in_bytes:
-        c4 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 4)).result
-        idx_i32 = _raw_arith.DivSIOp(raw_idx, c4).result
+        idx_i32 = idx // 4
     elif elem_bytes == 2:
-        c2 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 2)).result
-        byte_idx = _raw_arith.MulIOp(raw_idx, c2).result
-        c4 = _raw_arith.ConstantOp(idx_ty, ir.IntegerAttr.get(idx_ty, 4)).result
-        idx_i32 = _raw_arith.DivSIOp(byte_idx, c4).result
+        idx_i32 = (idx * 2) // 4
     else:
-        idx_i32 = raw_idx
+        idx_i32 = idx
 
-    i32_vec = buffer_ops.buffer_load(unwrap(rsrc), idx_i32, vec_width=vec_width, dtype=i32_ty)
-    vec_elem_ty = ir.VectorType.get((int(vec_elems),), elem_type)
-    return vector.bitcast(vec_elem_ty, i32_vec)
+    i32_vec = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    return vector.bitcast(T.vec(int(vec_elems), elem_type), i32_vec)
 
 
 @dataclass(frozen=True)
@@ -150,17 +130,16 @@ def load_b_pack_k32(
             buffer_ops, vector, b_rsrc, idx_bytes,
             elem_type=elem_type, vec_elems=4, elem_bytes=1, offset_in_bytes=True,
         )
-        vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
         packed32 = vector.extract(
-            vector.bitcast(vec1_i32, b4),
+            vector.bitcast(T.vec(1, T.i32), b4),
             static_position=[0],
             dynamic_position=[],
         )
 
-        c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
-        c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
-        c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
-        c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
+        c_08080808 = arith.constant(0x08080808, type=T.i32)
+        c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=T.i32)
+        c_1e = arith.constant(0x1E, type=T.i32)
+        c_4_i32 = arith.constant(4, type=T.i32)
 
         s0 = (packed32 & c_08080808) * c_1e
         even = (packed32 & c_0f0f0f0f) | s0
@@ -169,10 +148,8 @@ def load_b_pack_k32(
         s1 = (t & c_08080808) * c_1e
         odd = (t & c_0f0f0f0f) | s1
 
-        vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
-        v2 = vector.from_elements(vec2_i32, [even, odd])
-        vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-        v64 = vector.bitcast(vec1_i64, v2)
+        v2 = vector.from_elements(T.vec(2, T.i32), [even, odd])
+        v64 = vector.bitcast(T.vec(1, T.i64), v2)
         return vector.extract(v64, static_position=[0], dynamic_position=[])
 
     vec_elems = kpack_bytes // int(elem_bytes)
@@ -182,10 +159,7 @@ def load_b_pack_k32(
         offset_in_bytes=(elem_bytes == 1),
     )
 
-    i32 = ir.IntegerType.get_signless(32)
-    i64 = ir.IntegerType.get_signless(64)
-    vec4_i32 = ir.VectorType.get([4], i32)
-    b_i32x4 = vector.bitcast(vec4_i32, b16)
+    b_i32x4 = vector.bitcast(T.i32x4, b16)
 
     half = ki_step % 2
     if half == 0:
@@ -195,10 +169,8 @@ def load_b_pack_k32(
         d0 = vector.extract(b_i32x4, static_position=[2], dynamic_position=[])
         d1 = vector.extract(b_i32x4, static_position=[3], dynamic_position=[])
 
-    vec2_i32 = ir.VectorType.get([2], i32)
-    v2 = vector.from_elements(vec2_i32, [d0, d1])
-    vec1_i64 = ir.VectorType.get([1], i64)
-    v64 = vector.bitcast(vec1_i64, v2)
+    v2 = vector.from_elements(T.vec(2, T.i32), [d0, d1])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
@@ -262,10 +234,9 @@ def lds_store_16b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
     coord_store = fx.make_coord(row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds)
-    idx0 = idx0 + lds_base
+    idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v16 = vector.bitcast(vec16_ty, vec_part_i32x4)
     vector.store(v16, lds_memref, [idx0])
 
@@ -290,10 +261,9 @@ def lds_store_8b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
     coord_store = fx.make_coord(row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds)
-    idx0 = idx0 + lds_base
+    idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v8 = vector.bitcast(vec8_ty, vec_part_i32x2)
     vector.store(v8, lds_memref, [idx0])
 
@@ -318,10 +288,9 @@ def lds_store_4b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes / arith.constant(2, index=True))
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
     coord_store = fx.make_coord(row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds)
-    idx0 = idx0 + lds_base
+    idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v4 = vector.bitcast(vec4_ty, vec_part_i32x1)
     vector.store(v4, lds_memref, [idx0])
 
@@ -347,16 +316,14 @@ def lds_load_pack_k32(
     col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
     if ck_lds128:
         coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
-        idx_a16 = crd2idx(coord_a16, layout_lds)
-        idx_a16 = idx_a16 + lds_base
+        idx_a16 = crd2idx(coord_a16, layout_lds) + lds_base
         loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
-        col_swizzled = col_base_swz + arith.constant(int(half) * 8, index=True)
+        col_swizzled = col_base_swz + (half * 8)
         coord_a = fx.make_coord(curr_row_a_lds, col_swizzled)
-        idx_a = crd2idx(coord_a, layout_lds)
-        idx_a = idx_a + lds_base
+        idx_a = crd2idx(coord_a, layout_lds) + lds_base
         loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])

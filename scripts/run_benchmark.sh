@@ -44,11 +44,6 @@ fp8,9728,8192,8320,64,256,128
 int8,9728,8192,8320,64,256,128
 '
 
-# MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
-MOE_SHAPES='
-32768,8192,8192,16,4,64,128,128,256,128
-64,6144,1024,128,8,16,64,256,64,256
-'
 
 
 # Memory bound threshold (M or tokens <= threshold => memory bound)
@@ -133,7 +128,7 @@ _normalize_op() {
 RUN_SOFTMAX=1
 RUN_LAYERNORM=1
 RUN_PRESHUFFLE_GEMM=1
-RUN_MOE=1
+RUN_MOE=0
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
@@ -346,6 +341,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
     if python3 tests/kernels/test_preshuffle_gemm.py \
+      --flyc \
       --in_dtype "$dtype" \
       --num_warmup 10 \
       --num_iters 100 \
