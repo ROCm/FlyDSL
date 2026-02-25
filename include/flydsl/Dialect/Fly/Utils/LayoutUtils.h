@@ -19,7 +19,6 @@ namespace mlir::fly {
 // Recast helpers
 //
 // External callers (used by other translation units):
-//   - getTypeBitWidth()
 //   - layoutUpcast()
 //   - layoutDowncast()
 //   - layoutRecast()
@@ -28,16 +27,6 @@ namespace mlir::fly {
 //   - layoutUpcastImpl()
 //   - layoutDowncastImpl()
 // -----------------------------------------------------------------------------
-inline std::optional<int64_t> getTypeBitWidth(Type type) {
-  if (auto intTy = dyn_cast<IntegerType>(type)) {
-    return intTy.getWidth();
-  }
-  if (auto floatTy = dyn_cast<FloatType>(type)) {
-    return floatTy.getWidth();
-  }
-  return std::nullopt;
-}
-
 namespace detail {
 
 template <class IntTuple>
