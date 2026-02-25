@@ -95,6 +95,7 @@ set(MLIRFlyDSLSources
   MLIRPythonSources.Dialects.builtin
   MLIRPythonSources.Dialects.arith
   MLIRPythonSources.Dialects.math
+  MLIRPythonSources.Dialects.memref
   MLIRPythonSources.Dialects.gpu
   MLIRPythonSources.Dialects.func
   MLIRPythonSources.Dialects.cf
