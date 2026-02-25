@@ -254,6 +254,36 @@ IntTupleBuilder<IntTupleValueAdaptor>::ne(ArithValue lhs, ArithValue rhs) const 
   return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
 }
 
+IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
+IntTupleBuilder<IntTupleValueAdaptor>::bitwiseXor(ArithValue lhs, ArithValue rhs) const {
+  auto retAttr = attrBuilder.bitwiseXor(lhs.attr, rhs.attr);
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  return ArithValue{arith::XOrIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
+                                          extendToIntType(rhs.value, cmpType))
+                        .getResult(),
+                    retAttr};
+}
+
+IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
+IntTupleBuilder<IntTupleValueAdaptor>::bitwiseAnd(ArithValue lhs, ArithValue rhs) const {
+  auto retAttr = attrBuilder.bitwiseAnd(lhs.attr, rhs.attr);
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  return ArithValue{arith::AndIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
+                                          extendToIntType(rhs.value, cmpType))
+                        .getResult(),
+                    retAttr};
+}
+
+IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
+IntTupleBuilder<IntTupleValueAdaptor>::shiftRight(ArithValue lhs, ArithValue rhs) const {
+  auto retAttr = attrBuilder.shiftRight(lhs.attr, rhs.attr);
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  return ArithValue{arith::ShRSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
+                                           extendToIntType(rhs.value, cmpType))
+                        .getResult(),
+                    retAttr};
+}
+
 IntTupleAttr intTupleWrap(const IntTupleBuilder<IntTupleAttr> &builder, IntTupleAttr attr) {
   if (attr.isLeaf()) {
     SmallVector<Attribute> elements;

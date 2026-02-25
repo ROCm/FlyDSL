@@ -38,19 +38,19 @@ std::pair<IntTuple, IntTuple> canonicalizeStridePair(const IntTupleBuilder<IntTu
 }
 
 template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2idxTTT(IntTupleBuilder<IntTuple> &builder,
+typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2IdxTTT(IntTupleBuilder<IntTuple> &builder,
                                                                 IntTuple coord, IntTuple shape,
                                                                 IntTuple stride);
 
 template <class IntTuple>
 typename IntTupleBuilder<IntTuple>::ArithValue
-layoutCrd2idxITT(IntTupleBuilder<IntTuple> &builder,
+layoutCrd2IdxITT(IntTupleBuilder<IntTuple> &builder,
                  typename IntTupleBuilder<IntTuple>::ArithValue coord, IntTuple shape,
                  IntTuple stride) {
   using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   int32_t rank = shape.rank();
   if (rank == 1) {
-    return layoutCrd2idxTTT(builder, builder.makeInt(coord), builder.at(shape, 0),
+    return layoutCrd2IdxTTT(builder, builder.makeInt(coord), builder.at(shape, 0),
                             builder.at(stride, 0));
   }
   IntTuple si = builder.at(shape, 0);
@@ -64,7 +64,7 @@ layoutCrd2idxITT(IntTupleBuilder<IntTuple> &builder,
   if (si.isLeaf()) {
     result = builder.mul(ci, builder.getArithValue(di));
   } else {
-    result = layoutCrd2idxITT(builder, ci, si, di);
+    result = layoutCrd2IdxITT(builder, ci, si, di);
   }
 
   for (int i = 1; i < rank; ++i) {
@@ -81,14 +81,14 @@ layoutCrd2idxITT(IntTupleBuilder<IntTuple> &builder,
     if (si.isLeaf()) {
       result = builder.add(result, builder.mul(ci, builder.getArithValue(di)));
     } else {
-      result = builder.add(result, layoutCrd2idxITT(builder, ci, si, di));
+      result = builder.add(result, layoutCrd2IdxITT(builder, ci, si, di));
     }
   }
   return result;
 }
 
 template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2idxTTT(IntTupleBuilder<IntTuple> &builder,
+typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2IdxTTT(IntTupleBuilder<IntTuple> &builder,
                                                                 IntTuple coord, IntTuple shape,
                                                                 IntTuple stride) {
   using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
@@ -96,26 +96,141 @@ typename IntTupleBuilder<IntTuple>::ArithValue layoutCrd2idxTTT(IntTupleBuilder<
     if (shape.isLeaf()) {
       return builder.mul(builder.getArithValue(coord), builder.getArithValue(stride));
     } else {
-      return layoutCrd2idxITT(builder, builder.getArithValue(coord), shape, stride);
+      return layoutCrd2IdxITT(builder, builder.getArithValue(coord), shape, stride);
     }
   } else {
     assert(coord.rank() == shape.rank() && "Mismatched ranks");
-    ArithValue result = layoutCrd2idxTTT(builder, builder.at(coord, 0), builder.at(shape, 0),
+    ArithValue result = layoutCrd2IdxTTT(builder, builder.at(coord, 0), builder.at(shape, 0),
                                          builder.at(stride, 0));
     for (int i = 1; i < coord.rank(); ++i) {
-      result = builder.add(result, layoutCrd2idxTTT(builder, builder.at(coord, i),
+      result = builder.add(result, layoutCrd2IdxTTT(builder, builder.at(coord, i),
                                                     builder.at(shape, i), builder.at(stride, i)));
     }
     return result;
   }
 }
 
+template <class IntTuple>
+IntTuple layoutIdx2CrdTTT(IntTupleBuilder<IntTuple> &builder, IntTuple index, IntTuple shape,
+                          IntTuple stride);
+
+template <class IntTuple>
+IntTuple layoutIdx2CrdITT(IntTupleBuilder<IntTuple> &builder,
+                          typename IntTupleBuilder<IntTuple>::ArithValue index, IntTuple shape,
+                          IntTuple stride) {
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  for (int i = 0; i < shape.rank(); ++i) {
+    collector.push_back(layoutIdx2CrdTTT(builder, builder.makeInt(index), builder.at(shape, i),
+                                         builder.at(stride, i)));
+  }
+  return builder.makeTuple(collector);
+}
+
+template <class IntTuple>
+IntTuple layoutIdx2CrdTTT(IntTupleBuilder<IntTuple> &builder, IntTuple index, IntTuple shape,
+                          IntTuple stride) {
+  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+  if (index.isLeaf()) {
+    if (shape.isLeaf()) {
+      ArithValue shapeVal = builder.getArithValue(shape);
+      if (builder.isStaticValue(shapeVal, 1)) {
+        return builder.makeInt(builder.materializeConstantArith(0));
+      }
+      ArithValue idxVal = builder.getArithValue(index);
+      ArithValue strideVal = builder.getArithValue(stride);
+      return builder.makeInt(builder.mod(builder.div(idxVal, strideVal), shapeVal));
+    } else {
+      return layoutIdx2CrdITT(builder, builder.getArithValue(index), shape, stride);
+    }
+  } else {
+    assert(index.rank() == shape.rank() && "Mismatched ranks");
+    typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+    for (int i = 0; i < index.rank(); ++i) {
+      collector.push_back(layoutIdx2CrdTTT(builder, builder.at(index, i), builder.at(shape, i),
+                                           builder.at(stride, i)));
+    }
+    return builder.makeTuple(collector);
+  }
+}
+
+template <class IntTuple>
+typename IntTupleBuilder<IntTuple>::ArithValue
+layoutCrd2IdxColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple coord, IntTuple shape) {
+  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+  if (coord.isLeaf()) {
+    return builder.getArithValue(coord);
+  }
+  assert(coord.rank() == shape.rank() && "Mismatched ranks");
+  ArithValue result = layoutCrd2IdxColMajor(builder, builder.at(coord, coord.rank() - 1),
+                                            builder.at(shape, shape.rank() - 1));
+  for (int i = coord.rank() - 2; i >= 0; --i) {
+    ArithValue si = intTupleProductImpl(builder, builder.at(shape, i));
+    result = builder.add(layoutCrd2IdxColMajor(builder, builder.at(coord, i), builder.at(shape, i)),
+                         builder.mul(si, result));
+  }
+  return result;
+}
+
+template <class IntTuple>
+IntTuple layoutIdx2CrdColMajor(IntTupleBuilder<IntTuple> &builder,
+                               typename IntTupleBuilder<IntTuple>::ArithValue index,
+                               IntTuple shape) {
+  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+  if (shape.isLeaf()) {
+    return builder.makeInt(index);
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  ArithValue remaining = index;
+  for (int i = 0; i < shape.rank(); ++i) {
+    IntTuple si = builder.at(shape, i);
+    ArithValue siProduct = intTupleProductImpl(builder, si);
+    if (i == shape.rank() - 1) {
+      collector.push_back(layoutIdx2CrdColMajor(builder, remaining, si));
+    } else {
+      ArithValue ci = builder.mod(remaining, siProduct);
+      remaining = builder.div(remaining, siProduct);
+      collector.push_back(layoutIdx2CrdColMajor(builder, ci, si));
+    }
+  }
+  return builder.makeTuple(collector);
+}
+
+template <class IntTuple>
+IntTuple layoutCrd2CrdImpl(IntTupleBuilder<IntTuple> &builder, IntTuple coord, IntTuple srcShape,
+                           IntTuple dstShape) {
+  if (!coord.isLeaf() && !srcShape.isLeaf() && !dstShape.isLeaf()) {
+    assert(coord.rank() == srcShape.rank() && "Mismatched ranks");
+    assert(coord.rank() == dstShape.rank() && "Mismatched ranks");
+    typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+    for (int i = 0; i < coord.rank(); ++i) {
+      collector.push_back(layoutCrd2CrdImpl(builder, builder.at(coord, i), builder.at(srcShape, i),
+                                            builder.at(dstShape, i)));
+    }
+    return builder.makeTuple(collector);
+  } else {
+    auto idx = layoutCrd2IdxColMajor(builder, coord, srcShape);
+    return layoutIdx2CrdColMajor(builder, idx, dstShape);
+  }
+}
+
 } // namespace detail
 
 template <class IntTuple>
-IntTuple layoutCrd2idx(IntTupleBuilder<IntTuple> &builder, IntTuple coord, IntTuple shape,
+IntTuple layoutCrd2Idx(IntTupleBuilder<IntTuple> &builder, IntTuple coord, IntTuple shape,
                        IntTuple stride) {
-  return builder.makeInt(detail::layoutCrd2idxTTT(builder, coord, shape, stride));
+  return builder.makeInt(detail::layoutCrd2IdxTTT(builder, coord, shape, stride));
+}
+
+template <class IntTuple>
+IntTuple layoutIdx2Crd(IntTupleBuilder<IntTuple> &builder, IntTuple index, IntTuple shape,
+                       IntTuple stride) {
+  return detail::layoutIdx2CrdTTT(builder, index, shape, stride);
+}
+
+template <class IntTuple>
+IntTuple layoutCrd2Crd(IntTupleBuilder<IntTuple> &builder, IntTuple coord, IntTuple srcShape,
+                       IntTuple dstShape) {
+  return detail::layoutCrd2CrdImpl(builder, coord, srcShape, dstShape);
 }
 
 template <class Layout> class LayoutBuilder;
@@ -530,15 +645,17 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
       auto [coalShape, coalStride] =
           detail::coalesceImpl(builder, builder.at(lhsShape, i), builder.at(lhsStride, i));
 
-      IntTuple rhsShape, rhsStride;
-      if (auto attr = dyn_cast<LayoutAttr>(innerTileAttr.at(i))) {
-        rhsShape = builder.materializeConstantTuple(attr.getShape());
-        rhsStride = builder.materializeConstantTuple(attr.getStride());
-      } else {
-        rhsShape = builder.makeInt(
-            builder.materializeConstantArith(cast<IntAttr>(innerTileAttr.at(i)).getValue()));
-        rhsStride = builder.makeInt(builder.materializeConstantArith(1));
-      }
+      auto tileElem = innerTileAttr.at(i);
+      auto makeRhsPair = [&]() -> std::pair<IntTuple, IntTuple> {
+        if (auto attr = dyn_cast<LayoutAttr>(tileElem)) {
+          return {builder.materializeConstantTuple(attr.getShape()),
+                  builder.materializeConstantTuple(attr.getStride())};
+        }
+        return {
+            builder.makeInt(builder.materializeConstantArith(cast<IntAttr>(tileElem).getValue())),
+            builder.makeInt(builder.materializeConstantArith(1))};
+      };
+      auto [rhsShape, rhsStride] = makeRhsPair();
       auto [elemShape, elemStride] =
           detail::compositionImpl(builder, coalShape, coalStride, rhsShape, rhsStride);
       retShape.push_back(elemShape);
@@ -954,7 +1071,8 @@ Layout layoutZippedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, L
 
   Layout logicalProd = layoutLogicalProduct(builder, blockLayout, tilerLayout);
 
-  IntTupleAttr guide = builder.getLayoutAttr(tilerLayout).getShape();
+  auto *ctx = builder.getLayoutAttr(blockLayout).getContext();
+  IntTupleAttr guide = IntTupleAttr::getLeafStatic(ctx, 1);
   IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalProd), guide);
   IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalProd), guide);
   return builder.makeLayout(retShape, retStride);

@@ -332,16 +332,14 @@ public:
 
   LogicalResult matchAndRewrite(CopyAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    auto copyAtomTy = dyn_cast<CopyAtomTypeInterface>(op.getCopyAtom().getType());
-    if (!copyAtomTy)
+    Type copyAtomType = op.getCopyAtom().getType();
+    if (!isa<CopyAtomTypeInterface>(copyAtomType))
       return rewriter.notifyMatchFailure(op, "copyAtom does not implement CopyAtomTypeInterface");
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
 
-    auto srcPtrTy = dyn_cast<LLVM::LLVMPointerType>(src.getType());
-    auto dstPtrTy = dyn_cast<LLVM::LLVMPointerType>(dst.getType());
-    if (!srcPtrTy || !dstPtrTy)
+    if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
       return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr after conversion");
 
     auto srcFlyTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
@@ -352,9 +350,27 @@ public:
     if (srcFlyTy.getElemTy() != dstFlyTy.getElemTy())
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
+    Location loc = op.getLoc();
+
+    if (isa<CopyAtomUniversalCopyType>(copyAtomType))
+      return lowerUniversalCopy(op, rewriter, loc, cast<CopyAtomUniversalCopyType>(copyAtomType),
+                                srcFlyTy, src, dst);
+    else if (isa<fly_rocdl::CopyAtom_CDNA3_BufferLSAType>(copyAtomType))
+      return lowerCDNA3BufferLSA(op, rewriter, loc,
+                                 cast<fly_rocdl::CopyAtom_CDNA3_BufferLSAType>(copyAtomType),
+                                 srcFlyTy, src, dst);
+
+    return rewriter.notifyMatchFailure(op, "unsupported CopyAtom type");
+  }
+
+private:
+  LogicalResult lowerUniversalCopy(CopyAtomCall op, ConversionPatternRewriter &rewriter,
+                                   Location loc, CopyAtomUniversalCopyType atomTy,
+                                   fly::MemRefType srcFlyTy, Value src, Value dst) const {
     LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
 
-    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
+    auto thrValLayoutSrc =
+        dyn_cast<LayoutAttr>(cast<CopyAtomTypeInterface>(atomTy).getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
     IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
@@ -362,7 +378,6 @@ public:
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
 
-    Location loc = op.getLoc();
     Type elemTy = srcFlyTy.getElemTy();
     int64_t elemBits = 0;
     if (auto ft = dyn_cast<FloatType>(elemTy))
@@ -374,13 +389,18 @@ public:
     if (elemBits <= 0)
       return rewriter.notifyMatchFailure(op, "invalid element bit width");
 
-    // TODO: using copyAtom bitSize when layout_recast is ready.
     int64_t copyBytes = numValSrc * elemBits / 8;
     Value len = arith::ConstantIntOp::create(rewriter, loc, copyBytes, /*width=*/64).getResult();
     LLVM::MemcpyOp::create(rewriter, loc, dst, src, len, /*isVolatile=*/false);
 
     rewriter.eraseOp(op);
     return success();
+  }
+
+  LogicalResult lowerCDNA3BufferLSA(CopyAtomCall op, ConversionPatternRewriter &rewriter,
+                                    Location loc, fly_rocdl::CopyAtom_CDNA3_BufferLSAType atomTy,
+                                    fly::MemRefType srcFlyTy, Value src, Value dst) const {
+    return rewriter.notifyMatchFailure(op, "CopyAtom_CDNA3_BufferLSA lowering not yet implemented");
   }
 };
 
@@ -390,8 +410,6 @@ public:
 
   LogicalResult matchAndRewrite(MmaAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    // Only handle MFMA F32 16x16x4 F32 atom for now.
-
     Type mmaAtomType = op.getMmaAtom().getType();
     if (!isa<MmaAtomTypeInterface>(mmaAtomType))
       return rewriter.notifyMatchFailure(op,
@@ -399,39 +417,58 @@ public:
 
     Location loc = op.getLoc();
 
-    // After type conversion, memrefs are lowered to `!llvm.ptr<addrspace>`.
     Value dPtr = adaptor.getD();
     Value aPtr = adaptor.getA();
     Value bPtr = adaptor.getB();
     Value cPtr = adaptor.getC();
 
-    auto dPtrTy = dyn_cast<LLVM::LLVMPointerType>(dPtr.getType());
-    auto aPtrTy = dyn_cast<LLVM::LLVMPointerType>(aPtr.getType());
-    auto bPtrTy = dyn_cast<LLVM::LLVMPointerType>(bPtr.getType());
-    auto cPtrTy = dyn_cast<LLVM::LLVMPointerType>(cPtr.getType());
-
-    if (!dPtrTy || !aPtrTy || !bPtrTy || !cPtrTy)
+    if (!isa<LLVM::LLVMPointerType>(dPtr.getType()) ||
+        !isa<LLVM::LLVMPointerType>(aPtr.getType()) ||
+        !isa<LLVM::LLVMPointerType>(bPtr.getType()) || !isa<LLVM::LLVMPointerType>(cPtr.getType()))
       return rewriter.notifyMatchFailure(op, "expected llvm.ptr operands after type conversion");
 
+    if (auto universalFma = dyn_cast<MmaAtomUniversalFMAType>(mmaAtomType))
+      return lowerUniversalFMA(op, rewriter, loc, universalFma, dPtr, aPtr, bPtr, cPtr);
+    else if (auto cdna3Mfma = dyn_cast<fly_rocdl::MmaAtomCDNA3_MFMAType>(mmaAtomType))
+      return lowerCDNA3MFMA(op, rewriter, loc, cdna3Mfma, dPtr, aPtr, bPtr, cPtr);
+
+    return rewriter.notifyMatchFailure(op, "unsupported MmaAtom type");
+  }
+
+private:
+  LogicalResult lowerUniversalFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                                  MmaAtomUniversalFMAType atomTy, Value dPtr, Value aPtr,
+                                  Value bPtr, Value cPtr) const {
+    Type elemTy = atomTy.getElemTy();
+
+    Value a = LLVM::LoadOp::create(rewriter, loc, elemTy, aPtr);
+    Value b = LLVM::LoadOp::create(rewriter, loc, elemTy, bPtr);
+    Value c = LLVM::LoadOp::create(rewriter, loc, elemTy, cPtr);
+
+    Value mul = LLVM::FMulOp::create(rewriter, loc, elemTy, a, b);
+    Value res = LLVM::FAddOp::create(rewriter, loc, elemTy, mul, c);
+
+    LLVM::StoreOp::create(rewriter, loc, res, dPtr);
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+  LogicalResult lowerCDNA3MFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                               fly_rocdl::MmaAtomCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
+                               Value bPtr, Value cPtr) const {
     Type f32Ty = rewriter.getF32Type();
     VectorType accTy = VectorType::get({4}, f32Ty);
 
-    // Load A/B scalars and C accumulator vector from the provided pointers.
     Value a = LLVM::LoadOp::create(rewriter, loc, f32Ty, aPtr);
     Value b = LLVM::LoadOp::create(rewriter, loc, f32Ty, bPtr);
     Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
 
-    // MFMA control attributes (cbsz, abid, blgp). Default to 0.
-    // Note: These are I32Attr attributes, not Value operands!
     auto zeroAttr = rewriter.getI32IntegerAttr(0);
 
-    // rocdl.mfma.f32.16x16x4f32 : (f32, f32, vector<4xf32>) -> vector<4xf32>
-    // with attributes: cbsz, abid, blgp
     Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, a, b, c, zeroAttr,
                                                    zeroAttr, zeroAttr)
                     .getResult();
 
-    // Store result back to D pointer.
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);
     rewriter.eraseOp(op);
     return success();

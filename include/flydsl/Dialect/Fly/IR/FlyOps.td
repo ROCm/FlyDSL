@@ -400,10 +400,10 @@ def Fly_MakeTiledCopyOp : Fly_Op<"make_tiled_copy", [Pure, DeclareOpInterfaceMet
   let results = (outs Fly_TiledCopy:$result);
   let assemblyFormat = "`(` $copyAtom `,` $layoutThrVal  `,` $tileMN `)` attr-dict `:` functional-type(operands, results)";
 }
-def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure]> {
-  let arguments = (ins AnyType:$mmaAtom, Fly_Layout:$atomLayout, Fly_Tile:$permutation);
-  let results = (outs AnyType:$result);
-  let assemblyFormat = "`(` $mmaAtom `,` $atomLayout `,` $permutation `)` attr-dict `:` functional-type(operands, results)";
+def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins AnyType:$mmaAtom, Fly_Layout:$atomLayout, Optional<Fly_Tile>:$permutation);
+  let results = (outs Fly_TiledMma:$result);
+  let assemblyFormat = "`(` $mmaAtom `,` $atomLayout (`,` $permutation^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 
 

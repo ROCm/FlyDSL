@@ -112,6 +112,10 @@ public:
   ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const { return intCeilDiv(lhs, rhs); }
   ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const { return intShapeDiv(lhs, rhs); }
 
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const { return lhs ^ rhs; }
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const { return lhs & rhs; }
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const { return lhs >> rhs; }
+
   IntTupleAttr getAttr(IntTupleAttr attr) const { return attr; }
   ArithValue getArithValue(IntTupleAttr attr) const { return attr.getLeafAsInt(); }
 
@@ -224,6 +228,10 @@ public:
   ArithValue safeDiv(ArithValue lhs, ArithValue rhs) const { return div(lhs, rhs); }
   ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const;
   ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const;
+
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const;
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const;
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const;
 
   IntTupleAttr getAttr(IntTupleValueAdaptor adaptor) const { return adaptor.attr; }
 

@@ -235,6 +235,16 @@ def slice(src, coord, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def get_leaf(int_tuple, leaf_idx, loc=None, ip=None):
+    return fly.get_leaf(int_tuple, leaf_idx, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_flat_coord(index, layout, loc=None, ip=None):
+    return fly.get_flat_coord(index, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
@@ -479,6 +489,13 @@ def make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=None, ip=None):
     from .derived import TiledCopy
 
     return TiledCopy(fly.make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=loc, ip=ip))
+
+
+@dsl_api_wrapper
+def make_tiled_mma(mma_atom, atom_layout, permutation=None, loc=None, ip=None):
+    from .derived import TiledMma
+
+    return TiledMma(fly.make_tiled_mma(mma_atom, atom_layout, permutation=permutation, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper
