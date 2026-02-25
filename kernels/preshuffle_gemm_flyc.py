@@ -19,6 +19,8 @@ from flydsl.expr import buffer_ops, vector, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.lang.ir.types import T, memref
 
+from kernels.layout_utils import idx2crd, crd2idx, get as layout_get
+
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
@@ -227,16 +229,16 @@ def compile_preshuffle_gemm_a8(
         bx_m = bx * tile_m
         by_n = by * tile_n
 
-        # ---- Wave / lane decomposition (OLD flir.idx2crd/get → NEW fx.idx2crd/fx.get) ----
+        # ---- Wave / lane decomposition ----
         layout_wave_lane = fx.make_layout((4, 64), (64, 1))
-        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
-        wave_id = fx.get(coord_wave_lane, 0)
-        lane_id = fx.get(coord_wave_lane, 1)
+        coord_wave_lane = idx2crd(tx, layout_wave_lane)
+        wave_id = layout_get(coord_wave_lane, 0)
+        lane_id = layout_get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
-        lane_div_16 = fx.get(coord_lane16, 0)
-        lane_mod_16 = fx.get(coord_lane16, 1)
+        coord_lane16 = idx2crd(lane_id, layout_lane16)
+        lane_div_16 = layout_get(coord_lane16, 0)
+        lane_mod_16 = layout_get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         kpack_elems = 16 if elem_bytes == 1 else 8
@@ -291,7 +293,7 @@ def compile_preshuffle_gemm_a8(
             k0 = k0_base + ku
             k1 = lane_div_16
             coord_pack = fx.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
-            idx_pack = fx.crd2idx(coord_pack, layout_b)
+            idx_pack = crd2idx(coord_pack, layout_b)
             vec_elems = 16 if elem_bytes == 1 else 8
             b16 = _buffer_load_vec(
                 buffer_ops, vector, b_rsrc, idx_pack,
@@ -329,7 +331,7 @@ def compile_preshuffle_gemm_a8(
             col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
             coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
-            idx_a16 = fx.crd2idx(coord_a16, layout_lds)
+            idx_a16 = crd2idx(coord_a16, layout_lds)
             idx_a16 = idx_a16 + lds_base
             return vector.load_op(_vec16_type(), lds_a, [idx_a16])
 
@@ -859,7 +861,7 @@ def compile_preshuffle_gemm_a8(
 
     _cache_tag = (in_dtype, K, lds_stage, use_cshuffle_epilog)
 
-    @flyc.jit(use_bare_ptr=False, use_standard_memref=True)
+    @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,

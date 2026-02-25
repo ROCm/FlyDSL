@@ -29,19 +29,6 @@ def from_elements(*args, loc=None, ip=None, **kwargs):
     return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
 
 
-def load(memref, indices, *, loc=None, ip=None, **kwargs):
-    """Vector load wrapper that accepts ArithValue/wrappers for indices."""
-    from . import arith as _arith_ext
-
-    return _vector.load(
-        _arith_ext.unwrap(memref),
-        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=loc,
-        ip=ip,
-        **kwargs,
-    )
-
-
 def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
     """Vector store wrapper that accepts ArithValue/wrappers for value/indices."""
     from . import arith as _arith_ext
@@ -92,22 +79,6 @@ def load_op(result_type, memref, indices, *, loc=None, ip=None):
     ).result
 
 
-def transfer_read(result_type, source, indices, permutation_map, padding, in_bounds, *, loc=None, ip=None):
-    """Wrapper around `vector.TransferReadOp(...).result`."""
-    from . import arith as _arith_ext
-
-    return _vector.TransferReadOp(
-        result_type,
-        _arith_ext.unwrap(source),
-        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        permutation_map,
-        _arith_ext.unwrap(padding),
-        in_bounds,
-        loc=loc,
-        ip=ip,
-    ).result
-
-
 def bitcast(result_type, source, *, loc=None, ip=None):
     """Wrapper around `vector.BitCastOp(...).result`."""
     from . import arith as _arith_ext
@@ -118,30 +89,4 @@ def bitcast(result_type, source, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     ).result
-
-
-def shuffle(v1, v2, mask, *, loc=None, ip=None):
-    """Wrapper around `vector.ShuffleOp(...).result`."""
-    from . import arith as _arith_ext
-
-    return _vector.ShuffleOp(
-        _arith_ext.unwrap(v1, loc=loc),
-        _arith_ext.unwrap(v2, loc=loc),
-        mask,
-        loc=loc,
-        ip=ip,
-    ).result
-
-
-def broadcast(result_type, source, *, loc=None, ip=None):
-    """Wrapper around `vector.BroadcastOp(...).result`."""
-    from . import arith as _arith_ext
-
-    return _vector.BroadcastOp(
-        result_type,
-        _arith_ext.unwrap(source, loc=loc),
-        loc=loc,
-        ip=ip,
-    ).result
-
 

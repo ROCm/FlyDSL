@@ -79,16 +79,15 @@ class JitCompiledFunction:
         for arg in args:
             all_c_ptrs.extend(get_c_pointers(arg))
 
-        if not hasattr(self, '_func_exe'):
-            func_ptr = self._engine.raw_lookup(self._func_name)
-            self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
+        func_ptr = self._engine.raw_lookup(self._func_name)
+        func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
 
         num_args = len(all_c_ptrs)
         packed_args = self._get_packed_args_buffer(num_args)
         for i, ptr in enumerate(all_c_ptrs):
             packed_args[i] = ptr
 
-        return self._func_exe(packed_args)
+        return func_exe(packed_args)
 
     def print_ir(self, compiled: bool = True):
         if compiled:

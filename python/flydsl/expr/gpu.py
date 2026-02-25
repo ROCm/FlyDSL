@@ -26,34 +26,6 @@ def smem_space(int=False):
 lds_space = smem_space
 
 
-def find_ops(op, pred, single=False):
-    if isinstance(op, (ir.OpView, ir.Module)):
-        op = op.operation
-
-    matching = []
-
-    def _walk(op: ir.Operation):
-        if single and matching:
-            return
-        for r in op.regions:
-            for b in r.blocks:
-                for o in b.operations:
-                    if pred(o):
-                        matching.append(o)
-                    _walk(o)
-
-    _walk(op)
-    if single and matching:
-        matching = matching[0]
-    return matching
-
-
-def get_compile_object_bytes(compiled_module):
-    binary = find_ops(compiled_module, lambda o: isinstance(o, gpu.BinaryOp), single=True)
-    objects = list(map(gpu.ObjectAttr, binary.objects))
-    return objects[-1].object
-
-
 class SharedAllocator:
     pass
 
@@ -68,7 +40,5 @@ __all__ = [
     "barrier",
     "smem_space",
     "lds_space",
-    "find_ops",
-    "get_compile_object_bytes",
     "SharedAllocator",
 ]

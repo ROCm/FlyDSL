@@ -106,8 +106,6 @@ def convert_to_jit_arguments(
 
 @JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
 class TensorAdaptor:
-    _default_use_standard_memref = False
-
     def __init__(
         self,
         tensor: torch.Tensor,
@@ -117,7 +115,6 @@ class TensorAdaptor:
         self.tensor_adaptor = DLTensorAdaptor(tensor.__dlpack__(), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
-        self.use_standard_memref = self.__class__._default_use_standard_memref
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):
@@ -128,63 +125,11 @@ class TensorAdaptor:
 
     @requires_memref_desc
     def __ir_types__(self):
-        if self.use_standard_memref:
-            from .._mlir import ir
-            fly_str = str(self.tensor_adaptor.get_memref_type())
-            dtype_map = {
-                "f32": ir.F32Type.get, "f16": ir.F16Type.get, "bf16": ir.BF16Type.get,
-                "f64": ir.F64Type.get, "si8": lambda: ir.IntegerType.get_signless(8),
-                "si32": lambda: ir.IntegerType.get_signless(32),
-                "si16": lambda: ir.IntegerType.get_signless(16),
-            }
-            for key, factory in dtype_map.items():
-                if fly_str.startswith(f"!fly.memref<{key}"):
-                    with ir.Location.unknown():
-                        return [ir.MemRefType.get([ir.ShapedType.get_dynamic_size()], factory())]
         return [self.tensor_adaptor.get_memref_type()]
 
     @requires_memref_desc
     def __c_pointers__(self):
-        if self.use_standard_memref:
-            return self._standard_memref_c_pointers()
         return self.tensor_adaptor.get_c_pointers()
-
-    def _standard_memref_c_pointers(self):
-        """Build standard MLIR memref descriptor fields for rank-1 memref<?xT>.
-
-        Returns 5 pointers: one for each field of {alloc_ptr, align_ptr, offset, size, stride}.
-        """
-        import ctypes
-        fly_ptrs = self.tensor_adaptor.get_c_pointers()
-        pp = ctypes.cast(fly_ptrs[0], ctypes.POINTER(ctypes.c_void_p))
-        gpu_ptr_val = pp[0]
-
-        total_bytes = self.tensor_adaptor.size_in_bytes()
-        fly_str = str(self.tensor_adaptor.get_memref_type())
-        elem_bytes = 4
-        for k, sz in [("f64", 8), ("si64", 8), ("f32", 4), ("si32", 4),
-                       ("f16", 2), ("bf16", 2), ("si16", 2), ("si8", 1)]:
-            if k in fly_str:
-                elem_bytes = sz
-                break
-        numel = total_bytes // elem_bytes if elem_bytes > 0 else total_bytes
-
-        class MemRefDescriptor(ctypes.Structure):
-            _fields_ = [
-                ("allocated", ctypes.c_void_p),
-                ("aligned", ctypes.c_void_p),
-                ("offset", ctypes.c_int64),
-                ("size0", ctypes.c_int64),
-                ("stride0", ctypes.c_int64),
-            ]
-
-        self._desc = MemRefDescriptor(
-            allocated=gpu_ptr_val, aligned=gpu_ptr_val,
-            offset=0, size0=numel, stride0=1,
-        )
-        base = ctypes.addressof(self._desc)
-        return [ctypes.c_void_p(base + getattr(MemRefDescriptor, f).offset)
-                for f in ("allocated", "aligned", "offset", "size0", "stride0")]
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:

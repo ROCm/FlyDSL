@@ -31,13 +31,7 @@ __all__ = [
     'create_buffer_resource',
     'buffer_load',
     'buffer_store',
-    'buffer_load_2d',
-    'buffer_store_2d',
     'BufferResourceDescriptor',
-    'index_cast_to_i32',
-    'i32_mul',
-    'i32_add',
-    'i32_select',
 ]
 
 
@@ -166,8 +160,14 @@ class BufferResourceDescriptor:
         Example:
             >>> rsrc = BufferResourceDescriptor.from_memref(A)
         """
-        # Extract base pointer as index
-        extract_op = memref.ExtractAlignedPointerAsIndexOp(memref_val)
+        # Extract base pointer as index (supports both fly.memref and standard memref)
+        raw_val = _unwrap_value(memref_val)
+        type_str = str(raw_val.type)
+        if type_str.startswith("!fly.memref"):
+            from .._mlir.dialects import fly
+            extract_op = fly.ExtractAlignedPointerAsIndexOp(raw_val)
+        else:
+            extract_op = memref.ExtractAlignedPointerAsIndexOp(raw_val)
         ptr_idx = extract_op.result if hasattr(extract_op, 'result') else extract_op
         
         # Convert to LLVM pointer
@@ -437,142 +437,4 @@ def buffer_store(data: ir.Value,
     )
 
 
-# Convenience functions for common patterns
-
-def buffer_load_f32x4(rsrc: ir.Value, offset: ir.Value, mask: Optional[ir.Value] = None) -> ir.Value:
-    """Load vector<4xf32> using buffer operation."""
-    return buffer_load(rsrc, offset, vec_width=4, dtype=ir.F32Type.get(), mask=mask)
-
-
-def buffer_load_f16x4(rsrc: ir.Value, offset: ir.Value, mask: Optional[ir.Value] = None) -> ir.Value:
-    """Load vector<4xf16> using buffer operation (stored as 2xi32)."""
-    # For f16, we load 4 elements but they're packed into 2xi32
-    i32_data = buffer_load(rsrc, offset, vec_width=2, dtype=ir.IntegerType.get_signless(32), mask=mask)
-    # TODO: Add bitcast to 4xf16 if needed
-    return i32_data
-
-
-def buffer_store_f32x4(data: ir.Value, rsrc: ir.Value, offset: ir.Value, mask: Optional[ir.Value] = None):
-    """Store vector<4xf32> using buffer operation."""
-    buffer_store(data, rsrc, offset, mask=mask)
-
-
-def index_cast_to_i32(value) -> ir.Value:
-    """Cast index value to i32.
-    
-    Args:
-        value: Index value (can be ArithValue or ir.Value)
-        
-    Returns:
-        i32 value
-        
-    Example:
-        >>> row_i32 = index_cast_to_i32(row_index)
-    """
-    value = _unwrap_value(value)
-    i32_type = ir.IntegerType.get_signless(32)
-    op = std_arith.IndexCastOp(i32_type, value)
-    return _unwrap_value(op.result)
-
-
-def i32_mul(lhs, rhs) -> ir.Value:
-    """Multiply two i32 values.
-    
-    Args:
-        lhs, rhs: i32 values (will auto-unwrap if needed)
-        
-    Returns:
-        i32 product
-    """
-    lhs = _unwrap_value(lhs)
-    rhs = _unwrap_value(rhs)
-    op = std_arith.MulIOp(lhs, rhs)
-    return _unwrap_value(op.result)
-
-
-def i32_add(lhs, rhs) -> ir.Value:
-    """Add two i32 values.
-    
-    Args:
-        lhs, rhs: i32 values (will auto-unwrap if needed)
-        
-    Returns:
-        i32 sum
-    """
-    lhs = _unwrap_value(lhs)
-    rhs = _unwrap_value(rhs)
-    op = std_arith.AddIOp(lhs, rhs)
-    return _unwrap_value(op.result)
-
-
-def i32_select(cond, true_val, false_val) -> ir.Value:
-    """Select between two i32 values based on condition.
-    
-    Args:
-        cond: i1 condition (will auto-unwrap if needed)
-        true_val: Value if cond is true
-        false_val: Value if cond is false
-        
-    Returns:
-        Selected value
-    """
-    cond = _unwrap_value(cond)
-    true_val = _unwrap_value(true_val)
-    false_val = _unwrap_value(false_val)
-    op = std_arith.SelectOp(cond, true_val, false_val)
-    return _unwrap_value(op.result)
-
-
-def buffer_load_2d(rsrc, row, col, stride, vec_width=4, dtype=None, mask=None) -> ir.Value:
-    """High-level 2D buffer load with automatic offset calculation.
-    
-    Args:
-        rsrc: Buffer resource descriptor
-        row: Row index (index or ArithValue)
-        col: Column index (index or ArithValue)
-        stride: Row stride (index or ArithValue)
-        vec_width: Vector width (1, 2, or 4)
-        dtype: Element data type (defaults to f32)
-        mask: Optional mask for predicated load
-        
-    Returns:
-        Loaded data (scalar or vector)
-        
-    Example:
-        >>> rsrc = create_buffer_resource(A)
-        >>> data = buffer_load_2d(rsrc, row, col, N, vec_width=4)
-    """
-    # Compute offset: row * stride + col
-    row_i32 = index_cast_to_i32(row)
-    col_i32 = index_cast_to_i32(col)
-    stride_i32 = index_cast_to_i32(stride)
-    
-    offset = i32_add(i32_mul(row_i32, stride_i32), col_i32)
-    
-    return buffer_load(rsrc, offset, vec_width, dtype, mask)
-
-
-def buffer_store_2d(data, rsrc, row, col, stride, mask=None):
-    """High-level 2D buffer store with automatic offset calculation.
-    
-    Args:
-        data: Data to store (scalar or vector)
-        rsrc: Buffer resource descriptor
-        row: Row index (index or ArithValue)
-        col: Column index (index or ArithValue)
-        stride: Row stride (index or ArithValue)
-        mask: Optional mask for predicated store
-        
-    Example:
-        >>> rsrc = create_buffer_resource(B)
-        >>> buffer_store_2d(data, rsrc, row, col, M)
-    """
-    # Compute offset: row * stride + col
-    row_i32 = index_cast_to_i32(row)
-    col_i32 = index_cast_to_i32(col)
-    stride_i32 = index_cast_to_i32(stride)
-    
-    offset = i32_add(i32_mul(row_i32, stride_i32), col_i32)
-    
-    buffer_store(data, rsrc, offset, mask)
 

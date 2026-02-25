@@ -25,11 +25,6 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
     globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
     or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 )
-_ods_readlane = readlane
-_ods_readfirstlane = readfirstlane
-_ods_ds_swizzle = ds_swizzle
-_ods_raw_ptr_buffer_atomic_fadd = raw_ptr_buffer_atomic_fadd
-
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
@@ -98,50 +93,6 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     attrs = [int(v) if isinstance(v, int) else _unwrap_mfma_operand(v, loc=loc) for v in operands[3:]]
     return _ods_mfma_scale_f32_16x16x128_f8f6f4(result_type, *ops, *attrs, loc=loc, ip=ip).result
 
-
-def readlane(result_type, src, lane_id, *, loc=None, ip=None):
-    """Lane read that accepts ArithValue / wrappers."""
-    from . import arith as _arith_ext
-
-    return _ods_readlane(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(lane_id), loc=loc, ip=ip)
-
-
-def readfirstlane(result_type, src, *, loc=None, ip=None):
-    """Read-firstlane that accepts ArithValue / wrappers."""
-    from . import arith as _arith_ext
-
-    return _ods_readfirstlane(result_type, _arith_ext.unwrap(src), loc=loc, ip=ip)
-
-
-def ds_swizzle(result_type, src, offset, *, loc=None, ip=None):
-    """DS swizzle that accepts ArithValue / wrappers."""
-    from . import arith as _arith_ext
-
-    return _ods_ds_swizzle(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(offset), loc=loc, ip=ip)
-
-
-def raw_ptr_buffer_atomic_fadd(val, rsrc, voffset, soffset, cache, *, loc=None, ip=None):
-    """Atomic fadd that accepts `ArithValue` / wrappers (no explicit `arith.unwrap(...)` needed).
-
-    Signature intentionally matches the underlying ODS builder:
-      (val, rsrc, voffset, soffset, cache)
-    """
-    from . import arith as _arith_ext
-
-    return _ods_raw_ptr_buffer_atomic_fadd(
-        _arith_ext.unwrap(val),
-        _arith_ext.unwrap(rsrc),
-        _arith_ext.unwrap(voffset),
-        _arith_ext.unwrap(soffset),
-        _arith_ext.unwrap(cache),
-        loc=loc,
-        ip=ip,
-    )
-
-
-# Keep raw ODS builders available (rare: for tests that want the op object).
-_mfma_f32_16x16x16f16_ods = _ods_mfma_f32_16x16x16f16
-_mfma_f32_16x16x32_fp8_fp8_ods = _ods_mfma_f32_16x16x32_fp8_fp8
 
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
