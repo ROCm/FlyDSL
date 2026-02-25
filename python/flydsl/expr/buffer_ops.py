@@ -22,49 +22,16 @@ Example:
 """
 
 from .._mlir import ir
-from .._mlir.dialects import llvm, rocdl, arith as std_arith, memref
+from .._mlir.dialects import llvm, rocdl, arith as std_arith
 from .._mlir.extras import types as T
 from typing import Optional, Union
 
 __all__ = [
-    'create_llvm_ptr',
     'create_buffer_resource',
     'buffer_load',
     'buffer_store',
     'BufferResourceDescriptor',
 ]
-
-
-def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
-    """Convert an index value to LLVM pointer.
-    
-    Args:
-        value: Index value (typically from memref.extract_aligned_pointer_as_index)
-               Can be ir.Value or ArithValue wrapper
-        address_space: LLVM address space (0=generic, 3=LDS, 8=buffer descriptor)
-        
-    Returns:
-        LLVM pointer value
-        
-    Example:
-        >>> ptr_idx = memref.extract_aligned_pointer_as_index(A)
-        >>> ptr = create_llvm_ptr(ptr_idx)
-    """
-    # Extract actual MLIR value from wrapper
-    value = _unwrap_value(value)
-    
-    # Convert index to i64 first (llvm.inttoptr requires signless integer, not index)
-    if isinstance(value.type, ir.IndexType):
-        i64_type = ir.IntegerType.get_signless(64)
-        op = std_arith.IndexCastOp(i64_type, value)
-        value = _unwrap_value(op.result)
-    
-    # Use opaque pointer syntax (LLVM 15+)
-    if address_space == 0:
-        ptr_type = ir.Type.parse('!llvm.ptr')
-    else:
-        ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
-    return llvm.IntToPtrOp(ptr_type, value).result
 
 
 def _unwrap_value(value):
@@ -160,18 +127,14 @@ class BufferResourceDescriptor:
         Example:
             >>> rsrc = BufferResourceDescriptor.from_memref(A)
         """
-        # Extract base pointer as index (supports both fly.memref and standard memref)
+        # fly.memref is already just a pointer; cast directly to !llvm.ptr.
+        # The cast becomes identity after FlyToROCDL type conversion.
         raw_val = _unwrap_value(memref_val)
-        type_str = str(raw_val.type)
-        if type_str.startswith("!fly.memref"):
-            from .._mlir.dialects import fly
-            extract_op = fly.ExtractAlignedPointerAsIndexOp(raw_val)
-        else:
-            extract_op = memref.ExtractAlignedPointerAsIndexOp(raw_val)
-        ptr_idx = extract_op.result if hasattr(extract_op, 'result') else extract_op
-        
-        # Convert to LLVM pointer
-        base_ptr = create_llvm_ptr(ptr_idx, address_space=0)
+        ptr_type = ir.Type.parse('!llvm.ptr')
+        base_ptr = ir.Operation.create(
+            "builtin.unrealized_conversion_cast",
+            results=[ptr_type],
+            operands=[raw_val]).result
         
         # Create buffer resource descriptor
         flags_val = (7 << 12) | (4 << 15)  # data_format=7 (float), num_format=4 (32bit)
