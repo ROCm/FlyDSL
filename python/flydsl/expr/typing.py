@@ -5,6 +5,7 @@ from flydsl.runtime.device import get_rocm_arch
 
 from .._mlir import ir
 from .._mlir.dialects import gpu
+from flydsl.runtime.device import get_rocm_arch
 from .numeric import (
     BFloat16,
     Boolean,
