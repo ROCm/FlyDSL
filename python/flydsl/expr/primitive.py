@@ -238,6 +238,24 @@ def slice(src, coord, loc=None, ip=None):
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
+@dsl_api_wrapper
+def idx2crd(idx, layout, loc=None, ip=None):
+    if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
+        idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
+    return fly.idx2crd(idx, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get(int_tuple, mode, loc=None, ip=None):
+    if isinstance(int_tuple, (list, tuple)):
+        return int_tuple[mode]
+    selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
+    result = fly.get_scalar(selected, loc=loc, ip=ip)
+    if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
+        result = arith.IndexCastOp(ir.IndexType.get(), result).result
+    return result
+
 
 @dsl_api_wrapper
 def composition(layout, tiler, loc=None, ip=None):

@@ -1,7 +1,15 @@
 # Build directories
 build/
 build_*/
+build-fly/
 cmake-build-*/
+
+# GPU core dumps
+gpucore.*
+
+# IR dumps
+my_ir_dumps*/
+*.mlir
 
 # git 
 *.log

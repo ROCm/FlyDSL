@@ -52,7 +52,8 @@ class JitCompiledFunction:
             if self._engine is not None:
                 return
 
-            with ir.Context():
+            with ir.Context() as ctx:
+                ctx.load_all_available_dialects()
                 self._module = ir.Module.parse(self._compiled_ir)
                 self._engine = ExecutionEngine(
                     self._module,

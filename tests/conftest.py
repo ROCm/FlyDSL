@@ -1,63 +1,69 @@
-"""Pytest configuration for FLIR tests.
+"""Pytest configuration for Fly DSL tests.
 
-This test suite now uses FLIR's embedded MLIR Python bindings (the `_mlir`
-package under `build/python_packages/flydsl`) and no longer relies on an
-external MLIR Python installation.
+Supports both the new Fly dialect (build-fly/) and the legacy FLIR dialect.
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Ensure embedded `_mlir` is importable for the test suite.
-# This must run before importing `flydsl` (which imports `_mlir` at module import time).
-_repo_root = Path(__file__).resolve().parents[1]
-
-# Preferred build layout (new): `.flir/build` (see flir/build.sh)
-_embedded_pkg_dir = _repo_root / ".flir" / "build" / "python_packages" / "flydsl"
-# Legacy fallback: `build/python_packages/flydsl`
-if not _embedded_pkg_dir.exists():
-    _embedded_pkg_dir = _repo_root / "build" / "python_packages" / "flydsl"
-
-# Prefer in-tree Python sources (so tests exercise source `flir/`), while still
-# making the embedded `_mlir` runtime available for native extensions.
-_src_py_dir = _repo_root / "flydsl" / "src"
-if _src_py_dir.exists():
-    _p2 = str(_src_py_dir)
-    if _p2 in sys.path:
-        sys.path.remove(_p2)
-    sys.path.insert(0, _p2)
-
-if _embedded_pkg_dir.exists():
-    # Help flydsl locate the embedded build dir correctly.
-    # `_embedded_pkg_dir` points at: <build>/python_packages/flydsl
-    # So the build dir is its parent[1].
-    os.environ.setdefault("FLIR_BUILD_DIR", str(_embedded_pkg_dir.parents[1]))
-    _p = str(_embedded_pkg_dir)
-    if _p in sys.path:
-        sys.path.remove(_p)
-    # Keep embedded after source so imports resolve to in-tree sources.
-    sys.path.insert(1, _p)
-
 import pytest
 
-from flydsl.compiler.context import ensure_flir_python_extensions
-from _mlir.ir import Context, Location, Module, InsertionPoint
+_repo_root = Path(__file__).resolve().parents[1]
+
+# New Fly dialect build
+_fly_pkg_dir = _repo_root / "build-fly" / "python_packages"
+if _fly_pkg_dir.exists():
+    _p = str(_fly_pkg_dir)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Legacy: .flir/build or build/ (old flir dialect)
+for _legacy in [
+    _repo_root / ".flir" / "build" / "python_packages" / "flydsl",
+    _repo_root / "build" / "python_packages" / "flydsl",
+    _repo_root / "build" / "lib.linux-x86_64-cpython-312",
+]:
+    if _legacy.exists():
+        _p = str(_legacy)
+        if _p not in sys.path:
+            sys.path.append(_p)
+        break
+
+# Legacy: in-tree flydsl source (for old API tests)
+_src_py_dir = _repo_root / "flydsl" / "src"
+if _src_py_dir.exists() and (_src_py_dir / "flydsl").exists():
+    _p = str(_src_py_dir)
+    if _p not in sys.path:
+        sys.path.append(_p)
+
+# Try importing new or old context setup
+_ensure_extensions = None
+try:
+    from flydsl.compiler.context import ensure_flir_python_extensions
+    _ensure_extensions = ensure_flir_python_extensions
+except ImportError:
+    pass
+
+try:
+    from flydsl._mlir.ir import Context, Location, Module, InsertionPoint
+except ImportError:
+    try:
+        from _mlir.ir import Context, Location, Module, InsertionPoint
+    except ImportError:
+        Context = Location = Module = InsertionPoint = None
 
 
 @pytest.fixture
 def ctx():
     """Provide a fresh MLIR context for each test."""
+    if Context is None:
+        pytest.skip("MLIR Python bindings not available")
     with Context() as context:
-        # Ensure Flir + upstream dialects/passes/translations are registered.
-        ensure_flir_python_extensions(context)
-        
-        # Set default location
+        if _ensure_extensions:
+            _ensure_extensions(context)
         with Location.unknown(context):
-            # Create module and set up insertion point
             module = Module.create()
-            
-            # Provide context, module, and insertion point
             yield type("MLIRContext", (), {
                 "context": context,
                 "module": module,
