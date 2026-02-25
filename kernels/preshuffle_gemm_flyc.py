@@ -217,10 +217,9 @@ def compile_preshuffle_gemm_a8(
                                                    num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False,
                                                    num_records_bytes=_c_nrec)
-        if not is_f16_or_bf16:
-            _sa_nrec = arith.index_cast(_i64, c_m * 4)
         scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
-            arg_scale_a_v, max_size=False, num_records_bytes=_sa_nrec)
+            arg_scale_a_v, max_size=False,
+            num_records_bytes=arith.index_cast(_i64, c_m * 4))
         b_rsrc = buffer_ops.create_buffer_resource(arg_b_v, max_size=True)
         scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
             arg_scale_b_v, max_size=True)
@@ -294,18 +293,11 @@ def compile_preshuffle_gemm_a8(
             coord_pack = fx.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
             idx_pack = fx.crd2idx(coord_pack, layout_b)
             vec_elems = 16 if elem_bytes == 1 else 8
-            if elem_bytes == 1:
-                b16 = _buffer_load_vec(
-                    buffer_ops, vector, b_rsrc, idx_pack,
-                    elem_type=_elem_type(), vec_elems=vec_elems,
-                    elem_bytes=elem_bytes, offset_in_bytes=True,
-                )
-            else:
-                b16 = _buffer_load_vec(
-                    buffer_ops, vector, b_rsrc, idx_pack,
-                    elem_type=_elem_type(), vec_elems=vec_elems,
-                    elem_bytes=elem_bytes, offset_in_bytes=False,
-                )
+            b16 = _buffer_load_vec(
+                buffer_ops, vector, b_rsrc, idx_pack,
+                elem_type=_elem_type(), vec_elems=vec_elems,
+                elem_bytes=elem_bytes, offset_in_bytes=(elem_bytes == 1),
+            )
             b_i64x2 = vector.bitcast(T.i64x2, b16)
             b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
             b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
@@ -359,10 +351,7 @@ def compile_preshuffle_gemm_a8(
 
         # ── A global→reg load ─────────────────────────────────────────────
         num_a_loads = bytes_per_thread_a // a_load_bytes
-        if elem_bytes == 2:
-            tile_k_dwords = (tile_k * 2) // 4
-        else:
-            tile_k_dwords = tile_k // 4
+        tile_k_dwords = (tile_k * 2) // 4 if elem_bytes == 2 else tile_k // 4
         layout_a_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
         c4 = arith.constant(4, index=True)
         tx_i32_base = tx * c4

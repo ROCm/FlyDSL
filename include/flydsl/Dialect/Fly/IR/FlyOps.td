@@ -148,6 +148,13 @@ def Fly_GetIterOp : Fly_Op<"get_iter", [Pure, DeclareOpInterfaceMethods<InferTyp
   let assemblyFormat = "`(` $memref `)` attr-dict `:` functional-type(operands, results)";
 }
 
+def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_index", [Pure]> {
+  let summary = "Extract the aligned base pointer from a fly.memref as an index value";
+  let arguments = (ins Fly_MemRef:$source);
+  let results = (outs Index:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source)";
+}
+
 def Fly_GetLayoutsFromTileOp : Fly_Op<"get_layouts_from_tile", [Pure]> {
   let arguments = (ins Fly_Tile:$tile);
   let results = (outs AnyType:$result);

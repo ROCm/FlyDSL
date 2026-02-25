@@ -270,9 +270,32 @@ class ReplaceIfWithDispatch(Transformer):
             "scf_if_dispatch": cls.scf_if_dispatch,
         }
 
+    _REWRITE_HELPER_NAMES = {"dsl_not_", "dsl_and_", "dsl_or_",
+                              "scf_if_dispatch", "const_expr", "type",
+                              "bool", "isinstance", "hasattr"}
+
+    @staticmethod
+    def _could_be_dynamic(test_node):
+        """Check if an if-condition AST could produce an MLIR Value at runtime.
+
+        Calls to RewriteBoolOps helpers (dsl_not_, dsl_and_, dsl_or_) and
+        Python builtins are NOT considered dynamic — they just wrap Python-level
+        boolean logic. Only calls to user/MLIR functions can produce Values.
+        """
+        for child in ast.walk(test_node):
+            if isinstance(child, ast.Call):
+                func = child.func
+                if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
+                    continue
+                return True
+        return False
+
     def visit_If(self, node: ast.If) -> List[ast.AST]:
         if _is_constexpr(node.test):
             node.test = _unwrap_constexpr(node.test)
+            node = self.generic_visit(node)
+            return node
+        if not self._could_be_dynamic(node.test):
             node = self.generic_visit(node)
             return node
         node = self.generic_visit(node)
