@@ -28,7 +28,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from _mlir import ir
+from flydsl._mlir import ir
+from flydsl.expr.typing import T
 
 
 def default_epilog(
@@ -169,8 +170,8 @@ def c_shuffle_epilog(
     c_evec = arith.constant(EVec, index=True)
 
     if frag_elem_type is None:
-        frag_elem_type = ir.F16Type.get()
-    vec_frag = ir.VectorType.get([EVec], frag_elem_type)
+        frag_elem_type = T.f16
+    vec_frag = T.vec(EVec, frag_elem_type)
     bx_m_v = bx_m
     by_n_v = by_n
 
