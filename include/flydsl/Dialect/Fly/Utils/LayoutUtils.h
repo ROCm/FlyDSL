@@ -15,18 +15,6 @@
 
 namespace mlir::fly {
 
-// -----------------------------------------------------------------------------
-// Recast helpers
-//
-// External callers (used by other translation units):
-//   - layoutUpcast()
-//   - layoutDowncast()
-//   - layoutRecast()
-//
-// Internal helpers (intended for use only by this header's implementation):
-//   - layoutUpcastImpl()
-//   - layoutDowncastImpl()
-// -----------------------------------------------------------------------------
 namespace detail {
 
 template <class IntTuple>
