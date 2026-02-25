@@ -148,7 +148,6 @@ def Fly_GetIterOp : Fly_Op<"get_iter", [Pure, DeclareOpInterfaceMethods<InferTyp
   let assemblyFormat = "`(` $memref `)` attr-dict `:` functional-type(operands, results)";
 }
 
-
 def Fly_GetLayoutsFromTileOp : Fly_Op<"get_layouts_from_tile", [Pure]> {
   let arguments = (ins Fly_Tile:$tile);
   let results = (outs AnyType:$result);

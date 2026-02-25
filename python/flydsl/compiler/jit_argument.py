@@ -50,12 +50,14 @@ class JitArgumentRegistry:
 
 
 def _is_constexpr_annotation(annotation) -> bool:
+    """Check if annotation is Constexpr or Constexpr[T]."""
     if annotation is Constexpr:
         return True
     return get_origin(annotation) is Constexpr
 
 
 def _is_type_param_annotation(annotation) -> bool:
+    """Check if annotation is Type, Type[T]."""
     return annotation is Type or get_origin(annotation) is Type
 
 
@@ -104,6 +106,9 @@ def convert_to_jit_arguments(
     return param_names, jit_args, dsl_types, constexpr_values
 
 
+# ================================ Common useful JitArguments ================================
+
+
 @JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
 class TensorAdaptor:
     def __init__(
@@ -133,7 +138,7 @@ class TensorAdaptor:
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:
-            leading_dim = -1
+            leading_dim = -1  # automatically determine leading dimension
         self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
         return self
 

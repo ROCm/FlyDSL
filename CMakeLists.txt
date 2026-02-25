@@ -23,7 +23,6 @@ include(TableGen)
 include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
-
 include(MLIRDetectPythonEnv)
 mlir_configure_python_dev_packages()
 

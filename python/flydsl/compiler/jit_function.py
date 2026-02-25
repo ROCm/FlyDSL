@@ -24,7 +24,7 @@ from .kernel_function import (
     get_gpu_module_body,
 )
 from .protocol import get_ir_types, new_from_ir_values
-
+from flydsl.runtime.device import get_rocm_arch
 
 @lru_cache(maxsize=1)
 def _get_llvm_version() -> str:
@@ -114,14 +114,6 @@ def _jit_function_cache_key(func: Callable) -> str:
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 
-def _detect_gpu_chip() -> str:
-    try:
-        from flydsl.runtime.device import get_rocm_arch
-        return get_rocm_arch()
-    except Exception:
-        pass
-    return os.environ.get("FLYDSL_GPU_CHIP", "gfx942")
-
 
 class MlirCompiler:
     PIPELINE = (
@@ -131,14 +123,16 @@ class MlirCompiler:
         "fly-layout-lowering,"
         "convert-fly-to-rocdl,"
         "canonicalize,"
-        "cse,"
-        "gpu.module(convert-scf-to-cf),"
-        "gpu.module(convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}),"
-        "gpu.module(reconcile-unrealized-casts),"
+        "gpu.module("
+        "convert-scf-to-cf,"
+        "convert-vector-to-llvm,"
+        "canonicalize,"
+        "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
+        "),"
         "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
         "convert-scf-to-cf,"
         "convert-cf-to-llvm,"
-        "gpu-to-llvm{{intersperse-sizes-for-kernels=false use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
+        "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
         "convert-arith-to-llvm,"
         "convert-func-to-llvm,"
         "reconcile-unrealized-casts,"
@@ -151,7 +145,7 @@ class MlirCompiler:
         module.operation.verify()
 
         if chip is None:
-            chip = _detect_gpu_chip()
+            chip = get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         pm = PassManager.parse(cls.PIPELINE.format(chip=chip))
@@ -305,7 +299,7 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                chip = _detect_gpu_chip()
+                chip = get_rocm_arch()
                 gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
