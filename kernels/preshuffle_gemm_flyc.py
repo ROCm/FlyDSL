@@ -11,9 +11,9 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 
-import flydsl.expr.arith as arith
+from flydsl.expr import arith, vector
 from flydsl.expr import gpu
-from flydsl.expr import buffer_ops, vector, rocdl
+from flydsl.expr import buffer_ops, rocdl
 
 
 from flydsl.expr.arith import _to_raw as _raw
@@ -156,19 +156,11 @@ def compile_preshuffle_gemm_a8(
         i32_n: fx.Int32,
     ):
         # M, N are runtime i32 args; K is compile-time (determines loop structure).
-        c_m = arith.index_cast(ir.IndexType.get(), i32_m.ir_value())
-        c_n = arith.index_cast(ir.IndexType.get(), i32_n.ir_value())
-        c_k = arith.constant(K, index=True)
-
-        # Unwrap fx.Tensor → raw ir.Value for low-level dialect ops.
-        arg_c_v = arg_c.value
-        arg_a_v = arg_a.value
-        arg_b_v = arg_b.value
-        arg_scale_a_v = arg_scale_a.value
-        arg_scale_b_v = arg_scale_b.value
+        c_m = arith.index_cast(T.index, i32_m.ir_value())
+        c_n = arith.index_cast(T.index, i32_n.ir_value())
 
         # ---- Types ----
-        acc_init = arith.unwrap(
+        acc_init = (
             arith.constant_vector(0, T.i32x4)
             if is_int8
             else arith.constant_vector(0.0, T.f32x4)
@@ -212,19 +204,18 @@ def compile_preshuffle_gemm_a8(
         )
 
         # ---- Buffer resources ----
-        _i64 = ir.IntegerType.get_signless(64)
-        _a_nrec = arith.index_cast(_i64, c_m * (K * elem_bytes))
-        _c_nrec = arith.index_cast(_i64, c_m * c_n * 2)
-        a_rsrc = buffer_ops.create_buffer_resource(arg_a_v, max_size=False,
+        _a_nrec = arith.index_cast(T.i64, c_m * (K * elem_bytes))
+        _c_nrec = arith.index_cast(T.i64, c_m * c_n * 2)
+        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False,
                                                    num_records_bytes=_a_nrec)
-        c_rsrc = buffer_ops.create_buffer_resource(arg_c_v, max_size=False,
+        c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False,
                                                    num_records_bytes=_c_nrec)
         scale_a_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
-            arg_scale_a_v, max_size=False,
-            num_records_bytes=arith.index_cast(_i64, c_m * 4))
-        b_rsrc = buffer_ops.create_buffer_resource(arg_b_v, max_size=True)
+            arg_scale_a, max_size=False,
+            num_records_bytes=arith.index_cast(T.i64, c_m * 4))
+        b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
         scale_b_rsrc = None if is_f16_or_bf16 else buffer_ops.create_buffer_resource(
-            arg_scale_b_v, max_size=True)
+            arg_scale_b, max_size=True)
 
         bx_m = bx * tile_m
         by_n = by * tile_n
@@ -242,11 +233,9 @@ def compile_preshuffle_gemm_a8(
 
         row_a_lds = lane_mod_16
         kpack_elems = 16 if elem_bytes == 1 else 8
-        col_offset_base = lane_div_16 * arith.constant(int(kpack_elems), index=True)
+        col_offset_base = lane_div_16 * kpack_elems
         col_offset_base_bytes = (
-            col_offset_base
-            if elem_bytes == 1
-            else (col_offset_base * arith.constant(int(elem_bytes), index=True))
+            col_offset_base if elem_bytes == 1 else col_offset_base * elem_bytes
         )
 
         m_repeat = tile_m // 16
@@ -256,14 +245,12 @@ def compile_preshuffle_gemm_a8(
         n_per_wave = tile_n // num_waves
         num_acc_n = n_per_wave // 16
 
-        c_n_per_wave = arith.constant(n_per_wave, index=True)
-        n_tile_base = wave_id * c_n_per_wave
+        n_tile_base = wave_id * n_per_wave
 
         n_intra_list = []
         n_blk_list = []
         for i in range_constexpr(num_acc_n):
-            c_offset = arith.constant(i * 16, index=True)
-            global_n = by_n + n_tile_base + c_offset + lane_mod_16
+            global_n = by_n + n_tile_base + (i * 16) + lane_mod_16
             n_blk_list.append(global_n / 16)
             n_intra_list.append(global_n % 16)
 
@@ -271,7 +258,7 @@ def compile_preshuffle_gemm_a8(
         def load_b_pack(base_k, ki_step, ni):
             return load_b_pack_k32(
                 buffer_ops, arith, vector,
-                arg_b=arg_b_v, b_rsrc=b_rsrc, layout_b=layout_b,
+                arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
                 base_k=base_k, ki_step=ki_step,
                 n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
                 lane_div_16=lane_div_16,
@@ -288,7 +275,7 @@ def compile_preshuffle_gemm_a8(
                 ki1 = (ku * 2) + 1
                 return load_b_pack(base_k, ki0, ni), load_b_pack(base_k, ki1, ni)
 
-            base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+            base_k_bytes = base_k * elem_bytes
             k0_base = base_k_bytes / c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
@@ -307,9 +294,8 @@ def compile_preshuffle_gemm_a8(
             if not is_f16_or_bf16:
                 return b0_i64, b1_i64
 
-            vec1_i64_ty = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-            b0_v1 = vector.from_elements(vec1_i64_ty, [b0_i64])
-            b1_v1 = vector.from_elements(vec1_i64_ty, [b1_i64])
+            b0_v1 = vector.from_elements(T.vec(1, T.i64), [b0_i64])
+            b1_v1 = vector.from_elements(T.vec(1, T.i64), [b1_i64])
             if is_f16:
                 return vector.bitcast(T.f16x4, b0_v1), vector.bitcast(T.f16x4, b1_v1)
             return vector.bitcast(T.i16x4, b0_v1), vector.bitcast(T.i16x4, b1_v1)
@@ -344,9 +330,8 @@ def compile_preshuffle_gemm_a8(
             if not is_f16_or_bf16:
                 return a0_i64, a1_i64
 
-            vec1_i64_ty = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-            a0_v1 = vector.from_elements(vec1_i64_ty, [a0_i64])
-            a1_v1 = vector.from_elements(vec1_i64_ty, [a1_i64])
+            a0_v1 = vector.from_elements(T.vec(1, T.i64), [a0_i64])
+            a1_v1 = vector.from_elements(T.vec(1, T.i64), [a1_i64])
             if is_f16:
                 return vector.bitcast(T.f16x4, a0_v1), vector.bitcast(T.f16x4, a1_v1)
             return vector.bitcast(T.i16x4, a0_v1), vector.bitcast(T.i16x4, a1_v1)
@@ -379,10 +364,7 @@ def compile_preshuffle_gemm_a8(
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                 row_a_global = bx_m + row_a_local
                 idx_i32 = row_a_global * _k_div4_factor + (base_k_div4 + col_a_local_i32)
-                idx_elem = (
-                    idx_i32 if elem_bytes == 1
-                    else (idx_i32 * arith.constant(2, index=True))
-                )
+                idx_elem = idx_i32 if elem_bytes == 1 else idx_i32 * 2
                 a_16B = load_a_16(idx_elem)
                 parts.append(vector.bitcast(T.i32x4, a_16B))
             return parts
@@ -400,7 +382,7 @@ def compile_preshuffle_gemm_a8(
                 )
 
         def prefetch_ab_tile(base_k):
-            base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
+            base_k_bytes = base_k * elem_bytes
             base_k_div4 = base_k_bytes / 4
             a_regs = load_a_tile(base_k_div4)
             b_regs = load_b_tile(base_k)
@@ -412,9 +394,7 @@ def compile_preshuffle_gemm_a8(
             if is_last_tile and (not is_f16_or_bf16):
                 s_b_vals = []
                 for ni in range_constexpr(num_acc_n):
-                    offset = ni * 16
-                    c_offset = arith.constant(offset, index=True)
-                    col_g = by_n + n_tile_base + c_offset + lane_mod_16
+                    col_g = by_n + n_tile_base + (ni * 16) + lane_mod_16
                     s_b_vals.append(
                         buffer_ops.buffer_load(scale_b_rsrc, col_g, vec_width=1, dtype=T.f32)
                     )
@@ -457,8 +437,7 @@ def compile_preshuffle_gemm_a8(
                     col_base1 = col_offset_base_bytes + (ku1 * 64)
 
                     for mi in range_constexpr(m_repeat):
-                        mi_val = arith.constant(mi * 16, index=True)
-                        curr_row_a_lds = row_a_lds + mi_val
+                        curr_row_a_lds = row_a_lds + (mi * 16)
                         if (a0_prefetch is not None) and (ku0 == 0) and (mi == 0):
                             a0, a1 = a0_prefetch
                         else:
@@ -501,8 +480,7 @@ def compile_preshuffle_gemm_a8(
                 ki64 = ku * 64
                 col_base = col_offset_base_bytes + ki64
                 for mi in range_constexpr(m_repeat):
-                    mi_val = arith.constant(mi * 16, index=True)
-                    curr_row_a_lds = row_a_lds + mi_val
+                    curr_row_a_lds = row_a_lds + (mi * 16)
                     if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
                         a0, a1 = a0_prefetch
                     else:
@@ -516,11 +494,11 @@ def compile_preshuffle_gemm_a8(
             return current_accs_list, scales_pf
 
         # ── Epilogue (store output) ───────────────────────────────────────
-        vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
-        vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
-        vec1_i16 = ir.VectorType.get([1], ir.IntegerType.get_signless(16))
-        vec2_i16 = ir.VectorType.get([2], ir.IntegerType.get_signless(16))
-        vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
+        vec1_f16 = T.vec(1, T.f16)
+        vec2_f16 = T.f16x2
+        vec1_i16 = T.vec(1, T.i16)
+        vec2_i16 = T.i16x2
+        vec1_i32 = T.vec(1, T.i32)
 
         def store_output(final_accs, scales):
             if is_f16_or_bf16:
@@ -537,15 +515,11 @@ def compile_preshuffle_gemm_a8(
 
                 def write_row_to_lds(*, mi, ii, row_in_tile, row, row_base_lds,
                                      col_base_local, num_acc_n, lds_out):
-                    c0_i32 = arith.constant(0, type=T.i32)
-                    c1_i32 = arith.constant(1, type=T.i32)
-                    cFE_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
-                    c2_i32 = arith.constant(2, type=T.i32)
                     lane_id_i32 = arith.index_cast(T.i32, lane_id)
-                    lane_lsb = arith.andi(lane_id_i32, c1_i32)
-                    is_odd = lane_lsb != c0_i32
-                    nbr_lane = arith.xori(lane_id_i32, c1_i32)
-                    nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)
+                    lane_lsb = lane_id_i32 & 1
+                    is_odd = lane_lsb != 0
+                    nbr_lane = lane_id_i32 ^ 1
+                    nbr_lane_bytes = nbr_lane << 2
                     if not is_f16_or_bf16:
                         s_a_vec4 = s_a_vecs[mi]
                         s_a = vector.extract(s_a_vec4, static_position=[ii], dynamic_position=[])
@@ -571,7 +545,7 @@ def compile_preshuffle_gemm_a8(
                             static_position=[0], dynamic_position=[],
                         )
                         nbr_i32 = rocdl.ds_bpermute(
-                            T.i32, arith.unwrap(nbr_lane_bytes), arith.unwrap(v16_i32),
+                            T.i32, nbr_lane_bytes, v16_i32,
                         )
                         nbr_v1_i32 = vector.from_elements(vec1_i32, [nbr_i32])
                         nbr_v2_i16 = vector.bitcast(vec2_i16, nbr_v1_i32)
@@ -582,7 +556,7 @@ def compile_preshuffle_gemm_a8(
                         even_f16 = arith.select(is_odd, nbr_f16, v16)
                         odd_f16 = arith.select(is_odd, v16, nbr_f16)
                         col_local_i32 = arith.index_cast(T.i32, col_local)
-                        col_even_i32 = arith.andi(col_local_i32, cFE_i32)
+                        col_even_i32 = col_local_i32 & -2
                         col_even = arith.index_cast(T.index, col_even_i32)
                         lds_idx = row_base_lds + col_even
                         v2 = vector.from_elements(vec2_f16, [even_f16, odd_f16])
@@ -590,7 +564,7 @@ def compile_preshuffle_gemm_a8(
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     idx_out = row * c_n + col_g0
-                    byte_off = idx_out * arith.constant(2, index=True)
+                    byte_off = idx_out * 2
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
                     if e_vec == 4:
                         frag_i32x2 = vector.bitcast(T.vec(2, T.i32), frag)
@@ -628,7 +602,7 @@ def compile_preshuffle_gemm_a8(
                     else:
                         val_s = (val * s_a) * s_b_vals[ni]
                     val_f16 = arith.trunc_f(T.f16, val_s)
-                    idx_out = idx_base + arith.constant(ni * 16, index=True)
+                    idx_out = idx_base + (ni * 16)
                     buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
 
             mfma_epilog(
@@ -723,9 +697,7 @@ def compile_preshuffle_gemm_a8(
             accs_in, bt_flat_in, a0pf_in = _unpack_state(inner_state)
             b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
 
-            c_tile_k = arith.constant(tile_k, index=True)
-            c_tile_k2 = arith.constant(tile_k * 2, index=True)
-            next_k1 = k_iv + c_tile_k
+            next_k1 = k_iv + tile_k
             a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_base_pong,
                                       a0_prefetch=a0pf_in)
@@ -734,7 +706,7 @@ def compile_preshuffle_gemm_a8(
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
 
-            next_k2 = k_iv + c_tile_k2
+            next_k2 = k_iv + (tile_k * 2)
             a_regs_pong, b_tile_pong_new = prefetch_ab_tile(next_k2)
             accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_base_ping,
                                       a0_prefetch=a0_prefetch_ping)
@@ -835,8 +807,7 @@ def compile_preshuffle_gemm_a8(
                 bt_flat_in = list(inner[n_accs:])
                 b_tile_in = _unflatten_b_tile(bt_flat_in)
 
-                c_tile_k_s1 = arith.constant(tile_k, index=True)
-                next_k = iv + c_tile_k_s1
+                next_k = iv + tile_k
                 a_next, b_next = prefetch_ab_tile(next_k)
                 accs_in, _ = compute_tile(accs_in, b_tile_in, lds_base)
                 gpu.barrier()
