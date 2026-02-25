@@ -1225,6 +1225,38 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 )
                 func.ReturnOp([])
 
+            # run_2stage_direct: rank, grid_x, self_sg, sg0..sg7, in0..in7, tmp0..tmp7, out_ptr, stream_ptr (all scalars).
+            # No device loads -> graph-capturable. Use during HIP graph capture.
+            run2d_args = [i32, i32, i64] + [i64] * (8 + 8 + 8 + 1) + [i64]  # 4 + 25 + 1 = 30
+            run2d_fty = ir.FunctionType.get(run2d_args, [])
+            run2d = func.FuncOp("run_2stage_direct", run2d_fty)
+            run2d.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+            b2d = run2d.add_entry_block()
+            with ir.InsertionPoint(b2d):
+                rank_d = b2d.arguments[0]
+                grid_x_i32_d = b2d.arguments[1]
+                self_sg_d = b2d.arguments[2]
+                sgs_d = list(b2d.arguments[3:11])
+                ins_d = list(b2d.arguments[11:19])
+                tmps_d = list(b2d.arguments[19:27])
+                out_ptr_d = b2d.arguments[27]
+                stream_ptr_d = b2d.arguments[28]
+                gx_d = _res(arith.IndexCastOp(idx, _res(grid_x_i32_d)))
+                one_d = _c_index(1)
+                bx_d = _c_index(threads)
+                kops_d = [_res(rank_d), _res(self_sg_d)] + [_res(x) for x in sgs_d] + [_res(x) for x in ins_d] + [_res(x) for x in tmps_d] + [_res(out_ptr_d)]
+                # Capture-safe: no async_dependencies (avoids hipStreamWaitEvent during graph capture).
+                # Bind to stream via async_object only so launch can be recorded into CUDAGraph.
+                stream_token = stream_ptr_to_async_token(stream_ptr_d)
+                flir_ext.gpu_ext.LaunchFuncOp(
+                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}"],
+                    grid_size=(gx_d, one_d, one_d),
+                    block_size=(bx_d, one_d, one_d),
+                    kernel_operands=kops_d,
+                    async_dependencies=[stream_token],
+                )
+                func.ReturnOp([])
+
         return m
 
 

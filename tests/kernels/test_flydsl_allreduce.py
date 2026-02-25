@@ -239,6 +239,7 @@ def _dist_worker(
     num_warmup: int,
     skip_check: bool,
     allreduce_impl: str,
+    mode: str,
     result_dict: dict,
 ):
     """Worker function for distributed allreduce testing.
@@ -253,6 +254,7 @@ def _dist_worker(
         num_warmup: Number of warmup iterations
         skip_check: Whether to skip accuracy check
         allreduce_impl: Allreduce implementation ("flydsl" or "aiter")
+        mode: "eager" or "cudagraph" - which path to run (separate flows)
         result_dict: Shared dictionary to collect results from all ranks
     """
     torch.cuda.set_device(rank)
@@ -314,108 +316,147 @@ def _dist_worker(
     dist.all_reduce(torch.zeros(1, device=device), group=group)
     torch.cuda.synchronize()
 
-    # Warmup iterations
-    for _ in range(num_warmup):
+    def _run_eager():
         if hasattr(fa, 'all_reduce_reg'):
             fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
         else:
             fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
-    torch.cuda.synchronize()
-    dist.barrier(device_ids=[rank])
 
     try:
-        # Accuracy test (one-shot)
-        if not skip_check:
-            # Reset output
-            out.fill_(0)
+        if mode == "eager":
+            for _ in range(num_warmup):
+                _run_eager()
             torch.cuda.synchronize()
             dist.barrier(device_ids=[rank])
-            
-            # Run allreduce
-            if hasattr(fa, 'all_reduce_reg'):
-                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+            if not skip_check:
+                out.fill_(0)
+                torch.cuda.synchronize()
+                dist.barrier(device_ids=[rank])
+                _run_eager()
+                torch.cuda.synchronize()
+                dist.barrier(device_ids=[rank])
+                gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
+                dist.all_gather(gathered, x_flat, group=group)
+                ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
+                for t in gathered:
+                    ref_f32 += t.to(torch.float32)
+                max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
+                if max_err >= atol:
+                    print(out[:10])
+                    print(ref_f32[:10])
+                assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
             else:
-                fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
+                max_err = 0.0
+
             torch.cuda.synchronize()
             dist.barrier(device_ids=[rank])
-
-            # Check correctness
-            gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
-            dist.all_gather(gathered, x_flat, group=group)
-            ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
-            for t in gathered:
-                ref_f32 += t.to(torch.float32)
-            max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
-            if (max_err >= atol):
-                print(out[:10])
-                print(ref_f32[:10])
-            assert max_err < atol, f"[rank={rank}] max_err={max_err:.3e} >= atol={atol}"
-        else:
-            max_err = 0.0
-
-        torch.cuda.synchronize()
-        dist.barrier(device_ids=[rank])
-        # Performance test with torch.profiler
-        def run_allreduce():
-            if hasattr(fa, 'all_reduce_reg'):
-                fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=True,
+                with_modules=True,
+            ) as prof:
+                for _ in range(num_iters):
+                    _run_eager()
+                torch.cuda.synchronize()
+            prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_eager.json")
+            perf_df = get_trace_perf(prof, num_iters)
+            avg_name = "[avg us/iter]"
+            if avg_name in perf_df.index and "device_time_sum" in perf_df.columns:
+                avg_time_us = perf_df.at[avg_name, "device_time_sum"]
             else:
-                fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
-
-        with tpf.profile(
-            activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
-            profile_memory=False,
-            with_stack=True,
-            with_modules=True,
-        ) as prof:
-            for _ in range(num_iters):
-                run_allreduce()
-            torch.cuda.synchronize()
-        
-        prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}.json")
-
-        # Extract performance data
-        perf_df = get_trace_perf(prof, num_iters)
-        
-        # Get average device time in microseconds
-        avg_name = "[avg us/iter]"
-        if avg_name in perf_df.index and "device_time_sum" in perf_df.columns:
-            avg_time_us = perf_df.at[avg_name, "device_time_sum"]
-        else:
-            # Fallback: calculate from device_time_sum column
-            device_time_col = perf_df.get("device_time_sum", pd.Series())
-            if not device_time_col.empty:
-                avg_time_us = device_time_col.sum() / num_iters
-            else:
-                avg_time_us = 0.0
-
-        # Get device_time_sum
-        device_time_sum = 0.0
-        if "device_time_sum" in perf_df.columns:
-            device_time_sum = perf_df["device_time_sum"].sum()
-
-        # Get kernel name
-        kernel_name = "unknown"
-        if not perf_df.empty and "name" in perf_df.columns:
-            if "device_time_sum" in perf_df.columns:
+                device_time_col = perf_df.get("device_time_sum", pd.Series())
+                avg_time_us = device_time_col.sum() / num_iters if not device_time_col.empty else 0.0
+            device_time_sum = perf_df["device_time_sum"].sum() if "device_time_sum" in perf_df.columns else 0.0
+            kernel_name = "unknown"
+            if not perf_df.empty and "name" in perf_df.columns and "device_time_sum" in perf_df.columns:
                 top_kernel = perf_df.nlargest(1, "device_time_sum")
                 if not top_kernel.empty:
                     kernel_name = top_kernel.iloc[0]["name"]
+            result = {
+                "rank": rank,
+                "shape": shape,
+                "dtype": dtype_str,
+                "world_size": world_size,
+                "mode": "eager",
+                "max_error": max_err,
+                "avg_time_us": avg_time_us,
+                "device_time_sum_us": device_time_sum,
+                "kernel_name": kernel_name,
+                "num_iters": num_iters,
+                "num_warmup": num_warmup,
+            }
+            result_dict[rank] = result
 
-        # Collect results for this rank
-        result = {
-            "rank": rank,
-            "shape": shape,
-            "dtype": dtype_str,
-            "world_size": world_size,
-            "max_error": max_err,
-            "avg_time_us": avg_time_us,
-            "device_time_sum_us": device_time_sum,
-            "kernel_name": kernel_name,
-            "num_iters": num_iters,
-            "num_warmup": num_warmup,
-        }
-        result_dict[rank] = result
+        elif mode == "cudagraph":
+            if not hasattr(fa, "capture"):
+                if rank == 0:
+                    print("[test_flydsl_allreduce] WARN: fa has no capture(); skipping cudagraph.", flush=True)
+                result_dict[rank] = {
+                    "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
+                    "mode": "cudagraph", "max_error": float("nan"), "avg_time_us": 0.0,
+                    "device_time_sum_us": 0.0, "kernel_name": "skip", "num_iters": num_iters,
+                    "num_warmup": num_warmup, "error": "no capture()",
+                }
+            else:
+                for _ in range(num_warmup):
+                    _run_eager()
+                torch.cuda.synchronize()
+                dist.barrier(device_ids=[rank])
+                graph = torch.cuda.CUDAGraph()
+                try:
+                    with fa.capture():
+                        with torch.cuda.graph(graph):
+                            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
+                except Exception as cap_e:
+                    if rank == 0:
+                        print(f"[rank={rank}] WARN: cudagraph capture failed: {cap_e}", flush=True)
+                    result_dict[rank] = {
+                        "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
+                        "mode": "cudagraph", "max_error": float("nan"), "avg_time_us": 0.0,
+                        "device_time_sum_us": 0.0, "kernel_name": "skip", "num_iters": num_iters,
+                        "num_warmup": num_warmup, "error": str(cap_e),
+                    }
+                else:
+                    torch.manual_seed(42 + rank)
+                    x_flat.copy_(torch.randn_like(x_flat, device=device, dtype=dtype))
+                    out.fill_(0)
+                    torch.cuda.synchronize()
+
+                    dist.barrier(device_ids=[rank])
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    dist.barrier(device_ids=[rank])
+                    
+                    if not skip_check:
+                        gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
+                        dist.all_gather(gathered, x_flat, group=group)
+                        ref_f32 = torch.zeros_like(x_flat, dtype=torch.float32)
+                        for t in gathered:
+                            ref_f32 += t.to(torch.float32)
+                        max_err = (out.to(torch.float32) - ref_f32).abs().max().item()
+                        assert max_err < atol, f"[rank={rank}] cudagraph max_err={max_err:.3e} >= atol={atol}"
+                    else:
+                        max_err = 0.0
+                    start_evt = torch.cuda.Event(enable_timing=True)
+                    end_evt = torch.cuda.Event(enable_timing=True)
+                    torch.cuda.synchronize()
+                    start_evt.record()
+                    for _ in range(num_iters):
+                        graph.replay()
+                    end_evt.record()
+                    torch.cuda.synchronize()
+                    total_ms = start_evt.elapsed_time(end_evt)
+                    avg_time_us = (total_ms * 1000.0) / num_iters if num_iters else 0.0
+                    device_time_sum = total_ms * 1000.0
+                    result_dict[rank] = {
+                        "rank": rank, "shape": shape, "dtype": dtype_str, "world_size": world_size,
+                        "mode": "cudagraph", "max_error": max_err, "avg_time_us": avg_time_us,
+                        "device_time_sum_us": device_time_sum, "kernel_name": "cudagraph_replay",
+                        "num_iters": num_iters, "num_warmup": num_warmup,
+                    }
+        else:
+            raise ValueError(f"unsupported mode={mode!r}")
 
     except Exception as e:
         print(f"[rank={rank}] Error: {e}", flush=True)
@@ -426,6 +467,7 @@ def _dist_worker(
             "shape": shape,
             "dtype": dtype_str,
             "world_size": world_size,
+            "mode": mode,
             "max_error": float('inf'),
             "avg_time_us": 0.0,
             "device_time_sum_us": 0.0,
@@ -450,6 +492,7 @@ def run_all_tests(
     num_warmup: int = 5,
     skip_check: bool = False,
     allreduce_impl: str = "flydsl",
+    mode: str = "eager",
     configs: list = None,
 ):
     """Run all accuracy and performance tests, collect results and save to CSV.
@@ -460,6 +503,7 @@ def run_all_tests(
         num_warmup: Number of warmup iterations
         skip_check: Whether to skip accuracy check
         allreduce_impl: Allreduce implementation ("flydsl" or "aiter")
+        mode: "eager" or "cudagraph" - which path to run (default: eager)
         configs: List of (shape, dtype_str) tuples. If None, uses default configs.
     """
     ng = torch.cuda.device_count()
@@ -484,6 +528,7 @@ def run_all_tests(
     print(f"World size: {world_size}")
     print(f"Backend: aiter")
     print(f"Allreduce impl: {allreduce_impl}")
+    print(f"Mode: {mode}")
     print(f"Profile iterations: {num_iters}, Warmup: {num_warmup}")
     print(f"Skip check: {skip_check}")
     print("=" * 80)
@@ -517,7 +562,7 @@ def run_all_tests(
             # Spawn processes
             mp.spawn(
                 _dist_worker,
-                args=(world_size, shape, dtype_str, port, num_iters, num_warmup, skip_check, allreduce_impl, result_dict),
+                args=(world_size, shape, dtype_str, port, num_iters, num_warmup, skip_check, allreduce_impl, mode, result_dict),
                 nprocs=world_size,
                 join=True,
             )
@@ -549,6 +594,7 @@ def run_all_tests(
                     "shape": str(shape),
                     "dtype": dtype_str,
                     "world_size": world_size,
+                    "mode": mode,
                     "max_error": max_error,
                     "avg_time_us": mean_avg_time,
                     "min_avg_time_us": min_avg_time,
@@ -633,7 +679,13 @@ if __name__ == "__main__":
         choices=["flydsl", "aiter"],
         help="Allreduce implementation (default: flydsl)",
     )
-    
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="eager",
+        choices=["eager", "cudagraph"],
+        help="Test mode: eager or cudagraph (default: eager)",
+    )
     args = parser.parse_args()
     
     # Parse shapes if provided
@@ -661,5 +713,6 @@ if __name__ == "__main__":
         num_warmup=args.warmup,
         skip_check=args.skip_check,
         allreduce_impl=args.allreduce_impl,
+        mode=args.mode,
         configs=configs,
     )
