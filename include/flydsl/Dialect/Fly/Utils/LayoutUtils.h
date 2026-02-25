@@ -2,7 +2,6 @@
 #define FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
 
 #include <algorithm>
-#include <limits>
 #include <numeric>
 #include <optional>
 
@@ -754,32 +753,25 @@ Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t fac
 //   - denominator 1: upcast
 //   - otherwise: upcast then downcast
 template <class Layout>
-Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int64_t oldTypeBits,
-                    int64_t newTypeBits) {
+Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int32_t oldTypeBits,
+                    int32_t newTypeBits) {
   if (oldTypeBits <= 0 || newTypeBits <= 0) {
     return layout;
   }
-  int64_t g = std::gcd(oldTypeBits, newTypeBits);
-  int64_t num = newTypeBits / g;
-  int64_t den = oldTypeBits / g;
+  int32_t g = std::gcd(oldTypeBits, newTypeBits);
+  int32_t num = newTypeBits / g;
+  int32_t den = oldTypeBits / g;
 
   if (num == 1 && den == 1) {
     return layout;
   }
-  auto isInt32Factor = [](int64_t v) {
-    return v > 0 && v <= static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-  };
-  if (!isInt32Factor(num) || !isInt32Factor(den)) {
-    return layout;
-  }
   if (num == 1) {
-    return layoutDowncast(builder, layout, static_cast<int32_t>(den));
+    return layoutDowncast(builder, layout, den);
   }
   if (den == 1) {
-    return layoutUpcast(builder, layout, static_cast<int32_t>(num));
+    return layoutUpcast(builder, layout, num);
   }
-  return layoutDowncast(builder, layoutUpcast(builder, layout, static_cast<int32_t>(num)),
-                        static_cast<int32_t>(den));
+  return layoutDowncast(builder, layoutUpcast(builder, layout, num), den);
 }
 
 template <class Layout>

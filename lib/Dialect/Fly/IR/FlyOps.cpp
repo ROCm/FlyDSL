@@ -757,12 +757,12 @@ FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
   if (!layoutTy)
     return failure();
 
-  IntegerAttr newTypeBits = adaptor.getNewTypeBitsAttr();
-  IntegerAttr oldTypeBits = adaptor.getOldTypeBitsAttr();
+  int32_t newTypeBits = adaptor.getNewTypeBits();
+  int32_t oldTypeBits = adaptor.getOldTypeBits();
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   LayoutAttr inferred =
-      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits.getInt(), newTypeBits.getInt());
+      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits, newTypeBits);
   inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }

@@ -1420,13 +1420,12 @@ public:
     if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
       return failure();
 
-    IntegerAttr newTypeBits = op.getNewTypeBitsAttr();
-    IntegerAttr oldTypeBits = op.getOldTypeBitsAttr();
+    int32_t newTypeBits = op.getNewTypeBits();
+    int32_t oldTypeBits = op.getOldTypeBits();
 
     LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
     LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
-    LayoutValueAdaptor result =
-        layoutRecast(layoutBuilder, layoutAdaptor, oldTypeBits.getInt(), newTypeBits.getInt());
+    LayoutValueAdaptor result = layoutRecast(layoutBuilder, layoutAdaptor, oldTypeBits, newTypeBits);
     rewriter.replaceOp(op, layoutBuilder.getValue(result));
     return success();
   }
