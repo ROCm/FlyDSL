@@ -1,5 +1,6 @@
 
 #include "mlir/IR/Builders.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/Support/LogicalResult.h"
@@ -748,24 +749,25 @@ FLY_INFER_RETURN_TYPES(LeftInverseOp) {
 }
 
 FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
-  auto layoutTy = dyn_cast<LayoutType>(operands[0].getType());
+  RecastLayoutOp::Adaptor adaptor(operands, attributes, properties, regions);
+  auto layoutTy = dyn_cast<LayoutType>(adaptor.getSrc().getType());
   if (!layoutTy)
     return failure();
 
-  RecastLayoutOp::Adaptor adaptor(operands, attributes, properties, regions);
-  auto newTypeAttr = adaptor.getNewTypeAttr();
-  auto oldTypeAttr = adaptor.getOldTypeAttr();
-  if (!newTypeAttr || !oldTypeAttr)
+  auto newTypeBitsOp = adaptor.getOperands()[0].template getDefiningOp<arith::ConstantOp>();
+  auto oldTypeBitsOp = adaptor.getOperands()[1].template getDefiningOp<arith::ConstantOp>();
+  if (!newTypeBitsOp || !oldTypeBitsOp)
     return failure();
 
-  auto newTypeBits = getTypeBitWidth(newTypeAttr.getValue());
-  auto oldTypeBits = getTypeBitWidth(oldTypeAttr.getValue());
-  if (!newTypeBits || !oldTypeBits)
+  auto newTypeBitsAttr = dyn_cast<IntegerAttr>(newTypeBitsOp.getValue());
+  auto oldTypeBitsAttr = dyn_cast<IntegerAttr>(oldTypeBitsOp.getValue());
+  if (!newTypeBitsAttr || !oldTypeBitsAttr)
     return failure();
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   LayoutAttr inferred =
-      layoutRecast(layoutBuilder, layoutTy.getAttr(), *oldTypeBits, *newTypeBits);
+      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBitsAttr.getInt(),
+                   newTypeBitsAttr.getInt());
   inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }
