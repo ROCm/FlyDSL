@@ -15,6 +15,8 @@ Notes vs the C++ AIter implementation you pasted:
     elementwise sum to mimic all-reduce semantics for testing/experimentation.
 """
 
+from contextlib import contextmanager
+
 from flydsl.dialects.ext import flir, arith, gpu
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import llvm as flir_llvm
@@ -392,6 +394,57 @@ class FlyDSLAllreduce:
         for i in range(self.world_size, 8):
             self._in_ptrs[i] = int(self._in_ptrs[0])
 
+        # ---- Allocate and register input_buffer / output_buffer (eager path) ----
+        self.input_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
+        self.output_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
+        # Register input_buffer: gather IPC (handle, offset) for all ranks
+        inp_buf_storage = self.input_buffer.untyped_storage() if hasattr(self.input_buffer, "untyped_storage") else self.input_buffer.storage()
+        inp_buf_base = int(inp_buf_storage.data_ptr())
+        inp_buf_off = int(self.input_buffer.data_ptr()) - inp_buf_base
+        my_inp_buf_h = self._get_mem_handle_bytes(inp_buf_base)
+        all_inp_buf = self._gather_object_list_via_broadcast(self.group, (my_inp_buf_h, inp_buf_off))
+        self._input_buffer_bases = [None for _ in range(self.world_size)]
+        self._input_buffer_ptrs = [0 for _ in range(8)]
+        for r in range(self.world_size):
+            hb, off = all_inp_buf[r]
+            if r == self.rank:
+                self._input_buffer_ptrs[r] = int(self.input_buffer.data_ptr())
+            else:
+                peer_base = int(self._open_mem_handle(bytes(hb)))
+                self._input_buffer_bases[r] = peer_base
+                self._input_buffer_ptrs[r] = int(peer_base) + int(off)
+        for i in range(self.world_size, 8):
+            self._input_buffer_ptrs[i] = int(self._input_buffer_ptrs[0])
+        # Register output_buffer
+        out_buf_storage = self.output_buffer.untyped_storage() if hasattr(self.output_buffer, "untyped_storage") else self.output_buffer.storage()
+        out_buf_base = int(out_buf_storage.data_ptr())
+        out_buf_off = int(self.output_buffer.data_ptr()) - out_buf_base
+        my_out_buf_h = self._get_mem_handle_bytes(out_buf_base)
+        all_out_buf = self._gather_object_list_via_broadcast(self.group, (my_out_buf_h, out_buf_off))
+        self._output_buffer_bases = [None for _ in range(self.world_size)]
+        self._output_buffer_ptrs = [0 for _ in range(8)]
+        for r in range(self.world_size):
+            hb, off = all_out_buf[r]
+            if r == self.rank:
+                self._output_buffer_ptrs[r] = int(self.output_buffer.data_ptr())
+            else:
+                peer_base = int(self._open_mem_handle(bytes(hb)))
+                self._output_buffer_bases[r] = peer_base
+                self._output_buffer_ptrs[r] = int(peer_base) + int(off)
+        for i in range(self.world_size, 8):
+            self._output_buffer_ptrs[i] = int(self._output_buffer_ptrs[0])
+        # Rotated input_buffer ptrs for eager kernel (index i = (rank+i)%world_size)
+        _ws, _rk = int(self.world_size), int(self.rank)
+        rotated_input_buf_ptrs = [int(self._input_buffer_ptrs[(_rk + i) % _ws]) for i in range(8)]
+        self._gpu_input_buffer_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
+
+        # CUDAGraph state
+        self._IS_CAPTURING = False
+        self._graph_inp = None
+        self._graph_out = None
+        self._gpu_graph_in_ptrs_array = None
+        self._graph_in_bases = []
+
         # Pre-compute rotated pointer arrays and copy to GPU tensors
         # Rotated layout (AIter-style): index i corresponds to target=(rank+i)%ws.
         ws = int(self.world_size)
@@ -427,8 +480,61 @@ class FlyDSLAllreduce:
             if b is None:
                 continue
             self._close_mem_handle(int(b))
+        for b in getattr(self, "_input_buffer_bases", []):
+            if b is None:
+                continue
+            self._close_mem_handle(int(b))
+        for b in getattr(self, "_output_buffer_bases", []):
+            if b is None:
+                continue
+            self._close_mem_handle(int(b))
+        for b in getattr(self, "_graph_in_bases", []):
+            if b is None:
+                continue
+            self._close_mem_handle(int(b))
         self._meta_bases = []
         self._in_bases = []
+        self._input_buffer_bases = []
+        self._output_buffer_bases = []
+        self._graph_in_bases = []
+
+    @contextmanager
+    def capture(self):
+        """Context manager for CUDA graph capture. On exit, calls register_graph_buffers()."""
+        try:
+            self._IS_CAPTURING = True
+            yield
+        finally:
+            self._IS_CAPTURING = False
+            self.register_graph_buffers()
+
+    def register_graph_buffers(self):
+        """Gather IPC for graph-captured (inp, out) and build _gpu_graph_in_ptrs_array for replay."""
+        import torch  # type: ignore
+        if self._graph_inp is None:
+            return
+        # Gather IPC for each rank's _graph_inp (the inp tensor used during capture)
+        storage = self._graph_inp.untyped_storage() if hasattr(self._graph_inp, "untyped_storage") else self._graph_inp.storage()
+        base_ptr = int(storage.data_ptr())
+        off = int(self._graph_inp.data_ptr()) - base_ptr
+        my_handle = self._get_mem_handle_bytes(base_ptr)
+        all_graph_in = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
+        ws = int(self.world_size)
+        rk = int(self.rank)
+        self._graph_in_bases = [None for _ in range(self.world_size)]
+        graph_in_ptrs = [0 for _ in range(8)]
+        for r in range(self.world_size):
+            hb, o = all_graph_in[r]
+            if r == self.rank:
+                graph_in_ptrs[r] = int(self._graph_inp.data_ptr())
+            else:
+                peer_base = int(self._open_mem_handle(bytes(hb)))
+                self._graph_in_bases[r] = peer_base
+                graph_in_ptrs[r] = int(peer_base) + int(o)
+        for i in range(self.world_size, 8):
+            graph_in_ptrs[i] = int(graph_in_ptrs[0])
+        rotated = [int(graph_in_ptrs[(rk + i) % ws]) for i in range(8)]
+        self._gpu_graph_in_ptrs_array = torch.tensor(rotated, dtype=torch.int64, device=self.device)
 
     def __del__(self):
         try:
@@ -466,49 +572,128 @@ class FlyDSLAllreduce:
         self._exe_cache[key] = exe
         return exe
 
-    def all_reduce_reg(self, inp, out=None, open_fp8_quant: bool = False):
-        _ = open_fp8_quant
+    def _run_kernel_2stage(self, N: int, dtype_str: str, gpu_in_ptrs_array, out_ptr: int, *, capture_self_inp_ptr: int = None):
+        """Launch 2-stage allreduce kernel. When capturing, pass capture_self_inp_ptr=inp.data_ptr() so host has our rank's in ptr."""
         import torch  # type: ignore
+        pack_elems = 8 if dtype_str == "f16" else 4
+        num_packs = int(N) // int(pack_elems)
+        part_p = int(num_packs) // int(self.world_size)
+        grid_x = max(1, min(int(_AITER_KMAXBLOCKS), (max(1, int(part_p)) + int(self._threads) - 1) // int(self._threads)))
+        stream_ptr = torch.cuda.current_stream().cuda_stream
+        # During capture, never compile (could trigger sync/alloc); use cached exe only.
+        if torch.cuda.is_current_stream_capturing():
+            key = (int(N), str(dtype_str), int(self.world_size), "abi_stream_v1")
+            exe = self._exe_cache.get(key)
+            if exe is None:
+                raise RuntimeError(
+                    "allreduce exe not in cache during graph capture; run warmup (eager allreduce) before capture"
+                )
+        else:
+            exe = self._compile(N=N, dtype_str=dtype_str)
+        # During HIP graph capture: no device loads, no stream wait. Use run_2stage_direct with host ptrs.
+        if torch.cuda.is_current_stream_capturing():
+            if not hasattr(exe, "run_2stage_direct"):
+                raise RuntimeError("run_2stage_direct not found; rebuild with graph-capture support")
+            ws, rk = int(self.world_size), int(self.rank)
+            sg_direct = [int(self._sg_ptrs[(rk + i) % ws]) for i in range(8)]
+            self_inp = int(capture_self_inp_ptr) if capture_self_inp_ptr is not None else int(self._in_ptrs[rk])
+            in_direct = [
+                self_inp if (rk + i) % ws == rk else int(self._in_ptrs[(rk + i) % ws])
+                for i in range(8)
+            ]
+            tmp_direct = [int(self._tmp_ptrs[(rk + i) % ws]) for i in range(8)]
+            exe.run_2stage_direct(
+                int(self.rank),
+                int(grid_x),
+                int(self._self_sg),
+                *sg_direct,
+                *in_direct,
+                *tmp_direct,
+                int(out_ptr),
+                int(stream_ptr),
+            )
+        else:
+            exe.run_2stage_ptr(
+                int(self.rank),
+                int(grid_x),
+                int(self._self_sg),
+                int(self._gpu_sg_ptrs_array.data_ptr()),
+                int(gpu_in_ptrs_array.data_ptr()),
+                int(self._tmp_offset),
+                int(out_ptr),
+                int(stream_ptr),
+            )
 
+    def all_reduce(
+        self,
+        inp,
+        *,
+        out=None,
+        use_new: bool = True,
+        open_fp8_quant: bool = False,
+        registered_input: bool = False,
+        registered_output: bool = False,
+    ):
+        """Out-of-place all reduce. Eager: copy inp->input_buffer, kernel, copy output_buffer->out. Registered/graph: use inp/out directly."""
+        import torch  # type: ignore
+        _ = use_new
+        _ = open_fp8_quant
         if out is None:
             out = torch.empty_like(inp)
         if int(inp.numel()) != int(out.numel()):
             raise ValueError("inp.numel must equal out.numel")
         if not _is_weak_contiguous(out):
-            raise ValueError("output tensor must be weak-contiguous (match aiter contract)")
-        dtype_str = self._dtype_str(out)
-        if dtype_str != self._dtype_str(inp):
+            raise ValueError("output tensor must be weak-contiguous")
+        dtype_str = self._dtype_str(inp)
+        if dtype_str != self._dtype_str(out):
             raise ValueError("inp/out dtype mismatch")
-
-        bytes_n = int(out.numel()) * int(out.element_size())
+        bytes_n = int(inp.numel()) * int(inp.element_size())
         if bytes_n % 16 != 0:
-            raise ValueError("aiter-signal flydsl allreduce requires byte size multiple of 16")
+            raise ValueError("byte size must be multiple of 16")
         if bytes_n > int(self.max_size):
             raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
-
         N = int(out.numel())
-        # Get compiled kernel from cache (compiled during __init__)
-        # exe = self._compile(N=N, dtype_str=dtype_str)
-        pack_elems = 8 if dtype_str == "f16" else 4
-        num_packs = int(N) // int(pack_elems)
-        part_p = int(num_packs) // int(self.world_size)
-        # Use the 2-stage entrypoint unconditionally (it also covers small sizes).
-        blocks_2 = max(1, min(int(_AITER_KMAXBLOCKS), (max(1, int(part_p)) + int(self._threads) - 1) // int(self._threads)))
-        grid_x = int(blocks_2)
 
-        # Update index 0 of in_ptrs_array with current inp pointer
-        self._gpu_in_ptrs_array[0] = int(inp.data_ptr())
-        out_ptr = int(out.data_ptr())
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        if registered_input and registered_output:
+            # Registered path (or graph replay): use inp/out pointers
+            if self._IS_CAPTURING and torch.cuda.is_current_stream_capturing():
+                # Capture: record (inp, out) and run kernel with host-side ptrs (no device load)
+                self._graph_inp = inp
+                self._graph_out = out
+                self._gpu_in_ptrs_array[0] = int(inp.data_ptr())
+                self._run_kernel_2stage(
+                    N, dtype_str, self._gpu_in_ptrs_array, int(out.data_ptr()),
+                    capture_self_inp_ptr=int(inp.data_ptr()),
+                )
+                return out
+            if getattr(self, "_gpu_graph_in_ptrs_array", None) is not None and not self._IS_CAPTURING:
+                # Replay: use graph-registered in_ptrs and current out (same tensor as capture)
+                self._run_kernel_2stage(N, dtype_str, self._gpu_graph_in_ptrs_array, int(out.data_ptr()))
+                return out
+            # Registered but not graph: use _gpu_in_ptrs_array (rank_data ptrs) with [0]=inp
+            self._gpu_in_ptrs_array[0] = int(inp.data_ptr())
+            self._run_kernel_2stage(N, dtype_str, self._gpu_in_ptrs_array, int(out.data_ptr()))
+            return out
 
-        self._exe.run_2stage_ptr(
-            int(self.rank),
-            int(grid_x),
-            int(self._self_sg),
-            int(self._gpu_sg_ptrs_array.data_ptr()),  # sg_ptrs数组首地址
-            int(self._gpu_in_ptrs_array.data_ptr()),  # in_ptrs数组首地址
-            int(self._tmp_offset),  # tmp_offset
-            int(out_ptr),
-            int(stream_ptr),
-        )
+        # Eager path: memcpy inp -> input_buffer, kernel -> output_buffer, memcpy output_buffer -> out
+        inp_u8 = inp.view(torch.uint8)
+        self.input_buffer[:bytes_n].copy_(inp_u8)
+        self._run_kernel_2stage(N, dtype_str, self._gpu_input_buffer_ptrs_array, int(self.output_buffer.data_ptr()))
+        out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
         return out
+
+    def custom_all_reduce(self, inp, use_new: bool = True, open_fp8_quant: bool = False):
+        """Like aiter: in capture and capturing use registered; else eager."""
+        import torch  # type: ignore
+        if self._IS_CAPTURING:
+            if torch.cuda.is_current_stream_capturing():
+                print("**********capture****************")
+                return self.all_reduce(inp, use_new=use_new, open_fp8_quant=open_fp8_quant, registered_input=True, registered_output=True)
+            out = torch.empty_like(inp)
+            out.zero_()
+            return out
+        return self.all_reduce(inp, use_new=use_new, open_fp8_quant=open_fp8_quant, registered_input=False, registered_output=False)
+
+    def all_reduce_reg(self, inp, out=None, open_fp8_quant: bool = False):
+        """Eager path: uses input_buffer/output_buffer and memcpy."""
+        return self.all_reduce(inp, out=out, open_fp8_quant=open_fp8_quant, registered_input=False, registered_output=False)
