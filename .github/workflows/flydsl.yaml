@@ -21,6 +21,9 @@ env:
 
 jobs:
   test:
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       matrix:
         runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1' ]
@@ -159,6 +162,22 @@ jobs:
             echo "logs.tgz not found; skipping log extraction"
           fi
       
+      - name: Configure AWS credentials
+        if: ${{ always() && !github.event.pull_request.head.repo.fork }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
+
+      - name: Install AWS CLI
+        if: always()
+        run: bash ./flydsl-test/scripts/install_awscli.sh
+
+      - name: Publish packages to S3
+        if: ${{ always() && !github.event.pull_request.head.repo.fork }}
+        run: |
+          # aws s3 cp ${{ github.workspace }}/dist/ s3://framework-whls-nightlies/flydsl/ --recursive --exclude "*" --include "*.whl"
+
       - name: Clean up
         if: always()
         run: |
