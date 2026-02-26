@@ -19,7 +19,11 @@ def _set_capture_stream(stream_ptr):
     try:
         from pathlib import Path
         lib_dir = Path(__file__).resolve().parent.parent / "build-fly" / "python_packages" / "flydsl" / "_mlir" / "_mlir_libs"
-        lib = _ctypes.CDLL(str(lib_dir / "libmlir_rocm_runtime.so"))
+        # Prefer custom runtime with graph capture support.
+        rt = lib_dir / "libfly_jit_runtime.so"
+        if not rt.exists():
+            rt = lib_dir / "libmlir_rocm_runtime.so"
+        lib = _ctypes.CDLL(str(rt))
         lib.mgpuSetCaptureStream.argtypes = [_ctypes.c_void_p]
         lib.mgpuSetCaptureStream(stream_ptr)
     except Exception:
