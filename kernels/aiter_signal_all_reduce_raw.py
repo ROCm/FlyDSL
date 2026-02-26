@@ -1170,8 +1170,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 func.ReturnOp([])
 
             # run_2stage_ptr
-            # New signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base, tmp_offset, out_ptr, stream_ptr
-            run2p_args = [i32, i32, i64, i64, i64, i64, i64, i64]
+            # Signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base,
+            #            tmp_offset, out_ptr, stream_ptr, inp_ptr_override
+            # Motivation: avoid host-side H2D updates of the in_ptrs device array by passing
+            # the current-rank input pointer directly in the launch ABI.
+            run2p_args = [i32, i32, i64, i64, i64, i64, i64, i64, i64]
             run2p_fty = ir.FunctionType.get(run2p_args, [])
             run2p = func.FuncOp("run_2stage_ptr", run2p_fty)
             run2p.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -1185,6 +1188,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 tmp_offset = b2p.arguments[5]
                 out_ptr_i64 = b2p.arguments[6]
                 stream_ptr = b2p.arguments[7]
+                inp_ptr_override = b2p.arguments[8]
                 
                 # Load 8 sg_ptrs from device memory array
                 sgs = []
@@ -1197,6 +1201,8 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 for i in range(8):
                     in_ptr = _load_ptr_from_array(in_ptrs_array_base, _c_i32(i))
                     in_ptrs.append(in_ptr)
+                # Override the current-rank input pointer (index 0 in the rotated layout).
+                in_ptrs[0] = inp_ptr_override
                 
                 # Compute tmp_ptrs with rotation: tmp_ptrs[i] = sg_ptrs[(rank + i) % world_size] + tmp_offset
                 # This matches the original rotated layout where index i corresponds to target=(rank+i)%ws
