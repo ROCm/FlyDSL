@@ -223,6 +223,85 @@ MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
+// TiledCopyType
+//===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyTiledCopyType(MlirType type) { return isa<TiledCopyType>(unwrap(type)); }
+
+MlirTypeID mlirFlyTiledCopyTypeGetTypeID(void) { return wrap(TiledCopyType::getTypeID()); }
+
+MlirType mlirFlyTiledCopyTypeGetCopyAtom(MlirType type) {
+  return wrap(cast<TiledCopyType>(unwrap(type)).getCopyAtom());
+}
+
+MlirType mlirFlyTiledCopyTypeGetLayoutThrVal(MlirType type) {
+  return wrap(static_cast<Type>(cast<TiledCopyType>(unwrap(type)).getLayoutThrVal()));
+}
+
+MlirType mlirFlyTiledCopyTypeGetTileMN(MlirType type) {
+  return wrap(static_cast<Type>(cast<TiledCopyType>(unwrap(type)).getTileMN()));
+}
+
+static MlirType tiledCopyGetTiledTVLayout(MlirType type, bool isSrc) {
+  auto tiledCopyTy = cast<TiledCopyType>(unwrap(type));
+  auto copyAtom = cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+  LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+  TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+  auto *ctx = tiledLayoutThrVal.getContext();
+  LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+  auto atomLayoutRef = cast<LayoutAttr>(copyAtom.getThrValLayoutRef());
+  LayoutAttr refInv = layoutRightInverse(attrBuilder, atomLayoutRef);
+  LayoutAttr atomLayoutTrg =
+      cast<LayoutAttr>(isSrc ? copyAtom.getThrValLayoutSrc() : copyAtom.getThrValLayoutDst());
+  LayoutAttr ref2trg = layoutComposition(attrBuilder, refInv, atomLayoutTrg);
+
+  SmallVector<Attribute> tilerShapeElems;
+  SmallVector<Attribute> tilerStrideElems;
+  int64_t runningStride = 1;
+  for (int i = 0; i < tileMN.rank(); ++i) {
+    auto tileElem = tileMN.at(i);
+    int64_t tileSize;
+    if (auto intVal = dyn_cast<IntAttr>(tileElem))
+      tileSize = intVal.getValue();
+    else if (auto layoutVal = dyn_cast<LayoutAttr>(tileElem))
+      tileSize = attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, layoutVal.getShape()));
+    else
+      llvm_unreachable("unsupported tile element type");
+    tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, tileSize));
+    tilerStrideElems.push_back(IntTupleAttr::getLeafStatic(ctx, runningStride));
+    runningStride *= tileSize;
+  }
+  IntTupleAttr tilerShape = IntTupleAttr::get(ArrayAttr::get(ctx, tilerShapeElems));
+  IntTupleAttr tilerStride = IntTupleAttr::get(ArrayAttr::get(ctx, tilerStrideElems));
+  LayoutAttr refLayout = LayoutAttr::get(
+      IntTupleAttr::get(ArrayAttr::get(ctx, {tilerShape, IntTupleAttr::getLeafStatic(ctx, 1)})),
+      IntTupleAttr::get(ArrayAttr::get(ctx, {tilerStride, IntTupleAttr::getLeafStatic(ctx, 0)})));
+
+  LayoutAttr thrValView = fly::detail::layoutTiledCopyThrValView(attrBuilder, copyAtom, refLayout,
+                                                                 tiledLayoutThrVal, ref2trg);
+
+  SmallVector<Attribute> sliceElems;
+  sliceElems.push_back(IntTupleAttr::getLeafNone(ctx));
+  sliceElems.push_back(IntTupleAttr::getLeafNone(ctx));
+  sliceElems.push_back(IntTupleAttr::getLeafStatic(ctx, 0));
+  IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(ctx, sliceElems));
+
+  IntTupleAttr resultShape = intTupleSlice(attrBuilder, thrValView.getShape(), sliceCoord);
+  IntTupleAttr resultStride = intTupleSlice(attrBuilder, thrValView.getStride(), sliceCoord);
+  LayoutAttr result = LayoutAttr::get(resultShape, resultStride);
+  return wrap(LayoutType::get(result));
+}
+
+MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutSrc(MlirType type) {
+  return tiledCopyGetTiledTVLayout(type, true);
+}
+
+MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutDst(MlirType type) {
+  return tiledCopyGetTiledTVLayout(type, false);
+}
+
+//===----------------------------------------------------------------------===//
 // TiledMmaType
 //===----------------------------------------------------------------------===//
 
@@ -284,7 +363,7 @@ MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type) {
   return wrap(LayoutType::get(thrLayoutVMNK));
 }
 
-MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
+static MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
   auto tiledMmaTy = cast<TiledMmaType>(unwrap(type));
   auto mmaAtom = cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
   auto atomLayoutMNK = tiledMmaTy.getAtomLayout().getAttr();
@@ -357,10 +436,8 @@ MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
     IntTupleAttr mnStride = IntTupleAttr::get(ArrayAttr::get(ctx, {stride0, stride1}));
     LayoutAttr mnLayout = LayoutAttr::get(mnShape, mnStride);
 
-    TileAttr innerTile =
-        TileAttr::get(ArrayAttr::get(ctx, {mnLayout, IntAttr::getNone(ctx)}));
-    TileAttr outerTile =
-        TileAttr::get(ArrayAttr::get(ctx, {IntAttr::getNone(ctx), innerTile}));
+    TileAttr innerTile = TileAttr::get(ArrayAttr::get(ctx, {mnLayout, IntAttr::getNone(ctx)}));
+    TileAttr outerTile = TileAttr::get(ArrayAttr::get(ctx, {IntAttr::getNone(ctx), innerTile}));
     thrModeLayout = layoutComposition(attrBuilder, thrModeLayout, outerTile);
   }
 

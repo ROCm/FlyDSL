@@ -96,6 +96,14 @@ class TiledCopy:
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
 
+    @property
+    def tiled_tv_layout_S(self):
+        return static(self.tiled_copy_ty.tiled_tv_layout_src)
+
+    @property
+    def tiled_tv_layout_D(self):
+        return static(self.tiled_copy_ty.tiled_tv_layout_dst)
+
 
 class TiledMma:
     def __init__(self, value):
