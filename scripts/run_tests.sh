@@ -1,17 +1,25 @@
 #!/bin/bash
 # GEMM Test Suite - runs preshuffle GEMM tests via pytest
+#
+# Prerequisites: bash scripts/build.sh && pip install -e .
+#   (or: export PYTHONPATH=build-fly/python_packages:$REPO_ROOT)
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-BUILD_DIR="${FLIR_BUILD_DIR:-${REPO_ROOT}/build-fly}"
-if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
-  BUILD_DIR="${REPO_ROOT}/build"
+BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
+MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
+
+# If flydsl is not importable (no pip install -e .), fall back to PYTHONPATH.
+if ! python3 -c "import flydsl" 2>/dev/null; then
+  export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
 fi
 
-PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/flydsl"
-export PYTHONPATH="${REPO_ROOT}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH}"
+# Ensure MLIR runtime shared libraries are discoverable.
+if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
+  export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
+fi
 
 echo "========================================================================"
 echo "GEMM Test Suite"
