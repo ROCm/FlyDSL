@@ -317,10 +317,8 @@ def _dist_worker(
     torch.cuda.synchronize()
 
     def _run_eager():
-        if hasattr(fa, 'all_reduce_reg'):
-            fa.all_reduce_reg(x_flat, out, open_fp8_quant=False)
-        else:
-            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
+        # Use unified custom_all_reduce interface (auto-selects eager/registered path)
+        fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
 
     try:
         if mode == "eager":
@@ -407,7 +405,8 @@ def _dist_worker(
                 try:
                     with fa.capture():
                         with torch.cuda.graph(graph):
-                            fa.all_reduce(x_flat, out=out, open_fp8_quant=False, registered_input=True, registered_output=True)
+                            # Use unified custom_all_reduce interface (auto-selects registered path during capture)
+                            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
                 except Exception as cap_e:
                     if rank == 0:
                         print(f"[rank={rank}] WARN: cudagraph capture failed: {cap_e}", flush=True)
