@@ -646,20 +646,27 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
           detail::coalesceImpl(builder, builder.at(lhsShape, i), builder.at(lhsStride, i));
 
       auto tileElem = innerTileAttr.at(i);
-      auto makeRhsPair = [&]() -> std::pair<IntTuple, IntTuple> {
-        if (auto attr = dyn_cast<LayoutAttr>(tileElem)) {
-          return {builder.materializeConstantTuple(attr.getShape()),
-                  builder.materializeConstantTuple(attr.getStride())};
-        }
-        return {
-            builder.makeInt(builder.materializeConstantArith(cast<IntAttr>(tileElem).getValue())),
-            builder.makeInt(builder.materializeConstantArith(1))};
-      };
-      auto [rhsShape, rhsStride] = makeRhsPair();
-      auto [elemShape, elemStride] =
-          detail::compositionImpl(builder, coalShape, coalStride, rhsShape, rhsStride);
-      retShape.push_back(elemShape);
-      retStride.push_back(elemStride);
+      if (auto nestedTile = dyn_cast<TileAttr>(tileElem)) {
+        Layout subLayout = builder.makeLayout(coalShape, coalStride);
+        Layout composed = layoutComposition(builder, subLayout, nestedTile);
+        retShape.push_back(builder.getShape(composed));
+        retStride.push_back(builder.getStride(composed));
+      } else {
+        auto makeRhsPair = [&]() -> std::pair<IntTuple, IntTuple> {
+          if (auto attr = dyn_cast<LayoutAttr>(tileElem)) {
+            return {builder.materializeConstantTuple(attr.getShape()),
+                    builder.materializeConstantTuple(attr.getStride())};
+          }
+          return {
+              builder.makeInt(builder.materializeConstantArith(cast<IntAttr>(tileElem).getValue())),
+              builder.makeInt(builder.materializeConstantArith(1))};
+        };
+        auto [rhsShape, rhsStride] = makeRhsPair();
+        auto [elemShape, elemStride] =
+            detail::compositionImpl(builder, coalShape, coalStride, rhsShape, rhsStride);
+        retShape.push_back(elemShape);
+        retStride.push_back(elemStride);
+      }
     } else {
       retShape.push_back(builder.at(lhsShape, i));
       retStride.push_back(builder.at(lhsStride, i));
@@ -906,7 +913,9 @@ Layout layoutLogicalDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAt
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
 
   auto leafDivide = [&](Layout currentLayout, Attribute divisor) -> Layout {
-    if (auto attr = dyn_cast<LayoutAttr>(divisor)) {
+    if (auto nestedTile = dyn_cast<TileAttr>(divisor)) {
+      return layoutLogicalDivide(builder, currentLayout, nestedTile);
+    } else if (auto attr = dyn_cast<LayoutAttr>(divisor)) {
       return layoutLogicalDivide(builder, currentLayout, builder.materializeConstantLayout(attr));
     } else if (auto intDivisor = dyn_cast<IntAttr>(divisor)) {
       IntTuple divisorShape = builder.materializeConstantTuple(IntTupleAttr::get(intDivisor));

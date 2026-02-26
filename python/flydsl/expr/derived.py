@@ -34,8 +34,8 @@ class CopyAtom(Atom):
         return f"CopyAtom({self.atom_ty})"
 
     @property
-    def thr_size(self):
-        return static(self.atom_ty.thr_size)
+    def thr_layout(self):
+        return static(self.atom_ty.thr_layout)
 
     @property
     def tv_layout_src(self):
@@ -55,8 +55,8 @@ class MmaAtom(Atom):
         return f"MmaAtom({self.atom_ty})"
 
     @property
-    def thr_size(self):
-        return static(self.atom_ty.thr_size)
+    def thr_layout(self):
+        return static(self.atom_ty.thr_layout)
 
     @property
     def shape_mnk(self):
@@ -117,6 +117,26 @@ class TiledMma:
 
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
+
+    @property
+    def tile_size_mnk(self):
+        return static(self.tiled_mma_ty.tile_size_mnk)
+
+    @property
+    def thr_layout_vmnk(self):
+        return static(self.tiled_mma_ty.thr_layout_vmnk)
+
+    @property
+    def tiled_tv_layout_A(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_a)
+
+    @property
+    def tiled_tv_layout_B(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_b)
+
+    @property
+    def tiled_tv_layout_C(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_c)
 
 
 class ThrCopy(TiledCopy):

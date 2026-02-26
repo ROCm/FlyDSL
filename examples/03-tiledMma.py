@@ -32,6 +32,7 @@ def gemm_kernel(
     mma_atom = fx.make_mma_atom(fx.MmaAtomUniversalFMAType.get(fx.T.f32()))
     tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((4, 8, 1), (8, 1, 0)))
     thr_mma = tiled_mma.thr_slice(tid)
+
     partition_A = thr_mma.partition_A(bA)
     partition_B = thr_mma.partition_B(bB)
     partition_C = thr_mma.partition_C(bC)
@@ -48,7 +49,7 @@ def tiledMma(
     gemm_kernel(A, B, C).launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
 
 
-M, K, N = block_m, block_k, block_n
+M, N, K = block_m, block_n, block_k
 A = torch.randn(M, K, dtype=torch.float32).cuda()
 B = torch.randn(N, K, dtype=torch.float32).cuda()
 C = torch.zeros(M, N, dtype=torch.float32).cuda()

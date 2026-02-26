@@ -122,6 +122,22 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, M
 MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
 
 //===----------------------------------------------------------------------===//
+// TiledMmaType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyTiledMmaType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyTiledMmaTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetMmaAtom(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetAtomLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetPermutation(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutA(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutB(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type);
+
+//===----------------------------------------------------------------------===//
 // Pass Registration
 //===----------------------------------------------------------------------===//
 

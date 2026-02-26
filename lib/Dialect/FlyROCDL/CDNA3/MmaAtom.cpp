@@ -35,7 +35,7 @@ namespace mlir::fly_rocdl {
 
 bool MmaAtomCDNA3_MFMAType::isStatic() const { return true; }
 
-Attribute MmaAtomCDNA3_MFMAType::getThrSize() const { return FxC(64); }
+Attribute MmaAtomCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
 
 Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
@@ -73,12 +73,15 @@ LogicalResult MmaAtomCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> e
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
-  auto isValidElemType = [](Type ty) { return ty.isF16() || ty.isBF16() || ty.isF32(); };
+  auto isValidElemType = [](Type ty) {
+    return ty.isF16() || ty.isBF16() || ty.isF32() || isa<Float8E4M3FNUZType>(ty) ||
+           isa<Float8E5M2FNUZType>(ty);
+  };
   if (!isValidElemType(elemTyA)) {
-    return emitError() << "elemTyA must be f16, bf16, f32, got " << elemTyA;
+    return emitError() << "elemTyA must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyA;
   }
   if (!isValidElemType(elemTyB)) {
-    return emitError() << "elemTyB must be f16, bf16, f32, got " << elemTyB;
+    return emitError() << "elemTyB must be f16, bf16, f32, f8E4M3FNUZ, f8E5M2FNUZ, got " << elemTyB;
   }
   return success();
 }

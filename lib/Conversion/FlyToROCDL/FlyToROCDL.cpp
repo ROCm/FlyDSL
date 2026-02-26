@@ -453,25 +453,139 @@ private:
     return success();
   }
 
-  LogicalResult lowerCDNA3MFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
-                               fly_rocdl::MmaAtomCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
-                               Value bPtr, Value cPtr) const {
-    Type f32Ty = rewriter.getF32Type();
-    VectorType accTy = VectorType::get({4}, f32Ty);
+  static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
+  static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+  static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
-    Value a = LLVM::LoadOp::create(rewriter, loc, f32Ty, aPtr);
-    Value b = LLVM::LoadOp::create(rewriter, loc, f32Ty, bPtr);
+  static Type getMfmaABType(MLIRContext *ctx, Type elemTy) {
+    if (elemTy.isF32())
+      return Float32Type::get(ctx);
+    if (elemTy.isF16())
+      return VectorType::get({4}, Float16Type::get(ctx));
+    if (elemTy.isBF16())
+      return VectorType::get({2}, IntegerType::get(ctx, 16));
+    if (isF8(elemTy))
+      return IntegerType::get(ctx, 64);
+    return nullptr;
+  }
+
+  static int64_t getMfmaAccVecSize(int32_t m, int32_t k, Type elemTyA) {
+    if (elemTyA.isF32()) {
+      if (m == 32 && k == 1)
+        return 32;
+      if (m == 32 && k == 2)
+        return 16;
+      if (m == 16 && k == 1)
+        return 16;
+      if (m == 16 && k == 4)
+        return 4;
+      if (m == 4 && k == 1)
+        return 4;
+    }
+    if (elemTyA.isF16()) {
+      if (m == 32 && k == 4)
+        return 32;
+      if (m == 32 && k == 8)
+        return 16;
+      if (m == 16 && k == 4)
+        return 16;
+      if (m == 16 && k == 16)
+        return 4;
+      if (m == 4 && k == 4)
+        return 4;
+    }
+    if (elemTyA.isBF16()) {
+      if (m == 32 && k == 2)
+        return 32;
+      if (m == 32 && k == 4)
+        return 16;
+      if (m == 16 && k == 2)
+        return 16;
+      if (m == 16 && k == 8)
+        return 4;
+      if (m == 4 && k == 2)
+        return 4;
+    }
+    if (isF8(elemTyA)) {
+      if (m == 16 && k == 32)
+        return 4;
+      if (m == 32 && k == 16)
+        return 16;
+    }
+    return 0;
+  }
+
+  template <typename MfmaOp>
+  LogicalResult emitMfma(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                         Type abTyA, Type abTyB, VectorType accTy, Value aPtr, Value bPtr,
+                         Value cPtr, Value dPtr) const {
+    Value a = LLVM::LoadOp::create(rewriter, loc, abTyA, aPtr);
+    Value b = LLVM::LoadOp::create(rewriter, loc, abTyB, bPtr);
     Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
-
     auto zeroAttr = rewriter.getI32IntegerAttr(0);
-
-    Value res = ROCDL::mfma_f32_16x16x4f32::create(rewriter, loc, accTy, a, b, c, zeroAttr,
-                                                   zeroAttr, zeroAttr)
-                    .getResult();
-
+    Value res =
+        MfmaOp::create(rewriter, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr).getResult();
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);
     rewriter.eraseOp(op);
     return success();
+  }
+
+  LogicalResult lowerCDNA3MFMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                               fly_rocdl::MmaAtomCDNA3_MFMAType atomTy, Value dPtr, Value aPtr,
+                               Value bPtr, Value cPtr) const {
+    int32_t m = atomTy.getM();
+    int32_t n = atomTy.getN();
+    int32_t k = atomTy.getK();
+    Type elemTyA = atomTy.getElemTyA();
+    Type elemTyB = atomTy.getElemTyB();
+    MLIRContext *ctx = rewriter.getContext();
+
+    Type abTyA = getMfmaABType(ctx, elemTyA);
+    Type abTyB = getMfmaABType(ctx, elemTyB);
+    if (!abTyA || !abTyB)
+      return rewriter.notifyMatchFailure(op, "unsupported element type for MFMA");
+
+    int64_t accVecSize = getMfmaAccVecSize(m, k, elemTyA);
+    if (accVecSize == 0)
+      return rewriter.notifyMatchFailure(op, "unsupported MNK combination for MFMA");
+
+    Type accElemTy = atomTy.getElemTyAcc();
+    VectorType accTy = VectorType::get({accVecSize}, accElemTy);
+
+#define DISPATCH_MFMA(M_, K_, PRED, OP)                                                            \
+  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
+    return emitMfma<ROCDL::OP>(op, rewriter, loc, abTyA, abTyB, accTy, aPtr, bPtr, cPtr, dPtr);
+
+    DISPATCH_MFMA(32, 1, elemTyA.isF32(), mfma_f32_32x32x1f32)
+    DISPATCH_MFMA(16, 1, elemTyA.isF32(), mfma_f32_16x16x1f32)
+    DISPATCH_MFMA(4, 1, elemTyA.isF32(), mfma_f32_4x4x1f32)
+    DISPATCH_MFMA(32, 2, elemTyA.isF32(), mfma_f32_32x32x2f32)
+    DISPATCH_MFMA(16, 4, elemTyA.isF32(), mfma_f32_16x16x4f32)
+
+    DISPATCH_MFMA(32, 4, elemTyA.isF16(), mfma_f32_32x32x4f16)
+    DISPATCH_MFMA(16, 4, elemTyA.isF16(), mfma_f32_16x16x4f16)
+    DISPATCH_MFMA(4, 4, elemTyA.isF16(), mfma_f32_4x4x4f16)
+    DISPATCH_MFMA(32, 8, elemTyA.isF16(), mfma_f32_32x32x8f16)
+    DISPATCH_MFMA(16, 16, elemTyA.isF16(), mfma_f32_16x16x16f16)
+
+    DISPATCH_MFMA(32, 2, elemTyA.isBF16(), mfma_f32_32x32x2bf16)
+    DISPATCH_MFMA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
+    DISPATCH_MFMA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
+    DISPATCH_MFMA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+    DISPATCH_MFMA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
+
+    DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_fp8_fp8)
+    DISPATCH_MFMA(16, 32, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_fp8_bf8)
+    DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_16x16x32_bf8_fp8)
+    DISPATCH_MFMA(16, 32, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_16x16x32_bf8_bf8)
+    DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_fp8_fp8)
+    DISPATCH_MFMA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
+    DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
+    DISPATCH_MFMA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+#undef DISPATCH_MFMA
+
+    return rewriter.notifyMatchFailure(op, "no matching ROCDL MFMA intrinsic");
   }
 };
 

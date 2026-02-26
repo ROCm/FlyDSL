@@ -66,10 +66,10 @@ struct PyMmaAtomCDNA3_MFMAType : PyConcreteType<PyMmaAtomCDNA3_MFMAType> {
       return mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(self);
     });
 
-    c.def_prop_ro("thr_size", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
+    c.def_prop_ro("thr_layout", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
       auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::IntTupleAttr>(ty.getThrSize());
-      return wrap(::mlir::fly::IntTupleType::get(attr));
+      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrLayout());
+      return wrap(::mlir::fly::LayoutType::get(attr));
     });
     c.def_prop_ro("shape_mnk", [](PyMmaAtomCDNA3_MFMAType &self) -> MlirType {
       auto ty = ::mlir::cast<::mlir::fly::MmaAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));

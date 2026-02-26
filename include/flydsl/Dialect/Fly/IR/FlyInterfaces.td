@@ -39,7 +39,7 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
 def Fly_CopyAtomTypeInterface : TypeInterface<"CopyAtomTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutSrc", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutDst", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutRef", (ins)>
@@ -49,7 +49,7 @@ def Fly_CopyAtomTypeInterface : TypeInterface<"CopyAtomTypeInterface", [Fly_MayS
 def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getShapeMNK", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
