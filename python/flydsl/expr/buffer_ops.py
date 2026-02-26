@@ -130,7 +130,7 @@ class BufferResourceDescriptor:
         # fly.memref is already just a pointer; cast directly to !llvm.ptr.
         # The cast becomes identity after FlyToROCDL type conversion.
         raw_val = _unwrap_value(memref_val)
-        ptr_type = ir.Type.parse('!llvm.ptr')
+        ptr_type = ir.Type.parse('!llvm.ptr<1>')
         base_ptr = ir.Operation.create(
             "builtin.unrealized_conversion_cast",
             results=[ptr_type],
