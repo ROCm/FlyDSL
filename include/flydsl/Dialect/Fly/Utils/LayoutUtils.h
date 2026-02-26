@@ -2,14 +2,16 @@
 #define FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
 
 #include <algorithm>
+#include <numeric>
+#include <optional>
 
 #include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LogicalResult.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
-#include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 namespace mlir::fly {
 
@@ -627,7 +629,138 @@ template <class Layout> Layout layoutRightInverse(LayoutBuilder<Layout> &builder
       builder.makeLayout(builder.makeTuple(resultShape), builder.makeTuple(resultStride));
   return layoutCoalesce(builder, resultLayout);
 }
+
 template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
+
+namespace detail {
+
+// Internal helper for layoutUpcast(): recursively rewrites (shape, stride).
+template <class Layout>
+std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
+layoutUpcastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+                 typename LayoutBuilder<Layout>::IntTuple stride, int32_t factor) {
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  if (shape.isLeaf()) {
+    ArithValue shapeVal = builder.getArithValue(shape);
+    ArithValue strideVal = builder.getArithValue(stride);
+    if (builder.isNone(strideVal) || builder.isStaticValue(strideVal, 0)) {
+      return {shape, stride};
+    }
+
+    ArithValue factorVal = builder.materializeConstantArith(factor);
+    if (!builder.isStatic(strideVal)) {
+      return {shape, builder.makeInt(builder.safeDiv(strideVal, factorVal))};
+    }
+
+    int32_t staticStride = builder.getStaticValue(strideVal);
+    int32_t absStride = std::abs(staticStride);
+    assert((absStride % factor == 0 || factor % absStride == 0) &&
+           "layoutUpcast: divisibility condition failed between factor and stride");
+    int32_t sign = staticStride < 0 ? -1 : 1;
+
+    ArithValue absStrideVal = builder.materializeConstantArith(absStride);
+    ArithValue strideShapeScale = builder.ceilDiv(factorVal, absStrideVal);
+    ArithValue newShapeVal = builder.ceilDiv(shapeVal, strideShapeScale);
+    ArithValue newStrideAbs = builder.ceilDiv(absStrideVal, factorVal);
+    ArithValue newStrideVal =
+        sign > 0 ? newStrideAbs : builder.sub(builder.materializeConstantArith(0), newStrideAbs);
+    return {builder.makeInt(newShapeVal), builder.makeInt(newStrideVal)};
+  }
+
+  typename LayoutBuilder<Layout>::ElemCollector outShape;
+  typename LayoutBuilder<Layout>::ElemCollector outStride;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [childShape, childStride] =
+        layoutUpcastImpl(builder, builder.at(shape, i), builder.at(stride, i), factor);
+    outShape.push_back(childShape);
+    outStride.push_back(childStride);
+  }
+  return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
+}
+
+// Internal helper for layoutDowncast(): recursively rewrites (shape, stride).
+template <class Layout>
+std::pair<typename LayoutBuilder<Layout>::IntTuple, typename LayoutBuilder<Layout>::IntTuple>
+layoutDowncastImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+                   typename LayoutBuilder<Layout>::IntTuple stride, int32_t factor) {
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  if (shape.isLeaf()) {
+    ArithValue shapeVal = builder.getArithValue(shape);
+    ArithValue strideVal = builder.getArithValue(stride);
+    if (builder.isNone(strideVal)) {
+      return {shape, stride};
+    }
+    ArithValue factorVal = builder.materializeConstantArith(factor);
+    if (builder.isStaticValue(strideVal, 1) || builder.isStaticValue(strideVal, -1)) {
+      return {builder.makeInt(builder.mul(shapeVal, factorVal)), stride};
+    }
+    return {shape, builder.makeInt(builder.mul(strideVal, factorVal))};
+  }
+
+  typename LayoutBuilder<Layout>::ElemCollector outShape;
+  typename LayoutBuilder<Layout>::ElemCollector outStride;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [childShape, childStride] =
+        layoutDowncastImpl(builder, builder.at(shape, i), builder.at(stride, i), factor);
+    outShape.push_back(childShape);
+    outStride.push_back(childStride);
+  }
+  return {builder.makeTuple(outShape), builder.makeTuple(outStride)};
+}
+
+} // namespace detail
+
+// Public API: upcast layout by element-size factor.
+template <class Layout>
+Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
+  if (factor == 1) {
+    return layout;
+  }
+  auto [newShape, newStride] =
+      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  return builder.makeLayout(newShape, newStride);
+}
+
+// Public API: downcast layout by element-size factor.
+template <class Layout>
+Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t factor) {
+  if (factor == 1) {
+    return layout;
+  }
+  auto [newShape, newStride] =
+      detail::layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  return builder.makeLayout(newShape, newStride);
+}
+
+// Public API: recast layout from oldTypeBits to newTypeBits.
+// This follows the same branch structure as cutlass::recast_layout:
+//   - equal ratio: identity
+//   - numerator 1: downcast
+//   - denominator 1: upcast
+//   - otherwise: upcast then downcast
+template <class Layout>
+Layout layoutRecast(LayoutBuilder<Layout> &builder, Layout layout, int32_t oldTypeBits,
+                    int32_t newTypeBits) {
+  if (oldTypeBits <= 0 || newTypeBits <= 0) {
+    return layout;
+  }
+  int32_t g = std::gcd(oldTypeBits, newTypeBits);
+  int32_t num = newTypeBits / g;
+  int32_t den = oldTypeBits / g;
+
+  if (num == 1 && den == 1) {
+    return layout;
+  }
+  if (num == 1) {
+    return layoutDowncast(builder, layout, den);
+  }
+  if (den == 1) {
+    return layoutUpcast(builder, layout, num);
+  }
+  return layoutDowncast(builder, layoutUpcast(builder, layout, num), den);
+}
 
 template <class Layout>
 Layout layoutLogicalDivide(LayoutBuilder<Layout> &builder, Layout layout, Layout divisorLayout) {
