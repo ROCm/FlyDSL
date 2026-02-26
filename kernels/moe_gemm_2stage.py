@@ -105,8 +105,15 @@ def compile_moe_gemm1(
     x_is_token_slot = in_dtype == "int8smooth"
     # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
     is_int8 = is_int8 or x_is_token_slot
-    # UINT4 per-block dequant block size (number of K elements per qscale/qzero value).
+    # UINT4 dequant: PDF packed4 qparams, fixed k_quantize_block=64 (4 blocks per tile256).
+    # qscale/qzero are passed as packed4 i32 words with physical layout:
+    #   [expert, rows_per_expert//16, K//256, 16] (packed i32)  ==  [expert, N//16, k//4, 16, 4] (u8)
+    # UINT4 dequant: PDF packed4 qparams, fixed k_quantize_block=64.
     uint4_scale_block_k = 64
+    # Compile-time safety switch:
+    # - False (default): assume no-carry per-byte (15*qs+qz<=255), use fast packed-byte dequant.
+    # - True: use safe per-byte dequant in load_b_pack_k32.
+    overflow_guard = os.environ.get("FLIR_UINT4_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -124,9 +131,11 @@ def compile_moe_gemm1(
     size_x = DYN
     # W is packed 4-bit for W4A8: 2 values per byte.
     size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_w4 else (experts * (2 * inter_dim) * model_dim)
-    # UINT4 qscale/qzero: [experts * 2*inter_dim, model_dim // uint4_scale_block_k] stored as i32.
-    num_k_blocks_stage1 = model_dim // uint4_scale_block_k if is_uint4 else 0
-    size_qscale_w = experts * (2 * inter_dim) * num_k_blocks_stage1 if is_uint4 else 0
+    # UINT4 qscale/qzero packed4 words:
+    # stage1 rows_per_expert = 2*inter_dim, rows_blk = rows_per_expert//16, num_k256 = model_dim//256
+    rows_blk_stage1 = (2 * inter_dim) // 16 if is_uint4 else 0
+    num_k256_stage1 = model_dim // 256 if is_uint4 else 0
+    size_qscale_w = experts * rows_blk_stage1 * num_k256_stage1 * 16 if is_uint4 else 0
     size_qzero_w = size_qscale_w
     size_sorted = DYN
     size_expert_ids = DYN
@@ -161,7 +170,7 @@ def compile_moe_gemm1(
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi3"  # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
+        f"_abi4"  # uint4 packed4 qparams + half128_sel plumbing
     ).replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -560,15 +569,16 @@ def compile_moe_gemm1(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
-                c_num_k_blocks = arith.constant(num_k_blocks_stage1, index=True) if is_uint4 else None
+                # UINT4 packed4 qparams: cached per (ku,ni), reused by ki_step=0/1.
+                c_rows_blk_s1 = arith.constant((2 * inter_dim) // 16, index=True) if is_uint4 else None
+                c_num_k256_s1 = arith.constant(model_dim // 256, index=True) if is_uint4 else None
 
                 def _load_uint4_qs_qz(base_k, ku, ni, blk_list, intra_list):
-                    """Issue qscale/qzero buffer_loads for one (ku, ni) pair.
+                    """Load packed4 qscale/qzero word for one (ku,ni) pack base (k2=0).
 
-                    IMPORTANT: qscale/qzero are computed on the *preshuffled* weight tensor
-                    layout (the same 2D view that is later packed to uint4 bytes). Therefore,
-                    we must index qscale/qzero using the preshuffled (row, k_block) derived
-                    from the packed weight address, not the logical (n, k) coordinates.
+                    Returns: (qs_word, qz_word, within_tile_base)
+                    - qs_word/qz_word are i32 packed4 words (byte0..3).
+                    - within_tile_base is (col_byte % 128) at k2=0; caller derives half128_sel per ki_step.
                     """
                     # Compute the packed-weight byte offset for this (ku, ni) pack base (k2=0),
                     # matching `load_b_pack_k32`'s `coord_pack` / `idx_pack`.
@@ -586,19 +596,34 @@ def compile_moe_gemm1(
 
                     # Interpret the packed weight buffer as a row-major 2D tensor:
                     #   [N_total, K_bytes] where K_bytes = K/2 for packed 4-bit weights.
-                    #
-                    # For uint4_scale_block_k weights per block (64), the block size in bytes is 32.
                     row_stride_bytes = k_in / arith.constant(2, index=True)
                     row_id = idx_pack / row_stride_bytes
                     col_byte = idx_pack - (row_id * row_stride_bytes)
-                    k_block = col_byte / arith.constant(uint4_scale_block_k // 2, index=True)
+                    k256 = col_byte / arith.constant(128, index=True)
+                    within_tile_base = col_byte - (k256 * arith.constant(128, index=True))
 
-                    qs_idx = k_block * c_n_total + row_id
-                    qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
-                    qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
-                    return qs_val, qz_val
+                    # Derive expert/n_blk_local/n_lane from row_id (preshuffled flatten row index).
+                    n_lane = row_id % arith.constant(16, index=True)
+                    n_blk_global = row_id / arith.constant(16, index=True)
+                    expert_id = n_blk_global / c_rows_blk_s1
+                    n_blk_local = n_blk_global - (expert_id * c_rows_blk_s1)
 
-                def load_b_pack(base_k, ki_step, ni, blk_list, intra_list, qs_val=None, qz_bcast=None):
+                    qs_idx = ((((expert_id * c_rows_blk_s1) + n_blk_local) * c_num_k256_s1) + k256) * arith.constant(16, index=True) + n_lane
+                    qs_word = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    qz_word = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    return qs_word, qz_word, within_tile_base
+
+                def load_b_pack(base_k, ki_step, ni, blk_list, intra_list, qs_word=None, qz_word=None, within_tile_base=None):
+                    # Only needed for uint4 dequant with packed4 qparams (k_quantize_block==64).
+                    half128_sel = None
+                    if is_uint4:
+                        # within_tile for this ki_step: base + k2_base (0 or 4 bytes). Wrap at 128 just in case.
+                        add = arith.constant(4, index=True) if (ki_step % 2) == 1 else arith.constant(0, index=True)
+                        tmp = within_tile_base + add
+                        c128 = arith.constant(128, index=True)
+                        tmp_ge_128 = tmp >= c128
+                        within_tile = arith.select(tmp_ge_128, tmp - c128, tmp)
+                        half128_sel = within_tile >= arith.constant(64, index=True)
                     return load_b_pack_k32(
                         buffer_ops,
                         flir,
@@ -617,8 +642,11 @@ def compile_moe_gemm1(
                         elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                         unpack_uint4=is_uint4,
-                        uint4_qs=qs_val,
-                        uint4_qz_bcast=qz_bcast,
+                        uint4_qs_word=qs_word,
+                        uint4_qz_word=qz_word,
+                        uint4_half128_sel=half128_sel,
+                        uint4_k_quantize_block=uint4_scale_block_k,
+                        overflow_guard=overflow_guard,
                     )
     
                 def load_b_tile(base_k, blk_list, intra_list, col_list):
@@ -632,22 +660,25 @@ def compile_moe_gemm1(
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
                         # Pre-load qscale/qzero for all ni at this ku
-                        qs_list = []
-                        qz_list = []
+                        qs_word_list = []
+                        qz_word_list = []
+                        within_tile_list = []
                         if is_uint4:
                             for ni in range_constexpr(num_acc_n):
-                                qs, qz = _load_uint4_qs_qz(base_k, ku, ni, blk_list, intra_list)
-                                qs_list.append(qs)
-                                qz_list.append(qz)
+                                qs_word, qz_word, within_tile_base = _load_uint4_qs_qz(base_k, ku, ni, blk_list, intra_list)
+                                qs_word_list.append(qs_word)
+                                qz_word_list.append(qz_word)
+                                within_tile_list.append(within_tile_base)
                         packs0 = []
                         packs1 = []
                         for ni in range_constexpr(num_acc_n):
                             ki0 = (ku * 2) + 0
                             ki1 = (ku * 2) + 1
-                            qs = qs_list[ni] if is_uint4 else None
-                            qz = qz_list[ni] if is_uint4 else None
-                            b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list, qs_val=qs, qz_bcast=qz)
-                            b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list, qs_val=qs, qz_bcast=qz)
+                            qs_word = qs_word_list[ni] if is_uint4 else None
+                            qz_word = qz_word_list[ni] if is_uint4 else None
+                            within_tile_base = within_tile_list[ni] if is_uint4 else None
+                            b0 = load_b_pack(base_k, ki0, ni, blk_list, intra_list, qs_word=qs_word, qz_word=qz_word, within_tile_base=within_tile_base)
+                            b1 = load_b_pack(base_k, ki1, ni, blk_list, intra_list, qs_word=qs_word, qz_word=qz_word, within_tile_base=within_tile_base)
                             packs0.append(b0)
                             packs1.append(b1)
                         b_tile.append((packs0, packs1))
@@ -1320,6 +1351,7 @@ def compile_moe_gemm2(
     # INT4/UINT4 means W4A8: A2 is int8, W is packed 4-bit and dequantized to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_w4
     uint4_scale_block_k = 64
+    overflow_guard = os.environ.get("FLIR_UINT4_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -1340,9 +1372,11 @@ def compile_moe_gemm2(
     size_scale_x = DYN
     # W is packed 4-bit for W4A8: 2 values per byte.
     size_w = (experts * model_dim * inter_dim) // 2 if is_w4 else (experts * model_dim * inter_dim)
-    # UINT4 qscale/qzero: [experts * model_dim, inter_dim // uint4_scale_block_k] stored as i32.
-    num_k_blocks_stage2 = inter_dim // uint4_scale_block_k if is_uint4 else 0
-    size_qscale_w2 = experts * model_dim * num_k_blocks_stage2 if is_uint4 else 0
+    # UINT4 qscale/qzero packed4 words:
+    # stage2 rows_per_expert = model_dim, rows_blk = rows_per_expert//16, num_k256 = inter_dim//256
+    rows_blk_stage2 = model_dim // 16 if is_uint4 else 0
+    num_k256_stage2 = inter_dim // 256 if is_uint4 else 0
+    size_qscale_w2 = experts * rows_blk_stage2 * num_k256_stage2 * 16 if is_uint4 else 0
     size_qzero_w2 = size_qscale_w2
 
     total_threads = 256
@@ -1402,7 +1436,7 @@ def compile_moe_gemm2(
     module_name = (
         f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
+        f"_abi3"  # uint4 packed4 qparams + half128_sel plumbing
     ).replace("-", "_")
 
     class _MOE2(flir.MlirModule):
@@ -1780,11 +1814,12 @@ def compile_moe_gemm2(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) ---
-                c_num_k_blocks_s2 = arith.constant(num_k_blocks_stage2, index=True) if is_uint4 else None
+                c_rows_blk_s2 = arith.constant(model_dim // 16, index=True) if is_uint4 else None
+                c_num_k256_s2 = arith.constant(inter_dim // 256, index=True) if is_uint4 else None
 
                 def _load_uint4_qs_qz_s2(base_k, ku, ni):
                     # Same rationale as stage1: qscale/qzero are produced from the preshuffled
-                    # weight buffer, so we index them via the packed address (preshuffled row,k_block).
+                    # weight buffer, so we index them via the packed address (preshuffled row,k256).
                     base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
                     k0_base = base_k_bytes / arith.constant(64, index=True)
                     k0 = k0_base + arith.constant(ku, index=True)
@@ -1800,14 +1835,28 @@ def compile_moe_gemm2(
                     row_stride_bytes = k_in / arith.constant(2, index=True)
                     row_id = idx_pack / row_stride_bytes
                     col_byte = idx_pack - (row_id * row_stride_bytes)
-                    k_block = col_byte / arith.constant(uint4_scale_block_k // 2, index=True)
+                    k256 = col_byte / arith.constant(128, index=True)
+                    within_tile_base = col_byte - (k256 * arith.constant(128, index=True))
 
-                    qs_idx = k_block * c_n_total + row_id
-                    qs_val = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
-                    qz_val = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
-                    return qs_val, qz_val
+                    n_lane = row_id % arith.constant(16, index=True)
+                    n_blk_global = row_id / arith.constant(16, index=True)
+                    expert_id = n_blk_global / c_rows_blk_s2
+                    n_blk_local = n_blk_global - (expert_id * c_rows_blk_s2)
 
-                def load_b_pack(base_k, ki_step, ni, qs_val=None, qz_bcast=None):
+                    qs_idx = ((((expert_id * c_rows_blk_s2) + n_blk_local) * c_num_k256_s2) + k256) * arith.constant(16, index=True) + n_lane
+                    qs_word = buffer_ops.buffer_load(qs_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    qz_word = buffer_ops.buffer_load(qz_rsrc, qs_idx, vec_width=1, dtype=i32)
+                    return qs_word, qz_word, within_tile_base
+
+                def load_b_pack(base_k, ki_step, ni, qs_word=None, qz_word=None, within_tile_base=None):
+                    half128_sel = None
+                    if is_uint4:
+                        add = arith.constant(4, index=True) if (ki_step % 2) == 1 else arith.constant(0, index=True)
+                        tmp = within_tile_base + add
+                        c128 = arith.constant(128, index=True)
+                        tmp_ge_128 = tmp >= c128
+                        within_tile = arith.select(tmp_ge_128, tmp - c128, tmp)
+                        half128_sel = within_tile >= arith.constant(64, index=True)
                     return load_b_pack_k32(
                         buffer_ops,
                         flir,
@@ -1826,8 +1875,11 @@ def compile_moe_gemm2(
                         elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                         unpack_uint4=is_uint4,
-                        uint4_qs=qs_val,
-                        uint4_qz_bcast=qz_bcast,
+                        uint4_qs_word=qs_word,
+                        uint4_qz_word=qz_word,
+                        uint4_half128_sel=half128_sel,
+                        uint4_k_quantize_block=uint4_scale_block_k,
+                        overflow_guard=overflow_guard,
                     )
     
                 def load_b_tile(base_k):
@@ -1837,22 +1889,25 @@ def compile_moe_gemm2(
                     """
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
-                        qs_list = []
-                        qz_list = []
+                        qs_word_list = []
+                        qz_word_list = []
+                        within_tile_list = []
                         if is_uint4:
                             for ni in range_constexpr(num_acc_n):
-                                qs, qz = _load_uint4_qs_qz_s2(base_k, ku, ni)
-                                qs_list.append(qs)
-                                qz_list.append(qz)
+                                qs_word, qz_word, within_tile_base = _load_uint4_qs_qz_s2(base_k, ku, ni)
+                                qs_word_list.append(qs_word)
+                                qz_word_list.append(qz_word)
+                                within_tile_list.append(within_tile_base)
                         packs0 = []
                         packs1 = []
                         for ni in range_constexpr(num_acc_n):
                             ki0 = (ku * 2) + 0
                             ki1 = (ku * 2) + 1
-                            qs = qs_list[ni] if is_uint4 else None
-                            qz = qz_list[ni] if is_uint4 else None
-                            b0 = load_b_pack(base_k, ki0, ni, qs_val=qs, qz_bcast=qz)
-                            b1 = load_b_pack(base_k, ki1, ni, qs_val=qs, qz_bcast=qz)
+                            qs_word = qs_word_list[ni] if is_uint4 else None
+                            qz_word = qz_word_list[ni] if is_uint4 else None
+                            within_tile_base = within_tile_list[ni] if is_uint4 else None
+                            b0 = load_b_pack(base_k, ki0, ni, qs_word=qs_word, qz_word=qz_word, within_tile_base=within_tile_base)
+                            b1 = load_b_pack(base_k, ki1, ni, qs_word=qs_word, qz_word=qz_word, within_tile_base=within_tile_base)
                             packs0.append(b0)
                             packs1.append(b1)
                         b_tile.append((packs0, packs1))
