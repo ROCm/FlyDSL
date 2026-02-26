@@ -58,7 +58,7 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     return c.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
@@ -242,12 +242,39 @@ def test_mfma_a8_flyc_preshuffle(
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
+@pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
+@pytest.mark.parametrize("b_dtype", ["fp4"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (32, 8192, 8192, 32, 128, 256),
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+    ]
+)
+def test_mfma_w4_flyc_preshuffle(
+    a_dtype, b_dtype,
+    M, N, K, tile_m, tile_n, tile_k,
+    *,
+    lds_stage: int = DEFAULT_LDS_STAGE,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+):
+    """FP4 (MXFP4) preshuffle GEMM — gfx950 only."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+    if a_dtype == "fp8":
+        pytest.skip("fp8-A not yet supported with MXFP4 preshuffle kernel (op_sel_a overflow)")
+    pytest.skip("MXFP4 kernel not yet ported to flyc API")
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Preshuffle GEMM benchmark")
     parser.add_argument("--in_dtype", type=str, default="fp8",
-                        choices=["fp8", "int8", "int4", "fp16", "bf16"])
+                        choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"])
     parser.add_argument("-M", type=int, default=16)
     parser.add_argument("-N", type=int, default=10240)
     parser.add_argument("-K", type=int, default=8192)
@@ -258,49 +285,40 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--flyc", action="store_true", default=True)
-    parser.add_argument(
-        "--use_async_copy",
-        action="store_true",
-        default=False,
-        help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
-    )
-    parser.add_argument(
-        "--use_cshuffle_epilog",
-        action="store_true",
-        default=False,
-        help="Enable LDS cshuffle epilogue. Default: off.",
-    )
-    parser.add_argument(
-        "--run_aiter_bench",
-        action="store_true",
-        default=DEFAULT_RUN_AITER_BENCH,
-        help="Run aiter comparison benchmark (fp8/int8 only).",
-    )
-    parser.add_argument(
-        "--no_aiter_bench",
-        action="store_false",
-        dest="run_aiter_bench",
-        help="Disable aiter benchmark.",
-    )
-    parser.add_argument(
-        "--test_graph",
-        "-tg",
-        action="store_true",
-        default=False,
-        help="Run the perf harness with CUDA graph mode.",
-    )
-
+    parser.add_argument("--use_async_copy", action="store_true", default=False)
+    parser.add_argument("--use_cshuffle_epilog", action="store_true", default=False)
+    parser.add_argument("--run_aiter_bench", action="store_true", default=DEFAULT_RUN_AITER_BENCH)
+    parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
+    parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
+    parser.add_argument("--wfp4", action="store_true", default=False,
+                        help="Run weight-fp4 (MXFP4) preshuffle GEMM test.")
     args = parser.parse_args()
     torch.set_default_device("cuda")
-    test_mfma_a8_flyc_preshuffle(
-        args.in_dtype,
-        M=args.M, N=args.N, K=args.K,
-        tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
-        use_async_copy=bool(args.use_async_copy),
-        test_graph=bool(args.test_graph),
-        lds_stage=args.lds_stage,
-        bench_iters=args.num_iters,
-        bench_warmup=args.num_warmup,
-        run_aiter_bench=bool(args.run_aiter_bench),
-        use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
-    )
+    try:
+        if not args.wfp4:
+            if args.in_dtype == "fp4":
+                raise ValueError("--in_dtype fp4 requires --wfp4")
+            test_mfma_a8_flyc_preshuffle(
+                args.in_dtype,
+                M=args.M, N=args.N, K=args.K,
+                tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+                use_async_copy=bool(args.use_async_copy),
+                test_graph=bool(args.test_graph),
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+                run_aiter_bench=bool(args.run_aiter_bench),
+                use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            )
+        else:
+            test_mfma_w4_flyc_preshuffle(
+                args.in_dtype if args.in_dtype == "fp8" else "fp4",
+                "fp4",
+                M=args.M, N=args.N, K=args.K,
+                tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+            )
+    except pytest.skip.Exception as e:
+        print(f"Skipped: {e}")

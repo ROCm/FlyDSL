@@ -37,7 +37,11 @@ def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, ele
     else:
         idx_i32 = idx
 
-    i32_vec = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    i32_val = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    if vec_width == 1:
+        i32_vec = vector.from_elements(T.vec(1, T.i32), [i32_val])
+    else:
+        i32_vec = i32_val
     return vector.bitcast(T.vec(int(vec_elems), elem_type), i32_vec)
 
 
