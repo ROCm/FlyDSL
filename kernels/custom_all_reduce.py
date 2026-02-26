@@ -309,6 +309,10 @@ class FlyDSLAllreduce:
         self._exe_cache = {}
         self._threads = 512
         self._max_spin = int(os.environ.get("FLYDSL_AITER_SIGNAL_MAX_SPIN", "20000000"))
+        self._grid_x_cache = {}
+
+        self._reuse_out_default = str(os.environ.get("FLYDSL_AITER_REUSE_OUT", "0")).strip().lower() in {"1", "true", "yes", "y"}
+        self._cached_out = None
 
         # Compile kernel during init
         N = int(rank_data.numel())
@@ -396,13 +400,30 @@ class FlyDSLAllreduce:
         self._exe_cache[key] = exe
         return exe
 
-    def _run_kernel(self, N: int, dtype_str: str, gpu_in_ptrs_array, out_ptr: int, *, capture_self_inp_ptr: int = None):
+    def _run_kernel(
+        self,
+        N: int,
+        dtype_str: str,
+        gpu_in_ptrs_array,
+        out_ptr: int,
+        *,
+        stream_ptr: int | None = None,
+        inp_ptr_override: int | None = None,
+        capture_self_inp_ptr: int | None = None,
+    ):
         """Launch 2-stage allreduce kernel."""
-        pack_elems = 8 if dtype_str == "f16" else 4
-        num_packs = N // pack_elems
-        part_p = num_packs // self.world_size
-        grid_x = max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + self._threads - 1) // self._threads))
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        # Cache grid_x for stable shapes (common in training loops).
+        try:
+            grid_x = self._grid_x_cache[(int(N), str(dtype_str))]
+        except Exception:
+            pack_elems = 8 if dtype_str == "f16" else 4
+            num_packs = int(N) // int(pack_elems)
+            part_p = int(num_packs) // int(self.world_size)
+            grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + self._threads - 1) // self._threads)))
+            self._grid_x_cache[(int(N), str(dtype_str))] = int(grid_x)
+
+        if stream_ptr is None:
+            stream_ptr = int(torch.cuda.current_stream().cuda_stream)
 
         if torch.cuda.is_current_stream_capturing():
             key = (N, dtype_str, self.world_size, "flydsl_allreduce")
@@ -425,14 +446,28 @@ class FlyDSLAllreduce:
                 out_ptr, stream_ptr,
             )
         else:
+            if inp_ptr_override is None:
+                # Default override is the current-rank pointer in the provided ptr array.
+                # For eager path, caller passes input_buffer ptr here.
+                inp_ptr_override = int(self._input_buffer_ptrs[self.rank]) if hasattr(self, "_input_buffer_ptrs") else int(self._in_ptrs[self.rank])
             exe.run_2stage_ptr(
                 self.rank, grid_x, self._self_sg,
                 int(self._gpu_sg_ptrs_array.data_ptr()),
                 int(gpu_in_ptrs_array.data_ptr()),
                 self._tmp_offset, out_ptr, stream_ptr,
+                int(inp_ptr_override),
             )
 
-    def custom_all_reduce(self, inp, *, out=None, use_new: bool = True, open_fp8_quant: bool = False):
+    def custom_all_reduce(
+        self,
+        inp,
+        *,
+        out=None,
+        use_new: bool = True,
+        open_fp8_quant: bool = False,
+        validate: bool = True,
+        stream_ptr: int | None = None,
+    ):
         """Unified interface for all_reduce (eager and cudagraph).
 
         Automatically selects between eager and registered paths based on context.
@@ -441,19 +476,29 @@ class FlyDSLAllreduce:
         _ = open_fp8_quant
 
         if out is None:
-            out = torch.empty_like(inp)
-        if int(inp.numel()) != int(out.numel()):
-            raise ValueError("inp.numel must equal out.numel")
-        if not _is_weak_contiguous(out):
-            raise ValueError("output tensor must be weak-contiguous")
-        dtype_str = self._dtype_str(inp)
-        if dtype_str != self._dtype_str(out):
-            raise ValueError("inp/out dtype mismatch")
-        bytes_n = int(inp.numel()) * int(inp.element_size())
-        if bytes_n % 16 != 0:
-            raise ValueError("byte size must be multiple of 16")
-        if bytes_n > self.max_size:
-            raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
+            if self._reuse_out_default and (self._cached_out is not None) and self._cached_out.shape == inp.shape and self._cached_out.dtype == inp.dtype and self._cached_out.device == inp.device:
+                out = self._cached_out
+            else:
+                out = torch.empty_like(inp)
+                if self._reuse_out_default:
+                    self._cached_out = out
+
+        if validate:
+            if int(inp.numel()) != int(out.numel()):
+                raise ValueError("inp.numel must equal out.numel")
+            if not _is_weak_contiguous(out):
+                raise ValueError("output tensor must be weak-contiguous")
+            dtype_str = self._dtype_str(inp)
+            if dtype_str != self._dtype_str(out):
+                raise ValueError("inp/out dtype mismatch")
+            bytes_n = int(inp.numel()) * int(inp.element_size())
+            if bytes_n % 16 != 0:
+                raise ValueError("byte size must be multiple of 16")
+            if bytes_n > self.max_size:
+                raise ValueError(f"input bytes {bytes_n} exceed max_size {self.max_size}")
+        else:
+            dtype_str = self._dtype_str(inp)
+            bytes_n = int(inp.numel()) * int(inp.element_size())
         N = int(out.numel())
 
         if self._IS_CAPTURING:
@@ -462,6 +507,7 @@ class FlyDSLAllreduce:
                 self._graph_inp = inp
                 self._graph_out = out
                 self._run_kernel(N, dtype_str, self._gpu_in_ptrs_array, int(out.data_ptr()),
+                                 stream_ptr=stream_ptr,
                                  capture_self_inp_ptr=int(inp.data_ptr()))
                 return out
             else:
@@ -469,13 +515,27 @@ class FlyDSLAllreduce:
                 # Still run eager path to populate exe cache
                 inp_u8 = inp.view(torch.uint8)
                 self.input_buffer[:bytes_n].copy_(inp_u8)
-                self._run_kernel(N, dtype_str, self._gpu_input_buffer_ptrs_array, int(self.output_buffer.data_ptr()))
+                self._run_kernel(
+                    N,
+                    dtype_str,
+                    self._gpu_input_buffer_ptrs_array,
+                    int(self.output_buffer.data_ptr()),
+                    stream_ptr=stream_ptr,
+                    inp_ptr_override=int(self.input_buffer.data_ptr()),
+                )
                 out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
                 return out
 
         # Eager path: memcpy -> kernel -> memcpy
         inp_u8 = inp.view(torch.uint8)
         self.input_buffer[:bytes_n].copy_(inp_u8)
-        self._run_kernel(N, dtype_str, self._gpu_input_buffer_ptrs_array, int(self.output_buffer.data_ptr()))
+        self._run_kernel(
+            N,
+            dtype_str,
+            self._gpu_input_buffer_ptrs_array,
+            int(self.output_buffer.data_ptr()),
+            stream_ptr=stream_ptr,
+            inp_ptr_override=int(self.input_buffer.data_ptr()),
+        )
         out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
         return out
