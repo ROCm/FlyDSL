@@ -93,7 +93,7 @@ def _unwrap_tuple(elems):
 __all__ = [
     # Maybe remove it in the future
     "T",
-    # "arith",  # removed to avoid shadowing flydsl.expr.arith submodule
+    # "arith",
     # Enum Attributes
     "AddressSpace",
     "CachePolicy",
@@ -509,12 +509,11 @@ def raked_product(layout, tiler, loc=None, ip=None):
 def make_atom(atom_type, loc=None, ip=None):
     return fly.make_atom(atom_type, loc=loc, ip=ip)
 
-
-
 @dsl_api_wrapper
 def make_copy_atom(atom_type, loc=None, ip=None):
     from .derived import CopyAtom
     return CopyAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+
 
 @dsl_api_wrapper
 def make_tile(layouts, loc=None, ip=None):
