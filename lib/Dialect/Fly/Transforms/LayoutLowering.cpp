@@ -2167,6 +2167,30 @@ public:
   }
 };
 
+class RecastLayoutOpLowering : public OpRewritePattern<RecastLayoutOp> {
+public:
+  using OpRewritePattern<RecastLayoutOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(RecastLayoutOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value layoutValue = op.getSrc();
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+
+    int32_t newTypeBits = op.getNewTypeBits();
+    int32_t oldTypeBits = op.getOldTypeBits();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
+    LayoutValueAdaptor result = layoutRecast(layoutBuilder, layoutAdaptor, oldTypeBits, newTypeBits);
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
 class PrintOpLowering : public OpRewritePattern<PrintOp> {
 public:
   using OpRewritePattern<PrintOp>::OpRewritePattern;
