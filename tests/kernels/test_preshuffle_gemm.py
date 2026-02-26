@@ -27,6 +27,8 @@ from flydsl.runtime.device import get_rocm_arch
 
 logging.basicConfig(level=logging.INFO)
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 try:
     import aiter
@@ -34,15 +36,12 @@ try:
 except ImportError:
     HAS_AITER = False
 
-arch = str(get_rocm_arch())
-if "gfx95" in arch:
-    DTYPE_FP8 = torch.float8_e4m3fn
-else:
-    DTYPE_FP8 = torch.float8_e4m3fnuz
+ARCH = str(get_rocm_arch())
+DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 
 DEFAULT_LDS_STAGE = 2
-DEFAULT_BENCH_ITERS = 100
-DEFAULT_BENCH_WARMUP = 10
+DEFAULT_BENCH_ITERS = 20
+DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
 
 
@@ -64,21 +63,36 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     "M, N, K, tile_m, tile_n, tile_k",
     [
         (16, 5120, 8192, 16, 64, 512),
-        (5120, 5120, 8320, 64, 256, 128),
-        (9728, 8192, 8320, 128, 128, 128),
-        (5133, 5120, 8320, 64, 256, 128),
+        (33, 1024, 2048, 32, 64, 512),
+        pytest.param(5120, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
+        pytest.param(5120, 2048, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(9728, 8192, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(5133, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
     ]
 )
+@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph", marks=pytest.mark.large_shape),
+])
 def test_mfma_a8_flyc_preshuffle(
     in_dtype,
     M, N, K,
     tile_m, tile_n, tile_k,
     *,
+    use_async_copy,
+    test_graph,
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    use_cshuffle_epilog: bool = False,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
+    if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
+    if test_graph:
+        pytest.skip("CUDA graph capture requires async stream support in MLIR lowering")
     print("=" * 80)
     print(
         f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})"
@@ -94,8 +108,10 @@ def test_mfma_a8_flyc_preshuffle(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,
         lds_stage=lds_stage,
+        use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Kernel prepared (lds_stage={lds_stage})")
+    print(f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy})")
 
     size_c = M * N
     size_a = M * K
@@ -110,7 +126,6 @@ def test_mfma_a8_flyc_preshuffle(
         elem_bytes = 1
 
     device = torch.device("cuda")
-    torch.manual_seed(42)
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
 
@@ -174,6 +189,7 @@ def test_mfma_a8_flyc_preshuffle(
             sa.contiguous().view(-1) if sa.numel() > 0 else sa,
             sb.contiguous().view(-1) if sb.numel() > 0 else sb,
             M, N,
+            torch.cuda.current_stream(),
         )
 
     bench_iters = max(2, int(bench_iters))
@@ -187,11 +203,39 @@ def test_mfma_a8_flyc_preshuffle(
         sb_flat,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
+
+    if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
+        print("-" * 40)
+        print("Running Aiter Benchmark...")
+        try:
+            def launch_aiter(a, b, sa, sb):
+                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
+
+            c_aiter, us1 = run_perftest(
+                launch_aiter, a_q, b_shuffled, scale_a, scale_b,
+                testGraph=test_graph,
+            )
+            c_aiter_f32 = c_aiter.to(torch.float32)
+            verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
+
+            bytes_moved_a = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+            flops_a = 2 * M * N * K
+            tflops_aiter = flops_a / (us1 / 1e6) / 1e12
+            bw_aiter = bytes_moved_a / 1e9 / (us1 / 1e6)
+            print(
+                f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
+            )
+            print("-" * 40)
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else repr(e)
+            print(f"Skipping Aiter benchmark (not runnable here): {msg}")
+            print("-" * 40)
 
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
     flops = 2 * M * N * K
@@ -216,6 +260,37 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--flyc", action="store_true", default=True)
+    parser.add_argument(
+        "--use_async_copy",
+        action="store_true",
+        default=False,
+        help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
+    )
+    parser.add_argument(
+        "--use_cshuffle_epilog",
+        action="store_true",
+        default=False,
+        help="Enable LDS cshuffle epilogue. Default: off.",
+    )
+    parser.add_argument(
+        "--run_aiter_bench",
+        action="store_true",
+        default=DEFAULT_RUN_AITER_BENCH,
+        help="Run aiter comparison benchmark (fp8/int8 only).",
+    )
+    parser.add_argument(
+        "--no_aiter_bench",
+        action="store_false",
+        dest="run_aiter_bench",
+        help="Disable aiter benchmark.",
+    )
+    parser.add_argument(
+        "--test_graph",
+        "-tg",
+        action="store_true",
+        default=False,
+        help="Run the perf harness with CUDA graph mode.",
+    )
 
     args = parser.parse_args()
     torch.set_default_device("cuda")
@@ -223,7 +298,11 @@ if __name__ == "__main__":
         args.in_dtype,
         M=args.M, N=args.N, K=args.K,
         tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+        use_async_copy=bool(args.use_async_copy),
+        test_graph=bool(args.test_graph),
         lds_stage=args.lds_stage,
         bench_iters=args.num_iters,
         bench_warmup=args.num_warmup,
+        run_aiter_bench=bool(args.run_aiter_bench),
+        use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
     )

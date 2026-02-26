@@ -3,7 +3,8 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}/build-fly/python_packages:${REPO_ROOT}"
-export LD_LIBRARY_PATH="${REPO_ROOT}/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH:-}"
+MLIR_INSTALL_LIB="${REPO_ROOT}/../llvm-project-flydsl/build-flydsl/mlir_install/lib"
+export LD_LIBRARY_PATH="${REPO_ROOT}/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${MLIR_INSTALL_LIB}:${LD_LIBRARY_PATH:-}"
 
 echo "=== vecadd ==="
 python3 examples/01-vectorAdd.py 2>&1 | tail -2

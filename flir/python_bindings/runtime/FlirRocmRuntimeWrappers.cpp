@@ -81,6 +81,13 @@ extern "C" void mgpuStreamDestroy(hipStream_t stream) {
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
+  // Skip synchronization when the stream is in graph capture mode.
+  // hipStreamSynchronize is not allowed during capture and would abort it.
+  hipStreamCaptureStatus captureStatus;
+  if (hipStreamIsCapturing(stream, &captureStatus) == hipSuccess &&
+      captureStatus == hipStreamCaptureStatusActive) {
+    return;
+  }
   HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
 }
 
