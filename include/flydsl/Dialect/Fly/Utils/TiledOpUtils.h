@@ -13,7 +13,7 @@ namespace mlir::fly {
 namespace detail {
 
 template <class Layout>
-Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                  Layout trgLayout, LayoutAttr tiledLayoutThrVal,
                                  LayoutAttr ref2trg) {
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
@@ -138,7 +138,7 @@ Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomTypeInter
 } // namespace detail
 
 template <class Layout>
-Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                     LayoutAttr tiledLayoutThrVal, TileAttr tileMN,
                                     Layout srcLayout) {
   auto *ctx = tiledLayoutThrVal.getContext();
@@ -155,7 +155,7 @@ Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomType
 }
 
 template <class Layout>
-Layout layoutTiledCopyThrValViewDst(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValViewDst(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                     LayoutAttr tiledLayoutThrVal, TileAttr tileMN,
                                     Layout dstLayout) {
   auto *ctx = tiledLayoutThrVal.getContext();

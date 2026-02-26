@@ -29,7 +29,18 @@ class Atom:
         return [self.value]
 
 
-class CopyAtom(Atom):
+class CopyAtom:
+    def __init__(self, value: ir.Value):
+        self.value = value
+        self.atom_ty = self.value.type
+
+    @classmethod
+    def __new_from_ir_values__(cls, values):
+        return cls(values[0])
+
+    def __extract_ir_values__(self):
+        return [self.value]
+
     def __str__(self):
         return f"CopyAtom({self.atom_ty})"
 

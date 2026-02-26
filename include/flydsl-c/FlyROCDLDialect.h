@@ -31,7 +31,7 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(MlirType
 MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// CopyAtom_CDNA3_BufferLSAType
+// CopyOp_CDNA3_BufferLSAType
 //===----------------------------------------------------------------------===//
 
 //===----------------------------------------------------------------------===//

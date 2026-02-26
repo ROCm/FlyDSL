@@ -7,11 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-import flydsl
-
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..runtime.device import get_rocm_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
@@ -24,7 +23,7 @@ from .kernel_function import (
     get_gpu_module_body,
 )
 from .protocol import get_ir_types, new_from_ir_values
-from flydsl.runtime.device import get_rocm_arch
+
 
 @lru_cache(maxsize=1)
 def _get_llvm_version() -> str:
@@ -40,6 +39,8 @@ def _get_llvm_version() -> str:
 
 @lru_cache(maxsize=1)
 def _flydsl_verison_key() -> str:
+    import flydsl
+
     return f"flydsl:{flydsl.__version__}|llvm:{_get_llvm_version()}"
 
 
@@ -112,7 +113,6 @@ def _jit_function_cache_key(func: Callable) -> str:
 
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
-
 
 
 class MlirCompiler:
@@ -233,6 +233,8 @@ class JitFunction:
         if self.manager_key is not None:
             return
         self.manager_key = _jit_function_cache_key(self.func)
+        if not env.runtime.enable_cache:
+            return
         cache_root = env.runtime.cache_dir
         if cache_root:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
@@ -260,7 +262,7 @@ class JitFunction:
 
         self._ensure_cache_manager()
 
-        if not hasattr(self, '_sig'):
+        if not hasattr(self, "_sig"):
             self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
@@ -268,17 +270,18 @@ class JitFunction:
 
         cache_key = self._make_cache_key(bound.arguments)
 
-        # In-memory compiled function cache (survives across calls, avoids re-compilation)
-        if not hasattr(self, '_mem_cache'):
-            self._mem_cache = {}
-        compiled_func = self._mem_cache.get(cache_key)
-        if compiled_func is None:
-            cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
-        else:
-            cached_func = compiled_func
+        cached_func = None
+        if env.runtime.enable_cache:
+            if not hasattr(self, "_mem_cache"):
+                self._mem_cache = {}
+            compiled_func = self._mem_cache.get(cache_key)
+            if compiled_func is None:
+                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            else:
+                cached_func = compiled_func
 
         if cached_func is not None:
-            if not hasattr(self, '_cached_ctx'):
+            if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
             with self._cached_ctx:
@@ -329,9 +332,10 @@ class JitFunction:
                 original_ir,
             )
 
-            self._mem_cache[cache_key] = compiled_func
-            if self.cache_manager:
-                self.cache_manager.set(cache_key, compiled_func)
+            if env.runtime.enable_cache:
+                self._mem_cache[cache_key] = compiled_func
+                if self.cache_manager:
+                    self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
 

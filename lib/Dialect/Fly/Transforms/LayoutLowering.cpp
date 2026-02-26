@@ -1931,7 +1931,7 @@ static std::pair<Value, Value> getMemRefPtrAndLayout(OpBuilder &builder, Locatio
 }
 
 template <typename OpTy, LayoutValueAdaptor (*ThrValViewFunc)(LayoutBuilder<LayoutValueAdaptor> &,
-                                                              CopyAtomTypeInterface, LayoutAttr,
+                                                              CopyAtomType, LayoutAttr,
                                                               TileAttr, LayoutValueAdaptor)>
 class TiledCopyPartitionOpLowering : public OpRewritePattern<OpTy> {
 public:
@@ -1957,7 +1957,7 @@ public:
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(coord)))
       return failure();
 
-    auto copyAtom = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+    auto copyAtom = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
     if (!copyAtom)
       return failure();
 
@@ -2136,7 +2136,7 @@ public:
   using OpRewritePattern<CopyOp>::OpRewritePattern;
 
   static void emitCopyOrAtomCall(PatternRewriter &rewriter, Location loc, Value copyAtomVal,
-                                 CopyAtomTypeInterface copyAtomTy, Value srcPtr,
+                                 CopyAtomType copyAtomTy, Value srcPtr,
                                  LayoutValueAdaptor valSrcLayout, Value dstPtr,
                                  LayoutValueAdaptor valDstLayout,
                                  LayoutBuilder<LayoutValueAdaptor> &layoutBuilder) {
@@ -2169,11 +2169,11 @@ public:
     Value src = op.getSrc();
     Value dst = op.getDst();
 
-    CopyAtomTypeInterface copyAtomTy;
+    CopyAtomType copyAtomTy;
     if (auto tiledCopyTy = dyn_cast<TiledCopyType>(copyAtomVal.getType()))
-      copyAtomTy = dyn_cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+      copyAtomTy = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
     else
-      copyAtomTy = dyn_cast<CopyAtomTypeInterface>(copyAtomVal.getType());
+      copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType());
     if (!copyAtomTy)
       return failure();
 

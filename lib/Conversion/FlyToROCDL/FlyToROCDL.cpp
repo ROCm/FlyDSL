@@ -333,8 +333,9 @@ public:
   LogicalResult matchAndRewrite(CopyAtomCall op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     Type copyAtomType = op.getCopyAtom().getType();
-    if (!isa<CopyAtomTypeInterface>(copyAtomType))
-      return rewriter.notifyMatchFailure(op, "copyAtom does not implement CopyAtomTypeInterface");
+    auto copyAtom = dyn_cast<CopyAtomType>(copyAtomType);
+    if (!copyAtom)
+      return rewriter.notifyMatchFailure(op, "copyAtom is not CopyAtomType");
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
@@ -351,26 +352,23 @@ public:
       return rewriter.notifyMatchFailure(op, "src/dst element types mismatch");
 
     Location loc = op.getLoc();
+    Type copyOpType = copyAtom.getCopyOp();
 
-    if (isa<CopyAtomUniversalCopyType>(copyAtomType))
-      return lowerUniversalCopy(op, rewriter, loc, cast<CopyAtomUniversalCopyType>(copyAtomType),
-                                srcFlyTy, src, dst);
-    else if (isa<fly_rocdl::CopyAtom_CDNA3_BufferLSAType>(copyAtomType))
-      return lowerCDNA3BufferLSA(op, rewriter, loc,
-                                 cast<fly_rocdl::CopyAtom_CDNA3_BufferLSAType>(copyAtomType),
-                                 srcFlyTy, src, dst);
+    if (isa<CopyOpUniversalCopyType>(copyOpType))
+      return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
+    else if (isa<fly_rocdl::CopyOp_CDNA3_BufferLSAType>(copyOpType))
+      return lowerCDNA3BufferLSA(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
 
-    return rewriter.notifyMatchFailure(op, "unsupported CopyAtom type");
+    return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
   }
 
 private:
   LogicalResult lowerUniversalCopy(CopyAtomCall op, ConversionPatternRewriter &rewriter,
-                                   Location loc, CopyAtomUniversalCopyType atomTy,
-                                   fly::MemRefType srcFlyTy, Value src, Value dst) const {
+                                   Location loc, CopyAtomType copyAtomTy, fly::MemRefType srcFlyTy,
+                                   Value src, Value dst) const {
     LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
 
-    auto thrValLayoutSrc =
-        dyn_cast<LayoutAttr>(cast<CopyAtomTypeInterface>(atomTy).getThrValLayoutSrc());
+    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
     IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
@@ -398,9 +396,9 @@ private:
   }
 
   LogicalResult lowerCDNA3BufferLSA(CopyAtomCall op, ConversionPatternRewriter &rewriter,
-                                    Location loc, fly_rocdl::CopyAtom_CDNA3_BufferLSAType atomTy,
-                                    fly::MemRefType srcFlyTy, Value src, Value dst) const {
-    return rewriter.notifyMatchFailure(op, "CopyAtom_CDNA3_BufferLSA lowering not yet implemented");
+                                    Location loc, CopyAtomType copyAtomTy, fly::MemRefType srcFlyTy,
+                                    Value src, Value dst) const {
+    return rewriter.notifyMatchFailure(op, "CopyOp_CDNA3_BufferLSA lowering not yet implemented");
   }
 };
 
@@ -675,7 +673,7 @@ public:
     target.addIllegalDialect<fly::FlyDialect>();
 
     target.addLegalOp<MakeIntTupleOp, MakeLayoutOp, MakeTileOp>();
-    target.addLegalOp<MakeAtomOp>();
+    target.addLegalOp<MakeAtomOp, MakeCopyAtomOp>();
 
     FlyTypeConverter typeConverter;
 

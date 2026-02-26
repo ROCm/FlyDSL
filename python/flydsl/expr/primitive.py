@@ -4,8 +4,9 @@ from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
     CachePolicy,
+    CopyAtomType,
     # Type
-    CopyAtomUniversalCopyType,
+    CopyOpUniversalCopyType,
     IntTupleType,
     LayoutType,
     MemRefType,
@@ -25,7 +26,7 @@ from .typing import Int32
 #     "AddressSpace",
 #     "CachePolicy",
 #     # Types
-#     "CopyAtomUniversalCopyType",
+#     "CopyOpUniversalCopyType",
 #     "IntTupleType",
 #     "LayoutType",
 #     "MemRefType",
@@ -248,6 +249,7 @@ def get_flat_coord(index, layout, loc=None, ip=None):
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
+
 @dsl_api_wrapper
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
@@ -303,9 +305,7 @@ def recast_layout(layout, old_type_bits, new_type_bits, loc=None, ip=None):
 
     old_type_bits = _to_static_bits(old_type_bits)
     new_type_bits = _to_static_bits(new_type_bits)
-    return fly.recast_layout(
-        new_type_bits=new_type_bits, old_type_bits=old_type_bits, src=layout, loc=loc, ip=ip
-    )
+    return fly.recast_layout(new_type_bits=new_type_bits, old_type_bits=old_type_bits, src=layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -456,10 +456,23 @@ def add_offset(ptr, offset, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def make_copy_atom(atom_type, loc=None, ip=None):
+def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
     from .derived import CopyAtom
+    from .numeric import NumericMeta
 
-    return CopyAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+    if isinstance(elem_type, NumericMeta):
+        val_bits = elem_type.width
+    elif isinstance(elem_type, ir.Type):
+        if hasattr(elem_type, "width"):
+            val_bits = int(elem_type.width)
+        else:
+            raise TypeError(f"make_copy_atom: elem_type must have a width, got {elem_type}")
+    elif isinstance(elem_type, int):
+        val_bits = elem_type
+    else:
+        raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
+    copy_op_val = fly.make_atom(copy_op_type, loc=loc, ip=ip)
+    return CopyAtom(fly.make_copy_atom(copy_op_val, val_bits=val_bits, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper

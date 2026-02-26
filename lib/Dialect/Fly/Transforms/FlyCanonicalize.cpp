@@ -132,7 +132,7 @@ public:
           MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(layoutAttr.getStride()), {});
       rewriter.replaceOpWithNewOp<MakeLayoutOp>(op, layoutTy, shape, stride);
       return success();
-    } else if (isa<CopyAtomTypeInterface, MmaAtomTypeInterface>(resultType)) {
+    } else if (isa<MmaAtomTypeInterface>(resultType)) {
       auto mayStatic = cast<MayStaticTypeInterface>(resultType);
       if (!mayStatic.isStatic())
         return failure();
