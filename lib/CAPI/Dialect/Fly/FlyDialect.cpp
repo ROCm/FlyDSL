@@ -2,6 +2,8 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
+#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/TiledOpUtils.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
@@ -218,6 +220,189 @@ MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy) {
 
 MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type) {
   return wrap(cast<MmaAtomUniversalFMAType>(unwrap(type)).getElemTy());
+}
+
+//===----------------------------------------------------------------------===//
+// TiledMmaType
+//===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyTiledMmaType(MlirType type) { return isa<TiledMmaType>(unwrap(type)); }
+
+MlirTypeID mlirFlyTiledMmaTypeGetTypeID(void) { return wrap(TiledMmaType::getTypeID()); }
+
+MlirType mlirFlyTiledMmaTypeGetMmaAtom(MlirType type) {
+  return wrap(cast<TiledMmaType>(unwrap(type)).getMmaAtom());
+}
+
+MlirType mlirFlyTiledMmaTypeGetAtomLayout(MlirType type) {
+  return wrap(static_cast<Type>(cast<TiledMmaType>(unwrap(type)).getAtomLayout()));
+}
+
+MlirType mlirFlyTiledMmaTypeGetPermutation(MlirType type) {
+  return wrap(static_cast<Type>(cast<TiledMmaType>(unwrap(type)).getPermutation()));
+}
+
+MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type) {
+  auto tiledMmaTy = cast<TiledMmaType>(unwrap(type));
+  auto mmaAtom = cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto atomLayoutMNK = tiledMmaTy.getAtomLayout().getAttr();
+  auto permutationMNK = tiledMmaTy.getPermutation().getAttr();
+  auto *ctx = atomLayoutMNK.getContext();
+  LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+  IntTupleAttr shapeMNK = cast<IntTupleAttr>(mmaAtom.getShapeMNK());
+
+  SmallVector<Attribute> tileSizeElems;
+  for (int i = 0; i < 3; ++i) {
+    if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
+      auto atomShapeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
+      auto thrSizeI = attrBuilder.getStaticValue(
+          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
+      tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
+    } else {
+      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
+      auto sizeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
+      tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
+    }
+  }
+  auto result = IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
+  return wrap(IntTupleType::get(result));
+}
+
+MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type) {
+  auto tiledMmaTy = cast<TiledMmaType>(unwrap(type));
+  auto mmaAtom = cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto atomLayoutMNK = tiledMmaTy.getAtomLayout().getAttr();
+  auto *ctx = atomLayoutMNK.getContext();
+  LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+  LayoutAttr atomThrLayout = cast<LayoutAttr>(mmaAtom.getThrLayout());
+  LayoutAttr thrLayoutVMNK = layoutTiledProduct(
+      attrBuilder, atomThrLayout, attrBuilder.materializeConstantLayout(atomLayoutMNK));
+  return wrap(LayoutType::get(thrLayoutVMNK));
+}
+
+MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
+  auto tiledMmaTy = cast<TiledMmaType>(unwrap(type));
+  auto mmaAtom = cast<MmaAtomTypeInterface>(tiledMmaTy.getMmaAtom());
+  auto atomLayoutMNK = tiledMmaTy.getAtomLayout().getAttr();
+  auto permutationMNK = tiledMmaTy.getPermutation().getAttr();
+  auto *ctx = atomLayoutMNK.getContext();
+  LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+  IntTupleAttr shapeMNK = cast<IntTupleAttr>(mmaAtom.getShapeMNK());
+
+  int idx0, idx1;
+  switch (operandId) {
+  case MmaOperand::C:
+  case MmaOperand::D:
+    idx0 = 0;
+    idx1 = 1;
+    break;
+  case MmaOperand::A:
+    idx0 = 0;
+    idx1 = 2;
+    break;
+  case MmaOperand::B:
+    idx0 = 1;
+    idx1 = 2;
+    break;
+  }
+
+  SmallVector<Attribute> tileSizeElems;
+  for (int i : {idx0, idx1}) {
+    if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
+      auto atomShapeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
+      auto thrSizeI = attrBuilder.getStaticValue(
+          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
+      tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
+    } else {
+      auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
+      auto sizeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
+      tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
+    }
+  }
+  IntTupleAttr refShape = IntTupleAttr::get(ArrayAttr::get(ctx, tileSizeElems));
+  IntTupleAttr refStride = IntTupleAttr::get(
+      ArrayAttr::get(ctx, {IntTupleAttr::getLeafStatic(ctx, 1), refShape.at(0)})); // TODO
+  LayoutAttr refLayout = LayoutAttr::get(refShape, refStride);
+
+  LayoutAttr thrfrgResult = layoutTiledMmaThrValOperandView(attrBuilder, mmaAtom, atomLayoutMNK,
+                                                            permutationMNK, operandId, refLayout);
+
+  IntTupleAttr thrModeShape = thrfrgResult.getShape().at(0);
+  IntTupleAttr thrModeStride = thrfrgResult.getStride().at(0);
+  LayoutAttr thrModeLayout = LayoutAttr::get(thrModeShape, thrModeStride);
+
+  LayoutAttr atomThrLayout = cast<LayoutAttr>(mmaAtom.getThrLayout());
+  LayoutAttr thrLayoutVMNK = layoutTiledProduct(
+      attrBuilder, atomThrLayout, attrBuilder.materializeConstantLayout(atomLayoutMNK));
+
+  if (operandId == MmaOperand::A || operandId == MmaOperand::B) {
+    IntTupleAttr thrMSize = thrLayoutVMNK.getShape().at(1);
+    IntTupleAttr thrNSize = thrLayoutVMNK.getShape().at(2);
+    IntTupleAttr stride0, stride1;
+    if (operandId == MmaOperand::A) {
+      stride0 = IntTupleAttr::getLeafStatic(ctx, 1);
+      stride1 = IntTupleAttr::getLeafStatic(ctx, 0);
+    } else {
+      stride0 = IntTupleAttr::getLeafStatic(ctx, 0);
+      stride1 = IntTupleAttr::getLeafStatic(ctx, 1);
+    }
+    IntTupleAttr mnShape = IntTupleAttr::get(ArrayAttr::get(ctx, {thrMSize, thrNSize}));
+    IntTupleAttr mnStride = IntTupleAttr::get(ArrayAttr::get(ctx, {stride0, stride1}));
+    LayoutAttr mnLayout = LayoutAttr::get(mnShape, mnStride);
+
+    TileAttr innerTile =
+        TileAttr::get(ArrayAttr::get(ctx, {mnLayout, IntAttr::getNone(ctx)}));
+    TileAttr outerTile =
+        TileAttr::get(ArrayAttr::get(ctx, {IntAttr::getNone(ctx), innerTile}));
+    thrModeLayout = layoutComposition(attrBuilder, thrModeLayout, outerTile);
+  }
+
+  IntTupleAttr valModeShape = thrfrgResult.getShape().at(1);
+  IntTupleAttr valModeStride = thrfrgResult.getStride().at(1);
+
+  LayoutAttr complementThrVMNK = layoutComplement(attrBuilder, thrLayoutVMNK);
+
+  LayoutAttr thrCrd2idx_layout = LayoutAttr::get(
+      IntTupleAttr::get(
+          ArrayAttr::get(ctx, {thrLayoutVMNK.getShape(), complementThrVMNK.getShape()})),
+      IntTupleAttr::get(
+          ArrayAttr::get(ctx, {thrLayoutVMNK.getStride(), complementThrVMNK.getStride()})));
+  LayoutAttr thrIdx2Crd_layout = layoutRightInverse(attrBuilder, thrCrd2idx_layout);
+
+  IntTupleAttr vmnkSize = intTupleProduct(attrBuilder, thrLayoutVMNK.getShape());
+  LayoutAttr vmnkSizeLayout = LayoutAttr::get(
+      IntTupleAttr::get(ArrayAttr::get(ctx, {vmnkSize, IntTupleAttr::getLeafStatic(ctx, 1)})),
+      IntTupleAttr::get(ArrayAttr::get(
+          ctx, {IntTupleAttr::getLeafStatic(ctx, 1), IntTupleAttr::getLeafStatic(ctx, 0)})));
+
+  LayoutAttr thrIdx2Offset = layoutComposition(attrBuilder, vmnkSizeLayout, thrIdx2Crd_layout);
+  LayoutAttr resThrLayout = layoutComposition(attrBuilder, thrModeLayout, thrIdx2Offset);
+
+  IntTupleAttr finalShape =
+      IntTupleAttr::get(ArrayAttr::get(ctx, {resThrLayout.getShape(), valModeShape}));
+  IntTupleAttr finalStride =
+      IntTupleAttr::get(ArrayAttr::get(ctx, {resThrLayout.getStride(), valModeStride}));
+  LayoutAttr result = LayoutAttr::get(finalShape, finalStride);
+  return wrap(LayoutType::get(result));
+}
+
+MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutA(MlirType type) {
+  return tiledMmaGetTiledTVLayout(type, MmaOperand::A);
+}
+
+MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutB(MlirType type) {
+  return tiledMmaGetTiledTVLayout(type, MmaOperand::B);
+}
+
+MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type) {
+  return tiledMmaGetTiledTVLayout(type, MmaOperand::C);
 }
 
 //===----------------------------------------------------------------------===//

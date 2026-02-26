@@ -81,7 +81,9 @@ CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
 
 bool CopyAtomUniversalCopyType::isStatic() const { return true; }
 
-Attribute CopyAtomUniversalCopyType::getThrSize() const { return FxC(1); }
+Attribute CopyAtomUniversalCopyType::getThrLayout() const {
+  return FxLayout(FxC(1), FxC(1));
+}
 
 // TODO: Back to getBitSize() when recast_layout is ready.
 Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
@@ -100,7 +102,9 @@ Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
 }
 
-Attribute MmaAtomUniversalFMAType::getThrSize() const { return FxC(1); }
+Attribute MmaAtomUniversalFMAType::getThrLayout() const {
+  return FxLayout(FxC(1), FxC(1));
+}
 
 Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
   return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));

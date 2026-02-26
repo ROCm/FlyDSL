@@ -11,9 +11,8 @@ namespace mlir::fly_rocdl {
 
 bool CopyAtom_CDNA3_BufferLSAType::isStatic() const { return true; }
 
-Attribute CopyAtom_CDNA3_BufferLSAType::getThrSize() const {
-  auto ctx = getContext();
-  return FxC(1);
+Attribute CopyAtom_CDNA3_BufferLSAType::getThrLayout() const {
+  return FxLayout(FxC(1), FxC(1));
 }
 Attribute CopyAtom_CDNA3_BufferLSAType::getThrValLayoutSrc() const { return {}; }
 Attribute CopyAtom_CDNA3_BufferLSAType::getThrValLayoutDst() const { return {}; }

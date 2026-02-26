@@ -2046,8 +2046,7 @@ public:
         MakeViewOp::create(rewriter, loc, inputPtr, layoutBuilder.getValue(thrValView));
 
     LayoutBuilder<LayoutAttr> attrBuilder(ctx);
-    IntTupleAttr thrSizeAttr = cast<IntTupleAttr>(mmaAtom.getThrSize());
-    LayoutAttr atomThrIDLayout = LayoutAttr::get(thrSizeAttr, IntTupleAttr::getLeafStatic(ctx, 1));
+    LayoutAttr atomThrIDLayout = cast<LayoutAttr>(mmaAtom.getThrLayout());
     LayoutAttr thrLayoutVMNK = layoutTiledProduct(
         attrBuilder, atomThrIDLayout, attrBuilder.materializeConstantLayout(atomLayoutMNK));
 
