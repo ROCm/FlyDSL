@@ -506,6 +506,24 @@ public:
   }
 };
 
+
+class FlyUnrealizedCastLowering
+    : public OpConversionPattern<UnrealizedConversionCastOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    if (op.getNumResults() != 1 || adaptor.getInputs().size() != 1)
+      return failure();
+    Value input = adaptor.getInputs()[0];
+    Type resultType = getTypeConverter()->convertType(op.getResultTypes()[0]);
+    if (!resultType || resultType != input.getType())
+      return failure();
+    rewriter.replaceOp(op, input);
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -575,6 +593,7 @@ public:
     patterns.add<CopyAtomCallLowering>(typeConverter, context);
     patterns.add<MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
+    patterns.add<FlyUnrealizedCastLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);

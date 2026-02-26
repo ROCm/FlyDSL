@@ -221,12 +221,12 @@ def compile_preshuffle_gemm_a8(
 
         # ---- Wave / lane decomposition ----
         layout_wave_lane = fx.make_layout((4, 64), (64, 1))
-        coord_wave_lane = idx2crd(fx.make_int_tuple(tx), layout_wave_lane)
+        coord_wave_lane = idx2crd(tx, layout_wave_lane)
         wave_id = layout_get(coord_wave_lane, 0)
         lane_id = layout_get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(fx.make_int_tuple(lane_id), layout_lane16)
+        coord_lane16 = idx2crd(lane_id, layout_lane16)
         lane_div_16 = layout_get(coord_lane16, 0)
         lane_mod_16 = layout_get(coord_lane16, 1)
 
