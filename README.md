@@ -63,6 +63,7 @@ Or use the helper script (clones ROCm llvm-project and builds MLIR):
 
 ```bash
 bash scripts/build_llvm.sh
+export MLIR_PATH=/path/to/llvm-project/mlir_install
 ```
 
 ### B) Build FLIR (C++ + embedded python package)

@@ -689,9 +689,8 @@ def run_moe_stage2(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
-    group_size: int = -1,
-    # Stage2 output is fp16 (half2 atomics + CShuffle). The legacy f32-atomic path was removed.
     out_dtype: str = "f16",
+    group_size: int = -1,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -957,9 +956,12 @@ def run_moe_stage2(
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("f16", "fp16", "half"):
-        raise ValueError(f"out_dtype must be 'f16' (stage2 f32 path removed), got {out_dtype!r}")
-    out_torch_dtype = torch.float16
+    if out_s in ("f16", "fp16", "half"):
+        out_torch_dtype = torch.float16
+    elif out_s in ("f32", "fp32", "float"):
+        out_torch_dtype = torch.float32
+    else:
+        raise ValueError(f"out_dtype must be 'f16' or 'f32', got {out_dtype!r}")
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -971,6 +973,7 @@ def run_moe_stage2(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n,
@@ -1194,6 +1197,7 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"])
+@pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
@@ -1214,6 +1218,7 @@ def test_moe_gemm_2stage(
     tile_k2: int,
     doweight_stage1: bool,
     in_dtype: str,
+    out_dtype: str,
     use_reduce: bool,
     use_valid_mask: bool,
     test_graph: bool,
@@ -1234,6 +1239,9 @@ def test_moe_gemm_2stage(
     """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
+    out_s = str(out_dtype).strip().lower()
+    if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
+        pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16")
     device = torch.device("cuda")
@@ -1339,6 +1347,7 @@ def test_moe_gemm_2stage(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n2,
@@ -1761,6 +1770,13 @@ if __name__ == "__main__":
         choices=["both", "atomic", "reduce"],
         help="Stage2 accumulation mode: 'atomic', 'reduce', or 'both' (default: both).",
     )
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="f16",
+        choices=["f16", "f32"],
+        help="Stage2 output dtype: f16 (half2 atomics) or f32 (scalar fp32 atomics).",
+    )
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
 
     # Benchmark knobs
@@ -1809,6 +1825,13 @@ if __name__ == "__main__":
         reduce_flags = [False]
 
     def run_one(dt: str, use_reduce: bool):
+        out_s = str(args.out_dtype).strip().lower()
+        if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
+            print("[skip] reduce mode does not support out_dtype='f32'")
+            return
+        if (not bool(use_reduce)) and bool(args.use_valid_mask):
+            print("[skip] valid_mask is only used in reduce mode (atomic ignores it)")
+            return
         test_moe_gemm_2stage(
             tokens=int(args.tokenNum),
             model_dim=int(model_dim),
@@ -1822,6 +1845,7 @@ if __name__ == "__main__":
             tile_k2=tile_k2,
             doweight_stage1=bool(args.doweight_stage1),
             in_dtype=dt,
+            out_dtype=str(args.out_dtype),
             group_size=int(args.group_size),
             seed=int(args.seed),
             num_iters=int(args.num_iters),
