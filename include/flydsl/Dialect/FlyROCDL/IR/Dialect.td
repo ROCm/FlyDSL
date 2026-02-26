@@ -27,10 +27,10 @@ class FlyxROCL_MmaAtom<string typeName, string typeMnemonic, list<Trait> traits 
   let mnemonic = typeMnemonic;
 }
 
-class FlyxROCL_CopyAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyxROCL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
-        DeclareTypeInterfaceMethods<Fly_CopyAtomTypeInterface>
+        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;
 }

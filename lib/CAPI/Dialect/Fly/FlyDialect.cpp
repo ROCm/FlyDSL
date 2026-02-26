@@ -183,23 +183,67 @@ MlirType mlirFlyMemRefTypeGetSwizzle(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
-// CopyAtomUniversalCopyType
+// CopyOpUniversalCopyType
 //===----------------------------------------------------------------------===//
 
-bool mlirTypeIsAFlyCopyAtomUniversalCopyType(MlirType type) {
-  return isa<CopyAtomUniversalCopyType>(unwrap(type));
+bool mlirTypeIsAFlyCopyOpUniversalCopyType(MlirType type) {
+  return isa<CopyOpUniversalCopyType>(unwrap(type));
 }
 
-MlirTypeID mlirFlyCopyAtomUniversalCopyTypeGetTypeID(void) {
-  return wrap(CopyAtomUniversalCopyType::getTypeID());
+MlirTypeID mlirFlyCopyOpUniversalCopyTypeGetTypeID(void) {
+  return wrap(CopyOpUniversalCopyType::getTypeID());
 }
 
-MlirType mlirFlyCopyAtomUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize) {
-  return wrap(CopyAtomUniversalCopyType::get(unwrap(ctx), bitSize));
+MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize) {
+  return wrap(CopyOpUniversalCopyType::get(unwrap(ctx), bitSize));
 }
 
-int32_t mlirFlyCopyAtomUniversalCopyTypeGetBitSize(MlirType type) {
-  return cast<CopyAtomUniversalCopyType>(unwrap(type)).getBitSize();
+int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type) {
+  return cast<CopyOpUniversalCopyType>(unwrap(type)).getBitSize();
+}
+
+//===----------------------------------------------------------------------===//
+// CopyAtomType
+//===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyCopyAtomType(MlirType type) {
+  return isa<CopyAtomType>(unwrap(type));
+}
+
+MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) {
+  return wrap(CopyAtomType::getTypeID());
+}
+
+MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type) {
+  return wrap(cast<CopyAtomType>(unwrap(type)).getCopyOp());
+}
+
+int32_t mlirFlyCopyAtomTypeGetValBits(MlirType type) {
+  return cast<CopyAtomType>(unwrap(type)).getValBits();
+}
+
+MlirType mlirFlyCopyAtomTypeGetThrLayout(MlirType type) {
+  auto copyAtomTy = cast<CopyAtomType>(unwrap(type));
+  auto attr = cast<LayoutAttr>(copyAtomTy.getThrLayout());
+  return wrap(LayoutType::get(attr));
+}
+
+MlirType mlirFlyCopyAtomTypeGetThrValLayoutSrc(MlirType type) {
+  auto copyAtomTy = cast<CopyAtomType>(unwrap(type));
+  auto attr = cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
+  return wrap(LayoutType::get(attr));
+}
+
+MlirType mlirFlyCopyAtomTypeGetThrValLayoutDst(MlirType type) {
+  auto copyAtomTy = cast<CopyAtomType>(unwrap(type));
+  auto attr = cast<LayoutAttr>(copyAtomTy.getThrValLayoutDst());
+  return wrap(LayoutType::get(attr));
+}
+
+MlirType mlirFlyCopyAtomTypeGetThrValLayoutRef(MlirType type) {
+  auto copyAtomTy = cast<CopyAtomType>(unwrap(type));
+  auto attr = cast<LayoutAttr>(copyAtomTy.getThrValLayoutRef());
+  return wrap(LayoutType::get(attr));
 }
 
 //===----------------------------------------------------------------------===//
@@ -244,7 +288,7 @@ MlirType mlirFlyTiledCopyTypeGetTileMN(MlirType type) {
 
 static MlirType tiledCopyGetTiledTVLayout(MlirType type, bool isSrc) {
   auto tiledCopyTy = cast<TiledCopyType>(unwrap(type));
-  auto copyAtom = cast<CopyAtomTypeInterface>(tiledCopyTy.getCopyAtom());
+  auto copyAtom = cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
   LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   auto *ctx = tiledLayoutThrVal.getContext();

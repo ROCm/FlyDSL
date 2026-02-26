@@ -7,6 +7,8 @@ from .._mlir import ir
 def _unwrap_dsl_value(obj):
     if isinstance(obj, ir.Value):
         return obj
+    if isinstance(obj, type):
+        return obj
     if hasattr(obj, "__extract_ir_values__"):
         values = obj.__extract_ir_values__()
         if len(values) != 1:

@@ -326,13 +326,13 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
 };
 
 // ---------------------------------------------------------------------------
-// CopyAtomUniversalCopyType
+// CopyOpUniversalCopyType
 // ---------------------------------------------------------------------------
-struct PyCopyAtomUniversalCopyType : PyConcreteType<PyCopyAtomUniversalCopyType> {
-  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyCopyAtomUniversalCopyType;
+struct PyCopyOpUniversalCopyType : PyConcreteType<PyCopyOpUniversalCopyType> {
+  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyCopyOpUniversalCopyType;
   static constexpr GetTypeIDFunctionTy getTypeIdFunction =
-      mlirFlyCopyAtomUniversalCopyTypeGetTypeID;
-  static constexpr const char *pyClassName = "CopyAtomUniversalCopyType";
+      mlirFlyCopyOpUniversalCopyTypeGetTypeID;
+  static constexpr const char *pyClassName = "CopyOpUniversalCopyType";
   using Base::Base;
 
   static void bindDerived(ClassTy &c) {
@@ -340,40 +340,40 @@ struct PyCopyAtomUniversalCopyType : PyConcreteType<PyCopyAtomUniversalCopyType>
         "get",
         [](int32_t bitSize, DefaultingPyMlirContext context) {
           ::mlir::MLIRContext *ctx = unwrap(context.get()->get());
-          return PyCopyAtomUniversalCopyType(
-              context->getRef(), wrap(::mlir::fly::CopyAtomUniversalCopyType::get(ctx, bitSize)));
+          return PyCopyOpUniversalCopyType(
+              context->getRef(), wrap(::mlir::fly::CopyOpUniversalCopyType::get(ctx, bitSize)));
         },
         "bitSize"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyAtomUniversalCopyType with bit size");
+        "Create a CopyOpUniversalCopyType with bit size");
 
-    c.def_prop_ro("bit_size", [](PyCopyAtomUniversalCopyType &self) -> int32_t {
-      return mlirFlyCopyAtomUniversalCopyTypeGetBitSize(self);
+    c.def_prop_ro("bit_size", [](PyCopyOpUniversalCopyType &self) -> int32_t {
+      return mlirFlyCopyOpUniversalCopyTypeGetBitSize(self);
     });
+  }
+};
 
-    c.def_prop_ro("thr_layout", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrLayout());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_src", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutSrc());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_dst", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutDst());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
-    c.def_prop_ro("tv_layout_ref", [](PyCopyAtomUniversalCopyType &self) -> MlirType {
-      auto ty =
-          ::mlir::cast<::mlir::fly::CopyAtomTypeInterface>(unwrap(static_cast<MlirType>(self)));
-      auto attr = ::mlir::cast<::mlir::fly::LayoutAttr>(ty.getThrValLayoutRef());
-      return wrap(::mlir::fly::LayoutType::get(attr));
-    });
+// ---------------------------------------------------------------------------
+// CopyAtomType
+// ---------------------------------------------------------------------------
+struct PyCopyAtomType : PyConcreteType<PyCopyAtomType> {
+  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyCopyAtomType;
+  static constexpr GetTypeIDFunctionTy getTypeIdFunction = mlirFlyCopyAtomTypeGetTypeID;
+  static constexpr const char *pyClassName = "CopyAtomType";
+  using Base::Base;
+
+  static void bindDerived(ClassTy &c) {
+    c.def_prop_ro("copy_op",
+                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetCopyOp(self); });
+    c.def_prop_ro("val_bits",
+                  [](PyCopyAtomType &self) -> int32_t { return mlirFlyCopyAtomTypeGetValBits(self); });
+    c.def_prop_ro("thr_layout",
+                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrLayout(self); });
+    c.def_prop_ro("tv_layout_src",
+                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutSrc(self); });
+    c.def_prop_ro("tv_layout_dst",
+                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutDst(self); });
+    c.def_prop_ro("tv_layout_ref",
+                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutRef(self); });
   }
 };
 
@@ -562,7 +562,8 @@ NB_MODULE(_fly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PySwizzleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyPointerType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMemRefType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyAtomUniversalCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyOpUniversalCopyType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyAtomType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomUniversalFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);

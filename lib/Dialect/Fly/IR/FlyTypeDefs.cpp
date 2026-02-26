@@ -1,6 +1,7 @@
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 
 namespace mlir::fly {
 
@@ -79,21 +80,46 @@ CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
-bool CopyAtomUniversalCopyType::isStatic() const { return true; }
+bool CopyOpUniversalCopyType::isStatic() const { return true; }
 
-Attribute CopyAtomUniversalCopyType::getThrLayout() const {
-  return FxLayout(FxC(1), FxC(1));
+Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+
+Attribute CopyOpUniversalCopyType::getThrBitLayoutSrc() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+}
+Attribute CopyOpUniversalCopyType::getThrBitLayoutDst() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+}
+Attribute CopyOpUniversalCopyType::getThrBitLayoutRef() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 
-// TODO: Back to getBitSize() when recast_layout is ready.
-Attribute CopyAtomUniversalCopyType::getThrValLayoutSrc() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+bool CopyAtomType::isStatic() const {
+  auto copyOp = dyn_cast<CopyOpTypeInterface>(getCopyOp());
+  if (!copyOp)
+    return false;
+  return copyOp.isStatic();
 }
-Attribute CopyAtomUniversalCopyType::getThrValLayoutDst() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+
+Attribute CopyAtomType::getThrLayout() {
+  auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
+  return copyOp.getThrLayout();
 }
-Attribute CopyAtomUniversalCopyType::getThrValLayoutRef() const {
-  return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));
+
+Attribute CopyAtomType::getThrValLayoutSrc() {
+  auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
+  LayoutBuilder<LayoutAttr> builder(getContext());
+  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutSrc()), 1, getValBits());
+}
+Attribute CopyAtomType::getThrValLayoutDst() {
+  auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
+  LayoutBuilder<LayoutAttr> builder(getContext());
+  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutDst()), 1, getValBits());
+}
+Attribute CopyAtomType::getThrValLayoutRef() {
+  auto copyOp = cast<CopyOpTypeInterface>(getCopyOp());
+  LayoutBuilder<LayoutAttr> builder(getContext());
+  return layoutRecast(builder, cast<LayoutAttr>(copyOp.getThrBitLayoutRef()), 1, getValBits());
 }
 
 bool MmaAtomUniversalFMAType::isStatic() const { return true; }
@@ -102,9 +128,7 @@ Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
 }
 
-Attribute MmaAtomUniversalFMAType::getThrLayout() const {
-  return FxLayout(FxC(1), FxC(1));
-}
+Attribute MmaAtomUniversalFMAType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
   return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));

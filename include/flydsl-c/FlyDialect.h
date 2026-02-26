@@ -96,17 +96,30 @@ MLIR_CAPI_EXPORTED int32_t mlirFlyMemRefTypeGetAlignment(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGetSwizzle(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// CopyAtomUniversalCopyType
+// CopyOpUniversalCopyType
 //===----------------------------------------------------------------------===//
 
-MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomUniversalCopyType(MlirType type);
-MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomUniversalCopyTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyOpUniversalCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyOpUniversalCopyTypeGetTypeID(void);
 
-// Constructor
-MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize);
 
-// Accessors
-MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomUniversalCopyTypeGetBitSize(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// CopyAtomType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomTypeGetValBits(MlirType type);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutSrc(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutDst(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutRef(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // MmaAtomUniversalFMAType
