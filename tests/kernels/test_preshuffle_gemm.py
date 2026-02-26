@@ -91,8 +91,6 @@ def test_mfma_a8_flyc_preshuffle(
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
         pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
-    if test_graph:
-        pytest.skip("CUDA graph capture requires async stream support in MLIR lowering")
     print("=" * 80)
     print(
         f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})"

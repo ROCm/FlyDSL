@@ -10,7 +10,20 @@ import numpy as np
 import pandas as pd
 import logging
 
+import ctypes as _ctypes
 logger = logging.getLogger("flir")
+
+
+def _set_capture_stream(stream_ptr):
+    """Redirect MLIR kernel launches to the capture stream for CUDA graph support."""
+    try:
+        from pathlib import Path
+        lib_dir = Path(__file__).resolve().parent.parent / "build-fly" / "python_packages" / "flydsl" / "_mlir" / "_mlir_libs"
+        lib = _ctypes.CDLL(str(lib_dir / "libmlir_rocm_runtime.so"))
+        lib.mgpuSetCaptureStream.argtypes = [_ctypes.c_void_p]
+        lib.mgpuSetCaptureStream(stream_ptr)
+    except Exception:
+        pass
 pd.set_option("display.max_rows", 200)
 ## debug ##
 # pd.set_option("display.max_rows", None)
@@ -66,8 +79,15 @@ def perftest(
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    data = run_iters_rotate(num_iters, func, rotate_args)
+                capture_stream = torch.cuda.Stream()
+                capture_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(capture_stream):
+                    _set_capture_stream(capture_stream.cuda_stream)
+                    try:
+                        with torch.cuda.graph(graph, stream=capture_stream):
+                            data = run_iters_rotate(num_iters, func, rotate_args)
+                    finally:
+                        _set_capture_stream(0)
                 with tpf.profile(
                     activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
                     profile_memory=True,
