@@ -281,6 +281,24 @@ def coalesce(layout, pattern=None, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def recast_layout(layout, old_type_bits, new_type_bits, loc=None, ip=None):
+    def _to_static_bits(v):
+        if isinstance(v, int):
+            return v
+        if isinstance(v, ir.Type):
+            if hasattr(v, "width"):
+                return int(v.width)
+            raise TypeError(f"recast_layout only supports int/type-with-width, got type {v}")
+        raise TypeError(f"recast_layout only supports int/Type, got {type(v)}")
+
+    old_type_bits = _to_static_bits(old_type_bits)
+    new_type_bits = _to_static_bits(new_type_bits)
+    return fly.recast_layout(
+        new_type_bits=new_type_bits, old_type_bits=old_type_bits, src=layout, loc=loc, ip=ip
+    )
+
+
+@dsl_api_wrapper
 def zip(lhs, rhs, loc=None, ip=None):
     return fly.zip(lhs, rhs, loc=loc, ip=ip)
 
