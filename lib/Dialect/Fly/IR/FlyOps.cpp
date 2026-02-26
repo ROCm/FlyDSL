@@ -752,10 +752,18 @@ FLY_INFER_RETURN_TYPES(LeftInverseOp) {
 }
 
 FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
-  auto layoutTy = dyn_cast<LayoutType>(operands[2].getType());
+  RecastLayoutOp::Adaptor adaptor(operands, attributes, properties, regions);
+  auto layoutTy = dyn_cast<LayoutType>(adaptor.getSrc().getType());
   if (!layoutTy)
     return failure();
-  inferredReturnTypes.assign({layoutTy});
+
+  int32_t newTypeBits = adaptor.getNewTypeBits();
+  int32_t oldTypeBits = adaptor.getOldTypeBits();
+
+  LayoutBuilder<LayoutAttr> layoutBuilder(context);
+  LayoutAttr inferred =
+      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits, newTypeBits);
+  inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }
 

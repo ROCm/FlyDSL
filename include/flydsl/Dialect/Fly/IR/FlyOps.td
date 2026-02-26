@@ -333,8 +333,8 @@ def Fly_LeftInverseOp : Fly_Op<"left_inverse", [Pure, DeclareOpInterfaceMethods<
 }
 
 def Fly_RecastLayoutOp : Fly_Op<"recast_layout", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyTypeOf<[I32, I64]>:$new_type_bits,
-                       AnyTypeOf<[I32, I64]>:$old_type_bits,
+  let arguments = (ins I32Attr:$new_type_bits,
+                       I32Attr:$old_type_bits,
                        Fly_Layout:$src);
   let results = (outs Fly_Layout:$result);
   let assemblyFormat = "`(` $new_type_bits `,` $old_type_bits `,` $src `)` attr-dict `:` functional-type(operands, results)";
