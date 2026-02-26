@@ -434,6 +434,31 @@ struct PyMmaAtomUniversalFMAType : PyConcreteType<PyMmaAtomUniversalFMAType> {
   }
 };
 
+struct PyTiledCopyType : PyConcreteType<PyTiledCopyType> {
+  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyTiledCopyType;
+  static constexpr GetTypeIDFunctionTy getTypeIdFunction = mlirFlyTiledCopyTypeGetTypeID;
+  static constexpr const char *pyClassName = "TiledCopyType";
+  using Base::Base;
+
+  static void bindDerived(ClassTy &c) {
+    c.def_prop_ro("copy_atom", [](PyTiledCopyType &self) -> MlirType {
+      return mlirFlyTiledCopyTypeGetCopyAtom(self);
+    });
+    c.def_prop_ro("layout_thr_val", [](PyTiledCopyType &self) -> MlirType {
+      return mlirFlyTiledCopyTypeGetLayoutThrVal(self);
+    });
+    c.def_prop_ro("tile_mn", [](PyTiledCopyType &self) -> MlirType {
+      return mlirFlyTiledCopyTypeGetTileMN(self);
+    });
+    c.def_prop_ro("tiled_tv_layout_src", [](PyTiledCopyType &self) -> MlirType {
+      return mlirFlyTiledCopyTypeGetTiledTVLayoutSrc(self);
+    });
+    c.def_prop_ro("tiled_tv_layout_dst", [](PyTiledCopyType &self) -> MlirType {
+      return mlirFlyTiledCopyTypeGetTiledTVLayoutDst(self);
+    });
+  }
+};
+
 struct PyTiledMmaType : PyConcreteType<PyTiledMmaType> {
   static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyTiledMmaType;
   static constexpr GetTypeIDFunctionTy getTypeIdFunction = mlirFlyTiledMmaTypeGetTypeID;
@@ -539,5 +564,6 @@ NB_MODULE(_fly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMemRefType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCopyAtomUniversalCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomUniversalFMAType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);
 }
