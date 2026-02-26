@@ -149,6 +149,7 @@ __all__ = [
     "block_product",
     "raked_product",
     "make_atom",
+    "make_copy_atom",
     "make_tile",
     "mma_atom_call",
     "copy_atom_call",
@@ -508,6 +509,12 @@ def raked_product(layout, tiler, loc=None, ip=None):
 def make_atom(atom_type, loc=None, ip=None):
     return fly.make_atom(atom_type, loc=loc, ip=ip)
 
+
+
+@dsl_api_wrapper
+def make_copy_atom(atom_type, loc=None, ip=None):
+    from .derived import CopyAtom
+    return CopyAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
 
 @dsl_api_wrapper
 def make_tile(layouts, loc=None, ip=None):

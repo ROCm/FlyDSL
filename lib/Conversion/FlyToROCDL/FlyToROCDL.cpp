@@ -507,19 +507,21 @@ public:
 };
 
 
-class FlyUnrealizedCastLowering
-    : public OpConversionPattern<UnrealizedConversionCastOp> {
+class ExtractAlignedPointerAsIndexLowering
+    : public OpConversionPattern<ExtractAlignedPointerAsIndexOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
-  LogicalResult matchAndRewrite(UnrealizedConversionCastOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(ExtractAlignedPointerAsIndexOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    if (op.getNumResults() != 1 || adaptor.getInputs().size() != 1)
-      return failure();
-    Value input = adaptor.getInputs()[0];
-    Type resultType = getTypeConverter()->convertType(op.getResultTypes()[0]);
-    if (!resultType || resultType != input.getType())
-      return failure();
-    rewriter.replaceOp(op, input);
+    // fly.memref is a bare pointer; after type conversion the operand is llvm.ptr<AS>.
+    // Cast to the result type (e.g. llvm.ptr<0>) if address spaces differ.
+    Value src = adaptor.getSource();
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!resultType)
+      resultType = op.getResult().getType();
+    if (src.getType() != resultType)
+      src = rewriter.create<LLVM::AddrSpaceCastOp>(op.getLoc(), resultType, src);
+    rewriter.replaceOp(op, src);
     return success();
   }
 };
@@ -593,7 +595,7 @@ public:
     patterns.add<CopyAtomCallLowering>(typeConverter, context);
     patterns.add<MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
-    patterns.add<FlyUnrealizedCastLowering>(typeConverter, context);
+    patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
