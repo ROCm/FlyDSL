@@ -45,5 +45,6 @@ set(MLIR_BINDINGS_PYTHON_INSTALL_PREFIX "python_packages/flydsl/${MLIR_PYTHON_PA
 
 add_subdirectory(include/flydsl)
 add_subdirectory(lib)
+add_subdirectory(tools)
 
 add_subdirectory(python/mlir_flydsl)
