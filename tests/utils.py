@@ -324,10 +324,12 @@ def shuffle_weight(
     x_ = x
     x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
     x_ = x_.permute(0, 1, 3, 4, 2, 5).contiguous()
+    x_ = x_.view(*x.shape)
     if interleave_k64:
         if not use_int4:
             raise ValueError("interleave_k64 currently only supported for int4/uint4 (use_int4=True)")
-        # Interleave within each 128-K chunk: 0,64,1,65,...,63,127.
+        # Interleave within each 128-K chunk on the *full K axis*:
+        #   0,64,1,65,...,63,127.
         K_total = x_.shape[-1]
         if K_total % 128 != 0:
             raise ValueError(f"interleave_k64 requires K%128==0, got K={K_total}")
@@ -338,7 +340,6 @@ def shuffle_weight(
         y128[..., 0::2] = low
         y128[..., 1::2] = high
         x_ = y128.view(*x_.shape)
-    x_ = x_.view(*x.shape)
     x_ = x_.view(x_type)
     x_.is_shuffled = True
     return x_

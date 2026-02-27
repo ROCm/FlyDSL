@@ -317,25 +317,28 @@ def load_b_pack_k32(
             qs_sel = arith.select(sel_i1, qs_hiword, uint4_qs_word)
             qz_sel = arith.select(sel_i1, qz_hiword, uint4_qz_word)
 
-            # In PDF, qscale_0/qzero_0 apply to v0..v3 (low-nibble group), and qscale_4/qzero_4
-            # apply to v4..v7 (high-nibble group). In our unpack, that maps to:
-            #   even i32  -> low64 group  (qs_lo/qz_lo)
-            #   odd  i32  -> high64 group (qs_hi/qz_hi)
-            # NOTE: depending on the exact packing, low/high64 can land in either even or odd group.
-            # We map packed4 bytes such that:
-            #   even i32 uses byte1 (high64), odd i32 uses byte0 (low64).
-            # If this is reversed for a different packing, swap these assignments.
-            qs_even = (qs_sel >> c_8) & c_ff
-            qs_odd = qs_sel & c_ff
-            qz_even = (qz_sel >> c_8) & c_ff
-            qz_odd = qz_sel & c_ff
+            # Packed4 bytes for this 128-half:
+            # - byte0: low64 qparam, byte1: high64 qparam
+            qs_lo = qs_sel & c_ff
+            qs_hi = (qs_sel >> c_8) & c_ff
+            qz_lo = qz_sel & c_ff
+            qz_hi = (qz_sel >> c_8) & c_ff
 
-            qz_even_bc = qz_even | (qz_even << c_8) | (qz_even << c_16) | (qz_even << c_24)
-            qz_odd_bc = qz_odd | (qz_odd << c_8) | (qz_odd << c_16) | (qz_odd << c_24)
+            # qz_vec bytes: [qz_lo, qz_hi, qz_lo, qz_hi]
+            qz_vec = qz_lo | (qz_hi << c_8) | (qz_lo << c_16) | (qz_hi << c_24)
 
             if not bool(overflow_guard):
-                even = ((even * qs_even) + qz_even_bc) ^ c_sign_flip
-                odd = ((odd * qs_odd) + qz_odd_bc) ^ c_sign_flip
+                # Fast packed-byte math (assumes no cross-byte carries).
+                c_mask02 = arith.constant(0x00FF00FF, type=i32_ty)
+                c_mask13 = arith.constant(0xFF00FF00, type=i32_ty)
+
+                def _dequant_fast(v):
+                    v02 = v & c_mask02
+                    v13 = v & c_mask13
+                    return (((v02 * qs_lo) + (v13 * qs_hi)) + qz_vec) ^ c_sign_flip
+
+                even = _dequant_fast(even)
+                odd = _dequant_fast(odd)
             else:
                 # Safe per-byte dequant (no assumptions about carries).
                 c_255 = arith.constant(255, type=i32_ty)
@@ -344,20 +347,20 @@ def load_b_pack_k32(
                     gt = x > c_255
                     return arith.select(gt, c_255, x)
 
-                def _dequant_safe(v, qs_s, qz_s):
+                def _dequant_safe(v):
                     b0 = v & c_ff
                     b1 = (v >> c_8) & c_ff
                     b2 = (v >> c_16) & c_ff
                     b3 = (v >> c_24) & c_ff
-                    o0 = _clamp_u8((b0 * qs_s) + qz_s)
-                    o1 = _clamp_u8((b1 * qs_s) + qz_s)
-                    o2 = _clamp_u8((b2 * qs_s) + qz_s)
-                    o3 = _clamp_u8((b3 * qs_s) + qz_s)
+                    o0 = _clamp_u8((b0 * qs_lo) + qz_lo)
+                    o1 = _clamp_u8((b1 * qs_hi) + qz_hi)
+                    o2 = _clamp_u8((b2 * qs_lo) + qz_lo)
+                    o3 = _clamp_u8((b3 * qs_hi) + qz_hi)
                     out = o0 | (o1 << c_8) | (o2 << c_16) | (o3 << c_24)
                     return out ^ c_sign_flip
 
-                even = _dequant_safe(even, qs_even, qz_even)
-                odd = _dequant_safe(odd, qs_odd, qz_odd)
+                even = _dequant_safe(even)
+                odd = _dequant_safe(odd)
 
         elif uint4_qs is not None:
             # Legacy scalar-qparam mode.
