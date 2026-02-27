@@ -59,13 +59,27 @@ MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
-// CopyOp_CDNA3_BufferLSAType
+// CopyOpCDNA3BufferLDSTType
 //===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferLDSTType(MlirType type) {
+  return isa<CopyOpCDNA3BufferLDSTType>(unwrap(type));
+}
+
+MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetTypeID(void) {
+  return wrap(CopyOpCDNA3BufferLDSTType::getTypeID());
+}
+
+MlirType mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGet(MlirContext ctx, int32_t bitSize) {
+  return wrap(CopyOpCDNA3BufferLDSTType::get(unwrap(ctx), bitSize));
+}
+
+int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type) {
+  return cast<CopyOpCDNA3BufferLDSTType>(unwrap(type)).getBitSize();
+}
 
 //===----------------------------------------------------------------------===//
 // Pass Registration
 //===----------------------------------------------------------------------===//
 
-void mlirRegisterFlyToROCDLConversionPass(void) {
-  mlir::registerFlyToROCDLConversionPass();
-}
+void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }

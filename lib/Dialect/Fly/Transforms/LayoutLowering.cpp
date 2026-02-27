@@ -132,6 +132,8 @@ static unsigned mapAddressSpace(AddressSpace space) {
     return 1;
   case AddressSpace::Register:
     return 2;
+  case AddressSpace::BufferDesc:
+    return 8;
   }
   return 0;
 }
@@ -1930,9 +1932,9 @@ static std::pair<Value, Value> getMemRefPtrAndLayout(OpBuilder &builder, Locatio
   return {GetIterOp::create(builder, loc, memref), GetLayoutOp::create(builder, loc, memref)};
 }
 
-template <typename OpTy, LayoutValueAdaptor (*ThrValViewFunc)(LayoutBuilder<LayoutValueAdaptor> &,
-                                                              CopyAtomType, LayoutAttr,
-                                                              TileAttr, LayoutValueAdaptor)>
+template <typename OpTy,
+          LayoutValueAdaptor (*ThrValViewFunc)(LayoutBuilder<LayoutValueAdaptor> &, CopyAtomType,
+                                               LayoutAttr, TileAttr, LayoutValueAdaptor)>
 class TiledCopyPartitionOpLowering : public OpRewritePattern<OpTy> {
 public:
   using OpRewritePattern<OpTy>::OpRewritePattern;

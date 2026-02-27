@@ -30,10 +30,6 @@ using namespace mlir::fly;
 namespace {
 
 static unsigned mapAddressSpace(AddressSpace space) {
-  // - Global   -> 1 (global)
-  // - Shared   -> 3 (local/LDS/workgroup)
-  // - Register -> 5 (private)
-  // Fallback to 0 (generic).
   switch (space) {
   case AddressSpace::Global:
     return 1;
@@ -41,6 +37,8 @@ static unsigned mapAddressSpace(AddressSpace space) {
     return 3;
   case AddressSpace::Register:
     return 5;
+  case AddressSpace::BufferDesc:
+    return 8;
   }
   return 0;
 }
@@ -59,6 +57,55 @@ static FailureOr<Value> toI64(Value v, Location loc, ConversionPatternRewriter &
   }
   return failure();
 }
+
+class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
+public:
+  MakePtrOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
+      : OpConversionPattern<MakePtrOp>(typeConverter, context) {}
+
+  LogicalResult matchAndRewrite(MakePtrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto flyPtrTy = dyn_cast<fly::PointerType>(op.getResult().getType());
+    if (!flyPtrTy)
+      return failure();
+
+    auto resultTy = dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyPtrTy));
+    if (!resultTy)
+      return failure();
+
+    Location loc = op.getLoc();
+    AddressSpace addrSpace = flyPtrTy.getAddressSpace().getValue();
+    auto args = adaptor.getArgs();
+
+    if (addrSpace == AddressSpace::BufferDesc) {
+      if (args.size() != 4)
+        return rewriter.notifyMatchFailure(
+            op, "buffer_rsrc make_ptr expects 4 args: base, stride, numRecords, flags");
+
+      Value base = args[0];
+      Value stride = args[1];
+      Value numRecords = args[2];
+      Value flags = args[3];
+
+      Value rsrc =
+          ROCDL::MakeBufferRsrcOp::create(rewriter, loc, resultTy, base, stride, numRecords, flags);
+      rewriter.replaceOp(op, rsrc);
+      return success();
+    }
+
+    if (args.size() == 1) {
+      Value src = args[0];
+      if (src.getType() == resultTy) {
+        rewriter.replaceOp(op, src);
+        return success();
+      }
+      rewriter.replaceOpWithNewOp<LLVM::BitcastOp>(op, resultTy, src);
+      return success();
+    }
+
+    return rewriter.notifyMatchFailure(op, "unsupported make_ptr operand count");
+  }
+};
 
 class MemRefAllocOpLowering : public OpConversionPattern<MemRefAllocaOp> {
 public:
@@ -356,8 +403,8 @@ public:
 
     if (isa<CopyOpUniversalCopyType>(copyOpType))
       return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
-    else if (isa<fly_rocdl::CopyOp_CDNA3_BufferLSAType>(copyOpType))
-      return lowerCDNA3BufferLSA(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
+    else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
+      return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
 
     return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
   }
@@ -395,10 +442,67 @@ private:
     return success();
   }
 
-  LogicalResult lowerCDNA3BufferLSA(CopyAtomCall op, ConversionPatternRewriter &rewriter,
-                                    Location loc, CopyAtomType copyAtomTy, fly::MemRefType srcFlyTy,
-                                    Value src, Value dst) const {
-    return rewriter.notifyMatchFailure(op, "CopyOp_CDNA3_BufferLSA lowering not yet implemented");
+  static int64_t getElemBitWidth(Type elemTy) {
+    if (auto ft = dyn_cast<FloatType>(elemTy))
+      return ft.getWidth();
+    if (auto it = dyn_cast<IntegerType>(elemTy))
+      return it.getWidth();
+    return 0;
+  }
+
+  LogicalResult lowerCDNA3BufferLDST(CopyAtomCall op, ConversionPatternRewriter &rewriter,
+                                     Location loc, CopyAtomType copyAtomTy,
+                                     fly::MemRefType srcFlyTy, fly::MemRefType dstFlyTy, Value src,
+                                     Value dst) const {
+    LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
+
+    auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
+    if (!thrValLayoutSrc)
+      return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null");
+    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    if (!numValSrcAttr.isStatic())
+      return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
+    int64_t numValSrc = numValSrcAttr.getValue();
+
+    Type elemTy = srcFlyTy.getElemTy();
+    int64_t elemBits = getElemBitWidth(elemTy);
+    if (elemBits <= 0)
+      return rewriter.notifyMatchFailure(op, "unsupported element type");
+
+    int64_t vecWidth = numValSrc;
+    Type vecTy = vecWidth == 1 ? elemTy : VectorType::get({vecWidth}, elemTy);
+
+    AddressSpace srcAS = srcFlyTy.getAddressSpace().getValue();
+    AddressSpace dstAS = dstFlyTy.getAddressSpace().getValue();
+
+    bool srcIsBuffer = (srcAS == AddressSpace::BufferDesc);
+    bool dstIsBuffer = (dstAS == AddressSpace::BufferDesc);
+
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32).getResult();
+
+    ArrayAttr noAttrs;
+
+    if (srcIsBuffer && !dstIsBuffer) {
+      Value loaded = ROCDL::RawPtrBufferLoadOp::create(rewriter, loc, vecTy, src, zero, zero, zero,
+                                                       noAttrs, noAttrs, noAttrs);
+      LLVM::StoreOp::create(rewriter, loc, loaded, dst);
+    } else if (!srcIsBuffer && dstIsBuffer) {
+      Value loaded = LLVM::LoadOp::create(rewriter, loc, vecTy, src);
+      ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, loaded, dst, zero, zero, zero, noAttrs,
+                                         noAttrs, noAttrs);
+    } else if (srcIsBuffer && dstIsBuffer) {
+      Value loaded = ROCDL::RawPtrBufferLoadOp::create(rewriter, loc, vecTy, src, zero, zero, zero,
+                                                       noAttrs, noAttrs, noAttrs);
+      ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, loaded, dst, zero, zero, zero, noAttrs,
+                                         noAttrs, noAttrs);
+    } else {
+      int64_t copyBytes = numValSrc * elemBits / 8;
+      Value len = arith::ConstantIntOp::create(rewriter, loc, copyBytes, 64).getResult();
+      LLVM::MemcpyOp::create(rewriter, loc, dst, src, len, false);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
   }
 };
 
@@ -673,7 +777,7 @@ public:
     target.addIllegalDialect<fly::FlyDialect>();
 
     target.addLegalOp<MakeIntTupleOp, MakeLayoutOp, MakeTileOp>();
-    target.addLegalOp<MakeAtomOp, MakeCopyAtomOp>();
+    target.addLegalOp<MakeMmaAtomOp, MakeCopyAtomOp>();
 
     FlyTypeConverter typeConverter;
 
@@ -713,6 +817,7 @@ public:
       return true;
     });
 
+    patterns.add<MakePtrOpLowering>(typeConverter, context);
     patterns.add<MemRefAllocOpLowering>(typeConverter, context);
     patterns.add<GetIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);

@@ -29,7 +29,7 @@ def gemm_kernel(
     bB = fx.slice(bB, (None, bid))
     bC = fx.slice(bC, (None, bid))
 
-    mma_atom = fx.make_mma_atom(fx.MmaAtomUniversalFMAType.get(fx.T.f32()))
+    mma_atom = fx.make_mma_atom(fx.UniversalFMA(fx.Float32))
     tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((4, 8, 1), (8, 1, 0)))
     thr_mma = tiled_mma.thr_slice(tid)
 

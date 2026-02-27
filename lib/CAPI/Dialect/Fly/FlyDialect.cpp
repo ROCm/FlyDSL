@@ -214,6 +214,10 @@ MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) {
   return wrap(CopyAtomType::getTypeID());
 }
 
+MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits) {
+  return wrap(CopyAtomType::get(unwrap(copyOp), valBits));
+}
+
 MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type) {
   return wrap(cast<CopyAtomType>(unwrap(type)).getCopyOp());
 }

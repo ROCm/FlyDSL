@@ -2,5 +2,6 @@
 from .typing import *
 from .primitive import *
 from .gpu import *
-
 from .derived import *
+
+from . import rocdl  # noqa: F401

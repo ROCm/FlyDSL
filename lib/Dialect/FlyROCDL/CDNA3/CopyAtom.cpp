@@ -9,13 +9,18 @@ using namespace mlir::fly;
 
 namespace mlir::fly_rocdl {
 
-bool CopyOp_CDNA3_BufferLSAType::isStatic() const { return true; }
+bool CopyOpCDNA3BufferLDSTType::isStatic() const { return true; }
 
-Attribute CopyOp_CDNA3_BufferLSAType::getThrLayout() const {
-  return FxLayout(FxC(1), FxC(1));
+Attribute CopyOpCDNA3BufferLDSTType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutSrc() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOp_CDNA3_BufferLSAType::getThrBitLayoutSrc() const { return {}; }
-Attribute CopyOp_CDNA3_BufferLSAType::getThrBitLayoutDst() const { return {}; }
-Attribute CopyOp_CDNA3_BufferLSAType::getThrBitLayoutRef() const { return {}; }
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutDst() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+}
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutRef() const {
+  return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
+}
 
 } // namespace mlir::fly_rocdl

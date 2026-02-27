@@ -112,6 +112,7 @@ MLIR_CAPI_EXPORTED int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType typ
 
 MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomType(MlirType type);
 MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits);
 
 MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type);
 MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomTypeGetValBits(MlirType type);

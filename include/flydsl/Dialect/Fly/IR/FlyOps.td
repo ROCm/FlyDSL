@@ -378,16 +378,16 @@ def Fly_TileToShapeOp : Fly_Op<"tile_to_shape", [Pure, DeclareOpInterfaceMethods
 //===----------------------------------------------------------------------===//
 // Atom and Tiled Mma/Copy ops
 //===----------------------------------------------------------------------===//
-def Fly_MakeAtomOp : Fly_Op<"make_atom", [Pure]> {
+def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
   let arguments = (ins);
   let results = (outs AnyType:$result);
   let assemblyFormat = "attr-dict `:` functional-type(operands, results)";
 }
 
-def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyType:$copyOp, I32Attr:$valBits);
+def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
+  let arguments = (ins I32Attr:$valBits);
   let results = (outs Fly_CopyAtom:$result);
-  let assemblyFormat = "`(` $copyOp `,` $valBits `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "attr-dict `:` functional-type(operands, results)";
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
@@ -497,6 +497,12 @@ def Fly_MemRefStoreVecOp : Fly_Op<"memref.store_vec", []> {
   let assemblyFormat = "`(` $vector `,` $memref `)` attr-dict `:` functional-type(operands, results)";
 }
 
+
+def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
+  let arguments = (ins Variadic<AnyType>:$args);
+  let results = (outs Fly_Pointer:$result);
+  let assemblyFormat = "`(` $args `)` attr-dict `:` functional-type(operands, results)";
+}
 def Fly_PtrLoadOp : Fly_Op<"ptr.load"> {
   let arguments = (ins Fly_Pointer:$ptr);
   let results = (outs AnyType:$result);
