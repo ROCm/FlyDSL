@@ -1,0 +1,41 @@
+name: Promote Wheels
+
+on:
+  workflow_call:
+    inputs:
+      release_type:
+        description: 'Release type used to derive the S3 bucket name'
+        type: string
+        required: true
+
+env:
+  OIDC_ROLE: "arn:aws:iam::661452401056:role/framework-flydsl-nightlies"
+
+jobs:
+  promote:
+    runs-on: linux-flydsl-mi325-1
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/install_awscli.sh
+          path: flydsl
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ env.OIDC_ROLE }}
+
+      - name: Install AWS CLI
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Promote wheels from staging to release
+        run: |
+          aws s3 cp \
+            s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
+            s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950/ \
+            --recursive
