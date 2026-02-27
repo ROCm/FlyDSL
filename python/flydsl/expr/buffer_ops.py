@@ -127,14 +127,11 @@ class BufferResourceDescriptor:
         Example:
             >>> rsrc = BufferResourceDescriptor.from_memref(A)
         """
-        # fly.memref is already just a pointer; cast directly to !llvm.ptr.
-        # The cast becomes identity after FlyToROCDL type conversion.
+        # Extract raw pointer from fly.memref.
         raw_val = _unwrap_value(memref_val)
+        from .._mlir.dialects import fly as _fly
         ptr_type = ir.Type.parse('!llvm.ptr')
-        base_ptr = ir.Operation.create(
-            "builtin.unrealized_conversion_cast",
-            results=[ptr_type],
-            operands=[raw_val]).result
+        base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
         
         # Create buffer resource descriptor
         flags_val = (7 << 12) | (4 << 15)  # data_format=7 (float), num_format=4 (32bit)

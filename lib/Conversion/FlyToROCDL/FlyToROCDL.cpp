@@ -506,6 +506,26 @@ public:
   }
 };
 
+
+class ExtractAlignedPointerAsIndexLowering
+    : public OpConversionPattern<ExtractAlignedPointerAsIndexOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult matchAndRewrite(ExtractAlignedPointerAsIndexOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    // fly.memref is a bare pointer; after type conversion the operand is llvm.ptr<AS>.
+    // Cast to the result type (e.g. llvm.ptr<0>) if address spaces differ.
+    Value src = adaptor.getSource();
+    Type resultType = getTypeConverter()->convertType(op.getResult().getType());
+    if (!resultType)
+      resultType = op.getResult().getType();
+    if (src.getType() != resultType)
+      src = rewriter.create<LLVM::AddrSpaceCastOp>(op.getLoc(), resultType, src);
+    rewriter.replaceOp(op, src);
+    return success();
+  }
+};
+
 class FlyToROCDLConversionPass
     : public mlir::impl::FlyToROCDLConversionPassBase<FlyToROCDLConversionPass> {
 public:
@@ -575,6 +595,7 @@ public:
     patterns.add<CopyAtomCallLowering>(typeConverter, context);
     patterns.add<MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);
+    patterns.add<ExtractAlignedPointerAsIndexLowering>(typeConverter, context);
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
     populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
