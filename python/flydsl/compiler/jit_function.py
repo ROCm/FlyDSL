@@ -116,7 +116,7 @@ def _jit_function_cache_key(func: Callable) -> str:
 
 
 class MlirCompiler:
-    PIPELINE = (
+    LOWERING_PIPELINE = (
         "builtin.module("
         "gpu-kernel-outlining{{data-layout-str=}},"
         "fly-canonicalize,"
@@ -135,27 +135,63 @@ class MlirCompiler:
         "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
         "convert-arith-to-llvm,"
         "convert-func-to-llvm,"
-        "reconcile-unrealized-casts,"
-        "gpu-module-to-binary{{format=fatbin}}"
+        "reconcile-unrealized-casts"
         ")"
     )
 
+    BINARY_PIPELINE = "builtin.module(gpu-module-to-binary{format=fatbin})"
+
+    ISA_PIPELINE = "builtin.module(gpu-module-to-binary{format=isa})"
+
     @classmethod
-    def compile(cls, module: ir.Module, *, chip: str = None) -> ir.Module:
+    def _dump_asm(cls, module_asm: str, func_name: str):
+        try:
+            from .._mlir._mlir_libs._mlirDialectsGPU import ObjectAttr
+
+            isa_module = ir.Module.parse(module_asm)
+            pm = PassManager.parse(cls.ISA_PIPELINE)
+            pm.run(isa_module.operation)
+
+            for op in isa_module.body.operations:
+                if op.operation.name == "gpu.binary":
+                    objects = op.operation.attributes["objects"]
+                    for i in range(len(objects)):
+                        obj_attr = ObjectAttr(objects[i])
+                        isa_bytes = obj_attr.object
+
+                        dump_dir = Path(env.debug.dump_dir)
+                        dump_dir.mkdir(parents=True, exist_ok=True)
+                        out_path = dump_dir / f"{func_name}.s"
+                        out_path.write_bytes(isa_bytes)
+                        log().info(f"Dumped ASM to {out_path}")
+                        return
+            log().warning("No gpu.binary op found, cannot dump ASM")
+        except Exception as e:
+            log().warning(f"Failed to dump ASM: {e}")
+
+    @classmethod
+    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
 
         if chip is None:
             chip = get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        pm = PassManager.parse(cls.PIPELINE.format(chip=chip))
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        pm.enable_verifier(env.debug.enable_verifier)
-        pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-        pm.run(module.operation)
+        lowering_pm = PassManager.parse(cls.LOWERING_PIPELINE.format(chip=chip))
+        lowering_pm.enable_verifier(env.debug.enable_verifier)
+        lowering_pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+        lowering_pm.run(module.operation)
+
+        if env.debug.dump_asm:
+            cls._dump_asm(module.operation.get_asm(), func_name)
+
+        binary_pm = PassManager.parse(cls.BINARY_PIPELINE)
+        binary_pm.enable_verifier(env.debug.enable_verifier)
+        binary_pm.run(module.operation)
 
         return module
 
@@ -324,7 +360,7 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip)
+            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
 
             compiled_func = JitCompiledFunction(
                 compiled_module,
