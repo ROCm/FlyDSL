@@ -668,11 +668,14 @@ def load_b_raw_w4a16(
     return packed32
 
 
-def unpack_b_w4a16(packed32, arith, vector):
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
     """Phase 2 of W4A16 B load: 7-op unpack + int8->bf16 conversion.
 
     Takes the raw ``packed32`` from :func:`load_b_raw_w4a16` and produces
     ``(b0, b1)`` -- two i64 values each containing 4 bf16 for one MFMA.
+
+    If *scale_val* (an f32 SSA value) is provided, each element is multiplied
+    by the scale before truncation (groupwise dequant path).
 
     Uses shift-based f32→bf16 truncation (<0.5 ULP, fine for inference).
     """
@@ -688,8 +691,8 @@ def unpack_b_w4a16(packed32, arith, vector):
     s1 = (t & c_08080808) * c_1e
     odd = (t & c_0f0f0f0f) | s1
 
-    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector)
-    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector)
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
 
     return (b0, b1)
 
@@ -719,53 +722,23 @@ def load_b_raw_w4a16_groupwise(
 ):
     """Phase 1 of W4A16 groupwise B load: issue buffer_loads for weight + scale.
 
+    Reuses :func:`load_b_raw_w4a16` for the weight load, then issues an
+    additional buffer_load for the per-group scale.
+
     Returns ``(packed32, scale_val)`` to be passed to
-    :func:`unpack_b_w4a16_groupwise` later.
+    :func:`unpack_b_w4a16` (with ``scale_val``) later.
     """
-    if kpack_bytes != 8:
-        raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
-
-    c64 = arith.constant(64, index=True)
-    half_bytes = kpack_bytes // 2
-
-    k0_base = base_k / c64
-    k1_layout_offset = ku * 2
-    c2_idx = arith.constant(2, index=True)
-    c4_idx = arith.constant(4, index=True)
-
-    lane_div_32 = lane_div_16 / c2_idx
-    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
-
-    k0 = k0_base + (total_k1 / c4_idx)
-    k1_local = total_k1 % c4_idx
-
-    lane_odd = lane_div_16 % c2_idx
-    k2_base = lane_odd * arith.constant(half_bytes, index=True)
-
-    coord_pack = flir.make_coord(n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
-    idx_pack = flir.crd2idx(coord_pack, layout_b)
-    idx_bytes = idx_pack + k2_base
-
-    atom = flir.make_copy_atom(elem_type, vector_size=4)
-    b_view = flir.TensorView(
-        arg_b, (4,), strides=(1,),
-        base_indices=(idx_bytes,),
-        element_type=elem_type,
-    )
-    b4 = flir.copy(
-        atom, b_view, None,
-        alignment=4,
-        return_vector=True,
-        src_buffer_resource=b_rsrc,
-        src_buffer_offset_in_bytes=True,
-    )
-    vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
-    packed32 = vector.extract(
-        vector.bitcast(vec1_i32, b4),
-        static_position=[0],
-        dynamic_position=[],
+    # Reuse the non-groupwise weight load (identical address calc + buffer_load).
+    packed32 = load_b_raw_w4a16(
+        buffer_ops, flir, arith, vector,
+        arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
+        base_k=base_k, ku=ku,
+        n_blk=n_blk, n_intra=n_intra,
+        lane_div_16=lane_div_16, elem_type=elem_type,
+        kpack_bytes=kpack_bytes, act_elem_bytes=act_elem_bytes,
     )
 
+    # --- groupwise scale load (the only part that differs) ---
     i32 = ir.IntegerType.get_signless(32)
     f32 = ir.F32Type.get()
 
@@ -791,26 +764,10 @@ def load_b_raw_w4a16_groupwise(
 def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
     """Phase 2 of W4A16 groupwise B load: unpack + scale + convert to bf16.
 
-    Takes ``(packed32, scale_val)`` from :func:`load_b_raw_w4a16_groupwise`
-    and produces ``(b0, b1)`` -- two i64 values each containing 4 scaled bf16.
-
-    Uses shift-based f32→bf16 truncation (<0.5 ULP, fine for inference).
+    Thin wrapper around :func:`unpack_b_w4a16` with ``scale_val`` forwarded.
+    Kept for backward compatibility; new code can call ``unpack_b_w4a16``
+    directly with the ``scale_val`` keyword.
     """
-    c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
-    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
-    c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
-    c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
-
-    s0 = (packed32 & c_08080808) * c_1e
-    even = (packed32 & c_0f0f0f0f) | s0
-
-    t = packed32 >> c_4_i32
-    s1 = (t & c_08080808) * c_1e
-    odd = (t & c_0f0f0f0f) | s1
-
-    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
-    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
-
-    return (b0, b1)
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val)
 
 
