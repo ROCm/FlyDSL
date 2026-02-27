@@ -502,7 +502,8 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
     """Build an `ir.Module` that exports host entrypoints:
     - `run_1stage(rank, grid_x, self_sg, sg0..sg7, in0..in7, out)`
     - `run_2stage(rank, grid_x, self_sg, sg0..sg7, in0..in7, tmp0..tmp7, out)`
-    - `run_2stage_ptr(rank, grid_x, self_sg, sg0..sg7, in0_ptr..in7_ptr, tmp0_ptr..tmp7_ptr, out_ptr)`
+    - `run_2stage_arr(rank, grid_x, self_sg, sg_ptrs_base, in_ptrs_base, tmp_ptrs_base, out_ptr)`
+      Accepts base addresses of device pointer arrays; kernel loads pointers on-device for CUDAGraph compatibility.
 
     NOTE: Unlike the default MLIR ROCm runtime (which creates/synchronizes/destroys a HIP stream per call),
     our host wrappers accept a `stream_ptr` argument and bind kernel launches to the caller-provided stream
@@ -947,24 +948,41 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                             scf.YieldOp([_res(nxt)])
                     gpu.ReturnOp([])
 
-                # Kernel 2-stage ptr variant: accept raw i64 base pointers for ins/tmps/out.
-                # This avoids memref descriptor handling overhead in stage2.
-                k2p_args = [i32, i64] + [i64] * 8 + [i64] * 8 + [i64] * 8 + [i64]
-                k2p_fty = ir.FunctionType.get(k2p_args, [])
-                k2p = gpu.GPUFuncOp(ir.TypeAttr.get(k2p_fty))
-                k2p.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}")
-                k2p.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
-                # Set workgroup size attributes to allow threads/block
-                k2p.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
-                k2p.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
-                k2p_entry = ir.Block.create_at_start(k2p.operation.regions[0], k2p_args)
-                with ir.InsertionPoint(k2p_entry):
-                    rank = k2p_entry.arguments[0]
-                    self_sg = k2p_entry.arguments[1]
-                    sgs = list(k2p_entry.arguments[2:10])
-                    in_ptrs = list(k2p_entry.arguments[10:18])
-                    tmp_ptrs = list(k2p_entry.arguments[18:26])
-                    out_ptr_i64 = k2p_entry.arguments[26]
+                # Kernel 2-stage arr variant: accept array base pointers, load inside kernel.
+                # This makes device loads part of the kernel execution, enabling CUDAGraph replay.
+                # Signature: rank, self_sg, sg_ptrs_base, in_ptrs_base, tmp_ptrs_base, out_ptr
+                k2a_args = [i32, i64, i64, i64, i64, i64]
+                k2a_fty = ir.FunctionType.get(k2a_args, [])
+                k2a = gpu.GPUFuncOp(ir.TypeAttr.get(k2a_fty))
+                k2a.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_arr_ws{world_size}")
+                k2a.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k2a.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+                k2a.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
+                k2a_entry = ir.Block.create_at_start(k2a.operation.regions[0], k2a_args)
+                with ir.InsertionPoint(k2a_entry):
+                    rank = k2a_entry.arguments[0]
+                    self_sg = k2a_entry.arguments[1]
+                    sg_ptrs_base = k2a_entry.arguments[2]
+                    in_ptrs_base = k2a_entry.arguments[3]
+                    tmp_ptrs_base = k2a_entry.arguments[4]
+                    out_ptr_i64 = k2a_entry.arguments[5]
+
+                    # Load pointers from device arrays INSIDE the kernel
+                    # This makes the loads part of kernel execution, captured by CUDAGraph
+                    sgs = []
+                    for i in range(8):
+                        sg_ptr = _load_ptr_from_array(sg_ptrs_base, _c_i32(i))
+                        sgs.append(sg_ptr)
+                    
+                    in_ptrs = []
+                    for i in range(8):
+                        in_ptr = _load_ptr_from_array(in_ptrs_base, _c_i32(i))
+                        in_ptrs.append(in_ptr)
+                    
+                    tmp_ptrs = []
+                    for i in range(8):
+                        tmp_ptr = _load_ptr_from_array(tmp_ptrs_base, _c_i32(i))
+                        tmp_ptrs.append(tmp_ptr)
 
                     lane_i32 = _res(arith.IndexCastOp(i32, _res(gpu.thread_id("x"))))
                     bid_i32 = _res(arith.IndexCastOp(i32, _res(gpu.block_id("x"))))
@@ -986,7 +1004,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         max_spin=int(max_spin),
                     )
 
-                    # stage1 (keep existing LDS approach but using in_ptrs/tmp_ptrs directly)
+                    # stage1 (same as k2p but using loaded pointers)
                     tnum_gpu = int(threads // world_size)
                     tnum_gpu_i32 = _c_i32(tnum_gpu)
                     warp_id = _res(arith.DivUIOp(_res(lane_i32), _res(tnum_gpu_i32)))
@@ -994,10 +1012,8 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                     tid_pack = _addi(_muli(bid_i32, tnum_gpu_i32), lane_id)
                     stride_pack = _muli(_res(arith.IndexCastOp(i32, _res(gpu.grid_dim("x")))), tnum_gpu_i32)
                     smem = memref.GetGlobalOp(smem_ty, smem_sym).result
-                    # tmp_out is always tmp_ptrs[0] because host passes rotated order: tmp0 corresponds to self rank.
                     tmp_out_i64 = tmp_ptrs[0]
 
-                    # p = start_p + tid_pack; p < end_p; p += stride_pack, with parity ping-pong.
                     idx_p = _addi(start_p, tid_pack)
                     parity0 = _c_i32(0)
                     loop1 = scf.WhileOp([i32, i32], [_res(idx_p), _res(parity0)])
@@ -1011,8 +1027,6 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         cur = a1.arguments[0]
                         parity = a1.arguments[1]
 
-                        # in_base = in_ptrs[warp_id] (rotated order)
-                        # Merge address calculation to reduce intermediate variables
                         in_base = _select_i64_by_lane(warp_id, in_ptrs)
                         raw = _asm_ld_16b(_addr_add(in_base, _mul_i64(_res(arith.ExtUIOp(i64, _res(cur))), _c_i64(16))))
 
@@ -1042,13 +1056,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                                 out_raw = _res(vector.BitCastOp(v4i32, _res(acc)))
                             else:
                                 out16 = arith.TruncFOp(v8f16, _res(acc)).result
-                                # Use llvm.bitcast instead of vector.bitcast here; some environments are
-                                # picky about operand wrappers for vector.bitcast.
                                 from _mlir.dialects import llvm
-
                                 out_raw = llvm.BitcastOp(v4i32, _res(out16)).result
 
-                            # Merge address calculation to reduce intermediate variables
                             rel_p = _subi(cur, start_p)
                             _asm_st_16b(_addr_add(tmp_out_i64, _mul_i64(_res(arith.ExtUIOp(i64, _res(rel_p))), _c_i64(16))), out_raw)
                             scf.YieldOp([])
@@ -1058,8 +1068,6 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         scf.YieldOp([_res(nxt), _res(parity_next)])
 
                     # end_sync (not final)
-                    # Note: pointer table optimization requires reading pointers at call site
-                    # For now, use chain selection to avoid region isolation issues
                     _end_sync(
                         lane_i32=lane_i32,
                         rank_i32=rank,
@@ -1073,11 +1081,9 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         sg_ptrtbl=None,
                     )
 
-                    # stage2: all-gather fast path (16B) using raw pointers
-                    # Reuse warp_id, lane_id, tnum_gpu_i32 from stage1 to reduce register usage
+                    # stage2: all-gather fast path
                     vec_ok = (num_packs % world_size == 0) and (world_size != 6)
                     if vec_ok:
-                        # Reuse variables from stage1 (warp_id, lane_id, tnum_gpu_i32 already computed)
                         tid_pack2 = _addi(_muli(bid_i32, tnum_gpu_i32), lane_id)
                         stride_pack2 = _muli(_res(arith.IndexCastOp(i32, _res(gpu.grid_dim("x")))), tnum_gpu_i32)
 
@@ -1097,7 +1103,6 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                             else:
                                 dst_rank = _res(arith.RemUIOp(_res(sum_rw), _res(_c_i32(world_size))).result)
 
-                            # Merge address calculations to reduce intermediate variables
                             tmp_base = _select_i64_by_lane(warp_id, tmp_ptrs)
                             raw = _asm_ld_16b(_addr_add(tmp_base, _mul_i64(_res(arith.ExtUIOp(i64, _res(cur))), _c_i64(16))))
 
@@ -1169,96 +1174,37 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 )
                 func.ReturnOp([])
 
-            # run_2stage_ptr
-            # Signature: rank, grid_x, self_sg, sg_ptrs_array_base, in_ptrs_array_base,
-            #            tmp_offset, out_ptr, stream_ptr, inp_ptr_override
-            # Motivation: avoid host-side H2D updates of the in_ptrs device array by passing
-            # the current-rank input pointer directly in the launch ABI.
-            run2p_args = [i32, i32, i64, i64, i64, i64, i64, i64, i64]
-            run2p_fty = ir.FunctionType.get(run2p_args, [])
-            run2p = func.FuncOp("run_2stage_ptr", run2p_fty)
-            run2p.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-            b2p = run2p.add_entry_block()
-            with ir.InsertionPoint(b2p):
-                rank = b2p.arguments[0]
-                grid_x_i32 = b2p.arguments[1]
-                self_sg = b2p.arguments[2]
-                sg_ptrs_array_base = b2p.arguments[3]
-                in_ptrs_array_base = b2p.arguments[4]
-                tmp_offset = b2p.arguments[5]
-                out_ptr_i64 = b2p.arguments[6]
-                stream_ptr = b2p.arguments[7]
-                inp_ptr_override = b2p.arguments[8]
-                
-                # Load 8 sg_ptrs from device memory array
-                sgs = []
-                for i in range(8):
-                    sg_ptr = _load_ptr_from_array(sg_ptrs_array_base, _c_i32(i))
-                    sgs.append(sg_ptr)
-                
-                # Load 8 in_ptrs from device memory array
-                in_ptrs = []
-                for i in range(8):
-                    in_ptr = _load_ptr_from_array(in_ptrs_array_base, _c_i32(i))
-                    in_ptrs.append(in_ptr)
-                # Override the current-rank input pointer (index 0 in the rotated layout).
-                in_ptrs[0] = inp_ptr_override
-                
-                # Compute tmp_ptrs with rotation: tmp_ptrs[i] = sg_ptrs[(rank + i) % world_size] + tmp_offset
-                # This matches the original rotated layout where index i corresponds to target=(rank+i)%ws
-                tmp_ptrs = []
-                for i in range(8):
-                    # Calculate rotated index: (rank + i) % world_size
-                    rank_plus_i = _addi(rank, _c_i32(i))
-                    rotated_idx = _res(arith.RemUIOp(_res(rank_plus_i), _res(_c_i32(world_size))))
-                    # Load sg_ptr at rotated index
-                    sg_ptr_rotated = _load_ptr_from_array(sg_ptrs_array_base, rotated_idx)
-                    # Compute tmp_ptr = sg_ptr + offset
-                    tmp_ptr = _addi(sg_ptr_rotated, tmp_offset)
-                    tmp_ptrs.append(tmp_ptr)
+            # run_2stage_arr (unified for eager and CUDAGraph)
+            # Signature: rank, grid_x, self_sg, sg_ptrs_base, in_ptrs_base, tmp_ptrs_base, out_ptr, stream_ptr
+            # All pointer arrays are pre-rotated by Python caller (except sg_ptrs which is non-rotated).
+            # This wrapper launches a new kernel that loads pointers from device arrays INSIDE the kernel,
+            # making it compatible with CUDAGraph (device loads are replayed).
+            run2a_args = [i32, i32, i64, i64, i64, i64, i64, i64]
+            run2a_fty = ir.FunctionType.get(run2a_args, [])
+            run2a = func.FuncOp("run_2stage_arr", run2a_fty)
+            run2a.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+            b2a = run2a.add_entry_block()
+            with ir.InsertionPoint(b2a):
+                rank = b2a.arguments[0]
+                grid_x_i32 = b2a.arguments[1]
+                self_sg = b2a.arguments[2]
+                sg_ptrs_array_base = b2a.arguments[3]
+                in_ptrs_array_base = b2a.arguments[4]
+                tmp_ptrs_array_base = b2a.arguments[5]
+                out_ptr_i64 = b2a.arguments[6]
+                stream_ptr = b2a.arguments[7]
                 
                 gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
                 one = _c_index(1)
                 bx = _c_index(threads)
-                kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in in_ptrs] + [_res(x) for x in tmp_ptrs] + [_res(out_ptr_i64)]
+                # Pass array base addresses to the kernel; kernel loads pointers internally
+                kops = [_res(rank), _res(self_sg), _res(sg_ptrs_array_base), _res(in_ptrs_array_base), _res(tmp_ptrs_array_base), _res(out_ptr_i64)]
                 stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir_ext.gpu_ext.LaunchFuncOp(
-                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}"],
+                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_arr_ws{world_size}"],
                     grid_size=(gx, one, one),
                     block_size=(bx, one, one),
                     kernel_operands=kops,
-                    async_dependencies=[stream_token],
-                )
-                func.ReturnOp([])
-
-            # run_2stage_direct: rank, grid_x, self_sg, sg0..sg7, in0..in7, tmp0..tmp7, out_ptr, stream_ptr (all scalars).
-            # No device loads -> graph-capturable. Use during HIP graph capture.
-            run2d_args = [i32, i32, i64] + [i64] * (8 + 8 + 8 + 1) + [i64]  # 4 + 25 + 1 = 30
-            run2d_fty = ir.FunctionType.get(run2d_args, [])
-            run2d = func.FuncOp("run_2stage_direct", run2d_fty)
-            run2d.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-            b2d = run2d.add_entry_block()
-            with ir.InsertionPoint(b2d):
-                rank_d = b2d.arguments[0]
-                grid_x_i32_d = b2d.arguments[1]
-                self_sg_d = b2d.arguments[2]
-                sgs_d = list(b2d.arguments[3:11])
-                ins_d = list(b2d.arguments[11:19])
-                tmps_d = list(b2d.arguments[19:27])
-                out_ptr_d = b2d.arguments[27]
-                stream_ptr_d = b2d.arguments[28]
-                gx_d = _res(arith.IndexCastOp(idx, _res(grid_x_i32_d)))
-                one_d = _c_index(1)
-                bx_d = _c_index(threads)
-                kops_d = [_res(rank_d), _res(self_sg_d)] + [_res(x) for x in sgs_d] + [_res(x) for x in ins_d] + [_res(x) for x in tmps_d] + [_res(out_ptr_d)]
-                # Capture-safe: no async_dependencies (avoids hipStreamWaitEvent during graph capture).
-                # Bind to stream via async_object only so launch can be recorded into CUDAGraph.
-                stream_token = stream_ptr_to_async_token(stream_ptr_d)
-                flir_ext.gpu_ext.LaunchFuncOp(
-                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_ptr_ws{world_size}"],
-                    grid_size=(gx_d, one_d, one_d),
-                    block_size=(bx_d, one_d, one_d),
-                    kernel_operands=kops_d,
                     async_dependencies=[stream_token],
                 )
                 func.ReturnOp([])
