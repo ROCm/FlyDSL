@@ -47,7 +47,7 @@ def torch_moe_gemm1(
             k_s, k_e = g * group_size, (g + 1) * group_size
             w1[:, :, k_s:k_e] *= scale_w1_groups[:, g, :].unsqueeze(-1)
     else:
-        # Per-row dequantization (original path).
+        # Per-row dequantization.
         w1 = (
             w1_fp8_flat.to(torch.float32)
             if scale_w1_flat is None
@@ -120,7 +120,7 @@ def torch_moe_gemm2(
             k_s, k_e = g * group_size, (g + 1) * group_size
             w2[:, :, k_s:k_e] *= scale_w2_groups[:, g, :].unsqueeze(-1)
     else:
-        # Per-row dequantization (original path).
+        # Per-row dequantization.
         w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
         w2 = w2.view(experts, model_dim, inter_dim)
 
