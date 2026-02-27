@@ -2838,6 +2838,7 @@ class _MoeGemm2ReduceWrapper:
         model_dim: int,
         out_dtype_str: str = "f16",
         use_mask: bool = False,
+        zero_intermediate: bool = True,
     ):
         self._gemm2_exe = gemm2_exe
         self._reduce_exe = reduce_exe
@@ -2845,6 +2846,7 @@ class _MoeGemm2ReduceWrapper:
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
+        self._zero_intermediate = zero_intermediate
         
     def _get_torch_dtype(self):
         """Convert dtype string to torch dtype."""
@@ -2886,7 +2888,7 @@ class _MoeGemm2ReduceWrapper:
                 device=arg_out.device,
                 dtype=self._get_torch_dtype()
             )
-        if not self._use_mask:
+        if self._zero_intermediate and not self._use_mask:
             intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
@@ -2929,6 +2931,7 @@ def compile_moe_gemm2_ex(
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
+    zero_intermediate: bool = True,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -2938,6 +2941,9 @@ def compile_moe_gemm2_ex(
         mode: Execution mode selection:
             - "atomic": Use atomic accumulation (original behavior)
             - "reduce": Use non-atomic write + reduce kernel
+
+        zero_intermediate: If all output slots are valid,
+            set False to increase performance.
 
     Returns:
         Compiled executable (either wrapped or raw depending on mode).
@@ -2984,6 +2990,7 @@ def compile_moe_gemm2_ex(
             model_dim=model_dim,
             out_dtype_str=dtype_str,
             use_mask=use_mask,
+            zero_intermediate=zero_intermediate,
         )
     else:
         # Compile GEMM2 with accumulate=True (atomic mode)
