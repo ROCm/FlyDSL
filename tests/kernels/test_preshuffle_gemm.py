@@ -21,8 +21,10 @@ if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
 from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8 as compile_preshuffle_gemm_a8_flyc
+from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_w4
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
+from tests.kernels.utils import fp4_utils
 from flydsl.runtime.device import get_rocm_arch
 
 logging.basicConfig(level=logging.INFO)
@@ -266,7 +268,71 @@ def test_mfma_w4_flyc_preshuffle(
         pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
     if a_dtype == "fp8":
         pytest.skip("fp8-A not yet supported with MXFP4 preshuffle kernel (op_sel_a overflow)")
-    pytest.skip("MXFP4 kernel not yet ported to flyc API")
+
+    print("=" * 80)
+    print(f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    launch_fn = compile_preshuffle_gemm_w4(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        a_dtype=a_dtype, b_dtype=b_dtype,
+        out_dtype="bf16", lds_stage=lds_stage,
+    )
+    print(f"✓ Compiled (lds_stage={lds_stage})")
+
+    device = torch.device("cuda")
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
+
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+    a_fp32_padded[:M] = a_fp32[:M]
+    b_fp32_padded[:N] = b_fp32[:N]
+
+    a_q, scale_a_orig, _ = fp4_utils.per_1x32_f4_quant(a_fp32_padded)
+    a_q = a_q[:M]
+    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+
+    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q = b_q[:N]
+
+    def run_torch_w4(x, w, x_scales, w_scales, dtype):
+        x_f32 = fp4_utils.mxfp4_to_f32(x)
+        w_f32 = fp4_utils.mxfp4_to_f32(w)
+        x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales[:x.shape[0]].repeat_interleave(32, dim=1))
+        w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales[:w.shape[0]].repeat_interleave(32, dim=1))
+        return torch.mm(x_f32 * x_scales_f32, (w_f32 * w_scales_f32).T).to(dtype)
+
+    c_ref = run_torch_w4(a_q, b_q, scale_a_orig, scale_b, torch.float32)
+
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+
+    c_out = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
+
+    def _to_bytes(t):
+        if t.dtype == torch.uint8 or t.dtype == torch.int8:
+            return t
+        return t.view(torch.uint8)
+
+    launch_fn(
+        c_out.contiguous().view(-1),
+        _to_bytes(a_q).contiguous().view(-1),
+        _to_bytes(b_shuffled).contiguous().view(-1),
+        _to_bytes(scale_a).contiguous().view(-1),
+        _to_bytes(scale_b_shuffled).contiguous().view(-1),
+        M, N,
+        torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+    c_out_f32 = c_out.to(torch.float32)
+
+    assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
+    print(f"[flyc] MXFP4 GEMM: correctness PASSED")
 
 
 if __name__ == "__main__":
