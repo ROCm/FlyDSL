@@ -47,7 +47,7 @@ DTYPE_BF16 = torch.bfloat16
 import flydsl
 
 EPS: float = 1e-5
-from kernels.layernorm_kernel import (
+from flydsl.kernels.layernorm_kernel import (
     build_layernorm_module,
     KERNEL_NAME as LAYERNORM_KERNEL_NAME,
     BLOCK_THREADS,

@@ -23,10 +23,10 @@ from _mlir import ir
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
-from kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
 from flydsl.compiler.compiler import _apply_waves_per_eu_hint
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_16b_xor16,
@@ -34,7 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import mfma_epilog
+from flydsl.kernels.mfma_epilogues import mfma_epilog
 
 
 def compile_preshuffle_gemm_a8(

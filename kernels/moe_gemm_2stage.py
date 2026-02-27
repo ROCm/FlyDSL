@@ -29,7 +29,7 @@ from flydsl.lang.ir.types import T as I
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
@@ -39,8 +39,8 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
 
 
 @functools.lru_cache(maxsize=1024)

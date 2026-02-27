@@ -24,7 +24,7 @@ Computes `LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta` for each r
 
 **Builder:**
 ```python
-from kernels.layernorm_kernel import build_layernorm_module
+from flydsl.kernels.layernorm_kernel import build_layernorm_module
 
 executor = build_layernorm_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -63,7 +63,7 @@ Computes `RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma`.
 
 **Builder:**
 ```python
-from kernels.rmsnorm_kernel import build_rmsnorm_module
+from flydsl.kernels.rmsnorm_kernel import build_rmsnorm_module
 
 executor = build_rmsnorm_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -93,7 +93,7 @@ Computes row-wise softmax: `softmax(x)_i = exp(x_i - max(x)) / sum(exp(x - max(x
 
 **Builder:**
 ```python
-from kernels.softmax_kernel import build_softmax_module
+from flydsl.kernels.softmax_kernel import build_softmax_module
 
 executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -131,7 +131,7 @@ MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]
 
 **Builder:**
 ```python
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from flydsl.kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 
 executor = compile_preshuffle_gemm_a8(
     M=16, N=5120, K=8192,
@@ -170,7 +170,7 @@ MXFP4 mixed-precision GEMM with separate A/B quantization scales.
 
 **Builder:**
 ```python
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm
+from flydsl.kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm
 
 executor = compile_mxfp4_preshuffle_gemm(
     M=16, N=5120, K=8192,
@@ -204,7 +204,7 @@ Mixture-of-Experts GEMM with dual accumulators for gate/up projections and SiLU 
 
 **Stage 1 Builder:**
 ```python
-from kernels.moe_gemm_2stage import compile_moe_gemm1
+from flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
 
 executor = compile_moe_gemm1(
     model_dim=8192, inter_dim=8192,
@@ -251,7 +251,7 @@ MXFP4 variant of MoE GEMM combining dual-accumulator pattern with mixed-precisio
 
 **Builder:**
 ```python
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
+from flydsl.kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
 executor = compile_mixed_moe_gemm1(
     model_dim=8192, inter_dim=8192,
