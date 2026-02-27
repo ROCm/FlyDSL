@@ -31,8 +31,14 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(MlirType
 MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// CopyOp_CDNA3_BufferLSAType
+// CopyOpCDNA3BufferLDSTType
 //===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferLDSTType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGet(MlirContext ctx,
+                                                                     int32_t bitSize);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // Pass Registration

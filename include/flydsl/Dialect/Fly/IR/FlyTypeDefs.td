@@ -212,16 +212,6 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
   let assemblyFormat = "`<` $mmaAtom `,` $atomLayout `,` $permutation `>`";
 }
 
-def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "op.universal_copy", [
-  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
-  DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
-]> {
-  let parameters = (ins
-    "int32_t":$bitSize
-  );
-  let assemblyFormat = "`<` $bitSize `>`";
-}
-
 def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
 ]> {
@@ -245,7 +235,17 @@ def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [
   ];
 }
 
-def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "atom.universal_fma", [
+def Fly_CopyOpUniversalCopy : Fly_Type<"CopyOpUniversalCopy", "universal_copy", [
+  DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
+  DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
+]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+}
+
+def Fly_MmaAtomUniversalFMA : Fly_Type<"MmaAtomUniversalFMA", "universal_fma", [
   DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>,
   DeclareTypeInterfaceMethods<Fly_MmaAtomTypeInterface>
 ]> {

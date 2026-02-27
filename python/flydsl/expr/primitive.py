@@ -18,6 +18,13 @@ from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
 from .typing import Int32
 
+UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)  # noqa: E731
+UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)  # noqa: E731
+UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)  # noqa: E731
+UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)  # noqa: E731
+
+UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)  # noqa: E731
+
 # __all__ = [
 #     # Maybe remove it in the future
 #     "T",
@@ -449,6 +456,11 @@ def make_view(iter, layout, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def make_ptr(result_type, args, loc=None, ip=None):
+    return fly.make_ptr(result_type, args, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def add_offset(ptr, offset, loc=None, ip=None):
     if not isinstance(offset, ir.Value):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
@@ -471,15 +483,15 @@ def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
         val_bits = elem_type
     else:
         raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
-    copy_op_val = fly.make_atom(copy_op_type, loc=loc, ip=ip)
-    return CopyAtom(fly.make_copy_atom(copy_op_val, val_bits=val_bits, loc=loc, ip=ip))
+    copy_atom_ty = CopyAtomType.get(copy_op_type, val_bits)
+    return CopyAtom(fly.make_copy_atom(copy_atom_ty, val_bits=val_bits, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper
 def make_mma_atom(atom_type, loc=None, ip=None):
     from .derived import MmaAtom
 
-    return MmaAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+    return MmaAtom(fly.make_mma_atom(atom_type, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper

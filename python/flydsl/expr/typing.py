@@ -1,9 +1,10 @@
 import ctypes
 from typing import Generic, TypeVar
 
+from flydsl.runtime.device import get_rocm_arch
+
 from .._mlir import ir
 from .._mlir.dialects import gpu
-from flydsl.runtime.device import get_rocm_arch
 from .numeric import (
     BFloat16,
     Boolean,
@@ -77,15 +78,19 @@ class Types:
     @property
     def i8(self) -> ir.Type:
         return Int8.ir_type
+
     @property
     def i8x2(self) -> ir.Type:
         return _vec(2, Int8.ir_type)
+
     @property
     def i8x4(self) -> ir.Type:
         return _vec(4, Int8.ir_type)
+
     @property
     def i8x8(self) -> ir.Type:
         return _vec(8, Int8.ir_type)
+
     @property
     def i8x16(self) -> ir.Type:
         return _vec(16, Int8.ir_type)
@@ -93,12 +98,15 @@ class Types:
     @property
     def i16(self) -> ir.Type:
         return Int16.ir_type
+
     @property
     def i16x2(self) -> ir.Type:
         return _vec(2, Int16.ir_type)
+
     @property
     def i16x4(self) -> ir.Type:
         return _vec(4, Int16.ir_type)
+
     @property
     def i16x8(self) -> ir.Type:
         return _vec(8, Int16.ir_type)
@@ -106,9 +114,11 @@ class Types:
     @property
     def i32(self) -> ir.Type:
         return Int32.ir_type
+
     @property
     def i32x2(self) -> ir.Type:
         return _vec(2, Int32.ir_type)
+
     @property
     def i32x4(self) -> ir.Type:
         return _vec(4, Int32.ir_type)
@@ -116,6 +126,7 @@ class Types:
     @property
     def i64(self) -> ir.Type:
         return Int64.ir_type
+
     @property
     def i64x2(self) -> ir.Type:
         return _vec(2, Int64.ir_type)
@@ -124,12 +135,15 @@ class Types:
     @property
     def f16(self) -> ir.Type:
         return Float16.ir_type
+
     @property
     def f16x2(self) -> ir.Type:
         return _vec(2, Float16.ir_type)
+
     @property
     def f16x4(self) -> ir.Type:
         return _vec(4, Float16.ir_type)
+
     @property
     def f16x8(self) -> ir.Type:
         return _vec(8, Float16.ir_type)
@@ -137,12 +151,15 @@ class Types:
     @property
     def bf16(self) -> ir.Type:
         return BFloat16.ir_type
+
     @property
     def bf16x2(self) -> ir.Type:
         return _vec(2, BFloat16.ir_type)
+
     @property
     def bf16x4(self) -> ir.Type:
         return _vec(4, BFloat16.ir_type)
+
     @property
     def bf16x8(self) -> ir.Type:
         return _vec(8, BFloat16.ir_type)
@@ -150,9 +167,11 @@ class Types:
     @property
     def f32(self) -> ir.Type:
         return Float32.ir_type
+
     @property
     def f32x2(self) -> ir.Type:
         return _vec(2, Float32.ir_type)
+
     @property
     def f32x4(self) -> ir.Type:
         return _vec(4, Float32.ir_type)
@@ -165,15 +184,19 @@ class Types:
     @property
     def f8(self) -> ir.Type:
         return default_f8_type()
+
     @property
     def f8x2(self) -> ir.Type:
         return _vec(2, default_f8_type())
+
     @property
     def f8x4(self) -> ir.Type:
         return _vec(4, default_f8_type())
+
     @property
     def f8x8(self) -> ir.Type:
         return _vec(8, default_f8_type())
+
     @property
     def f8x16(self) -> ir.Type:
         return _vec(16, default_f8_type())

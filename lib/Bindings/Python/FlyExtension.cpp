@@ -330,8 +330,7 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
 // ---------------------------------------------------------------------------
 struct PyCopyOpUniversalCopyType : PyConcreteType<PyCopyOpUniversalCopyType> {
   static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyCopyOpUniversalCopyType;
-  static constexpr GetTypeIDFunctionTy getTypeIdFunction =
-      mlirFlyCopyOpUniversalCopyTypeGetTypeID;
+  static constexpr GetTypeIDFunctionTy getTypeIdFunction = mlirFlyCopyOpUniversalCopyTypeGetTypeID;
   static constexpr const char *pyClassName = "CopyOpUniversalCopyType";
   using Base::Base;
 
@@ -362,18 +361,31 @@ struct PyCopyAtomType : PyConcreteType<PyCopyAtomType> {
   using Base::Base;
 
   static void bindDerived(ClassTy &c) {
-    c.def_prop_ro("copy_op",
-                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetCopyOp(self); });
-    c.def_prop_ro("val_bits",
-                  [](PyCopyAtomType &self) -> int32_t { return mlirFlyCopyAtomTypeGetValBits(self); });
-    c.def_prop_ro("thr_layout",
-                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrLayout(self); });
-    c.def_prop_ro("tv_layout_src",
-                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutSrc(self); });
-    c.def_prop_ro("tv_layout_dst",
-                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutDst(self); });
-    c.def_prop_ro("tv_layout_ref",
-                  [](PyCopyAtomType &self) -> MlirType { return mlirFlyCopyAtomTypeGetThrValLayoutRef(self); });
+    c.def_static(
+        "get",
+        [](PyType &copyOp, int32_t valBits) {
+          return PyCopyAtomType(copyOp.getContext(), mlirFlyCopyAtomTypeGet(copyOp, valBits));
+        },
+        "copy_op"_a, "val_bits"_a,
+        "Create a CopyAtomType with the given copy op type and value bits");
+    c.def_prop_ro("copy_op", [](PyCopyAtomType &self) -> MlirType {
+      return mlirFlyCopyAtomTypeGetCopyOp(self);
+    });
+    c.def_prop_ro("val_bits", [](PyCopyAtomType &self) -> int32_t {
+      return mlirFlyCopyAtomTypeGetValBits(self);
+    });
+    c.def_prop_ro("thr_layout", [](PyCopyAtomType &self) -> MlirType {
+      return mlirFlyCopyAtomTypeGetThrLayout(self);
+    });
+    c.def_prop_ro("tv_layout_src", [](PyCopyAtomType &self) -> MlirType {
+      return mlirFlyCopyAtomTypeGetThrValLayoutSrc(self);
+    });
+    c.def_prop_ro("tv_layout_dst", [](PyCopyAtomType &self) -> MlirType {
+      return mlirFlyCopyAtomTypeGetThrValLayoutDst(self);
+    });
+    c.def_prop_ro("tv_layout_ref", [](PyCopyAtomType &self) -> MlirType {
+      return mlirFlyCopyAtomTypeGetThrValLayoutRef(self);
+    });
   }
 };
 

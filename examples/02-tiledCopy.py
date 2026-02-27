@@ -15,6 +15,10 @@ def copy_kernel(
     block_m = 8
     block_n = 24
     tile = fx.make_tile([fx.make_layout(block_m, 1), fx.make_layout(block_n, 1)])
+
+    A = fx.rocdl.make_buffer_tensor(A)
+    B = fx.rocdl.make_buffer_tensor(B)
+
     bA = fx.zipped_divide(A, tile)
     bB = fx.zipped_divide(B, tile)
     bA = fx.slice(bA, (None, bid))
@@ -22,7 +26,7 @@ def copy_kernel(
 
     thr_layout = fx.make_layout((4, 1), (1, 1))
     val_layout = fx.make_layout((1, 8), (1, 1))
-    copy_atom = fx.make_copy_atom(fx.CopyOpUniversalCopyType.get(128), fx.Float32)
+    copy_atom = fx.make_copy_atom(fx.rocdl.BufferLDST128b(), fx.Float32)
     layout_thr_val = fx.logical_product(thr_layout, val_layout)
     layout_thr_val = fx.raked_product(thr_layout, val_layout)
     tile_mn = fx.make_tile([fx.make_layout(4, 1), fx.make_layout(8, 1)])

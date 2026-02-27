@@ -1138,14 +1138,6 @@ FLY_INFER_RETURN_TYPES(TileToShapeOp) {
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(MakeCopyAtomOp) {
-  MakeCopyAtomOp::Adaptor adaptor(operands, attributes, properties, regions);
-  auto copyOpTy = adaptor.getCopyOp().getType();
-  int32_t valBits = adaptor.getValBits();
-  inferredReturnTypes.assign({CopyAtomType::get(copyOpTy, valBits)});
-  return success();
-}
-
 FLY_INFER_RETURN_TYPES(MakeTiledCopyOp) {
   auto copyAtomTy = operands[0].getType();
   auto layoutTy = dyn_cast<LayoutType>(operands[1].getType());
