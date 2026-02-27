@@ -11,11 +11,19 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 # Locate the build directory (default: .flir/build; fallback: build/).
 BUILD_DIR="${FLIR_BUILD_DIR:-${REPO_ROOT}/.flir/build}"
+if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build-fly" ]; then
+  BUILD_DIR="${REPO_ROOT}/build-fly"
+fi
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
   BUILD_DIR="${REPO_ROOT}/build"
 fi
-PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/flydsl"
-export PYTHONPATH="${REPO_ROOT}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
+PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages"
+# Ensure build packages take priority over pip-installed flydsl
+export PYTHONPATH="${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
+MLIR_LIBS_DIR="${PYTHON_PACKAGE_ROOT}/flydsl/_mlir/_mlir_libs"
+if [ -d "${MLIR_LIBS_DIR}" ]; then
+  export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
+fi
 
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flir_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
