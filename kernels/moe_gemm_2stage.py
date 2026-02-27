@@ -2705,7 +2705,7 @@ def compile_moe_reduction(
             thr_copy_X = tiled_copy_X.get_slice(tid)
             thr_copy_Y = tiled_copy_Y.get_slice(tid)
 
-            thread_offset_base = (arith.ArithValue(tid) * VEC_WIDTH).value
+            thread_offset_base = arith.ArithValue(tid) * VEC_WIDTH
 
             vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
             vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
@@ -2714,7 +2714,7 @@ def compile_moe_reduction(
 
             tile_n_idx = arith.ArithValue(flir.block_idx("y"))
             c_base = tile_n_idx * BLOCK_SIZE * VEC_WIDTH
-            curr_idx = (c_base + thread_offset_base).value
+            curr_idx = c_base + thread_offset_base
 
             if use_mask:
                 # OPTIMIZATION: Load all masks once before model_dim loop
