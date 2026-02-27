@@ -12,7 +12,7 @@ from flydsl.expr.typing import T
 from flydsl.expr import arith as _arith
 import flydsl.expr as fx
 
-from flydsl.expr import crd2idx, idx2crd, get as layout_get
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 
 def swizzle_xor16(row, col, k_blocks16):

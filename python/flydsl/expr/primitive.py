@@ -31,52 +31,6 @@ def _unwrap(v):
     return v
 
 
-def _idx2crd_arith(idx, layout, loc=None, ip=None):
-    """Pure-arith idx2crd for simple product layouts: (s0, s1, ...):(d0, d1, ...).
-    Returns a Python list of index-typed Values [coord0, coord1, ...].
-    """
-    import builtins as _builtins
-    import re
-    v = _unwrap(idx)
-    ly = _unwrap(layout)
-    ly_str = str(ly.type) if hasattr(ly, 'type') else str(ly)
-    shape_match = re.search(r'\(([^)]+)\):\(([^)]+)\)', ly_str)
-    if shape_match:
-        raw_shapes = [s.strip() for s in shape_match.group(1).split(',')]
-        raw_strides = [s.strip() for s in shape_match.group(2).split(',')]
-        shapes = [None if s == '?' else int(s) for s in raw_shapes]
-        strides = [None if d == '?' else int(d) for d in raw_strides]
-        if all(s is None for s in strides):
-            return [v]
-    else:
-        return [v]
-    if isinstance(v, ir.Value) and str(v.type) != 'index':
-        v = arith.IndexCastOp(ir.IndexType.get(), v).result
-    import builtins as _builtins
-    idx_type = ir.IndexType.get()
-    def _const(val):
-        return arith.ConstantOp(idx_type, ir.IntegerAttr.get(idx_type, val)).result
-    ndims = len(strides)
-    indexed = list(_builtins.zip(range(ndims), strides, shapes))
-    has_stride = [(i, s, sz) for i, s, sz in indexed if s is not None]
-    has_stride.sort(key=lambda x: x[1], reverse=True)
-    coords = [None] * ndims
-    remaining = v
-    for i, stride_val, size_val in has_stride:
-        if stride_val == 0:
-            coords[i] = _const(0)
-            continue
-        c_stride = _const(stride_val)
-        coord = arith.DivUIOp(remaining, c_stride).result
-        if size_val is not None:
-            c_size = _const(size_val)
-            coord = arith.RemUIOp(coord, c_size).result
-        coords[i] = coord
-    for i in range(ndims):
-        if coords[i] is None:
-            coords[i] = remaining
-    return coords
-
 
 def _unwrap_tuple(elems):
     """Unwrap each element in a tuple/list that may contain ArithValue wrappers.
@@ -279,18 +233,9 @@ def size(int_tuple, loc=None, ip=None):
 
 @dsl_api_wrapper
 def get(int_tuple, mode, loc=None, ip=None):
-    """Extract element `mode` from a coordinate."""
-    if isinstance(int_tuple, (list, tuple)):
-        return int_tuple[mode]
-    v = _unwrap(int_tuple)
-    tp = str(v.type) if hasattr(v, 'type') else ''
-    if 'int_tuple' in tp:
-        selected = fly.select(v, indices=[mode], loc=loc, ip=ip)
-        result = fly.get_scalar(selected, loc=loc, ip=ip)
-        if hasattr(result, 'type') and str(result.type) != 'index':
-            result = arith.IndexCastOp(ir.IndexType.get(), result).result
-        return result
-    return v
+    """Extract element from int_tuple by mode index."""
+    selected = fly.select(_unwrap(int_tuple), indices=[mode], loc=loc, ip=ip)
+    return fly.get_scalar(selected, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -308,85 +253,12 @@ def slice(src, coord, loc=None, ip=None):
 
 @dsl_api_wrapper
 def idx2crd(idx, layout, loc=None, ip=None):
-    """idx2crd: returns a Python list of index Values (pure arith decomposition)."""
-    return _idx2crd_arith(idx, layout, loc=loc, ip=ip)
-
-
-def _crd2idx_fly_fallback(crd, ly, loc=None, ip=None):
-    """Fall back to fly.crd2idx for layouts with dynamic strides."""
-    if isinstance(crd, (list, tuple)):
-        unwrapped = [_unwrap(c) for c in crd]
-        idx_type = ir.IndexType.get()
-        i32_type = ir.IntegerType.get_signless(32)
-        converted = []
-        for v in unwrapped:
-            if isinstance(v, ir.Value):
-                if str(v.type) == 'index':
-                    v = arith.IndexCastOp(i32_type, v).result
-                converted.append(v)
-            elif isinstance(v, int):
-                converted.append(arith.ConstantOp(i32_type, ir.IntegerAttr.get(i32_type, v)).result)
-            else:
-                converted.append(v)
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type(tuple(converted))
-        crd_val = fly.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
-    else:
-        crd_val = _unwrap(crd)
-    result = fly.crd2idx(crd_val, _unwrap(ly), loc=loc, ip=ip)
-    if hasattr(result, 'type') and 'int_tuple' in str(result.type):
-        result = fly.get_scalar(result, loc=loc, ip=ip)
-    if hasattr(result, 'type') and str(result.type) != 'index':
-        result = arith.IndexCastOp(ir.IndexType.get(), result).result
-    return result
+    return fly.idx2crd(_unwrap(idx), _unwrap(layout), loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
 def crd2idx(crd, layout, loc=None, ip=None):
-    """Pure-arith crd2idx: idx = sum(coord[i] * stride[i])."""
-    import builtins as _b
-    import re as _re
-    ly = _unwrap(layout)
-    ly_str = str(ly.type) if hasattr(ly, 'type') else ''
-    match = _re.search(r'\(([^)]+)\):\(([^)]+)\)', ly_str)
-    if not match:
-        return _crd2idx_fly_fallback(crd, ly, loc=loc, ip=ip)
-    raw_strides = [s.strip() for s in match.group(2).split(',')]
-    strides = [None if s == '?' else int(s) for s in raw_strides]
-    if any(s is None for s in strides):
-        return _crd2idx_fly_fallback(crd, ly, loc=loc, ip=ip)
-    if isinstance(crd, (list, tuple)):
-        coords = [_unwrap(c) for c in crd]
-    else:
-        coords = [_unwrap(crd)]
-    idx_type = ir.IndexType.get()
-    def _to_val(v):
-        if isinstance(v, ir.Value):
-            if str(v.type) != 'index':
-                return arith.IndexCastOp(idx_type, v).result
-            return v
-        if isinstance(v, int):
-            return arith.ConstantOp(idx_type, ir.IntegerAttr.get(idx_type, v)).result
-        return _unwrap(v)
-    coords = [_to_val(c) for c in coords]
-    idx_type = ir.IndexType.get()
-    def _c(v):
-        return arith.ConstantOp(idx_type, ir.IntegerAttr.get(idx_type, v)).result
-    result = None
-    for i, (coord_v, stride_v) in enumerate(_b.zip(coords, strides)):
-        cv = _unwrap(coord_v)
-        if isinstance(cv, ir.Value) and str(cv.type) != 'index':
-            cv = arith.IndexCastOp(idx_type, cv).result
-        if stride_v is None or stride_v == 1:
-            term = cv
-        elif stride_v == 0:
-            continue
-        else:
-            term = arith.MulIOp(cv, _c(stride_v)).result
-        if result is None:
-            result = term
-        else:
-            result = arith.AddIOp(result, term).result
-    return result if result is not None else _c(0)
+    return fly.crd2idx(_unwrap(crd), _unwrap(layout), loc=loc, ip=ip)
 
 
 @dsl_api_wrapper

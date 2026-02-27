@@ -18,7 +18,7 @@ from flydsl.expr import buffer_ops, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 
-from flydsl.expr import crd2idx, idx2crd, get as layout_get
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
