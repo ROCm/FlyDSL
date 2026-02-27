@@ -36,7 +36,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf"
+          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
+          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && apt-get install -y python3.10 python3.10-dev python3.10-venv"
           docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_build bash -c "git config --global --add safe.directory /flydsl"

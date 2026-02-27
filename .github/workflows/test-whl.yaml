@@ -51,7 +51,7 @@ jobs:
       - name: Install wheels and dependencies
         run: |
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools"
-          docker exec flydsl_test bash -c "python3 -m pip install /dist/*.whl"
+          docker exec flydsl_test bash -c "python3 -m pip install --no-index --find-links=/dist flydsl"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
