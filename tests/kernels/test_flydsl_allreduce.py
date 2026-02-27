@@ -454,12 +454,21 @@ def _dist_worker(
                     start_evt = torch.cuda.Event(enable_timing=True)
                     end_evt = torch.cuda.Event(enable_timing=True)
                     torch.cuda.synchronize()
+                    dist.barrier(device_ids=[rank])
 
-                    start_evt.record()
-                    for _ in range(num_iters):
-                        graph.replay()
-                    end_evt.record()
-                    torch.cuda.synchronize()
+                    with tpf.profile(
+                        activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                        profile_memory=False,
+                        with_stack=True,
+                        with_modules=True,
+                    ) as prof:
+                        start_evt.record()
+                        for _ in range(num_iters):
+                            graph.replay()
+                        end_evt.record()
+                        torch.cuda.synchronize()
+                    prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_cudagraph.json")
+
                     total_ms = start_evt.elapsed_time(end_evt)
                     avg_time_us = (total_ms * 1000.0) / num_iters if num_iters else 0.0
                     device_time_sum = total_ms * 1000.0
