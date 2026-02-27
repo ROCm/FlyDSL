@@ -319,20 +319,35 @@ def test_mfma_w4_flyc_preshuffle(
             return t
         return t.view(torch.uint8)
 
-    launch_fn(
-        c_out.contiguous().view(-1),
-        _to_bytes(a_q).contiguous().view(-1),
-        _to_bytes(b_shuffled).contiguous().view(-1),
-        _to_bytes(scale_a).contiguous().view(-1),
-        _to_bytes(scale_b_shuffled).contiguous().view(-1),
-        M, N,
-        torch.cuda.current_stream(),
+    def launch_kernel(c, a, b, sa, sb):
+        launch_fn(
+            c.contiguous().view(-1),
+            _to_bytes(a).contiguous().view(-1),
+            _to_bytes(b).contiguous().view(-1),
+            _to_bytes(sa).contiguous().view(-1),
+            _to_bytes(sb).contiguous().view(-1),
+            M, N,
+            torch.cuda.current_stream(),
+        )
+
+    bench_iters = max(2, int(bench_iters))
+    _, us = run_perftest(
+        launch_kernel, c_out, a_q, b_shuffled, scale_a, scale_b_shuffled,
+        num_iters=bench_iters, num_warmup=int(bench_warmup),
     )
     torch.cuda.synchronize()
     c_out_f32 = c_out.to(torch.float32)
 
     assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
-    print(f"[flyc] MXFP4 GEMM: correctness PASSED")
+
+    size_a = (M * K) // 2
+    size_b = (N * K) // 2
+    size_c = M * N
+    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * (K // 32)
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 if __name__ == "__main__":
