@@ -108,16 +108,16 @@ def idx2crd(idx, layout, loc=None, ip=None):
 def crd2idx(crd, layout, loc=None, ip=None):
     """crd2idx: compute flat index from coordinates. Returns index Value."""
     ly = _unwrap(layout)
-    parsed = _parse_layout(ly)
 
+    if not isinstance(crd, (list, tuple)):
+        return _crd2idx_via_fly(crd, ly, loc=loc, ip=ip)
+
+    parsed = _parse_layout(ly)
     if parsed is None or any(s is None for s in parsed[1]):
         return _crd2idx_via_fly(crd, ly, loc=loc, ip=ip)
 
     _, strides = parsed
-    if isinstance(crd, (list, tuple)):
-        coords = [_unwrap(c) for c in crd]
-    else:
-        coords = [_unwrap(crd)]
+    coords = [_unwrap(c) for c in crd]
 
     result = None
     for coord_v, stride_v in _builtins.zip(coords, strides):

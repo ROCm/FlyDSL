@@ -323,7 +323,7 @@ def compile_preshuffle_gemm_a8(
             k0_base = base_k_bytes / c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
-            coord_pack = fx.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
+            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
             idx_pack = crd2idx(coord_pack, layout_b)
             vec_elems = 16 if elem_bytes == 1 else 8
             b16 = _buffer_load_vec(
@@ -362,7 +362,7 @@ def compile_preshuffle_gemm_a8(
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
-            coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
+            coord_a16 = (curr_row_a_lds, col_base_swz)
             idx_a16 = crd2idx(coord_a16, layout_lds)
             return vector.load_op(_vec16_type(), lds_buffer, [idx_a16])
 
