@@ -21,12 +21,16 @@ if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
 from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8 as compile_preshuffle_gemm_a8_flyc
+from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_w4
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
+from tests.kernels.utils import fp4_utils
 from flydsl.runtime.device import get_rocm_arch
 
 logging.basicConfig(level=logging.INFO)
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 try:
     import aiter
@@ -34,15 +38,12 @@ try:
 except ImportError:
     HAS_AITER = False
 
-arch = str(get_rocm_arch())
-if "gfx95" in arch:
-    DTYPE_FP8 = torch.float8_e4m3fn
-else:
-    DTYPE_FP8 = torch.float8_e4m3fnuz
+ARCH = str(get_rocm_arch())
+DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 
 DEFAULT_LDS_STAGE = 2
-DEFAULT_BENCH_ITERS = 100
-DEFAULT_BENCH_WARMUP = 10
+DEFAULT_BENCH_ITERS = 20
+DEFAULT_BENCH_WARMUP = 3
 DEFAULT_RUN_AITER_BENCH = True
 
 
@@ -59,26 +60,39 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     return c.to(dtype)
 
 
-@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "bf16"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
         (16, 5120, 8192, 16, 64, 512),
-        (5120, 5120, 8320, 64, 256, 128),
-        (9728, 8192, 8320, 128, 128, 128),
-        (5133, 5120, 8320, 64, 256, 128),
+        (33, 1024, 2048, 32, 64, 512),
+        pytest.param(5120, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
+        pytest.param(5120, 2048, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(9728, 8192, 8320, 128, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(5133, 5120, 8320, 64, 256, 128, marks=pytest.mark.large_shape),
     ]
 )
+@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph", marks=pytest.mark.large_shape),
+])
 def test_mfma_a8_flyc_preshuffle(
     in_dtype,
     M, N, K,
     tile_m, tile_n, tile_k,
     *,
+    use_async_copy,
+    test_graph,
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    use_cshuffle_epilog: bool = False,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
+    if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
     print("=" * 80)
     print(
         f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})"
@@ -94,8 +108,10 @@ def test_mfma_a8_flyc_preshuffle(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,
         lds_stage=lds_stage,
+        use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Kernel prepared (lds_stage={lds_stage})")
+    print(f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy})")
 
     size_c = M * N
     size_a = M * K
@@ -110,7 +126,6 @@ def test_mfma_a8_flyc_preshuffle(
         elem_bytes = 1
 
     device = torch.device("cuda")
-    torch.manual_seed(42)
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
 
@@ -174,6 +189,7 @@ def test_mfma_a8_flyc_preshuffle(
             sa.contiguous().view(-1) if sa.numel() > 0 else sa,
             sb.contiguous().view(-1) if sb.numel() > 0 else sb,
             M, N,
+            torch.cuda.current_stream(),
         )
 
     bench_iters = max(2, int(bench_iters))
@@ -187,13 +203,147 @@ def test_mfma_a8_flyc_preshuffle(
         sb_flat,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
+    if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
+        print("-" * 40)
+        print("Running Aiter Benchmark...")
+        try:
+            def launch_aiter(a, b, sa, sb):
+                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
+
+            c_aiter, us1 = run_perftest(
+                launch_aiter, a_q, b_shuffled, scale_a, scale_b,
+                testGraph=test_graph,
+            )
+            c_aiter_f32 = c_aiter.to(torch.float32)
+            verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
+
+            bytes_moved_a = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+            flops_a = 2 * M * N * K
+            tflops_aiter = flops_a / (us1 / 1e6) / 1e12
+            bw_aiter = bytes_moved_a / 1e9 / (us1 / 1e6)
+            print(
+                f"Aiter Throughput: {us1:.1f} us, {tflops_aiter:.2f} TFLOPS, BW: {bw_aiter:.2f} GB/s"
+            )
+            print("-" * 40)
+        except Exception as e:
+            msg = str(e).splitlines()[0] if str(e) else repr(e)
+            print(f"Skipping Aiter benchmark (not runnable here): {msg}")
+            print("-" * 40)
+
     bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+@pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
+@pytest.mark.parametrize("b_dtype", ["fp4"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (32, 8192, 8192, 32, 128, 256),
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+    ]
+)
+def test_mfma_w4_flyc_preshuffle(
+    a_dtype, b_dtype,
+    M, N, K, tile_m, tile_n, tile_k,
+    *,
+    lds_stage: int = DEFAULT_LDS_STAGE,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+):
+    """FP4 (MXFP4) preshuffle GEMM — gfx950 only."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+    if a_dtype == "fp8":
+        pytest.skip("fp8-A not yet supported with MXFP4 preshuffle kernel (op_sel_a overflow)")
+
+    print("=" * 80)
+    print(f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    launch_fn = compile_preshuffle_gemm_w4(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        a_dtype=a_dtype, b_dtype=b_dtype,
+        out_dtype="bf16", lds_stage=lds_stage,
+    )
+    print(f"✓ Compiled (lds_stage={lds_stage})")
+
+    device = torch.device("cuda")
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
+
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+    a_fp32_padded[:M] = a_fp32[:M]
+    b_fp32_padded[:N] = b_fp32[:N]
+
+    a_q, scale_a_orig, _ = fp4_utils.per_1x32_f4_quant(a_fp32_padded)
+    a_q = a_q[:M]
+    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+
+    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q = b_q[:N]
+
+    def run_torch_w4(x, w, x_scales, w_scales, dtype):
+        x_f32 = fp4_utils.mxfp4_to_f32(x)
+        w_f32 = fp4_utils.mxfp4_to_f32(w)
+        x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales[:x.shape[0]].repeat_interleave(32, dim=1))
+        w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales[:w.shape[0]].repeat_interleave(32, dim=1))
+        return torch.mm(x_f32 * x_scales_f32, (w_f32 * w_scales_f32).T).to(dtype)
+
+    c_ref = run_torch_w4(a_q, b_q, scale_a_orig, scale_b, torch.float32)
+
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+
+    c_out = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
+
+    def _to_bytes(t):
+        if t.dtype == torch.uint8 or t.dtype == torch.int8:
+            return t
+        return t.view(torch.uint8)
+
+    def launch_kernel(c, a, b, sa, sb):
+        launch_fn(
+            c.contiguous().view(-1),
+            _to_bytes(a).contiguous().view(-1),
+            _to_bytes(b).contiguous().view(-1),
+            _to_bytes(sa).contiguous().view(-1),
+            _to_bytes(sb).contiguous().view(-1),
+            M, N,
+            torch.cuda.current_stream(),
+        )
+
+    bench_iters = max(2, int(bench_iters))
+    _, us = run_perftest(
+        launch_kernel, c_out, a_q, b_shuffled, scale_a, scale_b_shuffled,
+        num_iters=bench_iters, num_warmup=int(bench_warmup),
+    )
+    torch.cuda.synchronize()
+    c_out_f32 = c_out.to(torch.float32)
+
+    assert verify_output(c_out_f32, c_ref, rtol=0.1, atol=0.1)
+
+    size_a = (M * K) // 2
+    size_b = (N * K) // 2
+    size_c = M * N
+    bytes_moved = size_a + size_b + size_c * 2 + (M + N) * (K // 32)
     flops = 2 * M * N * K
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
@@ -205,7 +355,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Preshuffle GEMM benchmark")
     parser.add_argument("--in_dtype", type=str, default="fp8",
-                        choices=["fp8", "int8", "int4", "fp16", "bf16"])
+                        choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"])
     parser.add_argument("-M", type=int, default=16)
     parser.add_argument("-N", type=int, default=10240)
     parser.add_argument("-K", type=int, default=8192)
@@ -216,14 +366,40 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--flyc", action="store_true", default=True)
-
+    parser.add_argument("--use_async_copy", action="store_true", default=False)
+    parser.add_argument("--use_cshuffle_epilog", action="store_true", default=False)
+    parser.add_argument("--run_aiter_bench", action="store_true", default=DEFAULT_RUN_AITER_BENCH)
+    parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
+    parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
+    parser.add_argument("--wfp4", action="store_true", default=False,
+                        help="Run weight-fp4 (MXFP4) preshuffle GEMM test.")
     args = parser.parse_args()
     torch.set_default_device("cuda")
-    test_mfma_a8_flyc_preshuffle(
-        args.in_dtype,
-        M=args.M, N=args.N, K=args.K,
-        tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
-        lds_stage=args.lds_stage,
-        bench_iters=args.num_iters,
-        bench_warmup=args.num_warmup,
-    )
+    try:
+        if not args.wfp4:
+            if args.in_dtype == "fp4":
+                raise ValueError("--in_dtype fp4 requires --wfp4")
+            test_mfma_a8_flyc_preshuffle(
+                args.in_dtype,
+                M=args.M, N=args.N, K=args.K,
+                tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+                use_async_copy=bool(args.use_async_copy),
+                test_graph=bool(args.test_graph),
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+                run_aiter_bench=bool(args.run_aiter_bench),
+                use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+            )
+        else:
+            test_mfma_w4_flyc_preshuffle(
+                args.in_dtype if args.in_dtype == "fp8" else "fp4",
+                "fp4",
+                M=args.M, N=args.N, K=args.K,
+                tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+                lds_stage=args.lds_stage,
+                bench_iters=args.num_iters,
+                bench_warmup=args.num_warmup,
+            )
+    except pytest.skip.Exception as e:
+        print(f"Skipped: {e}")

@@ -12,8 +12,11 @@ from .protocol import get_c_pointers
 @lru_cache(maxsize=1)
 def _get_mlir_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    lib_names = ["libmlir_rocm_runtime.so", "libmlir_c_runner_utils.so"]
-    return [str(mlir_libs_dir / name) for name in lib_names]
+    # Prefer custom runtime (has CUDA graph capture support) over upstream.
+    rocm_rt = mlir_libs_dir / "libfly_jit_runtime.so"
+    if not rocm_rt.exists():
+        rocm_rt = mlir_libs_dir / "libmlir_rocm_runtime.so"
+    return [str(rocm_rt), str(mlir_libs_dir / "libmlir_c_runner_utils.so")]
 
 
 class JitCompiledFunction:

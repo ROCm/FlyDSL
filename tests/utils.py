@@ -1,6 +1,9 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
-from flydsl.compiler.pipeline import Pipeline, run_pipeline
+try:
+    from flydsl.compiler.pipeline import Pipeline, run_pipeline
+except ImportError:
+    Pipeline = run_pipeline = None
 from flydsl.runtime.device import get_rocm_arch
 from flydsl._mlir import ir
 import os
