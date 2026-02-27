@@ -1,5 +1,5 @@
 from .._mlir import ir
-from .._mlir.dialects import arith, fly
+from .._mlir.dialects import arith as _arith, fly
 from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
@@ -102,7 +102,7 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    raise ValueError("range_constexpr should be process by AST rewriter")
+    return range(*args)
 
 
 def make_int32(value):
@@ -253,7 +253,7 @@ def get(int_tuple, mode, loc=None, ip=None):
     selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
     result = fly.get_scalar(selected, loc=loc, ip=ip)
     if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
-        result = arith.IndexCastOp(ir.IndexType.get(), result).result
+        result = _arith.IndexCastOp(ir.IndexType.get(), result).result
     return result
 
 
@@ -390,7 +390,7 @@ def memref_load(memref, indices, loc=None, ip=None):
             return fly.memref_load(memref, indices, loc=loc, ip=ip)
         # Common case: user passes `index` as a 1-D coordinate/offset.
         if str(indices.type) == "index":
-            indices = arith.IndexCastOp(T.i32(), indices)
+            indices = _arith.IndexCastOp(T.i32(), indices)
         indices = make_int_tuple(indices, loc=loc, ip=ip)
         return fly.memref_load(memref, indices, loc=loc, ip=ip)
 
@@ -405,7 +405,7 @@ def memref_store(value, memref, indices, loc=None, ip=None):
         if str(indices.type).startswith("!fly.int_tuple"):
             return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
         if str(indices.type) == "index":
-            indices = arith.IndexCastOp(T.i32(), indices)
+            indices = _arith.IndexCastOp(T.i32(), indices)
         indices = make_int_tuple(indices, loc=loc, ip=ip)
         return fly.memref_store(value, memref, indices, loc=loc, ip=ip)
 
@@ -523,11 +523,11 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, arith.constant(T.i1(), int(val)))
+            return (False, _arith.constant(T.i1(), int(val)))
         elif isinstance(val, int):
-            return (False, arith.constant(T.i32(), val))
+            return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):
-            return (False, arith.constant(T.f64(), val))
+            return (False, _arith.constant(T.f64(), val))
         elif hasattr(val, "__extract_ir_values__"):
             ir_values = val.__extract_ir_values__()
             if len(ir_values) == 1:

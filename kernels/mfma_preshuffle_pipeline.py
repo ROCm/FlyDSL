@@ -12,7 +12,7 @@ from flydsl.expr.typing import T
 from flydsl.expr import arith as _arith
 import flydsl.expr as fx
 
-from flydsl.expr import crd2idx, idx2crd, get as layout_get
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 
 def swizzle_xor16(row, col, k_blocks16):
@@ -37,7 +37,11 @@ def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, ele
     else:
         idx_i32 = idx
 
-    i32_vec = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    i32_val = buffer_ops.buffer_load(rsrc, idx_i32, vec_width=vec_width, dtype=T.i32)
+    if vec_width == 1:
+        i32_vec = vector.from_elements(T.vec(1, T.i32), [i32_val])
+    else:
+        i32_vec = i32_val
     return vector.bitcast(T.vec(int(vec_elems), elem_type), i32_vec)
 
 
@@ -121,7 +125,7 @@ def load_b_pack_k32(
     half_bytes = kpack_bytes // 2
     k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
-    coord_pack = fx.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
+    coord_pack = (n_blk, k0, k1, n_intra, arith.constant(0, index=True))
     idx_pack = crd2idx(coord_pack, layout_b)
 
     if unpack_int4:
@@ -188,7 +192,7 @@ def tile_chunk_coord_i32(
         raise ValueError(f"chunk_i32 must be one of (1,2,4), got {chunk_i32!r}")
     chunk_off_i32 = arith.constant(i * total_threads * chunk_i32, index=True)
     tile_idx_i32 = tx_i32_base + chunk_off_i32
-    coord_local = idx2crd(fx.make_int_tuple(tile_idx_i32), layout_tile_div4)
+    coord_local = idx2crd(tile_idx_i32, layout_tile_div4)
     row_local = layout_get(coord_local, 0)
     col_local_i32 = layout_get(coord_local, 1)
     return row_local, col_local_i32
@@ -235,7 +239,7 @@ def lds_store_16b_xor16(
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
-    coord_store = fx.make_coord(row_local, col_swz)
+    coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v16 = vector.bitcast(vec16_ty, vec_part_i32x4)
     vector.store(v16, lds_memref, [idx0])
@@ -262,7 +266,7 @@ def lds_store_8b_xor16(
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
-    coord_store = fx.make_coord(row_local, col_swz)
+    coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v8 = vector.bitcast(vec8_ty, vec_part_i32x2)
     vector.store(v8, lds_memref, [idx0])
@@ -289,7 +293,7 @@ def lds_store_4b_xor16(
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
-    coord_store = fx.make_coord(row_local, col_swz)
+    coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v4 = vector.bitcast(vec4_ty, vec_part_i32x1)
     vector.store(v4, lds_memref, [idx0])
@@ -315,14 +319,14 @@ def lds_load_pack_k32(
     """Load one i64 A-pack for an MFMA K32 micro-step from LDS."""
     col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
     if ck_lds128:
-        coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
+        coord_a16 = (curr_row_a_lds, col_base_swz)
         idx_a16 = crd2idx(coord_a16, layout_lds) + lds_base
         loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
         col_swizzled = col_base_swz + (half * 8)
-        coord_a = fx.make_coord(curr_row_a_lds, col_swizzled)
+        coord_a = (curr_row_a_lds, col_swizzled)
         idx_a = crd2idx(coord_a, layout_lds) + lds_base
         loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)

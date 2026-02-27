@@ -125,8 +125,6 @@ class MlirCompiler:
         "canonicalize,"
         "gpu.module("
         "convert-scf-to-cf,"
-        "convert-vector-to-llvm,"
-        "canonicalize,"
         "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
         "),"
         "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"

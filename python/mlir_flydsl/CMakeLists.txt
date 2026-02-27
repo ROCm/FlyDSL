@@ -187,11 +187,32 @@ add_custom_target(CopyFlyPythonSources ALL
 add_dependencies(CopyFlyPythonSources FlyPythonModules)
 
 ################################################################################
+# Custom JIT runtime with CUDA graph capture support
+################################################################################
+
+find_package(hip QUIET CONFIG PATHS /opt/rocm)
+if(hip_FOUND)
+  add_library(FlyJitRuntime SHARED
+    ${PROJECT_SOURCE_DIR}/flir/python_bindings/runtime/FlirRocmRuntimeWrappers.cpp
+  )
+  target_include_directories(FlyJitRuntime PRIVATE
+    ${LLVM_INCLUDE_DIRS}
+    ${MLIR_INCLUDE_DIRS}
+  )
+  target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
+  target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
+  set_target_properties(FlyJitRuntime PROPERTIES
+    OUTPUT_NAME "fly_jit_runtime"
+    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
+  )
+  add_dependencies(FlyPythonCAPI FlyJitRuntime)
+endif()
+
+################################################################################
 # Create symlinks to MLIR runtime libraries
 ################################################################################
 
 set(_MLIR_RUNTIME_LIBS
-  mlir_rocm_runtime
   mlir_runner_utils
   mlir_c_runner_utils
 )
@@ -209,5 +230,17 @@ foreach(_lib ${_MLIR_RUNTIME_LIBS})
   )
   list(APPEND _RUNTIME_SYMLINKS "${_dst_link}")
 endforeach()
+
+# Symlink upstream libmlir_rocm_runtime.so as fallback (the custom FlyJitRuntime
+# takes precedence at load time via jit_executor.py).
+set(_src_rocm "${_LLVM_LIB_DIR}/libmlir_rocm_runtime.so")
+set(_dst_rocm "${_MLIR_LIBS_DIR}/libmlir_rocm_runtime.so")
+add_custom_command(
+  OUTPUT "${_dst_rocm}"
+  COMMAND ${CMAKE_COMMAND} -E create_symlink "${_src_rocm}" "${_dst_rocm}"
+  DEPENDS FlyPythonModules
+  COMMENT "Creating symlink to libmlir_rocm_runtime.so"
+)
+list(APPEND _RUNTIME_SYMLINKS "${_dst_rocm}")
 
 add_custom_target(MlirRuntimeSymlinks ALL DEPENDS ${_RUNTIME_SYMLINKS})
