@@ -1628,15 +1628,15 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
 
 @pytest.mark.parametrize(
-    "tokens, model_dim, inter_dim, experts, topk",
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
-        pytest.param(16384, 7168, 256, 256, 8, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
-        pytest.param(32768, 7168, 256, 256, 8, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
-        pytest.param(1, 7168, 256, 256, 8, id="DS-TP8-decode-bs1"),
-        pytest.param(8, 7168, 256, 256, 8, id="DS-TP8-decode-bs8"),
-        pytest.param(32768, 5120, 1536, 64, 6, id="EP-K6-prefill", marks=pytest.mark.large_shape),
-        pytest.param(1, 5120, 1536, 64, 6, id="EP-K6-decode-bs1"),
-        pytest.param(8, 5120, 1536, 64, 6, id="EP-K6-decode-bs8"),
+        pytest.param(16384, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
+        pytest.param(32768, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
+        pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
+        pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
+        pytest.param(32768, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(1, 5120, 1536, 64, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
+        pytest.param(8, 5120, 1536, 64, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8"])
@@ -1646,11 +1646,11 @@ def test_moe_stage2_standalone(
     inter_dim: int,
     experts: int,
     topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
     in_dtype: str,
     *,
-    tile_m: int = 64,   # Common block size for M
-    tile_n: int = 256,  # Common block size for N2
-    tile_k: int = 128,  # Common block size for K2
     seed: int = 0,
     num_iters: int = 10,
     num_warmup: int = 3,
