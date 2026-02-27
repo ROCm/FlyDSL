@@ -317,8 +317,15 @@ def _dist_worker(
     torch.cuda.synchronize()
 
     def _run_eager():
-        # Use unified custom_all_reduce interface (auto-selects eager/registered path)
-        fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+        nonlocal out
+        if allreduce_impl == "aiter":
+            # AIter: custom_all_reduce returns result, no out param
+            result = fa.custom_all_reduce(x_flat, open_fp8_quant=False)
+            if result is not None:
+                out.copy_(result)
+        else:
+            # FlyDSL: uses out parameter
+            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
 
     try:
         if mode == "eager":
@@ -403,10 +410,15 @@ def _dist_worker(
                 dist.barrier(device_ids=[rank])
                 graph = torch.cuda.CUDAGraph()
                 try:
+                    # Capture using simplified interface - tensors recorded during capture
                     with fa.capture():
-                        with torch.cuda.graph(graph):
-                            # Use unified custom_all_reduce interface (auto-selects registered path during capture)
+                        # Warmup inside capture context to populate exe cache
+                        for _ in range(3):
                             fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                        torch.cuda.synchronize()
+                        with torch.cuda.graph(graph):
+                            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                    # IPC handles exchanged at capture exit
                 except Exception as cap_e:
                     if rank == 0:
                         print(f"[rank={rank}] WARN: cudagraph capture failed: {cap_e}", flush=True)
@@ -417,6 +429,8 @@ def _dist_worker(
                         "num_warmup": num_warmup, "error": str(cap_e),
                     }
                 else:
+                    # Replay: write new data directly to x_flat, read result from out
+                    # No copy needed - kernel reads from user tensor addresses directly
                     torch.manual_seed(42 + rank)
                     x_flat.copy_(torch.randn_like(x_flat, device=device, dtype=dtype))
                     out.fill_(0)
@@ -440,6 +454,7 @@ def _dist_worker(
                     start_evt = torch.cuda.Event(enable_timing=True)
                     end_evt = torch.cuda.Event(enable_timing=True)
                     torch.cuda.synchronize()
+
                     start_evt.record()
                     for _ in range(num_iters):
                         graph.replay()
