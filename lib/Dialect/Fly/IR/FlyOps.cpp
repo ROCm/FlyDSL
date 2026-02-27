@@ -773,8 +773,7 @@ FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
   int32_t oldTypeBits = adaptor.getOldTypeBits();
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred =
-      layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits, newTypeBits);
+  LayoutAttr inferred = layoutRecast(layoutBuilder, layoutTy.getAttr(), oldTypeBits, newTypeBits);
   inferredReturnTypes.assign({LayoutType::get(context, inferred)});
   return success();
 }
@@ -1251,10 +1250,26 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
+  auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
   auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
-  if (!memrefTy)
+  if (!tiledCopyTy || !memrefTy)
     return failure();
-  inferredReturnTypes.assign({memrefTy});
+
+  auto copyAtom = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
+  if (!copyAtom)
+    return failure();
+
+  LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+  TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+  LayoutAttr inputLayout = memrefTy.getLayout();
+
+  LayoutBuilder<LayoutAttr> builder(context);
+  LayoutAttr retiled =
+      layoutTiledCopyRetile(builder, copyAtom, tiledLayoutThrVal, tileMN, inputLayout);
+
+  inferredReturnTypes.assign(
+      {MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), retiled,
+                       memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
