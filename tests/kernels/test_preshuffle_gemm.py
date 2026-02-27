@@ -90,7 +90,6 @@ def test_mfma_a8_flyc_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: int = 0,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):

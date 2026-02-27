@@ -136,7 +136,9 @@ bash scripts/build.sh -j64
   - Add MLIR build lib dir to the loader path:
     -  export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
 
-## Documentation
+- **Kernel cache issues** (stale results after code changes)
+  - Clear: `rm -rf ~/.flydsl/cache`
+  - Or disable: `export FLYDSL_RUNTIME_ENABLE_CACHE=0`
 
 **Full documentation: [rocm.github.io/FlyDSL](https://rocm.github.io/FlyDSL)**
 
@@ -361,8 +363,3 @@ FlyDSL's design is inspired by ideas from several projects:
 ## 📄 License
 
 Apache License 2.0
-
-## Disclaimer
-
-This is an experimental feature/tool and is not part of the official ROCm distribution. It is provided for evaluation and testing purposes only.
-For further usage or inquiries, please initiate a discussion thread with the original authors.

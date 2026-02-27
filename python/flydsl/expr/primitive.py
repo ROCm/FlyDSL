@@ -198,7 +198,7 @@ def const_expr(x):
 
 
 def range_constexpr(*args):
-    raise ValueError("range_constexpr should be process by AST rewriter")
+    return range(*args)
 
 
 def make_int32(value):
@@ -384,7 +384,7 @@ def get(int_tuple, mode, loc=None, ip=None):
     selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
     result = fly.get_scalar(selected, loc=loc, ip=ip)
     if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
-        result = arith.IndexCastOp(ir.IndexType.get(), result).result
+        result = _arith.IndexCastOp(ir.IndexType.get(), result).result
     return result
 
 

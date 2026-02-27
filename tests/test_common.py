@@ -78,8 +78,15 @@ def perftest(
 
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    data = run_iters_rotate(num_iters, func, rotate_args)
+                capture_stream = torch.cuda.Stream()
+                capture_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(capture_stream):
+                    _set_capture_stream(capture_stream.cuda_stream)
+                    try:
+                        with torch.cuda.graph(graph, stream=capture_stream):
+                            data = run_iters_rotate(num_iters, func, rotate_args)
+                    finally:
+                        _set_capture_stream(0)
                 with tpf.profile(
                     activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
                     profile_memory=True,
