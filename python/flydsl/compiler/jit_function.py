@@ -116,26 +116,58 @@ def _jit_function_cache_key(func: Callable) -> str:
 
 
 class MlirCompiler:
-    @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
-        return [
-            "gpu-kernel-outlining{data-layout-str=}",
-            "fly-canonicalize",
-            "fly-layout-lowering",
-            "convert-fly-to-rocdl",
-            "canonicalize",
-            f"gpu.module(convert-scf-to-cf,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
-            "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
-        ]
+    LOWERING_PIPELINE = (
+        "builtin.module("
+        "gpu-kernel-outlining{{data-layout-str=}},"
+        "fly-canonicalize,"
+        "fly-layout-lowering,"
+        "convert-fly-to-rocdl,"
+        "canonicalize,"
+        "gpu.module("
+        "convert-scf-to-cf,"
+        "convert-vector-to-llvm,"
+        "canonicalize,"
+        "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
+        "),"
+        "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
+        "convert-scf-to-cf,"
+        "convert-cf-to-llvm,"
+        "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
+        "convert-arith-to-llvm,"
+        "convert-func-to-llvm,"
+        "reconcile-unrealized-casts"
+        ")"
+    )
+
+    BINARY_PIPELINE = "builtin.module(gpu-module-to-binary{format=fatbin})"
+
+    ISA_PIPELINE = "builtin.module(gpu-module-to-binary{format=isa})"
+
+    @classmethod
+    def _dump_asm(cls, module_asm: str, func_name: str):
+        try:
+            from .._mlir._mlir_libs._mlirDialectsGPU import ObjectAttr
+
+            isa_module = ir.Module.parse(module_asm)
+            pm = PassManager.parse(cls.ISA_PIPELINE)
+            pm.run(isa_module.operation)
+
+            for op in isa_module.body.operations:
+                if op.operation.name == "gpu.binary":
+                    objects = op.operation.attributes["objects"]
+                    for i in range(len(objects)):
+                        obj_attr = ObjectAttr(objects[i])
+                        isa_bytes = obj_attr.object
+
+                        dump_dir = Path(env.debug.dump_dir)
+                        dump_dir.mkdir(parents=True, exist_ok=True)
+                        out_path = dump_dir / f"{func_name}.s"
+                        out_path.write_bytes(isa_bytes)
+                        log().info(f"Dumped ASM to {out_path}")
+                        return
+            log().warning("No gpu.binary op found, cannot dump ASM")
+        except Exception as e:
+            log().warning(f"Failed to dump ASM: {e}")
 
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
@@ -145,7 +177,6 @@ class MlirCompiler:
             chip = env.compile.arch or get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -154,37 +185,17 @@ class MlirCompiler:
             if func_name:
                 dump_dir = dump_dir / func_name
 
-            out = _dump_ir_to_file("00_original", dump_dir=dump_dir, asm=str(module))
-            print(f"[flydsl] DUMP_IR enabled, dir={dump_dir}")
-            print(f"[flydsl] dump 00_original -> {out}")
+        lowering_pm = PassManager.parse(cls.LOWERING_PIPELINE.format(chip=chip))
+        lowering_pm.enable_verifier(env.debug.enable_verifier)
+        lowering_pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+        lowering_pm.run(module.operation)
 
-            asm_for_isa = None
-            isa_stage_idx = len(fragments) - 1
-            for idx, frag in enumerate(fragments, start=1):
-                stage_name = f"{idx:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})")
-                pm.enable_verifier(env.debug.enable_verifier)
-                pm.run(module.operation)
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir_to_file(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl] dump {stage_name} -> {out}")
-                if idx == isa_stage_idx:
-                    asm_for_isa = stage_asm
+        if env.debug.dump_asm:
+            cls._dump_asm(module.operation.get_asm(), func_name)
 
-            if asm_for_isa is not None:
-                isa_out = _dump_isa(
-                    dump_dir=dump_dir,
-                    asm=asm_for_isa,
-                    verify=env.debug.enable_verifier,
-                )
-                if isa_out is not None:
-                    print(f"[flydsl] dump final_isa -> {isa_out}")
-        else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
+        binary_pm = PassManager.parse(cls.BINARY_PIPELINE)
+        binary_pm.enable_verifier(env.debug.enable_verifier)
+        binary_pm.run(module.operation)
 
         return module
 
@@ -354,10 +365,6 @@ class JitFunction:
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
             compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
-
-            if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
-                return None
 
             compiled_func = JitCompiledFunction(
                 compiled_module,
