@@ -73,17 +73,6 @@ extern "C" FLIR_EXPORT void mgpuLaunchKernel(hipFunction_t function, intptr_t gr
                                             extra));
 }
 
-// Capture-safe launch: same as mgpuLaunchKernel but no preceding stream wait.
-// For use when async_dependencies is empty (e.g. CUDAGraph capture).
-extern "C" FLIR_EXPORT void mgpuLaunchKernelCaptureSafe(
-    hipFunction_t function, intptr_t gridX, intptr_t gridY, intptr_t gridZ,
-    intptr_t blockX, intptr_t blockY, intptr_t blockZ, int32_t smem,
-    hipStream_t stream, void **params, void **extra, size_t /*paramsCount*/) {
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
-                                            blockX, blockY, blockZ, smem, stream,
-                                            params, extra));
-}
-
 extern "C" FLIR_EXPORT hipStream_t mgpuStreamCreate() {
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));

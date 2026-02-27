@@ -363,16 +363,30 @@ class FlyDSLAllreduce:
         except Exception:
             pass
 
+    # Class-level cache for dtype string conversion
+    _DTYPE_STR_CACHE = {}
+
     def _dtype_str(self, t):
-        return self._dtype_str_from_torch(getattr(t, "dtype", None))
+        dtype = getattr(t, "dtype", None)
+        # Fast path: check cache first
+        if dtype in self._DTYPE_STR_CACHE:
+            return self._DTYPE_STR_CACHE[dtype]
+        return self._dtype_str_from_torch(dtype)
 
     def _dtype_str_from_torch(self, dtype):
+        # Check cache first
+        if dtype in self._DTYPE_STR_CACHE:
+            return self._DTYPE_STR_CACHE[dtype]
         name = str(dtype)
         if "float16" in name:
-            return "f16"
-        if "float32" in name:
-            return "f32"
-        raise ValueError(f"unsupported dtype: {name}")
+            result = "f16"
+        elif "float32" in name:
+            result = "f32"
+        else:
+            raise ValueError(f"unsupported dtype: {name}")
+        # Cache the result
+        self._DTYPE_STR_CACHE[dtype] = result
+        return result
 
     def _compile(self, *, N: int, dtype_str: str):
         import flydsl
