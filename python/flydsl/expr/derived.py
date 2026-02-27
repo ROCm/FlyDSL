@@ -176,8 +176,7 @@ class ThrCopy(TiledCopy):
         return tiled_copy_partition_dst(self.value, dst, self._thr_idx_int)
 
     def retile(self, t: Tensor):
-        # return tiled_copy_retile(self.value, t)
-        raise NotImplementedError("Retiling is not supported yet")
+        return tiled_copy_retile(self.value, t)
 
 
 class ThrMma(TiledMma):

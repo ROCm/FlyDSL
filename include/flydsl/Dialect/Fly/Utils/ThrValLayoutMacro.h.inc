@@ -7,7 +7,6 @@
 #define FxVA_DISPATCH_CONCAT(MACRO, N) MACRO##N
 
 #define FxC(val) IntTupleAttr::getLeafStatic(getContext(), val)
-#define FxT_1(a) IntTupleAttr::get(ArrayAttr::get(getContext(), {a}))
 #define FxT_2(a, b) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b}))
 #define FxT_3(a, b, c) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c}))
 #define FxT_4(a, b, c, d) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d}))
@@ -17,7 +16,7 @@
 #define FxT_8(a, b, c, d, e, f, g, h) IntTupleAttr::get(ArrayAttr::get(getContext(), {a, b, c, d, e, f, g, h}))
 #define FxT(...) FxVA_DISPATCH(FxT_, __VA_ARGS__)
 
-#define FxThr1(a) FxT_1(FxC(a))
+#define FxThr1(a) FxC(a)
 #define FxThr2(a, b) FxT_2(FxC(a), FxC(b))
 #define FxThr3(a, b, c) FxT_3(FxC(a), FxC(b), FxC(c))
 #define FxThr4(a, b, c, d) FxT_4(FxC(a), FxC(b), FxC(c), FxC(d))
@@ -27,7 +26,7 @@
 #define FxThr8(a, b, c, d, e, f, g, h) FxT_8(FxC(a), FxC(b), FxC(c), FxC(d), FxC(e), FxC(f), FxC(g), FxC(h))
 #define FxThr(...) FxVA_DISPATCH(FxThr, __VA_ARGS__)
 
-#define FxVal1(a) FxT_1(FxC(a))
+#define FxVal1(a) FxC(a)
 #define FxVal2(a, b) FxT_2(FxC(a), FxC(b))
 #define FxVal3(a, b, c) FxT_3(FxC(a), FxC(b), FxC(c))
 #define FxVal4(a, b, c, d) FxT_4(FxC(a), FxC(b), FxC(c), FxC(d))
