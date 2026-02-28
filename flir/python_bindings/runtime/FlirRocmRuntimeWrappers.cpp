@@ -70,17 +70,33 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             extra));
 }
 
+// CUDA graph capture support: MLIR's JIT lowering always generates
+// mgpuStreamCreate → mgpuLaunchKernel → mgpuStreamSynchronize → mgpuStreamDestroy.
+// During graph capture, we redirect stream creation to the capture stream
+// so the kernel launch is recorded into the graph.
+static thread_local hipStream_t tls_capture_stream = nullptr;
+
+extern "C" void mgpuSetCaptureStream(void* stream) {
+  tls_capture_stream = (hipStream_t)stream;
+}
+
 extern "C" hipStream_t mgpuStreamCreate() {
+  if (tls_capture_stream)
+    return tls_capture_stream;
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
   return stream;
 }
 
 extern "C" void mgpuStreamDestroy(hipStream_t stream) {
+  if (stream == tls_capture_stream)
+    return;
   HIP_REPORT_IF_ERROR(hipStreamDestroy(stream));
 }
 
 extern "C" void mgpuStreamSynchronize(hipStream_t stream) {
+  if (tls_capture_stream)
+    return;
   HIP_REPORT_IF_ERROR(hipStreamSynchronize(stream));
 }
 

@@ -194,14 +194,16 @@ class CompileEnvManager(EnvManager):
     env_prefix = "COMPILE"
 
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
+    compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
+    arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
 
 
 class DebugEnvManager(EnvManager):
     env_prefix = "DEBUG"
 
     dump_asm = OptBool(False, description="Dump ASM to file")
-    dump_ir = OptBool(False, description="Dump IR to file")
-    dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), description="Directory for dumping IR")
+    dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
+    dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR")
 
     ast_diff = OptBool(False, description="Print AST diff during rewrite")
 

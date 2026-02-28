@@ -87,11 +87,25 @@ def mfma_i32_16x16x32_i8(result_type, operands, *, loc=None, ip=None):
 
 
 def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None):
+    # ODS signature: (res, a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB)
+    #   operands (Values): a, b, c, scaleA, scaleB
+    #   attributes (ints): cbsz, blgp, opselA, opselB
+    # Caller passes: [a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB]
     if _ods_mfma_scale_f32_16x16x128_f8f6f4 is None:
         raise AttributeError("ROCDL op not found: mfma_scale_f32_16x16x128_f8f6f4(_)")
-    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands[:3]]
-    attrs = [int(v) if isinstance(v, int) else _unwrap_mfma_operand(v, loc=loc) for v in operands[3:]]
-    return _ods_mfma_scale_f32_16x16x128_f8f6f4(result_type, *ops, *attrs, loc=loc, ip=ip).result
+    a = _unwrap_mfma_operand(operands[0], loc=loc)
+    b = _unwrap_mfma_operand(operands[1], loc=loc)
+    c = _unwrap_mfma_operand(operands[2], loc=loc)
+    cbsz = int(operands[3]) if len(operands) > 3 else 0
+    blgp = int(operands[4]) if len(operands) > 4 else 0
+    opselA = int(operands[5]) if len(operands) > 5 else 0
+    scaleA = _unwrap_mfma_operand(operands[6], loc=loc) if len(operands) > 6 else a
+    opselB = int(operands[7]) if len(operands) > 7 else 0
+    scaleB = _unwrap_mfma_operand(operands[8], loc=loc) if len(operands) > 8 else b
+    return _ods_mfma_scale_f32_16x16x128_f8f6f4(
+        result_type, a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB,
+        loc=loc, ip=ip,
+    ).result
 
 
 __all__ = [

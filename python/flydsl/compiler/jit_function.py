@@ -174,7 +174,7 @@ class MlirCompiler:
         module.operation.verify()
 
         if chip is None:
-            chip = get_rocm_arch()
+            chip = env.compile.arch or get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
 
@@ -338,7 +338,7 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                chip = get_rocm_arch()
+                chip = env.compile.arch or get_rocm_arch()
                 gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
@@ -361,6 +361,10 @@ class JitFunction:
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
             compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+
+            if env.compile.compile_only:
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
+                return None
 
             compiled_func = JitCompiledFunction(
                 compiled_module,

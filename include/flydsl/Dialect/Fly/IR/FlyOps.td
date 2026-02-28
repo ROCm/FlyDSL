@@ -470,6 +470,13 @@ def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma_partition_shape", [Pure, De
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
+def Fly_ExtractAlignedPointerAsIndexOp : Fly_Op<"extract_aligned_pointer_as_index", [Pure]> {
+  let summary = "Extract the raw pointer from a fly.memref";
+  let arguments = (ins Fly_MemRef:$source);
+  let results = (outs AnyType:$result);
+  let assemblyFormat = "$source attr-dict `:` type($source) `->` type($result)";
+}
+
 def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
   let arguments = (ins Fly_Layout:$layout);
   let results = (outs Fly_MemRef:$result);

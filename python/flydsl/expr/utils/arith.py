@@ -1,3 +1,4 @@
+import builtins
 from functools import partialmethod
 
 from ..._mlir import ir
@@ -130,7 +131,10 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
     if op == "div":
         if self.is_float:
             return arith.divf(self, other, loc=loc, ip=ip)
-        fp_ty = T.f64() if element_type(self.type).width > 32 else T.f32()
+        et = element_type(self.type)
+        if isinstance(et, ir.IndexType):
+            return arith.divui(self, other, loc=loc, ip=ip)
+        fp_ty = T.f64() if et.width > 32 else T.f32()
         lhs = int_to_fp(self, self.signed, fp_ty, loc=loc, ip=ip)
         rhs = int_to_fp(other, other.signed, fp_ty, loc=loc, ip=ip)
         return arith.divf(lhs, rhs, loc=loc, ip=ip)
@@ -330,3 +334,99 @@ class ArithValue(ir.Value):
 
     def __repr__(self):
         return self.__str__()
+
+
+# =========================================================================
+# Function-level arith API
+# =========================================================================
+
+def _to_raw(v):
+    """Convert ArithValue to raw ir.Value for nanobind MLIR ops."""
+    if isinstance(v, ir.Value):
+        return v
+    return ir.Value._CAPICreate(v._CAPIPtr)
+
+
+def constant(value, *, type=None, index=False, loc=None, ip=None):
+    """Create a constant value.
+
+    Args:
+        value: Python int/float/bool
+        type: Explicit MLIR type (optional)
+        index: If True, create index type constant
+    """
+    if index:
+        mlir_type = ir.IndexType.get()
+    elif type is not None:
+        mlir_type = type
+    elif isinstance(value, float):
+        mlir_type = T.f32()
+    elif isinstance(value, bool):
+        mlir_type = ir.IntegerType.get_signless(1)
+    elif isinstance(value, int):
+        mlir_type = ir.IntegerType.get_signless(32)
+    else:
+        raise ValueError(f"unsupported constant type: {builtins.type(value)}")
+    if isinstance(mlir_type, (ir.F16Type, ir.F32Type, ir.F64Type, ir.BF16Type)):
+        value = float(value)
+    return arith.constant(mlir_type, value, loc=loc, ip=ip)
+
+
+def index(value, *, loc=None, ip=None):
+    """Create an index constant."""
+    return constant(value, index=True, loc=loc, ip=ip)
+
+
+def constant_vector(element_value, vector_type, *, loc=None):
+    """Create a splat constant vector."""
+    elem_ty = element_type(vector_type)
+    if is_float_type(elem_ty):
+        attr = ir.FloatAttr.get(elem_ty, float(element_value))
+    else:
+        attr = ir.IntegerAttr.get(elem_ty, int(element_value))
+    dense = ir.DenseElementsAttr.get_splat(vector_type, attr)
+    return arith.constant(vector_type, dense, loc=loc)
+
+
+def index_cast(target_type, value, *, loc=None):
+    """Cast between index and integer types."""
+    v = _to_raw(value)
+    return arith.IndexCastOp(target_type, v, loc=loc).result
+
+
+def select(condition, true_value, false_value, *, loc=None):
+    """Select between two values based on a boolean condition."""
+    return arith.SelectOp(_to_raw(condition), _to_raw(true_value),
+                          _to_raw(false_value), loc=loc).result
+
+
+def sitofp(target_type, value, *, loc=None):
+    """Convert signed integer to floating point."""
+    return arith.SIToFPOp(target_type, _to_raw(value), loc=loc).result
+
+
+def trunc_f(target_type, value, *, loc=None):
+    """Truncate floating point to narrower type (e.g. f32 -> f16)."""
+    return arith.TruncFOp(target_type, _to_raw(value), loc=loc).result
+
+
+def andi(lhs, rhs, *, loc=None):
+    """Bitwise AND."""
+    return arith.AndIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+
+
+def xori(lhs, rhs, *, loc=None):
+    """Bitwise XOR."""
+    return arith.XOrIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+
+
+def shli(lhs, rhs, *, loc=None):
+    """Left shift."""
+    return arith.ShLIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+
+
+def unwrap(val, *, type=None, index=False, loc=None):
+    """Unwrap ArithValue to raw ir.Value. Materializes Python scalars."""
+    if isinstance(val, (int, float, bool)):
+        return _to_raw(constant(val, type=type, index=index, loc=loc))
+    return _to_raw(val)
