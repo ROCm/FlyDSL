@@ -149,7 +149,7 @@ executor = compile_preshuffle_gemm_a8(
 | `tile_m, tile_n, tile_k` | int | Block tile sizes |
 | `in_dtype` | str | `"fp8"`, `"int8"`, `"int4"`, `"fp16"`, `"bf16"` |
 | `lds_stage` | int | `2` = ping-pong LDS (tuned), `1` = single LDS buffer |
-| `use_cshuffle_epilog` | bool | CK-style LDS CShuffle epilogue |
+| `use_cshuffle_epilog` | bool | LDS CShuffle epilogue |
 
 **Key constraints:**
 - `tile_m * tile_k * elem_bytes` must be divisible by `total_threads` (256)
@@ -158,7 +158,7 @@ executor = compile_preshuffle_gemm_a8(
 
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
-- **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
+- **lds_stage=1 (single)**: Intrawave schedule with single LDS buffer
 - **K64-byte micro-step**: Each step issues 2x K32 MFMA operations (fp8/int8: 64 elements, fp16/bf16: 32 elements)
 - **XOR16 swizzle**: Byte-level swizzle on LDS to avoid bank conflicts
 - **B-preshuffle**: Shape (N0, K0, KLane, NLane, KPackBytes) = (N/16, K/64, 4, 16, kpack_bytes)
@@ -292,7 +292,7 @@ Configurable epilogue strategies for MFMA 16x16 kernels.
 | Function | Description |
 |---|---|
 | `default_epilog(...)` | Standard row-iterator: `row = bx_m + mi*16 + lane_div_16*4 + ii` |
-| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads (8,32) → half2 store |
+| `c_shuffle_epilog(...)` | LDS CShuffle: write to LDS → barrier → remap threads (8,32) → half2 store |
 | `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
 
 ### 5.3 Preshuffle Pipeline (`kernels/mfma_preshuffle_pipeline.py`)
