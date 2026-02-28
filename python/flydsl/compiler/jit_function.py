@@ -332,6 +332,43 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _stage_label_from_fragment(fragment: str) -> str:
+    """Extract pass name from a pipeline fragment for use as a filename."""
+    base = fragment.strip()
+    if base.startswith("gpu.module(") and base.endswith(")"):
+        base = base[len("gpu.module(") : -1].strip()
+    return base.split("{", 1)[0].strip()
+
+
+def _dump_ir_to_file(stage: str, *, dump_dir: Path, asm: str) -> Path:
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    out = dump_dir / f"{stage}.mlir"
+    out.write_text(asm, encoding="utf-8")
+    return out
+
+
+def _dump_isa(*, dump_dir: Path, asm: str, verify: bool) -> Optional[Path]:
+    """Best-effort dump of final ISA assembly (.s) from the post-reconcile IR."""
+    try:
+        from .._mlir.dialects import gpu
+        mod = ir.Module.parse(asm)
+        pm = PassManager.parse(
+            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})"
+        )
+        pm.enable_verifier(verify)
+        pm.run(mod.operation)
+        for op in mod.body:
+            if isinstance(op, gpu.BinaryOp):
+                objects = list(map(gpu.ObjectAttr, op.objects))
+                isa_bytes = objects[-1].object
+                out = dump_dir / "final_isa.s"
+                out.write_bytes(isa_bytes)
+                return out
+    except Exception:
+        pass
+    return None
+
+
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
@@ -367,6 +404,10 @@ class MlirCompiler:
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
+        if env.debug.dump_ir:
+            dump_dir = Path(env.debug.dump_dir)
+            if func_name:
+                dump_dir = dump_dir / func_name
 
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
