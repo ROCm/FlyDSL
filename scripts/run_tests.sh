@@ -102,6 +102,42 @@ echo "IR Tests: $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 echo ""
 
 #=============================================================================
+# Part 2.5: Python Examples (tests/python/examples/)
+#=============================================================================
+echo "========================================================================"
+echo "Part 2.5: Python Examples"
+echo "========================================================================"
+echo ""
+
+EXAMPLE_PASS_COUNT=0
+EXAMPLE_FAIL_COUNT=0
+
+for example_file in tests/python/examples/*.py; do
+    [ -f "$example_file" ] || continue
+    example_name=$(basename "$example_file" .py)
+
+    echo "Running: $example_name"
+    EXAMPLE_CACHE_DIR=$(mktemp -d /tmp/flir_example_test.XXXXXX)
+    FLIR_CACHE_DIR="${EXAMPLE_CACHE_DIR}" python3 "$example_file" \
+        --preset small --in_dtype both --run_kernel --test_bad_tile \
+        > "/tmp/${example_name}.log" 2>&1
+    if [ $? -eq 0 ]; then
+        echo "  PASS   $example_name"
+        EXAMPLE_PASS_COUNT=$((EXAMPLE_PASS_COUNT + 1))
+    else
+        echo "  FAIL   $example_name (see /tmp/${example_name}.log)"
+        tail -20 "/tmp/${example_name}.log" | sed 's/^/           /'
+        EXAMPLE_FAIL_COUNT=$((EXAMPLE_FAIL_COUNT + 1))
+    fi
+    rm -rf "${EXAMPLE_CACHE_DIR}"
+done
+
+EXAMPLE_TEST_COUNT=$((EXAMPLE_PASS_COUNT + EXAMPLE_FAIL_COUNT))
+echo ""
+echo "Example Tests: $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
+echo ""
+
+#=============================================================================
 # Part 3: GPU Execution Tests (Real GPU kernels)
 #=============================================================================
 echo "========================================================================"
@@ -209,6 +245,7 @@ echo "========================================================================"
 echo ""
 echo "MLIR IR Tests (Lowering):        $MLIR_PASS_COUNT/$MLIR_TEST_COUNT passed"
 echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
+echo "Python Examples:                  $EXAMPLE_PASS_COUNT/$EXAMPLE_TEST_COUNT passed"
 
 if command -v rocm-smi >/dev/null 2>&1; then
     echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed ($GPU_SKIP_COUNT skipped, $GPU_FAIL_COUNT failed)"
@@ -216,7 +253,7 @@ else
     echo "GPU Execution Tests:             Skipped (no GPU)"
 fi
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
+if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ] && [ $EXAMPLE_FAIL_COUNT -eq 0 ]; then
     echo ""
     echo ""
     echo "Verified Capabilities:"
