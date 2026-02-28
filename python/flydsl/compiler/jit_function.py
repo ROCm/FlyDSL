@@ -184,6 +184,8 @@ class MlirCompiler:
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         fragments = cls._pipeline_fragments(chip=chip)
 
+        if env.debug.print_origin_ir:
+            log().info(f"Origin IR: \n{module}")
         if env.debug.dump_ir:
             dump_dir = Path(env.debug.dump_dir)
             if func_name:
@@ -217,10 +219,6 @@ class MlirCompiler:
         else:
             pipeline = f"builtin.module({','.join(fragments)})"
             pm = PassManager.parse(pipeline)
-
-            if env.debug.print_origin_ir:
-                log().info(f"Origin IR: \n{module}")
-
             pm.enable_verifier(env.debug.enable_verifier)
             pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
             pm.run(module.operation)
