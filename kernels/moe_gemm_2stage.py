@@ -672,7 +672,7 @@ def compile_moe_gemm1(
                     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=i32_ty)
                     c_4_i32 = arith.constant(4, type=i32_ty)
 
-                    def _dequant_4pack(d0, d1, d2, d3, qs_word, qz_word, pack_group: int):
+                    def _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte):
                         """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
 
                         Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
@@ -683,37 +683,8 @@ def compile_moe_gemm1(
 
                         Dequant formula per byte: xor(nibble * scale + zero, 0x80)
                         low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
+                        Caller pre-computes all scale/zero params from qs_word/qz_word.
                         """
-                        # Unpack scale bytes
-                        qs_b0 = qs_word & c_ff
-                        qs_b1 = (qs_word >> c_8) & c_ff
-                        qs_b2 = (qs_word >> c_16_i32) & c_ff
-                        qs_b3 = (qs_word >> c_24) & c_ff
-
-                        # pack_group selects which scale/zero pair to use:
-                        #   0 -> (b0, b1) for K[0..127]
-                        #   1 -> (b2, b3) for K[128..255]
-                        if pack_group == 0:
-                            qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo_byte = qz_word & c_ff
-                            qz_hi_byte = (qz_word >> c_8) & c_ff
-                        else:
-                            qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo_byte = (qz_word >> c_16_i32) & c_ff
-                            qz_hi_byte = (qz_word >> c_24) & c_ff
-
-                        # Broadcast zero to all 4 byte positions using v_perm_b32.
-                        # v_perm_b32 dst, src0, src1, sel: each byte of sel picks a src byte.
-                        # sel byte value 0..3 picks byte 0..3 from src1 (qz_word).
-                        c_zero_i32 = arith.constant(0, type=i32_ty)
-                        if pack_group == 0:
-                            perm_lo = arith.constant(0x00000000, type=i32_ty)
-                            perm_hi = arith.constant(0x01010101, type=i32_ty)
-                        else:
-                            perm_lo = arith.constant(0x02020202, type=i32_ty)
-                            perm_hi = arith.constant(0x03030303, type=i32_ty)
-                        qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
-                        qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
 
                         dwords = [d0, d1, d2, d3]
                         even_outs = []
@@ -787,16 +758,46 @@ def compile_moe_gemm1(
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
-                        # Dequant all 4 dwords per ni, producing 8 output dwords each.
+                        def _unpack_qparams(qs_word, qz_word, pack_group: int, perm_lo, perm_hi):
+                            """Extract per-half scale/zero params from packed words."""
+                            c_zero_i32 = arith.constant(0, type=i32_ty)
+                            if pack_group == 0:
+                                qs_lo = qs_word & c_ff
+                                qs_hi = (qs_word >> c_8) & c_ff
+                                qz_lo_byte = qz_word & c_ff
+                                qz_hi_byte = (qz_word >> c_8) & c_ff
+                            else:
+                                qs_lo = (qs_word >> c_16_i32) & c_ff
+                                qs_hi = (qs_word >> c_24) & c_ff
+                                qz_lo_byte = (qz_word >> c_16_i32) & c_ff
+                                qz_hi_byte = (qz_word >> c_24) & c_ff
+                            qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
+                            qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
+                            return qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte
+
+                        def _pair_as_i64(a, b):
+                            """Pack two i32 dwords into one i64."""
+                            v2 = vector.from_elements(vec2_i32_ty, [a, b])
+                            return vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[])
+
+                        if pack_group == 0:
+                            perm_lo = arith.constant(0x00000000, type=i32_ty)
+                            perm_hi = arith.constant(0x01010101, type=i32_ty)
+                        else:
+                            perm_lo = arith.constant(0x02020202, type=i32_ty)
+                            perm_hi = arith.constant(0x03030303, type=i32_ty)
+
                         out8_list = []
                         for ni in range_constexpr(num_acc_n):
+                            qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte = \
+                                _unpack_qparams(qs_word_list[ni], qz_word_list[ni], pack_group, perm_lo, perm_hi)
                             w_i32x4 = w_i32x4_list[ni]
                             d0 = vector.extract(w_i32x4, static_position=[0], dynamic_position=[])
                             d1 = vector.extract(w_i32x4, static_position=[1], dynamic_position=[])
                             d2 = vector.extract(w_i32x4, static_position=[2], dynamic_position=[])
                             d3 = vector.extract(w_i32x4, static_position=[3], dynamic_position=[])
                             out8_list.append(
-                                _dequant_4pack(d0, d1, d2, d3, qs_word_list[ni], qz_word_list[ni], pack_group)
+                                _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte)
                             )
 
                         # Assemble b_tile: 2 entries per pack_group.
@@ -806,20 +807,16 @@ def compile_moe_gemm1(
                         packs1_lo = []
                         for ni in range_constexpr(num_acc_n):
                             out8 = out8_list[ni]
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[0], out8[1]])
-                            packs0_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[2], out8[3]])
-                            packs1_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            packs0_lo.append(_pair_as_i64(out8[0], out8[1]))
+                            packs1_lo.append(_pair_as_i64(out8[2], out8[3]))
                         b_tile.append((packs0_lo, packs1_lo))
 
                         packs0_hi = []
                         packs1_hi = []
                         for ni in range_constexpr(num_acc_n):
                             out8 = out8_list[ni]
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[4], out8[5]])
-                            packs0_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[6], out8[7]])
-                            packs1_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            packs0_hi.append(_pair_as_i64(out8[4], out8[5]))
+                            packs1_hi.append(_pair_as_i64(out8[6], out8[7]))
                         b_tile.append((packs0_hi, packs1_hi))
 
                     return b_tile
@@ -2063,7 +2060,7 @@ def compile_moe_gemm2(
                     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=i32_ty)
                     c_4_i32 = arith.constant(4, type=i32_ty)
 
-                    def _dequant_4pack(d0, d1, d2, d3, qs_word, qz_word, pack_group: int):
+                    def _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte):
                         """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
 
                         Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
@@ -2074,33 +2071,8 @@ def compile_moe_gemm2(
 
                         Dequant formula per byte: xor(nibble * scale + zero, 0x80)
                         low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
+                        Caller pre-computes all scale/zero params from qs_word/qz_word.
                         """
-                        # Unpack scale bytes
-                        qs_b0 = qs_word & c_ff
-                        qs_b1 = (qs_word >> c_8) & c_ff
-                        qs_b2 = (qs_word >> c_16_i32) & c_ff
-                        qs_b3 = (qs_word >> c_24) & c_ff
-
-                        if pack_group == 0:
-                            qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo_byte = qz_word & c_ff
-                            qz_hi_byte = (qz_word >> c_8) & c_ff
-                        else:
-                            qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo_byte = (qz_word >> c_16_i32) & c_ff
-                            qz_hi_byte = (qz_word >> c_24) & c_ff
-
-                        # Broadcast zero to all 4 byte positions using v_perm_b32.
-                        c_zero_i32 = arith.constant(0, type=i32_ty)
-                        if pack_group == 0:
-                            perm_lo = arith.constant(0x00000000, type=i32_ty)
-                            perm_hi = arith.constant(0x01010101, type=i32_ty)
-                        else:
-                            perm_lo = arith.constant(0x02020202, type=i32_ty)
-                            perm_hi = arith.constant(0x03030303, type=i32_ty)
-                        qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
-                        qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
-
                         dwords = [d0, d1, d2, d3]
                         even_outs = []
                         odd_outs = []
@@ -2167,35 +2139,62 @@ def compile_moe_gemm2(
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
+                        def _unpack_qparams(qs_word, qz_word, pack_group: int, perm_lo, perm_hi):
+                            """Extract per-half scale/zero params from packed words."""
+                            c_zero_i32 = arith.constant(0, type=i32_ty)
+                            if pack_group == 0:
+                                qs_lo = qs_word & c_ff
+                                qs_hi = (qs_word >> c_8) & c_ff
+                                qz_lo_byte = qz_word & c_ff
+                                qz_hi_byte = (qz_word >> c_8) & c_ff
+                            else:
+                                qs_lo = (qs_word >> c_16_i32) & c_ff
+                                qs_hi = (qs_word >> c_24) & c_ff
+                                qz_lo_byte = (qz_word >> c_16_i32) & c_ff
+                                qz_hi_byte = (qz_word >> c_24) & c_ff
+                            qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
+                            qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
+                            return qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte
+
+                        def _pair_as_i64(a, b):
+                            """Pack two i32 dwords into one i64."""
+                            v2 = vector.from_elements(vec2_i32_ty, [a, b])
+                            return vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[])
+
+                        if pack_group == 0:
+                            perm_lo = arith.constant(0x00000000, type=i32_ty)
+                            perm_hi = arith.constant(0x01010101, type=i32_ty)
+                        else:
+                            perm_lo = arith.constant(0x02020202, type=i32_ty)
+                            perm_hi = arith.constant(0x03030303, type=i32_ty)
+
                         out8_list = []
                         for ni in range_constexpr(num_acc_n):
+                            qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte = \
+                                _unpack_qparams(qs_word_list[ni], qz_word_list[ni], pack_group, perm_lo, perm_hi)
                             w_i32x4 = w_i32x4_list[ni]
                             d0 = vector.extract(w_i32x4, static_position=[0], dynamic_position=[])
                             d1 = vector.extract(w_i32x4, static_position=[1], dynamic_position=[])
                             d2 = vector.extract(w_i32x4, static_position=[2], dynamic_position=[])
                             d3 = vector.extract(w_i32x4, static_position=[3], dynamic_position=[])
                             out8_list.append(
-                                _dequant_4pack(d0, d1, d2, d3, qs_word_list[ni], qz_word_list[ni], pack_group)
+                                _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte)
                             )
 
                         packs0_lo = []
                         packs1_lo = []
                         for ni in range_constexpr(num_acc_n):
                             out8 = out8_list[ni]
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[0], out8[1]])
-                            packs0_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[2], out8[3]])
-                            packs1_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            packs0_lo.append(_pair_as_i64(out8[0], out8[1]))
+                            packs1_lo.append(_pair_as_i64(out8[2], out8[3]))
                         b_tile.append((packs0_lo, packs1_lo))
 
                         packs0_hi = []
                         packs1_hi = []
                         for ni in range_constexpr(num_acc_n):
                             out8 = out8_list[ni]
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[4], out8[5]])
-                            packs0_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
-                            v2 = vector.from_elements(vec2_i32_ty, [out8[6], out8[7]])
-                            packs1_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            packs0_hi.append(_pair_as_i64(out8[4], out8[5]))
+                            packs1_hi.append(_pair_as_i64(out8[6], out8[7]))
                         b_tile.append((packs0_hi, packs1_hi))
 
                     return b_tile
