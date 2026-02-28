@@ -1,1 +1,2 @@
 add_subdirectory(FlyToROCDL)
+add_subdirectory(FlyGpuStreamInject)

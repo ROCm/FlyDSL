@@ -1,6 +1,7 @@
 #include "flydsl-c/FlyROCDLDialect.h"
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
+#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
@@ -68,4 +69,8 @@ MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type) {
 
 void mlirRegisterFlyToROCDLConversionPass(void) {
   mlir::registerFlyToROCDLConversionPass();
+}
+
+void mlirRegisterFlyGpuStreamInjectPass(void) {
+  mlir::registerFlyGpuStreamInjectPass();
 }
