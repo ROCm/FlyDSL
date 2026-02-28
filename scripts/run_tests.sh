@@ -65,9 +65,32 @@ example_summary=$(grep -P '^\s*=+\s+.*(passed|failed|error|skipped|no tests ran)
 example_passed=$(echo "$example_summary" | grep -oP '\d+(?= passed)' || echo "0")
 example_failed=$(echo "$example_summary" | grep -oP '\d+(?= failed)' || echo "0")
 
+# ---------------------------------------------------------------------------
+# MLIR Lit Tests (test/) via lit
+# ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"
-echo "Summary: GEMM ${passed} passed, ${failed} failed, ${skipped} skipped | Examples ${example_passed} passed, ${example_failed} failed"
+echo "MLIR Lit Tests"
+echo "========================================================================"
+echo ""
+
+export FLY_BUILD_DIR="${BUILD_DIR}"
+lit -v "${REPO_ROOT}/test/" 2>&1 | tee /tmp/test_lit.log
+lit_exit=${PIPESTATUS[0]}
+if [ $lit_exit -ne 0 ]; then
+    exit_code=1
+fi
+
+lit_summary=$(grep -oP 'Passed:\s*\K\d+' /tmp/test_lit.log || echo "0")
+lit_failed_count=$(grep -oP 'Failed:\s*\K\d+' /tmp/test_lit.log || echo "0")
+lit_unsupported=$(grep -oP 'Unsupported:\s*\K\d+' /tmp/test_lit.log || echo "0")
+
+echo ""
+echo "========================================================================"
+echo "Summary"
+echo "  GEMM:     ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "  Examples: ${example_passed} passed, ${example_failed} failed"
+echo "  Lit:      ${lit_summary} passed, ${lit_failed_count} failed, ${lit_unsupported} unsupported"
 echo "========================================================================"
 
 exit $exit_code
