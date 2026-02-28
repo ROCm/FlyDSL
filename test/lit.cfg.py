@@ -6,10 +6,13 @@ config.test_format = lit.formats.ShTest(True)
 config.suffixes = [".mlir"]
 
 config.test_source_root = os.path.dirname(__file__)
-config.test_exec_root = os.path.join(os.path.dirname(__file__), "..", "build", "test")
 
 project_dir = os.path.dirname(__file__) + "/.."
-build_dir = os.path.join(project_dir, "build")
+build_dir = os.environ.get(
+    "FLY_BUILD_DIR", os.path.join(project_dir, "build-fly")
+)
+
+config.test_exec_root = os.path.join(build_dir, "test")
 mlir_install = os.environ.get(
     "MLIR_PATH",
     os.path.join(project_dir, "..", "llvm-project", "build-flydsl", "mlir_install"),
