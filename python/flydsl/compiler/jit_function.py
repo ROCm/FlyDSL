@@ -336,14 +336,11 @@ class JitFunction:
 
         cache_key = self._make_cache_key(bound.arguments)
 
-        # In-memory compiled function cache (survives across calls, avoids re-compilation)
         if not hasattr(self, '_mem_cache'):
             self._mem_cache = {}
-        compiled_func = self._mem_cache.get(cache_key)
-        if compiled_func is None:
+        cached_func = self._mem_cache.get(cache_key)
+        if cached_func is None and not env.debug.dump_ir:
             cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
-        else:
-            cached_func = compiled_func
 
         if cached_func is not None:
             if not hasattr(self, '_cached_ctx'):

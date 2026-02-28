@@ -202,8 +202,8 @@ class DebugEnvManager(EnvManager):
     env_prefix = "DEBUG"
 
     dump_asm = OptBool(False, description="Dump ASM to file")
-    dump_ir = OptBool(False, description="Dump IR to file")
-    dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), description="Directory for dumping IR")
+    dump_ir = OptBool(False, env_var="FLYDSL_DUMP_IR", description="Dump IR to file")
+    dump_dir = OptStr(str(Path.home() / ".flydsl" / "debug"), env_var="FLYDSL_DUMP_DIR", description="Directory for dumping IR")
 
     ast_diff = OptBool(False, description="Print AST diff during rewrite")
 
