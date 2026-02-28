@@ -196,7 +196,18 @@ def build_uint4_moe_weight(
     w_i8_shuf_no_interleave = _inverse_interleave_k64_in_128(w_i8_shuf) if interleave_k64 else w_i8_shuf
     # For W4 layout, the shuffle/unshuffle mapping uses Kpack=32 semantics (use_int4=True) even though data is i8.
     w_i8_unshuffled = _unshuffle_weight_base(w_i8_shuf_no_interleave, layout=(16, 16), use_int4=True)
-    w_i8_unshuffled_flat = w_i8_unshuffled.reshape(experts * rows_per_expert, K)
+    w_i8_unshuffled_flat = w_i8_unshuffled.reshape(experts * rows_per_expert, K).contiguous()
+
+    # Sanity-check the agreed preshuffled physical view:
+    #   (expert, rows//16, K//128, 4, 16, 32x4bits)
+    # Stored as packed bytes, so the byte-view innermost is 16B.
+    w_packed_u8 = w_packed.view(torch.uint8).contiguous()
+    assert w_packed_u8.numel() == (experts * rows_per_expert * K) // 2
+    w_bytes_view = w_packed_u8.view(experts, rows_per_expert // 16, K // 128, 4, 16, 16)
+    lo = w_bytes_view & 0xF
+    hi = (w_bytes_view >> 4) & 0xF
+    w_u4_view = torch.stack([lo, hi], dim=-1).reshape(experts, rows_per_expert // 16, K // 128, 4, 16, 32)
+    assert tuple(w_u4_view.shape) == (experts, rows_per_expert // 16, K // 128, 4, 16, 32)
 
     return w_packed, qscale_u8, qzero_u8, qscale_i32, qzero_i32, w_i8_unshuffled_flat
 

@@ -30,6 +30,7 @@ def make_preshuffle_b_layout(
     c_k: ir.Value,
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
+    packed_4bit: bool = False,
 ) -> PreshuffleBLayout:
     """Build B layout matching aiter/CK preshuffle for A8 MFMA kernels.
 
@@ -38,6 +39,8 @@ def make_preshuffle_b_layout(
     Notes:
     - For FP8/INT8: kpack_bytes=16 (one byte per element).
     - For packed INT4 (W4A8): kpack_bytes=8 (two 4-bit values per byte).
+    - For packed UINT4 (W4A8 + qparam): use packed_4bit=True + kpack_bytes=16. In this mode,
+      the logical K element domain is mapped to packed bytes by KBytes = K/2.
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
@@ -47,14 +50,28 @@ def make_preshuffle_b_layout(
     c4 = arith.constant(4, index=True)
     c_kpack = arith.constant(kpack_bytes, index=True)
 
-    # This layout is fundamentally byte-addressed along K:
-    # - For 1B types (fp8/i8): KBytes == K
-    # - For 2B types (fp16/bf16): KBytes == 2*K
+    # This layout is fundamentally byte-addressed along K.
     #
-    # We keep the same 64B K0 "macro-step" used by CK/aiter preshuffle.
+    # - Normal types:
+    #   - For 1B types (fp8/i8): KBytes == K
+    #   - For 2B types (fp16/bf16): KBytes == 2*K
+    # - packed_4bit:
+    #   - For packed 4-bit weights stored as bytes: KBytes == K/2
+    #
+    # We keep the same 64B K0 "macro-step" used by CK/aiter preshuffle; only the mapping
+    # from logical K elements to KBytes changes in packed_4bit mode.
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
-    c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
+    if packed_4bit:
+        if elem_bytes != 1:
+            raise ValueError(f"packed_4bit requires elem_bytes==1, got {elem_bytes!r}")
+        if kpack_bytes != 16:
+            raise ValueError(
+                f"packed_4bit requires kpack_bytes==16 (innermost 16B == 32x4bits), got {kpack_bytes!r}"
+            )
+        c_k_bytes = c_k / arith.constant(2, index=True)
+    else:
+        c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
     c_k0 = c_k_bytes / c64
     n0 = c_n / c16
 
