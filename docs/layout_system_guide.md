@@ -1,106 +1,100 @@
-# FLIR Layout Algebra Guide
+# Layout Algebra Guide
 
-> Core types, construction, coordinate mapping, algebra operations, and swizzling in the FLIR layout system.
+> Core types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
 
 ## Quick Reference
 
-| Operation | Python API | MLIR Op | Description |
+| Operation | Python API | Fly Dialect Op | Description |
 |---|---|---|---|
-| **Construction** | `flir.make_shape(8, 16)` | `flir.make_shape` | Create shape |
-| | `flir.make_stride(1, 8)` | `flir.make_stride` | Create stride |
-| | `flir.make_layout(shape, stride)` | `flir.make_layout` | Create layout from (shape, stride) |
-| | `flir.make_coord(i, j)` | `flir.make_coord` | Create coordinate |
-| | `flir.make_ordered_layout((8, 16), order=(1, 0))` | -- | Create layout with dimension ordering |
-| **Mapping** | `flir.crd2idx(coord, layout)` | `flir.crd2idx` | Coordinate → linear index |
-| | `flir.idx2crd(idx, layout)` | `flir.idx2crd` | Linear index → coordinate |
-| **Query** | `flir.size(layout)` | `flir.size` | Total element count |
-| | `flir.cosize(layout)` | `flir.cosize` | Codomain span |
-| | `flir.rank(layout)` | `flir.rank` | Number of dimensions |
-| | `flir.get(shape, idx)` | `flir.get` | Extract element at index |
-| **Algebra** | `flir.composition(A, B)` | `flir.composition` | Compose: A ∘ B |
-| | `flir.complement(tiler, size)` | `flir.complement` | Complement of tiler |
-| | `flir.coalesce(layout)` | `flir.coalesce` | Simplify layout |
-| **Products** | `flir.logical_product(A, B)` | `flir.logical_product` | Basic product |
-| | `flir.zipped_product(A, B)` | `flir.zipped_product` | Zipped product |
-| | `flir.tiled_product(A, B)` | `flir.tiled_product` | Tiled product |
-| | `flir.flat_product(A, B)` | `flir.flat_product` | Flat product |
-| | `flir.raked_product(A, B)` | `flir.raked_product` | Raked product |
-| | `flir.blocked_product(A, B)` | `flir.blocked_product` | Blocked product |
-| **Divides** | `flir.logical_divide(A, B)` | `flir.logical_divide` | Basic divide |
-| | `flir.zipped_divide(A, B)` | `flir.zipped_divide` | Zipped divide |
-| | `flir.tiled_divide(A, B)` | `flir.tiled_divide` | Tiled divide |
-| | `flir.flat_divide(A, B)` | `flir.flat_divide` | Flat divide |
-| **Partition** | `flir.local_partition(layout, tile, idx)` | `flir.local_partition` | Thread-local partition |
-| | `flir.local_tile(layout, tiler, coord)` | `flir.local_tile` | Extract tile at coordinate |
+| **Construction** | `fx.make_shape(8, 16)` | `fly.make_shape` | Create shape (IntTuple) |
+| | `fx.make_stride(1, 8)` | `fly.make_stride` | Create stride (IntTuple) |
+| | `fx.make_layout(shape, stride)` | `fly.make_layout` | Create layout from (shape, stride) |
+| | `fx.make_coord(i, j)` | `fly.make_coord` | Create coordinate |
+| | `fx.make_int_tuple(elems)` | `fly.make_int_tuple` | Create generic IntTuple |
+| **Mapping** | `fx.crd2idx(coord, layout)` | `fly.crd2idx` | Coordinate → linear index |
+| | `fx.idx2crd(idx, layout)` | `fly.idx2crd` | Linear index → coordinate |
+| **Query** | `fx.size(layout)` | `fly.size` | Total element count |
+| | `fx.get_shape(layout)` | `fly.get_shape` | Extract shape from layout |
+| | `fx.get_stride(layout)` | `fly.get_stride` | Extract stride from layout |
+| | `fx.get(int_tuple, idx)` | `fly.select` + `fly.get_scalar` | Extract element at index |
+| **Algebra** | `fx.composition(A, B)` | `fly.composition` | Compose: A ∘ B |
+| | `fx.complement(tiler, size)` | `fly.complement` | Complement of tiler |
+| | `fx.coalesce(layout)` | `fly.coalesce` | Simplify layout |
+| | `fx.right_inverse(layout)` | `fly.right_inverse` | Right inverse of layout |
+| **Products** | `fx.logical_product(A, B)` | `fly.logical_product` | Basic product |
+| | `fx.zipped_product(A, B)` | `fly.zipped_product` | Zipped product |
+| | `fx.tiled_product(A, B)` | `fly.tiled_product` | Tiled product |
+| | `fx.flat_product(A, B)` | `fly.flat_product` | Flat product |
+| | `fx.raked_product(A, B)` | `fly.raked_product` | Raked product |
+| | `fx.block_product(A, B)` | `fly.block_product` | Blocked product |
+| **Divides** | `fx.logical_divide(A, B)` | `fly.logical_divide` | Basic divide |
+| | `fx.zipped_divide(A, B)` | `fly.zipped_divide` | Zipped divide |
+| | `fx.tiled_divide(A, B)` | `fly.tiled_divide` | Tiled divide |
+| | `fx.flat_divide(A, B)` | `fly.flat_divide` | Flat divide |
+| **Structural** | `fx.select(it, indices)` | `fly.select` | Select modes by index |
+| | `fx.group(it, begin, end)` | `fly.group` | Group modes into nested tuple |
+| | `fx.append(base, elem)` | `fly.append` | Append mode to IntTuple |
+| | `fx.prepend(base, elem)` | `fly.prepend` | Prepend mode to IntTuple |
+| | `fx.zip(lhs, rhs)` | `fly.zip` | Zip two IntTuples |
+| **Recast** | `fx.recast_layout(ly, old, new)` | `fly.recast_layout` | Recast layout for type width change |
 
 ---
 
 ## 1. Core Types
 
-FLIR defines five custom MLIR types:
+The Fly dialect defines several custom MLIR types for layout algebra:
 
 | Type | MLIR Syntax | Description |
 |---|---|---|
-| `!flir.int` | `!flir.int` | Legacy integer type (compatibility) |
-| `!flir.shape<pattern>` | `!flir.shape<(8, 16)>` | Dimension extents -- can be nested |
-| `!flir.stride<pattern>` | `!flir.stride<(1, 8)>` | Memory strides -- can be nested |
-| `!flir.layout<shape:stride>` | `!flir.layout<(8, 16):(1, 8)>` | Layout = (Shape, Stride) pair |
-| `!flir.coord<pattern>` | `!flir.coord<(*, *)>` | Coordinate (flat, no nesting) |
+| `!fly.int_tuple` | `!fly.int_tuple<(8, 16)>` | Integer tuple — can be nested |
+| `!fly.layout` | `!fly.layout<(8, 16):(1, 8)>` | Layout = (Shape, Stride) pair |
+| `!fly.pointer` | `!fly.pointer<f16>` | Typed pointer |
+| `!fly.memref` | `!fly.memref<...>` | Memory reference with layout |
+| `!fly.swizzle` | `!fly.swizzle<...>` | Swizzle descriptor |
+| `!fly.copy_atom` | `!fly.copy_atom_universal_copy<...>` | Copy atom type |
+| `!fly.mma_atom` | `!fly.mma_atom_universal_fma<...>` | MMA atom type |
 
-### Pattern Attributes
+### IntTuple Patterns
 
-Patterns encode the structure of shapes/strides/coords at the type level:
+IntTuples encode structure at the type level:
 
 | Pattern | Meaning | Example |
 |---|---|---|
 | Integer literal | Static constant | `8` |
-| `*` (`#flir.underscore`) | Wildcard (any value) | Used in rank-only types |
-| `?` (`#flir.dync_i32`) | Dynamic value (runtime) | SSA operand provides the value |
+| Dynamic value | Runtime SSA value | Provided as operand |
 | Nested tuple | Hierarchical mode | `(8, (4, 2))` |
-
-**Type-mode ops**: `make_shape`, `make_stride`, `make_coord` encode structure in the result type. Only dynamic leaves appear as SSA operands.
 
 ---
 
 ## 2. Construction
 
-### Python API
+### Python API (via `flydsl.expr`)
 
 ```python
-from flydsl.dialects.ext import flir, arith
+import flydsl.expr as fx
+from flydsl.expr import arith
+from flydsl.expr.typing import T
 
-# Constants
-c8 = arith.constant(8, index=True)
-c16 = arith.constant(16, index=True)
-c1 = arith.constant(1, index=True)
+# Shapes and strides (static constants auto-materialized)
+shape = fx.make_shape(8, 16)              # !fly.int_tuple<(8, 16)>
+stride = fx.make_stride(1, 8)             # !fly.int_tuple<(1, 8)>
+layout = fx.make_layout(shape, stride)    # !fly.layout<(8, 16):(1, 8)>
 
-# Basic construction
-shape = flir.make_shape(c8, c16)            # (8, 16)
-stride = flir.make_stride(c1, c8)           # (1, 8) -- column-major
-layout = flir.make_layout(shape, stride)    # ((8, 16), (1, 8))
-coord = flir.make_coord(i, j)              # (i, j)
+# Shorthand — pass Python tuples directly
+layout = fx.make_layout((8, 16), (1, 8))
 
-# Static constants (Python ints auto-materialized)
-shape = flir.make_shape(8, 16)              # Same as above
-layout = flir.make_layout((8, 16), (1, 8))  # Tuple shorthand
+# Coordinates
+coord = fx.make_coord(i, j)
+
+# Generic integer tuple
+it = fx.make_int_tuple((4, 8, 2))
 
 # Nested shapes
-shape_nested = flir.make_shape(9, (4, 8))   # (9, (4, 8))
+shape_nested = fx.make_shape(9, (4, 8))   # (9, (4, 8))
 
-# Ordered layout (convenience)
-layout_cm = flir.make_ordered_layout((8, 16), order=(1, 0))  # col-major
-layout_rm = flir.make_ordered_layout((8, 16), order=(0, 1))  # row-major
-```
-
-### MLIR
-
-```mlir
-// Create 2D layout (8, 16) with column-major stride (1, 8)
-%shape = flir.make_shape %c8, %c16 : (!flir.int, !flir.int) -> !flir.shape<2>
-%stride = flir.make_stride %c1, %c8 : (!flir.int, !flir.int) -> !flir.stride<2>
-%layout = flir.make_layout %shape, %stride
-    : (!flir.shape<2>, !flir.stride<2>) -> !flir.layout<2>
-%coord = flir.make_coord %i, %j : (index, index) -> !flir.coord<2>
+# Identity layout / tensor
+identity = fx.make_identity_layout((M, N))
+id_tensor = fx.make_identity_tensor((M, N))
 ```
 
 ---
@@ -109,30 +103,32 @@ layout_rm = flir.make_ordered_layout((8, 16), order=(0, 1))  # row-major
 
 The fundamental operation: mapping between logical coordinates and physical memory indices.
 
-**Formula**: `Index = dot(Coord, Stride) = sum(coord_i * stride_i)`
+**Formula**: `Index = sum(coord_i * stride_i)`
 
-### `crd2idx` -- Coordinate to Index
-
-```python
-# Python
-idx = flir.crd2idx(coord, layout)
-```
-
-```mlir
-// MLIR
-%idx = flir.crd2idx %coord, %layout : (!flir.coord<2>, !flir.layout<2>) -> index
-```
-
-### `idx2crd` -- Index to Coordinate (inverse)
+### `crd2idx` — Coordinate to Index
 
 ```python
-# Python
-coord = flir.idx2crd(idx, layout)
+# Via fly dialect ops
+idx = fx.crd2idx(coord, layout)
 ```
 
-```mlir
-// MLIR
-%coord = flir.idx2crd %idx, %layout : (index, !flir.layout<2>) -> !flir.coord<2>
+### `idx2crd` — Index to Coordinate (inverse)
+
+```python
+coord = fx.idx2crd(idx, layout)
+```
+
+### Pure-Arith Helpers (`kernels/layout_utils.py`)
+
+For static-stride layouts, `layout_utils` provides lightweight helpers that parse layout type strings and emit pure arith ops:
+
+```python
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+
+# Parses '(4,64):(64,1)' from the type and emits arith ops
+flat_idx = crd2idx([row, col], layout_value)
+coords = idx2crd(flat_idx, layout_value)
+dim_val = layout_get(int_tuple, 0)
 ```
 
 ### Example
@@ -148,20 +144,19 @@ For layout `((8, 16), (1, 8))` (8x16, column-major):
 | Operation | Description | Example |
 |---|---|---|
 | `size(x)` | Product of all dimensions | `size((8, 16)) = 128` |
-| `cosize(layout)` | Span of the layout mapping (max index + 1) | `cosize(((8, 16), (1, 8))) = 128` |
-| `rank(x)` | Number of top-level dimensions | `rank((8, 16)) = 2` |
+| `get_shape(layout)` | Extract shape from layout | Returns `!fly.int_tuple` |
+| `get_stride(layout)` | Extract stride from layout | Returns `!fly.int_tuple` |
 | `get(x, i)` | Extract i-th element | `get((8, 16), 0) = 8` |
-| `get_shape(layout)` | Extract shape from layout | Returns `!flir.shape` |
-| `get_stride(layout)` | Extract stride from layout | Returns `!flir.stride` |
+| `get_scalar(x)` | Extract scalar from leaf IntTuple | Returns index value |
+| `rank(x)` | Number of top-level modes | `rank((8, 16)) = 2` |
+| `depth(x)` | Nesting depth | `depth((8, (4, 2))) = 2` |
 
 ```python
-s = flir.size(layout)       # total elements
-cs = flir.cosize(layout)    # codomain span
-r = flir.rank(layout)       # number of modes
-v = flir.get(shape, 0)      # first dimension
-
-shape = flir.get_shape(layout)
-stride = flir.get_stride(layout)
+s = fx.size(layout)           # total elements (returns Int32 for static)
+shape = fx.get_shape(layout)
+stride = fx.get_stride(layout)
+v = fx.get(shape, 0)          # first dimension
+r = fx.rank(shape)            # number of modes
 ```
 
 ---
@@ -175,30 +170,20 @@ Composes two layouts: result maps through B first, then A.
 **Semantics**: `result(x) = A(B(x))`
 
 ```python
-composed = flir.composition(layout_a, layout_b)
+composed = fx.composition(layout_a, layout_b)
 ```
 
-```mlir
-%composed = flir.composition %layoutA, %layoutB
-    : (!flir.layout<2>, !flir.layout<2>) -> !flir.layout<2>
-```
-
-**Use case**: Applying a permutation to a layout, or composing a tile coordinate mapping with a memory layout.
+**Use case**: Applying a permutation or tile coordinate mapping to a memory layout.
 
 ### 5.2 Complement: `complement(tiler, target_size)`
 
 Computes the "remaining" modes not covered by the tiler, up to `target_size` elements.
 
 ```python
-rest = flir.complement(tiler, target_size)
+rest = fx.complement(tiler, target_size)
 ```
 
-**Algorithm**:
-1. Filter out stride-0 and size-1 modes from the tiler
-2. Sort modes by stride (ascending)
-3. Fold to compute rest modes
-
-**Use case**: Internal building block for `logical_divide`. Also useful for computing the complementary iteration space when tiling.
+**Use case**: Internal building block for `logical_divide`. Computing complementary iteration space when tiling.
 
 ### 5.3 Coalesce: `coalesce(layout)`
 
@@ -206,53 +191,55 @@ Simplifies a layout by flattening nested modes and combining adjacent modes when
 
 **Post-conditions**:
 - `size(result) == size(layout)` (preserves total size)
-- `result` has depth ≤ 1 (flattened)
 - For all valid indices: `layout(i) == result(i)` (preserves mapping)
 
 ```python
-simplified = flir.coalesce(layout)
+simplified = fx.coalesce(layout)
+```
+
+### 5.4 Right Inverse: `right_inverse(layout)`
+
+Computes the right inverse of a layout mapping.
+
+```python
+inv = fx.right_inverse(layout)
+```
+
+### 5.5 Recast Layout: `recast_layout(layout, old_bits, new_bits)`
+
+Adjusts a layout for a type width change (e.g., FP16 → FP8):
+
+```python
+# Convert layout from 16-bit to 8-bit elements
+recasted = fx.recast_layout(layout, old_type_bits=16, new_type_bits=8)
 ```
 
 ---
 
 ## 6. Product Operations
 
-Products combine two layouts to create a larger layout. All products take `(block, tiler)` and produce a result layout.
+Products combine two layouts to create a larger layout. All products take `(layout, tiler)`.
 
 | Variant | Description |
 |---|---|
-| `logical_product` | Mode-wise concatenation (most basic). Scales tiler strides by block size. |
-| `zipped_product` | Interleaves modes from block and tiler. |
+| `logical_product` | Mode-wise concatenation (most basic). Scales tiler strides by layout size. |
+| `zipped_product` | Interleaves modes from layout and tiler. |
 | `tiled_product` | Creates hierarchical tiled structure. |
 | `flat_product` | Produces a flattened result. |
 | `raked_product` | Creates a raked (interleaved) access pattern. |
-| `blocked_product` | Creates a blocked access pattern. |
+| `block_product` | Creates a blocked access pattern. |
 
 ```python
-result = flir.logical_product(block_layout, tiler_layout)
-result = flir.zipped_product(block_layout, tiler_layout)
-result = flir.raked_product(block_layout, tiler_layout)
-# ... etc
-```
-
-### Example
-
-```python
-# Thread layout: 4 threads along M, 32 along N
-thr_layout = flir.make_ordered_layout((4, 32), order=(1, 0))
-
-# Value layout: each thread handles 4x4 elements
-val_layout = flir.make_ordered_layout((4, 4), order=(1, 0))
-
-# Raked product: interleaved access across threads
-raked = flir.raked_product(thr_layout, val_layout)
+result = fx.logical_product(layout, tiler)
+result = fx.zipped_product(layout, tiler)
+result = fx.raked_product(layout, tiler)
 ```
 
 ---
 
 ## 7. Divide Operations
 
-Divides partition a layout by a tiler, creating a view that separates "tile" and "rest" dimensions.
+Divides partition a layout by a divisor, creating a view that separates "tile" and "rest" dimensions.
 
 | Variant | Description |
 |---|---|
@@ -262,172 +249,212 @@ Divides partition a layout by a tiler, creating a view that separates "tile" and
 | `flat_divide` | Flattened division. |
 
 ```python
-result = flir.logical_divide(layout, tiler)
-result = flir.zipped_divide(layout, tiler)
-```
-
-### `zipped_divide` with TensorView
-
-`zipped_divide` has special support for `TensorView` objects, enabling block-level tiling:
-
-```python
-tensor = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
-tiles = flir.zipped_divide(tensor, (TILE_M, TILE_N))
-
-# Index with block coordinates to get a tile
-blk_tile = tiles[(flir.block_idx("y"), flir.block_idx("x"))]
+result = fx.logical_divide(layout, divisor)
+result = fx.zipped_divide(layout, divisor)
 ```
 
 ---
 
-## 8. Local Partition & Tile
+## 8. Structural Operations
 
-### `local_partition(layout, tile, index)`
+### `select(int_tuple, indices)`
 
-Partitions a layout for a specific thread/block index:
+Select modes by index:
 
 ```python
-# Partition layout by tile for thread `tid`
-thr_portion = flir.local_partition(layout, tile_layout, tid)
+selected = fx.select(int_tuple, indices=[0, 2])  # pick modes 0 and 2
 ```
 
-### `local_tile(layout, tiler, coord)`
+### `group(int_tuple, begin, end)`
 
-Extracts a tile from a layout at specific coordinates:
+Group a range of modes into a nested tuple:
 
 ```python
-tile = flir.local_tile(layout, tile_shape, block_coord)
+grouped = fx.group(int_tuple, begin=1, end=3)
+```
+
+### `append(base, elem)` / `prepend(base, elem)`
+
+Add a mode to the end/beginning:
+
+```python
+extended = fx.append(base_tuple, new_elem)
+extended = fx.prepend(base_tuple, new_elem)
+```
+
+### `zip(lhs, rhs)`
+
+Zip two IntTuples mode-wise:
+
+```python
+zipped = fx.zip(shapes_a, shapes_b)
+```
+
+### `slice(src, coord)`
+
+Slice an IntTuple/layout at a coordinate:
+
+```python
+sliced = fx.slice(layout, coord)
 ```
 
 ---
 
-## 9. Helper Functions
+## 9. MemRef / View / Copy Operations
 
-### `make_ordered_layout(shape, order, stride)`
-
-Creates a layout with specified dimension ordering:
+### MemRef Operations
 
 ```python
-# Column-major (N is the fast-changing dimension)
-layout_cm = flir.make_ordered_layout((M, N), order=(1, 0))
+# Allocate on-chip memory with layout
+alloca = fx.memref_alloca(memref_type, layout)
 
-# Row-major (M is the fast-changing dimension)
-layout_rm = flir.make_ordered_layout((M, N), order=(0, 1))
+# Load / store through layout
+val = fx.memref_load(memref, indices)
+fx.memref_store(value, memref, indices)
+
+# Vector load / store
+vec = fx.memref_load_vec(memref)
+fx.memref_store_vec(vector, memref)
+
+# Get layout from memref
+ly = fx.get_layout(memref)
+
+# Get iterator from memref
+it = fx.get_iter(memref)
 ```
 
-When `order` is provided, strides are computed automatically. When `stride` is provided instead, it's used directly.
-
-### `product_each(shape)`
-
-Element-wise product of nested shape dimensions:
+### View and Offset
 
 ```python
-# If shape is ((4, 8), (2, 16)):
-# product_each returns (32, 32) -- products within each mode
-result = flir.product_each(shape)
+# Create a view from iterator + layout
+view = fx.make_view(iterator, layout)
+
+# Add offset to a pointer
+ptr = fx.add_offset(ptr, offset)
 ```
 
-### `make_layout_tv(thr_layout, val_layout)`
-
-Creates a tiler and TV (thread-value) layout from separate thread and value layouts. Used internally by `make_tiled_copy_tv`.
-
----
-
-## 10. Swizzling
-
-### `swizzle_xor16(row, col, kBlocks16)`
-
-XOR-based swizzle for LDS bank-conflict avoidance at 16-byte granularity:
-
-**Formula**: `result = col XOR ((row % kBlocks16) * 16)`
+### Copy and GEMM Atoms
 
 ```python
-col_swizzled = flir.swizzle_xor16(row, col, k_blocks16)
-```
+# Create copy atom
+copy_atom = fx.make_copy_atom(CopyAtomUniversalCopyType.get(...))
 
-```mlir
-%swizzled = flir.swizzle_xor16 %row, %col, %kBlocks16
-    : (index, index, index) -> index
-```
+# Create MMA atom
+mma_atom = fx.make_mma_atom(MmaAtomUniversalFMAType.get(...))
 
-This matches the CK/ROCDSL-style LDS swizzle used for FP8/F16 tiles where the K dimension is permuted at 16-byte granularity while preserving intra-16B order.
+# Make tiled copy
+tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
 
-**Usage in kernels**: Applied when storing tiles to LDS to avoid bank conflicts:
+# Partition for a thread
+src_part = fx.tiled_copy_partition_src(tiled_copy, src, thr_coord)
+dst_part = fx.tiled_copy_partition_dst(tiled_copy, dst, thr_coord)
 
-```python
-# In preshuffle GEMM kernels:
-col_bytes = col_i32 * arith.constant(4, index=True)
-col_swz = flir.swizzle_xor16(row, col_bytes, k_blocks16)
-coord = flir.make_coord(row, col_swz)
-idx = flir.crd2idx(coord, lds_layout)
+# Execute copy / gemm
+fx.copy(copy_atom, src, dst)
+fx.gemm(mma_atom, d, a, b, c)
 ```
 
 ---
 
-## 11. Nested / Hierarchical Layouts
+## 10. Nested / Hierarchical Layouts
 
-FLIR supports nested layouts for representing multi-level tiling hierarchies:
+The Fly dialect supports nested layouts for representing multi-level tiling hierarchies:
 
 ```python
 # Nested shape: 9 elements in first mode, (4, 8) = 32 elements in second
-shape = flir.make_shape(9, (4, 8))
-
-# This represents a 2-level hierarchy:
-# - Outer: 9 x 4
-# - Inner: 4 within each outer element, 8 within each inner group
+shape = fx.make_shape(9, (4, 8))
 ```
 
 Nested layouts are used in GEMM kernels for multi-level tiling (block → warp → thread → instruction).
 
 ---
 
-## 12. Decision Tree
+## 11. IntTuple Arithmetic
+
+```python
+# Element-wise operations on IntTuples
+sum_it = fx.int_tuple_add(a, b)
+diff_it = fx.int_tuple_sub(a, b)
+prod_it = fx.int_tuple_mul(a, b)
+quot_it = fx.int_tuple_div(a, b)
+
+# Reduce to product
+total = fx.int_tuple_product(int_tuple)
+
+# Per-mode product (for nested tuples)
+products = fx.int_tuple_product_each(int_tuple)
+```
+
+---
+
+## 12. Printf Debugging
+
+The Fly dialect provides a `printf` op for kernel debugging:
+
+```python
+fx.printf("tid={} bid={} val={}", tid, bid, value)
+```
+
+Supports:
+- `ir.Value` — dynamic values
+- `int`, `float`, `bool` — auto-converted to constants
+- `str`, `type` — embedded as static text
+- DSL types with `__extract_ir_values__` — auto-unwrapped
+
+---
+
+## 13. Decision Tree
 
 ```
 Which layout operation do I need?
 
 ├── Creating a layout?
 │   ├── From explicit shape + stride → make_layout(shape, stride)
-│   ├── With dimension ordering → make_ordered_layout(shape, order)
-│   └── From existing layout components → make_layout(get_shape(l), new_stride)
+│   ├── Identity layout → make_identity_layout(shape)
+│   └── From existing components → make_layout(get_shape(l), new_stride)
 │
 ├── Querying a layout?
 │   ├── Total elements → size(layout)
-│   ├── Memory span → cosize(layout)
-│   ├── Number of modes → rank(layout)
-│   └── Extract component → get(shape, i), get_shape(layout), get_stride(layout)
+│   ├── Extract component → get_shape(layout), get_stride(layout)
+│   ├── Single mode → get(shape, i)
+│   └── Number of modes → rank(layout)
 │
 ├── Coordinate mapping?
 │   ├── Coord → memory index → crd2idx(coord, layout)
-│   └── Memory index → coord → idx2crd(idx, layout)
+│   ├── Memory index → coord → idx2crd(idx, layout)
+│   └── Static-stride shortcut → layout_utils.crd2idx(crd, layout)
 │
 ├── Combining layouts?
-│   ├── Sequential mapping (A then B) → composition(A, B)
-│   ├── Extending to more threads → logical_product / raked_product / blocked_product
+│   ├── Sequential mapping → composition(A, B)
+│   ├── Extending threads → logical_product / raked_product / block_product
 │   └── Simplifying → coalesce(layout)
 │
 ├── Partitioning / tiling?
-│   ├── Split layout into tiles → logical_divide / zipped_divide
-│   ├── Get one thread's portion → local_partition(layout, tile, thread_id)
-│   └── Get one block's tile → local_tile(layout, tile_shape, block_coord)
+│   ├── Split layout → logical_divide / zipped_divide
+│   └── Hierarchical tile → tiled_divide
 │
-└── LDS bank-conflict avoidance?
-    └── XOR swizzle → swizzle_xor16(row, col, k_blocks16)
+├── Type width change?
+│   └── recast_layout(layout, old_bits, new_bits)
+│
+└── Structural manipulation?
+    ├── Select modes → select(it, indices)
+    ├── Group modes → group(it, begin, end)
+    └── Extend → append(it, elem) / prepend(it, elem)
 ```
 
 ---
 
-## 13. Source Files
+## 14. Source Files
 
 | File | Description |
 |---|---|
-| `flir/include/flir/FlirOps.td` | All FLIR op definitions (construction, query, algebra, divide, product, local ops) |
-| `flir/include/flir/FlirTypeDefs.td` | Type definitions (`!flir.shape`, `!flir.stride`, `!flir.layout`, `!flir.coord`) |
-| `flir/include/flir/FlirAttrDefs.td` | Attribute definitions (`#flir.underscore`, `#flir.dync_i32`) |
-| `flir/lib/Dialect/Flir/FlirLayoutAlgebra.cpp` | Type inference for composition, logical_product, logical_divide |
-| `flir/lib/Dialect/Flir/FlirOps.cpp` | Op verifiers and custom builders |
-| `flydsl/src/flydsl/dialects/ext/flir.py` | Python API: all layout functions, TensorView, CopyAtom, TiledCopy |
-| `tests/pyir/test_layout_algebra.py` | Layout algebra tests (composition, complement, coalesce) |
+| `python/flydsl/expr/primitive.py` | All layout functions: construction, query, algebra, divide, product, copy, gemm |
+| `python/flydsl/expr/derived.py` | `CopyAtom`, `MmaAtom`, `TiledCopy` wrapper classes |
+| `python/flydsl/expr/typing.py` | `IntTupleType`, `LayoutType`, type definitions |
+| `kernels/layout_utils.py` | Pure-arith helpers: `crd2idx`, `idx2crd`, `get` for static layouts |
+| `flir/include/flir/FlirOps.td` | FLIR op definitions (legacy dialect) |
+| `flir/lib/Dialect/Flir/FlirLayoutAlgebra.cpp` | Type inference for composition, product, divide (FLIR) |
+| `tests/pyir/test_layout_algebra.py` | Layout algebra tests |
 | `tests/pyir/test_product_divide.py` | Product and divide operation tests |
 | `tests/pyir/test_nested_layouts.py` | Nested/hierarchical layout tests |
-| `tests/pyir/test_local_ops.py` | local_partition and local_tile tests |
+| `tests/pyir/test_local_ops.py` | Local partition and tile tests |

@@ -1,344 +1,395 @@
 # Kernel Authoring Guide
 
-> Writing GPU kernels with FlyDSL: MlirModule, thread hierarchy, TensorView, tiled copies, MFMA, shared memory, and synchronization.
+> Writing GPU kernels with FlyDSL: `@flyc.jit`, `@flyc.kernel`, expression API, launch configuration, shared memory, and synchronization.
 
 ## Quick Reference
 
 | Concept | API | Description |
 |---|---|---|
-| **Module** | `class MyKernel(MlirModule)` | Base class for kernel modules |
-| **Kernel** | `@kernel` decorator | Emit `gpu.func` with `gpu.kernel` attribute |
-| **Host func** | `@jit` decorator | Emit host-side `func.func` |
-| **Thread ID** | `flir.thread_idx("x")` | Get thread index in workgroup |
-| **Block ID** | `flir.block_idx("x")` | Get block/workgroup index |
-| **Block dim** | `flir.block_dim("x")` | Get block dimension size |
-| **Tensor** | `flir.make_tensor(ptr, shape, strides)` | Create a TensorView |
-| **Fragment** | `flir.make_fragment_like(template)` | Register memory buffer |
-| **Copy atom** | `flir.make_copy_atom(dtype, vec_size)` | Copy descriptor |
-| **Tiled copy** | `flir.make_tiled_copy_tv(atom, thr, val)` | Distributed copy |
-| **Copy** | `flir.copy(tiled, src, dst)` | Execute data movement |
-| **LDS** | `SmemAllocator` | Shared memory management |
-| **Barrier** | `gpu.barrier()` | Workgroup synchronization |
-| **Compile** | `compile(module)` | Full pipeline → executor |
+| **JIT host func** | `@flyc.jit` | Emit host-side launcher with JIT compilation |
+| **GPU kernel** | `@flyc.kernel` | Define GPU kernel function |
+| **Launch** | `kernel(...).launch(grid=, block=)` | Configure and emit GPU launch |
+| **Thread ID** | `fx.gpu.thread_idx.x` | Get thread index in workgroup |
+| **Block ID** | `fx.gpu.block_idx.x` | Get block/workgroup index |
+| **Block dim** | `fx.gpu.block_dim.x` | Get block dimension size |
+| **Compile-time** | `fx.Constexpr[int]` | Compile-time constant parameter |
+| **Tensor arg** | `fx.Tensor` | GPU tensor argument (via DLPack) |
+| **Stream arg** | `fx.Stream` | CUDA/HIP stream argument |
+| **Barrier** | `fx.gpu.barrier()` | Workgroup synchronization |
+| **Constants** | `arith.constant(val)` | Create MLIR constant value |
+| **Range loop** | `range_constexpr(n)` | Compile-time unrolled loop |
+| **Buffer load** | `buffer_ops.buffer_load(rsrc, off)` | AMD buffer load intrinsic |
 
 ---
 
-## 1. Module Structure
+## 1. Basic Kernel Pattern
 
-### 1.1 Using `MlirModule` (Structured Pattern)
+### 1.1 `@flyc.kernel` + `@flyc.jit`
 
 ```python
-from flydsl.lang.ir.module import MlirModule, kernel, jit
-from flydsl.dialects.ext import flir, arith, gpu
-import _mlir.extras.types as T
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import arith, gpu
 
-class VecAddKernel(MlirModule):
-    GPU_MODULE_NAME = "vec_add"
+@flyc.kernel
+def vec_add_kernel(
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
+    N: fx.Constexpr[int],
+):
+    tid = gpu.thread_idx.x
+    bid = gpu.block_idx.x
+    idx = bid * 256 + tid
+    # ... kernel body using arith/vector/buffer ops ...
 
-    @kernel
-    def vecAdd(self, A: T.memref(1024, T.f32()),
-                     B: T.memref(1024, T.f32()),
-                     C: T.memref(1024, T.f32())):
-        tid = flir.thread_idx("x")
-        bid = flir.block_idx("x")
-        # ... kernel body ...
+@flyc.jit
+def vec_add(
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
+    N: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),
+):
+    vec_add_kernel(A, B, C, N).launch(
+        grid=(N // 256,),
+        block=(256,),
+        stream=stream,
+    )
 
-# Instantiate to emit MLIR
-mod = VecAddKernel()
-print(mod.module)  # view MLIR IR
+# Usage:
+import torch
+A = torch.randn(1024, device="cuda", dtype=torch.float32)
+B = torch.randn(1024, device="cuda", dtype=torch.float32)
+C = torch.empty(1024, device="cuda", dtype=torch.float32)
+
+vec_add(A, B, C, 1024)
 ```
 
-### 1.2 Using `RAIIMLIRContextModule` (Standalone Pattern)
+### 1.2 How It Works
+
+1. `@flyc.kernel` wraps the function as a `KernelFunction`
+2. `@flyc.jit` wraps the function as a `JitFunction`
+3. On first call, `JitFunction.__call__` triggers:
+   - AST rewriting (Python loops/ifs → MLIR scf ops)
+   - MLIR module creation with `gpu.container_module`
+   - Tracing the jit function body to generate MLIR ops
+   - Calling `vec_add_kernel(...)` emits a `gpu.func` in `gpu.module`
+   - `.launch()` emits `gpu.launch_func`
+   - `MlirCompiler.compile()` runs the full pass pipeline
+   - `JitCompiledFunction` wraps the resulting ExecutionEngine
+4. Subsequent calls with the same type signature use the cached binary
+
+---
+
+## 2. Parameter Types
+
+### 2.1 `fx.Tensor`
+
+Maps a PyTorch tensor to an MLIR memref descriptor via DLPack:
 
 ```python
-from flydsl.compiler.context import RAIIMLIRContextModule
-from flydsl.dialects.ext import gpu, flir
-import _mlir.extras.types as T
-
-ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-gpu.set_container_module(ctx.module)
-
-@gpu.module("my_kernels", ["#rocdl.target<abi = \"500\">"])
-def mod():
-    pass
-
-@flir.kernel
-def my_kernel(A: T.memref(1024, T.f32())):
-    tid = flir.thread_idx("x")
-    # ... kernel body ...
+@flyc.kernel
+def my_kernel(input: fx.Tensor, output: fx.Tensor):
+    # input and output are Tensor wrappers around ir.Value (memref)
+    ...
 ```
 
-### 1.3 `MlirModule` Class Attributes
+At the host boundary, `torch.Tensor` is automatically converted via `TensorAdaptor`.
 
-| Attribute | Default | Description |
-|---|---|---|
-| `GPU_MODULE_NAME` | `"kernels"` | Name of the `gpu.module` container |
-| `GPU_MODULE_TARGETS` | `None` | Target list (overridden by `flir.compile()`) |
-| `ALLOW_UNREGISTERED_DIALECTS` | `True` | Allow unknown dialects in context |
+### 2.2 `fx.Constexpr[T]`
 
-### 1.4 `init_gpu_module()` Hook
-
-Override this method in your `MlirModule` subclass to insert ops at the beginning of the `gpu.module` body (e.g., `memref.global` for shared memory):
+Compile-time constant. Value is embedded directly in the generated IR:
 
 ```python
-class MyKernel(MlirModule):
-    GPU_MODULE_NAME = "my_kernel"
+@flyc.kernel
+def my_kernel(data: fx.Tensor, N: fx.Constexpr[int], dtype: fx.Constexpr[str]):
+    for i in range_constexpr(N // 64):  # unrolled at compile time
+        ...
+```
 
-    def init_gpu_module(self):
-        # Called before any @kernel methods
-        self.smem.finalize()  # emit memref.global for LDS
+Different `Constexpr` values produce different compiled kernels (separate cache entries).
+
+### 2.3 `fx.Int32`
+
+Runtime integer parameter (passed as `i32`):
+
+```python
+@flyc.jit
+def launch(data: fx.Tensor, size: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    ...
+```
+
+Python `int` values are automatically converted to `Int32` via the `JitArgumentRegistry`.
+
+### 2.4 `fx.Stream`
+
+CUDA/HIP stream for asynchronous kernel launch:
+
+```python
+@flyc.jit
+def launch(data: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+    my_kernel(data).launch(grid=(1,), block=(256,), stream=stream)
+
+# Launch on specific stream:
+stream = torch.cuda.Stream()
+launch(data, stream=fx.Stream(stream))
+```
+
+### 2.5 Custom Argument Types
+
+Register new Python types for the JIT boundary:
+
+```python
+from flydsl.compiler import JitArgumentRegistry
+
+@JitArgumentRegistry.register(MyCustomType, dsl_type=MyDslType)
+class MyCustomAdaptor:
+    def __init__(self, value: MyCustomType):
+        self.value = value
+
+    def __ir_types__(self):
+        return [...]  # MLIR types for this argument
+
+    def __c_pointers__(self):
+        return [...]  # ctypes pointers for invocation
 ```
 
 ---
 
-## 2. Thread / Block Hierarchy
+## 3. Thread / Block Hierarchy
 
 ```python
-# Thread index within workgroup (0 to blockDim-1)
-tid_x = flir.thread_idx("x")  # returns index-typed Value
-tid_y = flir.thread_idx("y")
-tid_z = flir.thread_idx("z")
+from flydsl.expr import gpu
+
+# Thread index within workgroup (returns Int32)
+tid_x = gpu.thread_idx.x
+tid_y = gpu.thread_idx.y
+tid_z = gpu.thread_idx.z
 
 # Block (workgroup) index within grid
-bid_x = flir.block_idx("x")
-bid_y = flir.block_idx("y")
+bid_x = gpu.block_idx.x
+bid_y = gpu.block_idx.y
 
 # Block dimensions
-bdim_x = flir.block_dim("x")
+bdim_x = gpu.block_dim.x
 
-# Linear thread index (common pattern)
-tid_linear = (flir.thread_idx("y") * flir.block_dim("x")
-              + flir.thread_idx("x")).value
+# Grid dimensions
+gdim_x = gpu.grid_dim.x
+
+# Low-level (returns raw ir.Value)
+raw_tid = gpu.thread_id("x")
+raw_bid = gpu.block_id("x")
 ```
 
 ---
 
-## 3. TensorView
+## 4. Expression API (`flydsl.expr`)
 
-`TensorView` is the Python-side representation of a multi-dimensional memory region:
+### 4.1 Arithmetic (`fx.arith`)
 
 ```python
-# Create from memref pointer with shape and strides
-tensor_A = flir.make_tensor(A, shape=(M, N), strides=(N, 1))
+from flydsl.expr import arith
+from flydsl.expr.typing import T
 
-# Create 1D view
-tensor_flat = flir.make_tensor(ptr, shape=(N,), strides=(1,))
+# Constants
+c42 = arith.constant(42, index=True)     # index type
+c3_14 = arith.constant(3.14, T.f32)      # f32 type
+
+# Arithmetic (operator overloading via ArithValue)
+result = a + b
+result = a * 2
+result = a // 4
+result = a % 16
+
+# Cast
+idx = arith.index_cast(T.index, int_val)
+
+# Select
+result = arith.select(cond, true_val, false_val)
+
+# Bitwise
+result = arith.andi(a, b)
+result = arith.xori(a, b)
+result = arith.shli(a, b)
 ```
 
-Key attributes:
-- `shape` -- tuple of dimension extents
-- `strides` -- memory strides per dimension
-- `base_indices` -- base offsets into the backing memref
-- `element_type` -- MLIR element type
-- `memref` -- backing MLIR memref value
-
-You can also construct a `TensorView` directly:
+### 4.2 Vector Operations (`fx.vector`)
 
 ```python
-view = flir.TensorView(
-    memref_value,
-    shape=(M, N),
-    strides=(N, 1),
-    base_indices=(offset_m, offset_n),
-    element_type=T.f16(),
-)
+from flydsl.expr import vector
+
+# Build vector from elements
+vec = vector.from_elements(vec_type, [a, b, c, d])
+
+# Vector store to memref
+vector.store(vec, memref, [idx])
+
+# Extract/insert
+elem = vector.extractelement(vec, idx)
+vec2 = vector.insertelement(vec, elem, idx)
+```
+
+### 4.3 Buffer Operations (`fx.buffer_ops`)
+
+AMD buffer load/store intrinsics for efficient global memory access:
+
+```python
+from flydsl.expr import buffer_ops
+
+# Create buffer resource descriptor from memref
+rsrc = buffer_ops.create_buffer_resource(memref_value)
+
+# Buffer load (vectorized)
+data = buffer_ops.buffer_load(rsrc, byte_offset, vec_width=4)
+
+# Buffer store
+buffer_ops.buffer_store(data, rsrc, byte_offset)
+```
+
+### 4.4 ROCm Intrinsics (`fx.rocdl`)
+
+```python
+from flydsl.expr import rocdl
+
+# MFMA instructions
+result = rocdl.mfma_f32_16x16x16_f16(a, b, acc)
+result = rocdl.mfma_f32_16x16x32_fp8(a, b, acc)
+result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
+
+# Warp shuffle
+val = rocdl.ds_bpermute(idx, src)
+
+# LDS operations
+rocdl.ds_write_b128(lds_ptr, offset, data)
+data = rocdl.ds_read_b128(lds_ptr, offset)
+```
+
+### 4.5 GPU Operations (`fx.gpu`)
+
+```python
+from flydsl.expr import gpu
+
+# Barrier (workgroup synchronization)
+gpu.barrier()
+
+# Shared memory address space attribute
+addrspace = gpu.smem_space()
+addrspace_int = gpu.smem_space(int=True)
 ```
 
 ---
 
-## 4. Tiled Copies
+## 5. Control Flow
 
-Tiled copies distribute data movement across threads in a workgroup.
+### 5.1 Python Loops → MLIR SCF
 
-### 4.1 Copy Atom
-
-A `CopyAtom` describes a single thread's copy operation:
+The `ASTRewriter` automatically transforms Python `for` loops:
 
 ```python
-# Copy atom: element type, vector width, coalesced flag
-copy_atom = flir.make_copy_atom(T.f32(), vector_size=8)
-copy_atom = flir.make_copy_atom(T.f16(), vector_size=16, is_coalesced=True)
+@flyc.kernel
+def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
+    # Compile-time unrolled loop
+    for i in range_constexpr(N):
+        # This loop is fully unrolled in the generated IR
+        ...
+
+    # Runtime loop (lowered to scf.for)
+    for i in range(runtime_value):
+        ...
 ```
 
-### 4.2 Tiled Copy
+### 5.2 `const_expr()`
 
-A `TiledCopy` distributes a copy atom across threads using thread and value layouts:
-
-```python
-THREADS = 256
-TILE = 8
-VEC = 4
-
-# Thread layout: how threads are arranged
-thr_layout = flir.make_ordered_layout((THREADS,), order=(0,))
-
-# Value layout: how many elements each thread handles
-val_layout = flir.make_ordered_layout((TILE,), order=(0,))
-
-# Create tiled copy
-tiled = flir.make_tiled_copy_tv(
-    copy_atom, thr_layout, val_layout,
-    thr_shape=(THREADS,), val_shape=(TILE,),
-)
-```
-
-### 4.3 Thread Slicing and Partitioning
+Mark a value as compile-time constant:
 
 ```python
-# Get this thread's slice of the copy
-thr_copy = tiled.get_slice(tid_linear)
+from flydsl.expr import const_expr
 
-# Partition source and destination tensors for this thread
-thr_src = thr_copy.partition_S(src_tensor)
-thr_dst = thr_copy.partition_D(dst_tensor)
-```
-
-### 4.4 Copy Execution
-
-```python
-# Register fragment (destination buffer)
-frag = flir.make_fragment_like(thr_src, T.f32())
-
-# Execute copy: src → frag
-flir.copy(tiled, thr_src, frag)
-
-# Copy with predication (bounds checking)
-flir.copy(tiled, thr_src, frag, pred=mask)
-
-# Copy with LDS swizzle
-flir.copy(atom, src, dst,
-    dst_swizzle_xor16_kblocks=k_blocks,
-    dst_swizzle_xor16_dims=(0, 1))
-
-# Copy returning vector (for buffer loads)
-vec = flir.copy(atom, src, None,
-    return_vector=True,
-    src_buffer_resource=rsrc,
-    alignment=16)
+@flyc.kernel
+def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
+    tile_size = const_expr(N // 4)
+    for i in range_constexpr(tile_size):
+        ...
 ```
 
 ---
 
-## 5. Register Fragments
+## 6. Shared Memory (LDS)
 
-Fragments represent per-thread register storage:
-
-```python
-# Create fragment matching a TensorView's shape
-frag = flir.make_fragment_like(tensor_view, T.f32())
-
-# Create fragment matching a TiledCopy
-frag = flir.make_fragment_like(tiled_copy)
-
-# Create explicit register tensor
-rmem = flir.make_rmem_tensor((16, 16), T.f32())
-
-# Create identity/coordinate tensor
-identity = flir.make_identity_tensor((M, N))
-```
-
----
-
-## 6. MFMA Operations
-
-Matrix Fused Multiply-Add instructions for AMD GPUs:
-
-### MLIR ROCm Dialect
-
-```mlir
-// Single MFMA instruction
-%d = flir.rocm.mfma %a, %b, %c {
-    shape = [32, 32, 8], arch = "gfx942"
-} : (!flir.tensor<f16, ...>, !flir.tensor<f16, ...>,
-     !flir.tensor<f32, ...>) -> !flir.tensor<f32, ...>
-
-// Tiled MFMA (multi-wavefront)
-%d = flir.rocm.tiled_mfma %a, %b, %c {
-    atom = #flir_rocm.mfma_atom<[32, 32, 8], f16, f16, f32, gfx942>,
-    tile_shape = [128, 128, 32]
-} : (...)
-```
-
-### Supported MFMA Shapes (GFX942)
-
-| Instruction | M | N | K | A Type | D Type |
-|---|---|---|---|---|---|
-| `mfma_f32_32x32x8_f16` | 32 | 32 | 8 | FP16 | FP32 |
-| `mfma_f32_16x16x16_f16` | 16 | 16 | 16 | FP16 | FP32 |
-| `mfma_f32_32x32x16_bf16` | 32 | 32 | 16 | BF16 | FP32 |
-| `mfma_f64_16x16x4_f64` | 16 | 16 | 4 | FP64 | FP64 |
-| `mfma_f32_16x16x32_f8` | 16 | 16 | 32 | FP8 | FP32 |
-| `mfma_i32_16x16x32_i8` | 16 | 16 | 32 | INT8 | INT32 |
-
-### In Python Kernel Code
-
-MFMA is typically used through the `rocdl` intrinsics after lowering, but the FLIR ROCm ops provide a structured interface during IR construction. See the GEMM kernels in `kernels/preshuffle_gemm.py` for complete examples.
-
----
-
-## 7. Shared Memory (LDS)
-
-### 7.1 `SmemAllocator`
+### 6.1 `SmemAllocator`
 
 ```python
 from flydsl.utils.smem_allocator import SmemAllocator
-import _mlir.extras.types as T
+from flydsl.expr.typing import T
 
-class MyGemmKernel(MlirModule):
-    GPU_MODULE_NAME = "gemm"
+# Create allocator for target architecture
+allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
 
-    def __init__(self):
-        self.smem = SmemAllocator(None, arch="gfx942")
-        # Reserve LDS space before emitting kernels
-        self.lds_a = self.smem.allocate_array(T.f16(), 8192)
-        self.lds_b = self.smem.allocate_array(T.f16(), 8192)
-        super().__init__()
+# Allocate typed arrays
+lds_a = allocator.allocate_array(T.f16, 8192)
+lds_b = allocator.allocate_array(T.f16, 8192)
 
-    def init_gpu_module(self):
-        # Emit memref.global for the LDS buffer
-        self.smem.finalize()
+# Inside kernel: get base pointer and typed views
+lds_base = allocator.get_base()
+lds_a_ptr = lds_a(lds_base)  # SmemPtr
+lds_b_ptr = lds_b(lds_base)  # SmemPtr
 
-    @kernel
-    def gemm_kernel(self, ...):
-        # Get LDS base pointer inside kernel
-        lds_base = self.smem.get_base()
-        # Get typed views
-        lds_a_ptr = self.lds_a(lds_base)  # SmemPtr
-        lds_b_ptr = self.lds_b(lds_base)  # SmemPtr
-        # Load/store through SmemPtr
-        val = lds_a_ptr.load([idx])
-        lds_b_ptr.store(val, [idx])
+# Load/store through SmemPtr
+val = lds_a_ptr.load([idx])
+lds_b_ptr.store(val, [idx])
 ```
 
-### 7.2 `SmemAllocator` API
+### 6.2 Finalizing LDS Allocation
 
-| Method | Description |
-|---|---|
-| `allocate(size_bytes)` | Allocate raw bytes |
-| `allocate(mlir_type)` | Allocate one scalar of given type |
-| `allocate_array(dtype, num_elems)` | Allocate contiguous array |
-| `allocate_tensor(layout, element_type, swizzle=None)` | Allocate tensor with layout |
-| `finalize()` | Emit `memref.global` (call in `init_gpu_module`) |
-| `get_base()` | Get base pointer (call inside kernel) |
+For `@flyc.kernel` style kernels, emit `memref.global` in the GPU module:
 
-### 7.3 LDS Capacity
+```python
+comp_ctx = CompilationContext.get_current()
+with ir.InsertionPoint(comp_ctx.gpu_module_body):
+    allocator.finalize()
+```
+
+### 6.3 LDS Capacity
 
 | Architecture | LDS per CU |
 |---|---|
 | `gfx942` (MI300X) | 64 KB |
 | `gfx950` (MI350) | 160 KB |
 
-The allocator checks capacity and raises `RuntimeError` on overflow.
+---
 
-### 7.4 `SmemPtr`
+## 7. Launch Configuration
 
-Returned by allocator generators, provides typed access to LDS regions:
+### 7.1 `KernelLauncher.launch()`
 
 ```python
-ptr = allocator_gen(lds_base)  # SmemPtr
-memref_view = ptr.get()        # ir.Value (memref view)
-val = ptr.load([idx])          # Load from LDS
-ptr.store(val, [idx])          # Store to LDS
+@flyc.jit
+def launch(data: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
+    my_kernel(data).launch(
+        grid=(num_blocks_x, num_blocks_y, num_blocks_z),
+        block=(threads_x, threads_y, threads_z),
+        smem=shared_mem_bytes,     # dynamic shared memory
+        stream=stream,             # CUDA/HIP stream
+    )
+```
+
+Grid and block dimensions accept:
+- `int` — static value
+- `ir.Value` — dynamic MLIR value
+- Tuple of 1–3 values — missing dimensions default to 1
+
+### 7.2 Dynamic Grid/Block Dimensions
+
+```python
+@flyc.jit
+def launch(data: fx.Tensor, M: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+    grid_x = M // 256
+    my_kernel(data, M).launch(
+        grid=(grid_x, 1, 1),
+        block=(256, 1, 1),
+        stream=stream,
+    )
 ```
 
 ---
@@ -346,118 +397,128 @@ ptr.store(val, [idx])          # Store to LDS
 ## 8. Synchronization
 
 ```python
-from flydsl.dialects.ext import gpu
+from flydsl.expr import gpu
 
 # Workgroup barrier (s_barrier)
 gpu.barrier()
 ```
 
-```mlir
-// MLIR
-gpu.barrier
+---
 
-// ROCm dialect
-flir.rocm.barrier              // workgroup barrier
-flir.rocm.wavefront_barrier    // wavefront-level barrier
+## 9. Compilation & Caching
+
+### 9.1 Automatic Caching
+
+JIT-compiled functions are cached automatically:
+
+- **In-memory cache** — keyed by argument type signature
+- **Disk cache** — stored in `~/.flydsl/cache/` (configurable via `FLYDSL_RUNTIME_CACHE_DIR`)
+- **Cache key** includes: source code hash, dependency sources, closure values, FlyDSL version, LLVM version
+
+### 9.2 Cache Invalidation
+
+Cache is invalidated when:
+- Source code of the function or its dependencies changes
+- Argument types change (different tensor shapes/dtypes)
+- `Constexpr` values change
+- FlyDSL or LLVM version changes
+
+### 9.3 Disabling Cache
+
+```bash
+FLYDSL_RUNTIME_ENABLE_CACHE=0 python my_script.py
+```
+
+### 9.4 Compile-Only Mode
+
+```bash
+COMPILE_ONLY=1 python my_script.py
 ```
 
 ---
 
-## 9. Complete Example: VecAdd
+## 10. Debugging
 
-From `tests/kernels/test_vec_add.py`:
+### 10.1 Dumping IR
+
+```bash
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./my_dumps python my_script.py
+```
+
+### 10.2 Printing IR
 
 ```python
-from flydsl.compiler.context import RAIIMLIRContextModule
-from flydsl.compiler.compiler import compile
-from flydsl.dialects.ext import gpu, flir
-import _mlir.extras.types as T
+# After compilation, access IR from the compiled function:
+result = launch(A, B, C, 1024)
 
-N = 20480000
-THREADS = 256
-TILE = 8
-VEC = 4
-
-# Set up MLIR context
-ctx = RAIIMLIRContextModule(allow_unregistered_dialects=True)
-gpu.set_container_module(ctx.module)
-
-@gpu.module("vec_kernels", ["#rocdl.target<abi = \"500\">"])
-def mod():
-    pass
-
-@flir.kernel
-def vecAdd(A: T.memref(N, T.f32()),
-           B: T.memref(N, T.f32()),
-           C: T.memref(N, T.f32())):
-    # Linear thread index
-    tid_linear = (flir.thread_idx("y") * flir.block_dim("x")
-                  + flir.thread_idx("x")).value
-
-    # Thread and value layouts
-    thr_layout = flir.make_ordered_layout((THREADS,), order=(0,))
-    val_layout = flir.make_ordered_layout((TILE,), order=(0,))
-
-    # Copy atom: f32, 4-wide vector loads
-    copy_atom = flir.make_copy_atom(T.f32(), vector_size=VEC)
-
-    # Tiled copy across all threads
-    tiled = flir.make_tiled_copy_tv(
-        copy_atom, thr_layout, val_layout,
-        thr_shape=(THREADS,), val_shape=(TILE,),
-    )
-
-    # Create tensors and partition into tiles
-    tensor_A = flir.make_tensor(A, shape=(N,), strides=(1,))
-    tiles_A = flir.zipped_divide(tensor_A, (THREADS * TILE,))
-    blkA = tiles_A[(flir.block_idx("x"),)]
-
-    # Get this thread's portion
-    thrA = tiled.get_slice(tid_linear).partition_S(blkA)
-    frgA = flir.make_fragment_like(thrA, T.f32())
-    flir.copy(tiled, thrA, frgA)
-
-    # ... repeat for B, add, store to C ...
-
-# Compile
-executor = compile(ctx.module)
+# Or use JitCompiledFunction directly:
+compiled_func.print_ir()              # compiled MLIR IR
+compiled_func.print_ir(compiled=False) # original IR before passes
 ```
+
+### 10.3 AST Diff
+
+```bash
+FLYDSL_DEBUG_AST_DIFF=1 python my_script.py
+```
+
+Shows the diff between original and rewritten AST for debugging control flow transformations.
 
 ---
 
-## 10. Kernel Launching
+## 11. Complete Example: Preshuffle GEMM
 
-After compilation, launch kernels through the executor:
+From `kernels/preshuffle_gemm_flyc.py`:
 
 ```python
-import torch
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl, range_constexpr
+from flydsl.expr.typing import T
+from flydsl.utils.smem_allocator import SmemAllocator
 
-# Create device tensors
-A = torch.randn(N, device="cuda", dtype=torch.float32)
-B = torch.randn(N, device="cuda", dtype=torch.float32)
-C = torch.empty(N, device="cuda", dtype=torch.float32)
+def compile_preshuffle_gemm_a8(*, M, N, K, tile_m, tile_n, tile_k,
+                                 in_dtype="fp8", lds_stage=2, ...):
+    allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
+    lds_a = allocator.allocate_array(T.i8, tile_m * tile_k)
+    # ... more allocations ...
 
-# Launch
-grid = (N // (THREADS * TILE), 1, 1)
-block = (THREADS, 1, 1)
+    @flyc.kernel
+    def gemm_kernel(
+        arg_c: fx.Tensor, arg_a: fx.Tensor, arg_b: fx.Tensor,
+        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor,
+        m_in: fx.Int32, n_in: fx.Int32,
+    ):
+        tid = gpu.thread_idx.x
+        bid = gpu.block_idx.x
+        # ... complex GEMM implementation using MFMA, LDS, tiling ...
 
-# For MlirModule-based kernels:
-executor = compile(mod)
-executor.vecAdd(A, B, C)
+    @flyc.jit
+    def launch_fn(
+        arg_c: fx.Tensor, arg_a: fx.Tensor, arg_b: fx.Tensor,
+        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor,
+        M_val: fx.Int32, N_val: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        gemm_kernel(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
+                    M_val, N_val).launch(
+            grid=(grid_x, grid_y), block=(256,),
+            smem=smem_bytes, stream=stream,
+        )
 
-# For GPUFunc-based kernels:
-vecAdd(A, B, C, grid_size=grid, block_size=block)
+    return launch_fn
 ```
 
 ---
 
-## 11. Decision Tree
+## 12. Decision Tree
 
 ```
 Writing a new kernel?
-
+│
 ├── Simple element-wise?
-│   ├── Use @flir.kernel with TensorView + copy
+│   ├── Use @flyc.kernel + @flyc.jit
+│   ├── fx.gpu.thread_idx.x for thread indexing
 │   └── See tests/kernels/test_vec_add.py
 │
 ├── Reduction (norm, softmax)?
@@ -465,45 +526,41 @@ Writing a new kernel?
 │   └── See kernels/layernorm_kernel.py, kernels/softmax_kernel.py
 │
 ├── Matrix multiply (GEMM)?
-│   ├── Use MlirModule + SmemAllocator + MFMA
+│   ├── Use @flyc.kernel + SmemAllocator + MFMA
 │   ├── B-preshuffle layout from mfma_preshuffle_pipeline.py
-│   └── See kernels/preshuffle_gemm.py
+│   └── See kernels/preshuffle_gemm_flyc.py
 │
 ├── Need shared memory?
-│   ├── Use SmemAllocator in MlirModule.__init__
-│   ├── Call finalize() in init_gpu_module()
+│   ├── Use SmemAllocator with target arch
+│   ├── Call finalize() in GPU module body
 │   └── Call get_base() inside @kernel
 │
-└── Need custom pipeline?
-    ├── Use Pipeline fluent API
-    └── Or use flir.compile() with defaults
+└── Need compile-time specialization?
+    ├── Use Constexpr[T] parameters
+    └── Use range_constexpr() for unrolled loops
 ```
 
 ---
 
-## 12. Source Files
+## 13. Source Files
 
 | File | Description |
 |---|---|
-| `flydsl/src/flydsl/lang/ir/module.py` | `MlirModule`, `@kernel`, `@jit` decorators |
-| `flydsl/src/flydsl/dialects/ext/flir.py` | Layout API, TensorView, CopyAtom, TiledCopy, `copy()` |
-| `flydsl/src/flydsl/dialects/ext/gpu.py` | GPU dialect: `barrier()`, `LaunchFuncOp`, `GPUFuncOp` |
-| `flydsl/src/flydsl/dialects/ext/rocm.py` | ROCm helpers: MfmaOp, Copy ops |
-| `flydsl/src/flydsl/utils/smem_allocator.py` | `SmemAllocator`, `SmemPtr`, LDS capacity checks |
-| `flydsl/src/flydsl/compiler/compiler.py` | `compile()` entry point |
-| `flydsl/src/flydsl/compiler/context.py` | `RAIIMLIRContextModule` |
-| `flir/include/flir/FlirRocmOps.td` | ROCm dialect ops (MFMA, LDS, copy, barriers) |
+| `python/flydsl/compiler/__init__.py` | Public API: `jit`, `kernel`, `from_dlpack` |
+| `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
+| `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher` |
+| `python/flydsl/compiler/jit_executor.py` | `JitCompiledFunction` (ExecutionEngine wrapper) |
+| `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor` |
+| `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
+| `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
+| `python/flydsl/expr/arith.py` | Arithmetic operations |
+| `python/flydsl/expr/vector.py` | Vector dialect operations |
+| `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
+| `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
+| `python/flydsl/expr/rocdl.py` | ROCm dialect intrinsics |
+| `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
+| `python/flydsl/utils/smem_allocator.py` | `SmemAllocator`, `SmemPtr`, LDS management |
+| `kernels/preshuffle_gemm_flyc.py` | Preshuffle GEMM kernel example |
 | `kernels/reduce.py` | Warp/block reduction primitives |
-| `tests/kernels/test_vec_add.py` | VecAdd example kernel |
-
-## 13. Test Files
-
-| File | Description |
-|---|---|
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
-| `tests/kernels/test_softmax.py` | Softmax kernel test |
-| `tests/kernels/test_layernorm.py` | LayerNorm kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |
-| `tests/kernels/test_eltwise_add.py` | Element-wise add test |
-| `tests/kernels/test_gpu_simple.py` | Simple GPU kernel tests |
-| `tests/kernels/test_shared_working.py` | Shared memory tests |

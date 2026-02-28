@@ -1,18 +1,17 @@
 # Pre-built Kernel Library Guide
 
-> Available FlyDSL kernels: Normalization, Softmax, GEMM, Mixed-precision GEMM, MoE GEMM -- configuration, data types, pipelines, and shared utilities.
+> Available FlyDSL kernels: Normalization, Softmax, GEMM — configuration, data types, pipelines, and shared utilities.
 
 ## Quick Reference
 
-| Kernel | Builder Function | Dtypes | Key Feature |
-|---|---|---|---|
-| **LayerNorm** | `build_layernorm_module(M, N, dtype_str)` | f32, f16, bf16 | Two-pass vectorized normalization |
-| **RMSNorm** | `build_rmsnorm_module(M, N, dtype_str)` | f32, f16, bf16 | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype_str)` | f32, f16, bf16 | Online softmax, adaptive block size |
-| **GEMM** | `compile_preshuffle_gemm_a8(...)` | fp8, int8, int4, fp16, bf16 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
-| **Mixed GEMM** | `compile_mxfp4_preshuffle_gemm(...)` | A:fp8/fp4, B:fp4 | MXFP4 mixed-precision with per-block scales |
-| **MoE GEMM** | `compile_moe_gemm1(...)` | fp8, fp16, int8, int4 | Dual accumulator, SiLU gating, expert routing |
-| **Mixed MoE GEMM** | `compile_mixed_moe_gemm1(...)` | A:fp8/fp4, B:fp4 | MXFP4 MoE with separate A/B scales |
+| Kernel | Builder Function | API Style | Dtypes | Key Feature |
+|---|---|---|---|---|
+| **LayerNorm** | `build_layernorm_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | Two-pass vectorized normalization |
+| **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **GEMM** | `compile_preshuffle_gemm_a8(...)` | New (`@flyc.kernel`) | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
+
+> **Note on API styles**: The normalization and softmax kernels use the legacy `MlirModule`-based API from `flydsl_` (imported via `from flydsl.dialects.ext import flir`). The GEMM kernel uses the new `@flyc.kernel`/`@flyc.jit` API from `python/flydsl/`. Both styles are fully functional.
 
 ---
 
@@ -115,7 +114,7 @@ executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 
 **Kernel signature:**
 ```
-GPU_MODULE_NAME = f"softmax_{dtype_str}"  # e.g., "softmax_bf16"
+GPU_MODULE_NAME = f"softmax_{dtype_str}"
 
 @kernel
 softmax_kernel(self, A, C, m_in)
@@ -123,17 +122,19 @@ softmax_kernel(self, A, C, m_in)
 
 ---
 
-## 3. GEMM Kernels
+## 3. GEMM Kernel
 
-### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm.py`)
+### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm_flyc.py`)
 
 MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]^T`.
 
+Uses the new `@flyc.kernel` / `@flyc.jit` API.
+
 **Builder:**
 ```python
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8
 
-executor = compile_preshuffle_gemm_a8(
+launch_fn = compile_preshuffle_gemm_a8(
     M=16, N=5120, K=8192,
     tile_m=16, tile_n=128, tile_k=256,
     in_dtype="fp8",
@@ -142,134 +143,48 @@ executor = compile_preshuffle_gemm_a8(
 )
 ```
 
+Returns a `@flyc.jit`-decorated function that auto-compiles on first call.
+
 **Parameters:**
 | Parameter | Type | Description |
 |---|---|---|
-| `M, N, K` | int | GEMM dimensions: A[M,K], B[N,K], C[M,N] |
+| `M, N, K` | int | GEMM dimensions: A[M,K], B[N,K], C[M,N]. M and N can be 0 (dynamic). |
 | `tile_m, tile_n, tile_k` | int | Block tile sizes |
-| `in_dtype` | str | `"fp8"`, `"int8"`, `"int4"`, `"fp16"`, `"bf16"` |
+| `in_dtype` | str | `"fp8"`, `"int8"`, `"int4"`, `"fp16"`, `"bf16"`, `"fp4"` |
 | `lds_stage` | int | `2` = ping-pong LDS (tuned), `1` = single LDS buffer |
 | `use_cshuffle_epilog` | bool | CK-style LDS CShuffle epilogue |
+| `waves_per_eu` | int | Occupancy hint (None = default, 1-4 = limit occupancy) |
+| `use_async_copy` | bool | Use async DMA for A tile global-to-LDS transfer |
 
 **Key constraints:**
-- `tile_m * tile_k * elem_bytes` must be divisible by `total_threads` (256)
 - `tile_k * elem_bytes` must be divisible by 64 (K64-byte micro-step)
 - INT4 is W4A8: A is int8, B is packed int4 (2 values/byte), unpacked to int8 in-kernel
 
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
 - **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
-- **K64-byte micro-step**: Each step issues 2x K32 MFMA operations (fp8/int8: 64 elements, fp16/bf16: 32 elements)
+- **K64-byte micro-step**: Each step issues 2x K32 MFMA operations
 - **XOR16 swizzle**: Byte-level swizzle on LDS to avoid bank conflicts
 - **B-preshuffle**: Shape (N0, K0, KLane, NLane, KPackBytes) = (N/16, K/64, 4, 16, kpack_bytes)
 - **CShuffle epilogue**: Write C tile to LDS in row-major, remap threads for half2 packing via `ds_bpermute`
 
-### 3.2 Mixed-Precision GEMM (`kernels/mixed_preshuffle_gemm.py`)
-
-MXFP4 mixed-precision GEMM with separate A/B quantization scales.
-
-**Builder:**
+**Launch function signature:**
 ```python
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm
-
-executor = compile_mxfp4_preshuffle_gemm(
-    M=16, N=5120, K=8192,
-    tile_m=16, tile_n=128, tile_k=256,
-    a_dtype="fp8", b_dtype="fp4",
-    lds_stage=2,
-    use_cshuffle_epilog=True,
-)
+launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, M_val, N_val, stream)
 ```
 
-**Parameters:**
-| Parameter | Type | Description |
-|---|---|---|
-| `a_dtype` | str | `"fp8"` or `"fp4"` for A matrix |
-| `b_dtype` | str | `"fp4"` for B matrix |
-| `use_cshuffle_epilog` | bool | Default `True` for mixed GEMM |
-
-**Key features:**
-- K128 stepping with per-pack scale factors
-- Packed FP4 element handling (2 elements per byte)
-- Separate scale loading for A and B paths with `quant_block_size=32`
-- Uses `mfma_scale_x128` on gfx950+ (9-operand scaling MFMA)
+Where:
+- `arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b`: PyTorch tensors (auto-converted to memref)
+- `M_val, N_val`: Python int (auto-converted to Int32)
+- `stream`: `fx.Stream` (default stream if omitted)
 
 ---
 
-## 4. MoE GEMM Kernels
+## 4. Shared Utilities
 
-### 4.1 MoE GEMM 2-Stage (`kernels/moe_gemm_2stage.py`)
+### 4.1 Reduction Helpers (`kernels/reduce.py`)
 
-Mixture-of-Experts GEMM with dual accumulators for gate/up projections and SiLU gating.
-
-**Stage 1 Builder:**
-```python
-from kernels.moe_gemm_2stage import compile_moe_gemm1
-
-executor = compile_moe_gemm1(
-    model_dim=8192, inter_dim=8192,
-    experts=16, topk=4,
-    tile_m=64, tile_n=128, tile_k=128,
-    doweight_stage1=True,
-    in_dtype="fp8", out_dtype="f16",
-)
-```
-
-**Parameters:**
-| Parameter | Type | Description |
-|---|---|---|
-| `model_dim` | int | Model hidden dimension |
-| `inter_dim` | int | Intermediate dimension |
-| `experts` | int | Number of experts |
-| `topk` | int | Top-K experts per token |
-| `tile_m, tile_n, tile_k` | int | Block tile sizes |
-| `doweight_stage1` | bool | Apply sorted weights in stage1 epilogue |
-| `in_dtype` | str | `"fp8"`, `"fp16"`, `"int8"`, `"int4"` |
-| `out_dtype` | str | `"f16"` or `"bf16"` |
-
-**Key features:**
-- **Dual accumulator**: `acc_gate` and `acc_up` for gate and up projections
-- **SiLU activation**: `silu(x) = x * sigmoid(x)` using `exp2` + `rcp` for efficiency
-- **Dynamic expert routing**: Expert ID lookup per M-tile
-- **Sorted token masking**: Sentinel value for out-of-bounds token safety
-- **Block validity gating**: Skip invalid M tiles early
-- **CShuffle epilogue**: Optional, with sorted weight and scale blending
-
-**Kernel signature:**
-```
-GPU_MODULE_NAME = f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}_t{tile_m}x{tile_n}x{tile_k}_abi3"
-
-@kernel
-moe_gemm1(self, arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
-          arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
-          arg_max_token_ids, tokens_in, inter_in, k_in, size_expert_ids_in)
-```
-
-### 4.2 Mixed MoE GEMM (`kernels/mixed_moe_gemm_2stage.py`)
-
-MXFP4 variant of MoE GEMM combining dual-accumulator pattern with mixed-precision scales.
-
-**Builder:**
-```python
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
-
-executor = compile_mixed_moe_gemm1(
-    model_dim=8192, inter_dim=8192,
-    experts=16, topk=4,
-    tile_m=64, tile_n=128, tile_k=256,
-    doweight_stage1=True,
-    a_dtype="fp8", b_dtype="fp4",
-    out_dtype="f16",
-)
-```
-
----
-
-## 5. Shared Utilities
-
-### 5.1 Reduction Helpers (`kernels/reduce.py`)
-
-Reusable warp and block reduction functions.
+Reusable warp and block reduction functions (used by normalization and softmax kernels).
 
 | Function | Description |
 |---|---|
@@ -285,31 +200,87 @@ Reusable warp and block reduction functions.
 3. Barrier
 4. Wave 0 reduces `NUM_WAVES` partials from LDS
 
-### 5.2 MFMA Epilogues (`kernels/mfma_epilogues.py`)
+### 4.2 MFMA Epilogues (`kernels/mfma_epilogues.py`)
 
 Configurable epilogue strategies for MFMA 16x16 kernels.
 
 | Function | Description |
 |---|---|
 | `default_epilog(...)` | Standard row-iterator: `row = bx_m + mi*16 + lane_div_16*4 + ii` |
-| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads (8,32) → half2 store |
+| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads → half2 store |
 | `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
 
-### 5.3 Preshuffle Pipeline (`kernels/mfma_preshuffle_pipeline.py`)
+### 4.3 Preshuffle Pipeline (`kernels/mfma_preshuffle_pipeline.py`)
 
-Shared data movement and layout utilities for preshuffle GEMM/MoE kernels.
+Shared data movement and layout utilities for preshuffle GEMM kernels.
 
 | Function | Description |
 |---|---|
-| `make_preshuffle_b_layout(flir, arith, N, K, ...)` | Build B-preshuffle layout: (N/16, K/64, 4, 16, kpack_bytes) |
-| `make_preshuffle_scale_layout(...)` | Build scale layout for MXFP4 quantization |
+| `make_preshuffle_b_layout(...)` | Build B-preshuffle layout: (N/16, K/64, 4, 16, kpack_bytes) |
 | `load_b_pack_k32(...)` | Load B pack for K32 MFMA micro-step (returns i64) |
 | `tile_chunk_coord_i32(...)` | Map (thread, chunk) → (row, col) for tile loads |
 | `buffer_copy_gmem16_dwordx4(...)` | 16-byte global load via buffer-load dwordx4 |
 | `lds_store_16b_xor16(...)` | Store 16B to LDS with XOR16 swizzle |
-| `lds_store_8b_xor16(...)` | Store 8B to LDS with XOR16 swizzle |
-| `lds_store_4b_xor16(...)` | Store 4B to LDS with XOR16 swizzle |
 | `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
+| `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
+
+### 4.4 Layout Utilities (`kernels/layout_utils.py`)
+
+Pure-arith layout helpers for static-stride layouts:
+
+| Function | Description |
+|---|---|
+| `crd2idx(crd, layout)` | Coordinate → flat index using pure arith ops |
+| `idx2crd(idx, layout)` | Flat index → coordinate list using pure arith ops |
+| `get(int_tuple, mode)` | Extract element at index from Python list/tuple |
+
+---
+
+## 5. Kernel API Comparison
+
+### Legacy API (Normalization / Softmax)
+
+Used by `layernorm_kernel.py`, `rmsnorm_kernel.py`, `softmax_kernel.py`:
+
+```python
+from flydsl.dialects.ext import flir, arith
+from flydsl.utils import SmemAllocator
+
+class _MyKernel(flir.MlirModule):
+    GPU_MODULE_NAME = "my_kernel"
+
+    def init_gpu_module(self):
+        allocator.finalize()
+
+    @flir.kernel
+    def kernel_func(self, Input, Output, m_in):
+        tid = flir.thread_idx("x")
+        # ... uses flir.*, arith.* directly ...
+
+    @flir.jit
+    def __call__(self, Input, Output, m_in):
+        # Host launcher
+        ...
+```
+
+### New API (GEMM)
+
+Used by `preshuffle_gemm_flyc.py`:
+
+```python
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.expr import arith, gpu, buffer_ops, rocdl
+
+@flyc.kernel
+def gemm_kernel(arg_c: fx.Tensor, arg_a: fx.Tensor, ...):
+    tid = gpu.thread_idx.x
+    # ... uses fx.*, arith.*, buffer_ops.*, rocdl.* ...
+
+@flyc.jit
+def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):
+    gemm_kernel(arg_c, ...).launch(grid=..., block=..., stream=stream)
+```
 
 ---
 
@@ -327,25 +298,17 @@ What operation do you need?
 │
 ├── Matrix Multiply (GEMM)
 │   ├── Standard GEMM (uniform precision)
-│   │   ├── FP8 / INT8 / INT4(W4A8) / FP16 / BF16
+│   │   ├── FP8 / INT8 / INT4(W4A8) / FP16 / BF16 / FP4
 │   │   └── → compile_preshuffle_gemm_a8()
 │   │
-│   ├── Mixed-precision GEMM (FP4 weights)
-│   │   ├── A: fp8 or fp4,  B: fp4
-│   │   └── → compile_mxfp4_preshuffle_gemm()
-│   │
-│   ├── MoE GEMM (expert routing)
-│   │   ├── Uniform precision (fp8/fp16/int8/int4)
-│   │   └── → compile_moe_gemm1()
-│   │
-│   └── Mixed MoE GEMM (FP4 expert weights)
-│       ├── A: fp8 or fp4,  B: fp4
-│       └── → compile_mixed_moe_gemm1()
+│   └── Uses new @flyc.kernel API
+│       └── See kernels/preshuffle_gemm_flyc.py
 │
 └── Building blocks
     ├── Warp/block reduction     → reduce.py
     ├── MFMA epilogue selection  → mfma_epilogues.py
-    └── Preshuffle data movement → mfma_preshuffle_pipeline.py
+    ├── Preshuffle data movement → mfma_preshuffle_pipeline.py
+    └── Static layout helpers    → layout_utils.py
 ```
 
 ---
@@ -355,25 +318,21 @@ What operation do you need?
 | File | Description |
 |---|---|
 | `kernels/__init__.py` | Package marker |
-| `kernels/kernels_common.py` | `stream_ptr_to_async_token()` helper |
-| `kernels/layernorm_kernel.py` | LayerNorm builder (`_LayerNorm` MlirModule) |
-| `kernels/rmsnorm_kernel.py` | RMSNorm builder (`_RMSNorm` MlirModule) |
-| `kernels/softmax_kernel.py` | Softmax builder (`_Softmax` MlirModule) |
-| `kernels/preshuffle_gemm.py` | Preshuffle GEMM builder (`_GEMM` MlirModule) |
-| `kernels/mixed_preshuffle_gemm.py` | Mixed-precision GEMM builder (`_GEMM` MlirModule) |
-| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage builder (`_MOE1` MlirModule) |
-| `kernels/mixed_moe_gemm_2stage.py` | Mixed MoE GEMM builder (`_MOE1` MlirModule) |
+| `kernels/layernorm_kernel.py` | LayerNorm builder (`_LayerNorm` MlirModule, legacy API) |
+| `kernels/rmsnorm_kernel.py` | RMSNorm builder (`_RMSNorm` MlirModule, legacy API) |
+| `kernels/softmax_kernel.py` | Softmax builder (`_Softmax` MlirModule, legacy API) |
+| `kernels/preshuffle_gemm_flyc.py` | Preshuffle GEMM builder (new `@flyc.kernel` API) |
 | `kernels/reduce.py` | Shared warp/block reduction helpers |
 | `kernels/mfma_epilogues.py` | MFMA epilogue strategies (default, CShuffle) |
 | `kernels/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
+| `kernels/layout_utils.py` | Pure-arith layout helpers (`crd2idx`, `idx2crd`) |
 
 ## 8. Test Files
 
 | File | Tests |
 |---|---|
-| `tests/kernels/test_layernorm.py` | LayerNorm correctness + perf vs PyTorch/AIter |
+| `tests/kernels/test_layernorm.py` | LayerNorm correctness + perf |
 | `tests/kernels/test_rmsnorm.py` | RMSNorm correctness + perf |
-| `tests/kernels/test_softmax.py` | Softmax correctness + perf vs PyTorch/AIter |
-| `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/int4/bf16 correctness + perf |
-| `tests/kernels/test_moe_gemm.py` | MoE GEMM stage1/stage2 correctness + perf |
-| `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure (FLIR vs AIter) |
+| `tests/kernels/test_softmax.py` | Softmax correctness + perf |
+| `tests/kernels/test_preshuffle_gemm.py` | GEMM fp8/int8/int4/bf16/fp4 correctness + perf |
+| `tests/kernels/benchmark_common.py` | Shared benchmark infrastructure |
