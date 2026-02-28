@@ -301,6 +301,149 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
+// MakeLayout operations
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+
+inline bool flatOrderLessThan(IntTupleAttr flatOrder, int32_t lhsIdx, int32_t rhsIdx) {
+  IntAttr lhs = flatOrder.at(lhsIdx).getLeafAsInt();
+  IntAttr rhs = flatOrder.at(rhsIdx).getLeafAsInt();
+  bool lhsStatic = lhs.isStatic();
+  bool rhsStatic = rhs.isStatic();
+  if (lhsStatic && rhsStatic)
+    return lhs.getValue() < rhs.getValue();
+  if (lhsStatic && !rhsStatic)
+    return true;
+  if (!lhsStatic && rhsStatic)
+    return false;
+  return lhsIdx < rhsIdx;
+}
+
+template <class Layout>
+typename LayoutBuilder<Layout>::IntTuple
+compactOrderImpl(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+                 IntTupleAttr order,
+                 SmallVectorImpl<typename LayoutBuilder<Layout>::ArithValue> &refShapeProducts,
+                 IntTupleAttr flatOrder, int32_t &flatIdx) {
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  if (!order.isLeaf()) {
+    assert(shape.rank() == order.rank() && "Need equal rank of shape and order");
+    typename LayoutBuilder<Layout>::ElemCollector collector;
+    for (int i = 0; i < order.rank(); ++i) {
+      collector.push_back(compactOrderImpl<Layout>(builder, builder.at(shape, i), order.at(i),
+                                                   refShapeProducts, flatOrder, flatIdx));
+    }
+    return builder.makeTuple(collector);
+  }
+
+  int32_t curIdx = flatIdx++;
+  ArithValue strideStart = builder.materializeConstantArith(1);
+  for (int i = 0; i < flatOrder.rank(); ++i) {
+    if (flatOrderLessThan(flatOrder, i, curIdx)) {
+      strideStart = builder.mul(strideStart, refShapeProducts[i]);
+    }
+  }
+
+  return intTupleCompactColMajor(builder, shape, strideStart);
+}
+
+template <class Layout>
+void buildRefShapeProducts(
+    LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout>::IntTuple shape,
+    IntTupleAttr order,
+    SmallVectorImpl<typename LayoutBuilder<Layout>::ArithValue> &refShapeProducts) {
+  if (order.isLeaf()) {
+    refShapeProducts.push_back(intTupleProductImpl(builder, shape));
+    return;
+  }
+  assert(shape.rank() == order.rank() && "Need equal rank of shape and order");
+  for (int i = 0; i < order.rank(); ++i) {
+    buildRefShapeProducts<Layout>(builder, builder.at(shape, i), order.at(i), refShapeProducts);
+  }
+}
+
+} // namespace detail
+
+template <class Layout>
+Layout layoutMakeOrderedLayout(LayoutBuilder<Layout> &builder, Layout layout, IntTupleAttr order) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  auto shape = builder.getShape(layout);
+  LayoutAttr layoutAttr = builder.getLayoutAttr(layout);
+  IntTupleAttr shapeAttr = layoutAttr.getShape();
+
+  if (order.isLeaf()) {
+    IntTuple compactStride = intTupleCompactColMajor(builder, shape);
+    return builder.makeLayout(shape, compactStride);
+  }
+
+  auto *ctx = shapeAttr.getContext();
+  IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+  IntTupleAttr flatOrder = intTupleFlatten(attrBuilder, order);
+
+  if (flatOrder.isLeaf()) {
+    IntTuple compactStride = intTupleCompactColMajor(builder, shape);
+    return builder.makeLayout(shape, compactStride);
+  }
+
+  SmallVector<ArithValue> refShapeProducts;
+  detail::buildRefShapeProducts<Layout>(builder, shape, order, refShapeProducts);
+  assert(refShapeProducts.size() == (size_t)flatOrder.rank() &&
+         "refShapeProducts and flatOrder must have the same rank");
+
+  int32_t flatIdx = 0;
+  IntTuple resultStride =
+      detail::compactOrderImpl<Layout>(builder, shape, order, refShapeProducts, flatOrder, flatIdx);
+  return builder.makeLayout(shape, resultStride);
+}
+
+template <class Layout>
+Layout layoutMakeFragmentLayout(LayoutBuilder<Layout> &builder, Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  auto shape = builder.getShape(layout);
+  auto stride = builder.getStride(layout);
+  LayoutAttr layoutAttr = builder.getLayoutAttr(layout);
+  int32_t R = layoutAttr.getShape().isLeaf() ? 1 : layoutAttr.getShape().rank();
+
+  if (R > 1) {
+    IntTuple mode0Shape = builder.at(shape, 0);
+    IntTuple filteredMode0Shape =
+        intTupleFilterZero(builder, layoutAttr.getStride().at(0), mode0Shape);
+    IntTuple compactMode0Stride = intTupleCompactColMajor(builder, filteredMode0Shape);
+    Layout mode0Layout = builder.makeLayout(mode0Shape, compactMode0Stride);
+
+    IntTuple restShape;
+    IntTuple restStride;
+    if (R == 2) {
+      restShape = builder.at(shape, 1);
+      restStride = builder.at(stride, 1);
+    } else {
+      typename LayoutBuilder<Layout>::ElemCollector restShapeElems;
+      typename LayoutBuilder<Layout>::ElemCollector restStrideElems;
+      for (int i = 1; i < R; ++i) {
+        restShapeElems.push_back(builder.at(shape, i));
+        restStrideElems.push_back(builder.at(stride, i));
+      }
+      restShape = builder.makeTuple(restShapeElems);
+      restStride = builder.makeTuple(restStrideElems);
+    }
+
+    Layout restLayout = builder.makeLayout(restShape, restStride);
+    IntTupleAttr restOrderAttr = builder.getLayoutAttr(restLayout).getStride();
+    Layout orderedRest = layoutMakeOrderedLayout(builder, restLayout, restOrderAttr);
+
+    return layoutTiledProduct(builder, mode0Layout, orderedRest);
+  }
+
+  IntTuple compactStride = intTupleCompactColMajor(builder, shape);
+  return builder.makeLayout(shape, compactStride);
+}
+
+//===----------------------------------------------------------------------===//
 // Layout operations
 //===----------------------------------------------------------------------===//
 
@@ -842,8 +985,8 @@ Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t facto
   if (factor == 1) {
     return layout;
   }
-  auto [newShape, newStride] =
-      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  auto [newShape, newStride] = detail::layoutUpcastImpl(builder, builder.getShape(layout),
+                                                        builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
@@ -853,8 +996,8 @@ Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t fac
   if (factor == 1) {
     return layout;
   }
-  auto [newShape, newStride] =
-      detail::layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  auto [newShape, newStride] = detail::layoutDowncastImpl(builder, builder.getShape(layout),
+                                                          builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 

@@ -214,7 +214,28 @@ FLY_INFER_RETURN_TYPES(MakeIdentityTensorOp) {
 }
 
 FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
-  inferredReturnTypes.assign({operands[0].getType()});
+  LayoutAttr srcLayout;
+  Type elemTy;
+  TypeAttr dtypeAttr;
+  if (properties)
+    dtypeAttr = properties.as<Properties *>()->dtype;
+
+  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
+    srcLayout = memrefTy.getLayout();
+    elemTy = dtypeAttr ? dtypeAttr.getValue() : memrefTy.getElemTy();
+  } else if (auto layoutTy = dyn_cast<LayoutType>(operands[0].getType())) {
+    if (!dtypeAttr)
+      return failure();
+    srcLayout = layoutTy.getAttr();
+    elemTy = dtypeAttr.getValue();
+  } else {
+    return failure();
+  }
+
+  LayoutBuilder<LayoutAttr> layoutBuilder(context);
+  LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, srcLayout);
+  inferredReturnTypes.assign({MemRefType::get(
+      elemTy, AddressSpaceAttr::get(context, AddressSpace::Register), fragmentLayout)});
   return success();
 }
 

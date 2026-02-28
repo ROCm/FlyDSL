@@ -96,9 +96,9 @@ def Fly_MakeIdentityTensorOp : Fly_Op<"make_identity_tensor", [Pure, DeclareOpIn
 }
 
 def Fly_MakeFragmentLikeOp : Fly_Op<"make_fragment_like", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_Layout:$src);
+  let arguments = (ins AnyTypeOf<[Fly_Layout, Fly_MemRef]>:$src, OptionalAttr<TypeAttr>:$dtype);
   let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $src `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $src (`,` $dtype^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 
 //===----------------------------------------------------------------------===//
