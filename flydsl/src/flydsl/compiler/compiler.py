@@ -255,12 +255,13 @@ def compile(
 ) -> Optional["Executor"]:
     """Compile a FLIR module to an Executor.
 
-    Returns an MLIR ExecutionEngine-backed executor, or None if COMPILE_ONLY=1.
+    Returns an MLIR ExecutionEngine-backed executor, or None if FLYDSL_COMPILE_ONLY=1.
 
     Environment Variables:
-        COMPILE_ONLY: If set to "1", only compile the module without creating
-            an executor. Returns None instead of an Executor. Useful for
-            offline compilation or verifying compilation without a GPU.
+        FLYDSL_COMPILE_ONLY: If set to "1", only compile the module without
+            creating an executor. Returns None instead of an Executor. Useful
+            for offline compilation or verifying compilation without a GPU.
+            Also accepts legacy COMPILE_ONLY.
         FLYDSL_TARGET_ARCH: Override the target GPU architecture. Supported
             values: "gfx942", "gfx950". Falls back to legacy ARCH env var.
             If not set, auto-detects from the current GPU.
@@ -276,7 +277,7 @@ def compile(
     ctx = mlir_module.context
     ensure_flir_python_extensions(ctx)
 
-    compile_only = _env_truthy("COMPILE_ONLY", "0")
+    compile_only = _env_truthy("FLYDSL_COMPILE_ONLY", "0") or _env_truthy("COMPILE_ONLY", "0")
     dump_enabled = _env_truthy("FLIR_DUMP_IR", "0")
     dump_root_dir = Path(os.environ.get("FLIR_DUMP_DIR", "my_ir_dumps")).resolve()
     dump_prefix_base = (
@@ -309,7 +310,7 @@ def compile(
             except Exception:
                 module = mlir_module
 
-    # Allow overriding target arch via env var (useful for cross-compilation or COMPILE_ONLY mode)
+    # Allow overriding target arch via env var (useful for cross-compilation or FLYDSL_COMPILE_ONLY mode)
     chip = (os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or "").strip() or get_rocm_arch()
 
     pipeline = _build_pipeline_str(
@@ -354,7 +355,7 @@ def compile(
                             print(f"[flir.compile] cache hit key={cache_key}")
                         if compile_only:
                             if dump_enabled or print_final_module:
-                                print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+                                print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
                             return None
                         from .executor import ExecutionEngineExecutor as Executor
                         if shared_libs is None:
@@ -432,7 +433,7 @@ def compile(
     # In compile-only mode, skip executor creation and return None
     if compile_only:
         if dump_enabled or print_final_module:
-            print(f"[flir.compile] COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+            print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
         return None
 
     from .executor import ExecutionEngineExecutor as Executor

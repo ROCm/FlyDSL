@@ -9,7 +9,7 @@ Usage:
     python tests/python/examples/aot_example.py
 
     # Pre-compile for a specific arch (cross-compilation, no GPU needed)
-    COMPILE_ONLY=1 FLYDSL_TARGET_ARCH=gfx942 python tests/python/examples/aot_example.py
+    FLYDSL_COMPILE_ONLY=1 FLYDSL_TARGET_ARCH=gfx942 python tests/python/examples/aot_example.py
 
     # Custom cache directory
     FLIR_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
@@ -22,7 +22,7 @@ Usage:
 
 Environment variables:
     FLIR_CACHE_DIR      Cache directory (default: ~/.cache/flydsl)
-    COMPILE_ONLY        Set to "1" to skip executor creation (no GPU needed)
+    FLYDSL_COMPILE_ONLY Set to "1" to skip executor creation (no GPU needed). Also accepts legacy COMPILE_ONLY.
     FLYDSL_TARGET_ARCH  Target GPU architecture (e.g. gfx942, gfx950). Also accepts legacy ARCH.
     FLIR_CACHE_REBUILD  Set to "1" to force recompilation even if cached
 """
@@ -376,7 +376,7 @@ def main():
 
     cache_dir = os.environ.get("FLIR_CACHE_DIR", "~/.cache/flydsl")
     arch = os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or "(auto-detect)"
-    compile_only = os.environ.get("COMPILE_ONLY", "0") == "1"
+    compile_only = os.environ.get("FLYDSL_COMPILE_ONLY", os.environ.get("COMPILE_ONLY", "0")) == "1"
 
     configs = CONFIG_PRESETS[args.preset]
     dtypes = DTYPE_PRESETS.get(args.in_dtype, [args.in_dtype])
