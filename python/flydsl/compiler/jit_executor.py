@@ -6,7 +6,20 @@ from typing import List
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
+from ..expr.typing import Stream
 from .protocol import fly_pointers
+
+
+def _get_current_gpu_stream() -> int:
+    """Return the raw stream handle (hipStream_t / cudaStream_t) for the
+    current PyTorch CUDA stream.  Falls back to the default stream (0)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.current_stream().cuda_stream
+    except Exception:
+        pass
+    return 0
 
 
 @lru_cache(maxsize=1)
@@ -87,14 +100,25 @@ class CompiledArtifact:
         if self._engine is None:
             self._ensure_engine()
 
-        ptrs: List[ctypes.c_void_p] = []
+        all_c_ptrs: List[ctypes.c_void_p] = []
+        has_stream_arg = False
         for arg in args:
-            ptrs.extend(fly_pointers(arg))
+            if isinstance(arg, Stream):
+                has_stream_arg = True
+            all_c_ptrs.extend(fly_pointers(arg))
+
+        if not has_stream_arg:
+            stream_ptr = kwargs.pop("stream", None)
+            if stream_ptr is None:
+                stream_ptr = _get_current_gpu_stream()
+            stream_val = ctypes.c_void_p(stream_ptr)
+            self._tls.stream_val = stream_val
+            all_c_ptrs.append(ctypes.cast(ctypes.pointer(stream_val), ctypes.c_void_p))
 
         func_ptr = self._engine.raw_lookup(self._entry)
         func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
 
-        packed_args = self._packer.pack(ptrs)
+        packed_args = self._packer.pack(all_c_ptrs)
 
         return func_exe(packed_args)
 

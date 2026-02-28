@@ -41,6 +41,9 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirTy
 /// Register the FlyToROCDL conversion pass.
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 
+/// Register the FlyGpuStreamInject pass.
+MLIR_CAPI_EXPORTED void mlirRegisterFlyGpuStreamInjectPass(void);
+
 #ifdef __cplusplus
 }
 #endif
