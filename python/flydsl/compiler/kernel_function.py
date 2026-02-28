@@ -176,6 +176,7 @@ class CompilationContext:
         self.kernel_counter = 0
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
+        self.stream_arg = None
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
@@ -268,7 +269,11 @@ class KernelLauncher:
             elif smem > 0:
                 smem_val = arith.constant(ir.IntegerType.get_signless(32), smem)
 
-            async_object = _unwrap_to_raw(stream) if stream is not None else None
+            if stream is not None:
+                async_object = _unwrap_to_raw(stream)
+            else:
+                ctx = CompilationContext.get_current()
+                async_object = ctx.stream_arg if ctx and ctx.stream_arg else None
 
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
