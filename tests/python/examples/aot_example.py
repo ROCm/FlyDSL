@@ -1,30 +1,22 @@
 #!/usr/bin/env python3
-"""AOT pre-compilation example for MOE kernels.
+"""AOT pre-compilation example for preshuffle GEMM kernels.
 
-Pre-compiles MOE GEMM stage1 + stage2 + reduction kernels for specified
-configurations and stores the compiled binaries in a cache directory.
+Pre-compiles preshuffle GEMM kernels for specified configurations and stores
+the compiled binaries in a cache directory.
 
 Usage:
     # Pre-compile with default configurations (auto-detect GPU arch)
     python tests/python/examples/aot_example.py
 
-    # Pre-compile for a specific arch (cross-compilation, no GPU needed)
-    FLYDSL_COMPILE_ONLY=1 FLYDSL_TARGET_ARCH=gfx942 python tests/python/examples/aot_example.py
-
     # Custom cache directory
-    FLIR_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
+    FLYDSL_RUNTIME_CACHE_DIR=/my/cache python tests/python/examples/aot_example.py
 
     # Pre-compile and verify by running kernels on GPU
     python tests/python/examples/aot_example.py --run_kernel
 
-    # Later, at runtime, load from cache:
-    FLIR_CACHE_DIR=/my/cache python my_app.py
-
 Environment variables:
-    FLIR_CACHE_DIR      Cache directory (default: ~/.cache/flydsl)
-    FLYDSL_COMPILE_ONLY Set to "1" to skip executor creation (no GPU needed). Also accepts legacy COMPILE_ONLY.
-    FLYDSL_TARGET_ARCH  Target GPU architecture (e.g. gfx942, gfx950). Also accepts legacy ARCH.
-    FLIR_CACHE_REBUILD  Set to "1" to force recompilation even if cached
+    FLYDSL_RUNTIME_CACHE_DIR  Cache directory (default: ~/.flydsl/cache)
+    ARCH                      Target GPU architecture (e.g. gfx942, gfx950).
 """
 
 import argparse
@@ -36,27 +28,17 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.moe_gemm_2stage import (
-    compile_moe_gemm1,
-    compile_moe_gemm2,
-    compile_moe_gemm2_ex,
-    compile_moe_reduction,
-    MoeGemm2Mode,
-)
+from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8
 
 
-def _run_kernel_stage1(
-    exe,
-    tokens: int,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
-    tile_m: int,
+def _run_kernel(
+    launch_fn,
+    M: int,
+    N: int,
+    K: int,
     in_dtype: str,
-    doweight_stage1: bool,
 ):
-    """Launch the compiled stage1 kernel with random data to verify it runs."""
+    """Launch the compiled kernel with random data to verify it runs."""
     import torch
     from tests.utils import pertoken_quant, shuffle_weight
     from flydsl.runtime.device import get_rocm_arch
@@ -67,101 +49,112 @@ def _run_kernel_stage1(
     device = torch.device("cuda")
     torch.manual_seed(0)
 
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32)
-    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
+    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
 
-    score = torch.randn((tokens, experts), device=device, dtype=torch.float32)
-    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
-    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    is_int4 = in_dtype == "int4"
+    is_int8 = (in_dtype == "int8") or is_int4
+    is_f16_or_bf16 = in_dtype in ("fp16", "bf16")
 
-    from tests.kernels.test_moe_gemm import build_routing_buffers
-    sorted_token_ids, sorted_weights, sorted_expert_ids, num_valid_ids, sorted_size, blocks = \
-        build_routing_buffers(
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-            experts=experts,
-            model_dim=model_dim,
-            tile_m=tile_m,
-            moe_sort_mode="torch",
-        )
-
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4")
-    if in_dtype == "fp8":
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)
-    elif in_dtype == "fp16":
-        x_q = x_fp32.to(torch.float16)
-        w1_q = w1_fp32.to(torch.float16)
-        scale_x, scale_w1 = None, None
-    elif in_dtype in ("int8", "int4"):
-        dtypeMax = 7 if in_dtype == "int4" else None
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8, **({"dtypeMax": dtypeMax} if dtypeMax else {}))
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, **({"dtypeMax": dtypeMax} if dtypeMax else {}))
+    if is_f16_or_bf16:
+        torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
+        a_q = a_fp32.to(torch_dtype)
+        b_q = b_fp32_t.to(torch_dtype)
+        scale_a = None
+        scale_b = None
     else:
-        x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
-        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
+        quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
+        a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)
+        if is_int4:
+            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.int8, dtypeMax=7)
+        else:
+            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)
 
-    w1_shuffled_flat = shuffle_weight(w1_q).view(experts * (2 * inter_dim), model_dim)
-    if in_dtype == "int4":
-        from tests.kernels.test_moe_gemm import _pack_shuffled_int8_to_packed_int4_no_perm
-        w_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat).contiguous()
+    a_q = a_q.contiguous()
+    b_q = b_q.contiguous()
+    b_shuffled = shuffle_weight(b_q, layout=(16, 16))
+
+    if is_int4:
+        flat = b_shuffled.contiguous().view(-1).to(torch.int16)
+        assert flat.numel() % 8 == 0
+        u = (flat & 0xF).to(torch.uint8).view(-1, 8)
+        out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
+        out[:, 0] = u[:, 0] | (u[:, 4] << 4)
+        out[:, 1] = u[:, 1] | (u[:, 5] << 4)
+        out[:, 2] = u[:, 2] | (u[:, 6] << 4)
+        out[:, 3] = u[:, 3] | (u[:, 7] << 4)
+        b_input = out.view(-1).to(torch.int8)
     else:
-        w_kernel = w1_shuffled_flat.contiguous().view(experts * (2 * inter_dim), model_dim)
+        b_input = b_shuffled
 
-    x_q = x_q.contiguous().view(tokens, model_dim)
-    scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32) if scale_x is None else scale_x.view(-1).contiguous()
-    scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
-    scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32) if scale_w1_flat is None else scale_w1_flat.view(-1).contiguous()
-    sorted_weights_1d = sorted_weights.contiguous().view(-1)
+    c_out = torch.zeros((M, N), dtype=torch.float16, device=device)
 
-    out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
+    def _as_i8(t):
+        return t.view(torch.int8) if "float8" in str(t.dtype) else t
 
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    exe(
-        out,
-        x_q,
-        w_kernel,
-        scale_x_1d,
-        scale_w1_1d,
-        sorted_token_ids,
-        sorted_expert_ids,
-        sorted_weights_1d,
-        num_valid_ids,
-        tokens,
-        inter_dim,
-        model_dim,
-        int(blocks),
-        stream_ptr,
+    sa_flat = (
+        torch.empty((0,), device=device, dtype=torch.float32)
+        if scale_a is None
+        else scale_a.contiguous().view(-1)
+    )
+    sb_flat = (
+        torch.empty((0,), device=device, dtype=torch.float32)
+        if scale_b is None
+        else scale_b.contiguous().view(-1)
+    )
+
+    stream = torch.cuda.current_stream()
+    launch_fn(
+        c_out.contiguous().view(-1),
+        _as_i8(a_q.contiguous().view(-1)),
+        _as_i8(b_input.contiguous().view(-1)),
+        sa_flat,
+        sb_flat,
+        M,
+        N,
+        stream,
     )
     torch.cuda.synchronize()
-    print(f"    output shape={tuple(out.shape)}, "
-          f"max={out.float().abs().max().item():.4f}, "
-          f"mean={out.float().abs().mean().item():.4f}")
+    print(
+        f"    output shape={tuple(c_out.shape)}, "
+        f"max={c_out.float().abs().max().item():.4f}, "
+        f"mean={c_out.float().abs().mean().item():.4f}"
+    )
+
+    # Quick sanity check against torch reference
+    if is_f16_or_bf16:
+        a_f32 = a_q.to(torch.float32)
+        b_f32 = b_q.to(torch.float32)
+    else:
+        a_f32 = a_q.to(torch.float32) * scale_a.view(-1, 1)
+        b_f32 = b_q.to(torch.float32) * scale_b.view(-1, 1)
+    c_ref = torch.mm(a_f32, b_f32.T).to(torch.float32)
+    c_check = c_out.to(torch.float32)
+
+    abs_diff = (c_check - c_ref).abs()
+    max_diff = abs_diff.max().item()
+    mean_diff = abs_diff.mean().item()
+    print(f"    ref check: max_diff={max_diff:.4f}, mean_diff={mean_diff:.4f}")
+
 
 # ---------------------------------------------------------------------------
-# Model configurations
+# Configurations
 #
-# Each entry: (in_dtype, tokens, model_dim, inter_dim, experts, topk,
-#              tile_m, tile_n1, tile_k1, tile_n2, tile_k2)
-#
-# Shapes from scripts/run_benchmark.sh, compiled for both fp8 and int8.
+# Each entry: (M, N, K, tile_m, tile_n, tile_k)
 # ---------------------------------------------------------------------------
 
 BENCHMARK_CONFIGS = [
-    # tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2
-    (32768, 8192, 8192, 16,  4, 64, 128, 128, 256, 128),
-    (64,    6144, 1024, 128, 8, 16, 64,  256, 64,  256),
+    (5120, 5120, 8320, 64, 256, 128),
+    (5120, 2048, 8320, 128, 128, 128),
 ]
 
-# Small shape for quick smoke-test
 SMALL_CONFIGS = [
-    (256, 1024, 256, 4, 2, 32, 128, 256, 256, 128),
+    (256, 1024, 2048, 32, 64, 512),
+    (16, 5120, 8192, 16, 64, 512),
 ]
 
-# Invalid tile size to verify the compiler produces a clear error.
-# tile_k=17 is not a power-of-2 / not aligned to MFMA requirements.
 BAD_TILE_CONFIGS = [
-    (256, 1024, 256, 4, 2, 32, 128, 17, 256, 128),
+    (256, 1024, 256, 32, 128, 17),
 ]
 
 CONFIG_PRESETS = {
@@ -170,7 +163,6 @@ CONFIG_PRESETS = {
     "bad_tile": BAD_TILE_CONFIGS,
 }
 
-# dtype combinations to compile for each shape
 DTYPE_PRESETS = {
     "fp8": ["fp8"],
     "int8": ["int8"],
@@ -179,23 +171,17 @@ DTYPE_PRESETS = {
 
 
 def compile_one_config(
-    tokens: int,
-    model_dim: int,
-    inter_dim: int,
-    experts: int,
-    topk: int,
+    M: int,
+    N: int,
+    K: int,
     tile_m: int,
-    tile_n1: int,
-    tile_k1: int,
-    tile_n2: int,
-    tile_k2: int,
+    tile_n: int,
+    tile_k: int,
     in_dtype: str = "fp8",
-    out_dtype: str = "f16",
-    doweight_stage1: bool = False,
-    gemm2_mode: str = "atomic",
+    lds_stage: int = 2,
     run_kernel: bool = False,
 ) -> dict:
-    """Compile one MOE configuration (stage1 + stage2 + optional reduction).
+    """Compile one preshuffle GEMM configuration.
 
     When run_kernel=True, also launches the kernel with random data to verify
     that the compiled binary actually runs on the GPU.
@@ -203,169 +189,83 @@ def compile_one_config(
     Returns a dict with timing info.
     """
     shape_str = (
-        f"t={tokens} dim={model_dim}x{inter_dim} "
-        f"e={experts} k={topk} "
-        f"tile=({tile_m},{tile_n1},{tile_k1})/({tile_m},{tile_n2},{tile_k2})"
+        f"M={M} N={N} K={K} "
+        f"tile=({tile_m},{tile_n},{tile_k}) "
+        f"dtype={in_dtype}"
     )
-    result = {"shape": shape_str, "stage1": None, "stage2": None, "reduce": None}
+    result = {"shape": shape_str, "compile_time": None}
 
-    # Stage 1
     t0 = time.time()
     try:
-        exe_s1 = compile_moe_gemm1(
-            model_dim=model_dim,
-            inter_dim=inter_dim,
-            experts=experts,
-            topk=topk,
+        launch_fn = compile_preshuffle_gemm_a8(
+            M=M,
+            N=N,
+            K=K,
             tile_m=tile_m,
-            tile_n=tile_n1,
-            tile_k=tile_k1,
-            doweight_stage1=doweight_stage1,
+            tile_n=tile_n,
+            tile_k=tile_k,
             in_dtype=in_dtype,
-            out_dtype=out_dtype,
+            lds_stage=lds_stage,
         )
         elapsed = time.time() - t0
-        result["stage1"] = elapsed
-        print(f"  [OK] stage1  {elapsed:6.1f}s  {shape_str}")
-        if run_kernel and exe_s1 is not None:
-            _run_kernel_stage1(
-                exe_s1, tokens, model_dim, inter_dim, experts, topk,
-                tile_m, in_dtype, doweight_stage1,
-            )
-    except Exception as e:
-        print(f"  [FAIL] stage1  {shape_str}: {e}")
+        result["compile_time"] = elapsed
+        print(f"  [OK] compile  {elapsed:6.1f}s  {shape_str}")
 
-    # Stage 2
-    t0 = time.time()
-    try:
-        if gemm2_mode == "reduce":
-            compile_moe_gemm2_ex(
-                model_dim=model_dim,
-                inter_dim=inter_dim,
-                experts=experts,
-                topk=topk,
-                tile_m=tile_m,
-                tile_n=tile_n2,
-                tile_k=tile_k2,
-                doweight_stage2=not doweight_stage1,
-                in_dtype=in_dtype,
-                out_dtype=out_dtype,
-                mode=MoeGemm2Mode.REDUCE,
-            )
-        else:
-            compile_moe_gemm2(
-                model_dim=model_dim,
-                inter_dim=inter_dim,
-                experts=experts,
-                topk=topk,
-                tile_m=tile_m,
-                tile_n=tile_n2,
-                tile_k=tile_k2,
-                doweight_stage2=not doweight_stage1,
-                in_dtype=in_dtype,
-                out_dtype=out_dtype,
-                accumulate=True,
-            )
-        elapsed = time.time() - t0
-        result["stage2"] = elapsed
-        print(f"  [OK] stage2  {elapsed:6.1f}s  {shape_str}")
+        if run_kernel and launch_fn is not None:
+            _run_kernel(launch_fn, M, N, K, in_dtype)
     except Exception as e:
-        print(f"  [FAIL] stage2  {shape_str}: {e}")
-
-    # Reduction kernel (only for reduce mode)
-    if gemm2_mode == "reduce":
-        t0 = time.time()
-        try:
-            compile_moe_reduction(
-                topk=topk,
-                model_dim=model_dim,
-                dtype_str=out_dtype,
-            )
-            elapsed = time.time() - t0
-            result["reduce"] = elapsed
-            print(f"  [OK] reduce  {elapsed:6.1f}s  {shape_str}")
-        except Exception as e:
-            print(f"  [FAIL] reduce  {shape_str}: {e}")
+        print(f"  [FAIL] compile  {shape_str}: {e}")
 
     return result
 
 
 def test_bad_tile_error():
     """Verify that an unsupported tile size produces a clear compile error."""
-    print("\n" + "=" * 72)
-    print("Testing invalid tile size (expecting compile error)")
-    print("=" * 72)
-
     for cfg in BAD_TILE_CONFIGS:
-        tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = cfg
-        shape_str = (
-            f"t={tokens} dim={model_dim}x{inter_dim} "
-            f"e={experts} k={topk} "
-            f"tile=({tile_m},{tile_n1},{tile_k1})"
-        )
+        M, N, K, tile_m, tile_n, tile_k = cfg
+        shape_str = f"M={M} N={N} K={K} tile=({tile_m},{tile_n},{tile_k})"
         try:
-            compile_moe_gemm1(
-                model_dim=model_dim,
-                inter_dim=inter_dim,
-                experts=experts,
-                topk=topk,
-                tile_m=tile_m,
-                tile_n=tile_n1,
-                tile_k=tile_k1,
-                doweight_stage1=False,
+            compile_preshuffle_gemm_a8(
+                M=M, N=N, K=K,
+                tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
                 in_dtype="fp8",
-                out_dtype="f16",
             )
-            print(f"  [UNEXPECTED] No error raised for bad tile: {shape_str}")
-            return False
-        except Exception as e:
+            raise AssertionError(f"No error raised for bad tile: {shape_str}")
+        except (ValueError, RuntimeError) as e:
             print(f"  [OK] Correctly rejected bad tile: {shape_str}")
             print(f"       Error: {type(e).__name__}: {e}")
-            return True
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AOT pre-compile MOE kernels into FLIR cache",
+        description="AOT pre-compile preshuffle GEMM kernels into FlyDSL cache",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--preset",
         type=str,
-        default="benchmark",
+        default="small",
         choices=list(CONFIG_PRESETS.keys()),
-        help="Configuration preset (default: benchmark)",
+        help="Configuration preset (default: small)",
     )
     parser.add_argument(
         "--in_dtype",
         type=str,
         default="both",
-        choices=list(DTYPE_PRESETS.keys()) + ["fp16", "int8smooth", "int4"],
+        choices=list(DTYPE_PRESETS.keys()) + ["fp16", "bf16", "int4"],
         help="Input data type(s): 'both' compiles fp8+int8 (default: both)",
     )
     parser.add_argument(
-        "--out_dtype",
-        type=str,
-        default="f16",
-        choices=["f16", "bf16", "f32"],
-        help="Output data type (default: f16)",
-    )
-    parser.add_argument(
-        "--gemm2_mode",
-        type=str,
-        default="atomic",
-        choices=["atomic", "reduce"],
-        help="Stage2 accumulation mode (default: atomic)",
-    )
-    parser.add_argument(
-        "--doweight_stage1",
-        action="store_true",
-        help="Apply routing weights in stage1 instead of stage2",
+        "--lds_stage",
+        type=int,
+        default=2,
+        choices=[1, 2],
+        help="LDS pipeline stages (default: 2)",
     )
     parser.add_argument(
         "--run_kernel",
         action="store_true",
-        help="After compilation, launch each stage1 kernel with random data to verify it runs",
+        help="After compilation, launch each kernel with random data to verify it runs",
     )
     parser.add_argument(
         "--test_bad_tile",
@@ -374,9 +274,8 @@ def main():
     )
     args = parser.parse_args()
 
-    cache_dir = os.environ.get("FLIR_CACHE_DIR", "~/.cache/flydsl")
-    arch = os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or "(auto-detect)"
-    compile_only = os.environ.get("FLYDSL_COMPILE_ONLY", os.environ.get("COMPILE_ONLY", "0")) == "1"
+    cache_dir = os.environ.get("FLYDSL_RUNTIME_CACHE_DIR", "~/.flydsl/cache")
+    arch = os.environ.get("ARCH", "(auto-detect)")
 
     configs = CONFIG_PRESETS[args.preset]
     dtypes = DTYPE_PRESETS.get(args.in_dtype, [args.in_dtype])
@@ -384,15 +283,15 @@ def main():
     total_jobs = len(configs) * len(dtypes)
 
     print("=" * 72)
-    print("FLIR MOE AOT Pre-compilation")
+    print("FlyDSL Preshuffle GEMM AOT Pre-compilation")
     print("=" * 72)
-    print(f"  Preset:       {args.preset} ({len(configs)} shapes x {len(dtypes)} dtypes = {total_jobs} jobs)")
+    print(
+        f"  Preset:       {args.preset} ({len(configs)} shapes x {len(dtypes)} dtypes = {total_jobs} jobs)"
+    )
     print(f"  in_dtype:     {dtypes}")
-    print(f"  out_dtype:    {args.out_dtype}")
-    print(f"  gemm2_mode:   {args.gemm2_mode}")
+    print(f"  lds_stage:    {args.lds_stage}")
     print(f"  Cache dir:    {cache_dir}")
     print(f"  Target arch:  {arch}")
-    print(f"  COMPILE_ONLY: {compile_only}")
     print(f"  run_kernel:   {args.run_kernel}")
     print("=" * 72)
 
@@ -404,65 +303,73 @@ def main():
         print(f"\n--- dtype: {dt} ---")
         for cfg in configs:
             job_idx += 1
-            tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2 = cfg
+            M, N, K, tile_m, tile_n, tile_k = cfg
             print(f"\n[{job_idx}/{total_jobs}] Compiling ({dt})...")
             r = compile_one_config(
-                tokens=tokens,
-                model_dim=model_dim,
-                inter_dim=inter_dim,
-                experts=experts,
-                topk=topk,
+                M=M,
+                N=N,
+                K=K,
                 tile_m=tile_m,
-                tile_n1=tile_n1,
-                tile_k1=tile_k1,
-                tile_n2=tile_n2,
-                tile_k2=tile_k2,
+                tile_n=tile_n,
+                tile_k=tile_k,
                 in_dtype=dt,
-                out_dtype=args.out_dtype,
-                doweight_stage1=args.doweight_stage1,
-                gemm2_mode=args.gemm2_mode,
+                lds_stage=args.lds_stage,
                 run_kernel=args.run_kernel,
             )
             results.append(r)
 
     total_elapsed = time.time() - total_t0
 
-    # Summary
-    ok_s1 = sum(1 for r in results if r["stage1"] is not None)
-    ok_s2 = sum(1 for r in results if r["stage2"] is not None)
-    fail_s1 = sum(1 for r in results if r["stage1"] is None)
-    fail_s2 = sum(1 for r in results if r["stage2"] is None)
+    ok = sum(1 for r in results if r["compile_time"] is not None)
+    fail = sum(1 for r in results if r["compile_time"] is None)
 
     print("\n" + "=" * 72)
     print("Summary")
     print("=" * 72)
     print(f"  Total time:   {total_elapsed:.1f}s")
-    print(f"  Stage1:       {ok_s1} ok, {fail_s1} failed")
-    print(f"  Stage2:       {ok_s2} ok, {fail_s2} failed")
+    print(f"  Compiled:     {ok} ok, {fail} failed")
     print(f"  Cache dir:    {cache_dir}")
 
-    # Bad tile test
     if args.test_bad_tile:
-        bad_tile_ok = test_bad_tile_error()
-        if not bad_tile_ok:
-            print("\n  Bad tile test: FAILED (expected error was not raised)")
-        else:
-            print("\n  Bad tile test: PASSED")
+        test_bad_tile_error()
 
     print()
 
     exit_code = 0
-    if fail_s1 + fail_s2 > 0:
+    if fail > 0:
         print("Some compilations failed. Check output above for details.")
         exit_code = 1
     else:
         print("All compilations succeeded. Cache is ready.")
-
-    if args.test_bad_tile and not bad_tile_ok:
-        exit_code = 1
 
     sys.exit(exit_code)
 
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# pytest interface
+# ---------------------------------------------------------------------------
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    SMALL_CONFIGS,
+    ids=[f"{c[0]}x{c[1]}x{c[2]}" for c in SMALL_CONFIGS],
+)
+def test_aot_compile(M, N, K, tile_m, tile_n, tile_k, in_dtype):
+    r = compile_one_config(
+        M=M, N=N, K=K,
+        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype=in_dtype,
+        run_kernel=True,
+    )
+    assert r["compile_time"] is not None, f"Compilation failed for {r['shape']}"
+
+
+def test_bad_tile_rejected():
+    test_bad_tile_error()

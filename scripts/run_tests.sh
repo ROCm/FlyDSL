@@ -43,7 +43,31 @@ skipped=$(echo "$summary" | grep -oP '\d+(?= skipped)' || echo "0")
 
 echo ""
 echo "========================================================================"
-echo "Summary: ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "GEMM Tests: ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "========================================================================"
+
+# ---------------------------------------------------------------------------
+# Python Examples (tests/python/examples/) via pytest
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Python Examples"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short 2>&1 | tee /tmp/test_examples.log
+example_exit=${PIPESTATUS[0]}
+if [ $example_exit -ne 0 ]; then
+    exit_code=1
+fi
+
+example_summary=$(grep -P '^\s*=+\s+.*(passed|failed|error|skipped|no tests ran).*=+\s*$' /tmp/test_examples.log | tail -1)
+example_passed=$(echo "$example_summary" | grep -oP '\d+(?= passed)' || echo "0")
+example_failed=$(echo "$example_summary" | grep -oP '\d+(?= failed)' || echo "0")
+
+echo ""
+echo "========================================================================"
+echo "Summary: GEMM ${passed} passed, ${failed} failed, ${skipped} skipped | Examples ${example_passed} passed, ${example_failed} failed"
 echo "========================================================================"
 
 exit $exit_code
