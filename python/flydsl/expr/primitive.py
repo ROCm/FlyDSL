@@ -210,6 +210,22 @@ def make_layout(shape, stride, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def make_ordered_layout(shape, order, loc=None, ip=None):
+    if not isinstance(shape, ir.Value):
+        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
+        shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
+    if not isinstance(order, ir.Value):
+        orderTy, dyncElems = fly.infer_int_tuple_type(order)
+        order = fly.make_int_tuple(orderTy, dyncElems, loc=loc, ip=ip)
+    return fly.make_ordered_layout(shape, order, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
+    return fly.make_fragment_like(tensor, dtype=dtype, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def size(int_tuple, loc=None, ip=None):
     result = fly.size(int_tuple, loc=loc, ip=ip)
     # If the int_tuple is static, return the static value
@@ -495,8 +511,18 @@ def make_mma_atom(atom_type, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def make_tile(layouts, loc=None, ip=None):
-    return fly.make_tile(layouts, loc=loc, ip=ip)
+def make_tile(*args, loc=None, ip=None):
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        modes = args[0]
+    else:
+        modes = args
+    resolved = []
+    for m in modes:
+        if isinstance(m, int):
+            resolved.append(make_layout(m, 1, loc=loc, ip=ip))
+        else:
+            resolved.append(m)
+    return fly.make_tile(resolved, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper

@@ -13,6 +13,9 @@ __all__ = [
     "ThrMma",
     "make_layout_tv",
     "make_tiled_copy",
+    "make_tiled_copy_A",
+    "make_tiled_copy_B",
+    "make_tiled_copy_C",
 ]
 
 
@@ -137,6 +140,18 @@ class TiledMma:
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
 
+    def make_fragment_A(self, a: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.A, self.value, a)
+        return make_fragment_like(a)
+
+    def make_fragment_B(self, b: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.B, self.value, b)
+        return make_fragment_like(b)
+
+    def make_fragment_C(self, c: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.C, self.value, c)
+        return make_fragment_like(c)
+
     @property
     def tile_size_mnk(self):
         return static(self.tiled_mma_ty.tile_size_mnk)
@@ -213,12 +228,36 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
 
 def make_tiled_copy_A(copy_atom, tiled_mma):
-    pass
+    layout_tv = tiled_mma.tiled_tv_layout_A
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [0]), 1),
+            make_layout(select(tile_size, [2]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
 
 def make_tiled_copy_B(copy_atom, tiled_mma):
-    pass
+    layout_tv = tiled_mma.tiled_tv_layout_B
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [1]), 1),
+            make_layout(select(tile_size, [2]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
 
 def make_tiled_copy_C(copy_atom, tiled_mma):
-    pass
+    layout_tv = tiled_mma.tiled_tv_layout_C
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [0]), 1),
+            make_layout(select(tile_size, [1]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)

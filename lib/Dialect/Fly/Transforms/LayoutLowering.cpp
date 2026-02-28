@@ -814,22 +814,19 @@ static bool appendScalarPrintfArg(PatternRewriter &rewriter, Location loc, Value
 static bool appendIntTuplePrintf(PatternRewriter &rewriter, Location loc,
                                  const IntTupleValueAdaptor &tuple, std::string &format,
                                  SmallVectorImpl<Value> &args) {
-  // For single leaf values, don't add parentheses
   if (tuple.isLeaf()) {
     IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
     Value leafValue = builder.getArithValue(tuple).value;
     return appendScalarPrintfArg(rewriter, loc, leafValue, format, args);
   }
 
-  SmallVector<Value> leaves;
   IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
-  collectLeafValues(builder, tuple, leaves);
   format += "(";
-  for (size_t i = 0; i < leaves.size(); ++i) {
+  for (int i = 0; i < tuple.rank(); ++i) {
     if (i > 0) {
-      format += ", ";
+      format += ",";
     }
-    if (!appendScalarPrintfArg(rewriter, loc, leaves[i], format, args)) {
+    if (!appendIntTuplePrintf(rewriter, loc, builder.at(tuple, i), format, args)) {
       return false;
     }
   }
@@ -838,7 +835,6 @@ static bool appendIntTuplePrintf(PatternRewriter &rewriter, Location loc,
 }
 
 static bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
-  // For single leaf values, don't add parentheses
   if (attr.isLeaf()) {
     if (attr.getLeafAsInt().isStatic()) {
       format += std::to_string(attr.getLeafAsInt().getValue());
@@ -848,18 +844,14 @@ static bool appendIntTuplePrintfStatic(IntTupleAttr attr, std::string &format) {
     return true;
   }
 
-  SmallVector<IntAttr> leaves;
-  collectLeafAttrs(attr, leaves);
   format += "(";
-  for (size_t i = 0; i < leaves.size(); ++i) {
+  for (int i = 0; i < attr.rank(); ++i) {
     if (i > 0) {
-      format += ", ";
+      format += ",";
     }
-    if (leaves[i].isStatic()) {
-      format += std::to_string(leaves[i].getValue());
-      continue;
+    if (!appendIntTuplePrintfStatic(attr.at(i), format)) {
+      return false;
     }
-    format += "?";
   }
   format += ")";
   return true;
@@ -1767,6 +1759,57 @@ public:
   }
 };
 
+class MakeOrderedLayoutOpLowering : public OpRewritePattern<MakeOrderedLayoutOp> {
+public:
+  using OpRewritePattern<MakeOrderedLayoutOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeOrderedLayoutOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value shapeValue = op.getShape();
+    Value orderValue = op.getOrder();
+
+    auto shapeTy = dyn_cast<IntTupleType>(shapeValue.getType());
+    auto orderTy = dyn_cast<IntTupleType>(orderValue.getType());
+    if (!shapeTy || !orderTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(shapeValue)))
+      return failure();
+
+    IntTupleAttr orderAttr = orderTy.getAttr();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    IntTupleValueAdaptor shapeAdaptor =
+        IntTupleValueAdaptor::create(layoutBuilder, shapeValue, shapeTy.getAttr());
+    IntTupleValueAdaptor dummyStride = intTupleCompactColMajor(layoutBuilder, shapeAdaptor);
+    LayoutValueAdaptor inputLayout = layoutBuilder.makeLayout(shapeAdaptor, dummyStride);
+
+    LayoutValueAdaptor result = layoutMakeOrderedLayout(layoutBuilder, inputLayout, orderAttr);
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
+class MakeFragmentLikeOpLowering : public OpRewritePattern<MakeFragmentLikeOp> {
+public:
+  using OpRewritePattern<MakeFragmentLikeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeFragmentLikeOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultTy = cast<fly::MemRefType>(op.getType());
+    LayoutAttr fragmentLayoutAttr = resultTy.getLayout();
+
+    IntTupleType shapeTy = IntTupleType::get(op.getContext(), fragmentLayoutAttr.getShape());
+    IntTupleType strideTy = IntTupleType::get(op.getContext(), fragmentLayoutAttr.getStride());
+    Value shape = MakeIntTupleOp::create(rewriter, loc, shapeTy, ValueRange{});
+    Value stride = MakeIntTupleOp::create(rewriter, loc, strideTy, ValueRange{});
+    Value layout = MakeLayoutOp::create(
+        rewriter, loc, LayoutType::get(op.getContext(), fragmentLayoutAttr), shape, stride);
+
+    rewriter.replaceOpWithNewOp<MemRefAllocaOp>(op, resultTy, layout);
+    return success();
+  }
+};
+
 class PrintOpLowering : public OpRewritePattern<PrintOp> {
 public:
   using OpRewritePattern<PrintOp>::OpRewritePattern;
@@ -1830,9 +1873,32 @@ public:
     };
     SmallVector<PrintSegment> segments;
 
+    auto expandFormatToSegments = [&](const std::string &fmtStr, size_t argBase) {
+      size_t fpos = 0;
+      size_t argCur = argBase;
+      while (fpos < fmtStr.size()) {
+        size_t ph = fmtStr.find("%", fpos);
+        if (ph == std::string::npos) {
+          segments.push_back({fmtStr.substr(fpos), -1});
+          break;
+        }
+        if (ph > fpos) {
+          segments.push_back({fmtStr.substr(fpos, ph - fpos), -1});
+        }
+        size_t specEnd = ph + 1;
+        while (specEnd < fmtStr.size() && !std::isalpha(fmtStr[specEnd])) {
+          ++specEnd;
+        }
+        if (specEnd < fmtStr.size()) {
+          ++specEnd;
+        }
+        segments.push_back({"", static_cast<int>(argCur++)});
+        fpos = specEnd;
+      }
+    };
+
     if (!userFormat.empty()) {
       size_t valueIdx = 0;
-      size_t argIdx = 0;
       size_t pos = 0;
       while (pos < userFormat.size()) {
         size_t placeholderPos = userFormat.find("{}", pos);
@@ -1848,15 +1914,9 @@ public:
           std::string staticFormat = formatValueToString(op.getValues()[valueIdx]);
           size_t numArgsAdded = args.size() - argStartIdx;
           if (numArgsAdded == 0 && !staticFormat.empty()) {
-            // Static value: add as text segment
             segments.push_back({staticFormat, -1});
           } else {
-            for (size_t i = 0; i < numArgsAdded; ++i) {
-              if (i > 0) {
-                segments.push_back({", ", -1});
-              }
-              segments.push_back({"", static_cast<int>(argStartIdx + i)});
-            }
+            expandFormatToSegments(staticFormat, argStartIdx);
           }
           valueIdx++;
         }
@@ -1873,15 +1933,9 @@ public:
         std::string staticFormat = formatValueToString(val);
         size_t numArgsAdded = args.size() - argStartIdx;
         if (numArgsAdded == 0 && !staticFormat.empty()) {
-          // Static value: add as text segment
           segments.push_back({staticFormat, -1});
         } else {
-          for (size_t i = 0; i < numArgsAdded; ++i) {
-            if (i > 0) {
-              segments.push_back({", ", -1});
-            }
-            segments.push_back({"", static_cast<int>(argStartIdx + i)});
-          }
+          expandFormatToSegments(staticFormat, argStartIdx);
         }
       }
     }
@@ -1928,6 +1982,9 @@ static std::pair<Value, Value> getMemRefPtrAndLayout(OpBuilder &builder, Locatio
                                                      Value memref) {
   if (auto makeViewOp = memref.getDefiningOp<MakeViewOp>()) {
     return {makeViewOp.getIter(), makeViewOp.getLayout()};
+  }
+  if (auto allocaOp = memref.getDefiningOp<MemRefAllocaOp>()) {
+    return {GetIterOp::create(builder, loc, memref), allocaOp.getLayout()};
   }
   return {GetIterOp::create(builder, loc, memref), GetLayoutOp::create(builder, loc, memref)};
 }
@@ -2128,6 +2185,42 @@ public:
 
     Value result = SliceOp::create(rewriter, loc, thrValMemref, sliceCoord);
 
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+class TiledCopyRetileOpLowering : public OpRewritePattern<TiledCopyRetileOp> {
+public:
+  using OpRewritePattern<TiledCopyRetileOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TiledCopyRetileOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+
+    Value input = op.getInput();
+    auto tiledCopyTy = dyn_cast<TiledCopyType>(op.getTiledCopy().getType());
+    auto inputMemRefTy = dyn_cast<fly::MemRefType>(input.getType());
+    if (!tiledCopyTy || !inputMemRefTy)
+      return failure();
+
+    auto [inputPtr, inputLayoutValue] = getMemRefPtrAndLayout(rewriter, loc, input);
+    auto inputLayoutTy = dyn_cast<LayoutType>(inputLayoutValue.getType());
+    if (!inputLayoutTy || !isNormalForm(cast<TypedValue<LayoutType>>(inputLayoutValue)))
+      return failure();
+
+    auto copyAtom = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
+    if (!copyAtom)
+      return failure();
+
+    LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
+    TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor inputLayoutAdaptor(inputLayoutValue, inputMemRefTy.getLayout());
+    LayoutValueAdaptor retiled = layoutTiledCopyRetile(layoutBuilder, copyAtom, tiledLayoutThrVal,
+                                                       tileMN, inputLayoutAdaptor);
+
+    Value result = MakeViewOp::create(rewriter, loc, inputPtr, layoutBuilder.getValue(retiled));
     rewriter.replaceOp(op, result);
     return success();
   }
@@ -2509,9 +2602,11 @@ public:
 
     patterns.add<LogicalProductOpLowering, ZippedProductOpLowering, TiledProductOpLowering,
                  FlatProductOpLowering, BlockedProductOpLowering, RakedProductOpLowering>(context);
+    patterns.add<MakeOrderedLayoutOpLowering, MakeFragmentLikeOpLowering>(context);
 
     patterns.add<TiledCopyPartitionSrcOpLowering, TiledCopyPartitionDstOpLowering,
                  TiledMmaPartitionOpLowering>(context);
+    patterns.add<TiledCopyRetileOpLowering>(context);
     patterns.add<ExpandCopyOpLowering, ExpandGemmOpLowering>(context);
 
     patterns.add<PrintOpLowering>(context);
