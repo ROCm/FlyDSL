@@ -672,16 +672,19 @@ def compile_moe_gemm1(
                     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=i32_ty)
                     c_4_i32 = arith.constant(4, type=i32_ty)
 
-                    # Fast-path masks: byte0/2 vs byte1/3.
-                    c_mask02 = arith.constant(0x00FF00FF, type=i32_ty)
-                    c_mask13 = arith.constant(0xFF00FF00, type=i32_ty)
+                    def _dequant_4pack(d0, d1, d2, d3, qs_word, qz_word, pack_group: int):
+                        """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
 
-                    def _dequant_pack(dword_i32, qs_word, qz_word, pack_group: int):
-                        # uint4 unpack to two i32 halves holding 8 u8 bytes.
-                        even = dword_i32 & c_0f0f0f0f
-                        odd = (dword_i32 >> c_4_i32) & c_0f0f0f0f
+                        Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
+                          Per byte: low nibble = low64 K value, high nibble = high64 K value.
+                        Output: 8 i32 dwords (each 4 dequantized i8 values):
+                          [0..3] = low64:  K0..K3, K4..K7, K8..K11, K12..K15
+                          [4..7] = high64: K64..K67, K68..K71, K72..K75, K76..K79
 
-                        # Unpack qparam bytes b0..b3
+                        Dequant formula per byte: xor(nibble * scale + zero, 0x80)
+                        low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
+                        """
+                        # Unpack qparam bytes
                         qs_b0 = qs_word & c_ff
                         qs_b1 = (qs_word >> c_8) & c_ff
                         qs_b2 = (qs_word >> c_16_i32) & c_ff
@@ -691,51 +694,65 @@ def compile_moe_gemm1(
                         qz_b2 = (qz_word >> c_16_i32) & c_ff
                         qz_b3 = (qz_word >> c_24) & c_ff
 
-                        # constexpr half selection by pack_group:
-                        # - 0 -> use (b0,b1) for K[0..127]
-                        # - 1 -> use (b2,b3) for K[128..255]
+                        # pack_group selects which scale/zero pair to use:
+                        #   0 -> (b0, b1) for K[0..127]
+                        #   1 -> (b2, b3) for K[128..255]
                         if pack_group == 0:
                             qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo, qz_hi = qz_b0, qz_b1
+                            qz_lo_byte, qz_hi_byte = qz_b0, qz_b1
                         else:
                             qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo, qz_hi = qz_b2, qz_b3
+                            qz_lo_byte, qz_hi_byte = qz_b2, qz_b3
 
-                        qz_vec = qz_lo | (qz_hi << c_8) | (qz_lo << c_16_i32) | (qz_hi << c_24)
+                        # Broadcast zero to all 4 byte positions.
+                        # TODO: replace with v_perm_b32 when available in rocdl
+                        # v_perm_b32 qzero_lo, vNULL, qz_word, 0x00000000  (broadcast byte0)
+                        # v_perm_b32 qzero_hi, vNULL, qz_word, 0x01010101  (broadcast byte1)
+                        qz_lo = qz_lo_byte | (qz_lo_byte << c_8) | (qz_lo_byte << c_16_i32) | (qz_lo_byte << c_24)
+                        qz_hi = qz_hi_byte | (qz_hi_byte << c_8) | (qz_hi_byte << c_16_i32) | (qz_hi_byte << c_24)
 
-                        if not bool(overflow_guard):
-                            def _dequant_fast(v):
-                                v02 = v & c_mask02
-                                v13 = v & c_mask13
-                                return (((v02 * qs_lo) + (v13 * qs_hi)) + qz_vec) ^ c_sign_flip
+                        dwords = [d0, d1, d2, d3]
+                        even_outs = []
+                        odd_outs = []
 
-                            even_out = _dequant_fast(even)
-                            odd_out = _dequant_fast(odd)
-                        else:
-                            c_255 = arith.constant(255, type=i32_ty)
+                        for di in range_constexpr(4):
+                            dw = dwords[di]
+                            even = dw & c_0f0f0f0f
+                            odd = (dw >> c_4_i32) & c_0f0f0f0f
 
-                            def _clamp_u8(x):
-                                gt = x > c_255
-                                return arith.select(gt, c_255, x)
+                            if not bool(overflow_guard):
+                                # Fast path: model guarantees nibble*scale+zero <= 255,
+                                # no byte-to-byte overflow.
+                                even_out = ((even * qs_lo) + qz_lo) ^ c_sign_flip
+                                odd_out = ((odd * qs_hi) + qz_hi) ^ c_sign_flip
+                            else:
+                                # Fallback safe path: per-byte clamp to [0,255].
+                                c_255 = arith.constant(255, type=i32_ty)
 
-                            def _dequant_safe(v):
-                                b0 = v & c_ff
-                                b1 = (v >> c_8) & c_ff
-                                b2 = (v >> c_16_i32) & c_ff
-                                b3 = (v >> c_24) & c_ff
-                                o0 = _clamp_u8((b0 * qs_lo) + qz_lo)
-                                o1 = _clamp_u8((b1 * qs_hi) + qz_hi)
-                                o2 = _clamp_u8((b2 * qs_lo) + qz_lo)
-                                o3 = _clamp_u8((b3 * qs_hi) + qz_hi)
-                                out = o0 | (o1 << c_8) | (o2 << c_16_i32) | (o3 << c_24)
-                                return out ^ c_sign_flip
+                                def _clamp_u8(x):
+                                    gt = x > c_255
+                                    return arith.select(gt, c_255, x)
 
-                            even_out = _dequant_safe(even)
-                            odd_out = _dequant_safe(odd)
+                                def _dequant_safe_single(v, qs, qz_byte):
+                                    b0 = v & c_ff
+                                    b1 = (v >> c_8) & c_ff
+                                    b2 = (v >> c_16_i32) & c_ff
+                                    b3 = (v >> c_24) & c_ff
+                                    o0 = _clamp_u8((b0 * qs) + qz_byte)
+                                    o1 = _clamp_u8((b1 * qs) + qz_byte)
+                                    o2 = _clamp_u8((b2 * qs) + qz_byte)
+                                    o3 = _clamp_u8((b3 * qs) + qz_byte)
+                                    out = o0 | (o1 << c_8) | (o2 << c_16_i32) | (o3 << c_24)
+                                    return out ^ c_sign_flip
 
-                        v2 = vector.from_elements(vec2_i32_ty, [even_out, odd_out])
-                        v64 = vector.bitcast(vec1_i64_ty, v2)
-                        return vector.extract(v64, static_position=[0], dynamic_position=[])
+                                even_out = _dequant_safe_single(even, qs_lo, qz_lo_byte)
+                                odd_out = _dequant_safe_single(odd, qs_hi, qz_hi_byte)
+
+                            even_outs.append(even_out)
+                            odd_outs.append(odd_out)
+
+                        # Return 8 dwords: [low64 x4, high64 x4] in natural K order.
+                        return even_outs + odd_outs
 
                     b_tile = []
                     # For tile_k=256 and packed_4bit: k_unroll==4 and we have 2 pack groups (each 128-K).
@@ -766,20 +783,40 @@ def compile_moe_gemm1(
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
-                        # Two ku values per pack_group (ku=0/1 use dword[0..1]/[2..3] inside i32x4).
-                        for ku_sub in range_constexpr(2):
-                            dword_base = 2 * ku_sub
-                            packs0 = []
-                            packs1 = []
-                            for ni in range_constexpr(num_acc_n):
-                                w_i32x4 = w_i32x4_list[ni]
-                                d0 = vector.extract(w_i32x4, static_position=[dword_base + 0], dynamic_position=[])
-                                d1 = vector.extract(w_i32x4, static_position=[dword_base + 1], dynamic_position=[])
-                                qs_word = qs_word_list[ni]
-                                qz_word = qz_word_list[ni]
-                                packs0.append(_dequant_pack(d0, qs_word, qz_word, pack_group))
-                                packs1.append(_dequant_pack(d1, qs_word, qz_word, pack_group))
-                            b_tile.append((packs0, packs1))
+                        # Dequant all 4 dwords per ni, producing 8 output dwords each.
+                        out8_list = []
+                        for ni in range_constexpr(num_acc_n):
+                            w_i32x4 = w_i32x4_list[ni]
+                            d0 = vector.extract(w_i32x4, static_position=[0], dynamic_position=[])
+                            d1 = vector.extract(w_i32x4, static_position=[1], dynamic_position=[])
+                            d2 = vector.extract(w_i32x4, static_position=[2], dynamic_position=[])
+                            d3 = vector.extract(w_i32x4, static_position=[3], dynamic_position=[])
+                            out8_list.append(
+                                _dequant_4pack(d0, d1, d2, d3, qs_word_list[ni], qz_word_list[ni], pack_group)
+                            )
+
+                        # Assemble b_tile: 2 entries per pack_group.
+                        # Entry 0 (low64):  packs0=K0..K7 (i64), packs1=K8..K15 (i64)
+                        # Entry 1 (high64): packs0=K64..K71 (i64), packs1=K72..K79 (i64)
+                        packs0_lo = []
+                        packs1_lo = []
+                        for ni in range_constexpr(num_acc_n):
+                            out8 = out8_list[ni]
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[0], out8[1]])
+                            packs0_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[2], out8[3]])
+                            packs1_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                        b_tile.append((packs0_lo, packs1_lo))
+
+                        packs0_hi = []
+                        packs1_hi = []
+                        for ni in range_constexpr(num_acc_n):
+                            out8 = out8_list[ni]
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[4], out8[5]])
+                            packs0_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[6], out8[7]])
+                            packs1_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                        b_tile.append((packs0_hi, packs1_hi))
 
                     return b_tile
     
@@ -2021,13 +2058,19 @@ def compile_moe_gemm2(
                     c_sign_flip = arith.constant(0x80808080, type=i32_ty)
                     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=i32_ty)
                     c_4_i32 = arith.constant(4, type=i32_ty)
-                    c_mask02 = arith.constant(0x00FF00FF, type=i32_ty)
-                    c_mask13 = arith.constant(0xFF00FF00, type=i32_ty)
 
-                    def _dequant_pack(dword_i32, qs_word, qz_word, pack_group: int):
-                        even = dword_i32 & c_0f0f0f0f
-                        odd = (dword_i32 >> c_4_i32) & c_0f0f0f0f
+                    def _dequant_4pack(d0, d1, d2, d3, qs_word, qz_word, pack_group: int):
+                        """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
 
+                        Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
+                          Per byte: low nibble = low64 K value, high nibble = high64 K value.
+                        Output: 8 i32 dwords (each 4 dequantized i8 values):
+                          [0..3] = low64:  K0..K3, K4..K7, K8..K11, K12..K15
+                          [4..7] = high64: K64..K67, K68..K71, K72..K75, K76..K79
+
+                        Dequant formula per byte: xor(nibble * scale + zero, 0x80)
+                        low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
+                        """
                         qs_b0 = qs_word & c_ff
                         qs_b1 = (qs_word >> c_8) & c_ff
                         qs_b2 = (qs_word >> c_16_i32) & c_ff
@@ -2039,46 +2082,55 @@ def compile_moe_gemm2(
 
                         if pack_group == 0:
                             qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo, qz_hi = qz_b0, qz_b1
+                            qz_lo_byte, qz_hi_byte = qz_b0, qz_b1
                         else:
                             qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo, qz_hi = qz_b2, qz_b3
+                            qz_lo_byte, qz_hi_byte = qz_b2, qz_b3
 
-                        qz_vec = qz_lo | (qz_hi << c_8) | (qz_lo << c_16_i32) | (qz_hi << c_24)
+                        # TODO: replace with v_perm_b32 when available in rocdl
+                        # v_perm_b32 qzero_lo, vNULL, qz_word, 0x00000000  (broadcast byte0)
+                        # v_perm_b32 qzero_hi, vNULL, qz_word, 0x01010101  (broadcast byte1)
+                        qz_lo = qz_lo_byte | (qz_lo_byte << c_8) | (qz_lo_byte << c_16_i32) | (qz_lo_byte << c_24)
+                        qz_hi = qz_hi_byte | (qz_hi_byte << c_8) | (qz_hi_byte << c_16_i32) | (qz_hi_byte << c_24)
 
-                        if not bool(overflow_guard):
-                            def _dequant_fast(v):
-                                v02 = v & c_mask02
-                                v13 = v & c_mask13
-                                return (((v02 * qs_lo) + (v13 * qs_hi)) + qz_vec) ^ c_sign_flip
+                        dwords = [d0, d1, d2, d3]
+                        even_outs = []
+                        odd_outs = []
 
-                            even_out = _dequant_fast(even)
-                            odd_out = _dequant_fast(odd)
-                        else:
-                            c_255 = arith.constant(255, type=i32_ty)
+                        for di in range_constexpr(4):
+                            dw = dwords[di]
+                            even = dw & c_0f0f0f0f
+                            odd = (dw >> c_4_i32) & c_0f0f0f0f
 
-                            def _clamp_u8(x):
-                                gt = x > c_255
-                                return arith.select(gt, c_255, x)
+                            if not bool(overflow_guard):
+                                even_out = ((even * qs_lo) + qz_lo) ^ c_sign_flip
+                                odd_out = ((odd * qs_hi) + qz_hi) ^ c_sign_flip
+                            else:
+                                c_255 = arith.constant(255, type=i32_ty)
 
-                            def _dequant_safe(v):
-                                b0 = v & c_ff
-                                b1 = (v >> c_8) & c_ff
-                                b2 = (v >> c_16_i32) & c_ff
-                                b3 = (v >> c_24) & c_ff
-                                o0 = _clamp_u8((b0 * qs_lo) + qz_lo)
-                                o1 = _clamp_u8((b1 * qs_hi) + qz_hi)
-                                o2 = _clamp_u8((b2 * qs_lo) + qz_lo)
-                                o3 = _clamp_u8((b3 * qs_hi) + qz_hi)
-                                out = o0 | (o1 << c_8) | (o2 << c_16_i32) | (o3 << c_24)
-                                return out ^ c_sign_flip
+                                def _clamp_u8(x):
+                                    gt = x > c_255
+                                    return arith.select(gt, c_255, x)
 
-                            even_out = _dequant_safe(even)
-                            odd_out = _dequant_safe(odd)
+                                def _dequant_safe_single(v, qs, qz_byte):
+                                    b0 = v & c_ff
+                                    b1 = (v >> c_8) & c_ff
+                                    b2 = (v >> c_16_i32) & c_ff
+                                    b3 = (v >> c_24) & c_ff
+                                    o0 = _clamp_u8((b0 * qs) + qz_byte)
+                                    o1 = _clamp_u8((b1 * qs) + qz_byte)
+                                    o2 = _clamp_u8((b2 * qs) + qz_byte)
+                                    o3 = _clamp_u8((b3 * qs) + qz_byte)
+                                    out = o0 | (o1 << c_8) | (o2 << c_16_i32) | (o3 << c_24)
+                                    return out ^ c_sign_flip
 
-                        v2 = vector.from_elements(vec2_i32_ty, [even_out, odd_out])
-                        v64 = vector.bitcast(vec1_i64_ty, v2)
-                        return vector.extract(v64, static_position=[0], dynamic_position=[])
+                                even_out = _dequant_safe_single(even, qs_lo, qz_lo_byte)
+                                odd_out = _dequant_safe_single(odd, qs_hi, qz_hi_byte)
+
+                            even_outs.append(even_out)
+                            odd_outs.append(odd_out)
+
+                        return even_outs + odd_outs
 
                     b_tile = []
                     for pack_group in range_constexpr(k_unroll // 2):
@@ -2107,19 +2159,36 @@ def compile_moe_gemm2(
                             )
                             w_i32x4_list.append(vector.bitcast(vec4_i32_ty, b16))
 
-                        for ku_sub in range_constexpr(2):
-                            dword_base = 2 * ku_sub
-                            packs0 = []
-                            packs1 = []
-                            for ni in range_constexpr(num_acc_n):
-                                w_i32x4 = w_i32x4_list[ni]
-                                d0 = vector.extract(w_i32x4, static_position=[dword_base + 0], dynamic_position=[])
-                                d1 = vector.extract(w_i32x4, static_position=[dword_base + 1], dynamic_position=[])
-                                qs_word = qs_word_list[ni]
-                                qz_word = qz_word_list[ni]
-                                packs0.append(_dequant_pack(d0, qs_word, qz_word, pack_group))
-                                packs1.append(_dequant_pack(d1, qs_word, qz_word, pack_group))
-                            b_tile.append((packs0, packs1))
+                        out8_list = []
+                        for ni in range_constexpr(num_acc_n):
+                            w_i32x4 = w_i32x4_list[ni]
+                            d0 = vector.extract(w_i32x4, static_position=[0], dynamic_position=[])
+                            d1 = vector.extract(w_i32x4, static_position=[1], dynamic_position=[])
+                            d2 = vector.extract(w_i32x4, static_position=[2], dynamic_position=[])
+                            d3 = vector.extract(w_i32x4, static_position=[3], dynamic_position=[])
+                            out8_list.append(
+                                _dequant_4pack(d0, d1, d2, d3, qs_word_list[ni], qz_word_list[ni], pack_group)
+                            )
+
+                        packs0_lo = []
+                        packs1_lo = []
+                        for ni in range_constexpr(num_acc_n):
+                            out8 = out8_list[ni]
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[0], out8[1]])
+                            packs0_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[2], out8[3]])
+                            packs1_lo.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                        b_tile.append((packs0_lo, packs1_lo))
+
+                        packs0_hi = []
+                        packs1_hi = []
+                        for ni in range_constexpr(num_acc_n):
+                            out8 = out8_list[ni]
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[4], out8[5]])
+                            packs0_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                            v2 = vector.from_elements(vec2_i32_ty, [out8[6], out8[7]])
+                            packs1_hi.append(vector.extract(vector.bitcast(vec1_i64_ty, v2), static_position=[0], dynamic_position=[]))
+                        b_tile.append((packs0_hi, packs1_hi))
 
                     return b_tile
     
