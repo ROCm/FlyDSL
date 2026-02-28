@@ -3,6 +3,11 @@
 
 include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
-def FlyROCDL_CopyAtom_BufferLSA : FlyxROCL_CopyAtom<"CopyAtom_CDNA3_BufferLSA", "atom.cdna3.buffer_lsa",[]> {}
+def FlyROCDL_CopyOpBufferLDST : FlyxROCL_CopyOp<"CopyOpCDNA3BufferLDST", "cdna3.buffer_ldst",[]> {
+  let parameters = (ins
+    "int32_t":$bitSize
+  );
+  let assemblyFormat = "`<` $bitSize `>`";
+}
 
 #endif // FLYROCDL_COPYATOM

@@ -1,4 +1,5 @@
 from .._mlir import ir
+from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .primitive import *
 from .typing import Layout, Tensor
 
@@ -12,6 +13,9 @@ __all__ = [
     "ThrMma",
     "make_layout_tv",
     "make_tiled_copy",
+    "make_tiled_copy_A",
+    "make_tiled_copy_B",
+    "make_tiled_copy_C",
 ]
 
 
@@ -28,13 +32,24 @@ class Atom:
         return [self.value]
 
 
-class CopyAtom(Atom):
+class CopyAtom:
+    def __init__(self, value: ir.Value):
+        self.value = value
+        self.atom_ty = self.value.type
+
+    @classmethod
+    def __new_from_ir_values__(cls, values):
+        return cls(values[0])
+
+    def __extract_ir_values__(self):
+        return [self.value]
+
     def __str__(self):
         return f"CopyAtom({self.atom_ty})"
 
     @property
-    def thr_size(self):
-        return static(self.atom_ty.thr_size)
+    def thr_layout(self):
+        return static(self.atom_ty.thr_layout)
 
     @property
     def tv_layout_src(self):
@@ -54,8 +69,8 @@ class MmaAtom(Atom):
         return f"MmaAtom({self.atom_ty})"
 
     @property
-    def thr_size(self):
-        return static(self.atom_ty.thr_size)
+    def thr_layout(self):
+        return static(self.atom_ty.thr_layout)
 
     @property
     def shape_mnk(self):
@@ -95,13 +110,67 @@ class TiledCopy:
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
 
+    @property
+    def tiled_tv_layout_S(self):
+        return static(self.tiled_copy_ty.tiled_tv_layout_src)
 
-class TiledMma(MmaAtom):
+    @property
+    def tiled_tv_layout_D(self):
+        return static(self.tiled_copy_ty.tiled_tv_layout_dst)
+
+
+class TiledMma:
+    def __init__(self, value):
+        self.value = value
+        self.tiled_mma_ty = self.value.type
+
+    @classmethod
+    def __new_from_ir_values__(cls, values):
+        return cls(values[0])
+
+    def __extract_ir_values__(self):
+        return [self.value]
+
+    def __str__(self):
+        return f"TiledMma({self.tiled_mma_ty})"
+
     def get_slice(self, thr_idx):
         return ThrMma(self, thr_idx)
 
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
+
+    def make_fragment_A(self, a: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.A, self.value, a)
+        return make_fragment_like(a)
+
+    def make_fragment_B(self, b: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.B, self.value, b)
+        return make_fragment_like(b)
+
+    def make_fragment_C(self, c: Tensor):
+        # return tiled_mma_make_fragment(MmaOperand.C, self.value, c)
+        return make_fragment_like(c)
+
+    @property
+    def tile_size_mnk(self):
+        return static(self.tiled_mma_ty.tile_size_mnk)
+
+    @property
+    def thr_layout_vmnk(self):
+        return static(self.tiled_mma_ty.thr_layout_vmnk)
+
+    @property
+    def tiled_tv_layout_A(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_a)
+
+    @property
+    def tiled_tv_layout_B(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_b)
+
+    @property
+    def tiled_tv_layout_C(self):
+        return static(self.tiled_mma_ty.tiled_tv_layout_c)
 
 
 class ThrCopy(TiledCopy):
@@ -122,27 +191,28 @@ class ThrCopy(TiledCopy):
         return tiled_copy_partition_dst(self.value, dst, self._thr_idx_int)
 
     def retile(self, t: Tensor):
-        # return tiled_copy_retile(self.value, t)
-        raise NotImplementedError("Retiling is not supported yet")
+        return tiled_copy_retile(self.value, t)
 
 
 class ThrMma(TiledMma):
     def __init__(self, tiled_mma: TiledMma, thr_idx):
+        super().__init__(tiled_mma.value)
         self.tiled_mma = tiled_mma
         self._thr_idx = thr_idx
+        self._thr_idx_int = make_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
         return self._thr_idx
 
     def partition_A(self, a: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.A, self.tiled_mma.value, a, self._thr_idx_int)
 
     def partition_B(self, b: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.B, self.tiled_mma.value, b, self._thr_idx_int)
 
     def partition_C(self, c: Tensor):
-        pass
+        return tiled_mma_partition(MmaOperand.C, self.tiled_mma.value, c, self._thr_idx_int)
 
 
 def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
@@ -155,3 +225,39 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
 
     tiler_mn = int_tuple_product_each(get_shape(layout_mn))
     return (tiler_mn, layout_tv)
+
+
+def make_tiled_copy_A(copy_atom, tiled_mma):
+    layout_tv = tiled_mma.tiled_tv_layout_A
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [0]), 1),
+            make_layout(select(tile_size, [2]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)
+
+
+def make_tiled_copy_B(copy_atom, tiled_mma):
+    layout_tv = tiled_mma.tiled_tv_layout_B
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [1]), 1),
+            make_layout(select(tile_size, [2]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)
+
+
+def make_tiled_copy_C(copy_atom, tiled_mma):
+    layout_tv = tiled_mma.tiled_tv_layout_C
+    tile_size = tiled_mma.tile_size_mnk
+    tile_mn = make_tile(
+        [
+            make_layout(select(tile_size, [0]), 1),
+            make_layout(select(tile_size, [1]), 1),
+        ]
+    )
+    return make_tiled_copy(copy_atom, layout_tv, tile_mn)

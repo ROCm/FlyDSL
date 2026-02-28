@@ -162,6 +162,53 @@ IntAttr operator!=(IntAttr lhs, IntAttr rhs) {
   return IntAttr::getDynamic(ctx, 32, 1);
 }
 
+IntAttr operator^(IntAttr lhs, IntAttr rhs) {
+  auto *ctx = lhs.getContext();
+  if (lhs.isStatic() && rhs.isStatic()) {
+    return IntAttr::getStatic(ctx, lhs.getValue() ^ rhs.getValue());
+  }
+  if (lhs.isStaticValue(0)) {
+    return rhs;
+  }
+  if (rhs.isStaticValue(0)) {
+    return lhs;
+  }
+  int32_t width = std::max(lhs.getWidth(), rhs.getWidth());
+  int32_t lhsDiv = lhs.isStatic() ? lhs.getValue() : lhs.getDivisibility();
+  int32_t rhsDiv = rhs.isStatic() ? rhs.getValue() : rhs.getDivisibility();
+  return IntAttr::getDynamic(ctx, width, utils::divisibilityBitwiseXor(lhsDiv, rhsDiv));
+}
+
+IntAttr operator&(IntAttr lhs, IntAttr rhs) {
+  auto *ctx = lhs.getContext();
+  if (lhs.isStatic() && rhs.isStatic()) {
+    return IntAttr::getStatic(ctx, lhs.getValue() & rhs.getValue());
+  }
+  if (lhs.isStaticValue(0) || rhs.isStaticValue(0)) {
+    return IntAttr::getStatic(ctx, 0);
+  }
+  int32_t width = std::max(lhs.getWidth(), rhs.getWidth());
+  int32_t lhsDiv = lhs.isStatic() ? lhs.getValue() : lhs.getDivisibility();
+  int32_t rhsDiv = rhs.isStatic() ? rhs.getValue() : rhs.getDivisibility();
+  return IntAttr::getDynamic(ctx, width, utils::divisibilityBitwiseAnd(lhsDiv, rhsDiv));
+}
+
+IntAttr operator>>(IntAttr lhs, IntAttr rhs) {
+  auto *ctx = lhs.getContext();
+  if (lhs.isStatic() && rhs.isStatic()) {
+    return IntAttr::getStatic(ctx, lhs.getValue() >> rhs.getValue());
+  }
+  if (lhs.isStaticValue(0)) {
+    return IntAttr::getStatic(ctx, 0);
+  }
+  int32_t width = lhs.getWidth();
+  int32_t lhsDiv = lhs.isStatic() ? lhs.getValue() : lhs.getDivisibility();
+  if (rhs.isStatic()) {
+    return IntAttr::getDynamic(ctx, width, utils::divisibilityShiftRight(lhsDiv, rhs.getValue()));
+  }
+  return IntAttr::getDynamic(ctx, width, 1);
+}
+
 IntAttr intMin(IntAttr lhs, IntAttr rhs) {
   auto *ctx = lhs.getContext();
   if (lhs.isStatic() && rhs.isStatic()) {

@@ -13,7 +13,7 @@ namespace mlir::fly {
 namespace detail {
 
 template <class Layout>
-Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                  Layout trgLayout, LayoutAttr tiledLayoutThrVal,
                                  LayoutAttr ref2trg) {
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
@@ -138,7 +138,7 @@ Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomTypeInter
 } // namespace detail
 
 template <class Layout>
-Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                     LayoutAttr tiledLayoutThrVal, TileAttr tileMN,
                                     Layout srcLayout) {
   auto *ctx = tiledLayoutThrVal.getContext();
@@ -155,7 +155,7 @@ Layout layoutTiledCopyThrValViewSrc(LayoutBuilder<Layout> &builder, CopyAtomType
 }
 
 template <class Layout>
-Layout layoutTiledCopyThrValViewDst(LayoutBuilder<Layout> &builder, CopyAtomTypeInterface copyAtom,
+Layout layoutTiledCopyThrValViewDst(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
                                     LayoutAttr tiledLayoutThrVal, TileAttr tileMN,
                                     Layout dstLayout) {
   auto *ctx = tiledLayoutThrVal.getContext();
@@ -171,7 +171,97 @@ Layout layoutTiledCopyThrValViewDst(LayoutBuilder<Layout> &builder, CopyAtomType
                                            ref2dst);
 }
 
-template <class Layout> Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder);
+template <class Layout>
+Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder, CopyAtomType copyAtom,
+                             LayoutAttr tiledLayoutThrVal, TileAttr tilerMN, Layout inputLayout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  auto *ctx = tiledLayoutThrVal.getContext();
+  LayoutBuilder<LayoutAttr> attrBuilder(ctx);
+
+  auto atomLayoutRef = cast<LayoutAttr>(copyAtom.getThrValLayoutRef());
+  auto atomNumVal = intTupleProductImpl(attrBuilder, atomLayoutRef.getShape().at(1));
+  auto tiledNumThr = intTupleProductImpl(attrBuilder, tiledLayoutThrVal.getShape().at(0));
+
+  IntTuple inputShape = builder.getShape(inputLayout);
+  IntTuple V = builder.at(inputShape, 0);
+
+  auto vVal = intTupleProductImpl(builder, V);
+  int32_t tiledNumThrStatic = attrBuilder.getStaticValue(tiledNumThr);
+  int32_t atomNumValStatic = attrBuilder.getStaticValue(atomNumVal);
+  int32_t vStatic = builder.getStaticValue(vVal);
+
+  int32_t upcastFactor = tiledNumThrStatic * vStatic;
+
+  LayoutAttr tiledLayoutTVInv = layoutRightInverse(attrBuilder, tiledLayoutThrVal);
+
+  SmallVector<Attribute> tilerShapeElems;
+  for (int i = 0; i < tilerMN.rank(); ++i) {
+    auto elem = tilerMN.at(i);
+    if (auto layoutElem = dyn_cast<LayoutAttr>(elem)) {
+      auto sz = intTupleProductImpl(attrBuilder, layoutElem.getShape());
+      tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, attrBuilder.getStaticValue(sz)));
+    } else if (auto intElem = dyn_cast<IntAttr>(elem)) {
+      tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, intElem.getValue()));
+    }
+  }
+  IntTupleAttr tilerShape = IntTupleAttr::get(ArrayAttr::get(ctx, tilerShapeElems));
+  IntTupleAttr tilerCompactStride = intTupleCompactColMajor(attrBuilder, tilerShape);
+  LayoutAttr tilerShapeLayout = LayoutAttr::get(tilerShape, tilerCompactStride);
+
+  LayoutAttr tiledLayoutTVInvWithShape =
+      layoutComposition(attrBuilder, tiledLayoutTVInv, tilerShapeLayout);
+  LayoutAttr frgLayoutMN = layoutUpcast(attrBuilder, tiledLayoutTVInvWithShape, upcastFactor);
+
+  LayoutAttr vLayout = LayoutAttr::get(IntTupleAttr::getLeafStatic(ctx, vStatic),
+                                       IntTupleAttr::getLeafStatic(ctx, 1));
+
+  LayoutAttr frgLayoutMNInv = layoutRightInverse(attrBuilder, frgLayoutMN);
+  LayoutAttr vProduct = layoutLogicalProduct(attrBuilder, vLayout, frgLayoutMNInv);
+
+  LayoutAttr atomNumValLayout = LayoutAttr::get(IntTupleAttr::getLeafStatic(ctx, atomNumValStatic),
+                                                IntTupleAttr::getLeafStatic(ctx, 1));
+  LayoutAttr frgLayoutV = layoutZippedDivide(attrBuilder, vProduct, atomNumValLayout);
+
+  IntTupleAttr frgMNShapeProductEach = intTupleProductEach(attrBuilder, frgLayoutMN.getShape());
+  IntTupleAttr divisorShapeForTensor = intTuplePrepend(attrBuilder, frgMNShapeProductEach,
+                                                       IntTupleAttr::getLeafStatic(ctx, vStatic));
+  SmallVector<Attribute> divisorTileElems;
+  if (divisorShapeForTensor.isLeaf()) {
+    divisorTileElems.push_back(IntAttr::getStatic(
+        ctx, attrBuilder.getStaticValue(attrBuilder.getArithValue(divisorShapeForTensor))));
+  } else {
+    for (int i = 0; i < divisorShapeForTensor.rank(); ++i) {
+      auto elemVal = intTupleProductImpl(attrBuilder, attrBuilder.at(divisorShapeForTensor, i));
+      divisorTileElems.push_back(IntAttr::getStatic(ctx, attrBuilder.getStaticValue(elemVal)));
+    }
+  }
+  TileAttr divisorTile = TileAttr::get(ArrayAttr::get(ctx, divisorTileElems));
+
+  Layout tTensor = layoutZippedDivide(builder, inputLayout, divisorTile);
+
+  Layout frgLayoutVMat = builder.materializeConstantLayout(frgLayoutV);
+  IntTuple tTensorFirstModeShape = builder.at(builder.getShape(tTensor), 0);
+  IntTuple tTensorFirstModeStride = builder.at(builder.getStride(tTensor), 0);
+  Layout tTensorFirstMode = builder.makeLayout(tTensorFirstModeShape, tTensorFirstModeStride);
+  Layout composedFirstMode = layoutComposition(builder, tTensorFirstMode, frgLayoutVMat);
+
+  IntTuple restModeShape = builder.at(builder.getShape(tTensor), 1);
+  IntTuple restModeStride = builder.at(builder.getStride(tTensor), 1);
+
+  typename LayoutBuilder<Layout>::ElemCollector retShapeElems;
+  typename LayoutBuilder<Layout>::ElemCollector retStrideElems;
+  retShapeElems.push_back(builder.getShape(composedFirstMode));
+  retStrideElems.push_back(builder.getStride(composedFirstMode));
+
+  for (int i = 1; i < restModeShape.rank(); ++i) {
+    retShapeElems.push_back(builder.at(restModeShape, i));
+    retStrideElems.push_back(builder.at(restModeStride, i));
+  }
+  Layout resultLayout =
+      builder.makeLayout(builder.makeTuple(retShapeElems), builder.makeTuple(retStrideElems));
+  return resultLayout;
+}
 
 template <class Layout>
 Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomTypeInterface mmaAtom,

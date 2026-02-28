@@ -4,8 +4,9 @@ from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
     CachePolicy,
+    CopyAtomType,
     # Type
-    CopyAtomUniversalCopyType,
+    CopyOpUniversalCopyType,
     IntTupleType,
     LayoutType,
     MemRefType,
@@ -17,6 +18,13 @@ from .._mlir.extras import types as T
 from .meta import dsl_api_wrapper
 from .typing import Int32
 
+UniversalCopy = lambda bit_size: CopyOpUniversalCopyType.get(bit_size)  # noqa: E731
+UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)  # noqa: E731
+UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)  # noqa: E731
+UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)  # noqa: E731
+
+UniversalFMA = lambda ty: MmaAtomUniversalFMAType.get(ty.ir_type)  # noqa: E731
+
 # __all__ = [
 #     # Maybe remove it in the future
 #     "T",
@@ -25,7 +33,7 @@ from .typing import Int32
 #     "AddressSpace",
 #     "CachePolicy",
 #     # Types
-#     "CopyAtomUniversalCopyType",
+#     "CopyOpUniversalCopyType",
 #     "IntTupleType",
 #     "LayoutType",
 #     "MemRefType",
@@ -202,6 +210,22 @@ def make_layout(shape, stride, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def make_ordered_layout(shape, order, loc=None, ip=None):
+    if not isinstance(shape, ir.Value):
+        shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
+        shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
+    if not isinstance(order, ir.Value):
+        orderTy, dyncElems = fly.infer_int_tuple_type(order)
+        order = fly.make_int_tuple(orderTy, dyncElems, loc=loc, ip=ip)
+    return fly.make_ordered_layout(shape, order, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
+    return fly.make_fragment_like(tensor, dtype=dtype, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def size(int_tuple, loc=None, ip=None):
     result = fly.size(int_tuple, loc=loc, ip=ip)
     # If the int_tuple is static, return the static value
@@ -235,8 +259,19 @@ def slice(src, coord, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def get_leaf(int_tuple, leaf_idx, loc=None, ip=None):
+    return fly.get_leaf(int_tuple, leaf_idx, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
+def get_flat_coord(index, layout, loc=None, ip=None):
+    return fly.get_flat_coord(index, layout, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
+
 
 @dsl_api_wrapper
 def idx2crd(idx, layout, loc=None, ip=None):
@@ -293,9 +328,7 @@ def recast_layout(layout, old_type_bits, new_type_bits, loc=None, ip=None):
 
     old_type_bits = _to_static_bits(old_type_bits)
     new_type_bits = _to_static_bits(new_type_bits)
-    return fly.recast_layout(
-        new_type_bits=new_type_bits, old_type_bits=old_type_bits, src=layout, loc=loc, ip=ip
-    )
+    return fly.recast_layout(new_type_bits=new_type_bits, old_type_bits=old_type_bits, src=layout, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -439,6 +472,11 @@ def make_view(iter, layout, loc=None, ip=None):
 
 
 @dsl_api_wrapper
+def make_ptr(result_type, args, loc=None, ip=None):
+    return fly.make_ptr(result_type, args, loc=loc, ip=ip)
+
+
+@dsl_api_wrapper
 def add_offset(ptr, offset, loc=None, ip=None):
     if not isinstance(offset, ir.Value):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
@@ -446,22 +484,45 @@ def add_offset(ptr, offset, loc=None, ip=None):
 
 
 @dsl_api_wrapper
-def make_copy_atom(atom_type, loc=None, ip=None):
+def make_copy_atom(copy_op_type, elem_type, loc=None, ip=None):
     from .derived import CopyAtom
+    from .numeric import NumericMeta
 
-    return CopyAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+    if isinstance(elem_type, NumericMeta):
+        val_bits = elem_type.width
+    elif isinstance(elem_type, ir.Type):
+        if hasattr(elem_type, "width"):
+            val_bits = int(elem_type.width)
+        else:
+            raise TypeError(f"make_copy_atom: elem_type must have a width, got {elem_type}")
+    elif isinstance(elem_type, int):
+        val_bits = elem_type
+    else:
+        raise TypeError(f"make_copy_atom: elem_type must be NumericType, ir.Type, or int, got {type(elem_type)}")
+    copy_atom_ty = CopyAtomType.get(copy_op_type, val_bits)
+    return CopyAtom(fly.make_copy_atom(copy_atom_ty, val_bits=val_bits, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper
 def make_mma_atom(atom_type, loc=None, ip=None):
     from .derived import MmaAtom
 
-    return MmaAtom(fly.make_atom(atom_type, loc=loc, ip=ip))
+    return MmaAtom(fly.make_mma_atom(atom_type, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper
-def make_tile(layouts, loc=None, ip=None):
-    return fly.make_tile(layouts, loc=loc, ip=ip)
+def make_tile(*args, loc=None, ip=None):
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        modes = args[0]
+    else:
+        modes = args
+    resolved = []
+    for m in modes:
+        if isinstance(m, int):
+            resolved.append(make_layout(m, 1, loc=loc, ip=ip))
+        else:
+            resolved.append(m)
+    return fly.make_tile(resolved, loc=loc, ip=ip)
 
 
 @dsl_api_wrapper
@@ -479,6 +540,13 @@ def make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=None, ip=None):
     from .derived import TiledCopy
 
     return TiledCopy(fly.make_tiled_copy(copy_atom, layout_thr_val, tile_mn, loc=loc, ip=ip))
+
+
+@dsl_api_wrapper
+def make_tiled_mma(mma_atom, atom_layout, permutation=None, loc=None, ip=None):
+    from .derived import TiledMma
+
+    return TiledMma(fly.make_tiled_mma(mma_atom, atom_layout, permutation=permutation, loc=loc, ip=ip))
 
 
 @dsl_api_wrapper

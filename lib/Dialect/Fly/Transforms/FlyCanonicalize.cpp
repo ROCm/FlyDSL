@@ -101,7 +101,7 @@ public:
 
   LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
     // Skip ops that are already in normal form
-    if (isa<MakeIntTupleOp, MakeAtomOp>(op))
+    if (isa<MakeIntTupleOp, MakeMmaAtomOp, MakeCopyAtomOp>(op))
       return failure();
     if (auto makeLayoutOp = dyn_cast<MakeLayoutOp>(op)) {
       if (makeLayoutOp.getShape().getDefiningOp<MakeIntTupleOp>() &&
@@ -132,11 +132,17 @@ public:
           MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(layoutAttr.getStride()), {});
       rewriter.replaceOpWithNewOp<MakeLayoutOp>(op, layoutTy, shape, stride);
       return success();
-    } else if (isa<CopyAtomTypeInterface, MmaAtomTypeInterface>(resultType)) {
+    } else if (isa<MmaAtomTypeInterface>(resultType)) {
       auto mayStatic = cast<MayStaticTypeInterface>(resultType);
       if (!mayStatic.isStatic())
         return failure();
-      rewriter.replaceOpWithNewOp<MakeAtomOp>(op, resultType);
+      rewriter.replaceOpWithNewOp<MakeMmaAtomOp>(op, resultType);
+      return success();
+    } else if (auto copyAtomTy = dyn_cast<CopyAtomType>(resultType)) {
+      auto mayStatic = cast<MayStaticTypeInterface>(resultType);
+      if (!mayStatic.isStatic())
+        return failure();
+      rewriter.replaceOpWithNewOp<MakeCopyAtomOp>(op, copyAtomTy, copyAtomTy.getValBits());
       return success();
     }
 
