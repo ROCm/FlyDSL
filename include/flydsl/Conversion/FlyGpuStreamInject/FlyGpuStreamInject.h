@@ -4,6 +4,7 @@
 #include "mlir/Pass/Pass.h"
 
 namespace mlir {
+#define GEN_PASS_DECL_FLYGPUSTREAMMARKPASS
 #define GEN_PASS_DECL_FLYGPUSTREAMINJECTPASS
 #include "flydsl/Conversion/Passes.h.inc"
 } // namespace mlir

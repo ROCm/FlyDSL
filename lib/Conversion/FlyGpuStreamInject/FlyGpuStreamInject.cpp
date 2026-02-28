@@ -8,60 +8,124 @@
 #include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
 
 namespace mlir {
+#define GEN_PASS_DEF_FLYGPUSTREAMMARKPASS
 #define GEN_PASS_DEF_FLYGPUSTREAMINJECTPASS
 #include "flydsl/Conversion/Passes.h.inc"
 } // namespace mlir
 
 using namespace mlir;
 
+static constexpr StringLiteral kStreamArgIndexAttr("fly.stream_arg_index");
+
 namespace {
 
-/// Try to find an existing block argument of the given type that has zero
-/// uses — this is the original stream parameter whose asyncObject link was
-/// dropped by gpu-to-llvm.  Search from the back because the stream arg is
-/// conventionally the last parameter.
-static Value findOrphanedArg(Block &entry, Type targetTy) {
-  for (BlockArgument arg : llvm::reverse(entry.getArguments())) {
-    if (arg.getType() == targetTy && arg.use_empty())
-      return arg;
+// ===----------------------------------------------------------------------===//
+// Phase 1: fly-gpu-stream-mark  (runs BEFORE gpu-to-llvm)
+//
+// While gpu.launch_func still carries asyncObject and the function is still
+// func.func with !gpu.async.token, record which arg index is the stream.
+// ===----------------------------------------------------------------------===//
+
+class FlyGpuStreamMarkPass
+    : public mlir::impl::FlyGpuStreamMarkPassBase<FlyGpuStreamMarkPass> {
+public:
+  using FlyGpuStreamMarkPassBase::FlyGpuStreamMarkPassBase;
+
+  void runOnOperation() override {
+    ModuleOp moduleOp = getOperation();
+    MLIRContext *ctx = &getContext();
+
+    moduleOp.walk([&](func::FuncOp funcOp) {
+      int64_t streamArgIdx = -1;
+      bool consistent = true;
+
+      funcOp.walk([&](gpu::LaunchFuncOp launch) {
+        Value asyncObj = launch.getAsyncObject();
+        if (!asyncObj)
+          return;
+        auto blockArg = dyn_cast<BlockArgument>(asyncObj);
+        if (!blockArg) {
+          consistent = false;
+          return;
+        }
+        int64_t idx = blockArg.getArgNumber();
+        if (streamArgIdx < 0)
+          streamArgIdx = idx;
+        else if (streamArgIdx != idx)
+          consistent = false;
+      });
+
+      if (consistent && streamArgIdx >= 0) {
+        funcOp->setAttr(kStreamArgIndexAttr,
+                        IntegerAttr::get(IndexType::get(ctx), streamArgIdx));
+      }
+    });
+  }
+};
+
+// ===----------------------------------------------------------------------===//
+// Phase 2: fly-gpu-stream-inject  (runs AFTER gpu-to-llvm)
+//
+// Re-wire the stream argument as asyncObject on each gpu.launch_func.
+// ===----------------------------------------------------------------------===//
+
+static Value addNewStreamArg(Operation *funcLikeOp, MLIRContext *ctx) {
+  auto ptrTy = LLVM::LLVMPointerType::get(ctx);
+
+  if (auto funcOp = dyn_cast<func::FuncOp>(funcLikeOp)) {
+    unsigned idx = funcOp.getNumArguments();
+    (void)funcOp.insertArgument(idx, ptrTy, {}, funcOp.getLoc());
+    return funcOp.getArgument(idx);
+  }
+  if (auto llvmFunc = dyn_cast<LLVM::LLVMFuncOp>(funcLikeOp)) {
+    auto oldTy = llvmFunc.getFunctionType();
+    SmallVector<Type> newInputs(oldTy.getParams());
+    newInputs.push_back(ptrTy);
+    auto newTy = LLVM::LLVMFunctionType::get(oldTy.getReturnType(), newInputs,
+                                              oldTy.isVarArg());
+    llvmFunc.setFunctionType(newTy);
+    Block &entry = llvmFunc.getBody().front();
+    return entry.addArgument(ptrTy, llvmFunc.getLoc());
   }
   return nullptr;
 }
 
-static void injectStreamIntoFunction(Operation *funcLikeOp, MLIRContext *ctx) {
-  auto ptrTy = LLVM::LLVMPointerType::get(ctx);
+static Block *getEntryBlock(Operation *funcLikeOp) {
+  if (auto f = dyn_cast<func::FuncOp>(funcLikeOp))
+    return &f.getBody().front();
+  if (auto f = dyn_cast<LLVM::LLVMFuncOp>(funcLikeOp))
+    return &f.getBody().front();
+  return nullptr;
+}
 
+static void injectStreamIntoFunction(Operation *funcLikeOp, MLIRContext *ctx) {
   SmallVector<gpu::LaunchFuncOp> launches;
-  funcLikeOp->walk([&](gpu::LaunchFuncOp op) { launches.push_back(op); });
+  funcLikeOp->walk([&](gpu::LaunchFuncOp op) {
+    if (!op.getAsyncObject())
+      launches.push_back(op);
+  });
   if (launches.empty())
     return;
 
   Value streamArg;
-  if (auto funcOp = dyn_cast<func::FuncOp>(funcLikeOp)) {
-    Block &entry = funcOp.getBody().front();
-    streamArg = findOrphanedArg(entry, ptrTy);
-    if (!streamArg) {
-      unsigned idx = funcOp.getNumArguments();
-      (void)funcOp.insertArgument(idx, ptrTy, {}, funcOp.getLoc());
-      streamArg = funcOp.getArgument(idx);
-    }
-  } else if (auto llvmFunc = dyn_cast<LLVM::LLVMFuncOp>(funcLikeOp)) {
-    Block &entry = llvmFunc.getBody().front();
-    streamArg = findOrphanedArg(entry, ptrTy);
-    if (!streamArg) {
-      auto oldTy = llvmFunc.getFunctionType();
-      SmallVector<Type> newInputs(oldTy.getParams());
-      newInputs.push_back(ptrTy);
-      auto newTy = LLVM::LLVMFunctionType::get(
-          oldTy.getReturnType(), newInputs, oldTy.isVarArg());
-      llvmFunc.setFunctionType(newTy);
-      streamArg = entry.addArgument(ptrTy, llvmFunc.getLoc());
-    }
-  } else {
-    return;
+
+  // Try the attribute left by fly-gpu-stream-mark.
+  if (auto attr =
+          funcLikeOp->getAttrOfType<IntegerAttr>(kStreamArgIndexAttr)) {
+    unsigned argIdx = attr.getValue().getZExtValue();
+    Block *entry = getEntryBlock(funcLikeOp);
+    if (entry && argIdx < entry->getNumArguments())
+      streamArg = entry->getArgument(argIdx);
+    funcLikeOp->removeAttr(kStreamArgIndexAttr);
   }
 
-  // Replace every gpu.launch_func with a copy carrying asyncObject = stream.
+  // Fallback: no attribute → add a new trailing stream arg.
+  if (!streamArg)
+    streamArg = addNewStreamArg(funcLikeOp, ctx);
+
+  if (!streamArg)
+    return;
+
   OpBuilder builder(ctx);
   for (gpu::LaunchFuncOp launch : launches) {
     builder.setInsertionPoint(launch);
@@ -95,8 +159,6 @@ public:
     ModuleOp moduleOp = getOperation();
     MLIRContext *ctx = &getContext();
 
-    // Handle both func.func and llvm.func since gpu-to-llvm may have already
-    // converted the function op.
     SmallVector<Operation *> targets;
     moduleOp.walk([&](func::FuncOp op) { targets.push_back(op); });
     moduleOp.walk([&](LLVM::LLVMFuncOp op) {
