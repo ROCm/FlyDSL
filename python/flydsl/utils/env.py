@@ -194,6 +194,8 @@ class CompileEnvManager(EnvManager):
     env_prefix = "COMPILE"
 
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
+    compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
+    arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
 
 
 class DebugEnvManager(EnvManager):
