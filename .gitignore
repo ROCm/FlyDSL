@@ -17,6 +17,7 @@ my_ir_dumps*/
 
 # Python
 __pycache__/
+python/flydsl/_version.py
 .ruff_cache/
 *.py[cod]
 *$py.class
