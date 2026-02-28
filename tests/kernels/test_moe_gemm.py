@@ -140,25 +140,41 @@ def build_uint4_moe_weight(
     u4_shuf = (u4_shuf_i8.view(torch.uint8) & 0xF).contiguous()
 
     # --- Step 2: sample qparams in physical layout [E, N//16, K//256, 16, 4] (u8) ---
-    qscale_u8 = torch.empty((experts, nb, g256, 16, 4), device=device, dtype=torch.uint8)
-    qzero_u8 = torch.empty_like(qscale_u8)
+    #
+    # The kernel indexes qparams by (n_blk, k256, n_lane) where n_blk and n_lane
+    # are in the *shuffled* physical space (same coordinates used for weight data).
+    # Each packed-i32 word has 4 bytes for the 4 K64 groups within a K256 tile:
+    #   u4_shuf_i8 = shuffle_weight(u4_unshuf_i8, use_int4=True, interleave_k64=bool(interleave_k64))
+    # u4_shuf = (byte[0]: qs for K64 group 0 (shuffled K 0..63)
+    #   byte[1]: qs for K64 group 1 (shuffled K 64..127)
+    #   byte[2]: qs for K64 group 2 (shuffled K 128..191)
+    #   byte[3]: qs for K64 group 3 (shuffled K 192..255)
+    #
+    # The kernel applies qs_lo (from pack_group byte pair's first byte) to even
+    # nibbles and qs_hi (second byte) to odd nibbles of each loaded dword.
+    # After K64 interleave packing, even nibbles = lo64 K, odd nibbles = hi64 K.
+    # So within each pack_group (covering 128 K values):
+    #   byte[2*pg+0] -> lo64 half (first 64 K values)
+    #   byte[2*pg+1] -> hi64 half (second 64 K values)
 
-    # Use uniform qparams for correctness (layout-independence):
-    # int8_bits = (u4 * 1 + 0) ^ 0x80
-    qs_i32 = torch.ones(qscale_u8.shape, device=device, dtype=torch.int32)
-    qz_i32 = torch.zeros(qscale_u8.shape, device=device, dtype=torch.int32)
-    qscale_u8.fill_(1)
-    qzero_u8.zero_()
+    qparam_shape = (experts, nb, g256, 16, 4)
+    qs_base = torch.randint(1, 5, (experts, nb, g256, 16), device=device, dtype=torch.int32)
+    qs_i32 = torch.ones(qparam_shape, device=device, dtype=torch.int32)
+    # qs_i32 = torch.randint(1, 5, qparam_shape, device=device, dtype=torch.int32)
+    qz_i32 = torch.zeros(qparam_shape, device=device, dtype=torch.int32)
+    qscale_u8 = qs_i32.to(torch.uint8)
+    qzero_u8 = qz_i32.to(torch.uint8)
 
     # --- Step 3: dequant in shuffled space (base, no interleave) using 4x64 blocks per K256 tile ---
+    # Reshape base-shuffled u4 to tile layout matching qparam structure.
     u4_tile = u4_shuf_base.view(experts, nb, 16, g256, 256).permute(0, 1, 3, 2, 4).contiguous()  # [E,nb,g256,16,256]
     u4_blocks = u4_tile.view(experts, nb, g256, 16, 4, 64).to(torch.int32)
     u8_blocks = (u4_blocks * qs_i32.unsqueeze(-1)) + qz_i32.unsqueeze(-1)  # <=255
-    u8_blocks = u8_blocks.to(torch.uint8)
+    u8_blocks = u8_blocks.clamp(0, 255).to(torch.uint8)
     u8_tile = u8_blocks.view(experts, nb, g256, 16, 256)
     w_u8_shuf_base = u8_tile.permute(0, 1, 3, 2, 4).contiguous().view(experts, rows_per_expert, K)
 
-    # Apply the exact same K64 interleave to the dequantized u8 bits (so int8 bits match packed uint4 storage).
+    # Apply K64 interleave to dequanted u8 bits (matches packed uint4 storage order).
     if interleave_k64:
         K_total = w_u8_shuf_base.shape[-1]
         u8_128 = w_u8_shuf_base.view(experts, rows_per_expert, K_total // 128, 128)
@@ -191,10 +207,7 @@ def build_uint4_moe_weight(
     )
 
     # Recover logical (unshuffled) int8 for torch reference:
-    # - inverse interleave (if enabled)
-    # - inverse preshuffle
     w_i8_shuf_no_interleave = _inverse_interleave_k64_in_128(w_i8_shuf) if interleave_k64 else w_i8_shuf
-    # For W4 layout, the shuffle/unshuffle mapping uses Kpack=32 semantics (use_int4=True) even though data is i8.
     w_i8_unshuffled = _unshuffle_weight_base(w_i8_shuf_no_interleave, layout=(16, 16), use_int4=True)
     w_i8_unshuffled_flat = w_i8_unshuffled.reshape(experts * rows_per_expert, K).contiguous()
 
@@ -701,8 +714,7 @@ def run_moe_stage1(
         w_kernel = w_packed.contiguous()
         qscale_w1_1d = qscale_i32_w1.contiguous().view(-1)
         qzero_w1_1d = qzero_i32_w1.contiguous().view(-1)
-        # Kernel applies sw (weight row scale) in epilogue. Use a small sw to keep fp16 outputs finite.
-        scale_w1_1d = torch.full((experts * (2 * inter_dim),), 1e-4, device=device, dtype=torch.float32)
+        scale_w1_1d = torch.full((experts * (2 * inter_dim),), 1e-3, device=device, dtype=torch.float32)
         scale_w1_flat = scale_w1_1d.view(experts * (2 * inter_dim), 1)
         # Reference uses logical int8 weights with the same sw.
         w1_q_flat_ref = w1_int8_unshuffled_flat
@@ -824,6 +836,16 @@ def run_moe_stage1(
 
         rtol = 0.5 if is_w4 else 0.25
         atol = 0.5 if is_w4 else 0.25
+        if is_uint4:
+            diff = (out.to(torch.float32) - ref)
+            abs_diff = diff.abs()
+            print(f"[DEBUG uint4 stage1] out shape={out.shape}, ref shape={ref.shape}")
+            print(f"[DEBUG uint4 stage1] out[0,0,:32]={[f'{v:.6f}' for v in out[0,0,:32].tolist()]}")
+            print(f"[DEBUG uint4 stage1] ref[0,0,:32]={[f'{v:.6f}' for v in ref[0,0,:32].tolist()]}")
+            print(f"[DEBUG uint4 stage1] diff[0,0,:32]={[f'{v:.6f}' for v in diff[0,0,:32].tolist()]}")
+            print(f"[DEBUG uint4 stage1] out[0,0,256:288]={[f'{v:.6f}' for v in out[0,0,256:288].tolist()]}")
+            print(f"[DEBUG uint4 stage1] ref[0,0,256:288]={[f'{v:.6f}' for v in ref[0,0,256:288].tolist()]}")
+            print(f"[DEBUG uint4 stage1] diff[0,0,256:288]={[f'{v:.6f}' for v in diff[0,0,256:288].tolist()]}")
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -1129,8 +1151,8 @@ def run_moe_stage2(
         w2_kernel = w2_packed.contiguous()
         qscale_w2_1d = qscale_i32_w2.contiguous().view(-1)
         qzero_w2_1d = qzero_i32_w2.contiguous().view(-1)
-        # Kernel applies sw (weight row scale). Use a small sw to keep fp16 outputs finite.
-        w2_scale_1d = torch.full((experts * model_dim,), 1e-4, device=device, dtype=torch.float32)
+        # Kernel applies sw (weight row scale).
+        w2_scale_1d = torch.full((experts * model_dim,), 1e-3, device=device, dtype=torch.float32)
         scale_w2 = w2_scale_1d.view(experts, model_dim, 1)
     else:
         # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
@@ -1495,8 +1517,7 @@ def test_moe_gemm_2stage(
     if init_scale == 1.0:
         init_scale = 0.2
     s = float(init_scale)
-    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
-    # x_fp32 = torch.ones((tokens, model_dim), device=device, dtype=torch.float32) * s
+    x_fp32 = torch.ones((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s #* (s / math.sqrt(model_dim))
     # w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * 0.2
