@@ -8,6 +8,50 @@ from __future__ import annotations
 from flydsl.dialects.ext.python_control_flow import lower_range_for_loops
 
 
+# ---------------------------------------------------------------------------
+# Single-warp (wave64) shuffle reductions
+# ---------------------------------------------------------------------------
+
+WAVE64_OFFSETS = [32, 16, 8, 4, 2, 1]
+
+
+def warp_reduce_sum(val, *, gpu, arith, flir, T, fm_fast, WARP_SIZE=64):
+    """Single-warp (wave64) sum reduction via xor shuffle.
+
+    Returns: scalar f32 value holding the warp-wide sum.
+    All lanes receive the same result after the final shuffle step.
+    """
+    width_i32 = arith.as_value(arith.constant(WARP_SIZE, type=T.i32()))
+    w = arith.as_value(val)
+    for sh in WAVE64_OFFSETS:
+        off = arith.as_value(arith.constant(sh, type=T.i32()))
+        peer = arith.as_value(
+            gpu.ShuffleOp(w, off, width_i32, mode="xor").shuffleResult
+        )
+        w = arith.as_value(
+            flir.arith.AddFOp(w, peer, fastmath=fm_fast).result
+        )
+    return w
+
+
+def warp_reduce_max(val, *, gpu, arith, flir, T, WARP_SIZE=64):
+    """Single-warp (wave64) max reduction via xor shuffle.
+
+    Returns: scalar f32 value holding the warp-wide max.
+    """
+    width_i32 = arith.as_value(arith.constant(WARP_SIZE, type=T.i32()))
+    w = arith.as_value(val)
+    for sh in WAVE64_OFFSETS:
+        off = arith.as_value(arith.constant(sh, type=T.i32()))
+        peer = arith.as_value(
+            gpu.ShuffleOp(w, off, width_i32, mode="xor").shuffleResult
+        )
+        w = arith.as_value(
+            flir.arith.MaximumFOp(w, peer).result
+        )
+    return w
+
+
 def reduce_vec_max(vec_val, *, VEC_WIDTH, compute_type, vector):
     if VEC_WIDTH == 1:
         return vector.extract(vec_val, static_position=[0], dynamic_position=[])

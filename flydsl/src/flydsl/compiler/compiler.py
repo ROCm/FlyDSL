@@ -37,6 +37,8 @@ def _pipeline_fragments(
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
+    unsafe_fp_math: bool = False,
+    fast_fp_math: bool = False,
 ) -> list[str]:
     """FLIR compilation pipeline fragments as a plain list of strings.
 
@@ -50,6 +52,8 @@ def _pipeline_fragments(
     rocdl_bare_ptr_opt = b2s(use_bare_ptr_memref_call_conv)
     llvm_bare_host_opt = b2s(use_bare_pointers_for_host)
     llvm_bare_kern_opt = b2s(use_bare_pointers_for_kernels)
+    unsafe_math_opt = b2s(unsafe_fp_math)
+    fast_opt = b2s(fast_fp_math)
     return [
         "flir-to-standard",
         "trivial-dce",
@@ -63,7 +67,7 @@ def _pipeline_fragments(
         "gpu.module(reconcile-unrealized-casts)",
         # Keep this as a formatted string so the chip is visible in dumps and matches
         # the non-dump compilation pipeline.
-        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast={fast_opt} features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math={unsafe_math_opt} wave64=true}}",
         "gpu-to-llvm{intersperse-sizes-for-kernels=false "
         + f"use-bare-pointers-for-host={llvm_bare_host_opt} "
         + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
@@ -92,6 +96,8 @@ def _build_pipeline_str(
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
+    unsafe_fp_math: bool = False,
+    fast_fp_math: bool = False,
 ) -> str:
     """Build the full PassManager pipeline string from `_pipeline_fragments`."""
     frags = _pipeline_fragments(
@@ -99,6 +105,8 @@ def _build_pipeline_str(
         use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
         use_bare_pointers_for_host=use_bare_pointers_for_host,
         use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+        unsafe_fp_math=unsafe_fp_math,
+        fast_fp_math=fast_fp_math,
     )
     return f"builtin.module({','.join(frags)})"
 
@@ -192,54 +200,212 @@ def _infer_kernel_names_from_asm(asm: str) -> list[str]:
     return names
 
 
-def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
-    """Apply AMDGPU waves-per-eu occupancy hint to GPU kernel functions.
+def _replace_ocml_exp2_with_intrinsic(module: ir.Module) -> ir.Module:
+    """Replace __ocml_exp2_f32 library calls with llvm.intr.exp2 intrinsics.
 
-    This modifies the MLIR module in-place by adding the 'amdgpu-waves-per-eu'
-    attribute to gpu.func operations marked as kernels.
+    The convert-gpu-to-rocdl pass lowers math.exp2 to __ocml_exp2_f32 which
+    generates a safe but slow 6-instruction pattern (range reduction + v_exp_f32
+    + v_ldexp_f32). By replacing with llvm.intr.exp2 + fast math flags, we get
+    bare v_exp_f32 (1 instruction).
 
-    Args:
-        mlir_module: MLIR module containing GPU kernels
-        waves_per_eu: Number of wavefronts per execution unit (1-4 typical)
+    Why text replacement instead of using math.exp2 directly:
+        The MLIR convert-gpu-to-rocdl pass unconditionally lowers math.exp2 to
+        the __ocml_exp2_f32 library call. There is no pass-level option to emit
+        the LLVM intrinsic instead, so we do a post-lowering text replacement
+        on the LLVM IR assembly.
+
+    TODO: Replace this text-based approach with a proper MLIR rewrite pass
+    when upstream MLIR adds an option to lower math.exp2 to llvm.intr.exp2.
+
+    Returns a new module (or the original if replacement fails).
     """
-    if waves_per_eu is None:
-        return
-
-    w = int(waves_per_eu)
-    if w < 1:
-        raise ValueError(f"waves_per_eu must be >= 1, got {w}")
+    import re
 
     try:
-        # Get the context from the module
-        with mlir_module.context:
-            # Navigate MLIR module structure: module -> gpu.module -> gpu.func
-            for op in mlir_module.body.operations:
-                # Look for gpu.module operations
-                if getattr(op, "OPERATION_NAME", None) != "gpu.module":
-                    continue
+        asm = module.operation.get_asm(enable_debug_info=True)
 
-                # gpu.module has a single region with a single block
-                gpu_module_region = op.regions[0]
+        # First replace all call sites, then remove the declaration.
+        # Use a broad pattern that handles loc() info and whitespace variants.
+        asm = re.sub(
+            r'llvm\.call @__ocml_exp2_f32\(([^)]+)\)\s*:\s*\(f32\)\s*->\s*f32',
+            r'llvm.intr.exp2(\1) {fastmathFlags = #llvm.fastmath<fast>} : (f32) -> f32',
+            asm,
+        )
 
-                # Within gpu.module, find gpu.func operations with gpu.kernel attribute
-                for inner_op in gpu_module_region.blocks[0].operations:
-                    if getattr(inner_op, "OPERATION_NAME", None) != "gpu.func":
-                        continue
+        # Remove the function declaration (it may have loc() info)
+        asm = re.sub(
+            r'\s*llvm\.func @__ocml_exp2_f32\(f32\)\s*->\s*f32[^\n]*\n',
+            '\n',
+            asm,
+        )
 
-                    # Only apply to kernel functions (not device functions)
-                    if "gpu.kernel" not in inner_op.attributes:
-                        continue
-
-                    # Add or append to the 'rocdl.waves_per_eu' attribute
-                    # This attribute is read by the ROCDL conversion pass
-                    inner_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                        ir.IntegerType.get_signless(32), w
-                    )
+        ctx = module.context
+        new_module = ir.Module.parse(asm, context=ctx)
+        return new_module
     except Exception as e:
-        # Best-effort: if attribute injection fails, log and continue
-        # This prevents breaking existing functionality
-        import warnings
-        warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
+        import sys
+        print(f"[flir.compile] WARNING: _replace_ocml_exp2_with_intrinsic failed: {e}", file=sys.stderr)
+        return module
+
+
+def _apply_unsafe_fp_math_on_llvm_funcs(module: ir.Module) -> None:
+    """Apply 'unsafe-fp-math'='true' function attribute to GPU kernel llvm.func ops.
+
+    This tells the LLVM AMDGPU backend to use fast/approximate math lowerings,
+    e.g. bare v_exp_f32 instead of the safe range-reduced exp2 pattern.
+    """
+    entries = []
+    for attr_name in ("unsafe-fp-math", "no-nans-fp-math", "no-infs-fp-math"):
+        key = ir.StringAttr.get(attr_name)
+        val = ir.StringAttr.get("true")
+        entries.append(ir.ArrayAttr.get([key, val]))
+    # Flush f32 denormals to zero so the AMDGPU backend emits bare v_exp_f32
+    # instead of a safe exp2 pattern with range-checking / v_ldexp_f32.
+    key_denorm = ir.StringAttr.get("denormal-fp-math-f32")
+    val_denorm = ir.StringAttr.get("preserve-sign,preserve-sign")
+    entries.append(ir.ArrayAttr.get([key_denorm, val_denorm]))
+    entries_strs = {f"{n}=true" for n in ("unsafe-fp-math", "no-nans-fp-math", "no-infs-fp-math")}
+    entries_strs.add("denormal-fp-math-f32=preserve-sign,preserve-sign")
+
+    def _append_passthrough(func_op):
+        try:
+            existing = func_op.attributes["passthrough"]
+        except KeyError:
+            existing = None
+
+        if existing is None:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get(entries)
+            return
+
+        try:
+            existing_entries = list(existing)
+        except TypeError:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get(entries)
+            return
+
+        existing_strs = {str(a).strip('"') for a in existing_entries}
+        new_entries = list(existing_entries)
+        for entry, entry_str in zip(entries, entries_strs):
+            if entry_str not in existing_strs:
+                new_entries.append(entry)
+        func_op.attributes["passthrough"] = ir.ArrayAttr.get(new_entries)
+
+    try:
+        for op in module.body.operations:
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            gpu_module_body = op.regions[0].blocks[0] if hasattr(op, 'regions') else op.body
+            for inner_op in gpu_module_body.operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                    continue
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                _append_passthrough(inner_op)
+    except Exception:
+        pass
+
+
+def _apply_waves_per_eu_on_llvm_funcs(module: ir.Module, waves_per_eu: int) -> None:
+    """Apply AMDGPU waves-per-eu hint to llvm.func ops via LLVM passthrough.
+    
+    This sets the 'amdgpu-waves-per-eu' attribute on GPU kernel functions,
+    which hints the LLVM backend about the desired occupancy per EU.
+    
+    The passthrough attribute format for LLVM attributes with values is:
+    ["attribute-name", "attribute-value"]
+    """
+    # For attributes with values, passthrough needs an ArrayAttr with [key, value]
+    attr_key = ir.StringAttr.get("amdgpu-waves-per-eu")
+    attr_value = ir.StringAttr.get(f"{waves_per_eu},{waves_per_eu}")
+    new_entry = ir.ArrayAttr.get([attr_key, attr_value])
+    new_entry_str = f"amdgpu-waves-per-eu={waves_per_eu},{waves_per_eu}"
+
+    def _append_passthrough(func_op):
+        try:
+            existing = func_op.attributes["passthrough"]
+        except KeyError:
+            existing = None
+        
+        if existing is None:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        # Best-effort: if it's not an ArrayAttr-like object, just overwrite.
+        try:
+            existing_entries = list(existing)
+        except TypeError:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        if any(str(a).strip('"') == new_entry_str for a in existing_entries):
+            return
+        func_op.attributes["passthrough"] = ir.ArrayAttr.get(existing_entries + [new_entry])
+
+    try:
+        for op in module.body.operations:
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            # gpu.module has a single region with a single block
+            gpu_module_body = op.regions[0].blocks[0] if hasattr(op, 'regions') else op.body
+            for inner_op in gpu_module_body.operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                    continue
+                # Check for gpu.kernel attribute (it's a unit attribute)
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                _append_passthrough(inner_op)
+    except Exception:
+        # Best-effort only.
+        pass
+
+
+def _apply_flat_work_group_size_on_llvm_funcs(module: ir.Module, max_workgroup_size: int) -> None:
+    """Apply AMDGPU flat-work-group-size hint to GPU kernel llvm.func ops.
+
+    LLVM expects a string value in the form "min,max". We set min=1 and max to
+    the requested workgroup size.
+    """
+    attr_key = ir.StringAttr.get("amdgpu-flat-work-group-size")
+    attr_value = ir.StringAttr.get(f"1,{max_workgroup_size}")
+    new_entry = ir.ArrayAttr.get([attr_key, attr_value])
+    new_entry_str = f"amdgpu-flat-work-group-size=1,{max_workgroup_size}"
+
+    def _append_passthrough(func_op):
+        try:
+            existing = func_op.attributes["passthrough"]
+        except KeyError:
+            existing = None
+
+        if existing is None:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        try:
+            existing_entries = list(existing)
+        except TypeError:
+            func_op.attributes["passthrough"] = ir.ArrayAttr.get([new_entry])
+            return
+
+        if any(str(a).strip('"') == new_entry_str for a in existing_entries):
+            return
+        func_op.attributes["passthrough"] = ir.ArrayAttr.get(existing_entries + [new_entry])
+
+    try:
+        for op in module.body.operations:
+            if getattr(op, "OPERATION_NAME", None) != "gpu.module":
+                continue
+            gpu_module_body = op.regions[0].blocks[0] if hasattr(op, 'regions') else op.body
+            for inner_op in gpu_module_body.operations:
+                if getattr(inner_op, "OPERATION_NAME", None) != "llvm.func":
+                    continue
+                if "gpu.kernel" not in inner_op.attributes:
+                    continue
+                _append_passthrough(inner_op)
+    except Exception:
+        # Best-effort only.
+        pass
+
+
 
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
@@ -252,6 +418,10 @@ def compile(
     use_bare_ptr_memref_call_conv: bool = False,
     use_bare_pointers_for_host: bool = False,
     use_bare_pointers_for_kernels: bool = False,
+    waves_per_eu: Optional[int] = None,
+    flat_work_group_size: Optional[int] = None,
+    unsafe_fp_math: bool = False,
+    fast_fp_math: bool = False,
 ) -> Optional["Executor"]:
     """Compile a FLIR module to an Executor.
 
@@ -316,6 +486,8 @@ def compile(
         use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
         use_bare_pointers_for_host=use_bare_pointers_for_host,
         use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+        unsafe_fp_math=unsafe_fp_math,
+        fast_fp_math=fast_fp_math,
     )
 
     with ctx:
@@ -377,6 +549,8 @@ def compile(
                     use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
                     use_bare_pointers_for_host=use_bare_pointers_for_host,
                     use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+                    unsafe_fp_math=unsafe_fp_math,
+                    fast_fp_math=fast_fp_math,
                 )
                 # Keep dump filenames stable vs the historical numbering scheme:
                 # 00_target_overridden, then 03..14 for pipeline stages, then 15_final_isa.
@@ -392,8 +566,24 @@ def compile(
 
                     # Dump ISA from the *post-LLVM* module (right before fatbin emission).
                     # This mirrors `tests/utils.py:compile_to_hsaco` and yields readable assembly.
+                    # Also apply waves_per_eu here (after LLVM lowering, before binary generation).
+                    # Match only the top-level reconcile-unrealized-casts, not the one inside gpu.module
                     if frag.strip() == "reconcile-unrealized-casts":
-                        asm_for_isa = stage_asm
+                        # Apply waves_per_eu if specified (BEFORE saving asm_for_isa)
+                        if waves_per_eu is not None:
+                            _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                        # Apply flat work-group-size hint if specified.
+                        if flat_work_group_size is not None:
+                            _apply_flat_work_group_size_on_llvm_funcs(module, flat_work_group_size)
+                        # Apply unsafe-fp-math function attributes for fast exp2/math
+                        if unsafe_fp_math:
+                            _apply_unsafe_fp_math_on_llvm_funcs(module)
+                            # Replace __ocml_exp2_f32 with llvm.intr.exp2 for fast exp2
+                            new_mod = _replace_ocml_exp2_with_intrinsic(module)
+                            if new_mod is not module:
+                                module = new_mod
+                        # Get ASM after applying attributes
+                        asm_for_isa = module.operation.get_asm(enable_debug_info=True)
 
                 if asm_for_isa is not None:
                     isa_out = _dump_isa_from_rocdl_module_asm(
@@ -406,9 +596,53 @@ def compile(
                         isa_stage = f"{stage_num_base + len(stage_frags):02d}_final_isa"
                         print(f"[flir.compile] dump {isa_stage} -> {isa_out}")
             else:
-                pm = PassManager.parse(pipeline, context=ctx)
-                pm.enable_verifier(bool(verify))
-                pm.run(module.operation)
+                need_split = (
+                    (waves_per_eu is not None)
+                    or (flat_work_group_size is not None)
+                    or unsafe_fp_math
+                )
+                if need_split:
+                    # Need to split the pipeline to apply function attributes
+                    # after LLVM lowering but before binary generation.
+                    stage_frags = _pipeline_fragments(
+                        chip=chip,
+                        use_bare_ptr_memref_call_conv=use_bare_ptr_memref_call_conv,
+                        use_bare_pointers_for_host=use_bare_pointers_for_host,
+                        use_bare_pointers_for_kernels=use_bare_pointers_for_kernels,
+                        unsafe_fp_math=unsafe_fp_math,
+                        fast_fp_math=fast_fp_math,
+                    )
+                    # Run all passes except the last one (gpu-module-to-binary)
+                    pre_binary_frags = stage_frags[:-1]
+                    binary_frag = stage_frags[-1]
+                    
+                    pre_binary_pipeline = f"builtin.module({','.join(pre_binary_frags)})"
+                    pm = PassManager.parse(pre_binary_pipeline, context=ctx)
+                    pm.enable_verifier(bool(verify))
+                    pm.run(module.operation)
+                    
+                    # Apply waves_per_eu
+                    if waves_per_eu is not None:
+                        _apply_waves_per_eu_on_llvm_funcs(module, waves_per_eu)
+                    # Apply flat work-group-size hint
+                    if flat_work_group_size is not None:
+                        _apply_flat_work_group_size_on_llvm_funcs(module, flat_work_group_size)
+                    # Apply unsafe-fp-math function attributes for fast exp2/math
+                    if unsafe_fp_math:
+                        _apply_unsafe_fp_math_on_llvm_funcs(module)
+                        # Replace __ocml_exp2_f32 with llvm.intr.exp2 for fast exp2
+                        new_mod = _replace_ocml_exp2_with_intrinsic(module)
+                        if new_mod is not module:
+                            module = new_mod
+                    
+                    # Run the final binary generation pass
+                    pm_binary = PassManager.parse(f"builtin.module({binary_frag})", context=ctx)
+                    pm_binary.enable_verifier(bool(verify))
+                    pm_binary.run(module.operation)
+                else:
+                    pm = PassManager.parse(pipeline, context=ctx)
+                    pm.enable_verifier(bool(verify))
+                    pm.run(module.operation)
             if print_final_module:
                 print(module)
 

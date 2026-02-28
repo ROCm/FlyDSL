@@ -24,7 +24,6 @@ from _mlir import ir
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
 from kernels.kernels_common import stream_ptr_to_async_token
-from flydsl.compiler.compiler import _apply_waves_per_eu_hint
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -1190,15 +1189,12 @@ def compile_preshuffle_gemm_a8(
 
     m = _GEMM()
 
-    # Apply waves_per_eu hint if specified (before final compilation)
-    if waves_per_eu is not None:
-        _apply_waves_per_eu_hint(m.module, waves_per_eu)
-
     return flydsl.compile(
         m,
         use_bare_ptr_memref_call_conv=False,
         use_bare_pointers_for_host=False,
         use_bare_pointers_for_kernels=False,
+        waves_per_eu=waves_per_eu,
     )
 
 

@@ -17,6 +17,7 @@ Example:
 from _mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_mfma_f32_32x32x8f16 = globals().get("mfma_f32_32x32x8f16", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -28,6 +29,8 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
 _ods_readlane = readlane
 _ods_readfirstlane = readfirstlane
 _ods_ds_swizzle = ds_swizzle
+_ods_permlane16_swap = permlane16_swap
+_ods_permlane32_swap = permlane32_swap
 _ods_raw_ptr_buffer_atomic_fadd = raw_ptr_buffer_atomic_fadd
 
 mask_mfma = 0x008
@@ -43,6 +46,61 @@ def sched_dsrd(cnt):
     sched_group_barrier(mask_dsrd, cnt, 0)
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
+
+
+def _unwrap_i32_scalar(v, *, loc=None):
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+
+    return _arith_ext.unwrap(v, type=IntegerType.get_signless(32), loc=loc)
+
+
+def async_global_load_to_lds(global_ptr, lds_ptr, size, offset=0, aux=0, *, loc=None, ip=None):
+    """Global->LDS async-style copy wrapper (closest stable ROCDL primitive)."""
+    from . import arith as _arith_ext
+
+    return global_load_lds(
+        _arith_ext.unwrap(global_ptr, loc=loc),
+        _arith_ext.unwrap(lds_ptr, loc=loc),
+        _unwrap_i32_scalar(size, loc=loc),
+        _unwrap_i32_scalar(offset, loc=loc),
+        _unwrap_i32_scalar(aux, loc=loc),
+        loc=loc,
+        ip=ip,
+    )
+
+
+def async_load_to_lds(global_ptr, lds_ptr, size, offset=0, aux=0, *, loc=None, ip=None):
+    """Alias for load_to_lds with scalar auto-unwrapping."""
+    from . import arith as _arith_ext
+
+    return load_to_lds(
+        _arith_ext.unwrap(global_ptr, loc=loc),
+        _arith_ext.unwrap(lds_ptr, loc=loc),
+        _unwrap_i32_scalar(size, loc=loc),
+        _unwrap_i32_scalar(offset, loc=loc),
+        _unwrap_i32_scalar(aux, loc=loc),
+        loc=loc,
+        ip=ip,
+    )
+
+
+def async_load_fence(wait_vmem=0, wait_ds=0, *, loc=None, ip=None):
+    """Waitcnt-style fence helper for staged async copy scheduling."""
+    # NOTE: wait_loadcnt/wait_dscnt lowerings are not stable on current toolchain.
+    # Use conservative full waitcnt fence for now.
+    _ = (wait_vmem, wait_ds)
+    return s_waitcnt(0, loc=loc, ip=ip)
+
+
+def phase_barrier(mask=0, *, loc=None, ip=None):
+    """Scheduling barrier wrapper used as phase fence in pipelined kernels."""
+    return sched_barrier(mask, loc=loc, ip=ip)
+
+
+def phase_group_barrier(mask, size, group_id=0, *, loc=None, ip=None):
+    """Group scheduling barrier wrapper used as phase fence in pipelined kernels."""
+    return sched_group_barrier(mask, size, group_id, loc=loc, ip=ip)
 
 
 def _unwrap_mfma_operand(v, *, loc=None):
@@ -67,6 +125,20 @@ def mfma_f32_16x16x16f16_op(result_type, operands, *, loc=None, ip=None):
 def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
     """Return the op result directly (no `.result` needed at call sites)."""
     return mfma_f32_16x16x16f16_op(result_type, operands, loc=loc, ip=ip).result
+
+
+def mfma_f32_32x32x8f16_op(result_type, operands, *, loc=None, ip=None):
+    """Return the op view (original behavior)."""
+    if _ods_mfma_f32_32x32x8f16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x8f16")
+    ops = [_unwrap_mfma_operand(v, loc=loc) for v in operands]
+    return _ods_mfma_f32_32x32x8f16(result_type, ops, loc=loc, ip=ip)
+
+
+def mfma_f32_32x32x8f16(result_type, operands, *, loc=None, ip=None):
+    """Return the op result directly (no `.result` needed at call sites)."""
+    return mfma_f32_32x32x8f16_op(result_type, operands, loc=loc, ip=ip).result
+
 
 # for bf16 version mfma
 def mfma_f32_16x16x16bf16_1k_op(result_type, operands, *, loc=None, ip=None):
@@ -138,6 +210,73 @@ def ds_swizzle(result_type, src, offset, *, loc=None, ip=None):
     return _ods_ds_swizzle(result_type, _arith_ext.unwrap(src), _arith_ext.unwrap(offset), loc=loc, ip=ip)
 
 
+def _unwrap_i32_lane_operand(v, *, loc=None):
+    from _mlir.ir import IntegerType
+    from . import arith as _arith_ext
+
+    return _arith_ext.unwrap(v, type=IntegerType.get_signless(32), loc=loc)
+
+
+def _permlane_i32x2_struct_type():
+    from _mlir import ir as _ir
+
+    # Some Python bindings accept optional spaces in LLVM type parser; keep both.
+    try:
+        return _ir.Type.parse("!llvm.struct<(i32, i32)>")
+    except Exception:
+        return _ir.Type.parse("!llvm.struct<(i32,i32)>")
+
+
+def _extract_permlane_lane_i32(pair_val, *, loc=None, ip=None):
+    from _mlir.dialects import llvm as _llvm
+    from _mlir.ir import IntegerType
+
+    i32 = IntegerType.get_signless(32)
+    return _llvm.extractvalue(i32, pair_val, [0], loc=loc, ip=ip)
+
+
+def permlane16_swap_pair(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane16 swap wrapper returning the raw i32x2 struct."""
+    return _ods_permlane16_swap(
+        _permlane_i32x2_struct_type(),
+        _unwrap_i32_lane_operand(old, loc=loc),
+        _unwrap_i32_lane_operand(src, loc=loc),
+        fi,
+        bound_control,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def permlane16_swap_i32(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane16 swap wrapper returning the swapped i32 lane value."""
+    pair_val = permlane16_swap_pair(
+        old, src, fi=fi, bound_control=bound_control, loc=loc, ip=ip
+    )
+    return _extract_permlane_lane_i32(pair_val, loc=loc, ip=ip)
+
+
+def permlane32_swap_pair(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane32 swap wrapper returning the raw i32x2 struct."""
+    return _ods_permlane32_swap(
+        _permlane_i32x2_struct_type(),
+        _unwrap_i32_lane_operand(old, loc=loc),
+        _unwrap_i32_lane_operand(src, loc=loc),
+        fi,
+        bound_control,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def permlane32_swap_i32(old, src, fi=False, bound_control=False, *, loc=None, ip=None):
+    """High-level permlane32 swap wrapper returning the swapped i32 lane value."""
+    pair_val = permlane32_swap_pair(
+        old, src, fi=fi, bound_control=bound_control, loc=loc, ip=ip
+    )
+    return _extract_permlane_lane_i32(pair_val, loc=loc, ip=ip)
+
+
 def raw_ptr_buffer_atomic_fadd(val, rsrc, voffset, soffset, cache, *, loc=None, ip=None):
     """Atomic fadd that accepts `ArithValue` / wrappers (no explicit `arith.unwrap(...)` needed).
 
@@ -173,6 +312,7 @@ __all__ = [
     'barrier', 's_barrier', 's_barrier_signal', 's_barrier_wait',
     's_waitcnt', 's_wait_loadcnt', 's_wait_storecnt',
     's_wait_dscnt', 's_wait_expcnt',
+    'async_load_fence',
     
     # Matrix operations - MFMA (Matrix Fused Multiply-Add)
     'mfma_f32_32x32x8f16', 'mfma_f32_16x16x16f16',
@@ -182,7 +322,7 @@ __all__ = [
     'mfma_i32_16x16x32_i8',
     'mfma_scale_f32_16x16x128_f8f6f4',
     # Raw-op constructors (return op view) for the above
-    'mfma_f32_16x16x16f16_op', 'mfma_f32_16x16x32_fp8_fp8_op',
+    'mfma_f32_32x32x8f16_op', 'mfma_f32_16x16x16f16_op', 'mfma_f32_16x16x32_fp8_fp8_op',
     'mfma_f32_16x16x16bf16_1k_op',
     'mfma_i32_16x16x32_i8_op',
     'mfma_scale_f32_16x16x128_f8f6f4_op',
@@ -198,6 +338,8 @@ __all__ = [
     # Shuffle and permutation
     'ds_swizzle', 'ds_bpermute',
     'permlanex16', 'permlane16_swap', 'permlane32_swap',
+    'permlane16_swap_pair', 'permlane16_swap_i32',
+    'permlane32_swap_pair', 'permlane32_swap_i32',
     'readlane', 'readfirstlane',
     'update_dpp',
     'ballot',
@@ -206,6 +348,7 @@ __all__ = [
     'raw_buffer_load', 'raw_buffer_store',
     'raw_ptr_buffer_load', 'raw_ptr_buffer_store',
     'load_to_lds', 'global_load_lds',
+    'async_load_to_lds', 'async_global_load_to_lds',
     'make_buffer_rsrc',
     
     # Atomic operations
@@ -219,6 +362,8 @@ __all__ = [
     # Scheduling and optimization
     's_setprio', 's_sleep',
     'sched_barrier', 'sched_group_barrier',
+    'phase_barrier', 'phase_group_barrier',
+    'sched_mfma', 'sched_vmem', 'sched_dsrd', 'sched_dswr',
     'iglp_opt',
     
     # Type conversions
