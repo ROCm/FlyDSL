@@ -212,7 +212,9 @@ create_venv_and_deps() {
 
   "${venv}/bin/python" -m pip install -U pip setuptools wheel
   # build deps + packaging tooling
-  "${venv}/bin/python" -m pip install -U numpy nanobind pybind11 auditwheel twine
+  # Pin nanobind to match the MLIR build (>= 2.9, nanobind 2.12+ needed for py312).
+  local nanobind_ver="${NANOBIND_VERSION:-2.12.0}"
+  "${venv}/bin/python" -m pip install -U numpy "nanobind==${nanobind_ver}" pybind11 auditwheel twine
 }
 
 build_one() {

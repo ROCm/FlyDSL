@@ -83,13 +83,55 @@ EMBEDDED_MLIR_ROOT = REPO_ROOT / EMBEDDED_MLIR_ROOT_REL
 EMBEDDED__MLIR = REPO_ROOT / EMBEDDED__MLIR_REL
 
 
+def _git_info() -> tuple[str, str]:
+    """Return (short_commit_hash, commit_count) from git, or ("", "") on failure."""
+    commit = ""
+    count = ""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=str(REPO_ROOT),
+        )
+        if r.returncode == 0:
+            commit = r.stdout.strip()
+        r = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=str(REPO_ROOT),
+        )
+        if r.returncode == 0:
+            count = r.stdout.strip()
+    except Exception:
+        pass
+    return commit, count
+
+
 def _read_version() -> str:
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
+    base_version = "0.0.0"
     for line in init_py.splitlines():
-        if line.startswith("__version__"):
-            # __version__ = "0.1.0"
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return "0.0.0"
+        if line.startswith("_BASE_VERSION"):
+            base_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+            break
+
+    git_commit, commit_count = _git_info()
+    if not git_commit or "+" in base_version:
+        return base_version
+
+    # Default: <base>.dev<N>+<hash>  (e.g. 0.1.0.dev335+38ebbc0)
+    #   pip install works; commit count is monotonically increasing for ordering,
+    #   hash suffix allows tracing back to the exact commit.
+    # The +<local> part is automatically stripped by PyPI uploads.
+    dev_tag = f".dev{commit_count}" if commit_count else ""
+    return f"{base_version}{dev_tag}+{git_commit}"
+
+
+def _write_version_file(version: str) -> None:
+    """Generate _version.py so that runtime __version__ matches the build version."""
+    version_file = PY_SRC / "flydsl" / "_version.py"
+    version_file.write_text(
+        f'__version__ = "{version}"\n',
+        encoding="utf-8",
+    )
 
 
 def _load_requirements() -> list[str]:
@@ -161,10 +203,13 @@ def _strip_embedded_shared_libs() -> None:
         print(f"Warning: failed to remove {capi}: {e}")
 
     # Strip shared libraries (extensions + runtime deps).
+    # Exclude libnanobind-*.so: strip --strip-unneeded removes dynamic symbols
+    # (e.g. nb_module_free) that extension modules resolve at load time, causing
+    # ImportError on Python 3.12+.
     so_files: list[Path] = [
         p
         for p in EMBEDDED__MLIR.rglob("*.so*")
-        if p.is_file() and not p.is_symlink()
+        if p.is_file() and not p.is_symlink() and not p.name.startswith("libnanobind")
     ]
     if not so_files:
         return
@@ -226,9 +271,21 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
         "libdrm_amdgpu.so.*",
     ]
 
+    # auditwheel needs to locate MLIR runtime libraries that are already
+    # bundled in the wheel.  Add the embedded _mlir_libs directory (and the
+    # MLIR install prefix, if available) to LD_LIBRARY_PATH so that the
+    # dynamic linker can resolve them during the repair step.
+    env = dict(os.environ)
+    extra_lib_dirs = [str(EMBEDDED__MLIR / "_mlir_libs")]
+    mlir_path = os.environ.get("MLIR_PATH")
+    if mlir_path:
+        extra_lib_dirs.append(os.path.join(mlir_path, "lib"))
+    existing = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = ":".join(extra_lib_dirs + ([existing] if existing else []))
+
     print(f"Running auditwheel repair on {wheel_path.name} ...")
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, env=env)
     except Exception as e:
         print(f"Warning: auditwheel repair failed; leaving original wheel. ({e})")
         shutil.rmtree(wheelhouse, ignore_errors=True)
@@ -314,9 +371,12 @@ else:
         "flydsl._mlir": str(EMBEDDED__MLIR_REL),
     }
 
+_version = _read_version()
+_write_version_file(_version)
+
 setup(
     name="flydsl",
-    version=_read_version(),
+    version=_version,
     description="FlyDSL - ROCm Domain Specific Language for layout algebra (Python + embedded MLIR runtime)",
     long_description=(REPO_ROOT / "README.md").read_text(encoding="utf-8") if (REPO_ROOT / "README.md").exists() else "",
     long_description_content_type="text/markdown",
