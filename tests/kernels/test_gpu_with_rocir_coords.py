@@ -116,7 +116,7 @@ def test_matmul_with_flir():
     max_error = int(np.max(diff))
 
     print(f" Max abs diff: {max_error}")
-    assert(max_error == 0, "Max absolute difference is not 0")
+    assert max_error == 0, "Max absolute difference is not 0"
     return
 
 

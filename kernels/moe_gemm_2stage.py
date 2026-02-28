@@ -2114,17 +2114,36 @@ def compile_moe_gemm2(
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
 
-                        ts2 = t2 * topk_i32_v + s2
-                        sx = arith.f32(1.0) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
+                        # Mask sentinel (token_id==tokens, slot==topk) to avoid OOB scale_x loads.
+                        # For invalid rows, force sx=0 so they contribute exactly 0 to output.
+                        t_ok = arith.cmpu(t2, tokens_i32, "ult")
+                        s_ok = arith.cmpu(s2, topk_i32_v, "ult")
+                        ts_ok = arith.andi(t_ok, s_ok)
+                        t2_safe = arith.select(ts_ok, t2, arith.i32(0))
+                        s2_safe = arith.select(ts_ok, s2, arith.i32(0))
+                        ts2 = t2_safe * topk_i32_v + s2_safe
+                        sx = (
+                            arith.select(ts_ok, arith.f32(1.0), arith.f32(0.0))
+                            if is_f16
+                            else arith.select(
+                                ts_ok,
+                                buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
+                                arith.f32(0.0),
+                            )
+                        )
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
                             if tw_pf is not None:
-                                tw = tw_pf[tw_idx]
+                                tw = arith.select(ts_ok, tw_pf[tw_idx], arith.f32(0.0))
                             else:
-                                tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
+                                tw = arith.select(
+                                    ts_ok,
+                                    buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32),
+                                    arith.f32(0.0),
+                                )
 
-                        idx0 = t2 * model_i32  # i32 element index base
+                        idx0 = t2_safe * model_i32  # i32 element index base (safe for sentinel rows)
 
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
