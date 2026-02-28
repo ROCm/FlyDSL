@@ -698,13 +698,6 @@ def run_moe_stage1(
             interleave_k64=bool(uint4_interleave),
         )
 
-        # Log (shape + a sample packed word)
-        print(f"[uint4 packed4] stage1 interleave_k64={bool(uint4_interleave)} qscale_u8.shape={tuple(qscale_u8_w1.shape)} qzero_u8.shape={tuple(qzero_u8_w1.shape)}")
-        print(f"[uint4 packed4] stage1 qscale_i32.shape={tuple(qscale_i32_w1.shape)} qzero_i32.shape={tuple(qzero_i32_w1.shape)}")
-        b = qscale_u8_w1[0, 0, 0, 0, :].tolist()
-        p = int(qscale_i32_w1[0, 0, 0, 0].item())
-        print(f"[uint4 packed4] stage1 sample qscale bytes={b} packed_i32=0x{p:08x}")
-
         w_kernel = w_packed.contiguous()
         qscale_w1_1d = qscale_i32_w1.contiguous().view(-1)
         qzero_w1_1d = qzero_i32_w1.contiguous().view(-1)
@@ -1132,12 +1125,6 @@ def run_moe_stage2(
             seed=seed + 22,
             interleave_k64=bool(uint4_interleave),
         )
-
-        print(f"[uint4 packed4] stage2 interleave_k64={bool(uint4_interleave)} qscale_u8.shape={tuple(qscale_u8_w2.shape)} qzero_u8.shape={tuple(qzero_u8_w2.shape)}")
-        print(f"[uint4 packed4] stage2 qscale_i32.shape={tuple(qscale_i32_w2.shape)} qzero_i32.shape={tuple(qzero_i32_w2.shape)}")
-        b = qscale_u8_w2[0, 0, 0, 0, :].tolist()
-        p = int(qscale_i32_w2[0, 0, 0, 0].item())
-        print(f"[uint4 packed4] stage2 sample qscale bytes={b} packed_i32=0x{p:08x}")
 
         w2_kernel = w2_packed.contiguous()
         qscale_w2_1d = qscale_i32_w2.contiguous().view(-1)

@@ -169,15 +169,6 @@ def load_b_pack_k32(
     kpack_bytes: int = 16,
     elem_bytes: int = 1,
     unpack_int4: bool = False,
-    unpack_uint4: bool = False,
-    uint4_qs: "ir.Value | None" = None,
-    uint4_qz_bcast: "ir.Value | None" = None,
-    # New uint4 packed4 mode (PDF layout): packed4 words + half128 selector.
-    uint4_qs_word: "ir.Value | None" = None,
-    uint4_qz_word: "ir.Value | None" = None,
-    uint4_half128_sel: "ir.Value | None" = None,  # i1 or index; used only when qs/qz present and k_quantize_block==64
-    uint4_k_quantize_block: int = 64,
-    overflow_guard: bool = False,
 ) -> ir.Value:
     """Load one B pack for one MFMA(x32) micro-step.
 
@@ -187,24 +178,11 @@ def load_b_pack_k32(
       this micro-step.
     - For packed INT4 (W4A8): loads 4 bytes (8 int4 values) and unpacks to 8 int8 bytes
       using the 7-op sequence (no v_perm).
-    - For packed UINT4 (W4A8 zero-point): loads 4 bytes (8 uint4 values) and unpacks to
-      8 uint8 bytes (3 ops). When ``uint4_qs`` / ``uint4_qz_bcast`` are provided, applies
-      in-place dequant ``int8 = (uint8 * qs + qz) ^ 0x80808080`` directly on the i32
-      halves, avoiding any i64 split/rejoin overhead.
-
-      ``uint4_qz_bcast`` can be either pre-broadcast (all 4 byte lanes identical) or a
-      raw scalar — in the latter case the broadcast is computed here, AFTER the weight
-      data is loaded, so that the qzero buffer_load latency overlaps with the weight
-      load instead of forcing an early s_waitcnt.
     """
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
     if unpack_int4 and kpack_bytes != 8:
         raise ValueError("unpack_int4 requires kpack_bytes=8 (packed int4 layout)")
-    if unpack_uint4 and kpack_bytes != 8:
-        raise ValueError("unpack_uint4 requires kpack_bytes=8 (packed uint4 layout)")
-    if unpack_int4 and unpack_uint4:
-        raise ValueError("unpack_int4 and unpack_uint4 are mutually exclusive")
 
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
@@ -264,130 +242,6 @@ def load_b_pack_k32(
         t = packed32 >> c_4_i32
         s1 = (t & c_08080808) * c_1e
         odd = (t & c_0f0f0f0f) | s1
-
-        vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
-        v2 = vector.from_elements(vec2_i32, [even, odd])
-        vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
-        v64 = vector.bitcast(vec1_i64, v2)
-        return vector.extract(v64, static_position=[0], dynamic_position=[])
-
-    if unpack_uint4:
-        # Load 4 bytes -> i32 -> unpack to 2 x i32 (8 unsigned u8 bytes).
-        atom = flir.make_copy_atom(elem_type, vector_size=4)
-        idx_bytes = idx_pack + k2_base
-        b_view = flir.TensorView(
-            arg_b,
-            (4,),
-            strides=(1,),
-            base_indices=(idx_bytes,),
-            element_type=elem_type,
-        )
-        b4 = flir.copy(
-            atom,
-            b_view,
-            None,
-            alignment=4,
-            return_vector=True,
-            src_buffer_resource=b_rsrc,
-            src_buffer_offset_in_bytes=True,
-        )
-        vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
-        packed32 = vector.extract(
-            vector.bitcast(vec1_i32, b4),
-            static_position=[0],
-            dynamic_position=[],
-        )
-
-        # 3-op UINT4 unpack: bytes [(v4<<4)|v0, ...] → even=low nibbles, odd=high nibbles
-        c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
-        c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
-
-        even = packed32 & c_0f0f0f0f
-        odd = (packed32 >> c_4_i32) & c_0f0f0f0f
-
-        # In-place dequant: int8 = (uint8 * qscale + qzero) ^ 0x80808080
-        #
-        # Two modes:
-        # - Legacy scalar mode: uint4_qs + uint4_qz_bcast (broadcast computed here).
-        # - Packed4 PDF mode: uint4_qs_word/uint4_qz_word are packed4 i32 words (little-endian),
-        #   `uint4_half128_sel` selects (byte0,byte1) vs (byte2,byte3). Only valid when k_quantize_block==64.
-        if uint4_qs_word is not None or uint4_qz_word is not None or uint4_half128_sel is not None:
-            if uint4_qs_word is None or uint4_qz_word is None or uint4_half128_sel is None:
-                raise ValueError("packed4 uint4 mode requires qs_word, qz_word, and half128_sel")
-            if int(uint4_k_quantize_block) != 64:
-                raise ValueError(f"packed4 uint4 mode requires k_quantize_block==64, got {uint4_k_quantize_block!r}")
-
-            i32_ty = ir.IntegerType.get_signless(32)
-            c_sign_flip = arith.constant(0x80808080, type=i32_ty)
-            c_ff = arith.constant(0x000000FF, type=i32_ty)
-            c_8 = arith.constant(8, type=i32_ty)
-            c_16 = arith.constant(16, type=i32_ty)
-            c_24 = arith.constant(24, type=i32_ty)
-
-            # Normalize sel to i1 (caller may pass index or i1).
-            sel_i1 = uint4_half128_sel
-            if str(getattr(sel_i1, "type", "")) != "i1":
-                sel_i1 = sel_i1 != arith.constant(0, type=i32_ty)
-
-            qs_hiword = uint4_qs_word >> c_16
-            qz_hiword = uint4_qz_word >> c_16
-            qs_sel = arith.select(sel_i1, qs_hiword, uint4_qs_word)
-            qz_sel = arith.select(sel_i1, qz_hiword, uint4_qz_word)
-
-            # Packed4 bytes for this 128-half:
-            # - byte0: low64 qparam, byte1: high64 qparam
-            qs_lo = qs_sel & c_ff
-            qs_hi = (qs_sel >> c_8) & c_ff
-            qz_lo = qz_sel & c_ff
-            qz_hi = (qz_sel >> c_8) & c_ff
-
-            # qz_vec bytes: [qz_lo, qz_hi, qz_lo, qz_hi]
-            qz_vec = qz_lo | (qz_hi << c_8) | (qz_lo << c_16) | (qz_hi << c_24)
-
-            if not bool(overflow_guard):
-                # Fast packed-byte math (assumes no cross-byte carries).
-                c_mask02 = arith.constant(0x00FF00FF, type=i32_ty)
-                c_mask13 = arith.constant(0xFF00FF00, type=i32_ty)
-
-                def _dequant_fast(v):
-                    v02 = v & c_mask02
-                    v13 = v & c_mask13
-                    return (((v02 * qs_lo) + (v13 * qs_hi)) + qz_vec) ^ c_sign_flip
-
-                even = _dequant_fast(even)
-                odd = _dequant_fast(odd)
-            else:
-                # Safe per-byte dequant (no assumptions about carries).
-                c_255 = arith.constant(255, type=i32_ty)
-
-                def _clamp_u8(x):
-                    gt = x > c_255
-                    return arith.select(gt, c_255, x)
-
-                def _dequant_safe(v):
-                    b0 = v & c_ff
-                    b1 = (v >> c_8) & c_ff
-                    b2 = (v >> c_16) & c_ff
-                    b3 = (v >> c_24) & c_ff
-                    o0 = _clamp_u8((b0 * qs_lo) + qz_lo)
-                    o1 = _clamp_u8((b1 * qs_hi) + qz_hi)
-                    o2 = _clamp_u8((b2 * qs_lo) + qz_lo)
-                    o3 = _clamp_u8((b3 * qs_hi) + qz_hi)
-                    out = o0 | (o1 << c_8) | (o2 << c_16) | (o3 << c_24)
-                    return out ^ c_sign_flip
-
-                even = _dequant_safe(even)
-                odd = _dequant_safe(odd)
-
-        elif uint4_qs is not None:
-            # Legacy scalar-qparam mode.
-            c_sign_flip = arith.constant(0x80808080, type=ir.IntegerType.get_signless(32))
-            c_8 = arith.constant(8, type=ir.IntegerType.get_signless(32))
-            c_16 = arith.constant(16, type=ir.IntegerType.get_signless(32))
-            qz1 = uint4_qz_bcast | (uint4_qz_bcast << c_8)
-            qz_bc = qz1 | (qz1 << c_16)
-            even = ((even * uint4_qs) + qz_bc) ^ c_sign_flip
-            odd = ((odd * uint4_qs) + qz_bc) ^ c_sign_flip
 
         vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
         v2 = vector.from_elements(vec2_i32, [even, odd])
