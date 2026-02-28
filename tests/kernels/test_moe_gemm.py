@@ -1741,7 +1741,7 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "int4_bf16", "all"],
+        choices=["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "all"],
         help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / int4_bf16 / all (default: all). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
         "int4 means W4A8: A int8, W packed int4. "
@@ -1865,7 +1865,7 @@ if __name__ == "__main__":
     # Expand "all" to all supported dtypes.
     in_dtypes = args.in_dtype.split(",")
     if "all" in in_dtypes:
-        in_dtypes = ["fp8", "fp16", "int8", "int4", "int4_bf16"]
+        in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16"]
     for dt in in_dtypes:
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)
