@@ -199,7 +199,7 @@ def test_mfma_a8_flir_preshuffle(
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
-    # Preshuffle B to CK/aiter layout.
+    # Preshuffle B.
     b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
@@ -303,14 +303,14 @@ def test_mfma_a8_flir_preshuffle(
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
-        # MXFP4 constraints (same as CK: KPerBlock=256 fp4, NPerBlock>=128):
+        # MXFP4 constraints (KPerBlock=256 fp4, NPerBlock>=128):
         #   tile_k >= 256 (pack_K=2), tile_n >= 128 (pack_N=2 with 4 waves)
         #   K must be a multiple of tile_k
-        # Tile configs aligned with CK kernels (see aiter gemm_a4w4_blockscale_common.py)
-        (32, 8192, 8192, 32, 128, 256),                                                      # decode, ~1.03x CK
-        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill, ~0.78x CK
-        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill, ~0.98x CK
-        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # non-aligned M, ~0.79x CK
+        # Tile configs (see aiter gemm_a4w4_blockscale_common.py)
+        (32, 8192, 8192, 32, 128, 256),                                                      # decode
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill
+        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # non-aligned M
     ]
 )
 def test_mfma_w4_flir_preshuffle(

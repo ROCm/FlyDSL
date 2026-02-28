@@ -8,7 +8,7 @@ extracted from `tests/kernels/test_preshuffle_gemm.py` in the same style as
 
 Pipelines:
 - `pingpong`: tuned 2-stage pipeline with ping-pong LDS for A (2 LDS buffers)
-- `ck_v1_single_lds`: CK-like Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
+- `ck_v1_single_lds`: Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
 """
 
 import os
@@ -155,7 +155,7 @@ def compile_mxfp4_preshuffle_gemm(
             f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
         )
 
-    # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
+    # LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
 
     #TODO: use f4?
@@ -265,7 +265,7 @@ def compile_mxfp4_preshuffle_gemm(
             stride_lds = flir.make_stride(tile_k // a_elem_vec_pack, 1)
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
-            # CK-style XOR16 swizzle parameter (const).
+            # XOR16 swizzle parameter (const).
             # For FP4, LDS K dimension is tile_k_bytes // a_elem_vec_pack (128 bytes)
             # k_blocks16 must match actual LDS size to avoid swizzle address overflow
             lds_k_bytes = tile_k_bytes // a_elem_vec_pack
@@ -310,7 +310,7 @@ def compile_mxfp4_preshuffle_gemm(
             row_a_lds = lane_mod_16
             # Per-`k1` (KLane) base offset along K inside a 64B K0 block.
             #
-            # CK preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
+            # Preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
             # - fp8/int8: 16 elems (1B)
             # - fp16/bf16: 8 elems (2B)
             #
@@ -838,9 +838,9 @@ def compile_mxfp4_preshuffle_gemm(
                     body_row=body_row,
                 )
 
-            # ---------------- Scheduling hints (match CK-style) ----------------
+            # ---------------- Scheduling hints ----------------
             # These sched_group_barrier hints help the backend interleave VMEM/DS/MFMA
-            # similarly to CK's tuned pipelines.
+            # for tuned pipeline interleaving.
             rocdl.sched_barrier(0)
 
             # Scheduling is beneficial for compute-bound shapes (larger tiles with many MFMAs).
@@ -848,7 +848,7 @@ def compile_mxfp4_preshuffle_gemm(
             _use_scheduler = (tile_m >= 64)
 
             def hot_loop_scheduler():
-                """CK-style intrawave scheduler adapted from preshuffle_gemm.py.
+                """Intrawave scheduler adapted from preshuffle_gemm.py.
 
                 Pattern: preload DS reads, then interleave VMEM/MFMA/DSRD/DSWR groups
                 so the MFMA pipeline stays fed while memory operations complete.
@@ -868,7 +868,7 @@ def compile_mxfp4_preshuffle_gemm(
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # DS-read preload (CK default is 2 ds_read_b128).
+                # DS-read preload (2 ds_read_b128).
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 rocdl.sched_mfma(1)
@@ -1053,7 +1053,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                 store_output(final_accs)
             # else:
-            #     # CK-like bpreshuffle v1 spirit:
+            #     # Bpreshuffle v1 spirit:
             #     # - Intrawave schedule
             #     # - Global prefetch 2 (regs double-buffer)
             #     # - Local shared memory buffer 1 (single LDS tile for A)
