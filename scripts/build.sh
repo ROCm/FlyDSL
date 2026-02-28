@@ -65,6 +65,16 @@ if [ ! -f "${REPO_ROOT}/thirdparty/dlpack/include/dlpack/dlpack.h" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Remove editable-install symlink that would cause CopyFlyPythonSources to
+# overwrite the freshly built _mlir_libs with files from a different build.
+# ---------------------------------------------------------------------------
+_EDITABLE_MLIR_LINK="${REPO_ROOT}/python/flydsl/_mlir"
+if [ -L "${_EDITABLE_MLIR_LINK}" ]; then
+  echo "Removing editable-install symlink: ${_EDITABLE_MLIR_LINK}"
+  rm -f "${_EDITABLE_MLIR_LINK}"
+fi
+
+# ---------------------------------------------------------------------------
 # CMake configure
 # ---------------------------------------------------------------------------
 NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')" 2>/dev/null || true)
