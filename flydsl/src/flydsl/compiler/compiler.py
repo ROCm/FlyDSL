@@ -261,8 +261,9 @@ def compile(
         COMPILE_ONLY: If set to "1", only compile the module without creating
             an executor. Returns None instead of an Executor. Useful for
             offline compilation or verifying compilation without a GPU.
-        ARCH: Override the target GPU architecture. Supported values: "gfx942",
-            "gfx950". If not set, auto-detects from the current GPU.
+        FLYDSL_TARGET_ARCH: Override the target GPU architecture. Supported
+            values: "gfx942", "gfx950". Falls back to legacy ARCH env var.
+            If not set, auto-detects from the current GPU.
     """
 
     # Accept `flir.lang.MlirModule` instances.
@@ -309,7 +310,7 @@ def compile(
                 module = mlir_module
 
     # Allow overriding target arch via env var (useful for cross-compilation or COMPILE_ONLY mode)
-    chip = os.environ.get("ARCH", "").strip() or get_rocm_arch()
+    chip = (os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or "").strip() or get_rocm_arch()
 
     pipeline = _build_pipeline_str(
         chip=chip,
