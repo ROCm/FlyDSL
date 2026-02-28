@@ -684,32 +684,36 @@ def compile_moe_gemm1(
                         Dequant formula per byte: xor(nibble * scale + zero, 0x80)
                         low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
                         """
-                        # Unpack qparam bytes
+                        # Unpack scale bytes
                         qs_b0 = qs_word & c_ff
                         qs_b1 = (qs_word >> c_8) & c_ff
                         qs_b2 = (qs_word >> c_16_i32) & c_ff
                         qs_b3 = (qs_word >> c_24) & c_ff
-                        qz_b0 = qz_word & c_ff
-                        qz_b1 = (qz_word >> c_8) & c_ff
-                        qz_b2 = (qz_word >> c_16_i32) & c_ff
-                        qz_b3 = (qz_word >> c_24) & c_ff
 
                         # pack_group selects which scale/zero pair to use:
                         #   0 -> (b0, b1) for K[0..127]
                         #   1 -> (b2, b3) for K[128..255]
                         if pack_group == 0:
                             qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo_byte, qz_hi_byte = qz_b0, qz_b1
+                            qz_lo_byte = qz_word & c_ff
+                            qz_hi_byte = (qz_word >> c_8) & c_ff
                         else:
                             qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo_byte, qz_hi_byte = qz_b2, qz_b3
+                            qz_lo_byte = (qz_word >> c_16_i32) & c_ff
+                            qz_hi_byte = (qz_word >> c_24) & c_ff
 
-                        # Broadcast zero to all 4 byte positions.
-                        # TODO: replace with v_perm_b32 when available in rocdl
-                        # v_perm_b32 qzero_lo, vNULL, qz_word, 0x00000000  (broadcast byte0)
-                        # v_perm_b32 qzero_hi, vNULL, qz_word, 0x01010101  (broadcast byte1)
-                        qz_lo = qz_lo_byte | (qz_lo_byte << c_8) | (qz_lo_byte << c_16_i32) | (qz_lo_byte << c_24)
-                        qz_hi = qz_hi_byte | (qz_hi_byte << c_8) | (qz_hi_byte << c_16_i32) | (qz_hi_byte << c_24)
+                        # Broadcast zero to all 4 byte positions using v_perm_b32.
+                        # v_perm_b32 dst, src0, src1, sel: each byte of sel picks a src byte.
+                        # sel byte value 0..3 picks byte 0..3 from src1 (qz_word).
+                        c_zero_i32 = arith.constant(0, type=i32_ty)
+                        if pack_group == 0:
+                            perm_lo = arith.constant(0x00000000, type=i32_ty)
+                            perm_hi = arith.constant(0x01010101, type=i32_ty)
+                        else:
+                            perm_lo = arith.constant(0x02020202, type=i32_ty)
+                            perm_hi = arith.constant(0x03030303, type=i32_ty)
+                        qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
+                        qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
 
                         dwords = [d0, d1, d2, d3]
                         even_outs = []
@@ -2071,27 +2075,31 @@ def compile_moe_gemm2(
                         Dequant formula per byte: xor(nibble * scale + zero, 0x80)
                         low64 uses (qs_lo, qz_lo), high64 uses (qs_hi, qz_hi).
                         """
+                        # Unpack scale bytes
                         qs_b0 = qs_word & c_ff
                         qs_b1 = (qs_word >> c_8) & c_ff
                         qs_b2 = (qs_word >> c_16_i32) & c_ff
                         qs_b3 = (qs_word >> c_24) & c_ff
-                        qz_b0 = qz_word & c_ff
-                        qz_b1 = (qz_word >> c_8) & c_ff
-                        qz_b2 = (qz_word >> c_16_i32) & c_ff
-                        qz_b3 = (qz_word >> c_24) & c_ff
 
                         if pack_group == 0:
                             qs_lo, qs_hi = qs_b0, qs_b1
-                            qz_lo_byte, qz_hi_byte = qz_b0, qz_b1
+                            qz_lo_byte = qz_word & c_ff
+                            qz_hi_byte = (qz_word >> c_8) & c_ff
                         else:
                             qs_lo, qs_hi = qs_b2, qs_b3
-                            qz_lo_byte, qz_hi_byte = qz_b2, qz_b3
+                            qz_lo_byte = (qz_word >> c_16_i32) & c_ff
+                            qz_hi_byte = (qz_word >> c_24) & c_ff
 
-                        # TODO: replace with v_perm_b32 when available in rocdl
-                        # v_perm_b32 qzero_lo, vNULL, qz_word, 0x00000000  (broadcast byte0)
-                        # v_perm_b32 qzero_hi, vNULL, qz_word, 0x01010101  (broadcast byte1)
-                        qz_lo = qz_lo_byte | (qz_lo_byte << c_8) | (qz_lo_byte << c_16_i32) | (qz_lo_byte << c_24)
-                        qz_hi = qz_hi_byte | (qz_hi_byte << c_8) | (qz_hi_byte << c_16_i32) | (qz_hi_byte << c_24)
+                        # Broadcast zero to all 4 byte positions using v_perm_b32.
+                        c_zero_i32 = arith.constant(0, type=i32_ty)
+                        if pack_group == 0:
+                            perm_lo = arith.constant(0x00000000, type=i32_ty)
+                            perm_hi = arith.constant(0x01010101, type=i32_ty)
+                        else:
+                            perm_lo = arith.constant(0x02020202, type=i32_ty)
+                            perm_hi = arith.constant(0x03030303, type=i32_ty)
+                        qz_lo = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_lo], [], [])
+                        qz_hi = llvm.call_intrinsic(i32_ty, "llvm.amdgcn.perm", [c_zero_i32, qz_word, perm_hi], [], [])
 
                         dwords = [d0, d1, d2, d3]
                         even_outs = []
