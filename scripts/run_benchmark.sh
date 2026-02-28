@@ -55,6 +55,12 @@ MOE_SHAPES='
 64,6144,1024,128,8,16,64,256,64,256
 '
 
+# MoE shapes (W4A16 / bf16): "in_dtype,tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2,group_size"
+MOE_EXTRA_SHAPES='
+int4_bf16,5231,7168,512,384,8,64,64,128,256,128,32
+bf16,5231,7168,512,384,8,64,64,128,256,128,-1
+'
+
 
 # Memory bound threshold (M or tokens <= threshold => memory bound)
 MEMORY_BOUND_THRESHOLD=512
@@ -457,6 +463,54 @@ if [ "${RUN_MOE}" -eq 1 ]; then
     tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+    fi
+  done
+
+  # MoE (W4A16 / bf16)
+  for shape in $MOE_EXTRA_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    in_dtype=$1; tokens=$2; model_dim=$3; inter_dim=$4; experts=$5; topk=$6; tile_m=$7; tile_n=$8; tile_k=$9; tile_n2=${10}; tile_k2=${11}; group_size=${12}
+    log="${BENCH_LOG_DIR}/moe_${in_dtype}_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype "$in_dtype" \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --group_size "$group_size" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "moe ${in_dtype} failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "moe_${in_dtype}"
+    fi
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+    dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+    fi
+
+    dt_s2="$(grep -Eo 'FLIR MoE stage2 \[' "${log}" | tail -1 || true)"
+    tf_s2="$(grep -Eo 'FLIR MoE stage2 .*([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FLIR MoE stage2 .*([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+      _emit_row "moe_gemm2" "${shape_moe}" "${in_dtype}" "${tb_s2}" "${tf_s2}"
     fi
   done
 fi
