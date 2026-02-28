@@ -1290,11 +1290,10 @@ def run_moe_stage2(
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
-    if int(qscale_w2_1d.numel()) > 0:
-        print(qscale_w2_1d.shape, qscale_w2_1d.dtype)
-        print(qzero_w2_1d.shape, qzero_w2_1d.dtype)
-        print(qscale_w2_1d.min(), qscale_w2_1d.max())
-        print(qzero_w2_1d.min(), qzero_w2_1d.max())
+    # When not uint4, qscale/qzero are unused; pass at least 1-element buffers to avoid
+    # potential runtime crash on 0-size memrefs.
+    qscale_launch = qscale_w2_1d if int(qscale_w2_1d.numel()) > 0 else torch.zeros((1,), device=device, dtype=torch.int32)
+    qzero_launch = qzero_w2_1d if int(qzero_w2_1d.numel()) > 0 else torch.zeros((1,), device=device, dtype=torch.int32)
     _, us = run_perftest(
         launch,
         out_perf,
@@ -1302,8 +1301,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
-        qscale_w2_1d,
-        qzero_w2_1d,
+        qscale_launch,
+        qzero_launch,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
@@ -1321,8 +1320,8 @@ def run_moe_stage2(
         w2_kernel.view(-1),
         a2_scale_1d,
         w2_scale_1d,
-        qscale_w2_1d,
-        qzero_w2_1d,
+        qscale_launch,
+        qzero_launch,
         sorted_token_ids,
         sorted_expert_ids,
         sorted_weights_1d,
