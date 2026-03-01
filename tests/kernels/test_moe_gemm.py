@@ -62,7 +62,7 @@ except Exception:
     HAS_AITER = False
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
-from kernels.moe_gemm_2stage import (
+from flydsl.kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
@@ -460,7 +460,7 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    from kernels.moe_gemm_2stage import compile_moe_gemm1
+    from flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
