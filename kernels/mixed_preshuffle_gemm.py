@@ -8,7 +8,7 @@ extracted from `tests/kernels/test_preshuffle_gemm.py` in the same style as
 
 Pipelines:
 - `pingpong`: tuned 2-stage pipeline with ping-pong LDS for A (2 LDS buffers)
-- `ck_v1_single_lds`: CK-like Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
+- `ck_v1_single_lds`: Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
 """
 
 import os
@@ -24,7 +24,7 @@ from _mlir import ir
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_16b_xor16,
@@ -33,8 +33,8 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import mfma_epilog
-from kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.mfma_epilogues import mfma_epilog
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
 
 
 def compile_mxfp4_preshuffle_gemm(
@@ -84,6 +84,10 @@ def compile_mxfp4_preshuffle_gemm(
     pack_M = 2
     pack_N = 2
     pack_K = 2
+    # MXFP4 packed-K: default pack_K=2 (two K128 half-steps per tile).
+    # For tile_k=128 we use an effective pack_K=1 (Option A): only the first half-step
+    # (ikxdl=0) is executed, and the packed scale selector remains in-range.
+    pack_K_eff = 1 if int(tile_k) == 128 else pack_K
 
     quant_block_size_a = 32
     quant_block_size_b = 32
@@ -107,17 +111,19 @@ def compile_mxfp4_preshuffle_gemm(
         )
 
     # MXFP4 packing constraints:
-    # - k_unroll_packed = (tile_k_bytes // 128) // pack_K must be >= 1 => tile_k >= 256
+    # - k_unroll_packed = (tile_k_bytes // 128) // pack_K_eff must be >= 1
+    #     => tile_k >= 256 for pack_K_eff=2 (default)
+    #     => tile_k >= 128 for pack_K_eff=1 (tile_k=128 special-case)
     # - num_acc_n_packed = (tile_n // 4 // 16) // pack_N must be >= 1 => tile_n >= 128
     num_waves = 4
     k_unroll_check = tile_k_bytes // 128
-    k_unroll_packed_check = k_unroll_check // pack_K
+    k_unroll_packed_check = k_unroll_check // pack_K_eff
     n_per_wave_check = int(tile_n) // num_waves
     num_acc_n_check = n_per_wave_check // 16
     num_acc_n_packed_check = num_acc_n_check // pack_N
     if k_unroll_packed_check < 1:
         raise ValueError(
-            f"MXFP4 requires tile_k >= {128 * pack_K} (pack_K={pack_K}), got tile_k={tile_k} "
+            f"MXFP4 requires tile_k >= {128 * pack_K_eff} (pack_K_eff={pack_K_eff}), got tile_k={tile_k} "
             f"(k_unroll={k_unroll_check}, k_unroll_packed={k_unroll_packed_check})"
         )
     if num_acc_n_packed_check < 1:
@@ -155,7 +161,7 @@ def compile_mxfp4_preshuffle_gemm(
             f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
         )
 
-    # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
+    # LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
 
     #TODO: use f4?
@@ -265,7 +271,7 @@ def compile_mxfp4_preshuffle_gemm(
             stride_lds = flir.make_stride(tile_k // a_elem_vec_pack, 1)
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
-            # CK-style XOR16 swizzle parameter (const).
+            # XOR16 swizzle parameter (const).
             # For FP4, LDS K dimension is tile_k_bytes // a_elem_vec_pack (128 bytes)
             # k_blocks16 must match actual LDS size to avoid swizzle address overflow
             lds_k_bytes = tile_k_bytes // a_elem_vec_pack
@@ -310,7 +316,7 @@ def compile_mxfp4_preshuffle_gemm(
             row_a_lds = lane_mod_16
             # Per-`k1` (KLane) base offset along K inside a 64B K0 block.
             #
-            # CK preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
+            # Preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
             # - fp8/int8: 16 elems (1B)
             # - fp16/bf16: 8 elems (2B)
             #
@@ -338,7 +344,7 @@ def compile_mxfp4_preshuffle_gemm(
             n_tile_base = wave_id * c_n_per_wave
 
             # fp4 pack
-            k_unroll_packed  = k_unroll // pack_K
+            k_unroll_packed  = k_unroll // pack_K_eff
             m_repeat_packed  = m_repeat // pack_M
             num_acc_n_packed = num_acc_n // pack_N
 
@@ -564,6 +570,7 @@ def compile_mxfp4_preshuffle_gemm(
                     lds_base,
                     *,
                     a0_prefetch=None,
+                    k_half_sel: int = 0,
                     a_scale=None,
                     b_scale=None,
                 ):
@@ -599,8 +606,8 @@ def compile_mxfp4_preshuffle_gemm(
                         for ni in range_constexpr(num_acc_n_packed):
                             b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
                             b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
-                            for ikxdl in range_constexpr(pack_K):
-                                k_idx = ku128 * pack_K + ikxdl
+                            for ikxdl in range_constexpr(pack_K_eff):
+                                k_idx = ku128 * pack_K_eff + ikxdl
 
                                 b_packs0, b_packs1 = b_tile_in[k_idx]
 
@@ -649,10 +656,10 @@ def compile_mxfp4_preshuffle_gemm(
                                                 cbsz,
                                                 blgp,
                                                 # op_sel_a + scale_a (per-block quant)
-                                                ikxdl * pack_M + imxdl,
+                                                (k_half_sel * pack_M) + (ikxdl * pack_M + imxdl),
                                                 a_scale_val,
                                                 # op_sel_b + scale_b
-                                                ikxdl * pack_N + inxdl,
+                                                (k_half_sel * pack_N) + (ikxdl * pack_N + inxdl),
                                                 b_scale_val,
                                             ],
                                         )
@@ -838,9 +845,9 @@ def compile_mxfp4_preshuffle_gemm(
                     body_row=body_row,
                 )
 
-            # ---------------- Scheduling hints (match CK-style) ----------------
+            # ---------------- Scheduling hints ----------------
             # These sched_group_barrier hints help the backend interleave VMEM/DS/MFMA
-            # similarly to CK's tuned pipelines.
+            # for tuned pipeline interleaving.
             rocdl.sched_barrier(0)
 
             # Scheduling is beneficial for compute-bound shapes (larger tiles with many MFMAs).
@@ -848,7 +855,7 @@ def compile_mxfp4_preshuffle_gemm(
             _use_scheduler = (tile_m >= 64)
 
             def hot_loop_scheduler():
-                """CK-style intrawave scheduler adapted from preshuffle_gemm.py.
+                """Intrawave scheduler adapted from preshuffle_gemm.py.
 
                 Pattern: preload DS reads, then interleave VMEM/MFMA/DSRD/DSWR groups
                 so the MFMA pipeline stays fed while memory operations complete.
@@ -857,18 +864,18 @@ def compile_mxfp4_preshuffle_gemm(
                   - Each DS_read feeds pack_N=2 MFMAs (same A, different B/inxdl)
                   - mfma_group = pack_N = 2
                   - mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed
-                                 * pack_K * pack_M * pack_N
+                                 * pack_K_eff * pack_M * pack_N
                 """
                 if not _use_scheduler:
                     return
 
                 # MFMA grouping: pack_N MFMAs share one A DS_read
                 mfma_group = pack_N
-                mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed * pack_K * pack_M * pack_N
+                mfma_total = k_unroll_packed * m_repeat_packed * num_acc_n_packed * pack_K_eff * pack_M * pack_N
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # DS-read preload (CK default is 2 ds_read_b128).
+                # DS-read preload (2 ds_read_b128).
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 rocdl.sched_mfma(1)
@@ -910,7 +917,7 @@ def compile_mxfp4_preshuffle_gemm(
                 # Prologue: tile-0
                 k0 = arith.constant(0, index=True)
                 a_regs0, b_tile0 = prefetch_ab_tile(k0)
-                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
+                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 256)
 
                 store_a_tile_to_lds(a_regs0, lds_base0)
                 gpu.barrier()
@@ -924,6 +931,113 @@ def compile_mxfp4_preshuffle_gemm(
                 # Prefetch A0 for the first compute tile (overlap with the next VMEM prefetch).
                 a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
 
+
+                def pipeline_tilek_128(
+                    accs,
+                    *,
+                    lds_base_pong,
+                    lds_base_ping,
+                    b_tile_pong,
+                    a0_prefetch_pong,
+                    a_scale_pong,
+                    b_scale_pong,
+                ):
+                    # tile_k=128: use pack_K_eff=1 and double-buffer scales at 256-K granularity.
+                    # - scale_ping: current 256-block
+                    # - scale_pong: next 256-block (prefetched when loading next_k2)
+                    a_scale_ping, b_scale_ping = a_scale_pong, b_scale_pong
+
+                    c_k_stop = c_k - (tile_k * 3)
+                    for k_iv in range(0, c_k_stop, tile_k * 2):
+                        next_k1 = k_iv + tile_k
+                        a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
+
+                        accs, _ = compute_tile(
+                            accs,
+                            b_tile_pong,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                            k_half_sel=0,
+                            a_scale=a_scale_ping,
+                            b_scale=b_scale_ping,
+                        )
+                        a0_prefetch_pong = None
+
+                        store_a_tile_to_lds(a_regs_ping, lds_base_ping)
+                        hot_loop_scheduler()
+                        gpu.barrier()
+
+                        # Cross-tile prefetch for the ping tile we are about to compute.
+                        a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
+
+                        next_k2 = k_iv + tile_k * 2
+                        a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
+                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // 256)
+
+                        accs, _ = compute_tile(
+                            accs,
+                            b_tile_ping,
+                            lds_base_ping,
+                            a0_prefetch=a0_prefetch_ping,
+                            k_half_sel=1,
+                            a_scale=a_scale_ping,
+                            b_scale=b_scale_ping,
+                        )
+
+                        store_a_tile_to_lds(a_regs_pong, lds_base_pong)
+                        hot_loop_scheduler()
+                        gpu.barrier()
+
+                        # Cross-tile prefetch for the next pong tile.
+                        a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
+
+                        # Advance scale ping/pong: next loop's current becomes this iteration's pong.
+                        a_scale_ping, b_scale_ping = a_scale_pong, b_scale_pong
+
+                    # Tail: 2 remaining tiles at (c_k - 2*tile_k) and (c_k - tile_k).
+                    last_k = c_k - tile_k
+                    a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
+
+                    accs, _ = compute_tile(
+                        accs,
+                        b_tile_pong,
+                        lds_base_pong,
+                        a0_prefetch=a0_prefetch_pong,
+                        k_half_sel=0,
+                        a_scale=a_scale_ping,
+                        b_scale=b_scale_ping,
+                    )
+
+                    store_a_tile_to_lds(a_regs_ping, lds_base_ping)
+                    hot_loop_scheduler()
+                    gpu.barrier()
+
+                    # Cross-tile prefetch for the final ping tile.
+                    a0_prefetch_ping = prefetch_a0_pack(lds_base_ping)
+
+                    final_accs, _ = compute_tile(
+                        accs,
+                        b_tile_ping,
+                        lds_base_ping,
+                        a0_prefetch=a0_prefetch_ping,
+                        k_half_sel=1,
+                        a_scale=a_scale_ping,
+                        b_scale=b_scale_ping,
+                    )
+                    return final_accs
+
+                if int(tile_k) == 128:
+                    final_accs = pipeline_tilek_128(
+                        accs,
+                        lds_base_pong=lds_base_pong,
+                        lds_base_ping=lds_base_ping,
+                        b_tile_pong=b_tile_pong,
+                        a0_prefetch_pong=a0_prefetch_pong,
+                        a_scale_pong=a_scale_pong,
+                        b_scale_pong=b_scale_pong,
+                    )
+                    store_output(final_accs)
+                    return
 
                 num_tiles = K // tile_k
                 if (num_tiles % 2) == 1:
@@ -951,8 +1065,8 @@ def compile_mxfp4_preshuffle_gemm(
                 
                         next_k2 = k_iv + tile_k * 2
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // 256)
-                
+                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // 256)
+
                         accs, _ = compute_tile(
                             accs,
                             b_tile_ping,
@@ -983,8 +1097,8 @@ def compile_mxfp4_preshuffle_gemm(
                     for k_iv in range(0, c_k_stop, tile_k * 2):
                         next_k1 = k_iv + tile_k
                         a_regs_ping, b_tile_ping = prefetch_ab_tile(next_k1)
-                        a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(next_k1 // 256)
-                
+                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // 256)
+
                         accs, _ = compute_tile(
                             accs,
                             b_tile_pong,
@@ -1003,8 +1117,8 @@ def compile_mxfp4_preshuffle_gemm(
                 
                         next_k2 = k_iv + tile_k * 2
                         a_regs_pong, b_tile_pong = prefetch_ab_tile(next_k2)
-                        a_scale_pong, b_scale_pong= prefetch_ab_scale_tile(next_k2 // 256)
-                
+                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // 256)
+
                         accs, _ = compute_tile(
                             accs,
                             b_tile_ping,
@@ -1018,13 +1132,13 @@ def compile_mxfp4_preshuffle_gemm(
                         store_a_tile_to_lds(a_regs_pong, lds_base_pong)
                         hot_loop_scheduler()
                         gpu.barrier()
-                
+
                         a0_prefetch_pong = prefetch_a0_pack(lds_base_pong)
                 
                     last_k = c_k - tile_k
                     a_regs_ping, b_tile_ping = prefetch_ab_tile(last_k)
-                    a_scale_ping, b_scale_ping= prefetch_ab_scale_tile(last_k // 256)
-                
+                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(last_k // 256)
+
                     accs, _ = compute_tile(
                         accs,
                         b_tile_pong,
@@ -1053,7 +1167,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                 store_output(final_accs)
             # else:
-            #     # CK-like bpreshuffle v1 spirit:
+            #     # Bpreshuffle v1 spirit:
             #     # - Intrawave schedule
             #     # - Global prefetch 2 (regs double-buffer)
             #     # - Local shared memory buffer 1 (single LDS tile for A)
