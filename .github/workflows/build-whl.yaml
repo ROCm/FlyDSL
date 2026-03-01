@@ -90,6 +90,16 @@ jobs:
             dist/flir-opt
           retention-days: 3
 
+      - name: Build summary
+        if: always()
+        env:
+          SUMMARY_DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
+          SUMMARY_LLVM_COMMIT: ${{ env.LLVM_COMMIT }}
+          SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
+          SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
+          SUMMARY_WHEEL_DIR: dist
+        run: python3 flydsl/scripts/generate_summary.py build
+
       - name: Configure AWS credentials
         if: inputs.release_type == 'nightlies'
         uses: aws-actions/configure-aws-credentials@v4

@@ -145,6 +145,7 @@ def promote_summary(summary: Path) -> None:
     release_type = os.environ.get("SUMMARY_RELEASE_TYPE", "unknown")
     source = os.environ.get("SUMMARY_S3_SOURCE", "unknown")
     dest = os.environ.get("SUMMARY_S3_DEST", "unknown")
+    wheel_names = os.environ.get("SUMMARY_WHEEL_NAMES", "").strip()
 
     _out(summary, "## Promote Summary")
     _out(summary)
@@ -153,6 +154,14 @@ def promote_summary(summary: Path) -> None:
         ["Source", f"`{source}`"],
         ["Destination", f"`{dest}`"],
     ])
+
+    if wheel_names:
+        _out(summary, "### Promoted Wheels")
+        _out(summary, "```")
+        for whl in wheel_names.split():
+            _out(summary, f"  {whl}")
+        _out(summary, "```")
+        _out(summary)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────

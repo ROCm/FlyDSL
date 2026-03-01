@@ -49,6 +49,7 @@ jobs:
             ${{ env.DOCKER_IMAGE }}
 
       - name: Install wheels and dependencies
+        id: install
         run: |
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools"
           docker exec flydsl_test bash -c "python3 -m pip install --no-index --find-links=/dist flydsl"
@@ -57,8 +58,9 @@ jobs:
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
       - name: Run tests
+        id: tests
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
+          docker exec flydsl_test bash -c "cd /flydsl && RUN_TESTS_FULL=1 bash scripts/run_tests.sh" 2>&1 | tee /tmp/test_output.log
 
       - name: Show test logs
         if: failure()
@@ -71,8 +73,9 @@ jobs:
           fi
 
       - name: Run benchmarks
+        id: benchmarks
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl && bash scripts/run_benchmark.sh"
+          docker exec flydsl_test bash -c "cd /flydsl && bash scripts/run_benchmark.sh" 2>&1 | tee /tmp/bench_output.log
 
       - name: Show benchmark logs
         if: failure()
@@ -83,6 +86,17 @@ jobs:
             tar -xzf logs.tgz || true
             cat *.log || true
           fi
+
+      - name: Test summary
+        if: always()
+        env:
+          SUMMARY_RUNNER: ${{ matrix.runners }}
+          SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
+          SUMMARY_TEST_LOG: /tmp/test_output.log
+          SUMMARY_BENCH_LOG: /tmp/bench_output.log
+        run: python3 flydsl/scripts/generate_summary.py test
 
       - name: Clean up
         if: always()
