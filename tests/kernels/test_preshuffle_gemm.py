@@ -127,9 +127,8 @@ def test_mfma_a8_flir_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    waves_per_eu: int = 0,
 ):
-    if use_async_copy and get_hip_arch() != "gfx950":
-        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -141,6 +140,8 @@ def test_mfma_a8_flir_preshuffle(
         raise ValueError(
             f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
+    waves_per_eu = int(waves_per_eu) if waves_per_eu is not None else 0
+    waves_per_eu = None if waves_per_eu <= 0 else waves_per_eu
     exe = compile_preshuffle_gemm_a8(
         M=M,
         N=N,
@@ -151,9 +152,12 @@ def test_mfma_a8_flir_preshuffle(
         in_dtype=in_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        waves_per_eu=waves_per_eu,
         use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
+    print(
+        f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={waves_per_eu})"
+    )
 
     size_c = M * N
     size_a = M * K
@@ -259,8 +263,12 @@ def test_mfma_a8_flir_preshuffle(
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-
-
+    
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
@@ -268,7 +276,7 @@ def test_mfma_a8_flir_preshuffle(
             def launch_aiter(a, b, sa, sb):
                 return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, num_iters= bench_iters, testGraph=test_graph)
             c_aiter_f32 = c_aiter.to(torch.float32)
             verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
 
@@ -290,13 +298,6 @@ def test_mfma_a8_flir_preshuffle(
         print("-" * 40)
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
-
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
-
 
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
@@ -558,6 +559,13 @@ if __name__ == "__main__":
         help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
     )
     parser.add_argument(
+        "--waves_per_eu",
+        type=int,
+        default=0,
+        choices=[0, 1, 2, 3, 4],
+        help="Occupancy hint (waves per EU). 0 means 'no hint' (default).",
+    )
+    parser.add_argument(
         "--test_graph",
         "-tg",
         action="store_true",
@@ -590,6 +598,7 @@ if __name__ == "__main__":
                 run_aiter_bench=bool(args.run_aiter_bench),
                 use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
                 use_async_copy=bool(args.use_async_copy),
+                waves_per_eu=int(args.waves_per_eu),
                 test_graph=bool(args.test_graph),
             )
         else:
