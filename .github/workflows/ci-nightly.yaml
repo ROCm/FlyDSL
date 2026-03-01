@@ -24,7 +24,7 @@ jobs:
   build:
     uses: ./.github/workflows/build-whl.yaml
     with:
-      release_type: ${{ inputs.release_type || 'dev' }}
+      release_type: ${{ inputs.release_type || 'nightlies' }}
     permissions:
       id-token: write
       contents: read
@@ -37,9 +37,10 @@ jobs:
 
   promote:
     needs: test
+    if: ${{ (inputs.release_type || 'nightlies') == 'nightlies' }}
     uses: ./.github/workflows/promote.yaml
     with:
-      release_type: ${{ inputs.release_type || 'dev' }}
+      release_type: ${{ inputs.release_type || 'nightlies' }}
     permissions:
       id-token: write
       contents: read
