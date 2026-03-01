@@ -104,7 +104,7 @@ jobs:
       - name: Upload wheels to S3 staging
         if: inputs.release_type == 'nightlies'
         run: |
-          aws s3 cp dist/ s3://framework-whls-nightlies/whl-staging/gfx942-gfx950/ \
+          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
             --recursive --exclude "*" --include "*.whl"
 
       - name: Clean up

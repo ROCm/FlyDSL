@@ -37,15 +37,25 @@ jobs:
       - name: Install AWS CLI
         run: bash ./flydsl/scripts/install_awscli.sh
 
-      - name: Promote wheels from staging to release
+      - name: Download wheels from staging
         run: |
           STAGING="s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
-          RELEASE="s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
-          echo "Promoting wheels from ${STAGING} to ${RELEASE}"
-          echo "Wheels: ${{ inputs.wheel_names }}"
+          mkdir -p /tmp/promote-wheels
+          echo "Downloading wheels from ${STAGING}"
           for WHL in ${{ inputs.wheel_names }}; do
-            echo "Copying ${WHL}..."
-            aws s3 cp "${STAGING}/${WHL}" "${RELEASE}/${WHL}"
+            echo "Downloading ${WHL}..."
+            aws s3 cp "${STAGING}/${WHL}" "/tmp/promote-wheels/${WHL}"
+          done
+          echo "Downloaded wheels:"
+          ls -lh /tmp/promote-wheels/
+
+      - name: Upload wheels to ${{ inputs.release_type }}
+        run: |
+          RELEASE="s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
+          echo "Uploading wheels to ${RELEASE}"
+          for WHL in ${{ inputs.wheel_names }}; do
+            echo "Uploading ${WHL}..."
+            aws s3 cp "/tmp/promote-wheels/${WHL}" "${RELEASE}/${WHL}"
           done
           echo "All wheels promoted successfully"
 
