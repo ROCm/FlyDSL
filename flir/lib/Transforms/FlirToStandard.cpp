@@ -1775,7 +1775,7 @@ struct SwizzleXor16OpLowering : public RewritePattern {
         !kBlocks16.getType().isIndex())
       return failure();
 
-    // CK-style fast path for power-of-two kBlocks16:
+    // Fast path for power-of-two kBlocks16:
     //   row_mod = row & (kBlocks16-1)
     //   mask    = row_mod << 4   // 16 = 2^4
     //   out     = col xor mask

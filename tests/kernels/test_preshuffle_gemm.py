@@ -30,8 +30,8 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
+from flydsl.kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from flydsl.kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
@@ -199,7 +199,7 @@ def test_mfma_a8_flir_preshuffle(
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
-    # Preshuffle B to CK/aiter layout.
+    # Preshuffle B.
     b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
@@ -303,10 +303,10 @@ def test_mfma_a8_flir_preshuffle(
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
-        # MXFP4 constraints (same as CK: KPerBlock=256 fp4, NPerBlock>=128):
+        # MXFP4 constraints (KPerBlock=256 fp4, NPerBlock>=128):
         #   tile_k >= 256 (pack_K=2) OR tile_k == 128 (pack_K_eff=1), tile_n >= 128 (pack_N=2 with 4 waves)
         #   K must be a multiple of tile_k
-        # Tile configs aligned with CK kernels (see aiter gemm_a4w4_blockscale_common.py)
+        # Tile configs
         (64, 8192, 8192, 64, 128, 128),                                                      # tile_k=128 (pack_K_eff=1)
         (32, 8192, 8192, 32, 128, 256),                                                      # decode, ~1.03x CK
         pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill, ~0.78x CK

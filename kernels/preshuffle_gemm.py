@@ -8,7 +8,7 @@ extracted from `tests/kernels/test_preshuffle_gemm.py` in the same style as
 
 Pipelines:
 - `pingpong`: tuned 2-stage pipeline with ping-pong LDS for A (2 LDS buffers)
-- `ck_v1_single_lds`: CK-like Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
+- `ck_v1_single_lds`: Intrawave + bpreshuffle v1 spirit (single LDS buffer for A)
 """
 
 import os
@@ -23,10 +23,10 @@ from _mlir import ir
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.lang.ir.types import T, memref
-from kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
 from flydsl.compiler.compiler import _apply_waves_per_eu_hint
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_16b_xor16,
@@ -34,7 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import mfma_epilog
+from flydsl.kernels.mfma_epilogues import mfma_epilog
 
 
 def compile_preshuffle_gemm_a8(
@@ -143,7 +143,7 @@ def compile_preshuffle_gemm_a8(
         )
     a_async_load_bytes = 4 if gpu_arch == "gfx942" else 16
     a_async_load_dword = a_async_load_bytes // 4
-    # CK-style LDS128: stride is in BYTES along K (for XOR16 swizzle).
+    # LDS128: stride is in BYTES along K (for XOR16 swizzle).
     lds_stride_bytes = tile_k_bytes
 
     def _elem_type():
@@ -262,7 +262,7 @@ def compile_preshuffle_gemm_a8(
             stride_lds = flir.make_stride(tile_k, 1)
             layout_lds = flir.make_layout(shape_lds, stride_lds)
 
-            # CK-style XOR16 swizzle parameter (const).
+            # XOR16 swizzle parameter (const).
             k_blocks16 = arith.index(tile_k_bytes // 16)
 
             tx = gpu.thread_id("x")
@@ -341,7 +341,7 @@ def compile_preshuffle_gemm_a8(
             row_a_lds = lane_mod_16
             # Per-`k1` (KLane) base offset along K inside a 64B K0 block.
             #
-            # CK preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
+            # Preshuffle uses KPackBytes=16 across dtypes, but KPackElems differs:
             # - fp8/int8: 16 elems (1B)
             # - fp16/bf16: 8 elems (2B)
             #
@@ -931,9 +931,9 @@ def compile_preshuffle_gemm_a8(
                     body_row=body_row,
                 )
 
-            # ---------------- Scheduling hints (match CK-style) ----------------
+            # ---------------- Scheduling hints ----------------
             # These sched_group_barrier hints help the backend interleave VMEM/DS/MFMA
-            # similarly to CK's tuned pipelines.
+            # for tuned pipeline interleaving.
             rocdl.sched_barrier(0)
 
             def hot_loop_scheduler():
@@ -945,7 +945,7 @@ def compile_preshuffle_gemm_a8(
                 mfma_per_iter = 2 * mfma_group
                 sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                # DS-read preload (CK default is 2).
+                # DS-read preload (2).
                 rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 if tile_m == 16:
@@ -1118,7 +1118,7 @@ def compile_preshuffle_gemm_a8(
 
                 store_output(final_accs, scales)
             else:
-                # CK-like bpreshuffle v1 spirit:
+                # Bpreshuffle v1 spirit:
                 # - Intrawave schedule
                 # - Global prefetch 2 (regs double-buffer)
                 # - Local shared memory buffer 1 (single LDS tile for A)
