@@ -1,0 +1,47 @@
+name: FlyDSL Nightly CI
+
+on:
+  # schedule:
+  #   - cron: '0 2 * * *'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type: "nightlies" publishes to S3, "dev" skips S3 upload'
+        type: choice
+        options:
+          - nightlies
+          - dev
+        default: "nightlies"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-whl.yaml
+    with:
+      release_type: ${{ inputs.release_type || 'nightlies' }}
+    permissions:
+      id-token: write
+      contents: read
+
+  test:
+    needs: build
+    uses: ./.github/workflows/test-whl.yaml
+    permissions:
+      contents: read
+
+  promote:
+    needs: [build, test]
+    if: ${{ (inputs.release_type || 'nightlies') == 'nightlies' }}
+    uses: ./.github/workflows/promote.yaml
+    with:
+      release_type: ${{ inputs.release_type || 'nightlies' }}
+      wheel_names: ${{ needs.build.outputs.wheel_names }}
+    permissions:
+      id-token: write
+      contents: read

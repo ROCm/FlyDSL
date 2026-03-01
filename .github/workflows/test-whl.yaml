@@ -1,0 +1,105 @@
+name: Test Wheels
+
+on:
+  workflow_call:
+
+env:
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        runners: ['linux-flydsl-mi325-1', 'linux-flydsl-mi355-1']
+      fail-fast: false
+    runs-on: ${{ matrix.runners }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: flydsl
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          path: dist
+
+      - name: Start GPU test container
+        run: |
+          docker ps -aq -f name=flydsl_test | xargs -r docker stop | xargs -r docker rm || true
+
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
+            -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
+            -v "${GITHUB_WORKSPACE}/dist:/dist" \
+            --ipc=host --group-add video \
+            --shm-size 16g \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            -w /flydsl \
+            --name flydsl_test \
+            ${{ env.DOCKER_IMAGE }}
+
+      - name: Install wheels and dependencies
+        id: install
+        run: |
+          docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools"
+          docker exec flydsl_test bash -c "python3 -m pip install --no-index --find-links=/dist flydsl"
+          docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
+          docker exec flydsl_test bash -c "mkdir -p /flydsl/.flir/build/bin && cp /dist/flir-opt /flydsl/.flir/build/bin/flir-opt && chmod +x /flydsl/.flir/build/bin/flir-opt"
+          docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
+
+      - name: Run tests
+        id: tests
+        run: |
+          docker exec flydsl_test bash -c "cd /flydsl && RUN_TESTS_FULL=1 bash scripts/run_tests.sh" 2>&1 | tee /tmp/test_output.log
+
+      - name: Show test logs
+        if: failure()
+        run: |
+          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/logs.tgz . || true
+          if [ -f logs.tgz ]; then
+            tar -xzf logs.tgz || true
+            cat *.log || true
+          fi
+
+      - name: Run benchmarks
+        id: benchmarks
+        run: |
+          docker exec flydsl_test bash -c "cd /flydsl && bash scripts/run_benchmark.sh" 2>&1 | tee /tmp/bench_output.log
+
+      - name: Show benchmark logs
+        if: failure()
+        run: |
+          docker exec flydsl_test bash -c 'cd /tmp/flir_bench && tar czf /tmp/flir_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/flir_bench/logs.tgz . || true
+          if [ -f logs.tgz ]; then
+            tar -xzf logs.tgz || true
+            cat *.log || true
+          fi
+
+      - name: Test summary
+        if: always()
+        env:
+          SUMMARY_RUNNER: ${{ matrix.runners }}
+          SUMMARY_INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SUMMARY_TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          SUMMARY_BENCHMARKS_OUTCOME: ${{ steps.benchmarks.outcome }}
+          SUMMARY_TEST_LOG: /tmp/test_output.log
+          SUMMARY_BENCH_LOG: /tmp/bench_output.log
+        run: python3 flydsl/scripts/generate_summary.py test
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop flydsl_test || true
+          docker rm flydsl_test || true

@@ -1,0 +1,124 @@
+name: Build Wheels
+
+on:
+  workflow_call:
+    inputs:
+      release_type:
+        description: 'Release type: "nightlies" publishes to S3, "dev" skips S3 upload'
+        type: string
+        default: "dev"
+    outputs:
+      wheel_names:
+        description: 'Space-separated list of built wheel filenames'
+        value: ${{ jobs.build.outputs.wheel_names }}
+
+env:
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+  LLVM_COMMIT: "04f968b02917"
+  OIDC_ROLE: "arn:aws:iam::661452401056:role/framework-flydsl-nightlies"
+
+jobs:
+  build:
+    runs-on: linux-flydsl-mi325-1
+    outputs:
+      wheel_names: ${{ steps.collect-wheels.outputs.wheel_names }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          path: flydsl
+
+      - name: Start build container
+        run: |
+          docker run -dt --network=host --user root \
+            -v "${GITHUB_WORKSPACE}/flydsl:/flydsl" \
+            --ipc=host --shm-size 16g \
+            -w /flydsl \
+            --name flydsl_build \
+            ${{ env.DOCKER_IMAGE }}
+
+      - name: Install build dependencies
+        run: |
+          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
+          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && apt-get install -y python3.10 python3.10-dev python3.10-venv"
+          docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
+          docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
+          docker exec flydsl_build bash -c "git config --global --add safe.directory /flydsl"
+
+      - name: Restore cached MLIR install tarball
+        id: mlir-cache
+        uses: actions/cache@v4
+        with:
+          path: mlir_install.tgz
+          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/flir/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
+
+      - name: Use cached MLIR install tarball
+        if: steps.mlir-cache.outputs.cache-hit == 'true'
+        run: |
+          docker cp mlir_install.tgz flydsl_build:/tmp/mlir_install.tgz
+          docker exec flydsl_build bash -c "mkdir -p /llvm-project && tar -xzf /tmp/mlir_install.tgz -C /llvm-project"
+          docker exec flydsl_build bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
+
+      - name: Build LLVM
+        if: steps.mlir-cache.outputs.cache-hit != 'true'
+        run: |
+          docker exec flydsl_build bash -c "cd /flydsl && LLVM_COMMIT=${{ env.LLVM_COMMIT }} bash scripts/build_llvm.sh"
+          docker cp flydsl_build:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
+
+      - name: Build wheels
+        run: |
+          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.39 && cd /flydsl && bash scripts/build_wheels.sh"
+          docker cp flydsl_build:/flydsl/dist ./dist
+          docker cp flydsl_build:/flydsl/.flir/build_py312/bin/flir-opt ./dist/flir-opt
+
+      - name: Collect wheel names
+        id: collect-wheels
+        run: |
+          WHEELS=$(ls dist/*.whl | xargs -n1 basename | tr '\n' ' ')
+          echo "wheel_names=${WHEELS}" >> $GITHUB_OUTPUT
+          echo "Built wheels: ${WHEELS}"
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-wheels
+          path: |
+            dist/*.whl
+            dist/flir-opt
+          retention-days: 3
+
+      - name: Build summary
+        if: always()
+        env:
+          SUMMARY_DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
+          SUMMARY_LLVM_COMMIT: ${{ env.LLVM_COMMIT }}
+          SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
+          SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
+          SUMMARY_WHEEL_DIR: dist
+        run: python3 flydsl/scripts/generate_summary.py build
+
+      - name: Configure AWS credentials
+        if: inputs.release_type == 'nightlies'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: ${{ env.OIDC_ROLE }}
+
+      - name: Install AWS CLI
+        if: inputs.release_type == 'nightlies'
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Upload wheels to S3 staging
+        if: inputs.release_type == 'nightlies'
+        run: |
+          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
+            --recursive --exclude "*" --include "*.whl"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop flydsl_build || true
+          docker rm flydsl_build || true
