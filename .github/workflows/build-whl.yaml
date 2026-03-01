@@ -66,12 +66,15 @@ jobs:
         run: |
           docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.39 && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
+          docker cp flydsl_build:/flydsl/.flir/build_py312/bin/flir-opt ./dist/flir-opt
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: flydsl-wheels
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            dist/flir-opt
           retention-days: 3
 
       - name: Configure AWS credentials

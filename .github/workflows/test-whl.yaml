@@ -53,6 +53,7 @@ jobs:
           docker exec flydsl_test bash -c "python3 -m pip install -U pip setuptools"
           docker exec flydsl_test bash -c "python3 -m pip install --no-index --find-links=/dist flydsl"
           docker exec flydsl_test bash -c "python3 -m pip install -U 'hypothesis>=6.82.0'"
+          docker exec flydsl_test bash -c "mkdir -p /flydsl/.flir/build/bin && cp /dist/flir-opt /flydsl/.flir/build/bin/flir-opt && chmod +x /flydsl/.flir/build/bin/flir-opt"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
       - name: Run tests
