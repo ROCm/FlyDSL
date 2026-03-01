@@ -88,8 +88,8 @@ jobs:
 
       - name: Upload wheels to S3 staging
         run: |
-          aws s3 sync dist/ s3://framework-whls-nightlies/whl-staging/gfx942-gfx950/ \
-            --exclude "*" --include "*.whl" --delete
+          aws s3 cp dist/ s3://framework-whls-nightlies/whl-staging/gfx942-gfx950/ \
+            --recursive --exclude "*" --include "*.whl"
 
       - name: Clean up
         if: always()
