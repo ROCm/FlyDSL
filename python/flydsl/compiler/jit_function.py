@@ -171,6 +171,7 @@ def _jit_function_cache_key(func: Callable) -> str:
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
+        wave64 = "true" if MlirCompiler._use_wave64(chip) else "false"
         return [
             "gpu-kernel-outlining{data-layout-str=}",
             "fly-canonicalize",
@@ -180,7 +181,7 @@ class MlirCompiler:
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
             f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
             "fly-gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
@@ -189,6 +190,13 @@ class MlirCompiler:
             "reconcile-unrealized-casts",
             "gpu-module-to-binary{format=fatbin}",
         ]
+
+    @staticmethod
+    def _use_wave64(chip: str) -> bool:
+        chip = str(chip)
+        if chip.startswith("gfx12"):
+            return False
+        return True
 
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
