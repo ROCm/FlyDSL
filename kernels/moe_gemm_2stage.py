@@ -29,7 +29,7 @@ from flydsl.lang.ir.types import T as I
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
-from kernels.mfma_preshuffle_pipeline import (
+from flydsl.kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
@@ -39,10 +39,9 @@ from kernels.mfma_preshuffle_pipeline import (
     load_b_pack_k32,
     tile_chunk_coord_i32,
 )
-from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from kernels.kernels_common import stream_ptr_to_async_token
-from kernels.moe_reduce import compile_moe_reduction
-
+from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from flydsl.kernels.kernels_common import stream_ptr_to_async_token
+from flydsl.kernels.moe_reduce import compile_moe_reduction
 
 @functools.lru_cache(maxsize=1024)
 def compile_moe_gemm1(
@@ -406,7 +405,7 @@ def compile_moe_gemm1(
                         s_raw = arith.shrui(fused_i, arith.i32(24))
                         # X is indexed by token-slot in **slot-major** order:
                         #   row_ts = slot * tokens + token
-                        # This matches CK's moe_smoothquant output layout.
+                        # This matches the moe_smoothquant output layout.
                         row_ts_i32 = s_raw * tokens_i32 + t_raw
                         row_ts_idx = arith.index_cast(ir.IndexType.get(), row_ts_i32)
                         # Apply bounds check to token-slot index
@@ -1468,7 +1467,7 @@ def compile_moe_gemm2(
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
-            # sorted_token_ids / sorted_weights: [blocks*tile_m] (CK-style padded length)
+            # sorted_token_ids / sorted_weights: [blocks*tile_m] (padded length)
             sorted_nbytes_idx = (
                 size_expert_ids_in
                 * arith.constant(tile_m, index=True)
@@ -2242,7 +2241,7 @@ def compile_moe_gemm2(
                     def precompute_row(*, row_local, row):
                         # Precompute row context for cshuffle stores.
                         # Return (fused_i32, row_valid_i1) so the epilogue can skip the entire row
-                        # for invalid tail rows (CK-style), avoiding per-store branching.
+                        # for invalid tail rows, avoiding per-store branching.
                         fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
                         row_i32 = arith.index_cast(i32, row)
                         row_valid0 = arith.cmpu(row_i32, num_valid_i32, "ult")
@@ -2266,7 +2265,7 @@ def compile_moe_gemm2(
                         idx_elem_even = idx_elem & mask_even_i32
                         if out_is_bf16:
                             if bool(accumulate):
-                                # Use global atomicrmw fadd on <2 x bf16> (CK path).
+                                # Use global atomicrmw fadd on <2 x bf16>.
                                 # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)

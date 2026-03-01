@@ -62,7 +62,7 @@ except Exception:
     HAS_AITER = False
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
-from kernels.moe_gemm_2stage import (
+from flydsl.kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
@@ -220,7 +220,7 @@ def build_routing_buffers(
     tile_m: int,
     moe_sort_mode: Optional[str] = None,
 ) -> RoutingBuffers:
-    """Build routing buffers once (CK format), reusable across stage1 + stage2.
+    """Build routing buffers once, reusable across stage1 + stage2.
 
     NOTE:
     - `moe_sort_mode="aiter"` aligns with `aiter/aiter/test_moe_flydsl.py` (swap path):
@@ -242,7 +242,7 @@ def build_routing_buffers(
             num_experts=int(experts),
             block_size=int(tile_m),
         )
-        # num_valid_ids[0] == total padded rows (CK-style); kernels use this for early-exit.
+        # num_valid_ids[0] == total padded rows; kernels use this for early-exit.
         num_valid_ids = num_tokens_post_pad[:1].contiguous()
         sorted_size = int(sorted_token_ids.numel())
         blocks = int(sorted_expert_ids.numel())
@@ -334,7 +334,7 @@ def run_moe_stage1(
         if w1_fp32_in is not None
         else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
     )
-    # w2 is required by aiter CK API even for stage1; keep it allocated to avoid null ptr.
+    # w2 is required by aiter API even for stage1; keep it allocated to avoid null ptr.
     # Stage1 kernels should not touch it, but we allocate a correct-shape tensor for safety.
     w2_fp32 = (
         w2_fp32_in
@@ -384,7 +384,7 @@ def run_moe_stage1(
     if in_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
-    # w2 is not used by our kernel, but required by CK stage1 API
+    # w2 is not used by our kernel, but required by aiter stage1 API
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
@@ -411,7 +411,7 @@ def run_moe_stage1(
         scale_x = amax / 127.0
         scale_x[scale_x == 0] = 1.0
         x_q = (x_route / scale_x).to(torch.int8)
-        # Match CK moe_smoothquant layout: slot-major [topk*tokens, K].
+        # Match moe_smoothquant layout: slot-major [topk*tokens, K].
         x_q = x_q.permute(1, 0, 2).contiguous()
         scale_x = scale_x.permute(1, 0, 2).contiguous()
         # W quantization is unchanged for this harness (same as aiter perf tests: smooth scales
@@ -424,7 +424,7 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
 
@@ -459,6 +459,7 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
+    from flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -552,23 +553,23 @@ def run_moe_stage1(
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
-    # Compare + benchmark vs aiter CK stage1 (optional; enabled by default when aiter is runnable).
+    # Compare + benchmark vs aiter stage1 (optional; enabled by default when aiter is runnable).
     if compare_aiter_ck is None:
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
     else:
         compare_ck = bool(compare_aiter_ck)
-    # aiter CK paths are fp8-only in our setup.
+    # aiter paths are fp8-only in our setup.
     compare_ck = compare_ck and (in_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
-            pytest.skip("aiter not available; cannot compare to CK moe stage1.", allow_module_level=False)
+            pytest.skip("aiter not available; cannot compare to aiter moe stage1.", allow_module_level=False)
         try:
             from aiter.ops.moe_op import ck_moe_stage1_fwd
             from aiter.ops.enum import QuantType, ActivationType
 
             out_ck = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-            # aiter CK expects w1/w2 with expert dimension preserved.
+            # aiter expects w1/w2 with expert dimension preserved.
             w1_ck = w1_shuffled
             w2_ck = w2_shuffled
             w1_scale_ck = scale_w1.contiguous()
@@ -593,9 +594,9 @@ def run_moe_stage1(
                     dst_type=o.dtype,
                 )
 
-            # Benchmark CK stage1
+            # Benchmark aiter stage1
             # Align with aiter swap rules:
-            # - CK takes quantized activations (fp8) + per-token scale
+            # - aiter takes quantized activations (fp8) + per-token scale
             # - routing buffers are used as-is (no host trim/pad); launch range is sorted_eids.numel()
             _, us_ck = run_perftest(
                 launch_ck,
@@ -614,17 +615,17 @@ def run_moe_stage1(
                 testGraph=test_graph,
             )
 
-            # Correctness: flir vs CK
+            # Correctness: flir vs aiter
             assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="flir vs aiter:")
 
             # Perf print: use the same flop model for both
             flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
-            print(f"[aiter CK] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, flir vs aiter speedups: {tflops / tflops_ck:.2f}x")
+            print(f"[aiter] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, flir vs aiter speedups: {tflops / tflops_ck:.2f}x")
         except Exception as e:
-            # Treat CK compare as best-effort: many environments can import `aiter` but can't load
+            # Treat aiter compare as best-effort: many environments can import `aiter` but can't load
             # the full JIT .so dependency chain. Don't fail the FLIR test suite for that.
-            logging.warning(f"Skipping aiter CK moe stage1 compare (not runnable here): {e}")
+            logging.warning(f"Skipping aiter moe stage1 compare (not runnable here): {e}")
     if return_outputs:
         return out, us
     return None
@@ -798,7 +799,7 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
@@ -996,21 +997,21 @@ def run_moe_stage2(
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
-    # Optional compare vs aiter CK stage2.
+    # Optional compare vs aiter stage2.
     if compare_aiter_ck is None:
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
     else:
         compare_ck = bool(compare_aiter_ck)
-    # aiter CK paths are fp8-only in our setup.
+    # aiter paths are fp8-only in our setup.
     compare_ck = compare_ck and (in_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
-            pytest.skip("aiter not available; cannot compare to CK moe stage2.", allow_module_level=False)
+            pytest.skip("aiter not available; cannot compare to aiter moe stage2.", allow_module_level=False)
         try:
             from aiter.ops.moe_op import ck_moe_stage2_fwd
             from aiter.ops.enum import QuantType, ActivationType
 
-            # CK stage2 output type is fp16 in many builds; keep fp16 for compatibility.
+            # aiter stage2 output type is fp16 in many builds; keep fp16 for compatibility.
             # (Some environments don't accept fp32 output tensors here.)
             out_ck = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
             out_ck_perf = torch.zeros_like(out_ck)
@@ -1055,11 +1056,11 @@ def run_moe_stage2(
             flops = 2 * tokens * topk * model_dim * inter_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
             print(
-                f"[aiter CK] stage2: {us_ck:.1f} us, "
+                f"[aiter] stage2: {us_ck:.1f} us, "
                 f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), flir vs aiter speedups: {tflops / tflops_ck:.2f}x"
             )
 
-            # Correctness run (best-effort; do not fail perf comparison if CK diverges).
+            # Correctness run (best-effort; do not fail perf comparison if aiter diverges).
             out_ck.zero_()
             launch_ck(
                 out_ck,
@@ -1074,10 +1075,10 @@ def run_moe_stage2(
                 sorted_weights,
             )
             torch.cuda.synchronize()
-            if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter CK] stage2:"):
-                    logging.warning("[aiter CK] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
+            if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter] stage2:"):
+                    logging.warning("[aiter] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
         except Exception as e:
-            logging.warning(f"Skipping aiter CK moe stage2 compare (not runnable here): {e}")
+            logging.warning(f"Skipping aiter moe stage2 compare (not runnable here): {e}")
 
     # Print profile breakdown if the executor supports it
     if hasattr(exe, 'print_profile_stats'):
@@ -1171,8 +1172,8 @@ def test_moe_gemm_2stage(
     )
 
     # Default routing + comparison knobs for test stability:
-    # - Use torch routing (no CK dependency for sorting).
-    # - Only compare CK for fp8, and only when explicitly requested.
+    # - Use torch routing (no aiter dependency for sorting).
+    # - Only compare aiter for fp8, and only when explicitly requested.
     if moe_sort_mode is None:
         moe_sort_mode = "torch"
     if compare_aiter_ck is None:
