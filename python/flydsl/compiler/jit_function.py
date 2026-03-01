@@ -129,7 +129,7 @@ class MlirCompiler:
         "canonicalize,"
         "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
         "),"
-        "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
+        "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}},"
         "convert-scf-to-cf,"
         "convert-cf-to-llvm,"
         "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
@@ -169,6 +169,13 @@ class MlirCompiler:
         except Exception as e:
             log().warning(f"Failed to dump ASM: {e}")
 
+    @staticmethod
+    def _use_wave64(chip: str) -> bool:
+        chip = str(chip)
+        if chip.startswith("gfx12"):
+            return False
+        return True
+
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -181,7 +188,7 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        lowering_pm = PassManager.parse(cls.LOWERING_PIPELINE.format(chip=chip))
+        lowering_pm = PassManager.parse(cls.LOWERING_PIPELINE.format(chip=chip, wave64="true" if cls._use_wave64(chip) else "false"))
         lowering_pm.enable_verifier(env.debug.enable_verifier)
         lowering_pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
         lowering_pm.run(module.operation)
