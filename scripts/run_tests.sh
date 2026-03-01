@@ -66,31 +66,52 @@ example_passed=$(echo "$example_summary" | grep -oP '\d+(?= passed)' || echo "0"
 example_failed=$(echo "$example_summary" | grep -oP '\d+(?= failed)' || echo "0")
 
 # ---------------------------------------------------------------------------
-# MLIR Lit Tests (test/) via lit
+# MLIR FileCheck Tests (test/**/*.mlir)
 # ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"
-echo "MLIR Lit Tests"
+echo "MLIR FileCheck Tests"
 echo "========================================================================"
 echo ""
 
-export FLY_BUILD_DIR="${BUILD_DIR}"
-lit -v "${REPO_ROOT}/test/" 2>&1 | tee /tmp/test_lit.log
-lit_exit=${PIPESTATUS[0]}
-if [ $lit_exit -ne 0 ]; then
-    exit_code=1
+FLY_OPT="${BUILD_DIR}/bin/fly-opt"
+FILECHECK="${MLIR_PATH:+${MLIR_PATH}/bin/FileCheck}"
+if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
+    FILECHECK="$(which FileCheck 2>/dev/null || true)"
 fi
+mlir_pass=0
+mlir_fail=0
 
-lit_summary=$(grep -oP 'Passed:\s*\K\d+' /tmp/test_lit.log || echo "0")
-lit_failed_count=$(grep -oP 'Failed:\s*\K\d+' /tmp/test_lit.log || echo "0")
-lit_unsupported=$(grep -oP 'Unsupported:\s*\K\d+' /tmp/test_lit.log || echo "0")
+if [ ! -x "${FLY_OPT}" ]; then
+    echo "[SKIP] fly-opt not found at ${FLY_OPT}"
+elif [ ! -x "${FILECHECK}" ]; then
+    echo "[SKIP] FileCheck not found at ${FILECHECK}"
+else
+    for test_file in $(find "${REPO_ROOT}/test" -name "*.mlir" -type f 2>/dev/null | sort); do
+        test_name="${test_file#${REPO_ROOT}/test/}"
+        run_line=$(grep '^// RUN:' "$test_file" | head -1 | sed 's|^// RUN: *||')
+        if [ -z "$run_line" ]; then
+            continue
+        fi
+        cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${test_file}|g; s|FileCheck|${FILECHECK}|g")
+        if eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
+            echo "  PASS  ${test_name}"
+            mlir_pass=$((mlir_pass + 1))
+        else
+            echo "  FAIL  ${test_name}"
+            tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
+            mlir_fail=$((mlir_fail + 1))
+            exit_code=1
+        fi
+    done
+fi
 
 echo ""
 echo "========================================================================"
 echo "Summary"
-echo "  GEMM:     ${passed} passed, ${failed} failed, ${skipped} skipped"
-echo "  Examples: ${example_passed} passed, ${example_failed} failed"
-echo "  Lit:      ${lit_summary} passed, ${lit_failed_count} failed, ${lit_unsupported} unsupported"
+echo "  GEMM:      ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "  Examples:  ${example_passed} passed, ${example_failed} failed"
+echo "  FileCheck: ${mlir_pass} passed, ${mlir_fail} failed"
 echo "========================================================================"
 
 exit $exit_code
