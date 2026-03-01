@@ -14,6 +14,7 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+from ..expr.typing import Stream
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import JitCompiledFunction
 from .kernel_function import (
@@ -167,7 +168,9 @@ class MlirCompiler:
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
+            "fly-gpu-stream-mark",
             "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            "fly-gpu-stream-inject",
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
@@ -346,10 +349,12 @@ class JitFunction:
                 self._cached_ctx.load_all_available_dialects()
             with self._cached_ctx:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
+                _ensure_stream_arg(jit_args)
                 return cached_func(*jit_args)
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+            has_user_stream = _ensure_stream_arg(jit_args)
             ir_types = get_ir_types(jit_args)
             loc = ir.Location.unknown(ctx)
 
@@ -375,7 +380,10 @@ class JitFunction:
 
                     with ir.InsertionPoint(entry_block):
                         ir_args = list(func_op.regions[0].blocks[0].arguments)
-                        dsl_args = new_from_ir_values(dsl_types, jit_args, ir_args)
+                        if not has_user_stream:
+                            comp_ctx.stream_arg = ir_args[-1]
+                        user_jit_args = jit_args[:len(param_names)]
+                        dsl_args = new_from_ir_values(dsl_types, user_jit_args, ir_args)
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))
                         named_args.update(constexpr_values)
@@ -401,6 +409,16 @@ class JitFunction:
                 self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
+
+
+def _ensure_stream_arg(jit_args: list) -> bool:
+    """Ensure jit_args contains a Stream argument.  If the user's function
+    already declares ``stream: fx.Stream``, return True (user-supplied).
+    Otherwise append a default ``Stream(None)`` and return False."""
+    if any(isinstance(a, Stream) for a in jit_args):
+        return True
+    jit_args.append(Stream(None))
+    return False
 
 
 def jit(func: Optional[Callable] = None) -> JitFunction:
