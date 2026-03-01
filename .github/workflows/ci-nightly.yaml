@@ -36,11 +36,12 @@ jobs:
       contents: read
 
   promote:
-    needs: test
+    needs: [build, test]
     if: ${{ (inputs.release_type || 'nightlies') == 'nightlies' }}
     uses: ./.github/workflows/promote.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}
+      wheel_names: ${{ needs.build.outputs.wheel_names }}
     permissions:
       id-token: write
       contents: read
