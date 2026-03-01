@@ -304,13 +304,14 @@ def test_mfma_a8_flir_preshuffle(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
         # MXFP4 constraints (KPerBlock=256 fp4, NPerBlock>=128):
-        #   tile_k >= 256 (pack_K=2), tile_n >= 128 (pack_N=2 with 4 waves)
+        #   tile_k >= 256 (pack_K=2) OR tile_k == 128 (pack_K_eff=1), tile_n >= 128 (pack_N=2 with 4 waves)
         #   K must be a multiple of tile_k
-        # Tile configs (see aiter gemm_a4w4_blockscale_common.py)
-        (32, 8192, 8192, 32, 128, 256),                                                      # decode
-        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill
-        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill
-        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # non-aligned M
+        # Tile configs
+        (64, 8192, 8192, 64, 128, 128),                                                      # tile_k=128 (pack_K_eff=1)
+        (32, 8192, 8192, 32, 128, 256),                                                      # decode, ~1.03x CK
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill, ~0.78x CK
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill, ~0.98x CK
+        pytest.param(5133, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # non-aligned M, ~0.79x CK
     ]
 )
 def test_mfma_w4_flir_preshuffle(
