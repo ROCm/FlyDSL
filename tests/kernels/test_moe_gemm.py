@@ -66,7 +66,6 @@ from flydsl.kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
-    compile_moe_reduction,
     MoeGemm2Mode,
 )
 
@@ -1301,6 +1300,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 # to enable masked reduction (different reduce kernel signature).
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
+                zero_intermediate=False, # test non-zeroed performance
             )
         else:
             # Use torch.sum for reduction (baseline comparison)
@@ -1378,140 +1378,6 @@ class _TorchReduceWrapper:
         return self._mode
 
 
-# Reduce Kernel Performance Profiling
-def profile_reduce_kernel(
-    tokens: int,
-    topk: int,
-    model_dim: int,
-    dtype: torch.dtype = torch.float16,
-    num_iters: int = 20,
-    num_warmup: int = 5,
-    compare_torch: bool = True,
-):
-    """Profile reduce kernel bandwidth and latency.
-
-    Args:
-        tokens: Number of tokens
-        topk: Top-k value
-        model_dim: Model dimension
-        dtype: Data type (torch.float16 or torch.bfloat16)
-        num_iters: Number of benchmark iterations
-        num_warmup: Number of warmup iterations
-        compare_torch: If True, also benchmark torch.sum for comparison
-
-    Returns:
-        Dict with profiling results
-    """
-    import torch.profiler as tpf
-
-    dtype_str = {torch.float16: "f16", torch.bfloat16: "bf16", torch.float32: "f32"}[dtype]
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-    # Create test tensors
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    # Calculate theoretical bandwidth
-    elem_bytes = X.element_size()
-    read_bytes = tokens * topk * model_dim * elem_bytes
-    write_bytes = tokens * model_dim * elem_bytes
-    total_bytes = read_bytes + write_bytes
-
-    def _get_kernel_time_us(prof):
-        """Extract CUDA kernel time from profiler (microseconds)."""
-        total = 0.0
-        for evt in prof.events():
-            if str(getattr(evt, 'device_type', '')).endswith('CUDA'):
-                total += getattr(evt, 'self_device_time_total', 0)
-        return total
-
-    results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-
-    # Benchmark FlyDSL reduce
-    for _ in range(num_warmup):
-        reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
-    torch.cuda.synchronize()
-
-    with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
-        for _ in range(num_iters):
-            reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
-        torch.cuda.synchronize()
-
-    flydsl_us = _get_kernel_time_us(prof) / num_iters
-    flydsl_bw = (total_bytes / 2**40) / (flydsl_us / 1e6)  # TB/s
-    results["flydsl"] = {"latency_us": flydsl_us, "bandwidth_tb_s": flydsl_bw}
-
-    # Benchmark torch.sum if requested
-    if compare_torch:
-        for _ in range(num_warmup):
-            torch.sum(X, dim=1, out=Y)
-        torch.cuda.synchronize()
-
-        with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
-            for _ in range(num_iters):
-                torch.sum(X, dim=1, out=Y)
-            torch.cuda.synchronize()
-
-        torch_us = _get_kernel_time_us(prof) / num_iters
-        torch_bw = (total_bytes / 2**40) / (torch_us / 1e6)
-        results["torch"] = {"latency_us": torch_us, "bandwidth_tb_s": torch_bw}
-        results["speedup"] = torch_us / flydsl_us if flydsl_us > 0 else 0
-
-    return results
-
-
-def print_reduce_profile(results: dict):
-    """Pretty print reduce profiling results."""
-    tokens, topk, model_dim = results["shape"]
-    print(f"\n[Reduce Kernel Profile] shape=({tokens}, {topk}, {model_dim}), dtype={results['dtype']}")
-    print(f"  FlyDSL:  {results['flydsl']['latency_us']:.1f} us, {results['flydsl']['bandwidth_tb_s']:.2f} TB/s")
-    if "torch" in results:
-        print(f"  torch:   {results['torch']['latency_us']:.1f} us, {results['torch']['bandwidth_tb_s']:.2f} TB/s")
-        print(f"  speedup: {results['speedup']:.2f}x")
-
-
-@pytest.mark.parametrize(
-    "tokens, topk, model_dim",
-    [
-        pytest.param(32769, 8, 7168, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
-        pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
-        pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
-        pytest.param(16384, 6, 5120, id="EP-K6-prefill", marks=pytest.mark.large_shape),
-        pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
-        pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
-    ],
-)
-def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
-    """Test reduce kernel correctness and performance vs torch.sum."""
-    dtype = torch.float16
-    dtype_str = "f16"
-
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-
-    # Create test data
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y_flydsl = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-
-    # Run kernels
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
-    torch.sum(X, dim=1, out=Y_ref)
-    torch.cuda.synchronize()
-
-    # Correctness check using verify_output
-    assert verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
-
-    # Performance profiling
-    results = profile_reduce_kernel(
-        tokens=tokens, topk=topk, model_dim=model_dim,
-        num_iters=20, num_warmup=5, compare_torch=True,
-    )
-    print_reduce_profile(results)
-
-
-
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
@@ -1579,14 +1445,14 @@ def test_moe_stage2_standalone(
     # Run reduce mode with FlyDSL kernel (production path)
     run_moe_stage2(
         **common_args,
-        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True),
+        use_reduce=True,
         kernel_name="moe_gemm2_reduce_flydsl",
     )
 
     # Run reduce mode and use valid mask with FlyDSL kernel
     run_moe_stage2(
         **common_args,
-        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
+        use_reduce=True,
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
