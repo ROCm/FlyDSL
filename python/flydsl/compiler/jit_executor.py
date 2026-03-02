@@ -6,111 +6,117 @@ from typing import List
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
-from .protocol import get_c_pointers
+from .protocol import fly_pointers
 
 
 @lru_cache(maxsize=1)
-def _get_mlir_runtime_libs() -> List[str]:
+def _resolve_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    # Prefer custom runtime (has CUDA graph capture support) over upstream.
     rocm_rt = mlir_libs_dir / "libfly_jit_runtime.so"
     if not rocm_rt.exists():
         rocm_rt = mlir_libs_dir / "libmlir_rocm_runtime.so"
     return [str(rocm_rt), str(mlir_libs_dir / "libmlir_c_runner_utils.so")]
 
 
-class JitCompiledFunction:
-    def __init__(
-        self,
-        compiled_module: ir.Module,
-        func_name: str,
-        original_ir: str = None,
-    ):
-        self._compiled_ir = str(compiled_module)
-        self._func_name = func_name
-        self._original_ir = original_ir
-        self._module = None
-        self._engine = None
-        self._engine_lock = threading.Lock()
+class _ArgPacker:
+    """Thread-local buffer for packing C pointer arguments."""
+
+    def __init__(self):
         self._tls = threading.local()
 
-    def __getstate__(self):
-        return {
-            "compiled_ir": self._compiled_ir,
-            "func_name": self._func_name,
-            "original_ir": self._original_ir,
-        }
-
-    def __setstate__(self, state):
-        self._compiled_ir = state["compiled_ir"]
-        self._func_name = state["func_name"]
-        self._original_ir = state["original_ir"]
-        self._module = None
-        self._engine = None
-        self._engine_lock = threading.Lock()
-        self._tls = threading.local()
-
-    def _init_engine(self):
-        with self._engine_lock:
-            if self._engine is not None:
-                return
-
-            with ir.Context() as ctx:
-                ctx.load_all_available_dialects()
-                self._module = ir.Module.parse(self._compiled_ir)
-                self._engine = ExecutionEngine(
-                    self._module,
-                    opt_level=3,
-                    shared_libs=_get_mlir_runtime_libs(),
-                )
-                self._engine.initialize()
-
-    def _get_packed_args_buffer(self, size: int):
+    def pack(self, ptrs: List[ctypes.c_void_p]):
+        size = len(ptrs)
         buf = getattr(self._tls, "packed_args", None)
         capacity = getattr(self._tls, "capacity", 0)
         if buf is None or capacity < size:
             buf = (ctypes.c_void_p * size)()
             self._tls.packed_args = buf
             self._tls.capacity = size
+        for i, ptr in enumerate(ptrs):
+            buf[i] = ptr
         return buf
+
+
+class CompiledArtifact:
+    def __init__(
+        self,
+        compiled_module: ir.Module,
+        func_name: str,
+        source_ir: str = None,
+    ):
+        self._ir_text = str(compiled_module)
+        self._entry = func_name
+        self._source_ir = source_ir
+        self._module = None
+        self._engine = None
+        self._lock = threading.Lock()
+        self._packer = _ArgPacker()
+
+    def __getstate__(self):
+        return {
+            "ir_text": self._ir_text,
+            "entry": self._entry,
+            "source_ir": self._source_ir,
+        }
+
+    def __setstate__(self, state):
+        self._ir_text = state["ir_text"]
+        self._entry = state["entry"]
+        self._source_ir = state["source_ir"]
+        self._module = None
+        self._engine = None
+        self._lock = threading.Lock()
+        self._packer = _ArgPacker()
+
+    def _ensure_engine(self):
+        with self._lock:
+            if self._engine is not None:
+                return
+
+            with ir.Context() as ctx:
+                ctx.load_all_available_dialects()
+                self._module = ir.Module.parse(self._ir_text)
+                self._engine = ExecutionEngine(
+                    self._module,
+                    opt_level=3,
+                    shared_libs=_resolve_runtime_libs(),
+                )
+                self._engine.initialize()
 
     def __call__(self, *args, **kwargs):
         if self._engine is None:
-            self._init_engine()
+            self._ensure_engine()
 
-        all_c_ptrs: List[ctypes.c_void_p] = []
+        ptrs: List[ctypes.c_void_p] = []
         for arg in args:
-            all_c_ptrs.extend(get_c_pointers(arg))
+            ptrs.extend(fly_pointers(arg))
 
-        func_ptr = self._engine.raw_lookup(self._func_name)
+        func_ptr = self._engine.raw_lookup(self._entry)
         func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
 
-        num_args = len(all_c_ptrs)
-        packed_args = self._get_packed_args_buffer(num_args)
-        for i, ptr in enumerate(all_c_ptrs):
-            packed_args[i] = ptr
+        packed_args = self._packer.pack(ptrs)
 
         return func_exe(packed_args)
 
-    def print_ir(self, compiled: bool = True):
+    def dump(self, compiled: bool = True):
         if compiled:
             print("=" * 60)
             print("Compiled MLIR IR:")
             print("=" * 60)
-            print(self._compiled_ir)
+            print(self._ir_text)
         else:
-            if self._original_ir is None:
+            if self._source_ir is None:
                 print("Original IR not available")
             else:
                 print("=" * 60)
                 print("Original MLIR IR:")
                 print("=" * 60)
-                print(self._original_ir)
+                print(self._source_ir)
 
     @property
     def ir(self) -> str:
-        return self._compiled_ir
+        return self._ir_text
 
     @property
-    def original_ir(self) -> str:
-        return self._original_ir
+    def source_ir(self) -> str:
+        return self._source_ir

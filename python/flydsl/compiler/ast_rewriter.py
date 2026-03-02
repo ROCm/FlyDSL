@@ -32,12 +32,9 @@ def _find_func_in_code_object(co, func_name):
 def _is_constexpr(node):
     if not isinstance(node, ast.Call):
         return False
-    func = node.func
-    if isinstance(func, ast.Name) and func.id == "const_expr":
-        return True
-    if isinstance(func, ast.Attribute) and func.attr == "const_expr":
-        return True
-    return False
+    target = node.func
+    target_name = getattr(target, "id", None) or getattr(target, "attr", None)
+    return target_name == "const_expr"
 
 
 def _unwrap_constexpr(node):
@@ -142,24 +139,24 @@ class Transformer(ast.NodeTransformer):
 class RewriteBoolOps(Transformer):
     @staticmethod
     def dsl_and_(lhs, rhs):
-        if hasattr(lhs, "__dsl_and__"):
-            return lhs.__dsl_and__(rhs)
-        if hasattr(rhs, "__dsl_and__"):
-            return rhs.__dsl_and__(lhs)
+        if hasattr(lhs, "__fly_and__"):
+            return lhs.__fly_and__(rhs)
+        if hasattr(rhs, "__fly_and__"):
+            return rhs.__fly_and__(lhs)
         return lhs and rhs
 
     @staticmethod
     def dsl_or_(lhs, rhs):
-        if hasattr(lhs, "__dsl_or__"):
-            return lhs.__dsl_or__(rhs)
-        if hasattr(rhs, "__dsl_or__"):
-            return rhs.__dsl_or__(lhs)
+        if hasattr(lhs, "__fly_or__"):
+            return lhs.__fly_or__(rhs)
+        if hasattr(rhs, "__fly_or__"):
+            return rhs.__fly_or__(lhs)
         return lhs or rhs
 
     @staticmethod
     def dsl_not_(x):
-        if hasattr(x, "__dsl_not__"):
-            return x.__dsl_not__()
+        if hasattr(x, "__fly_not__"):
+            return x.__fly_not__()
         return not x
 
     @classmethod
@@ -173,53 +170,49 @@ class RewriteBoolOps(Transformer):
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
 
-        if isinstance(node.op, ast.And):
-            func_name = "dsl_and_"
-            short_circuit_value = ast.Constant(value=False)
-        elif isinstance(node.op, ast.Or):
-            func_name = "dsl_or_"
-            short_circuit_value = ast.Constant(value=True)
-        else:
+        _BOOL_OP_MAP = {ast.And: "dsl_and_", ast.Or: "dsl_or_"}
+        handler = _BOOL_OP_MAP.get(type(node.op))
+        if handler is None:
             return node
 
-        def short_circuit_eval(value, sc_value):
+        def _should_skip(operand):
+            bail_val = ast.Constant(value=(type(node.op) is ast.Or))
             return ast.BoolOp(
                 op=ast.And(),
                 values=[
-                    ast.Compare(
-                        left=ast.Call(
-                            func=ast.Name(id="type", ctx=ast.Load()),
-                            args=[value],
-                            keywords=[],
-                        ),
-                        ops=[ast.Eq()],
-                        comparators=[ast.Name(id="bool", ctx=ast.Load())],
+                    ast.Call(
+                        func=ast.Name(id="isinstance", ctx=ast.Load()),
+                        args=[operand, ast.Name(id="bool", ctx=ast.Load())],
+                        keywords=[],
                     ),
-                    ast.Compare(
-                        left=value,
-                        ops=[ast.Eq()],
-                        comparators=[sc_value],
-                    ),
+                    ast.Compare(left=operand, ops=[ast.Eq()], comparators=[bail_val]),
                 ],
             )
 
-        lhs = node.values[0]
-        for i in range(1, len(node.values)):
-            test = short_circuit_eval(lhs, short_circuit_value)
-            lhs = ast.IfExp(
-                test=test,
-                body=lhs,
-                orelse=ast.Call(func=ast.Name(func_name, ctx=ast.Load()), args=[lhs, node.values[i]], keywords=[]),
+        result = node.values[0]
+        for rhs in node.values[1:]:
+            result = ast.IfExp(
+                test=_should_skip(result),
+                body=result,
+                orelse=ast.Call(
+                    func=ast.Name(handler, ctx=ast.Load()),
+                    args=[result, rhs],
+                    keywords=[],
+                ),
             )
 
-        return ast.copy_location(ast.fix_missing_locations(lhs), node)
+        return ast.copy_location(ast.fix_missing_locations(result), node)
 
     def visit_UnaryOp(self, node: ast.UnaryOp):
         node = self.generic_visit(node)
-        if isinstance(node.op, ast.Not):
-            call = ast.Call(func=ast.Name("dsl_not_", ctx=ast.Load()), args=[node.operand], keywords=[])
-            return ast.copy_location(ast.fix_missing_locations(call), node)
-        return node
+        if not isinstance(node.op, ast.Not):
+            return node
+        replacement = ast.Call(
+            func=ast.Name("dsl_not_", ctx=ast.Load()),
+            args=[node.operand],
+            keywords=[],
+        )
+        return ast.copy_location(ast.fix_missing_locations(replacement), node)
 
 
 @ASTRewriter.register
@@ -384,22 +377,19 @@ class InsertEmptyYieldForSCFFor(Transformer):
         )
 
     @staticmethod
-    def _is_range_constexpr(iter_node):
+    def _iter_call_name(iter_node):
         if not isinstance(iter_node, ast.Call):
-            return False
-        func = iter_node.func
-        if isinstance(func, ast.Name) and func.id == "range_constexpr":
-            return True
-        if isinstance(func, ast.Attribute) and func.attr == "range_constexpr":
-            return True
-        return False
+            return None
+        target = iter_node.func
+        return getattr(target, "id", None) or getattr(target, "attr", None)
 
-    @staticmethod
-    def _is_range(iter_node):
-        if not isinstance(iter_node, ast.Call):
-            return False
-        func = iter_node.func
-        return isinstance(func, ast.Name) and func.id == "range"
+    @classmethod
+    def _is_range_constexpr(cls, iter_node):
+        return cls._iter_call_name(iter_node) == "range_constexpr"
+
+    @classmethod
+    def _is_range(cls, iter_node):
+        return cls._iter_call_name(iter_node) == "range"
 
     def visit_For(self, node: ast.For) -> ast.For:
         if self._is_range_constexpr(node.iter):
