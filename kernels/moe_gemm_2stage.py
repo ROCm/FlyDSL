@@ -114,16 +114,15 @@ def compile_moe_gemm1(
         quant scales (used to emulate MoE smoothquant behavior where each (token,slot)->expert route can
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
-      - "int4_bf16": W4A16 path: X is bf16, W is packed int4 unpacked to bf16 in-kernel
     """
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}  # legacy; kept until stage2/reduction are migrated
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"
     is_f16 = in_dtype == "fp16"
@@ -412,8 +411,8 @@ def compile_moe_gemm1(
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
-                if is_f16_or_bf16:
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
@@ -605,7 +604,7 @@ def compile_moe_gemm1(
                         lane_div_16=lane_div_16,  # 0..3
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
-                        elem_bytes=w_elem_bytes,
+                        elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                     )
     
@@ -1313,7 +1312,6 @@ def compile_moe_gemm2(
       - "bf16": A2/W are bf16
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
-      - "int4_bf16": W4A16 path: A2 is bf16, W is packed int4 unpacked to bf16 in-kernel
 
     Stage2 output supports:
       - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
@@ -1326,9 +1324,9 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"
     is_f16 = in_dtype == "fp16"
@@ -1375,8 +1373,8 @@ def compile_moe_gemm2(
     size_sorted = DYN
     size_expert_ids_shape = DYN
     size_scale_x = DYN
-    # W is packed int4 for W4A8/W4A16: 2 values per byte.
-    size_w = (experts * model_dim * inter_dim) // 2 if (is_int4 or is_int4_bf16) else (experts * model_dim * inter_dim)
+    # W is packed int4 for W4A8: 2 values per byte.
+    size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
 
     total_threads = 256
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -1654,8 +1652,8 @@ def compile_moe_gemm2(
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
-                if is_f16_or_bf16:
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
@@ -1821,7 +1819,7 @@ def compile_moe_gemm2(
                         lane_div_16=lane_div_16,  # 0..3
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
-                        elem_bytes=w_elem_bytes,
+                        elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                     )
     
