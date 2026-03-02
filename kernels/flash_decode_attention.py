@@ -119,7 +119,7 @@ def build_flash_decode_attention_module(
             # Load this thread's Q elements into registers.
             q_local = []
             for e in range_constexpr(ELEMS_PER_THREAD):
-                q_e = flir.memref.load(Q, [arith.as_value(h), d_indices[e]])
+                q_e = flir.memref.load(Q, [arith.as_value(h), arith.as_value(d_indices[e])])
                 q_f = (
                     q_e
                     if dtype_str == "f32"
@@ -142,7 +142,7 @@ def build_flash_decode_attention_module(
                 partial = c_zero_f
                 for e in range_constexpr(ELEMS_PER_THREAD):
                     k_e = flir.memref.load(
-                        K, [arith.as_value(h), arith.as_value(j), d_indices[e]]
+                        K, [arith.as_value(h), arith.as_value(j), arith.as_value(d_indices[e])]
                     )
                     k_f = (
                         k_e
@@ -219,7 +219,7 @@ def build_flash_decode_attention_module(
                 new_acc = []
                 for e in range_constexpr(ELEMS_PER_THREAD):
                     v_e = flir.memref.load(
-                        V, [arith.as_value(h), arith.as_value(j), d_indices[e]]
+                        V, [arith.as_value(h), arith.as_value(j), arith.as_value(d_indices[e])]
                     )
                     v_f = (
                         v_e
@@ -259,7 +259,7 @@ def build_flash_decode_attention_module(
                 flir.memref.store(
                     arith.as_value(out_e),
                     O,
-                    [arith.as_value(h), d_indices[e]],
+                    [arith.as_value(h), arith.as_value(d_indices[e])],
                 )
 
         @flir.jit
