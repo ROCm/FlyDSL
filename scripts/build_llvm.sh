@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
 LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
-LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_BUILD_DIR/mlir_install}"
-LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_BUILD_DIR/mlir_install.tgz}"
+LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
+LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # Read LLVM commit hash from cmake/llvm-hash.txt
