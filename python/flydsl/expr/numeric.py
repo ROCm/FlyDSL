@@ -47,10 +47,10 @@ class NumericMeta(type):
         zero=None,
         **kwargs,
     ):
-        def _extract_ir_values(self):
+        def _fly_values(self):
             return [self.ir_value()]
 
-        def _new_from_ir_values(cls, values):
+        def _fly_construct(cls, values):
             return cls(values[0])
 
         def _c_pointers(self):
@@ -65,11 +65,11 @@ class NumericMeta(type):
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
 
         new_attrs = {
-            "__extract_ir_values__": _extract_ir_values,
-            "__new_from_ir_values__": classmethod(_new_from_ir_values),
+            "__fly_values__": _fly_values,
+            "__fly_construct__": classmethod(_fly_construct),
         }
         if signed is not None:
-            new_attrs["__c_pointers__"] = _c_pointers
+            new_attrs["__fly_ptrs__"] = _c_pointers
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -113,78 +113,72 @@ class NumericMeta(type):
             raise ValueError(f"no zero value for {cls}")
 
 
-def _integer_promote(x, promote_bool=False):
+_CMP_OPS = frozenset({operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne})
+
+
+def _widen_narrow_int(x, widen_bool=False):
+    """Promote sub-32-bit integers (and optionally bools) to i32."""
     ty = type(x)
-    if ty is Boolean:
-        if promote_bool:
-            return x.to(Int32), Int32
+    if ty is Boolean and not widen_bool:
         return x, ty
     if ty.is_integer and ty.width < 32:
         return x.to(Int32), Int32
     return x, ty
 
 
-def _numeric_binary_op_type_promote(a, b, promote_bool=False):
-    a_type = type(a)
-    b_type = type(b)
-
-    a, a_type = _integer_promote(a, promote_bool=promote_bool)
-    b, b_type = _integer_promote(b, promote_bool=promote_bool)
-
-    if a_type == b_type:
-        return a, b, a_type
-
-    if a_type.is_float or b_type.is_float:
-        a_width = getattr(a_type, "width", 0)
-        b_width = getattr(b_type, "width", 0)
-
-        if a_type.is_float and not b_type.is_float:
-            res_type = a_type
-        elif b_type.is_float and not a_type.is_float:
-            res_type = b_type
-        elif a_width > b_width and a_width >= 16:
-            res_type = a_type
-        elif b_width > a_width and b_width >= 16:
-            res_type = b_type
-        elif a_width == b_width:
-            if a_type is Float64 or b_type is Float64:
-                res_type = Float64
-            elif a_type is Float32 or b_type is Float32:
-                res_type = Float32
-            elif a_type is Float16 or b_type is Float16:
-                res_type = Float16
-            else:
-                raise ValueError(f"implicit float promotion of {a_type} and {b_type} not supported")
-        else:
-            raise ValueError(f"implicit float promotion of {a_type} and {b_type} not supported")
-
-        new_a = a.to(res_type) if type(a) is not res_type else a
-        new_b = b.to(res_type) if type(b) is not res_type else b
-        return new_a, new_b, res_type
-
-    a_width = a_type.width
-    b_width = b_type.width
-    a_signed = a_type.signed
-    b_signed = b_type.signed
-
-    if a_signed == b_signed:
-        if a_width >= b_width:
-            return a, b.to(a_type), a_type
-        return a.to(b_type), b, b_type
-
-    unsigned_type = a_type if not a_signed else b_type
-    signed_type = a_type if a_signed else b_type
-    if unsigned_type.width >= signed_type.width:
-        res_type = unsigned_type
-    else:
-        res_type = signed_type
-    new_a = a.to(res_type) if type(a) is not res_type else a
-    new_b = b.to(res_type) if type(b) is not res_type else b
-    return new_a, new_b, res_type
+def _resolve_float_type(ta, tb):
+    """Pick the wider float type, or the one with higher rank at equal width."""
+    _FLOAT_RANK = {Float64: 3, Float32: 2, Float16: 1, BFloat16: 1}
+    if ta.is_float and not tb.is_float:
+        return ta
+    if tb.is_float and not ta.is_float:
+        return tb
+    wa, wb = ta.width, tb.width
+    if wa != wb:
+        wider = ta if wa > wb else tb
+        if wider.width >= 16:
+            return wider
+    ra = _FLOAT_RANK.get(ta, 0)
+    rb = _FLOAT_RANK.get(tb, 0)
+    if ra >= rb and ra > 0:
+        return ta
+    if rb > ra:
+        return tb
+    raise ValueError(f"no common float type for {ta} and {tb}; cast explicitly")
 
 
-def _numeric_binary_op(op, promote_operand=True, promote_bool=False, flip=False):
-    def wrapper(lhs, rhs, *, loc=None, ip=None):
+def _coerce_operands(a, b, widen_bool=False):
+    """Promote *a* and *b* to a common scalar type."""
+    ta, tb = type(a), type(b)
+    a, ta = _widen_narrow_int(a, widen_bool=widen_bool)
+    b, tb = _widen_narrow_int(b, widen_bool=widen_bool)
+
+    if ta is tb:
+        return a, b, ta
+
+    if ta.is_float or tb.is_float:
+        dest = _resolve_float_type(ta, tb)
+        return (a if type(a) is dest else a.to(dest),
+                b if type(b) is dest else b.to(dest),
+                dest)
+
+    # Both integers — pick wider; on tie, prefer unsigned when mixed sign
+    if ta.signed == tb.signed:
+        wider = ta if ta.width >= tb.width else tb
+        return (a if type(a) is wider else a.to(wider),
+                b if type(b) is wider else b.to(wider),
+                wider)
+
+    u, s = (ta, tb) if not ta.signed else (tb, ta)
+    dest = u if u.width >= s.width else s
+    return (a if type(a) is dest else a.to(dest),
+            b if type(b) is dest else b.to(dest),
+            dest)
+
+
+def _make_binop(op, promote=True, widen_bool=False, swap=False):
+    """Create a binary-operator closure for Numeric subclasses."""
+    def _apply(lhs, rhs, *, loc=None, ip=None):
         if not isinstance(rhs, Numeric):
             if not isinstance(rhs, (ArithValue, int, float, bool)):
                 return NotImplemented
@@ -192,42 +186,25 @@ def _numeric_binary_op(op, promote_operand=True, promote_bool=False, flip=False)
                 return NotImplemented
             rhs = as_numeric(rhs)
 
-        res_type = type(lhs)
-
-        if promote_operand:
-            lhs, rhs, res_type = _numeric_binary_op_type_promote(lhs, rhs, promote_bool)
+        out_type = type(lhs)
+        if promote:
+            lhs, rhs, out_type = _coerce_operands(lhs, rhs, widen_bool)
         else:
             rhs = type(lhs)(rhs)
 
-        if op in (
-            operator.lt,
-            operator.le,
-            operator.gt,
-            operator.ge,
-            operator.eq,
-            operator.ne,
-        ):
-            res_type = Boolean
-        elif op == operator.truediv and isinstance(lhs, Integer):
-            res_type = Float64 if res_type.width > 32 else Float32
+        if op in _CMP_OPS:
+            out_type = Boolean
+        elif op is operator.truediv and isinstance(lhs, Integer):
+            out_type = Float64 if out_type.width > 32 else Float32
 
-        if isinstance(lhs.value, ArithValue):
-            lhs_val = lhs.value.with_signedness(lhs.signed)
-        else:
-            lhs_val = lhs.value
+        lv = lhs.value.with_signedness(lhs.signed) if isinstance(lhs.value, ArithValue) else lhs.value
+        rv = rhs.value.with_signedness(rhs.signed) if isinstance(rhs.value, ArithValue) else rhs.value
 
-        if isinstance(rhs.value, ArithValue):
-            rhs_val = rhs.value.with_signedness(rhs.signed)
-        else:
-            rhs_val = rhs.value
+        if swap:
+            lv, rv = rv, lv
+        return out_type(op(lv, rv), loc=loc, ip=ip)
 
-        if flip:
-            lhs_val, rhs_val = rhs_val, lhs_val
-
-        res_val = op(lhs_val, rhs_val)
-        return res_type(res_val, loc=loc, ip=ip)
-
-    return wrapper
+    return _apply
 
 
 class Numeric(metaclass=NumericMeta):
@@ -264,7 +241,7 @@ class Numeric(metaclass=NumericMeta):
                 raise ValueError(f"cannot convert {type(self)} to {dtype}")
         elif dtype in (int, float, bool):
             if isinstance(self.value, ir.Value):
-                raise ValueError(f"unable to convert dynamic value to static type: {dtype}")
+                raise ValueError(f"dynamic IR value cannot be materialized as {dtype}")
             return dtype(self.value)
         else:
             raise ValueError(f"unable to convert {type(self)} to {dtype}")
@@ -272,7 +249,7 @@ class Numeric(metaclass=NumericMeta):
     def ir_value(self, *, loc=None, ip=None) -> ir.Value:
         return self.to(ir.Value, loc=loc, ip=ip)
 
-    def __ir_types__(self):
+    def __fly_types__(self):
         return [type(self).ir_type]
 
     def __neg__(self, *, loc=None, ip=None):
@@ -280,29 +257,29 @@ class Numeric(metaclass=NumericMeta):
             return type(self)(-self.value)
         return type(self)(-self.value, loc=loc, ip=ip)
 
-    def __dsl_bool__(self, *, loc=None, ip=None):
+    def __fly_bool__(self, *, loc=None, ip=None):
         if isinstance(self.value, (int, float, bool)):
             return Boolean(bool(self.value))
         zero = arith_const(type(self).zero, type(self).ir_type, loc=loc, ip=ip)
         return self.__ne__(type(self)(zero, loc=loc, ip=ip), loc=loc, ip=ip)
 
-    def __dsl_not__(self, *, loc=None, ip=None):
-        b = self.__dsl_bool__(loc=loc, ip=ip)
+    def __fly_not__(self, *, loc=None, ip=None):
+        b = self.__fly_bool__(loc=loc, ip=ip)
         if isinstance(b.value, bool):
             return Boolean(not b.value)
         zero = arith_const(0, T.bool(), loc=loc, ip=ip)
         return Boolean(b.ir_value().__eq__(zero), loc=loc, ip=ip)
 
-    def __dsl_and__(self, other, *, loc=None, ip=None):
-        lhs = self.__dsl_bool__(loc=loc, ip=ip)
-        rhs = as_numeric(other).__dsl_bool__(loc=loc, ip=ip)
+    def __fly_and__(self, other, *, loc=None, ip=None):
+        lhs = self.__fly_bool__(loc=loc, ip=ip)
+        rhs = as_numeric(other).__fly_bool__(loc=loc, ip=ip)
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value and rhs.value)
         return Boolean(lhs.ir_value().__and__(rhs.ir_value()), loc=loc, ip=ip)
 
-    def __dsl_or__(self, other, *, loc=None, ip=None):
-        lhs = self.__dsl_bool__(loc=loc, ip=ip)
-        rhs = as_numeric(other).__dsl_bool__(loc=loc, ip=ip)
+    def __fly_or__(self, other, *, loc=None, ip=None):
+        lhs = self.__fly_bool__(loc=loc, ip=ip)
+        rhs = as_numeric(other).__fly_bool__(loc=loc, ip=ip)
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value or rhs.value)
         return Boolean(lhs.ir_value().__or__(rhs.ir_value()), loc=loc, ip=ip)
@@ -310,12 +287,12 @@ class Numeric(metaclass=NumericMeta):
     def __bool__(self):
         if isinstance(self.value, (int, float, bool)):
             return bool(self.value)
-        raise RuntimeError(f"unable to convert dynamic '{type(self).__name__}' value to bool at compile time")
+        raise RuntimeError(f"cannot evaluate dynamic '{type(self).__name__}' as Python bool during tracing")
 
     def __index__(self):
         if isinstance(self.value, (int, float, bool)):
             return int(self.value)
-        raise RuntimeError(f"'{type(self.value)}' object cannot be interpreted as an integer")
+        raise RuntimeError(f"dynamic '{type(self.value).__name__}' has no Python integer representation")
 
     @staticmethod
     def from_python_value(value):
@@ -365,61 +342,61 @@ class Numeric(metaclass=NumericMeta):
         return ir2dsl_map[ir_type]
 
     def __add__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.add, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.add, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __sub__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.sub, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.sub, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __mul__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.mul, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.mul, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __floordiv__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.floordiv, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.floordiv, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __truediv__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.truediv, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.truediv, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __mod__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.mod, promote_bool=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.mod, widen_bool=True)(self, other, loc=loc, ip=ip)
 
     def __radd__(self, other, *, loc=None, ip=None):
         return self.__add__(other, loc=loc, ip=ip)
 
     def __rsub__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.sub, promote_bool=True, flip=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.sub, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
 
     def __rmul__(self, other, *, loc=None, ip=None):
         return self.__mul__(other, loc=loc, ip=ip)
 
     def __rfloordiv__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.floordiv, promote_bool=True, flip=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.floordiv, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
 
     def __rtruediv__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.truediv, promote_bool=True, flip=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.truediv, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
 
     def __rmod__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.mod, promote_bool=True, flip=True)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.mod, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
 
     def __pow__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.pow)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.pow)(self, other, loc=loc, ip=ip)
 
     def __eq__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.eq)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.eq)(self, other, loc=loc, ip=ip)
 
     def __ne__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.ne)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
 
     def __lt__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.lt)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.lt)(self, other, loc=loc, ip=ip)
 
     def __le__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.le)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.le)(self, other, loc=loc, ip=ip)
 
     def __gt__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.gt)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.gt)(self, other, loc=loc, ip=ip)
 
     def __ge__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.ge)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.ge)(self, other, loc=loc, ip=ip)
 
 
 def as_numeric(obj):
@@ -435,9 +412,9 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
         if isinstance(x, (bool, int, float)):
             if isinstance(x, float):
                 if np.isnan(x):
-                    raise ValueError("cannot convert float NaN to integer")
+                    raise ValueError("float NaN is not representable as integer")
                 elif np.isinf(x):
-                    raise OverflowError("cannot convert float infinity to integer")
+                    raise OverflowError("float infinity is not representable as integer")
             np_dtype = ty.numpy_dtype
             if np_dtype is not None:
                 x_val = int(np.array(x).astype(np_dtype))
@@ -477,37 +454,37 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
         return res_type(self.ir_value(loc=loc, ip=ip).__invert__(loc=loc, ip=ip))
 
     def __lshift__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.lshift)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.lshift)(self, other, loc=loc, ip=ip)
 
     def __rlshift__(self, other, *, loc=None, ip=None):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
-            raise ValueError(f"cannot left shift {other_} with {self}")
+            raise ValueError(f"left-shift requires integer operands, got {other_}")
         return other_.__lshift__(self, loc=loc, ip=ip)
 
     def __rshift__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.rshift)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.rshift)(self, other, loc=loc, ip=ip)
 
     def __rrshift__(self, other, *, loc=None, ip=None):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
-            raise ValueError(f"cannot right shift {other_} with {self}")
+            raise ValueError(f"right-shift requires integer operands, got {other_}")
         return other_.__rshift__(self, loc=loc, ip=ip)
 
     def __and__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.and_)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.and_)(self, other, loc=loc, ip=ip)
 
     def __rand__(self, other, *, loc=None, ip=None):
         return self.__and__(other, loc=loc, ip=ip)
 
     def __or__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.or_)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.or_)(self, other, loc=loc, ip=ip)
 
     def __ror__(self, other, *, loc=None, ip=None):
         return self.__or__(other, loc=loc, ip=ip)
 
     def __xor__(self, other, *, loc=None, ip=None):
-        return _numeric_binary_op(operator.xor)(self, other, loc=loc, ip=ip)
+        return _make_binop(operator.xor)(self, other, loc=loc, ip=ip)
 
     def __rxor__(self, other, *, loc=None, ip=None):
         return self.__xor__(other, loc=loc, ip=ip)
@@ -524,7 +501,7 @@ class Float(Numeric, metaclass=NumericMeta, width=32, ir_type=T.f32):
             super().__init__(float(x))
         elif isinstance(x, ir.Value):
             if isinstance(x.type, ir.IntegerType):
-                raise ValueError("signless integer to float conversion is not supported directly")
+                raise ValueError("bare signless integer cannot be promoted to float; use a typed wrapper")
             elif is_float_type(x.type):
                 if x.type != ty.ir_type:
                     x = fp_to_fp(x, ty.ir_type, loc=loc, ip=ip)
@@ -555,11 +532,11 @@ class Boolean(Integer, metaclass=NumericMeta, width=1, signed=True, ir_type=T.bo
             else:
                 value = a != arith_const(0, a.type, loc=loc, ip=ip)
         if value is None:
-            raise ValueError(f"cannot convert {a} to Boolean")
+            raise ValueError(f"no Boolean coercion defined for {a}")
         super().__init__(value, loc=loc, ip=ip)
 
     def __neg__(self, *, loc=None, ip=None):
-        raise TypeError("negation is not supported for boolean type")
+        raise TypeError("unary minus is undefined for booleans")
 
 
 class Int4(Integer, metaclass=NumericMeta, width=4, signed=True, ir_type=lambda: T.IntegerType.get_signless(4)):
@@ -599,9 +576,9 @@ class Uint64(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=T.i
 
 
 class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         if not isinstance(self.value, float):
-            raise ValueError("only float is supported")
+            raise ValueError("host-side pointer requires a concrete float value")
         f16_val = np.float16(self.value)
         bits = f16_val.view(np.uint16)
         c_val = ctypes.c_short(bits)
@@ -609,9 +586,9 @@ class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
 
 
 class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         if not isinstance(self.value, float):
-            raise ValueError("only float is supported")
+            raise ValueError("host-side pointer requires a concrete float value")
         f32_val = np.float32(self.value)
         bits = f32_val.view(np.uint32)
         bf16_bits = np.uint16(bits >> 16)
@@ -620,16 +597,16 @@ class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
 
 
 class Float32(Float, metaclass=NumericMeta, width=32, ir_type=T.f32):
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         if not isinstance(self.value, float):
-            raise ValueError("only float is supported")
+            raise ValueError("host-side pointer requires a concrete float value")
         return [ctypes.cast(ctypes.pointer(ctypes.c_float(self.value)), ctypes.c_void_p)]
 
 
 class Float64(Float, metaclass=NumericMeta, width=64, ir_type=T.f64):
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         if not isinstance(self.value, float):
-            raise ValueError("only float is supported")
+            raise ValueError("host-side pointer requires a concrete float value")
         return [ctypes.cast(ctypes.pointer(ctypes.c_double(self.value)), ctypes.c_void_p)]
 
 

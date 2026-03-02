@@ -15,7 +15,7 @@ from .._mlir.passmanager import PassManager
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
-from .jit_executor import JitCompiledFunction
+from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
     FuncLocationTracker,
@@ -23,7 +23,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import get_ir_types, new_from_ir_values
+from .protocol import fly_types, fly_construct
 from flydsl.runtime.device import get_rocm_arch
 
 @lru_cache(maxsize=1)
@@ -350,7 +350,7 @@ class JitFunction:
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
-            ir_types = get_ir_types(jit_args)
+            ir_types = fly_types(jit_args)
             loc = ir.Location.unknown(ctx)
 
             log().info(f"jit_args={jit_args}")
@@ -375,7 +375,7 @@ class JitFunction:
 
                     with ir.InsertionPoint(entry_block):
                         ir_args = list(func_op.regions[0].blocks[0].arguments)
-                        dsl_args = new_from_ir_values(dsl_types, jit_args, ir_args)
+                        dsl_args = fly_construct(dsl_types, jit_args, ir_args)
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))
                         named_args.update(constexpr_values)
@@ -390,7 +390,7 @@ class JitFunction:
                 print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
                 return None
 
-            compiled_func = JitCompiledFunction(
+            compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,

@@ -21,10 +21,10 @@ class Atom:
         self.atom_ty = self.value.type
 
     @classmethod
-    def __new_from_ir_values__(cls, values):
+    def __fly_construct__(cls, values):
         return cls(values[0])
 
-    def __extract_ir_values__(self):
+    def __fly_values__(self):
         return [self.value]
 
 
@@ -80,10 +80,10 @@ class TiledCopy:
         self.tiled_copy_ty = self.value.type
 
     @classmethod
-    def __new_from_ir_values__(cls, values):
+    def __fly_construct__(cls, values):
         return cls(values[0])
 
-    def __extract_ir_values__(self):
+    def __fly_values__(self):
         return [self.value]
 
     def __str__(self):

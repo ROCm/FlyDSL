@@ -129,16 +129,16 @@ class TensorAdaptor:
         return wrapper
 
     @requires_memref_desc
-    def __ir_types__(self):
+    def __fly_types__(self):
         return [self.tensor_adaptor.get_memref_type()]
 
     @requires_memref_desc
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         return self.tensor_adaptor.get_c_pointers()
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:
-            leading_dim = -1  # automatically determine leading dimension
+            leading_dim = -1
         self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
         return self
 
