@@ -61,10 +61,11 @@ def torch_ref_sigmoid_gating_update_fwd(
     for n in range(B):
         state_idx = int(state_indices[n].item())
         for hv in range(HV):
+            h_idx = hv // (HV // H)
             h = state_after[state_idx, hv].clone()  # [K, V]
             for t in range(T_seq):
-                q_t = q[n, t, hv % H, :].float() * scale
-                k_t = k[n, t, hv % H, :].float()
+                q_t = q[n, t, h_idx, :].float() * scale
+                k_t = k[n, t, h_idx, :].float()
                 v_t = v[n, t, hv, :].float().clone()
 
                 x = a[n, t, hv].float() + dt_bias[hv].float()
@@ -88,11 +89,8 @@ def torch_ref_sigmoid_gating_update_fwd(
     return out, state_after
 
 
-def test_fused_sigmoid_gating_delta_rule_update_fwd_mvp(ctx):
-    B, T_seq, H, HV, K, V = 1, 4, 1, 1, 8, 8
-    N_STATE = 2
-    torch.manual_seed(42)
-
+def _build_inputs(B, T_seq, H, HV, K, V, N_STATE, state_indices, seed=42):
+    torch.manual_seed(seed)
     A_log = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
     dt_bias = torch.randn(HV, device="cuda", dtype=torch.float32) * 0.1
     a = torch.randn(B, T_seq, HV, device="cuda", dtype=torch.float32) * 0.1
@@ -100,10 +98,76 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_mvp(ctx):
     q = torch.randn(B, T_seq, H, K, device="cuda", dtype=torch.float32) * 0.1
     k = torch.randn(B, T_seq, H, K, device="cuda", dtype=torch.float32) * 0.1
     v = torch.randn(B, T_seq, HV, V, device="cuda", dtype=torch.float32) * 0.1
-
     state_pool = torch.randn(N_STATE, HV, K, V, device="cuda", dtype=torch.float32) * 0.1
-    state_indices = torch.tensor([1], device="cuda", dtype=torch.int32)
+    state_indices = torch.tensor(state_indices, device="cuda", dtype=torch.int32)
+    return A_log, a, dt_bias, q, k, v, b, state_pool, state_indices
 
+
+def _run_kernel(
+    B,
+    T_seq,
+    H,
+    HV,
+    K,
+    V,
+    N_STATE,
+    A_log,
+    a,
+    dt_bias,
+    q,
+    k,
+    v,
+    b,
+    state_pool,
+    state_indices,
+    disable_state_update=False,
+    disable_output_calculation=False,
+):
+    m = build_fused_sigmoid_gating_delta_rule_update_fwd_module(
+        B=B,
+        T_seq=T_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        N_STATE=N_STATE,
+        dtype_str="f32",
+        disable_state_update=disable_state_update,
+        disable_output_calculation=disable_output_calculation,
+    )
+    exe = flydsl.compile(m)
+    a_flat = a.reshape(B * T_seq, HV).contiguous()
+    b_flat = b.reshape(B * T_seq, HV).contiguous()
+    q_flat = q.reshape(B * T_seq * H, K).contiguous()
+    k_flat = k.reshape(B * T_seq * H, K).contiguous()
+    v_flat = v.reshape(B * T_seq * HV, V).contiguous()
+    state_flat = state_pool.reshape(N_STATE * HV, K, V).contiguous()
+    if disable_output_calculation:
+        o_flat = torch.full(
+            (B * T_seq * HV, V), float("nan"), device="cuda", dtype=torch.float32
+        )
+    else:
+        o_flat = torch.empty(B * T_seq * HV, V, device="cuda", dtype=torch.float32)
+
+    exe(A_log, a_flat, dt_bias, q_flat, k_flat, v_flat, b_flat, state_flat, state_indices, o_flat)
+    torch.cuda.synchronize()
+    return o_flat.reshape(B, T_seq, HV, V), state_flat.reshape(N_STATE, HV, K, V)
+
+
+@pytest.mark.parametrize(
+    "B,T_seq,H,HV,K,V,N_STATE,state_indices",
+    [
+        (1, 4, 1, 1, 8, 8, 2, [1]),  # MVP baseline
+        (1, 4, 2, 4, 8, 8, 3, [2]),  # HV > H mapping
+        (2, 3, 2, 2, 8, 8, 4, [3, 1]),  # multi-batch + state-pool indirection
+    ],
+)
+def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
+    ctx, B, T_seq, H, HV, K, V, N_STATE, state_indices
+):
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
+        B, T_seq, H, HV, K, V, N_STATE, state_indices
+    )
     scale = K ** (-0.5)
     ref_o, ref_state = torch_ref_sigmoid_gating_update_fwd(
         A_log=A_log,
@@ -117,8 +181,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_mvp(ctx):
         state_indices=state_indices,
         scale=scale,
     )
-
-    m = build_fused_sigmoid_gating_delta_rule_update_fwd_module(
+    got_o, got_state = _run_kernel(
         B=B,
         T_seq=T_seq,
         H=H,
@@ -126,36 +189,91 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_mvp(ctx):
         K=K,
         V=V,
         N_STATE=N_STATE,
-        dtype_str="f32",
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
     )
-    exe = flydsl.compile(m)
-
-    a_flat = a.reshape(B * T_seq, HV).contiguous()
-    b_flat = b.reshape(B * T_seq, HV).contiguous()
-    q_flat = q.reshape(B * T_seq * H, K).contiguous()
-    k_flat = k.reshape(B * T_seq * H, K).contiguous()
-    v_flat = v.reshape(B * T_seq * HV, V).contiguous()
-    state_flat = state_pool.reshape(N_STATE * HV, K, V).contiguous()
-    o_flat = torch.empty(B * T_seq * HV, V, device="cuda", dtype=torch.float32)
-
-    exe(A_log, a_flat, dt_bias, q_flat, k_flat, v_flat, b_flat, state_flat, state_indices, o_flat)
-    torch.cuda.synchronize()
-
-    got_o = o_flat.reshape(B, T_seq, HV, V)
-    got_state = state_flat.reshape(N_STATE, HV, K, V)
-
-    print("got_o:", got_o)
-    print("ref_o:", ref_o)
-    print("got_state:", got_state)
-    print("ref_state:", ref_state)
-    print(f"got_o range: [{got_o.min().item():.6e}, {got_o.max().item():.6e}]")
-    print(f"ref_o range: [{ref_o.min().item():.6e}, {ref_o.max().item():.6e}]")
-    print(f"got_state range: [{got_state.min().item():.6e}, {got_state.max().item():.6e}]")
-    print(f"ref_state range: [{ref_state.min().item():.6e}, {ref_state.max().item():.6e}]")
-
     out_err = (got_o - ref_o).abs().max().item()
     state_err = (got_state - ref_state).abs().max().item()
+    print(f"shape(B,T,H,HV,K,V)=({B},{T_seq},{H},{HV},{K},{V})")
     print(f"max output error: {out_err:.3e}")
     print(f"max state  error: {state_err:.3e}")
     assert out_err < 1e-4
+    assert state_err < 1e-4
+
+
+def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_state_update(ctx):
+    B, T_seq, H, HV, K, V, N_STATE = 1, 4, 1, 1, 8, 8, 2
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
+        B, T_seq, H, HV, K, V, N_STATE, [1], seed=123
+    )
+    got_o, got_state = _run_kernel(
+        B=B,
+        T_seq=T_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        N_STATE=N_STATE,
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool.clone(),
+        state_indices=state_indices,
+        disable_state_update=True,
+    )
+    assert got_o.isfinite().all()
+    assert torch.allclose(got_state, state_pool, atol=0.0, rtol=0.0)
+
+
+def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_output_calculation(ctx):
+    B, T_seq, H, HV, K, V, N_STATE = 1, 4, 1, 1, 8, 8, 2
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
+        B, T_seq, H, HV, K, V, N_STATE, [1], seed=456
+    )
+    scale = K ** (-0.5)
+    _, ref_state = torch_ref_sigmoid_gating_update_fwd(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
+        scale=scale,
+    )
+    got_o, got_state = _run_kernel(
+        B=B,
+        T_seq=T_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        N_STATE=N_STATE,
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
+        disable_output_calculation=True,
+    )
+    assert torch.isnan(got_o).all()
+    state_err = (got_state - ref_state).abs().max().item()
+    print(f"max state error (disable output): {state_err:.3e}")
     assert state_err < 1e-4
