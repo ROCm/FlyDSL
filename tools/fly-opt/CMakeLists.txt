@@ -2,6 +2,8 @@ set(LIBS
   MLIRFlyDialect
   MLIRFlyROCDLDialect
   MLIRFlyToROCDL
+  MLIRFlyGpuStreamInject
+  MLIRRegisterAllExtensions
 
   MLIRMlirOptMain
 )

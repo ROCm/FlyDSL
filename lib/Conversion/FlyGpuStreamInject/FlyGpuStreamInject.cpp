@@ -1,173 +1,208 @@
+#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
+
+#include "mlir/Conversion/AsyncToLLVM/AsyncToLLVM.h"
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
+#include "mlir/Conversion/ConvertToLLVM/ToLLVMPass.h"
+#include "mlir/Conversion/GPUCommon/GPUCommonPass.h"
+#include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+#include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
-
-#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 namespace mlir {
-#define GEN_PASS_DEF_FLYGPUSTREAMMARKPASS
-#define GEN_PASS_DEF_FLYGPUSTREAMINJECTPASS
+#define GEN_PASS_DEF_FLYGPUTOLLVMPASS
 #include "flydsl/Conversion/Passes.h.inc"
 } // namespace mlir
 
 using namespace mlir;
 
-static constexpr StringLiteral kStreamArgIndexAttr("fly.stream_arg_index");
-
 namespace {
 
-// ===----------------------------------------------------------------------===//
-// Phase 1: fly-gpu-stream-mark  (runs BEFORE gpu-to-llvm)
-//
-// While gpu.launch_func still carries asyncObject and the function is still
-// func.func with !gpu.async.token, record which arg index is the stream.
-// ===----------------------------------------------------------------------===//
-
-class FlyGpuStreamMarkPass
-    : public mlir::impl::FlyGpuStreamMarkPassBase<FlyGpuStreamMarkPass> {
+/// Higher-priority pattern for gpu.launch_func that preserves asyncObject.
+///
+/// The upstream LegalizeLaunchFuncOpPattern ignores the asyncObject operand
+/// and always creates/destroys its own stream via mgpuStreamCreate.  This
+/// pattern adds a single check: if the original op carries an asyncObject,
+/// use it as the stream instead.
+class FlyLaunchFuncOpPattern
+    : public ConvertOpToLLVMPattern<gpu::LaunchFuncOp> {
 public:
-  using FlyGpuStreamMarkPassBase::FlyGpuStreamMarkPassBase;
+  FlyLaunchFuncOpPattern(const LLVMTypeConverter &converter,
+                         bool kernelBarePtrCallConv,
+                         bool kernelIntersperseSizeCallConv)
+      : ConvertOpToLLVMPattern<gpu::LaunchFuncOp>(converter,
+                                                  /*benefit=*/2),
+        kernelBarePtrCallConv(kernelBarePtrCallConv),
+        kernelIntersperseSizeCallConv(kernelIntersperseSizeCallConv),
+        streamCreateCallBuilder(
+            "mgpuStreamCreate",
+            LLVM::LLVMPointerType::get(&converter.getContext()), {}) {}
 
-  void runOnOperation() override {
-    ModuleOp moduleOp = getOperation();
-    MLIRContext *ctx = &getContext();
+  LogicalResult
+  matchAndRewrite(gpu::LaunchFuncOp launchOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    for (Value operand : adaptor.getOperands())
+      if (!LLVM::isCompatibleType(operand.getType()))
+        return rewriter.notifyMatchFailure(launchOp,
+                                           "operand is not an LLVM type");
 
-    moduleOp.walk([&](func::FuncOp funcOp) {
-      int64_t streamArgIdx = -1;
-      bool consistent = true;
+    if (launchOp.getAsyncDependencies().size() > 1)
+      return rewriter.notifyMatchFailure(
+          launchOp, "Cannot convert with more than one async dependency.");
 
-      funcOp.walk([&](gpu::LaunchFuncOp launch) {
-        Value asyncObj = launch.getAsyncObject();
-        if (!asyncObj)
-          return;
-        auto blockArg = dyn_cast<BlockArgument>(asyncObj);
-        if (!blockArg) {
-          consistent = false;
-          return;
-        }
-        int64_t idx = blockArg.getArgNumber();
-        if (streamArgIdx < 0)
-          streamArgIdx = idx;
-        else if (streamArgIdx != idx)
-          consistent = false;
-      });
+    if (!launchOp.getAsyncToken() && !launchOp.getAsyncDependencies().empty())
+      return rewriter.notifyMatchFailure(
+          launchOp, "Cannot convert non-async op with async dependencies.");
 
-      if (consistent && streamArgIdx >= 0) {
-        funcOp->setAttr(kStreamArgIndexAttr,
-                        IntegerAttr::get(IndexType::get(ctx), streamArgIdx));
+    Location loc = launchOp.getLoc();
+
+    // --- Stream selection (the fix over upstream) ---
+    Value stream = Value();
+    if (!adaptor.getAsyncDependencies().empty())
+      stream = adaptor.getAsyncDependencies().front();
+    else if (adaptor.getAsyncObject())
+      stream = adaptor.getAsyncObject();
+    else if (launchOp.getAsyncToken())
+      stream = streamCreateCallBuilder.create(loc, rewriter, {}).getResult();
+
+    // Lower kernel operands to LLVM types.
+    OperandRange origArguments = launchOp.getKernelOperands();
+    SmallVector<Value, 8> llvmArguments = getTypeConverter()->promoteOperands(
+        loc, origArguments, adaptor.getKernelOperands(), rewriter,
+        /*useBarePtrCallConv=*/kernelBarePtrCallConv);
+
+    SmallVector<Value, 8> llvmArgumentsWithSizes;
+    if (kernelIntersperseSizeCallConv) {
+      if (origArguments.size() != llvmArguments.size())
+        return rewriter.notifyMatchFailure(
+            launchOp,
+            "Cannot add sizes to arguments with one-to-many expansion.");
+
+      llvmArgumentsWithSizes.reserve(llvmArguments.size() * 2);
+      for (auto [llvmArg, origArg] :
+           llvm::zip_equal(llvmArguments, origArguments)) {
+        auto memrefTy = dyn_cast<MemRefType>(origArg.getType());
+        if (!memrefTy)
+          return rewriter.notifyMatchFailure(
+              launchOp, "Operand to launch op is not a memref.");
+        if (!memrefTy.hasStaticShape() ||
+            !memrefTy.getElementType().isIntOrFloat())
+          return rewriter.notifyMatchFailure(
+              launchOp, "Operand is not a static-shape int/float memref.");
+        unsigned bitwidth = memrefTy.getElementTypeBitWidth();
+        if (bitwidth % 8 != 0)
+          return rewriter.notifyMatchFailure(
+              launchOp, "Operand element type is not byte-aligned.");
+        uint64_t staticSize = static_cast<uint64_t>(bitwidth / 8) *
+                              static_cast<uint64_t>(memrefTy.getNumElements());
+        Value sizeArg = LLVM::ConstantOp::create(
+            rewriter, loc, getIndexType(), rewriter.getIndexAttr(staticSize));
+        llvmArgumentsWithSizes.push_back(llvmArg);
+        llvmArgumentsWithSizes.push_back(sizeArg);
       }
-    });
+    }
+
+    std::optional<gpu::KernelDim3> clusterSize = std::nullopt;
+    if (launchOp.hasClusterSize())
+      clusterSize =
+          gpu::KernelDim3{adaptor.getClusterSizeX(), adaptor.getClusterSizeY(),
+                          adaptor.getClusterSizeZ()};
+
+    gpu::LaunchFuncOp::create(
+        rewriter, launchOp.getLoc(), launchOp.getKernelAttr(),
+        gpu::KernelDim3{adaptor.getGridSizeX(), adaptor.getGridSizeY(),
+                        adaptor.getGridSizeZ()},
+        gpu::KernelDim3{adaptor.getBlockSizeX(), adaptor.getBlockSizeY(),
+                        adaptor.getBlockSizeZ()},
+        adaptor.getDynamicSharedMemorySize(),
+        llvmArgumentsWithSizes.empty() ? llvmArguments : llvmArgumentsWithSizes,
+        stream, clusterSize);
+
+    if (launchOp.getAsyncToken())
+      rewriter.replaceOp(launchOp, {stream});
+    else
+      rewriter.eraseOp(launchOp);
+    return success();
   }
+
+private:
+  bool kernelBarePtrCallConv;
+  bool kernelIntersperseSizeCallConv;
+  FunctionCallBuilder streamCreateCallBuilder;
 };
 
 // ===----------------------------------------------------------------------===//
-// Phase 2: fly-gpu-stream-inject  (runs AFTER gpu-to-llvm)
-//
-// Re-wire the stream argument as asyncObject on each gpu.launch_func.
+// fly-gpu-to-llvm pass: drop-in replacement for gpu-to-llvm
 // ===----------------------------------------------------------------------===//
 
-static Value addNewStreamArg(Operation *funcLikeOp, MLIRContext *ctx) {
-  auto ptrTy = LLVM::LLVMPointerType::get(ctx);
-
-  if (auto funcOp = dyn_cast<func::FuncOp>(funcLikeOp)) {
-    unsigned idx = funcOp.getNumArguments();
-    (void)funcOp.insertArgument(idx, ptrTy, {}, funcOp.getLoc());
-    return funcOp.getArgument(idx);
-  }
-  if (auto llvmFunc = dyn_cast<LLVM::LLVMFuncOp>(funcLikeOp)) {
-    auto oldTy = llvmFunc.getFunctionType();
-    SmallVector<Type> newInputs(oldTy.getParams());
-    newInputs.push_back(ptrTy);
-    auto newTy = LLVM::LLVMFunctionType::get(oldTy.getReturnType(), newInputs,
-                                              oldTy.isVarArg());
-    llvmFunc.setFunctionType(newTy);
-    Block &entry = llvmFunc.getBody().front();
-    return entry.addArgument(ptrTy, llvmFunc.getLoc());
-  }
-  return nullptr;
-}
-
-static Block *getEntryBlock(Operation *funcLikeOp) {
-  if (auto f = dyn_cast<func::FuncOp>(funcLikeOp))
-    return &f.getBody().front();
-  if (auto f = dyn_cast<LLVM::LLVMFuncOp>(funcLikeOp))
-    return &f.getBody().front();
-  return nullptr;
-}
-
-static void injectStreamIntoFunction(Operation *funcLikeOp, MLIRContext *ctx) {
-  SmallVector<gpu::LaunchFuncOp> launches;
-  funcLikeOp->walk([&](gpu::LaunchFuncOp op) {
-    if (!op.getAsyncObject())
-      launches.push_back(op);
-  });
-  if (launches.empty())
-    return;
-
-  Value streamArg;
-
-  // Try the attribute left by fly-gpu-stream-mark.
-  if (auto attr =
-          funcLikeOp->getAttrOfType<IntegerAttr>(kStreamArgIndexAttr)) {
-    unsigned argIdx = attr.getValue().getZExtValue();
-    Block *entry = getEntryBlock(funcLikeOp);
-    if (entry && argIdx < entry->getNumArguments())
-      streamArg = entry->getArgument(argIdx);
-    funcLikeOp->removeAttr(kStreamArgIndexAttr);
-  }
-
-  // Fallback: no attribute → add a new trailing stream arg.
-  if (!streamArg)
-    streamArg = addNewStreamArg(funcLikeOp, ctx);
-
-  if (!streamArg)
-    return;
-
-  OpBuilder builder(ctx);
-  for (gpu::LaunchFuncOp launch : launches) {
-    builder.setInsertionPoint(launch);
-
-    gpu::KernelDim3 grid{launch.getGridSizeX(), launch.getGridSizeY(),
-                         launch.getGridSizeZ()};
-    gpu::KernelDim3 block{launch.getBlockSizeX(), launch.getBlockSizeY(),
-                          launch.getBlockSizeZ()};
-
-    std::optional<gpu::KernelDim3> cluster;
-    if (launch.hasClusterSize())
-      cluster = gpu::KernelDim3{launch.getClusterSizeX(),
-                                launch.getClusterSizeY(),
-                                launch.getClusterSizeZ()};
-
-    gpu::LaunchFuncOp::create(
-        builder, launch.getLoc(), launch.getKernelAttr(), grid, block,
-        launch.getDynamicSharedMemorySize(), launch.getKernelOperands(),
-        /*asyncObject=*/streamArg, cluster);
-
-    launch.erase();
-  }
-}
-
-class FlyGpuStreamInjectPass
-    : public mlir::impl::FlyGpuStreamInjectPassBase<FlyGpuStreamInjectPass> {
+class FlyGpuToLLVMPass
+    : public mlir::impl::FlyGpuToLLVMPassBase<FlyGpuToLLVMPass> {
 public:
-  using FlyGpuStreamInjectPassBase::FlyGpuStreamInjectPassBase;
+  using FlyGpuToLLVMPassBase::FlyGpuToLLVMPassBase;
+
+  void getDependentDialects(DialectRegistry &registry) const final {
+    FlyGpuToLLVMPassBase::getDependentDialects(registry);
+    registerConvertToLLVMDependentDialectLoading(registry);
+  }
 
   void runOnOperation() override {
-    ModuleOp moduleOp = getOperation();
-    MLIRContext *ctx = &getContext();
+    MLIRContext *context = &getContext();
 
-    SmallVector<Operation *> targets;
-    moduleOp.walk([&](func::FuncOp op) { targets.push_back(op); });
-    moduleOp.walk([&](LLVM::LLVMFuncOp op) {
-      if (!op.isExternal())
-        targets.push_back(op);
-    });
+    // Phase 1: Progressive vector lowering (same as upstream).
+    {
+      RewritePatternSet patterns(context);
+      vector::populateVectorTransferLoweringPatterns(patterns,
+                                                     /*maxTransferRank=*/1);
+      vector::populateVectorFromElementsUnrollPatterns(patterns);
+      if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+        return signalPassFailure();
+    }
 
-    for (Operation *op : targets)
-      injectStreamIntoFunction(op, ctx);
+    // Phase 2: GPU-to-LLVM conversion with our custom pattern.
+    LowerToLLVMOptions options(context);
+    options.useBarePtrCallConv = hostBarePtrCallConv;
+    RewritePatternSet patterns(context);
+    ConversionTarget target(*context);
+    target.addLegalDialect<LLVM::LLVMDialect>();
+    LLVMTypeConverter converter(context, options);
+
+    for (Dialect *dialect : context->getLoadedDialects()) {
+      auto *iface = dyn_cast<ConvertToLLVMPatternInterface>(dialect);
+      if (!iface)
+        continue;
+      iface->populateConvertToLLVMConversionPatterns(target, converter,
+                                                     patterns);
+    }
+
+    target.addLegalOp<gpu::GPUModuleOp, gpu::BinaryOp>();
+    target.addDynamicallyLegalOp<gpu::LaunchFuncOp>(
+        [&](gpu::LaunchFuncOp op) -> bool { return converter.isLegal(op); });
+
+    populateVectorToLLVMConversionPatterns(converter, patterns);
+    populateFinalizeMemRefToLLVMConversionPatterns(converter, patterns);
+    populateAsyncStructuralTypeConversionsAndLegality(converter, patterns,
+                                                      target);
+    // Upstream patterns (benefit=1 for LaunchFuncOp).
+    populateGpuToLLVMConversionPatterns(converter, patterns,
+                                        kernelBarePtrCallConv,
+                                        kernelIntersperseSizeCallConv);
+    // Our pattern (benefit=2) — takes priority for gpu.launch_func.
+    patterns.add<FlyLaunchFuncOpPattern>(converter, kernelBarePtrCallConv,
+                                         kernelIntersperseSizeCallConv);
+
+    if (failed(applyPartialConversion(getOperation(), target,
+                                      std::move(patterns))))
+      signalPassFailure();
   }
 };
 

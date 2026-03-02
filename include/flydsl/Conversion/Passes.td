@@ -14,37 +14,33 @@ def FlyToROCDLConversionPass : Pass<"convert-fly-to-rocdl"> {
   ];
 }
 
-def FlyGpuStreamMarkPass : Pass<"fly-gpu-stream-mark", "::mlir::ModuleOp"> {
-  let summary = "Mark stream argument indices before gpu-to-llvm drops asyncObject";
+def FlyGpuToLLVMPass : Pass<"fly-gpu-to-llvm", "::mlir::ModuleOp"> {
+  let summary = "GPU to LLVM conversion that preserves asyncObject on gpu.launch_func";
   let description = [{
-    Scans host functions for `gpu.launch_func` ops that carry an `asyncObject`
-    operand.  Records the corresponding function-argument index as a
-    `fly.stream_arg_index` attribute on the enclosing function so that the
-    downstream `fly-gpu-stream-inject` pass can re-wire it precisely after
-    `gpu-to-llvm` has dropped the `asyncObject`.
+    Drop-in replacement for the upstream `gpu-to-llvm` pass.  Registers a
+    higher-priority pattern for `gpu.launch_func` that preserves the
+    `asyncObject` operand through the conversion.  The upstream pattern
+    ignores `asyncObject` and always creates/destroys its own stream,
+    which breaks CUDA/HIP graph capture.
+
+    All other conversion patterns are identical to the upstream pass.
   }];
-  let dependentDialects = [
-    "gpu::GPUDialect",
-    "func::FuncDialect"
+  let options = [
+    Option<"hostBarePtrCallConv", "use-bare-pointers-for-host", "bool",
+           /*default=*/"false",
+           "Use bare pointers to pass memref arguments to host functions.">,
+    Option<"kernelBarePtrCallConv", "use-bare-pointers-for-kernels", "bool",
+           /*default=*/"false",
+           "Use bare pointers to pass memref arguments to kernels.">,
+    Option<"kernelIntersperseSizeCallConv", "intersperse-sizes-for-kernels",
+           "bool", /*default=*/"false",
+           "Insert size argument after each memref argument.">
   ];
-}
-
-def FlyGpuStreamInjectPass : Pass<"fly-gpu-stream-inject", "::mlir::ModuleOp"> {
-  let summary = "Inject external stream parameter into host functions for GPU kernel launches";
-  let description = [{
-    Re-wires the stream argument (identified by `fly.stream_arg_index` attribute
-    set by the earlier `fly-gpu-stream-mark` pass) as the `asyncObject` operand
-    on each `gpu.launch_func`.  If no attribute is present (i.e. the function had
-    no stream parameter), a new `!llvm.ptr` argument is appended instead.
-
-    The downstream translation phase (SelectObjectAttr) will then use this
-    stream directly instead of calling mgpuStreamCreate / mgpuStreamSynchronize
-    / mgpuStreamDestroy.
-  }];
   let dependentDialects = [
     "gpu::GPUDialect",
     "LLVM::LLVMDialect",
-    "func::FuncDialect"
+    "func::FuncDialect",
+    "memref::MemRefDialect"
   ];
 }
 

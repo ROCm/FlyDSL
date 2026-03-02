@@ -71,10 +71,6 @@ void mlirRegisterFlyToROCDLConversionPass(void) {
   mlir::registerFlyToROCDLConversionPass();
 }
 
-void mlirRegisterFlyGpuStreamMarkPass(void) {
-  mlir::registerFlyGpuStreamMarkPass();
-}
-
-void mlirRegisterFlyGpuStreamInjectPass(void) {
-  mlir::registerFlyGpuStreamInjectPass();
+void mlirRegisterFlyGpuToLLVMPass(void) {
+  mlir::registerFlyGpuToLLVMPass();
 }
