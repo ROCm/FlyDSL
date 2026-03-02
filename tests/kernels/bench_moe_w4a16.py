@@ -54,9 +54,7 @@ def benchmark_flydsl(
     """
     device = "cuda"
 
-    # FlyDSL only supports group_size=32 for W4A16/W4A8; fall back to per-row otherwise.
-    # int4_fp8 is per-row only.
-    if in_dtype in ("int4_bf16", "int4") and group_size == 32:
+    if in_dtype in ("int4_bf16", "int4", "int4_fp8") and group_size == 32:
         flydsl_group_size = 32
     else:
         flydsl_group_size = -1
@@ -113,7 +111,9 @@ def benchmark_flydsl(
         compare_aiter_ck=False,
     )
 
-    return (us1 + us2) / 1000  # convert us to ms
+    ms1 = us1 / 1000
+    ms2 = us2 / 1000
+    return (ms1 + ms2, ms1, ms2)
 
 
 def benchmark_flydsl_hybrid_w2_bf16(
@@ -199,7 +199,7 @@ def main():
                              help="Run all W4 variants: W4A8/W4A16 x per-row/g32")
     dtype_group.add_argument("--hybrid-w2-bf16", action="store_true",
                              help="Benchmark hybrid: stage1 W4A16, stage2 bf16 (compare vs pure W4A16)")
-    parser.add_argument("--tokens", type=int, default=5231)
+    parser.add_argument("--tokens", type=int, default=16384)
     parser.add_argument("--model-dim", type=int, default=7168)
     parser.add_argument("--inter-dim", type=int, default=512)
     parser.add_argument("--experts", type=int, default=384)
@@ -239,15 +239,15 @@ def main():
         flydsl_in_dtype = "int4_bf16"
         dtype_name = "W4A16"
 
-    supports_groupwise = flydsl_in_dtype in ("int4", "int4_bf16")
+    supports_groupwise = flydsl_in_dtype in ("int4", "int4_bf16", "int4_fp8")
 
     M = tokens * topk
     total_flops = M * (2 * inter_dim) * model_dim * 2 + M * model_dim * inter_dim * 2
 
     def _run_and_collect(in_dtype, group_size, label):
-        """Run benchmark, return (label, ms, tflops)."""
+        """Run benchmark, return (label, ms, tflops, ms1, ms2)."""
         print(f"  Running {label} ...")
-        ms = benchmark_flydsl(
+        ms, ms1, ms2 = benchmark_flydsl(
             tokens, model_dim, inter_dim, experts, topk,
             in_dtype=in_dtype, group_size=group_size,
             num_warmup=args.num_warmup, num_iters=args.num_iters,
@@ -255,7 +255,7 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
         tflops = total_flops / (ms / 1000) / 1e12
-        return (label, ms, tflops)
+        return (label, ms, tflops, ms1, ms2)
 
     effective_gs = group_size if supports_groupwise else -1
     print("=" * 70)
@@ -263,6 +263,8 @@ def main():
     print("=" * 70)
     print(f"\nParams: tokens={tokens}, model_dim={model_dim}, inter_dim={inter_dim}")
     print(f"        experts={experts}, topk={topk}, M_effective={M}")
+    print(f"Stage1 GEMM: M={M}, N={2*inter_dim}, K={model_dim}")
+    print(f"Stage2 GEMM: M={M}, N={model_dim}, K={inter_dim}")
     print(f"Total FLOPs: {total_flops / 1e12:.4f} TFLOPs\n")
 
     if is_compare:
@@ -270,6 +272,7 @@ def main():
             ("int4",      -1, "W4A8",     "per-row"),
             ("int4",      32, "W4A8",     "g32"),
             ("int4_fp8",  -1, "W4A_FP8",  "per-row"),
+            ("int4_fp8",  32, "W4A_FP8",  "g32"),
             ("int4_bf16", -1, "W4A16",    "per-row"),
             ("int4_bf16", 32, "W4A16",    "g32"),
         ]
@@ -280,14 +283,14 @@ def main():
         print("\n" + "=" * 70)
         print("                         RESULTS")
         print("=" * 70)
-        print(f"\n{'Kernel':<30s} {'Latency':>10s} {'TFLOPS':>10s}")
-        print("-" * 52)
-        for label, ms, tflops, _, _ in results:
-            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {tflops:>8.2f}")
+        print(f"\n{'Kernel':<30s} {'Total':>10s} {'Stage1':>10s} {'Stage2':>10s} {'TFLOPS':>10s}")
+        print("-" * 72)
+        for label, ms, tflops, ms1, ms2, _, _ in results:
+            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {ms1:>8.2f} ms {ms2:>8.2f} ms {tflops:>8.2f}")
 
-        by_key = {(r[3], r[4]): r[1] for r in results}
+        by_key = {(r[5], r[6]): r[1] for r in results}
         print()
-        for tag in ("W4A8", "W4A16"):
+        for tag in ("W4A8", "W4A_FP8", "W4A16"):
             pr = by_key[(tag, "per-row")]
             g = by_key[(tag, "g32")]
             d = g - pr
@@ -310,7 +313,7 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
 
-        _, w4a16_ms, _ = _run_and_collect("int4_bf16", group_size, "pure W4A16 (baseline)")
+        _, w4a16_ms, _, _, _ = _run_and_collect("int4_bf16", group_size, "pure W4A16 (baseline)")
 
         print("\n" + "=" * 70)
         print("                         RESULTS")
@@ -342,10 +345,10 @@ def main():
         print("\n" + "=" * 70)
         print("                         RESULTS")
         print("=" * 70)
-        print(f"\n{'Kernel':<30s} {'Latency':>10s} {'TFLOPS':>10s}")
-        print("-" * 52)
-        for label, ms, tflops in results:
-            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {tflops:>8.2f}")
+        print(f"\n{'Kernel':<30s} {'Total':>10s} {'Stage1':>10s} {'Stage2':>10s} {'TFLOPS':>10s}")
+        print("-" * 72)
+        for label, ms, tflops, ms1, ms2 in results:
+            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {ms1:>8.2f} ms {ms2:>8.2f} ms {tflops:>8.2f}")
 
         if len(results) == 2:
             perrow_ms = results[0][1]

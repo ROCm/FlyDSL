@@ -445,8 +445,8 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 / W4A8 (int4_fp8 is per-row only for now) ---
-    use_groupwise_scale = (is_int4_bf16 or is_int4) and group_size > 0
+    # --- Groupwise scale for W4A16 / W4A8 / W4A_FP8 ---
+    use_groupwise_scale = (is_int4_bf16 or is_int4 or is_int4_fp8) and group_size > 0
     scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
     if use_groupwise_scale:
         N_total = 2 * inter_dim
@@ -873,8 +873,8 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for W4A16 / W4A8 (stage 2) ---
-    use_groupwise_scale = (is_int4_bf16 or is_int4) and group_size > 0
+    # --- Groupwise scale for W4A16 / W4A8 / W4A_FP8 (stage 2) ---
+    use_groupwise_scale = (is_int4_bf16 or is_int4 or is_int4_fp8) and group_size > 0
     scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
     if use_groupwise_scale:
         num_groups_s2 = inter_dim // group_size
@@ -1253,8 +1253,8 @@ def test_moe_gemm_2stage(
     out_s = str(out_dtype).strip().lower()
     if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
         pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
-    if group_size > 0 and in_dtype not in ("int4_bf16", "int4"):
-        pytest.skip("groupwise scale only applies to int4_bf16 and int4")
+    if group_size > 0 and in_dtype not in ("int4_bf16", "int4", "int4_fp8"):
+        pytest.skip("groupwise scale only applies to int4_bf16, int4, and int4_fp8")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
