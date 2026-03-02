@@ -266,12 +266,12 @@ def main():
     print(f"Total FLOPs: {total_flops / 1e12:.4f} TFLOPs\n")
 
     if is_compare:
-        results = []
         configs = [
-            ("int4",      -1, "W4A8",  "per-row"),
-            ("int4",      32, "W4A8",  "g32"),
-            ("int4_bf16", -1, "W4A16", "per-row"),
-            ("int4_bf16", 32, "W4A16", "g32"),
+            ("int4",      -1, "W4A8",     "per-row"),
+            ("int4",      32, "W4A8",     "g32"),
+            ("int4_fp8",  -1, "W4A_FP8",  "per-row"),
+            ("int4_bf16", -1, "W4A16",    "per-row"),
+            ("int4_bf16", 32, "W4A16",    "g32"),
         ]
         results = []
         for dtype, gs, tag, scale in configs:
@@ -294,8 +294,10 @@ def main():
             print(f"  {tag}: g32 vs per-row  {d:+.2f} ms ({d / pr * 100:+.1f}%)")
         pr8 = by_key[("W4A8", "per-row")]
         pr16 = by_key[("W4A16", "per-row")]
-        d = pr8 - pr16
-        print(f"  per-row: W4A8 vs W4A16  {d:+.2f} ms ({d / pr16 * 100:+.1f}%)")
+        fp8 = by_key[("W4A_FP8", "per-row")]
+        print(f"  per-row: W4A8 vs W4A16    {pr8 - pr16:+.2f} ms ({(pr8 - pr16) / pr16 * 100:+.1f}%)")
+        print(f"  per-row: W4A_FP8 vs W4A8  {fp8 - pr8:+.2f} ms ({(fp8 - pr8) / pr8 * 100:+.1f}%)")
+        print(f"  per-row: W4A_FP8 vs W4A16 {fp8 - pr16:+.2f} ms ({(fp8 - pr16) / pr16 * 100:+.1f}%)")
         print()
 
     elif is_hybrid:
