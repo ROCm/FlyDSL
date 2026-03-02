@@ -161,7 +161,7 @@ class MlirCompiler:
             "fly-layout-lowering",
             "convert-fly-to-rocdl",
             "canonicalize",
-            f"gpu.module(convert-scf-to-cf,"
+            f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
             f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
