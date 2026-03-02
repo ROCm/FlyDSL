@@ -28,6 +28,7 @@ from typing import Optional, Union
 
 __all__ = [
     'create_llvm_ptr',
+    'get_element_ptr',
     'create_buffer_resource',
     'buffer_load',
     'buffer_store',
@@ -71,6 +72,97 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     else:
         ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     return llvm.IntToPtrOp(ptr_type, value).result
+
+
+def get_element_ptr(
+    base_ptr,
+    byte_offset: Union[int, ir.Value, None] = None,
+    static_byte_offset: int = 0,
+    elem_type: Optional[ir.Type] = None,
+    no_wrap_flags=None,
+) -> ir.Value:
+    """Get an LLVM element pointer (GEP) with a byte offset.
+
+    This is a small helper around `llvm.getelementptr` for the common pattern of
+    pointer arithmetic in byte units (i8 element type), preserving provenance
+    from the base pointer.
+
+    Args:
+        base_ptr: LLVM pointer value (e.g. `!llvm.ptr<3>`). Can be wrapped.
+        byte_offset: Byte offset to add:
+                     - `None` (default) meaning 0
+                     - a Python `int` (constant)
+                     - an MLIR value (`index` or integer type) for a dynamic offset.
+        static_byte_offset: Extra constant byte offset to add (Python `int`).
+                            This is useful for expressing:
+                            `addr = base_ptr + byte_offset + static_byte_offset`
+                            while keeping the constant part explicit.
+        elem_type: Element type used for GEP indexing (defaults to i8 for bytes).
+        no_wrap_flags: Optional LLVM GEP "no wrap" flags.
+
+    Returns:
+        LLVM pointer with the same type as `base_ptr`.
+    """
+    # MLIR LLVM-dialect `llvm.getelementptr` encodes mixed static/dynamic indices using
+    # *both*:
+    # - `dynamicIndices`: SSA values for the dynamic indices
+    # - `rawConstantIndices`: a DenseI32ArrayAttr holding the constants, with a sentinel
+    #   marking positions that are dynamic.
+    #
+    # The sentinel used by MLIR is INT32_MIN (-2147483648). Python bindings don't expose
+    # a named constant for it, so we define it locally here to avoid a module-level
+    # magic global while still documenting the contract.
+    _gep_dynamic_index_sentinel = -(2**31)
+
+    base_ptr = _unwrap_value(base_ptr)
+    if not isinstance(static_byte_offset, int):
+        raise TypeError(
+            f"static_byte_offset must be int, got {type(static_byte_offset).__name__}"
+        )
+    if elem_type is None:
+        elem_type = ir.IntegerType.get_signless(8)
+    elif callable(elem_type):
+        # Some type helper modules expose types as callables, e.g. `T.i8()`.
+        elem_type = elem_type()
+
+    if byte_offset is None:
+        dynamic_indices = []
+        raw_constant_indices = [int(static_byte_offset)]
+    elif isinstance(byte_offset, int):
+        dynamic_indices = []
+        raw_constant_indices = [int(byte_offset) + int(static_byte_offset)]
+    else:
+        offset_val = _unwrap_value(byte_offset)
+        if isinstance(offset_val.type, ir.IndexType):
+            i64_type = ir.IntegerType.get_signless(64)
+            offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
+        elif isinstance(offset_val.type, ir.IntegerType):
+            # LLVM GEP indices are integer-typed; keep as-is.
+            pass
+        else:
+            raise TypeError(
+                "byte_offset must be int, index, or integer-typed MLIR value; "
+                f"got {offset_val.type}"
+            )
+
+        if static_byte_offset != 0:
+            if not isinstance(offset_val.type, ir.IntegerType):
+                raise TypeError(f"dynamic byte_offset must be integer-typed, got {offset_val.type}")
+            static_type = offset_val.type
+            static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
+            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
+            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
+        dynamic_indices = [offset_val]
+        raw_constant_indices = [_gep_dynamic_index_sentinel]
+
+    return llvm.GEPOp(
+        base_ptr.type,
+        base_ptr,
+        dynamic_indices,
+        raw_constant_indices,
+        elem_type,
+        no_wrap_flags,
+    ).result
 
 
 def _unwrap_value(value):

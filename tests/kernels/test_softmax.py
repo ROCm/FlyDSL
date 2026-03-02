@@ -48,7 +48,7 @@ from tests.kernels.benchmark_common import (
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
-from kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
+from flydsl.kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100

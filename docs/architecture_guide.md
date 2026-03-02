@@ -192,7 +192,7 @@ executor.my_kernel(A, B, C)
 2. Overrides `gpu.module` targets consistently
 3. Checks the on-disk cache (can skip recompilation)
 4. Runs the full pipeline
-5. Returns an `ExecutionEngineExecutor` (or `None` if `COMPILE_ONLY=1`)
+5. Returns an `ExecutionEngineExecutor` (or `None` if `FLYDSL_COMPILE_ONLY=1`)
 
 ---
 
@@ -275,7 +275,7 @@ On-disk compilation cache (inspired by Triton):
 
 | Variable | Default | Description |
 |---|---|---|
-| `COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. |
+| `FLYDSL_COMPILE_ONLY` | `0` | If `1`, compile without creating an executor. Returns `None`. Also accepts legacy `COMPILE_ONLY`. |
 | `FLIR_DUMP_IR` | `0` | If `1`, dump intermediate IR at each pipeline stage. |
 | `FLIR_DUMP_DIR` | `my_ir_dumps` | Directory for IR dumps when `FLIR_DUMP_IR=1`. |
 | `ARCH` | auto-detect | Override target GPU architecture (e.g., `gfx942`, `gfx950`). |
