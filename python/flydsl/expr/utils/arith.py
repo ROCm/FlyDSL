@@ -143,6 +143,9 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
         if self.is_float:
             q = arith.divf(self, other, loc=loc, ip=ip)
             return math.floor(q, loc=loc, ip=ip)
+        et = element_type(self.type)
+        if isinstance(et, ir.IndexType):
+            return arith.divui(self, other, loc=loc, ip=ip)
         if self.signed is not False:
             return arith.floordivsi(self, other, loc=loc, ip=ip)
         return arith.divui(self, other, loc=loc, ip=ip)
@@ -150,6 +153,9 @@ def _binary_op(self, other, op, *, loc=None, ip=None):
     if op == "mod":
         if self.is_float:
             return arith.remf(self, other, loc=loc, ip=ip)
+        et = element_type(self.type)
+        if isinstance(et, ir.IndexType):
+            return arith.remui(self, other, loc=loc, ip=ip)
         if self.signed is not False:
             return arith.remsi(self, other, loc=loc, ip=ip)
         return arith.remui(self, other, loc=loc, ip=ip)
