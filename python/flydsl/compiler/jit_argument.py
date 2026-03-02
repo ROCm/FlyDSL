@@ -9,6 +9,18 @@ from ..expr.typing import Constexpr, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
 
 
+_FLOAT8_DTYPES = tuple(
+    dt
+    for dt in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e5m2", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+        getattr(torch, "float8_e5m2fnuz", None),
+    )
+    if dt is not None
+)
+
+
 class JitArgumentRegistry:
     registry: Dict[type, Tuple[Callable, Type[DslType]]] = {}
     jit_arg2dsl_type: Dict[type, Type[DslType]] = {}
@@ -117,7 +129,15 @@ class TensorAdaptor:
         assumed_align: Optional[int] = None,
         use_32bit_stride: bool = False,
     ):
-        self.tensor_adaptor = DLTensorAdaptor(tensor.__dlpack__(), assumed_align, use_32bit_stride)
+        # Torch DLPack does not support float8 tensors in some versions.
+        # Reinterpret as uint8 (same storage bytes) for argument transport.
+        self._tensor_keepalive = tensor
+        dlpack_tensor = tensor
+        if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
+            dlpack_tensor = tensor.view(torch.uint8)
+            self._tensor_keepalive = dlpack_tensor
+
+        self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
 
