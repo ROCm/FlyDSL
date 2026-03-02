@@ -17,6 +17,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
+  mlir::registerFlyGpuToLLVMPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
@@ -24,5 +25,6 @@ int main(int argc, char **argv) {
   registry.insert<mlir::fly::FlyDialect>();
   registry.insert<mlir::fly_rocdl::FlyROCDLDialect>();
 
-  return mlir::asMainReturnCode(mlir::MlirOptMain(argc, argv, "Fly Optimizer Driver\n", registry));
+  return mlir::asMainReturnCode(
+      mlir::MlirOptMain(argc, argv, "Fly Optimizer Driver\n", registry));
 }

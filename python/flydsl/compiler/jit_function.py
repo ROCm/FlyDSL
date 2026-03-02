@@ -17,6 +17,7 @@ from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+from ..expr.typing import Stream
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -385,7 +386,7 @@ class MlirCompiler:
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            "fly-gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",

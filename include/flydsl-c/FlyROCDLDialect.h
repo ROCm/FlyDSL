@@ -46,6 +46,9 @@ MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirT
 
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
 
+/// Register the FlyGpuToLLVM pass (replaces gpu-to-llvm with asyncObject fix).
+MLIR_CAPI_EXPORTED void mlirRegisterFlyGpuToLLVMPass(void);
+
 #ifdef __cplusplus
 }
 #endif
