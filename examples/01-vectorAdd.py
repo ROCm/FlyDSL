@@ -58,20 +58,76 @@ def vectorAdd(
     vectorAddKernel(A, B, C, block_dim).launch(grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream)
 
 
-n = 128
-A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-C = torch.zeros(n, dtype=torch.float32).cuda()
 
-tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
-vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
 
-torch.cuda.synchronize()
+def run_eager():
+    """Normal execution (no graph capture) - should always work."""
+    n = 128
+    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    C = torch.zeros(n, dtype=torch.float32).cuda()
+    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
+    vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+    is_closed = torch.allclose(C, A + B)
+    print(f"[Eager] Result correct: {is_closed}")
+    if not is_closed:
+        print("tA:", A[:32])
+        print("tB:", B[:32])
+        print("tC:", C[:32])
+    print("Hello, Fly!")
+    return is_closed
 
-is_closed = torch.allclose(C, A + B)
-print("Result correct:", is_closed)
-if not is_closed:
-    print("tA:", A[:32])
-    print("tB:", B[:32])
-    print("tC:", C[:32])
-print("Hello, Fly!")
+
+def run_graph_capture():
+    """CUDA Graph Capture via fly-gpu-stream-inject (no TLS hack needed)."""
+    n = 128
+    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    C = torch.zeros(n, dtype=torch.float32).cuda()
+    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
+
+    # Warmup (triggers JIT compilation)
+    vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+
+    C.zero_()
+
+    graph = torch.cuda.CUDAGraph()
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+
+    with torch.cuda.stream(capture_stream):
+        with torch.cuda.graph(graph, stream=capture_stream):
+            vectorAdd(tA, B, C, n, n + 1, stream=capture_stream)
+
+    C.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    ok = torch.allclose(C, A + B)
+    print(f"[Graph Capture] Result correct: {ok}")
+    if not ok:
+        print(f"  Expected: {(A + B)[:16]}")
+        print(f"  Got:      {C[:16]}")
+    return ok
+
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("Test 1: Eager execution")
+    print("=" * 50)
+    ok1 = run_eager()
+
+    print()
+    print("=" * 50)
+    print("Test 2: CUDA Graph Capture")
+    print("=" * 50)
+    try:
+        ok2 = run_graph_capture()
+    except Exception as e:
+        print(f"[Graph Capture] FAILED with exception: {e}")
+        ok2 = False
+
+    print()
+    print(f"All passed: {ok1 and ok2}")
