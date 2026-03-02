@@ -127,9 +127,9 @@ def compile_moe_gemm1(
         if int(tile_k) != 256:
             raise ValueError(f"a8w4smooth kernel path requires tile_k==256, got {tile_k!r}")
     # Compile-time safety switch:
-    # - False (default): assume no-carry per-byte (15*qs+qz<=255), use fast packed-byte dequant.
-    # - True: use safe per-byte dequant in load_b_pack_k32.
-    overflow_guard = os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
+    # - a8w4smooth defaults to True (safe dequant); other dtypes default to False (fast path).
+    # - Override via FLIR_A8W4SMOOTH_OVERFLOW_GUARD env var.
+    overflow_guard = is_a8w4smooth and os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "1") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -1521,7 +1521,7 @@ def compile_moe_gemm2(
             )
         if int(tile_k) != 256:
             raise ValueError(f"a8w4smooth kernel path requires tile_k==256, got {tile_k!r}")
-    overflow_guard = os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
+    overflow_guard = is_a8w4smooth and os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "1") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
