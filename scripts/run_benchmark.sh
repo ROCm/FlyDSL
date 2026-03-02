@@ -49,10 +49,12 @@ GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
 '
 
-# MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
+# MoE shapes: "in_dtype,tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
 MOE_SHAPES='
-32768,8192,8192,16,4,64,128,128,256,128
-64,6144,1024,128,8,16,64,256,64,256
+fp8,32768,8192,8192,16,4,64,128,128,256,128
+fp8,64,6144,1024,128,8,16,64,256,64,256
+int8smooth,32,4096,2048,16,8,16,64,256,64,256
+uint4,32,4096,2048,16,8,16,64,256,64,256
 '
 
 
@@ -410,7 +412,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
   done
 fi
 
-# MoE
+# MoE (all dtypes: fp8, int8smooth, uint4, etc.)
 if [ "${RUN_MOE}" -eq 1 ]; then
   for shape in $MOE_SHAPES; do
     oldIFS=$IFS
@@ -418,10 +420,10 @@ if [ "${RUN_MOE}" -eq 1 ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    tokens=$1; model_dim=$2; inter_dim=$3; experts=$4; topk=$5; tile_m=$6; tile_n=$7; tile_k=$8; tile_n2=$9; tile_k2=${10}
-    log="${BENCH_LOG_DIR}/moe_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    in_dtype=$1; tokens=$2; model_dim=$3; inter_dim=$4; experts=$5; topk=$6; tile_m=$7; tile_n=$8; tile_k=$9; tile_n2=${10}; tile_k2=${11}
+    log="${BENCH_LOG_DIR}/moe_${in_dtype}_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
     if python3 tests/kernels/test_moe_gemm.py \
-      --in_dtype fp8 \
+      --in_dtype "$in_dtype" \
       -dim "$model_dim,$inter_dim" \
       -t "$tokens" \
       -e "$experts" \
@@ -438,25 +440,24 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
       FAIL_COUNT=$((FAIL_COUNT + 1))
-      echo "moe failed. Log: ${log}" >&2
-      _show_fail_log "${log}" "moe"
+      echo "moe[${in_dtype}] failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "moe_${in_dtype}"
     fi
-    # Emit stage1 + stage2 rows (parse from log; keep terminal output concise).
-    # Keep shape string compact (no spaces/commas) so table alignment stays stable.
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+    op_prefix="moe[${in_dtype}]"
 
     dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
     tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
-      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+      _emit_row "${op_prefix}" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
     dt_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
     tf_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
-      _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+      _emit_row "${op_prefix}" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
   done
 fi

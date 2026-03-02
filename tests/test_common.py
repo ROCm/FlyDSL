@@ -423,9 +423,6 @@ def checkAllclose(
 
 
 def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_threshold=2e-3):
-    if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
-        return True
-    
     # Calculate various error metrics
     abs_diff = (c_out - c_ref).abs()
     max_diff = abs_diff.max().item()
@@ -447,6 +444,8 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_thresh
         print(f"✗ Check failed: logits_diff {logits_diff} > {logits_diff_threshold}")
         logging.error(f"logits_diff: {logits_diff} is too large (threshold: {logits_diff_threshold})")
         return False
+    if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
+        return True
     print(f"{msg} ✓ Check passed")
     return True
 

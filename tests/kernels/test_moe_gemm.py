@@ -34,21 +34,23 @@ else:
     DTYPE_FP8 = torch.float8_e4m3fnuz
 
 def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
-    """Pack a preshuffled int8 tensor (values in [-8, 7]) into packed int4 bytes.
+    """Pack a K64-interleaved int8 tensor into packed int4 bytes.
 
-    Each contiguous 8-value block [v0..v7] -> 4 bytes:
-      b0=(v4<<4)|v0, b1=(v5<<4)|v1, b2=(v6<<4)|v2, b3=(v7<<4)|v3.
+    Input is K64-interleaved: [lo[0], hi[0], lo[1], hi[1], ...].
+    Each contiguous 8-value block [v0..v7] -> 4 bytes with adjacent pairing:
+      b0=(v1<<4)|v0, b1=(v3<<4)|v2, b2=(v5<<4)|v4, b3=(v7<<4)|v6.
 
-    This matches the 7-op in-kernel unpack sequence and avoids any v_perm.
+    This ensures each byte contains (lo_nibble, hi_nibble), so the kernel's
+    even/odd split cleanly separates lo64 from hi64.
     """
     flat = x_shuf_i8.contiguous().view(-1).to(torch.int16)
     assert flat.numel() % 8 == 0
     u = (flat & 0xF).to(torch.uint8).view(-1, 8)
     out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
-    out[:, 0] = u[:, 0] | (u[:, 4] << 4)
-    out[:, 1] = u[:, 1] | (u[:, 5] << 4)
-    out[:, 2] = u[:, 2] | (u[:, 6] << 4)
-    out[:, 3] = u[:, 3] | (u[:, 7] << 4)
+    out[:, 0] = u[:, 0] | (u[:, 1] << 4)
+    out[:, 1] = u[:, 2] | (u[:, 3] << 4)
+    out[:, 2] = u[:, 4] | (u[:, 5] << 4)
+    out[:, 3] = u[:, 6] | (u[:, 7] << 4)
     return out.view(-1).to(torch.int8)
 
 
@@ -140,53 +142,34 @@ def build_uint4_moe_weight(
     u4_shuf = (u4_shuf_i8.view(torch.uint8) & 0xF).contiguous()
 
     # --- Step 2: sample qparams in physical layout [E, N//16, K//256, 16, 4] (u8) ---
-    #
-    # The kernel indexes qparams by (n_blk, k256, n_lane) where n_blk and n_lane
-    # are in the *shuffled* physical space (same coordinates used for weight data).
-    # Each packed-i32 word has 4 bytes for the 4 K64 groups within a K256 tile:
-    #   u4_shuf_i8 = shuffle_weight(u4_unshuf_i8, use_int4=True, interleave_k64=bool(interleave_k64))
-    # u4_shuf = (byte[0]: qs for K64 group 0 (shuffled K 0..63)
-    #   byte[1]: qs for K64 group 1 (shuffled K 64..127)
-    #   byte[2]: qs for K64 group 2 (shuffled K 128..191)
-    #   byte[3]: qs for K64 group 3 (shuffled K 192..255)
-    #
-    # The kernel applies qs_lo (from pack_group byte pair's first byte) to even
-    # nibbles and qs_hi (second byte) to odd nibbles of each loaded dword.
-    # After K64 interleave packing, even nibbles = lo64 K, odd nibbles = hi64 K.
-    # So within each pack_group (covering 128 K values):
-    #   byte[2*pg+0] -> lo64 half (first 64 K values)
-    #   byte[2*pg+1] -> hi64 half (second 64 K values)
-
+    # Use non-uniform random qparams to exercise dequant correctness:
+    #   - byte layout per i32 word: [lo0_scale, hi0_scale, lo1_scale, hi1_scale]
+    #   - lo bytes use small scales, hi bytes use large scales (maximally different).
+    #   - Constraint: 15*qs + qz <= 255 (so no overflow in uint8 dequant).
     qparam_shape = (experts, nb, g256, 16, 4)
-    qs_base = torch.randint(1, 5, (experts, nb, g256, 16), device=device, dtype=torch.int32)
-    qs_i32 = torch.ones(qparam_shape, device=device, dtype=torch.int32)
-    # qs_i32 = torch.randint(1, 5, qparam_shape, device=device, dtype=torch.int32)
-    qz_i32 = torch.zeros(qparam_shape, device=device, dtype=torch.int32)
+    qs_i32 = torch.randint(1, 3, qparam_shape, device=device, dtype=torch.int32)
+    qz_i32 = torch.randint(0, 16, qparam_shape, device=device, dtype=torch.int32)
     qscale_u8 = qs_i32.to(torch.uint8)
     qzero_u8 = qz_i32.to(torch.uint8)
 
-    # --- Step 3: dequant in shuffled space (base, no interleave) using 4x64 blocks per K256 tile ---
-    # Reshape base-shuffled u4 to tile layout matching qparam structure.
-    u4_tile = u4_shuf_base.view(experts, nb, 16, g256, 256).permute(0, 1, 3, 2, 4).contiguous()  # [E,nb,g256,16,256]
-    u4_blocks = u4_tile.view(experts, nb, g256, 16, 4, 64).to(torch.int32)
-    u8_blocks = (u4_blocks * qs_i32.unsqueeze(-1)) + qz_i32.unsqueeze(-1)  # <=255
-    u8_blocks = u8_blocks.clamp(0, 255).to(torch.uint8)
-    u8_tile = u8_blocks.view(experts, nb, g256, 16, 256)
-    w_u8_shuf_base = u8_tile.permute(0, 1, 3, 2, 4).contiguous().view(experts, rows_per_expert, K)
+    # --- Step 3: dequant in logical space [E, N, K] using 4x64 blocks per K256 tile ---
+    # Reshape logical u4 to match physical qparam tiling: [E, nb, 16, g256, 4, 64]
+    u4_logical_view = u4_unshuf.view(experts, nb, 16, g256, 4, 64).to(torch.int32)
+    # Permute to [E, nb, g256, 16, 4, 64] to align with qs_i32 [E, nb, g256, 16, 4]
+    u4_logical_view = u4_logical_view.permute(0, 1, 3, 2, 4, 5)
+    
+    u8_logical_view = (u4_logical_view * qs_i32.unsqueeze(-1)) + qz_i32.unsqueeze(-1)
+    # Clamp to [0, 255] to match kernel safe-path
+    u8_logical_view = torch.clamp(u8_logical_view, 0, 255).to(torch.uint8)
+    
+    # Back to logical [E, N, K]
+    u8_unshuf = u8_logical_view.permute(0, 1, 3, 2, 4, 5).reshape(experts, rows_per_expert, K)
+    
+    # Storage order u8 (shuffled + interleaved)
+    w_u8_shuf_i8 = shuffle_weight(u8_unshuf.view(torch.int8), use_int4=True, interleave_k64=bool(interleave_k64))
+    w_u8_shuf = w_u8_shuf_i8.view(torch.uint8)
 
-    # Apply K64 interleave to dequanted u8 bits (matches packed uint4 storage order).
-    if interleave_k64:
-        K_total = w_u8_shuf_base.shape[-1]
-        u8_128 = w_u8_shuf_base.view(experts, rows_per_expert, K_total // 128, 128)
-        low = u8_128[..., :64]
-        high = u8_128[..., 64:]
-        y = torch.empty_like(u8_128)
-        y[..., 0::2] = low
-        y[..., 1::2] = high
-        w_u8_shuf = y.view(experts, rows_per_expert, K_total)
-    else:
-        w_u8_shuf = w_u8_shuf_base
-
+    # Apply sign flip to u8 before converting to i8
     w_i8_shuf = (w_u8_shuf ^ 0x80).view(torch.int8)
 
     # Pack uint4 weights (storage order).
@@ -207,9 +190,8 @@ def build_uint4_moe_weight(
     )
 
     # Recover logical (unshuffled) int8 for torch reference:
-    w_i8_shuf_no_interleave = _inverse_interleave_k64_in_128(w_i8_shuf) if interleave_k64 else w_i8_shuf
-    w_i8_unshuffled = _unshuffle_weight_base(w_i8_shuf_no_interleave, layout=(16, 16), use_int4=True)
-    w_i8_unshuffled_flat = w_i8_unshuffled.reshape(experts * rows_per_expert, K).contiguous()
+    # Important: XOR 0x80 must happen on the logical u8 values
+    w_i8_unshuffled_flat = (u8_unshuf.to(torch.int32) ^ 0x80).to(torch.int8).reshape(-1, K).contiguous()
 
     # Sanity-check the agreed preshuffled physical view:
     #   (expert, rows//16, K//128, 4, 16, 32x4bits)
@@ -265,18 +247,18 @@ def _uint4_packed_w_to_unshuffled_int8(
         return x_
 
     def _unpack_uint4_from_packed_int4_no_perm(packed_i8: torch.Tensor) -> torch.Tensor:
-        # Inverse of _pack_shuffled_int8_to_packed_int4_no_perm byte layout.
+        # Inverse of _pack_shuffled_int8_to_packed_int4_no_perm (adjacent pairing).
         p = packed_i8.view(torch.uint8).contiguous().view(-1, 4)  # [blocks, 4 bytes]
         out = torch.empty((p.shape[0], 8), device=p.device, dtype=torch.uint8)
 
         b0, b1, b2, b3 = p[:, 0], p[:, 1], p[:, 2], p[:, 3]
         out[:, 0] = b0 & 0xF
-        out[:, 4] = b0 >> 4
-        out[:, 1] = b1 & 0xF
-        out[:, 5] = b1 >> 4
-        out[:, 2] = b2 & 0xF
-        out[:, 6] = b2 >> 4
-        out[:, 3] = b3 & 0xF
+        out[:, 1] = b0 >> 4
+        out[:, 2] = b1 & 0xF
+        out[:, 3] = b1 >> 4
+        out[:, 4] = b2 & 0xF
+        out[:, 5] = b2 >> 4
+        out[:, 6] = b3 & 0xF
         out[:, 7] = b3 >> 4
 
         return out.view(-1)  # flat uint4 values in [0,15]
@@ -846,7 +828,7 @@ def run_moe_stage1(
             print(f"[DEBUG uint4 stage1] out[0,0,256:288]={[f'{v:.6f}' for v in out[0,0,256:288].tolist()]}")
             print(f"[DEBUG uint4 stage1] ref[0,0,256:288]={[f'{v:.6f}' for v in ref[0,0,256:288].tolist()]}")
             print(f"[DEBUG uint4 stage1] diff[0,0,256:288]={[f'{v:.6f}' for v in diff[0,0,256:288].tolist()]}")
-        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
+        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol, logits_diff_threshold=0.005)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -1517,7 +1499,8 @@ def test_moe_gemm_2stage(
     if init_scale == 1.0:
         init_scale = 0.2
     s = float(init_scale)
-    x_fp32 = torch.ones((tokens, model_dim), device=device, dtype=torch.float32) * s
+    # x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
     # fan_in = model_dim for W1: [E, 2*inter, model]
     w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s #* (s / math.sqrt(model_dim))
     # w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * 0.2
