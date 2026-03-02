@@ -112,7 +112,12 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   fi
 
   echo "Creating tarball..."
-  tar -C "$(dirname "${LLVM_INSTALL_DIR}")" -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
+  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
+  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
+  # non-fatal for packaging.
+  tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
+      -C "$(dirname "${LLVM_INSTALL_DIR}")" \
+      -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
 fi
 
 echo "=============================================="

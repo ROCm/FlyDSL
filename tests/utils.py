@@ -1,13 +1,26 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
-from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.runtime.device import get_rocm_arch
-from flydsl._mlir import ir
 import os
 import torch
 import functools
 import time
 from typing import Optional
+
+
+def _resolve_pipeline_api():
+    """Resolve Pipeline/run_pipeline from available FlyDSL APIs.
+
+    Newer trees may not expose `flydsl.compiler.pipeline`; older test helpers still
+    rely on the FLIR pass pipeline builder. Resolve lazily so modules that only use
+    quant helpers (e.g. moe tests) don't fail at import time.
+    """
+    try:
+        from flydsl.compiler.pipeline import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
+    except Exception:
+        from flydsl.passes import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """
@@ -48,6 +61,9 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
 
 def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """Implementation of compile_to_hsaco; assumes an MLIR context is already active."""
+    from flydsl._mlir import ir
+
+    Pipeline, run_pipeline = _resolve_pipeline_api()
     # Check environment variables for IR dumping
     dump_ir = os.environ.get('FLIR_DUMP_IR', '0') == '1'
     dump_dir = os.environ.get('FLIR_DUMP_DIR', '/tmp/flir_dump')

@@ -12,8 +12,19 @@ def torch_moe_gemm1(
     doweight_stage1: bool,
 ) -> torch.Tensor:
     """Return [tokens, topk, inter_dim] fp32."""
-    tokens, model_dim = x_fp8.shape
+    if x_fp8.dim() == 2:
+        tokens, model_dim = x_fp8.shape
+        x_is_token_slot = False
+    elif x_fp8.dim() == 3:
+        tokens, topk_x, model_dim = x_fp8.shape
+        x_is_token_slot = True
+    else:
+        raise ValueError(f"x_fp8 must be 2D or 3D, got shape={tuple(x_fp8.shape)}")
     topk = topk_ids.shape[1]
+    if x_is_token_slot and topk_x != topk:
+        raise ValueError(
+            f"x_fp8 topk dim mismatch: x_fp8.shape[1]={topk_x}, topk_ids.shape[1]={topk}"
+        )
     # Derive experts from weight shapes (topk_ids may not cover all experts when tokens are tiny).
     if w1_fp8_flat.dim() == 2:
         experts = int(w1_fp8_flat.shape[0] // (2 * inter_dim))
@@ -37,7 +48,8 @@ def torch_moe_gemm1(
             continue
         t_idx = idx[:, 0]
         s_idx = idx[:, 1]
-        y2 = F.linear(x[t_idx, :], w1[e, :, :])  # [num, 2*inter_dim]
+        x_sel = x[t_idx, s_idx, :] if x_is_token_slot else x[t_idx, :]
+        y2 = F.linear(x_sel, w1[e, :, :])  # [num, 2*inter_dim]
         gate = y2[:, :inter_dim]
         up = y2[:, inter_dim:]
         y = F.silu(gate) * up
