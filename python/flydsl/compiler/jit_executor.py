@@ -87,14 +87,14 @@ class CompiledArtifact:
         if self._engine is None:
             self._ensure_engine()
 
-        ptrs: List[ctypes.c_void_p] = []
+        all_c_ptrs: List[ctypes.c_void_p] = []
         for arg in args:
-            ptrs.extend(fly_pointers(arg))
+            all_c_ptrs.extend(fly_pointers(arg))
 
         func_ptr = self._engine.raw_lookup(self._entry)
         func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
 
-        packed_args = self._packer.pack(ptrs)
+        packed_args = self._packer.pack(all_c_ptrs)
 
         return func_exe(packed_args)
 

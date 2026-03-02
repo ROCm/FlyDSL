@@ -1,6 +1,7 @@
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
+#include "mlir/InitAllExtensions.h"
 #include "mlir/InitAllPasses.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -16,11 +17,14 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
+  mlir::registerFlyGpuToLLVMPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
+  mlir::registerAllExtensions(registry);
   registry.insert<mlir::fly::FlyDialect>();
   registry.insert<mlir::fly_rocdl::FlyROCDLDialect>();
 
-  return mlir::asMainReturnCode(mlir::MlirOptMain(argc, argv, "Fly Optimizer Driver\n", registry));
+  return mlir::asMainReturnCode(
+      mlir::MlirOptMain(argc, argv, "Fly Optimizer Driver\n", registry));
 }
