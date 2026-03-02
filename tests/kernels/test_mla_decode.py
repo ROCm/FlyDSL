@@ -32,19 +32,12 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-import flydsl
-from kernels.mla_decode import KERNEL_NAME, build_mla_decode_module
+from kernels.mla_decode import KERNEL_NAME, compile_mla_decode
 from tests.test_common import verify_output
 from aiter.test_common import run_perftest
 
 DEFAULT_SEED = 42
 UNIFORM_RANGE = (-0.5, 0.5)
-MLA_COMPILE_KWARGS = {
-    "unsafe_fp_math": True,
-    "fast_fp_math": True,
-    "waves_per_eu": 1,
-    "flat_work_group_size": 256,
-}
 
 
 def setup_seed(seed):
@@ -268,11 +261,13 @@ def run_config(
     Lv = D_V
     BLOCK_DV = triton.next_power_of_2(Lv)
     grid_s2 = (B, Hq)
+    stream = torch.cuda.current_stream()
 
     def _run():
         exe(
             q_flat, kv_paged_flat, mid_o_flat, mid_lse_flat,
             bt_flat, B, Sq, kv_indptr, num_blocks_per_seq, num_kv_splits,
+            stream,
         )
         _fwd_kernel_stage2_asm[grid_s2](
             mid_o_4d, mid_lse_3d, output,
@@ -364,7 +359,7 @@ def main():
     print("=" * 110)
 
     print("\nCompiling MLA decode kernel...", flush=True)
-    m = build_mla_decode_module(
+    exe = compile_mla_decode(
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
         kv_lora_rank=kv_lora_rank,
@@ -372,7 +367,6 @@ def main():
         page_block_size=page_block_size,
         causal=causal,
     )
-    exe = flydsl.compile(m, **MLA_COMPILE_KWARGS)
     print("Compiled OK.\n", flush=True)
 
     # (B, Sq, Skv, shuffle, num_kv_splits)
