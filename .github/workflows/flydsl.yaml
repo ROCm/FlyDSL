@@ -58,6 +58,12 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
+      - name: Read LLVM commit from cmake/llvm-hash.txt
+        run: |
+          LLVM_COMMIT=$(cat flydsl-test/cmake/llvm-hash.txt | tr -d '[:space:]' | cut -c1-12)
+          echo "LLVM_COMMIT=${LLVM_COMMIT}" >> $GITHUB_ENV
+          echo "Using LLVM commit: ${LLVM_COMMIT}"
+
       - name: Install dependencies
         run: |
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
