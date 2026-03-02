@@ -54,7 +54,7 @@ MOE_SHAPES='
 fp8,32768,8192,8192,16,4,64,128,128,256,128
 fp8,64,6144,1024,128,8,16,64,256,64,256
 int8smooth,32,4096,2048,16,8,16,64,256,64,256
-uint4,32,4096,2048,16,8,16,64,256,64,256
+a8w4smooth,32,4096,2048,16,8,16,64,256,64,256
 '
 
 
@@ -412,7 +412,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
   done
 fi
 
-# MoE (all dtypes: fp8, int8smooth, uint4, etc.)
+# MoE (all dtypes: fp8, int8smooth, a8w4smooth, etc.)
 if [ "${RUN_MOE}" -eq 1 ]; then
   for shape in $MOE_SHAPES; do
     oldIFS=$IFS

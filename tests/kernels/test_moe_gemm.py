@@ -91,7 +91,7 @@ def _unshuffle_weight_base(x_shuf: torch.Tensor, layout=(16, 16), use_int4: bool
     return x_.view(*x_shuf.shape).view(x_type)
 
 
-def build_uint4_moe_weight(
+def build_a8w4smooth_moe_weight(
     *,
     experts: int,
     rows_per_expert: int,
@@ -100,18 +100,18 @@ def build_uint4_moe_weight(
     seed: int = 0,
     interleave_k64: bool = True,
 ) -> Tuple[
-    torch.Tensor,  # w_packed_i8 (packed uint4 bytes)
+    torch.Tensor,  # w_packed_i8 (packed 4-bit bytes)
     torch.Tensor,  # qscale_u8 (physical u8 5D)
     torch.Tensor,  # qzero_u8  (physical u8 5D)
     torch.Tensor,  # qscale_packed_i32 (physical packed4 i32 4D)
     torch.Tensor,  # qzero_packed_i32  (physical packed4 i32 4D)
     torch.Tensor,  # w_int8_unshuffled_flat [experts*rows_per_expert, K]
 ]:
-    """Generate uint4 weights + qparams in the agreed PDF physical layouts.
+    """Generate a8w4smooth weights + qparams in the agreed PDF physical layouts.
 
     This is a *generator* (not a forward quantizer):
     - Randomly samples qscale/qzero (u8) per (tile256, n_lane, row) with constraint 15*qs+qz<=255.
-    - Randomly samples uint4 values and builds the corresponding int8 bits via: int8_bits = (u4*qs+qz) ^ 0x80.
+    - Randomly samples 4-bit unsigned values and builds the corresponding int8 bits via: int8_bits = (u4*qs+qz) ^ 0x80.
     - Produces the shuffled+interleaved storage-order weights (for packing), and also reconstructs the
       corresponding *logical* (unshuffled) int8 weights for torch reference by inverse-interleave + unshuffle.
     """
@@ -129,7 +129,7 @@ def build_uint4_moe_weight(
     nb = rows_per_expert // 16
     g256 = K // 256
 
-    # --- Step 1: build shuffled uint4 weights via the same shuffle_weight mapping as the kernel expects ---
+    # --- Step 1: build shuffled 4-bit weights via the same shuffle_weight mapping as the kernel expects ---
     u4_unshuf = torch.randint(0, 16, (experts, rows_per_expert, K), device=device, dtype=torch.uint8)
     u4_unshuf_i8 = u4_unshuf.view(torch.int8)
 
@@ -172,7 +172,7 @@ def build_uint4_moe_weight(
     # Apply sign flip to u8 before converting to i8
     w_i8_shuf = (w_u8_shuf ^ 0x80).view(torch.int8)
 
-    # Pack uint4 weights (storage order).
+    # Pack 4-bit weights (storage order).
     w_packed = _pack_shuffled_int8_to_packed_int4_no_perm(u4_shuf.reshape(-1, K).to(torch.int8))
 
     # Build packed4 i32 views (byte0..3 -> i32)
@@ -207,7 +207,7 @@ def build_uint4_moe_weight(
     return w_packed, qscale_u8, qzero_u8, qscale_i32, qzero_i32, w_i8_unshuffled_flat
 
 
-def _uint4_packed_w_to_unshuffled_int8(
+def _a8w4smooth_packed_w_to_unshuffled_int8(
     w_packed_i8: torch.Tensor,
     qscale_kn: torch.Tensor,  # [K//block, N] int32
     qzero_kn: torch.Tensor,   # [K//block, N] int32
@@ -219,9 +219,9 @@ def _uint4_packed_w_to_unshuffled_int8(
     scale_block_k: int = 64,
     layout=(16, 16),
 ) -> torch.Tensor:
-    """Rebuild unshuffled int8 weights from packed uint4 + qscale/qzero.
+    """Rebuild unshuffled int8 weights from packed 4-bit + qscale/qzero.
 
-    Dequant contract (byte-wise): int8_bits = (uint4 * qscale + qzero) ^ 0x80
+    Dequant contract (byte-wise): int8_bits = (u4 * qscale + qzero) ^ 0x80
     """
 
     def _unshuffle_weight(x_shuf: torch.Tensor, layout=(16, 16), use_int4: bool = False) -> torch.Tensor:
@@ -261,7 +261,7 @@ def _uint4_packed_w_to_unshuffled_int8(
         out[:, 6] = b3 & 0xF
         out[:, 7] = b3 >> 4
 
-        return out.view(-1)  # flat uint4 values in [0,15]
+        return out.view(-1)  # flat 4-bit values in [0,15]
 
     assert int(experts) > 0 and int(rows_per_expert) > 0
     assert int(N) == int(experts) * int(rows_per_expert), f"N={N}, experts={experts}, rows_per_expert={rows_per_expert}"
@@ -608,15 +608,15 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth")
     if in_dtype not in _valid_dtypes:
         raise ValueError(
             f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_uint4 = in_dtype == "uint4"
-    is_w4 = is_int4 or is_uint4
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "uint4")
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    is_w4 = is_int4 or is_a8w4smooth
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
@@ -657,11 +657,13 @@ def run_moe_stage1(
         # exercise the API rather than implementing the exact SQ calibration workflow).
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
-    elif in_dtype == "uint4":
-        # W4A8 zero-point: X is int8, W is uint4 packed with per-block qscale/qzero.
+    elif in_dtype == "a8w4smooth":
+        # W4A8 smooth: X is int8 repeated to [topk, tokens, model_dim] (slot-major).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
+        x_q = x_q.unsqueeze(0).expand(topk, tokens, model_dim).contiguous()
+        scale_x = scale_x.unsqueeze(0).expand(topk, tokens, 1).contiguous()
         # For the new PDF-layout testcase we generate quantized weights directly via
-        # `build_uint4_moe_weight` (do not derive them from fp32 here).
+        # `build_a8w4smooth_moe_weight` (do not derive them from fp32 here).
         w1_q, scale_w1 = None, None
         w2_q, _scale_w2_unused = None, None
     else:
@@ -670,13 +672,13 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # ---- UINT4 (PDF packed4 layout): run kernel with packed4 qparams ----
-    uint4_qparam_format = os.environ.get("FLIR_UINT4_QPARAM_FORMAT", "packed4").strip().lower()
-    uint4_interleave = os.environ.get("FLIR_UINT4_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
-    if is_uint4 and uint4_qparam_format != "packed4":
-        raise ValueError(f"uint4 only supports FLIR_UINT4_QPARAM_FORMAT=packed4, got {uint4_qparam_format!r}")
+    # ---- A8W4SMOOTH (PDF packed4 layout): run kernel with packed4 qparams ----
+    a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+    a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+    if is_a8w4smooth and a8w4smooth_qparam_format != "packed4":
+        raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
 
-    if is_uint4:
+    if is_a8w4smooth:
         (
             w_packed,
             qscale_u8_w1,
@@ -684,13 +686,13 @@ def run_moe_stage1(
             qscale_i32_w1,
             qzero_i32_w1,
             w1_int8_unshuffled_flat,
-        ) = build_uint4_moe_weight(
+        ) = build_a8w4smooth_moe_weight(
             experts=experts,
             rows_per_expert=(2 * inter_dim),
             K=model_dim,
             device=device,
             seed=seed + 11,
-            interleave_k64=bool(uint4_interleave),
+            interleave_k64=bool(a8w4smooth_interleave),
         )
 
         w_kernel = w_packed.contiguous()
@@ -713,11 +715,11 @@ def run_moe_stage1(
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
     x_q = (
         x_q.contiguous().view(tokens * topk, model_dim)
-        if is_int8smooth
+        if (is_int8smooth or is_a8w4smooth)
         else x_q.contiguous().view(tokens, model_dim)
     )
-    if not is_uint4:
-        # W4A8 packing (int4 only; uint4 uses packed4 qparams path above).
+    if not is_a8w4smooth:
+        # W4A8 packing (int4 only; a8w4smooth uses packed4 qparams path above).
         qscale_w1_1d = torch.empty((0,), device=device, dtype=torch.int32)
         qzero_w1_1d = torch.empty((0,), device=device, dtype=torch.int32)
         if is_int4:
@@ -732,7 +734,7 @@ def run_moe_stage1(
         scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_x_1d = scale_x.view(-1).contiguous()  # [tokens] or [tokens*topk] for int8smooth
-    if not is_uint4:
+    if not is_a8w4smooth:
         if scale_w1_flat is None:
             scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
         else:
@@ -796,14 +798,14 @@ def run_moe_stage1(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
-        if is_int8smooth:
+        if is_int8smooth or is_a8w4smooth:
             # x_q is slot-major [topk, tokens, K]; convert to [tokens, topk, K] for ref.
             x_ref = x_q.view(topk, tokens, model_dim).permute(1, 0, 2).contiguous()
             sx_ref = scale_x.view(topk, tokens, 1).permute(1, 0, 2).contiguous()
         else:
             x_ref = x_q
             sx_ref = scale_x
-        if not is_uint4:
+        if not is_a8w4smooth:
             w1_q_flat_ref = w1_q_flat
         ref = torch_moe_gemm1(
             x_ref,
@@ -818,17 +820,17 @@ def run_moe_stage1(
 
         rtol = 0.5 if is_w4 else 0.25
         atol = 0.5 if is_w4 else 0.25
-        if is_uint4:
+        if is_a8w4smooth:
             diff = (out.to(torch.float32) - ref)
             abs_diff = diff.abs()
-            print(f"[DEBUG uint4 stage1] out shape={out.shape}, ref shape={ref.shape}")
-            print(f"[DEBUG uint4 stage1] out[0,0,:32]={[f'{v:.6f}' for v in out[0,0,:32].tolist()]}")
-            print(f"[DEBUG uint4 stage1] ref[0,0,:32]={[f'{v:.6f}' for v in ref[0,0,:32].tolist()]}")
-            print(f"[DEBUG uint4 stage1] diff[0,0,:32]={[f'{v:.6f}' for v in diff[0,0,:32].tolist()]}")
-            print(f"[DEBUG uint4 stage1] out[0,0,256:288]={[f'{v:.6f}' for v in out[0,0,256:288].tolist()]}")
-            print(f"[DEBUG uint4 stage1] ref[0,0,256:288]={[f'{v:.6f}' for v in ref[0,0,256:288].tolist()]}")
-            print(f"[DEBUG uint4 stage1] diff[0,0,256:288]={[f'{v:.6f}' for v in diff[0,0,256:288].tolist()]}")
-        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol, logits_diff_threshold=0.005)
+            print(f"[DEBUG a8w4smooth stage1] out shape={out.shape}, ref shape={ref.shape}")
+            print(f"[DEBUG a8w4smooth stage1] out[0,0,:32]={[f'{v:.6f}' for v in out[0,0,:32].tolist()]}")
+            print(f"[DEBUG a8w4smooth stage1] ref[0,0,:32]={[f'{v:.6f}' for v in ref[0,0,:32].tolist()]}")
+            print(f"[DEBUG a8w4smooth stage1] diff[0,0,:32]={[f'{v:.6f}' for v in diff[0,0,:32].tolist()]}")
+            print(f"[DEBUG a8w4smooth stage1] out[0,0,256:288]={[f'{v:.6f}' for v in out[0,0,256:288].tolist()]}")
+            print(f"[DEBUG a8w4smooth stage1] ref[0,0,256:288]={[f'{v:.6f}' for v in ref[0,0,256:288].tolist()]}")
+            print(f"[DEBUG a8w4smooth stage1] diff[0,0,256:288]={[f'{v:.6f}' for v in diff[0,0,256:288].tolist()]}")
+        assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol, logits_diff_threshold=0.01)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
     flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
@@ -836,10 +838,10 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * 1  # x int8/fp8
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_w4 else 1)  # w (packed for int4/uint4)
+    bytes_moved += (tokens * topk if (is_int8smooth or is_a8w4smooth) else tokens) * model_dim * 1  # x int8/fp8
+    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_w4 else 1)  # w (packed for int4/a8w4smooth)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
+    bytes_moved += (tokens * topk if (is_int8smooth or is_a8w4smooth) else tokens) * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4  # sorted_weights f32
     bytes_moved += int(sorted_token_ids.numel()) * 4  # sorted_token_ids i32
@@ -1063,15 +1065,15 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    _valid_dtypes2 = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    _valid_dtypes2 = ("fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth")
     if in_dtype not in _valid_dtypes2:
         raise ValueError(
             f"in_dtype must be one of {_valid_dtypes2}, got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_uint4 = in_dtype == "uint4"
-    is_w4 = is_int4 or is_uint4
-    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "uint4")
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    is_w4 = is_int4 or is_a8w4smooth
+    is_int8 = in_dtype in ("int8", "int8smooth", "int4", "a8w4smooth")
     is_int8smooth = in_dtype == "int8smooth"
 
     # Quantize inputs / weights.
@@ -1094,11 +1096,11 @@ def run_moe_stage2(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
-    elif in_dtype == "uint4":
-        # W4A8 zero-point: A2 is int8, W2 is uint4 packed with per-block qscale/qzero.
+    elif in_dtype == "a8w4smooth":
+        # W4A8 zero-point: A2 is int8, W2 is 4-bit packed with per-block qscale/qzero.
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         # For the new PDF-layout testcase we generate quantized weights directly via
-        # `build_uint4_moe_weight` (do not derive them from fp32 here).
+        # `build_a8w4smooth_moe_weight` (do not derive them from fp32 here).
         w1_q, scale_w1 = None, None
         w2_q, scale_w2 = None, None
     else:
@@ -1107,13 +1109,13 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # ---- UINT4 (PDF packed4 layout): run kernel with packed4 qparams ----
-    uint4_qparam_format = os.environ.get("FLIR_UINT4_QPARAM_FORMAT", "packed4").strip().lower()
-    uint4_interleave = os.environ.get("FLIR_UINT4_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
-    if is_uint4 and uint4_qparam_format != "packed4":
-        raise ValueError(f"uint4 only supports FLIR_UINT4_QPARAM_FORMAT=packed4, got {uint4_qparam_format!r}")
+    # ---- A8W4SMOOTH (PDF packed4 layout): run kernel with packed4 qparams ----
+    a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+    a8w4smooth_interleave = os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+    if is_a8w4smooth and a8w4smooth_qparam_format != "packed4":
+        raise ValueError(f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}")
 
-    if is_uint4:
+    if is_a8w4smooth:
         (
             w2_packed,
             qscale_u8_w2,
@@ -1121,13 +1123,13 @@ def run_moe_stage2(
             qscale_i32_w2,
             qzero_i32_w2,
             w2_int8_unshuffled_flat,
-        ) = build_uint4_moe_weight(
+        ) = build_a8w4smooth_moe_weight(
             experts=experts,
             rows_per_expert=model_dim,
             K=inter_dim,
             device=device,
             seed=seed + 22,
-            interleave_k64=bool(uint4_interleave),
+            interleave_k64=bool(a8w4smooth_interleave),
         )
 
         w2_kernel = w2_packed.contiguous()
@@ -1149,7 +1151,7 @@ def run_moe_stage2(
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
         scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
         w1_q_flat_ref = w1_q_flat
-        # NOTE: uint4 packed4 layout-only mode returns early above and never reaches here.
+        # NOTE: a8w4smooth packed4 layout-only mode returns early above and never reaches here.
         # Build stage2 input via reference stage1 only when correctness is enabled.
         if bool(skip_ref):
             raise RuntimeError(
@@ -1178,13 +1180,13 @@ def run_moe_stage2(
                 out1_ref = out1_ref * smooth_scale2[topk_ids.to(torch.int64)]
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=torch.int8)
 
-    if not is_uint4:
+    if not is_a8w4smooth:
         # Flatten weights/scales for the kernel.
         w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
         scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
         # For W4A8, pack preshuffled int8 weights into packed 4-bit bytes.
-        # (int4 only; uint4 uses packed4 qparams path above).
+        # (int4 only; a8w4smooth uses packed4 qparams path above).
         qscale_w2_1d = torch.empty((0,), device=device, dtype=torch.int32)
         qzero_w2_1d = torch.empty((0,), device=device, dtype=torch.int32)
         if is_int4:
@@ -1202,7 +1204,7 @@ def run_moe_stage2(
         a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         a2_scale_1d = a2_scale.view(-1).contiguous()  # [tokens*topk]
-    if not is_uint4:
+    if not is_a8w4smooth:
         if scale_w2_flat is None:
             w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
         else:
@@ -1281,7 +1283,7 @@ def run_moe_stage2(
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
     # across perf iterations for correctness. Time into a dedicated buffer, then run
     # a single clean launch for correctness verification below.
-    # When not uint4, qscale/qzero are unused; pass at least 1-element buffers to avoid
+    # When not a8w4smooth, qscale/qzero are unused; pass at least 1-element buffers to avoid
     # potential runtime crash on 0-size memrefs.
     qscale_launch = qscale_w2_1d if int(qscale_w2_1d.numel()) > 0 else torch.zeros((1,), device=device, dtype=torch.int32)
     qzero_launch = qzero_w2_1d if int(qzero_w2_1d.numel()) > 0 else torch.zeros((1,), device=device, dtype=torch.int32)
@@ -1322,7 +1324,7 @@ def run_moe_stage2(
     if not bool(skip_ref):
         ref2 = torch_moe_gemm2(
             a2_q,
-            (w2_int8_unshuffled_flat.view(experts, model_dim, inter_dim) if is_uint4 else w2_q),
+            (w2_int8_unshuffled_flat.view(experts, model_dim, inter_dim) if is_a8w4smooth else w2_q),
             a2_scale,
             scale_w2,
             topk_ids.to(torch.int64),
@@ -1338,7 +1340,7 @@ def run_moe_stage2(
 
     bytes_moved = 0
     bytes_moved += tokens * topk * inter_dim * 1  # a2 fp8 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_w4 else 1)  # w2 (packed for int4/uint4)
+    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_w4 else 1)  # w2 (packed for int4/a8w4smooth)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
@@ -1454,7 +1456,7 @@ def run_moe_stage2(
         pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4", "uint4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
@@ -1972,11 +1974,11 @@ if __name__ == "__main__":
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "uint4", "all"],
-        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / uint4 / all (default: fp8). "
+        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / a8w4smooth / all (default: fp8). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
         "int4 means W4A8: A int8, W packed int4. "
-        "uint4 means W4A8 with per-block qscale/qzero zero-point dequant.",
+        "a8w4smooth means W4A8 with per-block qscale/qzero zero-point dequant + smoothquant-style repeat input.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")

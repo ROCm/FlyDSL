@@ -70,7 +70,7 @@ def compile_moe_gemm1(
         quant scales (used to emulate MoE smoothquant behavior where each (token,slot)->expert route can
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
-      - "uint4": W4A8 zero-point path: X is int8, W is packed uint4 (2 values per byte) with
+      - "a8w4smooth": W4A8 zero-point path: X is int8, W is packed 4-bit unsigned (2 values per byte) with
         per-block qscale/qzero dequant to int8 in-kernel
     """
 
@@ -78,7 +78,7 @@ def compile_moe_gemm1(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth")
     if in_dtype not in _valid_dtypes:
         raise ValueError(
             f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
@@ -97,39 +97,39 @@ def compile_moe_gemm1(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
     is_int4 = in_dtype == "int4"
-    is_uint4 = in_dtype == "uint4"
-    is_w4 = is_int4 or is_uint4
-    # INT4/UINT4 means W4A8: X is int8, W is packed 4-bit and dequantized to int8 in-kernel.
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    is_w4 = is_int4 or is_a8w4smooth
+    # INT4/A8W4SMOOTH means W4A8: X is int8, W is packed 4-bit and dequantized to int8 in-kernel.
     is_int8 = (in_dtype == "int8") or is_w4
-    x_is_token_slot = in_dtype == "int8smooth"
-    # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
+    x_is_token_slot = in_dtype in ("int8smooth", "a8w4smooth")
+    # "int8smooth"/"a8w4smooth" use int8 MFMA, but X/scale_x are provided per (token,slot).
     is_int8 = is_int8 or x_is_token_slot
-    # UINT4 dequant: PDF packed4 qparams, fixed k_quantize_block=64 (4 blocks per tile256).
+    # A8W4SMOOTH dequant: PDF packed4 qparams, fixed k_quantize_block=64 (4 blocks per tile256).
     # qscale/qzero are passed as packed4 i32 words with physical layout:
     #   [expert, rows_per_expert//16, K//256, 16] (packed i32)  ==  [expert, N//16, k//4, 16, 4] (u8)
-    # UINT4 dequant: PDF packed4 qparams, fixed k_quantize_block=64.
-    uint4_scale_block_k = 64
-    if is_uint4:
-        # This kernel path assumes the uint4 PDF packed4 layout + K64 interleave used by
-        # `tests/kernels/test_moe_gemm.py:build_uint4_moe_weight`.
-        uint4_qparam_format = os.environ.get("FLIR_UINT4_QPARAM_FORMAT", "packed4").strip().lower()
-        if uint4_qparam_format != "packed4":
+    # A8W4SMOOTH dequant: PDF packed4 qparams, fixed k_quantize_block=64.
+    a8w4smooth_scale_block_k = 64
+    if is_a8w4smooth:
+        # This kernel path assumes the a8w4smooth PDF packed4 layout + K64 interleave used by
+        # `tests/kernels/test_moe_gemm.py:build_a8w4smooth_moe_weight`.
+        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+        if a8w4smooth_qparam_format != "packed4":
             raise ValueError(
-                f"uint4 only supports FLIR_UINT4_QPARAM_FORMAT=packed4, got {uint4_qparam_format!r}"
+                f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}"
             )
-        uint4_interleave = (
-            os.environ.get("FLIR_UINT4_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+        a8w4smooth_interleave = (
+            os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
         )
-        if not bool(uint4_interleave):
+        if not bool(a8w4smooth_interleave):
             raise ValueError(
-                "uint4 kernel path requires FLIR_UINT4_INTERLEAVE_K64=1 (K64 interleave 0,64,1,65,...)"
+                "a8w4smooth kernel path requires FLIR_A8W4SMOOTH_INTERLEAVE_K64=1 (K64 interleave 0,64,1,65,...)"
             )
         if int(tile_k) != 256:
-            raise ValueError(f"uint4 kernel path requires tile_k==256, got {tile_k!r}")
+            raise ValueError(f"a8w4smooth kernel path requires tile_k==256, got {tile_k!r}")
     # Compile-time safety switch:
     # - False (default): assume no-carry per-byte (15*qs+qz<=255), use fast packed-byte dequant.
     # - True: use safe per-byte dequant in load_b_pack_k32.
-    overflow_guard = os.environ.get("FLIR_UINT4_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
+    overflow_guard = os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -147,11 +147,11 @@ def compile_moe_gemm1(
     size_x = DYN
     # W is packed 4-bit for W4A8: 2 values per byte.
     size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_w4 else (experts * (2 * inter_dim) * model_dim)
-    # UINT4 qscale/qzero packed4 words:
+    # A8W4SMOOTH qscale/qzero packed4 words:
     # stage1 rows_per_expert = 2*inter_dim, rows_blk = rows_per_expert//16, num_k256 = model_dim//256
-    rows_blk_stage1 = (2 * inter_dim) // 16 if is_uint4 else 0
-    num_k256_stage1 = model_dim // 256 if is_uint4 else 0
-    size_qscale_w = experts * rows_blk_stage1 * num_k256_stage1 * 16 if is_uint4 else 0
+    rows_blk_stage1 = (2 * inter_dim) // 16 if is_a8w4smooth else 0
+    num_k256_stage1 = model_dim // 256 if is_a8w4smooth else 0
+    size_qscale_w = experts * rows_blk_stage1 * num_k256_stage1 * 16 if is_a8w4smooth else 0
     size_qzero_w = size_qscale_w
     size_sorted = DYN
     size_expert_ids = DYN
@@ -186,7 +186,7 @@ def compile_moe_gemm1(
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi4"  # uint4 packed4 qparams + half128_sel plumbing
+        f"_abi4"  # a8w4smooth packed4 qparams + half128_sel plumbing
     ).replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -217,8 +217,8 @@ def compile_moe_gemm1(
             arg_w: lambda: T.memref(DYN, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_qscale_w: lambda: T.memref(size_qscale_w if is_uint4 else DYN, T.i32()),
-            arg_qzero_w: lambda: T.memref(size_qzero_w if is_uint4 else DYN, T.i32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w if is_a8w4smooth else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w if is_a8w4smooth else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
@@ -272,9 +272,9 @@ def compile_moe_gemm1(
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
-            # uint4: innermost 16B (== 32x4bits) pack, with K mapped to packed bytes (K/2).
+            # a8w4smooth: innermost 16B (== 32x4bits) pack, with K mapped to packed bytes (K/2).
             # int4: keep legacy kpack_bytes=8 path unchanged.
-            kpack_bytes = 16 if is_uint4 else (8 if is_int4 else 16)
+            kpack_bytes = 16 if is_a8w4smooth else (8 if is_int4 else 16)
             b_layout = make_preshuffle_b_layout(
                 flir,
                 arith,
@@ -282,7 +282,7 @@ def compile_moe_gemm1(
                 c_k=k_in,
                 kpack_bytes=kpack_bytes,
                 elem_bytes=elem_bytes,
-                packed_4bit=bool(is_uint4),
+                packed_4bit=bool(is_a8w4smooth),
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.constant(int(elem_bytes), index=True)) / arith.index(64)
@@ -372,10 +372,10 @@ def compile_moe_gemm1(
                     )
                     sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
-                # UINT4 per-block qscale/qzero buffer resources.
+                # A8W4SMOOTH per-block qscale/qzero buffer resources.
                 qs_rsrc = None
                 qz_rsrc = None
-                if is_uint4:
+                if is_a8w4smooth:
                     qs_rsrc = buffer_ops.create_buffer_resource(arg_qscale_w, max_size=False)
                     qz_rsrc = buffer_ops.create_buffer_resource(arg_qzero_w, max_size=False)
 
@@ -589,9 +589,9 @@ def compile_moe_gemm1(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
-                # UINT4 packed4 qparams: used by load_b_tile_uint4 only.
-                c_rows_blk_s1 = arith.constant((2 * inter_dim) // 16, index=True) if is_uint4 else None
-                c_num_k256_s1 = arith.constant(model_dim // 256, index=True) if is_uint4 else None
+                # A8W4SMOOTH packed4 qparams: used by load_b_tile_a8w4smooth only.
+                c_rows_blk_s1 = arith.constant((2 * inter_dim) // 16, index=True) if is_a8w4smooth else None
+                c_num_k256_s1 = arith.constant(model_dim // 256, index=True) if is_a8w4smooth else None
 
                 def load_b_pack(base_k, ki_step, ni, blk_list, intra_list):
                     return load_b_pack_k32(
@@ -613,8 +613,8 @@ def compile_moe_gemm1(
                         unpack_int4=is_int4,
                     )
 
-                def load_b_tile_uint4(base_k, blk_list, intra_list):
-                    """UINT4 tile-k=256 loader (drop-in): use buffer_load_dwordx4 + constexpr ku mapping.
+                def load_b_tile_a8w4smooth(base_k, blk_list, intra_list):
+                    """A8W4SMOOTH tile-k=256 loader (drop-in): use buffer_load_dwordx4 + constexpr ku mapping.
 
                     Returns the same structure as `load_b_tile`:
                       b_tile[ku] = (packs0[ni], packs1[ni]) where each pack is i64 (8 bytes).
@@ -627,9 +627,9 @@ def compile_moe_gemm1(
                     - Within each 4B slice: byte0/2 use lo64, byte1/3 use hi64 (perm128 interleave).
                     """
                     if int(tile_k) != 256:
-                        raise ValueError(f"uint4 tile loader requires tile_k==256, got {tile_k!r}")
+                        raise ValueError(f"a8w4smooth tile loader requires tile_k==256, got {tile_k!r}")
                     if int(kpack_bytes) != 16:
-                        raise ValueError(f"uint4 tile loader requires kpack_bytes==16, got {kpack_bytes!r}")
+                        raise ValueError(f"a8w4smooth tile loader requires kpack_bytes==16, got {kpack_bytes!r}")
 
                     i32_ty = ir.IntegerType.get_signless(32)
                     i64_ty = ir.IntegerType.get_signless(64)
@@ -673,7 +673,7 @@ def compile_moe_gemm1(
                     c_4_i32 = arith.constant(4, type=i32_ty)
 
                     def _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte):
-                        """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
+                        """Dequant 4 packed 4-bit dwords -> 8 dwords in natural K order.
 
                         Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
                           Per byte: low nibble = low64 K value, high nibble = high64 K value.
@@ -1048,8 +1048,8 @@ def compile_moe_gemm1(
                 # Prologue: prefetch tile0, store to LDS(cur), sync.
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
-                b_gate_cur = load_b_tile_uint4(k0, n_blk_gate, n_intra_gate) if is_uint4 else load_b_tile(k0, n_blk_gate, n_intra_gate)
-                b_up_cur = load_b_tile_uint4(k0, n_blk_up, n_intra_up) if is_uint4 else load_b_tile(k0, n_blk_up, n_intra_up)
+                b_gate_cur = load_b_tile_a8w4smooth(k0, n_blk_gate, n_intra_gate) if is_a8w4smooth else load_b_tile(k0, n_blk_gate, n_intra_gate)
+                b_up_cur = load_b_tile_a8w4smooth(k0, n_blk_up, n_intra_up) if is_a8w4smooth else load_b_tile(k0, n_blk_up, n_intra_up)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
     
@@ -1069,8 +1069,8 @@ def compile_moe_gemm1(
                     # ---- stage 0: prefetch+store ping, compute pong ----
                     next_k1 = k_iv + tile_k
                     x_regs_ping = load_x_tile(next_k1)
-                    b_gate_ping = load_b_tile_uint4(next_k1, n_blk_gate, n_intra_gate) if is_uint4 else load_b_tile(next_k1, n_blk_gate, n_intra_gate)
-                    b_up_ping = load_b_tile_uint4(next_k1, n_blk_up, n_intra_up) if is_uint4 else load_b_tile(next_k1, n_blk_up, n_intra_up)
+                    b_gate_ping = load_b_tile_a8w4smooth(next_k1, n_blk_gate, n_intra_gate) if is_a8w4smooth else load_b_tile(next_k1, n_blk_gate, n_intra_gate)
+                    b_up_ping = load_b_tile_a8w4smooth(next_k1, n_blk_up, n_intra_up) if is_a8w4smooth else load_b_tile(next_k1, n_blk_up, n_intra_up)
     
                     acc_gate, acc_up, _ = compute_tile(
                         acc_gate,
@@ -1091,8 +1091,8 @@ def compile_moe_gemm1(
                     # ---- stage 1: prefetch+store pong, compute ping ----
                     next_k2 = k_iv + c2_tile_k
                     x_regs_pong = load_x_tile(next_k2)
-                    b_gate_next = load_b_tile_uint4(next_k2, n_blk_gate, n_intra_gate) if is_uint4 else load_b_tile(next_k2, n_blk_gate, n_intra_gate)
-                    b_up_next = load_b_tile_uint4(next_k2, n_blk_up, n_intra_up) if is_uint4 else load_b_tile(next_k2, n_blk_up, n_intra_up)
+                    b_gate_next = load_b_tile_a8w4smooth(next_k2, n_blk_gate, n_intra_gate) if is_a8w4smooth else load_b_tile(next_k2, n_blk_gate, n_intra_gate)
+                    b_up_next = load_b_tile_a8w4smooth(next_k2, n_blk_up, n_intra_up) if is_a8w4smooth else load_b_tile(next_k2, n_blk_up, n_intra_up)
     
                     acc_gate, acc_up, _ = compute_tile(
                         acc_gate,
@@ -1117,8 +1117,8 @@ def compile_moe_gemm1(
                 # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
                 k_tail1 = k_in - tile_k
                 x_regs_ping = load_x_tile(k_tail1)
-                b_gate_ping = load_b_tile_uint4(k_tail1, n_blk_gate, n_intra_gate) if is_uint4 else load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
-                b_up_ping = load_b_tile_uint4(k_tail1, n_blk_up, n_intra_up) if is_uint4 else load_b_tile(k_tail1, n_blk_up, n_intra_up)
+                b_gate_ping = load_b_tile_a8w4smooth(k_tail1, n_blk_gate, n_intra_gate) if is_a8w4smooth else load_b_tile(k_tail1, n_blk_gate, n_intra_gate)
+                b_up_ping = load_b_tile_a8w4smooth(k_tail1, n_blk_up, n_intra_up) if is_a8w4smooth else load_b_tile(k_tail1, n_blk_up, n_intra_up)
     
                 acc_gate, acc_up, _ = compute_tile(
                     acc_gate,
@@ -1398,8 +1398,8 @@ def compile_moe_gemm1(
             arg_w: lambda: T.memref(DYN, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), T.f32()),
-            arg_qscale_w: lambda: T.memref(size_qscale_w if is_uint4 else DYN, T.i32()),
-            arg_qzero_w: lambda: T.memref(size_qzero_w if is_uint4 else DYN, T.i32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w if is_a8w4smooth else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w if is_a8w4smooth else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
             arg_expert_ids: lambda: T.memref(DYN, T.i32()),
             arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
@@ -1472,7 +1472,7 @@ def compile_moe_gemm2(
       - "fp16": A2/W are fp16
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
-      - "uint4": W4A8 zero-point path: A2 is int8, W is packed uint4 with per-block
+      - "a8w4smooth": W4A8 zero-point path: A2 is int8, W is packed 4-bit unsigned with per-block
         qscale/qzero dequant to int8 in-kernel
 
     Stage2 output supports:
@@ -1486,7 +1486,7 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "uint4")
+    _valid_dtypes = ("fp8", "fp16", "int8", "int8smooth", "int4", "a8w4smooth")
     if in_dtype not in _valid_dtypes:
         raise ValueError(
             f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
@@ -1501,27 +1501,27 @@ def compile_moe_gemm2(
     if (not bool(accumulate)) and out_is_f32:
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
-    is_uint4 = in_dtype == "uint4"
-    is_w4 = is_int4 or is_uint4
-    # INT4/UINT4 means W4A8: A2 is int8, W is packed 4-bit and dequantized to int8 in-kernel.
+    is_a8w4smooth = in_dtype == "a8w4smooth"
+    is_w4 = is_int4 or is_a8w4smooth
+    # INT4/A8W4SMOOTH means W4A8: A2 is int8, W is packed 4-bit and dequantized to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_w4
-    uint4_scale_block_k = 64
-    if is_uint4:
-        uint4_qparam_format = os.environ.get("FLIR_UINT4_QPARAM_FORMAT", "packed4").strip().lower()
-        if uint4_qparam_format != "packed4":
+    a8w4smooth_scale_block_k = 64
+    if is_a8w4smooth:
+        a8w4smooth_qparam_format = os.environ.get("FLIR_A8W4SMOOTH_QPARAM_FORMAT", "packed4").strip().lower()
+        if a8w4smooth_qparam_format != "packed4":
             raise ValueError(
-                f"uint4 only supports FLIR_UINT4_QPARAM_FORMAT=packed4, got {uint4_qparam_format!r}"
+                f"a8w4smooth only supports FLIR_A8W4SMOOTH_QPARAM_FORMAT=packed4, got {a8w4smooth_qparam_format!r}"
             )
-        uint4_interleave = (
-            os.environ.get("FLIR_UINT4_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
+        a8w4smooth_interleave = (
+            os.environ.get("FLIR_A8W4SMOOTH_INTERLEAVE_K64", "1").strip().lower() not in ("0", "false", "no")
         )
-        if not bool(uint4_interleave):
+        if not bool(a8w4smooth_interleave):
             raise ValueError(
-                "uint4 kernel path requires FLIR_UINT4_INTERLEAVE_K64=1 (K64 interleave 0,64,1,65,...)"
+                "a8w4smooth kernel path requires FLIR_A8W4SMOOTH_INTERLEAVE_K64=1 (K64 interleave 0,64,1,65,...)"
             )
         if int(tile_k) != 256:
-            raise ValueError(f"uint4 kernel path requires tile_k==256, got {tile_k!r}")
-    overflow_guard = os.environ.get("FLIR_UINT4_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
+            raise ValueError(f"a8w4smooth kernel path requires tile_k==256, got {tile_k!r}")
+    overflow_guard = os.environ.get("FLIR_A8W4SMOOTH_OVERFLOW_GUARD", "0") in ("1", "true", "True", "YES", "yes")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -1542,11 +1542,11 @@ def compile_moe_gemm2(
     size_scale_x = DYN
     # W is packed 4-bit for W4A8: 2 values per byte.
     size_w = (experts * model_dim * inter_dim) // 2 if is_w4 else (experts * model_dim * inter_dim)
-    # UINT4 qscale/qzero packed4 words:
+    # A8W4SMOOTH qscale/qzero packed4 words:
     # stage2 rows_per_expert = model_dim, rows_blk = rows_per_expert//16, num_k256 = inter_dim//256
-    rows_blk_stage2 = model_dim // 16 if is_uint4 else 0
-    num_k256_stage2 = inter_dim // 256 if is_uint4 else 0
-    size_qscale_w2 = experts * rows_blk_stage2 * num_k256_stage2 * 16 if is_uint4 else 0
+    rows_blk_stage2 = model_dim // 16 if is_a8w4smooth else 0
+    num_k256_stage2 = inter_dim // 256 if is_a8w4smooth else 0
+    size_qscale_w2 = experts * rows_blk_stage2 * num_k256_stage2 * 16 if is_a8w4smooth else 0
     size_qzero_w2 = size_qscale_w2
 
     total_threads = 256
@@ -1606,7 +1606,7 @@ def compile_moe_gemm2(
     module_name = (
         f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi3"  # uint4 packed4 qparams + half128_sel plumbing
+        f"_abi3"  # a8w4smooth packed4 qparams + half128_sel plumbing
     ).replace("-", "_")
 
     class _MOE2(flir.MlirModule):
@@ -1637,8 +1637,8 @@ def compile_moe_gemm2(
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
-            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_uint4 else DYN, T.i32()),
-            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_uint4 else DYN, T.i32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_a8w4smooth else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_a8w4smooth else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
@@ -1649,7 +1649,7 @@ def compile_moe_gemm2(
             size_expert_ids_in: lambda: T.index(),
         ):
             x_elem = I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
-            # For int4/uint4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
+            # For int4/a8w4smooth, weights are stored as packed bytes (i8) and unpacked to i8 packs.
             w_elem = I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
             f16 = I.f16
             f32 = I.f32
@@ -1681,9 +1681,9 @@ def compile_moe_gemm2(
 
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.constant(experts * model_dim, index=True)
-            # uint4: innermost 16B (== 32x4bits) pack, with K mapped to packed bytes (K/2).
+            # a8w4smooth: innermost 16B (== 32x4bits) pack, with K mapped to packed bytes (K/2).
             # int4: keep legacy kpack_bytes=8 path unchanged.
-            kpack_bytes = 16 if is_uint4 else (8 if is_int4 else 16)
+            kpack_bytes = 16 if is_a8w4smooth else (8 if is_int4 else 16)
             b_layout = make_preshuffle_b_layout(
                 flir,
                 arith,
@@ -1691,7 +1691,7 @@ def compile_moe_gemm2(
                 c_k=k_in,
                 kpack_bytes=kpack_bytes,
                 elem_bytes=elem_bytes,
-                packed_4bit=bool(is_uint4),
+                packed_4bit=bool(is_a8w4smooth),
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.constant(int(elem_bytes), index=True)) / arith.index(64)
@@ -1776,10 +1776,10 @@ def compile_moe_gemm2(
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
-            # UINT4 per-block qscale/qzero buffer resources.
+            # A8W4SMOOTH per-block qscale/qzero buffer resources.
             qs_rsrc = None
             qz_rsrc = None
-            if is_uint4:
+            if is_a8w4smooth:
                 qs_rsrc = buffer_ops.create_buffer_resource(arg_qscale_w, max_size=False)
                 qz_rsrc = buffer_ops.create_buffer_resource(arg_qzero_w, max_size=False)
 
@@ -1992,8 +1992,8 @@ def compile_moe_gemm2(
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
     
                 # --- B Load Logic (K64) ---
-                c_rows_blk_s2 = arith.constant(model_dim // 16, index=True) if is_uint4 else None
-                c_num_k256_s2 = arith.constant(inter_dim // 256, index=True) if is_uint4 else None
+                c_rows_blk_s2 = arith.constant(model_dim // 16, index=True) if is_a8w4smooth else None
+                c_num_k256_s2 = arith.constant(inter_dim // 256, index=True) if is_a8w4smooth else None
 
                 def load_b_pack(base_k, ki_step, ni):
                     return load_b_pack_k32(
@@ -2015,12 +2015,12 @@ def compile_moe_gemm2(
                         unpack_int4=is_int4,
                     )
 
-                def load_b_tile_uint4(base_k):
-                    """UINT4 tile-k=256 loader (drop-in): use buffer_load_dwordx4 + constexpr ku mapping."""
+                def load_b_tile_a8w4smooth(base_k):
+                    """A8W4SMOOTH tile-k=256 loader (drop-in): use buffer_load_dwordx4 + constexpr ku mapping."""
                     if int(tile_k) != 256:
-                        raise ValueError(f"uint4 tile loader requires tile_k==256, got {tile_k!r}")
+                        raise ValueError(f"a8w4smooth tile loader requires tile_k==256, got {tile_k!r}")
                     if int(kpack_bytes) != 16:
-                        raise ValueError(f"uint4 tile loader requires kpack_bytes==16, got {kpack_bytes!r}")
+                        raise ValueError(f"a8w4smooth tile loader requires kpack_bytes==16, got {kpack_bytes!r}")
 
                     i32_ty = ir.IntegerType.get_signless(32)
                     i64_ty = ir.IntegerType.get_signless(64)
@@ -2061,7 +2061,7 @@ def compile_moe_gemm2(
                     c_4_i32 = arith.constant(4, type=i32_ty)
 
                     def _dequant_4pack(d0, d1, d2, d3, qs_lo, qs_hi, qz_lo, qz_hi, qz_lo_byte, qz_hi_byte):
-                        """Dequant 4 packed uint4 dwords -> 8 dwords in natural K order.
+                        """Dequant 4 packed 4-bit dwords -> 8 dwords in natural K order.
 
                         Input: 4 dwords, each containing 8 nibbles in K64-interleaved order.
                           Per byte: low nibble = low64 K value, high nibble = high64 K value.
@@ -2462,7 +2462,7 @@ def compile_moe_gemm2(
                 # Prologue.
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
-                b_cur = load_b_tile_uint4(k0) if is_uint4 else load_b_tile(k0)
+                b_cur = load_b_tile_a8w4smooth(k0) if is_a8w4smooth else load_b_tile(k0)
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
     
@@ -2491,7 +2491,7 @@ def compile_moe_gemm2(
                 for k_iv in range(arith.index(0), c_k_main2, arith.index(tile_k * 2)):
                     next_k1 = k_iv + tile_k
                     x_regs_ping = load_x_tile(next_k1)
-                    b_ping = load_b_tile_uint4(next_k1) if is_uint4 else load_b_tile(next_k1)
+                    b_ping = load_b_tile_a8w4smooth(next_k1) if is_a8w4smooth else load_b_tile(next_k1)
     
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
@@ -2504,7 +2504,7 @@ def compile_moe_gemm2(
     
                     next_k2 = k_iv + c2_tile_k
                     x_regs_pong = load_x_tile(next_k2)
-                    b_next = load_b_tile_uint4(next_k2) if is_uint4 else load_b_tile(next_k2)
+                    b_next = load_b_tile_a8w4smooth(next_k2) if is_a8w4smooth else load_b_tile(next_k2)
     
                     acc, _ = compute_tile(acc, b_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping)
                     a0_prefetch_ping = None
@@ -2530,7 +2530,7 @@ def compile_moe_gemm2(
                     # Tail: 2 remaining tiles.
                     k_tail1 = k_in - tile_k
                     x_regs_ping = load_x_tile(k_tail1)
-                    b_ping = load_b_tile_uint4(k_tail1) if is_uint4 else load_b_tile(k_tail1)
+                    b_ping = load_b_tile_a8w4smooth(k_tail1) if is_a8w4smooth else load_b_tile(k_tail1)
     
                     acc, _ = compute_tile(acc, b_cur, lds_base_pong, a0_prefetch=a0_prefetch_pong)
                     a0_prefetch_pong = None
@@ -2810,8 +2810,8 @@ def compile_moe_gemm2(
             arg_w: lambda: T.memref(size_w, I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(experts * model_dim, T.f32()),
-            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_uint4 else DYN, T.i32()),
-            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_uint4 else DYN, T.i32()),
+            arg_qscale_w: lambda: T.memref(size_qscale_w2 if is_a8w4smooth else DYN, T.i32()),
+            arg_qzero_w: lambda: T.memref(size_qzero_w2 if is_a8w4smooth else DYN, T.i32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
             arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
             arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
