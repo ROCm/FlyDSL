@@ -7,9 +7,9 @@ Phase 2: single-step update logic implemented in the timestep loop:
 - h += k ⊗ v
 - o = sum(h * q * scale, dim=0)
 
-Simplified scope:
-- IS_BETA_HEADWISE = False (beta is scalar per (t, hv))
-- no h0 / ht
+Scope:
+- supports scalar beta and headwise beta-vector branches
+- supports h0 (initial state) and ht (final state) IO
 - dtype: f32 main path
 """
 
@@ -24,12 +24,23 @@ import _mlir.extras.types as T
 KERNEL_NAME = "fused_recurrent_gated_delta_rule_fwd_kernel"
 
 
-def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dtype_str="f32"):
+def build_fused_recurrent_gated_delta_rule_fwd_module(
+    B,
+    T_seq,
+    H,
+    HV,
+    K,
+    V,
+    dtype_str="f32",
+    is_beta_headwise=False,
+):
     """Build the fused recurrent gated delta rule forward kernel module.
 
     Args:
         B, T_seq, H, HV, K, V: compile-time dimensions
         dtype_str: "f32" or "f16" (MVP: f32 only)
+        is_beta_headwise: use beta_headwise[B*T*HV, V] when True,
+            otherwise use beta_scalar[B*T, HV]
     """
     gpu_arch = get_hip_arch()
     compute_type = T.f32()
@@ -46,6 +57,7 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
     BT = B * T_seq
     BTH = B * T_seq * H
     BTHV = B * T_seq * HV
+    BHV = B * HV
 
     class _FusedRecurrentGatedDeltaRuleFwd(flir.MlirModule):
         GPU_MODULE_NAME = f"fused_recurrent_gated_delta_rule_fwd_{dtype_str}"
@@ -62,7 +74,10 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
             k: lambda: T.memref(BTH, K, elem_type),
             v: lambda: T.memref(BTHV, V, elem_type),
             g: lambda: T.memref(BT, HV, elem_type),
-            beta: lambda: T.memref(BT, HV, elem_type),
+            beta_scalar: lambda: T.memref(BT, HV, elem_type),
+            beta_headwise: lambda: T.memref(BTHV, V, elem_type),
+            h0: lambda: T.memref(BHV, K, V, elem_type),
+            ht: lambda: T.memref(BHV, K, V, elem_type),
             o: lambda: T.memref(BTHV, V, elem_type),
         ):
             # Block index -> (n, hv)
@@ -70,7 +85,10 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
             c_hv = arith.as_value(arith.index(HV))
             i_n = arith.as_value(flir.arith.DivUIOp(arith.as_value(i_nh), c_hv).result)
             i_hv = arith.as_value(flir.arith.RemUIOp(arith.as_value(i_nh), c_hv).result)
-            i_h = i_hv  # H==HV for simplified scope
+            c_hv_per_h = arith.as_value(arith.index(HV // H))
+            i_h = arith.as_value(
+                flir.arith.DivUIOp(arith.as_value(i_hv), c_hv_per_h).result
+            )
 
             base_ptr = allocator.get_base()
             s_h = _state["smem_h"](base_ptr).get()
@@ -86,12 +104,19 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
             c_T = arith.as_value(arith.index(T_seq))
             c_H = arith.as_value(arith.index(H))
 
-            # Initialize recurrent state h to zeros.
+            # row_h = n * HV + hv for h0/ht
+            m0 = flir.arith.MulIOp(arith.as_value(i_n), c_hv).result
+            row_h = arith.as_value(flir.arith.AddIOp(arith.as_value(m0), arith.as_value(i_hv)).result)
+
+            # Initialize recurrent state h from h0.
             for ik in range_constexpr(K):
                 for iv in range_constexpr(V):
+                    h_init = memref.load(h0, [arith.as_value(row_h), arith.index(ik), arith.index(iv)])
+                    if dtype_str != "f32":
+                        h_init = flir.arith.extf(comp, arith.as_value(h_init))
                     crd = flir.make_coord(arith.index(ik), arith.index(iv))
                     idx = flir.crd2idx(crd, layout_h)
-                    memref.store(arith.constant(0.0, type=comp), s_h, [arith.as_value(idx)])
+                    memref.store(arith.as_value(h_init), s_h, [arith.as_value(idx)])
 
             gpu.barrier()
 
@@ -117,10 +142,14 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
 
                 # Load g and beta (already precomputed).
                 g_val = memref.load(g, [arith.as_value(row_gb), arith.as_value(i_hv)])
-                beta_val = memref.load(beta, [arith.as_value(row_gb), arith.as_value(i_hv)])
                 if dtype_str != "f32":
                     g_val = flir.arith.extf(comp, arith.as_value(g_val))
-                    beta_val = flir.arith.extf(comp, arith.as_value(beta_val))
+
+                beta_val_scalar = None
+                if not is_beta_headwise:
+                    beta_val_scalar = memref.load(beta_scalar, [arith.as_value(row_gb), arith.as_value(i_hv)])
+                    if dtype_str != "f32":
+                        beta_val_scalar = flir.arith.extf(comp, arith.as_value(beta_val_scalar))
 
                 # exp(g) via exp2(g * log2(e))
                 g_log2e = flir.arith.MulFOp(arith.as_value(g_val), arith.as_value(c_log2e), fastmath=fm_fast).result
@@ -168,9 +197,17 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
 
                 # v *= beta
                 for iv in range_constexpr(V):
-                    v_vals[iv] = flir.arith.MulFOp(
-                        arith.as_value(v_vals[iv]), arith.as_value(beta_val), fastmath=fm_fast
-                    ).result
+                    if is_beta_headwise:
+                        beta_v = memref.load(beta_headwise, [arith.as_value(row_vt), arith.index(iv)])
+                        if dtype_str != "f32":
+                            beta_v = flir.arith.extf(comp, arith.as_value(beta_v))
+                        v_vals[iv] = flir.arith.MulFOp(
+                            arith.as_value(v_vals[iv]), arith.as_value(beta_v), fastmath=fm_fast
+                        ).result
+                    else:
+                        v_vals[iv] = flir.arith.MulFOp(
+                            arith.as_value(v_vals[iv]), arith.as_value(beta_val_scalar), fastmath=fm_fast
+                        ).result
 
                 # h += k ⊗ v
                 for ik in range_constexpr(K):
@@ -197,6 +234,15 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
                     out_val = s if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(s))
                     memref.store(arith.as_value(out_val), o, [arith.as_value(row_vt), arith.index(iv)])
 
+            # Write final recurrent state to ht.
+            for ik in range_constexpr(K):
+                for iv in range_constexpr(V):
+                    crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                    idx = flir.crd2idx(crd, layout_h)
+                    h_fin = memref.load(s_h, [arith.as_value(idx)])
+                    out_h = h_fin if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(h_fin))
+                    memref.store(arith.as_value(out_h), ht, [arith.as_value(row_h), arith.index(ik), arith.index(iv)])
+
         @flir.jit
         def __call__(
             self: flir.T.i64,
@@ -204,7 +250,10 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
             k: lambda: T.memref(BTH, K, elem_type),
             v: lambda: T.memref(BTHV, V, elem_type),
             g: lambda: T.memref(BT, HV, elem_type),
-            beta: lambda: T.memref(BT, HV, elem_type),
+            beta_scalar: lambda: T.memref(BT, HV, elem_type),
+            beta_headwise: lambda: T.memref(BTHV, V, elem_type),
+            h0: lambda: T.memref(BHV, K, V, elem_type),
+            ht: lambda: T.memref(BHV, K, V, elem_type),
             o: lambda: T.memref(BTHV, V, elem_type),
         ):
             c1 = flir.const_index(1)
@@ -214,7 +263,7 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
                 [self.GPU_MODULE_NAME, "fused_recurrent_gated_delta_rule_fwd_kernel"],
                 grid_size=(gx, c1, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[q, k, v, g, beta, o],
+                kernel_operands=[q, k, v, g, beta_scalar, beta_headwise, h0, ht, o],
             )
 
     return _FusedRecurrentGatedDeltaRuleFwd()

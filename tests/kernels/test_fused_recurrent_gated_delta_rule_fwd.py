@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Test FlyDSL fused_recurrent_gated_delta_rule_fwd kernel.
 
-Phase 1: Environment check, PyTorch ref, skeleton build+launch.
-Uses PyTorch reference implementation for correctness verification.
-Simplified scope: g and beta precomputed, IS_BETA_HEADWISE=False, no h0/ht.
+Phase 3 coverage:
+- scalar beta path
+- headwise beta path (IS_BETA_HEADWISE=True)
+- h0/ht state IO
 """
 
 import sys
@@ -162,7 +163,9 @@ def test_fused_recurrent_gated_delta_rule_fwd_phase2_launch(ctx):
         pytest.skip("fused_recurrent_gated_delta_rule_fwd_kernel not available")
 
     B, T, H, HV, K, V = 1, 4, 1, 1, 8, 8
-    m = build_fused_recurrent_gated_delta_rule_fwd_module(B, T, H, HV, K, V, "f32")
+    m = build_fused_recurrent_gated_delta_rule_fwd_module(
+        B, T, H, HV, K, V, "f32", is_beta_headwise=False
+    )
     exe = flydsl.compile(m)
 
     torch.manual_seed(0)
@@ -171,9 +174,12 @@ def test_fused_recurrent_gated_delta_rule_fwd_phase2_launch(ctx):
     q_flat = torch.randn(B * T * H, K, device="cuda", dtype=torch.float32) * 0.1
     k_flat = torch.randn(B * T * H, K, device="cuda", dtype=torch.float32) * 0.1
     v_flat = torch.randn(B * T * HV, V, device="cuda", dtype=torch.float32) * 0.1
+    beta_headwise_flat = torch.zeros(B * T * HV, V, device="cuda", dtype=torch.float32)
+    h0 = torch.zeros(B * HV, K, V, device="cuda", dtype=torch.float32)
+    ht = torch.empty(B * HV, K, V, device="cuda", dtype=torch.float32)
     o_flat = torch.empty(B * T * HV, V, device="cuda", dtype=torch.float32).fill_(-1.0)
 
-    exe(q_flat, k_flat, v_flat, g_flat, beta_flat, o_flat)
+    exe(q_flat, k_flat, v_flat, g_flat, beta_flat, beta_headwise_flat, h0, ht, o_flat)
     torch.cuda.synchronize()
 
     assert torch.isfinite(o_flat).all().item(), "Output should be finite"
@@ -202,24 +208,40 @@ def test_fused_recurrent_gated_delta_rule_fwd_flydsl(ctx):
     v = torch.randn(B, T, HV, V, device="cuda", dtype=torch.float32) * 0.1
 
     scale = K ** (-0.5)
-    ref, _ = fused_recurrent_gated_delta_rule_fwd_torch_ref(q, k, v, g, beta, scale)
+
+    initial_state = torch.randn(B, HV, K, V, device="cuda", dtype=torch.float32) * 0.1
+    ref, ref_ht = fused_recurrent_gated_delta_rule_fwd_torch_ref(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        scale,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
 
     try:
-        m = build_fused_recurrent_gated_delta_rule_fwd_module(B, T, H, HV, K, V, "f32")
+        m = build_fused_recurrent_gated_delta_rule_fwd_module(
+            B, T, H, HV, K, V, "f32", is_beta_headwise=False
+        )
         exe = flydsl.compile(m)
     except Exception as e:
         pytest.skip(f"Kernel build/compile failed: {e}")
 
-    # Reshape for kernel: g,beta [B*T,HV], q,k [B*T*H,K], v,o [B*T*HV,V]
+    # Reshape for kernel.
     g_flat = g.reshape(B * T, HV).contiguous()
     beta_flat = beta.reshape(B * T, HV).contiguous()
+    beta_headwise_flat = torch.zeros(B * T * HV, V, device="cuda", dtype=torch.float32)
     q_flat = q.reshape(B * T * H, K).contiguous()
     k_flat = k.reshape(B * T * H, K).contiguous()
     v_flat = v.reshape(B * T * HV, V).contiguous()
+    h0 = initial_state.reshape(B * HV, K, V).contiguous()
+    ht = torch.empty(B * HV, K, V, device="cuda", dtype=torch.float32)
     o_flat = torch.empty(B * T * HV, V, device="cuda", dtype=torch.float32)
 
     try:
-        exe(q_flat, k_flat, v_flat, g_flat, beta_flat, o_flat)
+        exe(q_flat, k_flat, v_flat, g_flat, beta_flat, beta_headwise_flat, h0, ht, o_flat)
         torch.cuda.synchronize()
     except Exception as e:
         pytest.fail(f"Kernel launch failed: {e}")
@@ -228,11 +250,85 @@ def test_fused_recurrent_gated_delta_rule_fwd_flydsl(ctx):
     abs_diff = (o_got - ref).abs()
     print(f"o_got:\n{o_got}")
     print(f"ref:\n{ref}")
-    print(f"|o_got - ref|:\n{abs_diff}")
+    # print(f"|o_got - ref|:\n{abs_diff}")
     max_err = (o_got - ref).abs().max().item()
     print(f"Max error vs ref: {max_err:.2e}")
     # Relaxed tolerance: FlyDSL uses exp2(x*log2e) vs torch.exp, f32 accumulation differs
     assert max_err < 2e-3, f"Error too large: {max_err}"
+
+    ht_got = ht.reshape(B, HV, K, V)
+    max_err_ht = (ht_got - ref_ht).abs().max().item()
+    print(f"ht_got:\n{ht_got}")
+    print(f"ref_ht:\n{ref_ht}")
+    # print(f"|ht_got - ref_ht|:\n{(ht_got - ref_ht).abs()}")
+    print(f"Max final-state error vs ref: {max_err_ht:.2e}")
+    assert max_err_ht < 2e-3, f"Final state error too large: {max_err_ht}"
+
+
+def test_fused_recurrent_gated_delta_rule_fwd_flydsl_beta_headwise_and_state(ctx):
+    """Test headwise-beta branch plus h0/ht state IO."""
+    if flydsl is None:
+        pytest.skip("flydsl not available")
+    try:
+        from kernels.fused_recurrent_gated_delta_rule_fwd_kernel import (
+            build_fused_recurrent_gated_delta_rule_fwd_module,
+        )
+    except ImportError:
+        pytest.skip("fused_recurrent_gated_delta_rule_fwd_kernel not available")
+
+    B, T, H, HV, K, V = 1, 4, 1, 1, 8, 8
+    torch.manual_seed(7)
+
+    g = torch.randn(B, T, HV, device="cuda", dtype=torch.float32) * 0.1
+    beta_headwise = torch.sigmoid(
+        torch.randn(B, T, HV, V, device="cuda", dtype=torch.float32) * 0.5
+    )
+    q = torch.randn(B, T, H, K, device="cuda", dtype=torch.float32) * 0.1
+    k = torch.randn(B, T, H, K, device="cuda", dtype=torch.float32) * 0.1
+    v = torch.randn(B, T, HV, V, device="cuda", dtype=torch.float32) * 0.1
+    initial_state = torch.randn(B, HV, K, V, device="cuda", dtype=torch.float32) * 0.1
+
+    scale = K ** (-0.5)
+    ref, ref_ht = fused_recurrent_gated_delta_rule_fwd_torch_ref(
+        q,
+        k,
+        v,
+        g,
+        beta_headwise,
+        scale,
+        initial_state=initial_state,
+        output_final_state=True,
+    )
+
+    m = build_fused_recurrent_gated_delta_rule_fwd_module(
+        B, T, H, HV, K, V, "f32", is_beta_headwise=True
+    )
+    exe = flydsl.compile(m)
+
+    g_flat = g.reshape(B * T, HV).contiguous()
+    beta_scalar_dummy = torch.zeros(B * T, HV, device="cuda", dtype=torch.float32)
+    beta_headwise_flat = beta_headwise.reshape(B * T * HV, V).contiguous()
+    q_flat = q.reshape(B * T * H, K).contiguous()
+    k_flat = k.reshape(B * T * H, K).contiguous()
+    v_flat = v.reshape(B * T * HV, V).contiguous()
+    h0 = initial_state.reshape(B * HV, K, V).contiguous()
+    ht = torch.empty(B * HV, K, V, device="cuda", dtype=torch.float32)
+    o_flat = torch.empty(B * T * HV, V, device="cuda", dtype=torch.float32)
+
+    exe(q_flat, k_flat, v_flat, g_flat, beta_scalar_dummy, beta_headwise_flat, h0, ht, o_flat)
+    torch.cuda.synchronize()
+
+    o_got = o_flat.reshape(B, T, HV, V)
+    ht_got = ht.reshape(B, HV, K, V)
+    max_err_o = (o_got - ref).abs().max().item()
+    max_err_ht = (ht_got - ref_ht).abs().max().item()
+    print(f"headwise ht_got:\n{ht_got}")
+    print(f"headwise ref_ht:\n{ref_ht}")
+    # print(f"headwise |ht_got - ref_ht|:\n{(ht_got - ref_ht).abs()}")
+    print(f"Headwise beta max output error: {max_err_o:.2e}")
+    print(f"Headwise beta max final-state error: {max_err_ht:.2e}")
+    assert max_err_o < 2e-3, f"Headwise output error too large: {max_err_o}"
+    assert max_err_ht < 2e-3, f"Headwise final state error too large: {max_err_ht}"
 
 
 if __name__ == "__main__":
