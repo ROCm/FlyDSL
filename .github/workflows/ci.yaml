@@ -21,6 +21,14 @@ on:
         description: 'Skip promote job (build + test only)'
         type: boolean
         default: false
+      docker_image:
+        description: 'Docker base image for build and test'
+        type: string
+        default: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+      llvm_commit:
+        description: 'LLVM commit hash for MLIR build'
+        type: string
+        default: "04f968b02917"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
@@ -31,6 +39,8 @@ jobs:
     uses: ./.github/workflows/build-whl.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}
+      docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1' }}
+      llvm_commit: ${{ inputs.llvm_commit || '04f968b02917' }}
     permissions:
       id-token: write
       contents: read
@@ -39,6 +49,8 @@ jobs:
     needs: build
     if: ${{ !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
+    with:
+      docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1' }}
     permissions:
       contents: read
 

@@ -2,9 +2,11 @@ name: Test Wheels
 
 on:
   workflow_call:
-
-env:
-  DOCKER_IMAGE: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+    inputs:
+      docker_image:
+        description: 'Docker base image for testing'
+        type: string
+        required: true
 
 jobs:
   test:
@@ -46,7 +48,7 @@ jobs:
             --security-opt seccomp=unconfined \
             -w /flydsl \
             --name flydsl_test \
-            ${{ env.DOCKER_IMAGE }}
+            ${{ inputs.docker_image }}
 
       - name: Install wheels and dependencies
         id: install

@@ -12,9 +12,6 @@ on:
         type: string
         required: true
 
-env:
-  OIDC_ROLE: "arn:aws:iam::661452401056:role/framework-flydsl-nightlies"
-
 jobs:
   promote:
     runs-on: linux-flydsl-mi325-1
@@ -34,7 +31,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
-          role-to-assume: ${{ env.OIDC_ROLE }}
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-${{ inputs.release_type }}
 
       - name: Install AWS CLI
         run: bash ./flydsl/scripts/install_awscli.sh
