@@ -563,8 +563,8 @@ def compile_preshuffle_gemm_a8(
             _ptr_type = ir.Type.parse('!llvm.ptr<1>')
             _i32_type = ir.IntegerType.get_signless(32)
             _i64_type = ir.IntegerType.get_signless(64)
-            _scale_a_raw = arg_scale_a.__extract_ir_values__()[0]
-            _scale_b_raw = arg_scale_b.__extract_ir_values__()[0]
+            _scale_a_raw = arg_scale_a.value
+            _scale_b_raw = arg_scale_b.value
             _scale_a_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_a_raw)
             _scale_b_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_b_raw)
             _scale_a_ptr_int = _llvm_d.ptrtoint(_i64_type, _scale_a_ptr)
