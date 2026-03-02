@@ -25,29 +25,34 @@ def _flatten_args(args, kwargs):
     return new_args, new_kwargs
 
 
+def _caller_location(depth=1):
+    """Build an MLIR Location from the Python call-site *depth* frames up."""
+    frame = inspect.currentframe()
+    for _ in range(depth + 1):
+        if frame is not None:
+            frame = frame.f_back
+    if frame is None:
+        return ir.Location.unknown()
+
+    info = inspect.getframeinfo(frame)
+    pos = getattr(info, "positions", None)
+    line = pos.lineno if pos is not None else info.lineno
+    col = (pos.col_offset or 0) if pos is not None else 0
+    file_loc = ir.Location.file(info.filename, line, col)
+
+    if info.code_context:
+        label = " ".join(ln.strip() for ln in info.code_context)
+    else:
+        label = info.function
+    return ir.Location.name(label, childLoc=file_loc)
+
+
 def traced_op(op):
     @wraps(op)
     def wrapper(*args, **kwargs):
         loc = kwargs.pop("loc", None)
         if loc is None:
-            frame = inspect.currentframe().f_back
-            frameInfo = inspect.getframeinfo(frame)
-            if hasattr(frameInfo, "positions") and frameInfo.positions is not None:
-                line = frameInfo.positions.lineno
-                col = frameInfo.positions.col_offset or 0
-            else:
-                line = frameInfo.lineno
-                col = 0
-            file_loc = ir.Location.file(frameInfo.filename, line, col)
-
-            loc = ir.Location.name(
-                (
-                    "".join([c.strip() for c in frameInfo.code_context])
-                    if frameInfo.code_context
-                    else frameInfo.function
-                ),
-                childLoc=file_loc,
-            )
+            loc = _caller_location(depth=1)
         args, kwargs = _flatten_args(args, kwargs)
         with loc:
             return op(*args, **kwargs)
