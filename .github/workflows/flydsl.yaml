@@ -91,7 +91,7 @@ jobs:
         if: steps.mlir-cache.outputs.cache-hit != 'true'
         run: |
           set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && LLVM_COMMIT=${{ env.LLVM_COMMIT }} bash scripts/build_llvm.sh"
+          docker exec flydsl_test bash -c "cd /flydsl-test && LLVM_COMMIT=${{ env.LLVM_COMMIT }} LLVM_INSTALL_DIR=/llvm-project/mlir_install LLVM_INSTALL_TGZ=/llvm-project/mlir_install.tgz bash scripts/build_llvm.sh"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
           docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
           ls -lh ./mlir_install.tgz || true
