@@ -112,7 +112,9 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             c_scale = arith.constant(scale, type=comp)
             c_neg_one = arith.constant(-1.0, type=comp)
             c_one = arith.constant(1.0, type=comp)
+            c_softplus_beta = arith.constant(SOFTPLUS_BETA, type=comp)
             c_inv_softplus_beta = arith.constant(1.0 / SOFTPLUS_BETA, type=comp)
+            c_softplus_threshold = arith.constant(SOFTPLUS_THRESHOLD, type=comp)
             fm_fast = flir.arith.FastMathFlags.fast
 
             c_TH = arith.as_value(arith.index(T_seq * H))
@@ -180,17 +182,17 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                     v_vals.append(memref.load(v, [arith.as_value(row_vt), arith.index(iv)]))
 
                 # g = -exp(A_log) * softplus(a + dt_bias)
-                # For MVP we use the stable softplus form log(1 + exp(x));
-                # SOFTPLUS_THRESHOLD is reserved for a thresholded branch in a later step.
-                _ = SOFTPLUS_THRESHOLD
                 a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
                 dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
                 a_val = memref.load(a, [arith.as_value(row_ab), arith.as_value(i_hv)])
                 x = flir.arith.AddFOp(
                     arith.as_value(a_val), arith.as_value(dt_bias_val), fastmath=fm_fast
                 ).result
+                beta_x = flir.arith.MulFOp(
+                    arith.as_value(c_softplus_beta), arith.as_value(x), fastmath=fm_fast
+                ).result
                 x_log2e = flir.arith.MulFOp(
-                    arith.as_value(x), arith.as_value(c_log2e), fastmath=fm_fast
+                    arith.as_value(beta_x), arith.as_value(c_log2e), fastmath=fm_fast
                 ).result
                 exp_x = flir.math.exp2(arith.as_value(x_log2e), fastmath=fm_fast)
                 one_plus_exp_x = flir.arith.AddFOp(
@@ -209,6 +211,14 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                     arith.as_value(ln_one_plus_exp_x),
                     fastmath=fm_fast,
                 ).result
+                use_exp_branch = arith.CmpFOp(
+                    arith.CmpFPredicate.OLE,
+                    arith.as_value(beta_x),
+                    arith.as_value(c_softplus_threshold),
+                ).result
+                softplus_x = arith.select(
+                    use_exp_branch, arith.as_value(softplus_x), arith.as_value(x)
+                )
 
                 a_log_log2e = flir.arith.MulFOp(
                     arith.as_value(a_log_val), arith.as_value(c_log2e), fastmath=fm_fast

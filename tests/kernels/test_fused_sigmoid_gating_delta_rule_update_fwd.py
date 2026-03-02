@@ -154,6 +154,16 @@ def _run_kernel(
     return o_flat.reshape(B, T_seq, HV, V), state_flat.reshape(N_STATE, HV, K, V)
 
 
+def _print_minmax(name, x):
+    x_f = x.float()
+    finite_mask = torch.isfinite(x_f)
+    if finite_mask.any():
+        v = x_f[finite_mask]
+        print(f"{name} min={v.min().item():.3e}, max={v.max().item():.3e}")
+    else:
+        print(f"{name} min=nan, max=nan (all non-finite)")
+
+
 @pytest.mark.parametrize(
     "B,T_seq,H,HV,K,V,N_STATE,state_indices",
     [
@@ -199,6 +209,10 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
         state_pool=state_pool,
         state_indices=state_indices,
     )
+    _print_minmax("got_o", got_o)
+    _print_minmax("ref_o", ref_o)
+    _print_minmax("got_state", got_state)
+    _print_minmax("ref_state", ref_state)
     out_err = (got_o - ref_o).abs().max().item()
     state_err = (got_state - ref_state).abs().max().item()
     print(f"shape(B,T,H,HV,K,V)=({B},{T_seq},{H},{HV},{K},{V})")
@@ -213,6 +227,20 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_state_update(ctx):
     A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
         B, T_seq, H, HV, K, V, N_STATE, [1], seed=123
     )
+    scale = K ** (-0.5)
+    ref_o, _ = torch_ref_sigmoid_gating_update_fwd(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
+        scale=scale,
+    )
+    ref_state = state_pool
     got_o, got_state = _run_kernel(
         B=B,
         T_seq=T_seq,
@@ -232,8 +260,12 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_state_update(ctx):
         state_indices=state_indices,
         disable_state_update=True,
     )
+    _print_minmax("got_o", got_o)
+    _print_minmax("ref_o", ref_o)
+    _print_minmax("got_state", got_state)
+    _print_minmax("ref_state", ref_state)
     assert got_o.isfinite().all()
-    assert torch.allclose(got_state, state_pool, atol=0.0, rtol=0.0)
+    assert torch.allclose(got_state, ref_state, atol=0.0, rtol=0.0)
 
 
 def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_output_calculation(ctx):
@@ -242,7 +274,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_output_calculation(c
         B, T_seq, H, HV, K, V, N_STATE, [1], seed=456
     )
     scale = K ** (-0.5)
-    _, ref_state = torch_ref_sigmoid_gating_update_fwd(
+    ref_o, ref_state = torch_ref_sigmoid_gating_update_fwd(
         A_log=A_log,
         a=a,
         dt_bias=dt_bias,
@@ -273,7 +305,66 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_disable_output_calculation(c
         state_indices=state_indices,
         disable_output_calculation=True,
     )
+    _print_minmax("got_o", got_o)
+    _print_minmax("ref_o", ref_o)
+    _print_minmax("got_state", got_state)
+    _print_minmax("ref_state", ref_state)
     assert torch.isnan(got_o).all()
     state_err = (got_state - ref_state).abs().max().item()
     print(f"max state error (disable output): {state_err:.3e}")
+    assert state_err < 1e-4
+
+
+def test_fused_sigmoid_gating_delta_rule_update_fwd_softplus_threshold_branch(ctx):
+    """Cover softplus threshold branch with extreme positive inputs."""
+    B, T_seq, H, HV, K, V, N_STATE = 1, 4, 1, 1, 8, 8, 2
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
+        B, T_seq, H, HV, K, V, N_STATE, [1], seed=789
+    )
+    # Force beta*x >> threshold to trigger the linear branch in softplus.
+    a.fill_(35.0)
+    dt_bias.fill_(0.0)
+
+    scale = K ** (-0.5)
+    ref_o, ref_state = torch_ref_sigmoid_gating_update_fwd(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
+        scale=scale,
+    )
+    got_o, got_state = _run_kernel(
+        B=B,
+        T_seq=T_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        N_STATE=N_STATE,
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        state_pool=state_pool,
+        state_indices=state_indices,
+    )
+    _print_minmax("got_o", got_o)
+    _print_minmax("ref_o", ref_o)
+    _print_minmax("got_state", got_state)
+    _print_minmax("ref_state", ref_state)
+    out_err = (got_o - ref_o).abs().max().item()
+    state_err = (got_state - ref_state).abs().max().item()
+    print(f"max output error (softplus threshold): {out_err:.3e}")
+    print(f"max state  error (softplus threshold): {state_err:.3e}")
+    assert got_o.isfinite().all()
+    assert got_state.isfinite().all()
+    assert out_err < 1e-4
     assert state_err < 1e-4
