@@ -120,6 +120,13 @@ def compile_preshuffle_gemm_a8(
     b_load_bytes = 16
     num_b_loads = bytes_per_thread_b // b_load_bytes
 
+    wave_size = 64
+    num_a_lds_load = bytes_a_per_tile // wave_size // a_load_bytes
+    num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
+
+    _is_gfx950 = str(gpu_arch).startswith("gfx950")
+    _is_gfx942 = str(gpu_arch).startswith("gfx942")
+
     lds_stride_bytes = tile_k_bytes
 
     def _elem_type():
@@ -873,39 +880,95 @@ def compile_preshuffle_gemm_a8(
                 rocdl.sched_barrier(0)
                 return
 
-            mfma_group = num_acc_n
-            mfma_total = (k_unroll * 2) * m_repeat * mfma_group
-            mfma_per_iter = 2 * mfma_group
-            sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(1)
-            if tile_m == 16:
-                rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1)
-            if tile_m == 16:
-                rocdl.sched_vmem(1)
-            if num_acc_n < 4:
-                rocdl.sched_dsrd(1)
+            import math as _math
+
+            def _build_scheduler(numer: int, denom: int):
+                if denom <= 0:
+                    return []
+                if numer <= 0:
+                    return [0] * denom
+                out = []
+                prev = 0
+                for i in range_constexpr(denom):
+                    cur = ((i + 1) * numer + (denom - 1)) // denom
+                    out.append(cur - prev)
+                    prev = cur
+                return out
+
+            if _is_gfx942 or (not use_async_copy):
+                mfma_group = num_acc_n
+                mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(1)
                 if tile_m == 16:
                     rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(1)
                 if tile_m == 16:
                     rocdl.sched_vmem(1)
-                rocdl.sched_mfma(1)
-            dswr_tail = num_a_loads
-            dstr_advance = 2
-            if dswr_tail > sche_iters:
-                dswr_tail = sche_iters
-            dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
-            for sche_i in range_constexpr(sche_iters):
-                rocdl.sched_vmem(1)
-                rocdl.sched_mfma(mfma_group)
-                rocdl.sched_dsrd(1)
-                rocdl.sched_mfma(mfma_group)
-                if (not use_async_copy) and (sche_i >= dswr_start - 1):
-                    rocdl.sched_dswr(1)
+                if num_acc_n < 4:
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(1)
+                    if tile_m == 16:
+                        rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(1)
+                dswr_tail = num_a_loads
+                dstr_advance = 2
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
+            else:
+                mfma_group = num_acc_n
+                bytes_k_per_mfma = 128 if _is_gfx950 else 32
+                num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
+                mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
+                num_ds_load = num_a_lds_load
+                dswr_tail = num_a_loads
+                dstr_advance = 2
+                if dswr_tail > mfma_total:
+                    dswr_tail = mfma_total
+                num_gmem_loads = num_b_loads + num_a_async_loads
+                dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
+                dsrd_preload = 2
+                if dsrd_preload > num_ds_load:
+                    dsrd_preload = num_ds_load
+                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
+                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
+
+                idx_ds_read = dsrd_preload
+                idx_gmem_load = 0
+                if dsrd_preload:
+                    rocdl.sched_dsrd(dsrd_preload)
+                for mfma_idx in range_constexpr(mfma_total):
+                    rocdl.sched_mfma(1)
+                    n_dsrd = dsrd_schedule[mfma_idx]
+                    if n_dsrd and (idx_ds_read < num_ds_load):
+                        if idx_ds_read + n_dsrd > num_ds_load:
+                            n_dsrd = num_ds_load - idx_ds_read
+                        if n_dsrd:
+                            rocdl.sched_dsrd(n_dsrd)
+                            idx_ds_read += n_dsrd
+
+                    n_vmem = vmem_schedule[mfma_idx]
+                    if n_vmem and (idx_gmem_load < num_gmem_loads):
+                        if idx_gmem_load + n_vmem > num_gmem_loads:
+                            n_vmem = num_gmem_loads - idx_gmem_load
+                        if n_vmem:
+                            rocdl.sched_vmem(n_vmem)
+                            idx_gmem_load += n_vmem
+
             rocdl.sched_barrier(0)
 
         # ── Main pipeline ─────────────────────────────────────────────────
@@ -1096,7 +1159,15 @@ def compile_preshuffle_gemm_a8(
         gx = _raw((idx_m + (tile_m - 1)) / tile_m)
         gy = _raw(idx_n / tile_n)
 
-        kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n).launch(
+        launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n)
+        if waves_per_eu is not None:
+            _wpe = int(waves_per_eu)
+            if _wpe >= 1:
+                for op in ctx.gpu_module_body.operations:
+                    if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                        op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
+                            ir.IntegerType.get_signless(32), _wpe)
+        launcher.launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),
             stream=stream,

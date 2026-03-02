@@ -89,6 +89,7 @@ def test_mfma_a8_flyc_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    waves_per_eu: int = 0,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
@@ -103,6 +104,8 @@ def test_mfma_a8_flyc_preshuffle(
     if lds_stage not in (1, 2):
         raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage!r}")
 
+    _wpe = int(waves_per_eu) if waves_per_eu else 0
+    _wpe = None if _wpe <= 0 else _wpe
     launch_fn = compile_preshuffle_gemm_a8_flyc(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
@@ -110,8 +113,9 @@ def test_mfma_a8_flyc_preshuffle(
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         use_async_copy=bool(use_async_copy),
+        waves_per_eu=_wpe,
     )
-    print(f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy})")
+    print(f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={_wpe})")
 
     size_c = M * N
     size_a = M * K
@@ -368,6 +372,7 @@ if __name__ == "__main__":
     parser.add_argument("--flyc", action="store_true", default=True)
     parser.add_argument("--use_async_copy", action="store_true", default=False)
     parser.add_argument("--use_cshuffle_epilog", action="store_true", default=False)
+    parser.add_argument("--waves_per_eu", type=int, default=0, choices=[0, 1, 2, 3, 4])
     parser.add_argument("--run_aiter_bench", action="store_true", default=DEFAULT_RUN_AITER_BENCH)
     parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
@@ -390,6 +395,7 @@ if __name__ == "__main__":
                 bench_warmup=args.num_warmup,
                 run_aiter_bench=bool(args.run_aiter_bench),
                 use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
+                waves_per_eu=int(args.waves_per_eu),
             )
         else:
             test_mfma_w4_flyc_preshuffle(
