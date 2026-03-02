@@ -9,10 +9,9 @@
 | **FlyDSL** | Python DSL front-end for authoring GPU kernels | `python/flydsl/` |
 | **FlyDSL Compiler** | `@flyc.jit` / `@flyc.kernel` — trace-based JIT compiler | `python/flydsl/compiler/` |
 | **FlyDSL Expr** | DSL expression ops (arith, vector, gpu, buffer, rocdl) | `python/flydsl/expr/` |
-| **FLIR** | Flexible Layout IR — MLIR dialect with layout algebra | `flir/` |
-| **FLIR Backend** | `flydsl_` — MLIR dialect extensions and `MlirModule` (legacy API) | `flydsl_/src/flydsl_/` |
+| **Fly Dialect** | Flexible Layout IR — MLIR dialect with layout algebra | `include/flydsl/Dialect/Fly/` |
 | **MlirCompiler** | End-to-end MLIR pass pipeline (DSL → binary) | `python/flydsl/compiler/jit_function.py` |
-| **JitCompiledFunction** | MLIR ExecutionEngine wrapper for JIT execution | `python/flydsl/compiler/jit_executor.py` |
+| **JITCFunction** | MLIR ExecutionEngine wrapper for JIT execution | `python/flydsl/compiler/jit_executor.py` |
 
 ---
 
@@ -20,36 +19,37 @@
 
 ```
 FlyDSL/
-├── flir/                             # C++ MLIR dialect + compiler infrastructure
-│   ├── include/flir/
-│   │   ├── FlirOps.td                # FLIR layout ops (make_shape, crd2idx, composition, ...)
-│   │   ├── FlirTypeDefs.td           # Custom types (!flir.shape, !flir.layout, ...)
-│   │   ├── FlirAttrDefs.td           # Attributes (#flir.underscore, #flir.dync_i32)
-│   │   ├── FlirPasses.td             # Pass declarations (flir-to-standard, trivial-dce)
-│   │   ├── FlirRocmOps.td            # ROCm ops (MFMA, LDS, copy, barriers)
-│   │   └── FlirRocmDialect.td        # ROCm dialect declaration
-│   ├── lib/Dialect/
-│   │   ├── Flir/
-│   │   │   ├── FlirOps.cpp           # Op verifiers and builders
-│   │   │   ├── FlirLayoutAlgebra.cpp  # Type inference for composition/product/divide
-│   │   │   └── FlirDialect.cpp       # Dialect registration
-│   │   └── FlirRocm/                 # ROCm dialect implementation
-│   ├── lib/Transforms/
-│   │   ├── FlirToStandard.cpp        # flir-to-standard lowering pass
-│   │   └── FlirDCE.cpp               # trivial-dce pass
-│   ├── python_bindings/              # Python ↔ C++ bridge
-│   │   ├── dialects/flir.py          # Low-level Python bindings for FLIR ops
-│   │   └── FlirRegisterPasses.cpp    # Register passes and dialects from Python
-│   ├── tools/flir-opt/               # CLI tool for running passes on .mlir files
-│   └── build.sh                      # Build script (CMake + ninja)
+├── include/flydsl/                   # C++ dialect headers
+│   └── Dialect/
+│       ├── Fly/                      # Fly layout dialect
+│       │   ├── IR/
+│       │   │   ├── FlyDialect.td     # Dialect declaration (name = "fly")
+│       │   │   ├── FlyOps.td         # Layout ops (make_shape, crd2idx, composition, ...)
+│       │   │   ├── FlyTypeDefs.td    # Custom types (!fly.int_tuple, !fly.layout, ...)
+│       │   │   ├── FlyAttrDefs.td    # Attributes
+│       │   │   └── FlyInterfaces.td  # Op interfaces
+│       │   └── Transforms/
+│       │       ├── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
+│       │       └── LayoutLowering.td # Layout lowering pass
+│       └── FlyROCDL/                 # FlyROCDL dialect (copy/MMA atoms)
+│           └── IR/
+│               ├── Dialect.td        # FlyROCDL dialect declaration
+│               ├── CopyAtom.td       # Copy atom ops
+│               └── MmaAtom.td        # MMA atom ops
 │
-├── python/flydsl/                    # High-level Python DSL package (NEW)
+├── lib/                              # C++ dialect implementation
+│   ├── Dialect/Fly/                  # Fly dialect ops, type inference, lowering
+│   ├── Dialect/FlyROCDL/             # FlyROCDL dialect implementation
+│   ├── Conversion/                   # Dialect conversion passes
+│   └── Transforms/                   # Optimization passes
+│
+├── python/flydsl/                    # Python DSL package
 │   ├── __init__.py                   # Package version
 │   ├── compiler/
 │   │   ├── __init__.py               # Public API: jit, kernel, from_dlpack
 │   │   ├── jit_function.py           # @jit decorator, MlirCompiler, JitCacheManager
 │   │   ├── kernel_function.py        # @kernel decorator, KernelFunction, KernelLauncher
-│   │   ├── jit_executor.py           # JitCompiledFunction (ExecutionEngine wrapper)
+│   │   ├── jit_executor.py           # JITCFunction (ExecutionEngine wrapper)
 │   │   ├── jit_argument.py           # Argument conversion (Tensor, Stream, Int32)
 │   │   ├── ast_rewriter.py           # AST rewriting for Python control flow → MLIR
 │   │   └── protocol.py              # DslType / JitArgument protocols
@@ -57,15 +57,15 @@ FlyDSL/
 │   │   ├── __init__.py               # Public expr API
 │   │   ├── typing.py                 # Types (T.f32, Tensor, Stream, Constexpr)
 │   │   ├── numeric.py                # DSL numeric types (Float32, Int32, ...)
-│   │   ├── primitive.py              # Primitive operations
-│   │   ├── derived.py                # Derived / composite operations
+│   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
+│   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
 │   │   ├── arith.py                  # Arithmetic dialect ops
 │   │   ├── vector.py                 # Vector dialect ops
-│   │   ├── gpu.py                    # GPU dialect ops (thread_id, block_id, barrier)
+│   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
 │   │   ├── buffer_ops.py             # Buffer / memory operations
 │   │   └── rocdl.py                  # ROCm-specific intrinsics
 │   ├── lang/ir/
-│   │   └── types.py                  # T / Types helper (backward-compat shim)
+│   │   └── types.py                  # T / Types helper
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/
@@ -73,27 +73,12 @@ FlyDSL/
 │       ├── logger.py                 # Logging utilities
 │       └── smem_allocator.py         # SmemAllocator for LDS management
 │
-├── flydsl_/                          # MLIR backend package (legacy / lower-level)
-│   └── src/flydsl_/
-│       ├── compiler/
-│       │   ├── compiler.py           # compile() for FLIR-based modules
-│       │   ├── pipeline.py           # Pipeline fluent API
-│       │   ├── executor.py           # ExecutionEngineExecutor
-│       │   ├── context.py            # RAIIMLIRContext, RAIIMLIRContextModule
-│       │   ├── cache.py              # On-disk compilation cache
-│       │   └── flir_opt_helper.py    # Helper for invoking flir-opt
-│       ├── dialects/ext/
-│       │   ├── flir.py               # Layout algebra Python API
-│       │   ├── gpu.py                # GPU dialect extensions
-│       │   ├── rocm.py               # ROCm dialect helpers
-│       │   └── ...                   # arith, scf, memref, vector, func, rocdl, ...
-│       ├── lang/ir/
-│       │   └── module.py             # MlirModule base class (legacy @kernel/@jit)
-│       └── utils/
-│           └── smem_allocator.py     # SmemAllocator
+├── examples/                         # Runnable examples
+│   ├── 01-vectorAdd.py               # Vector addition with layout algebra
+│   └── 02-tiledCopy.py               # Tiled copy with partitioned tensors
 │
 ├── kernels/                          # Pre-built GPU kernels
-│   ├── preshuffle_gemm_flyc.py       # GEMM with B-preshuffle (NEW flyc API)
+│   ├── preshuffle_gemm_flyc.py       # GEMM with B-preshuffle (@flyc.kernel API)
 │   ├── layernorm_kernel.py           # LayerNorm
 │   ├── rmsnorm_kernel.py             # RMSNorm
 │   ├── softmax_kernel.py             # Softmax
@@ -106,16 +91,16 @@ FlyDSL/
 │   ├── mlir/                         # MLIR IR tests (no GPU required)
 │   ├── pyir/                         # Python IR tests (no GPU required)
 │   ├── kernels/                      # GPU kernel tests + benchmarks
-│   ├── python/                       # New Python DSL tests
+│   ├── python/                       # Python DSL tests
 │   │   ├── examples/                 # Example-based tests
-│   │   ├── gpu/                      # GPU tests with new API
+│   │   ├── gpu/                      # GPU tests
 │   │   └── ir/                       # IR generation tests
 │   ├── conftest.py                   # Pytest fixtures
 │   ├── test_common.py                # Shared test utilities
 │   └── utils.py                      # Compilation helpers
 │
 └── scripts/                          # Build and test helpers
-    ├── build.sh                      # Build FLIR (CMake + ninja)
+    ├── build.sh                      # Build FlyDSL (CMake + ninja)
     ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
     ├── run_tests.sh                  # Run GEMM test suite
     ├── run_benchmark.sh              # Run benchmarks
@@ -124,30 +109,17 @@ FlyDSL/
 
 ---
 
-## 2. Two-Layer Architecture
+## 2. Architecture
 
-FlyDSL uses a two-layer architecture:
-
-### Layer 1: High-Level Python DSL (`python/flydsl/`)
-
-The user-facing API. Kernel authors use `@flyc.jit` and `@flyc.kernel` decorators with expression operations from `flydsl.expr`. This layer:
+The user-facing API lives in `python/flydsl/`. Kernel authors use `@flyc.jit` and `@flyc.kernel` decorators with expression operations from `flydsl.expr`:
 
 - **Traces** Python functions via AST rewriting and execution
-- **Generates** standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)
-- **Compiles** through the `MlirCompiler` pass pipeline
+- **Generates** Fly dialect ops + standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)
+- **Compiles** through the `MlirCompiler` pass pipeline (Fly → ROCDL → LLVM → HSACO)
 - **Caches** compiled kernels to disk for fast re-use
 - **Executes** via MLIR ExecutionEngine
 
-### Layer 2: MLIR Backend (`flydsl_/`)
-
-The lower-level FLIR dialect API. Provides:
-
-- `MlirModule` base class for structured IR construction
-- FLIR layout algebra operations (composition, product, divide)
-- `Pipeline` fluent API for custom pass pipelines
-- Direct MLIR dialect extensions
-
-Most new kernel development should use the Layer 1 API. Layer 2 is used internally and for kernels that need direct FLIR dialect access.
+The Fly dialect (`include/flydsl/Dialect/Fly/`) provides the MLIR-level layout algebra (composition, product, divide, coordinate mapping). Python DSL operations in `flydsl.expr` lower to Fly dialect ops during tracing, which are then compiled through the `MlirCompiler` pipeline.
 
 ---
 
@@ -184,7 +156,7 @@ Python Function (@flyc.kernel / @flyc.jit)
    └────────────────────────────────────────────────┘
         │
         ▼
-   JitCompiledFunction (ExecutionEngine)
+   JITCFunction (ExecutionEngine)
 ```
 
 ### 3.2 Pipeline Stages in Detail
@@ -219,7 +191,7 @@ When a `@flyc.jit` function is called:
 5. **Function tracing** — execute transformed function body to generate MLIR ops
 6. **GPU kernel emission** — `@kernel` calls emit `gpu.func` into `gpu.module`
 7. **Pipeline compilation** — `MlirCompiler.compile()` runs the full pass pipeline
-8. **Execution** — `JitCompiledFunction` wraps MLIR ExecutionEngine for invoking the compiled code
+8. **Execution** — `JITCFunction` wraps MLIR ExecutionEngine for invoking the compiled code
 9. **Cache store** — compiled function is serialized to disk for future runs
 
 ---
@@ -279,7 +251,7 @@ launcher.launch(
 )
 ```
 
-### 4.4 `JitCompiledFunction`
+### 4.4 `JITCFunction`
 
 Wraps MLIR's `ExecutionEngine` for JIT execution:
 
@@ -296,13 +268,13 @@ Extensible type system for mapping Python values to MLIR:
 # DslType protocol — for values used inside kernel/jit functions
 class DslType(Protocol):
     @classmethod
-    def __new_from_ir_values__(cls, values: List[ir.Value]) -> "DslType": ...
-    def __extract_ir_values__(self) -> List[ir.Value]: ...
+    def __fly_construct__(cls, values: List[ir.Value]) -> "DslType": ...
+    def __fly_values__(self) -> List[ir.Value]: ...
 
 # JitArgument protocol — for values passed at the host boundary
 class JitArgument(Protocol):
-    def __ir_types__(self) -> List[ir.Type]: ...
-    def __c_pointers__(self) -> List[ctypes.c_void_p]: ...
+    def __fly_types__(self) -> List[ir.Type]: ...
+    def __fly_ptrs__(self) -> List[ctypes.c_void_p]: ...
 ```
 
 Built-in types: `Tensor`, `Stream`, `Int32`, `Constexpr[T]`
@@ -313,8 +285,8 @@ from flydsl.compiler import JitArgumentRegistry
 
 @JitArgumentRegistry.register(MyPythonType, dsl_type=MyDslType)
 class MyJitArg:
-    def __ir_types__(self): ...
-    def __c_pointers__(self): ...
+    def __fly_types__(self): ...
+    def __fly_ptrs__(self): ...
 ```
 
 ### 4.6 `ASTRewriter`
@@ -325,23 +297,6 @@ Transforms Python control flow to MLIR ops at the AST level:
 - `for i in range_constexpr(n)` → compile-time unrolled loop
 - `if condition` → `scf.if`
 - `const_expr(value)` → compile-time constant
-
-### 4.7 `MlirModule` (Legacy API, in `flydsl_`)
-
-The older structured kernel authoring API. Still used by some kernels:
-
-```python
-from flydsl_.lang.ir.module import MlirModule, kernel, jit
-from flydsl_.dialects.ext import flir
-
-class MyKernels(MlirModule):
-    GPU_MODULE_NAME = "my_kernels"
-
-    @kernel
-    def my_kernel(self, A):
-        tid = flir.thread_idx("x")
-        # ...
-```
 
 ---
 
@@ -433,16 +388,15 @@ dumps/my_func_name/
 |---|---|
 | `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher`, `CompilationContext` |
-| `python/flydsl/compiler/jit_executor.py` | `JitCompiledFunction` — ExecutionEngine wrapper |
+| `python/flydsl/compiler/jit_executor.py` | `JITCFunction` — ExecutionEngine wrapper |
 | `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor`, `from_dlpack` |
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
-| `python/flydsl/compiler/protocol.py` | `DslType`, `JitArgument` protocols |
+| `python/flydsl/compiler/protocol.py` | `fly_types`, `fly_values`, `fly_construct` protocols |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |
+| `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, copy, gemm) |
+| `python/flydsl/expr/derived.py` | Derived types (`CopyAtom`, `MmaAtom`, `TiledCopy`) |
 | `python/flydsl/expr/numeric.py` | DSL numeric types (Float32, Int32, ...) |
 | `python/flydsl/utils/env.py` | `EnvManager` — typed environment variable configuration |
 | `python/flydsl/runtime/device.py` | `get_rocm_arch()` GPU detection |
-| `flydsl_/src/flydsl_/compiler/compiler.py` | `compile()` for FLIR-based modules (legacy) |
-| `flydsl_/src/flydsl_/compiler/pipeline.py` | `Pipeline` fluent API (legacy) |
-| `flydsl_/src/flydsl_/lang/ir/module.py` | `MlirModule`, legacy `@kernel` / `@jit` decorators |
-| `flir/include/flir/FlirPasses.td` | Pass declarations (flir-to-standard, trivial-dce) |
-| `flir/lib/Transforms/FlirToStandard.cpp` | FLIR → standard lowering implementation |
+| `include/flydsl/Dialect/Fly/IR/FlyOps.td` | Fly dialect op definitions |
+| `include/flydsl/Dialect/Fly/Transforms/Passes.td` | Pass declarations (fly-layout-lowering, etc.) |

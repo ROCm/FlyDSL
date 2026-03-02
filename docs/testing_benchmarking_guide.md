@@ -215,7 +215,6 @@ def insert_point(ctx):
 
 **Build discovery:** Supports multiple build layouts:
 - `build-fly/python_packages` (preferred, new Fly dialect)
-- `.flir/build/python_packages/flydsl` (legacy FLIR)
 - `build/python_packages/flydsl` (fallback)
 
 **Session hook:** Prevents pytest exit code 5 (no tests collected) from being treated as failure.
@@ -355,29 +354,7 @@ def test_my_kernel():
     assert err == 0, f"Mismatch: {err * 100:.2f}%"
 ```
 
-### 6.3 GPU Kernel Test Pattern (Legacy API)
-
-```python
-# tests/kernels/test_my_kernel.py
-import torch
-from flydsl.dialects.ext import flir, arith
-from flydsl.compiler.compiler import compile
-from tests.test_common import checkAllclose
-
-class MyKernel(flir.MlirModule):
-    GPU_MODULE_NAME = "my_kernel"
-
-    @flir.kernel
-    def kernel_func(self, ...):
-        ...
-
-def test_my_kernel():
-    mod = MyKernel()
-    executor = compile(mod.module)
-    # ... setup, execute, validate ...
-```
-
-### 6.4 Benchmark Test Pattern
+### 6.3 Benchmark Test Pattern
 
 ```python
 from tests.kernels.benchmark_common import bench_gpu_us_torch
@@ -447,6 +424,8 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python my_test.py
 Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
 
 ### Legacy API (via `compile_to_hsaco`)
+
+For legacy test utilities using `tests/utils.py`:
 
 ```bash
 FLIR_DUMP_IR=1 FLIR_DUMP_DIR=./dumps python tests/kernels/test_softmax.py

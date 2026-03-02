@@ -2,6 +2,8 @@
 
 > Writing GPU kernels with FlyDSL: `@flyc.jit`, `@flyc.kernel`, expression API, launch configuration, shared memory, and synchronization.
 
+> **API**: This guide documents the current `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`). The legacy `flydsl_` package and `MlirModule`-based API have been removed.
+
 ## Quick Reference
 
 | Concept | API | Description |
@@ -77,7 +79,7 @@ vec_add(A, B, C, 1024)
    - Calling `vec_add_kernel(...)` emits a `gpu.func` in `gpu.module`
    - `.launch()` emits `gpu.launch_func`
    - `MlirCompiler.compile()` runs the full pass pipeline
-   - `JitCompiledFunction` wraps the resulting ExecutionEngine
+   - `JITCFunction` wraps the resulting ExecutionEngine
 4. Subsequent calls with the same type signature use the cached binary
 
 ---
@@ -148,10 +150,10 @@ class MyCustomAdaptor:
     def __init__(self, value: MyCustomType):
         self.value = value
 
-    def __ir_types__(self):
+    def __fly_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __c_pointers__(self):
+    def __fly_ptrs__(self):
         return [...]  # ctypes pointers for invocation
 ```
 
@@ -451,7 +453,7 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./my_dumps python my_script.py
 # After compilation, access IR from the compiled function:
 result = launch(A, B, C, 1024)
 
-# Or use JitCompiledFunction directly:
+# Or use JITCFunction directly:
 compiled_func.print_ir()              # compiled MLIR IR
 compiled_func.print_ir(compiled=False) # original IR before passes
 ```
@@ -549,7 +551,7 @@ Writing a new kernel?
 | `python/flydsl/compiler/__init__.py` | Public API: `jit`, `kernel`, `from_dlpack` |
 | `python/flydsl/compiler/jit_function.py` | `@jit` decorator, `MlirCompiler`, `JitCacheManager` |
 | `python/flydsl/compiler/kernel_function.py` | `@kernel` decorator, `KernelFunction`, `KernelLauncher` |
-| `python/flydsl/compiler/jit_executor.py` | `JitCompiledFunction` (ExecutionEngine wrapper) |
+| `python/flydsl/compiler/jit_executor.py` | `JITCFunction` (ExecutionEngine wrapper) |
 | `python/flydsl/compiler/jit_argument.py` | `JitArgumentRegistry`, `TensorAdaptor` |
 | `python/flydsl/compiler/ast_rewriter.py` | `ASTRewriter` — Python AST → MLIR control flow |
 | `python/flydsl/expr/typing.py` | `Types` (`T`), `Tensor`, `Stream`, `Constexpr` |

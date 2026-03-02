@@ -29,7 +29,7 @@ from flydsl.runtime.device import get_rocm_arch
 @lru_cache(maxsize=1)
 def _get_llvm_version() -> str:
     _FLYDSL_ROOT = Path(__file__).resolve().parents[4]
-    llvm_hash_file = _FLYDSL_ROOT / "cmake" / "llvm-hash.txt"
+    llvm_hash_file = _FLYDSL_ROOT / "thirdparty" / "llvm-hash.txt"
     if llvm_hash_file.exists():
         llvm_hash = llvm_hash_file.read_text()
     else:

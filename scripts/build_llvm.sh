@@ -11,8 +11,8 @@ LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Read LLVM commit hash from cmake/llvm-hash.txt
-LLVM_HASH_FILE="${REPO_ROOT}/cmake/llvm-hash.txt"
+# Read LLVM commit hash from thirdparty/llvm-hash.txt
+LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
 if [[ -f "${LLVM_HASH_FILE}" ]]; then
     LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
 else

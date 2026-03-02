@@ -6,12 +6,12 @@
 
 | Kernel | Builder Function | API Style | Dtypes | Key Feature |
 |---|---|---|---|---|
-| **LayerNorm** | `build_layernorm_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | Two-pass vectorized normalization |
-| **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
-| **Softmax** | `build_softmax_module(M, N, dtype)` | Legacy (`MlirModule`) | f32, f16, bf16 | Online softmax, adaptive block size |
+| **LayerNorm** | `build_layernorm_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | Two-pass vectorized normalization |
+| **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
+| **Softmax** | `build_softmax_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | Online softmax, adaptive block size |
 | **GEMM** | `compile_preshuffle_gemm_a8(...)` | New (`@flyc.kernel`) | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 
-> **Note on API styles**: The normalization and softmax kernels use the legacy `MlirModule`-based API from `flydsl_` (imported via `from flydsl.dialects.ext import flir`). The GEMM kernel uses the new `@flyc.kernel`/`@flyc.jit` API from `python/flydsl/`. Both styles are fully functional.
+> **Note on API styles**: The normalization and softmax kernels use a legacy API (importing from `flydsl.dialects.ext`). These kernels may require migration to the `@flyc.kernel` API. The GEMM kernel uses the new `@flyc.kernel`/`@flyc.jit` API from `python/flydsl/`.
 
 ---
 
@@ -237,31 +237,6 @@ Pure-arith layout helpers for static-stride layouts:
 ---
 
 ## 5. Kernel API Comparison
-
-### Legacy API (Normalization / Softmax)
-
-Used by `layernorm_kernel.py`, `rmsnorm_kernel.py`, `softmax_kernel.py`:
-
-```python
-from flydsl.dialects.ext import flir, arith
-from flydsl.utils import SmemAllocator
-
-class _MyKernel(flir.MlirModule):
-    GPU_MODULE_NAME = "my_kernel"
-
-    def init_gpu_module(self):
-        allocator.finalize()
-
-    @flir.kernel
-    def kernel_func(self, Input, Output, m_in):
-        tid = flir.thread_idx("x")
-        # ... uses flir.*, arith.* directly ...
-
-    @flir.jit
-    def __call__(self, Input, Output, m_in):
-        # Host launcher
-        ...
-```
 
 ### New API (GEMM)
 

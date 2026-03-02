@@ -28,12 +28,15 @@ FlyDSL/
 │   ├── build.sh               # build FlyDSL (C++ + Python bindings)
 │   ├── run_tests.sh           # run pytest GEMM tests
 │   └── run_benchmark.sh       # run performance benchmarks
-├── include/flydsl/            # C++ dialect headers
+├── include/flydsl/            # C++ dialect headers (Fly dialect)
 ├── lib/                       # C++ dialect implementation
 ├── python/flydsl/             # Python DSL sources
 │   ├── expr/                  # DSL expression API (primitive, arith, etc.)
 │   ├── compiler/              # JIT compilation pipeline
 │   └── _mlir/                 # (symlink to embedded MLIR bindings)
+├── examples/                  # Runnable examples
+│   ├── 01-vectorAdd.py        # Vector addition with layout algebra
+│   └── 02-tiledCopy.py        # Tiled copy with partitioned tensors
 ├── kernels/                   # Python GPU kernels (importable as `kernels.*`)
 ├── tests/                     # pytest-based tests
 ├── CMakeLists.txt             # top-level CMake
@@ -163,6 +166,16 @@ Formula: `Index = dot(Coord, Stride) = sum(c_i * s_i)`
     *   `product(A, B)`: Combine layouts (Logical, Tiled, Blocked, etc.).
     *   `divide(A, B)`: Partition layout A by B (Logical, Tiled, etc.).
 
+## Documentation
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
+| Layout System | Fly layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Kernel Authoring | Writing GPU kernels — `@flyc.kernel`, `@flyc.jit`, expression API | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Pre-built Kernels | Available kernels — GEMM, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
+| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
+
 ## 🐍 Python API (`flydsl`)
 
 ### `@flyc.kernel` / `@flyc.jit` API
@@ -173,18 +186,144 @@ import flydsl.expr as fx
 from flydsl.expr import arith, gpu
 
 @flyc.kernel
-def my_kernel(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Int32):
-    tx = gpu.thread_id("x")
-    bx = gpu.block_id("x")
+def my_kernel(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int]):
+    tid = gpu.thread_idx.x
+    bid = gpu.block_idx.x
     # ... kernel body using layout ops ...
 
 @flyc.jit
-def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Int32):
+def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int],
+           stream: fx.Stream = fx.Stream(None)):
     my_kernel(arg_a, arg_b, n).launch(
         grid=(grid_x, 1, 1),
         block=(256, 1, 1),
+        stream=stream,
     )
 ```
+
+### Compilation Pipeline
+
+On first call, `@flyc.jit` traces the Python function into an MLIR module, then compiles it through `MlirCompiler`:
+
+```
+Python Function (@flyc.kernel / @flyc.jit)
+        │
+        ▼  AST Rewriting + Tracing
+   MLIR Module (gpu, arith, scf, memref dialects)
+        │
+        ▼  MlirCompiler.compile()
+   ┌────────────────────────────────────────────────┐
+   │  gpu-kernel-outlining                          │
+   │  fly-canonicalize                              │
+   │  fly-layout-lowering                           │
+   │  convert-fly-to-rocdl                          │
+   │  canonicalize + cse                            │
+   │  gpu.module(convert-gpu-to-rocdl{...})         │
+   │  rocdl-attach-target{chip=gfxNNN}              │
+   │  gpu-to-llvm → convert-arith/func-to-llvm      │
+   │  gpu-module-to-binary{format=fatbin}           │
+   └────────────────────────────────────────────────┘
+        │
+        ▼
+   Cached Compiled Artifact (ExecutionEngine)
+```
+
+Compiled kernels are cached to disk (`~/.flydsl/cache/`) and reused on subsequent calls with the same type signature.
+
+## ⚙️ Hierarchical Kernel Control
+
+FlyDSL keeps the tiling hierarchy explicit across block, warp, thread, and instruction scopes using layout algebra:
+
+```python
+import flydsl.expr as fx
+
+# Define thread and value layouts for tiled copy
+thr_layout = fx.make_layout((THR_M, THR_N), (1, THR_M))
+val_layout = fx.make_layout((VAL_M, VAL_N), (1, VAL_M))
+
+# Create tiled copy with vectorized atoms
+copy_atom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
+layout_thr_val = fx.raked_product(thr_layout, val_layout)
+tile_mn = fx.make_tile([fx.make_layout(THR_M, 1), fx.make_layout(VAL_M, 1)])
+tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
+
+# Partition tensor across blocks and threads
+thr_copy = tiled_copy.get_slice(tid)
+partition_src = thr_copy.partition_S(block_tile_A)
+partition_dst = thr_copy.partition_D(register_fragment)
+
+# Execute copy
+fx.copy(copy_atom, partition_src, partition_dst)
+```
+
+With per-level partitions, you can allocate register fragments, emit predicate masks, and schedule MFMA/vector instructions while retaining full knowledge of the execution hierarchy.
+
+## 🧮 Minimal VecAdd Example
+
+This condensed snippet mirrors `examples/01-vectorAdd.py`, showing how to define GPU kernels with layout algebra and tiled copies:
+
+```python
+import torch
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+
+@flyc.kernel
+def vectorAddKernel(
+    A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
+    block_dim: fx.Constexpr[int],
+):
+    bid = fx.block_idx.x
+    tid = fx.thread_idx.x
+
+    # Partition tensors by block
+    tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
+    tB = fx.logical_divide(B, fx.make_layout(block_dim, 1))
+    tC = fx.logical_divide(C, fx.make_layout(block_dim, 1))
+
+    tA = fx.slice(tA, (None, bid))
+    tB = fx.slice(tB, (None, bid))
+    tC = fx.slice(tC, (None, bid))
+
+    # Load to registers, compute, store via copy atoms
+    RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
+                              fx.AddressSpace.Register)
+    copyAtom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
+    rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+    rB = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+    rC = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+
+    fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
+    fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
+
+    vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
+    fx.memref_store_vec(vC, rC)
+    fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid)))
+
+@flyc.jit
+def vectorAdd(
+    A: fx.Tensor, B: fx.Tensor, C,
+    n: fx.Int32,
+    const_n: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),
+):
+    block_dim = 64
+    grid_x = (n + block_dim - 1) // block_dim
+    vectorAddKernel(A, B, C, block_dim).launch(
+        grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream,
+    )
+
+# Usage
+n = 128
+A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+C = torch.zeros(n, dtype=torch.float32).cuda()
+vectorAdd(A, B, C, n, n + 1, stream=torch.cuda.Stream())
+
+torch.cuda.synchronize()
+print("Result correct:", torch.allclose(C, A + B))
+```
+
+See `examples/` for more examples including tiled copy (`02-tiledCopy.py`).
 
 ## ✅ Testing Status
 
@@ -199,6 +338,21 @@ def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Int32):
 *   AMD MI300X/MI308X (gfx942), AMD MI350 (gfx950)
 *   Linux / ROCm 6.x, 7.x
 
+## 🙏 Acknowledgements
+
+FlyDSL's design is inspired by ideas from several projects:
+
+- [Categorical Foundations for CuTe Layouts](https://arxiv.org/abs/2601.05972) — mathematical framework for layout algebra ([companion code](https://github.com/ColfaxResearch/layout-categories))
+- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) — CuTe layout algebra concepts (BSD-3-Clause parts only; no EULA-licensed code was referenced)
+- [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) — tile-based kernel design patterns for AMD GPUs
+- [ROCm AIter](https://github.com/ROCm/aiter) — test infrastructure and performance comparison baselines (MIT)
+- [Triton](https://github.com/triton-lang/triton) — Python DSL for GPU kernel authoring
+
 ## 📄 License
 
 Apache License 2.0
+
+## Disclaimer
+
+This is an experimental feature/tool and is not part of the official ROCm distribution. It is provided for evaluation and testing purposes only.
+For further usage or inquiries, please initiate a discussion thread with the original authors.
