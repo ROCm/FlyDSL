@@ -115,6 +115,11 @@ def compile_preshuffle_gemm_a8(
     a_async_load_bytes = 4 if gpu_arch == "gfx942" else 16
     a_async_load_dword = a_async_load_bytes // 4
 
+    bytes_b_per_tile = int(tile_n) * int(tile_k) * int(elem_bytes) // b_elem_vec_pack
+    bytes_per_thread_b = bytes_b_per_tile // total_threads
+    b_load_bytes = 16
+    num_b_loads = bytes_per_thread_b // b_load_bytes
+
     lds_stride_bytes = tile_k_bytes
 
     def _elem_type():
@@ -890,9 +895,10 @@ def compile_preshuffle_gemm_a8(
                     rocdl.sched_vmem(1)
                 rocdl.sched_mfma(1)
             dswr_tail = num_a_loads
+            dstr_advance = 2
             if dswr_tail > sche_iters:
                 dswr_tail = sche_iters
-            dswr_start = sche_iters - dswr_tail
+            dswr_start = max(sche_iters - dswr_tail - dstr_advance, 0)
             for sche_i in range_constexpr(sche_iters):
                 rocdl.sched_vmem(1)
                 rocdl.sched_mfma(mfma_group)
@@ -950,6 +956,7 @@ def compile_preshuffle_gemm_a8(
             if not use_async_copy:
                 store_a_tile_to_lds(a_regs_ping, lds_a_ping)
             hot_loop_scheduler()
+            rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
@@ -965,6 +972,7 @@ def compile_preshuffle_gemm_a8(
             if not use_async_copy:
                 store_a_tile_to_lds(a_regs_pong, lds_a_pong)
             hot_loop_scheduler()
+            rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_pong_new = prefetch_a0_pack(lds_a_pong)
 
@@ -1020,6 +1028,7 @@ def compile_preshuffle_gemm_a8(
                 if not use_async_copy:
                     store_a_tile_to_lds(a_regs_ping, lds_a_ping)
                 hot_loop_scheduler()
+                rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
                 _sc_last2 = load_fp4_scales(arith.index(((K // tile_k) - 1) * _fp4_scale_k_stride)) if is_fp4 else None
@@ -1048,6 +1057,7 @@ def compile_preshuffle_gemm_a8(
                 gpu.barrier()
                 store_a_tile_to_lds(a_next, lds_a_pong)
                 hot_loop_scheduler()
+                rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 results = yield list(accs_in) + _flatten_b_tile(b_next)
 
