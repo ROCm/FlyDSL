@@ -271,6 +271,11 @@ def _asm_ld_16b(addr_i64):
     return _res(v)
 
 
+def _llvm_ld_16b(addr_i64):
+    """Load 16 bytes using flat_load_dwordx4 (same as _asm_ld_16b)."""
+    return _asm_ld_16b(addr_i64)
+
+
 def _asm_st_16b(addr_i64, v4i32_val):
     """Store 16 bytes to a global address (global_store_dwordx4)."""
     from _mlir.dialects import llvm
@@ -279,6 +284,52 @@ def _asm_st_16b(addr_i64, v4i32_val):
         None,
         [_res(addr_i64), _res(v4i32_val)],
         "global_store_dwordx4 $0, $1, off",
+        "v,v",
+        has_side_effects=True,
+    )
+    _asm_waitcnt()
+
+
+def _asm_st_16b_nt(addr_i64, v4i32_val):
+    """Store 16 bytes to a global address with nontemporal hint (global_store_dwordx4 nt)."""
+    from _mlir.dialects import llvm
+
+    llvm.InlineAsmOp(
+        None,
+        [_res(addr_i64), _res(v4i32_val)],
+        "global_store_dwordx4 $0, $1, off sc0 sc1",
+        "v,v",
+        has_side_effects=True,
+    )
+    _asm_waitcnt()
+
+
+def _asm_lds_st_16b(offset_i32, v4i32_val):
+    """Store 16 bytes to LDS (shared memory) using ds_write_b128.
+    
+    Args:
+        offset_i32: Byte offset into LDS (i32)
+        v4i32_val: Value to store (vector<4xi32>)
+    """
+    from _mlir.dialects import llvm
+
+    llvm.InlineAsmOp(
+        None,
+        [_res(offset_i32), _res(v4i32_val)],
+        "ds_write_b128 $0, $1",
+        "v,v",
+        has_side_effects=True,
+    )
+
+
+def _asm_st_32b_dword(addr_i64, val_i32):
+    """Store 4 bytes (i32) to a global address (global_store_dword)."""
+    from _mlir.dialects import llvm
+
+    llvm.InlineAsmOp(
+        None,
+        [_res(addr_i64), _res(val_i32)],
+        "global_store_dword $0, $1, off",
         "v,v",
         has_side_effects=True,
     )
@@ -1114,6 +1165,224 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
 
                     gpu.ReturnOp([])
 
+                # Kernel 2-stage write_mode: for large tensors (N > 512*4096)
+                # Different algorithm from regular 2stage:
+                # Stage1: Write local input to REMOTE tmp buffers (scatter)
+                # Stage2: Read local tmp (containing all ranks' data), reduce, write to REMOTE output
+                # No Stage3 needed.
+                # Signature: rank, self_sg, sg_ptrs_base, inp_ptr, out_ptrs_base, tmp_ptrs_base, tmp_self_ptr, debug_buf
+                # tmp_self_ptr is this rank's tmp buffer address (passed directly to avoid compiler optimization issues)
+                # debug_buf is a buffer to write kernel-side debug info (for verifying params are passed correctly)
+                k2w_args = [i32, i64, i64, i64, i64, i64, i64, i64]
+                k2w_fty = ir.FunctionType.get(k2w_args, [])
+                k2w = gpu.GPUFuncOp(ir.TypeAttr.get(k2w_fty))
+                k2w.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_write_mode_ws{world_size}")
+                k2w.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k2w.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+                k2w.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
+                k2w_entry = ir.Block.create_at_start(k2w.operation.regions[0], k2w_args)
+                with ir.InsertionPoint(k2w_entry):
+                    rank = k2w_entry.arguments[0]
+                    self_sg = k2w_entry.arguments[1] #delete
+                    sg_ptrs_base = k2w_entry.arguments[2]
+                    inp_ptr_i64 = k2w_entry.arguments[3]  # Single input pointer (this rank's input)
+                    out_ptrs_base = k2w_entry.arguments[4]  # Output pointer array base
+                    tmp_ptrs_base = k2w_entry.arguments[5]  # Tmp pointer array base
+                    tmp_self_ptr = k2w_entry.arguments[6]   #delete # This rank's tmp buffer (direct ptr to avoid compiler issues)
+                    debug_buf = k2w_entry.arguments[7]       #delete# Debug buffer to write kernel-side values
+
+                    # # DEBUG: Write tmp_self_ptr to debug_buf (only thread 0, block 0)
+                    # tid_idx = _res(gpu.thread_id("x"))
+                    # bid_idx = _res(gpu.block_id("x"))
+                    # is_tid0 = _cmp(arith.CmpIPredicate.eq, _res(arith.IndexCastOp(i32, _res(tid_idx))), _c_i32(0))
+                    # is_bid0 = _cmp(arith.CmpIPredicate.eq, _res(arith.IndexCastOp(i32, _res(bid_idx))), _c_i32(0))
+                    # is_first = _res(arith.AndIOp(_res(is_tid0), _res(is_bid0)))
+                    # if_first = scf.IfOp(_res(is_first), results_=[], hasElse=False)
+                    # with ir.InsertionPoint(if_first.then_block):
+                    #     # Write low 32 bits to debug_buf[0]
+                    #     tmp_lo = _res(arith.TruncIOp(i32, _res(tmp_self_ptr)))
+                    #     _asm_st_32b_dword(debug_buf, tmp_lo)
+                    #     # Write high 32 bits to debug_buf[4]
+                    #     tmp_hi_i64 = _res(arith.ShRUIOp(_res(tmp_self_ptr), _res(_c_i64(32))))
+                    #     tmp_hi = _res(arith.TruncIOp(i32, _res(tmp_hi_i64)))
+                    #     debug_buf_4 = _res(arith.AddIOp(_res(debug_buf), _res(_c_i64(4))))
+                    #     _asm_st_32b_dword(debug_buf_4, tmp_hi)
+                    #     scf.YieldOp([])
+
+                    # Load signal pointers from device array
+                    sgs = []
+                    for i in range(8):
+                        sg_ptr = _load_ptr_from_array(sg_ptrs_base, _c_i32(i))
+                        sgs.append(sg_ptr)
+                    
+                    # NOTE: tmp_ptrs preloading not needed
+                    # Stage1 dynamically loads from tmp_ptrs_base
+                    # Stage2 uses tmp_self_ptr kernel parameter
+                    
+                    # Load output pointers from device array (for stage2 remote writes)
+                    out_ptrs = []
+                    for i in range(8):
+                        out_ptr = _load_ptr_from_array(out_ptrs_base, _c_i32(i))
+                        out_ptrs.append(out_ptr)
+
+                    lane_i32 = _res(arith.IndexCastOp(i32, _res(gpu.thread_id("x"))))
+                    bid_i32 = _res(arith.IndexCastOp(i32, _res(gpu.block_id("x"))))
+
+                    tnum_gpu = int(threads // world_size)
+                    tnum_gpu_i32 = _c_i32(tnum_gpu)
+                    # Avoid DivUIOp/RemUIOp - use ShRUIOp/SubIOp instead (tnum_gpu=8 is power of 2)
+                    import math
+                    log2_tnum = int(math.log2(tnum_gpu))  # should be 3 for tnum_gpu=8
+                    warp_id = _res(arith.ShRUIOp(_res(lane_i32), _c_i32(log2_tnum)))
+                    warp_base = _muli(warp_id, tnum_gpu_i32)
+                    lane_id = _res(arith.SubIOp(_res(lane_i32), _res(warp_base)))
+                    tid_pack = _addi(_muli(bid_i32, tnum_gpu_i32), lane_id)
+                    stride_pack = _muli(_res(arith.IndexCastOp(i32, _res(gpu.grid_dim("x")))), tnum_gpu_i32)
+                    
+                    smem = memref.GetGlobalOp(smem_ty, smem_sym).result
+                    # tmp_out is this rank's tmp buffer (for stage2 reads)
+                    # Load from tmp_ptrs_base[rank] to avoid compiler optimization issues with direct param
+                    tmp_out_i64 = _load_ptr_from_array(tmp_ptrs_base, rank)
+
+                    # Stage1: Write local input to REMOTE tmp buffers
+                    # Each warp handles one target rank (warp_id)
+                    # Write to: tmps[warp_id][rank * part + (idx - start)]
+                    start_w = _muli(warp_id, _c_i32(part_p))
+                    # Avoid SelectOp: compute end_w using IfOp
+                    is_last_w = _cmp(arith.CmpIPredicate.eq, warp_id, _c_i32(world_size - 1))
+                    end_w_if = scf.IfOp(_res(is_last_w), results_=[i32], hasElse=True)
+                    with ir.InsertionPoint(end_w_if.then_block):
+                        scf.YieldOp([_res(_c_i32(num_packs))])
+                    with ir.InsertionPoint(end_w_if.else_block):
+                        scf.YieldOp([_res(_addi(start_w, _c_i32(part_p)))])
+                    end_w = _res(end_w_if.results[0])
+
+                    idx_s1 = _addi(start_w, tid_pack)
+                    loop_s1 = scf.WhileOp([i32, i32], [_res(idx_s1), _res(stride_pack)])
+                    bs1 = ir.Block.create_at_start(loop_s1.before, [i32, i32])
+                    as1 = ir.Block.create_at_start(loop_s1.after, [i32, i32])
+                    with ir.InsertionPoint(bs1):
+                        cur = bs1.arguments[0]
+                        cond = _cmp(arith.CmpIPredicate.ult, cur, end_w)
+                        scf.ConditionOp(_res(cond), [_res(cur), _res(bs1.arguments[1])])
+                    with ir.InsertionPoint(as1):
+                        cur = as1.arguments[0]
+                        stride_pack_s1 = as1.arguments[1]
+                        # Load from local input: inp_ptr[cur]
+                        raw = _asm_ld_16b(_addr_add(inp_ptr_i64, _mul_i64(_res(arith.ExtUIOp(i64, _res(cur))), _c_i64(16))))
+                        # Write to remote tmp: tmps[warp_id][rank * part + (cur - start_w)]
+                        rel_idx = _subi(cur, start_w)
+                        dst_off = _addi(_muli(rank, _c_i32(part_p)), rel_idx)
+                        dst_tmp = _load_ptr_from_array(tmp_ptrs_base, warp_id)
+                        _asm_st_16b(_addr_add(dst_tmp, _mul_i64(_res(arith.ExtUIOp(i64, _res(dst_off))), _c_i64(16))), raw)
+                        
+                        nxt = _addi(cur, stride_pack_s1)
+                        scf.YieldOp([_res(nxt), _res(stride_pack_s1)])
+
+                    # start_sync: wait for all ranks to complete stage1
+                    _start_sync(
+                        lane_i32=lane_i32,
+                        rank_i32=rank,
+                        bid_i32=bid_i32,
+                        self_sg_i64=self_sg,
+                        sgs_i64=sgs,
+                        ngpus=world_size,
+                        meta_size_bytes=int(meta_size_bytes),
+                        max_spin=int(max_spin),
+                    )
+
+                    # Stage2: Read local tmp (contains all ranks' data), reduce, write to REMOTE output
+                    # tmp_out[warp_id * part + idx] contains data from rank=(rank+warp_id)%ngpus
+                    # Single buffer mode: tmp_smem[0..threads-1], res_smem[threads..threads+tnum_gpu-1]
+                    # Loop: for idx from tid_pack to part_p, step stride_pack (multi-block cooperative)
+                    idx_s2 = tid_pack
+                    part_p_i32 = _c_i32(part_p)
+                    loop_s2 = scf.WhileOp([i32, i32], [_res(idx_s2), _res(stride_pack)])
+                    bs2 = ir.Block.create_at_start(loop_s2.before, [i32, i32])
+                    as2 = ir.Block.create_at_start(loop_s2.after, [i32, i32])
+                    with ir.InsertionPoint(bs2):
+                        cur = bs2.arguments[0]
+                        stride_pack_loop = bs2.arguments[1]
+                        cond = _cmp(arith.CmpIPredicate.ult, cur, part_p_i32)  # Fixed: compare with part_p
+                        scf.ConditionOp(_res(cond), [_res(cur), _res(bs2.arguments[1])])
+                    with ir.InsertionPoint(as2):
+                        cur = as2.arguments[0]
+                        stride_pack_loop = as2.arguments[1]
+                        
+                        # Load tmp_out[warp_id * part + cur] into shared memory
+                        # Each thread loads from its warp's section of local tmp
+                        src_off = _addi(_muli(warp_id, _c_i32(part_p)), cur)
+                        src_off_i64 = _res(arith.ExtUIOp(i64, _res(src_off)))
+                        byte_off = _mul_i64(src_off_i64, _c_i64(16))
+                        load_addr = _addr_add(tmp_out_i64, byte_off)
+                        
+                        raw = _llvm_ld_16b(load_addr)
+                        
+                        # Store to tmp_smem[threadIdx.x] (single buffer, no ping-pong)
+                        sm_idx = _res(arith.IndexCastOp(idx, _res(lane_i32)))
+                        memref.StoreOp(_res(raw), smem, [_res(sm_idx)])
+                        gpu.BarrierOp()
+
+                        # Avoid AndIOp: compute lane_id_local = lane_i32 - warp_id_local * tnum_gpu
+                        # tnum_gpu = threads // world_size (e.g., 64 for 512/8)
+                        warp_id_local = _res(arith.ShRUIOp(_res(lane_i32), _c_i32(log2_tnum)))  # log2(tnum_gpu)
+                        warp_base_local = _muli(warp_id_local, _c_i32(tnum_gpu))
+                        lane_id_local = _res(arith.SubIOp(_res(lane_i32), _res(warp_base_local)))
+                        
+                        # Load all world_size values from smem for reduction
+                        raw_vals = []
+                        for i in range(world_size):
+                            # sm_idx = i * tnum_gpu + lane_id_local
+                            sm_i = _addi(_muli(_c_i32(i), _c_i32(tnum_gpu)), lane_id_local)
+                            sm_i_idx = _res(arith.IndexCastOp(idx, _res(sm_i)))
+                            raw_vals.append(memref.LoadOp(smem, [_res(sm_i_idx)]).result)
+
+                        # Compute reduction (all threads compute, only warp0's result is meaningful)
+                        acc = None
+                        for i in range(world_size):
+                            raw_i = raw_vals[i]
+                            if dtype_str == "f32":
+                                vf = _res(vector.BitCastOp(v4f32, _res(raw_i)))
+                                acc = vf if acc is None else _res(arith.AddFOp(_res(acc), _res(vf)))
+                            else:
+                                v16 = _res(vector.BitCastOp(v8f16, _res(raw_i)))
+                                v32 = _res(arith.ExtFOp(v8f32, _res(v16)))
+                                acc = v32 if acc is None else _res(arith.AddFOp(_res(acc), _res(v32)))
+                        if dtype_str == "f32":
+                            out_raw = _res(vector.BitCastOp(v4i32, _res(acc)))
+                        else:
+                            out16 = _res(arith.TruncFOp(v8f16, _res(acc)))
+                            out_raw = _res(vector.BitCastOp(v4i32, _res(out16)))
+
+                        # All threads compute the same result (for same lane_id_local), use directly
+                        # No need for warp0 store/broadcast since all warps read same smem positions
+                        result_raw = out_raw
+                        
+                        # Each warp writes to its corresponding remote output
+                        # warp w writes to GPU w, at offset: rank * part_p + cur
+                        # (this GPU's partition written to all remote GPUs)
+                        dst_out_off = _addi(_muli(rank, _c_i32(part_p)), cur)
+                        dst_byte_off = _mul_i64(_res(arith.ExtUIOp(i64, _res(dst_out_off))), _c_i64(16))
+                        
+                        dst_ptr = out_ptrs[0]
+                        for w in range(1, world_size):
+                            is_warp_w = _cmp(arith.CmpIPredicate.eq, warp_id_local, _c_i32(w))
+                            dst_ptr = _res(arith.SelectOp(_res(is_warp_w), _res(out_ptrs[w]), _res(dst_ptr)))
+                        dst_addr = _addr_add(dst_ptr, dst_byte_off)
+                        _asm_st_16b(dst_addr, result_raw)
+                        
+                        nxt = _addi(cur, stride_pack_loop)
+                        scf.YieldOp([_res(nxt), _res(stride_pack_loop)])
+                    
+                    gpu.BarrierOp()
+                    # Wait for memory stores to complete before returning
+                    _asm_waitcnt()
+                    # Note: _end_sync in kernel causes hang on ROCm. Remote write visibility 
+                    # is handled by host-side synchronization (stream sync + dist.barrier)
+                    # in custom_all_reduce.py instead.
+
+                    gpu.ReturnOp([])
+
             # ---- host entrypoints (llvm.emit_c_interface) ----
 
             # run_1stage
@@ -1202,6 +1471,43 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 stream_token = stream_ptr_to_async_token(stream_ptr)
                 flir_ext.gpu_ext.LaunchFuncOp(
                     ["aiter_signal", f"aiter_signal_all_reduce_2stage_arr_ws{world_size}"],
+                    grid_size=(gx, one, one),
+                    block_size=(bx, one, one),
+                    kernel_operands=kops,
+                    async_dependencies=[stream_token],
+                )
+                func.ReturnOp([])
+
+            # run_2stage_write_mode (for large tensors, N > 512*4096)
+            # Signature: rank, grid_x, self_sg, sg_ptrs_base, inp_ptr, out_ptrs_base, tmp_ptrs_base, tmp_self_ptr, debug_buf, stream_ptr
+            # Parameters grouped by role: input params (inp_ptr), output params (out_ptrs_base)
+            # tmp_self_ptr is this rank's tmp buffer address (passed directly to avoid compiler optimization issues)
+            # debug_buf is for kernel-side debug output
+            run2w_args = [i32, i32, i64, i64, i64, i64, i64, i64, i64, i64]
+            run2w_fty = ir.FunctionType.get(run2w_args, [])
+            run2w = func.FuncOp("run_2stage_write_mode", run2w_fty)
+            run2w.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+            b2w = run2w.add_entry_block()
+            with ir.InsertionPoint(b2w):
+                rank = b2w.arguments[0]
+                grid_x_i32 = b2w.arguments[1]
+                self_sg = b2w.arguments[2]
+                sg_ptrs_array_base = b2w.arguments[3]
+                inp_ptr_i64 = b2w.arguments[4]
+                out_ptrs_array_base = b2w.arguments[5]
+                tmp_ptrs_array_base = b2w.arguments[6]
+                tmp_self_ptr = b2w.arguments[7]
+                debug_buf = b2w.arguments[8]
+                stream_ptr = b2w.arguments[9]
+                
+                gx = _res(arith.IndexCastOp(idx, _res(grid_x_i32)))
+                one = _c_index(1)
+                bx = _c_index(threads)
+                # Pass to kernel: rank, self_sg, sg_ptrs_base, inp_ptr, out_ptrs_base, tmp_ptrs_base, tmp_self_ptr, debug_buf
+                kops = [_res(rank), _res(self_sg), _res(sg_ptrs_array_base), _res(inp_ptr_i64), _res(out_ptrs_array_base), _res(tmp_ptrs_array_base), _res(tmp_self_ptr), _res(debug_buf)]
+                stream_token = stream_ptr_to_async_token(stream_ptr)
+                flir_ext.gpu_ext.LaunchFuncOp(
+                    ["aiter_signal", f"aiter_signal_all_reduce_2stage_write_mode_ws{world_size}"],
                     grid_size=(gx, one, one),
                     block_size=(bx, one, one),
                     kernel_operands=kops,
