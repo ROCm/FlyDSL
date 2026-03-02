@@ -11,37 +11,68 @@ It is extracted from `tests/kernels/test_moe_gemm.py` so that:
 
 import os
 
-import flydsl
-from flydsl.dialects.ext import flir
-from flydsl.dialects.ext.python_control_flow import range_constexpr
+import flydsl.compiler as flyc
+import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
+
+from flydsl.expr import range_constexpr
 from flydsl.runtime.device import (
     get_rocm_arch as get_hip_arch,
     supports_bf16_global_atomics,
     bf16_global_atomics_arch_description,
 )
-from flydsl.utils import SmemAllocator, SmemPtr
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from _mlir import ir
-import _mlir.extras.types as T
-from flydsl.lang.ir.types import T as I
+from flydsl._mlir import ir
+from flydsl.expr.typing import T
 
 from flydsl.dialects.ext import arith, gpu, buffer_ops, llvm, vector, rocdl, scf, memref
 
-from flydsl.kernels.mfma_preshuffle_pipeline import (
+from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_load_pack_k32,
     lds_store_4b_xor16,
     lds_store_8b_xor16,
     lds_store_16b_xor16,
     make_preshuffle_b_layout,
-    make_preshuffle_scale_layout,
     load_b_pack_k32,
     tile_chunk_coord_i32,
+    swizzle_xor16,
 )
-from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from flydsl.kernels.kernels_common import stream_ptr_to_async_token
+from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.kernels_common import stream_ptr_to_async_token
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 import functools
+
+def make_preshuffle_scale_layout(
+    arith_mod,
+    *,
+    c_mn: ir.Value,
+    c_k: ir.Value,
+    mn_pack: int = 2,
+    k_pack: int = 2,
+    elem_bytes: int = 4,
+    scale_block_size: int = 32,
+):
+    c16 = arith_mod.constant(16, index=True)
+    c4 = arith_mod.constant(4, index=True)
+    c_mn_pack = arith_mod.constant(mn_pack, index=True)
+    c_k_pack = arith_mod.constant(k_pack, index=True)
+    c_k_scale = c_k / scale_block_size
+
+    c_mn1 = c_mn / c16 / c_mn_pack
+    c_k1 = c_k_scale / c4 / c_k_pack
+    if elem_bytes != mn_pack * k_pack:
+        raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
+
+    stride_nlane = arith_mod.constant(1, index=True)
+    stride_klane = c16
+    stride_k0 = c4 * stride_klane
+    stride_n0 = c_k1 * stride_k0
+    stride_b_scale = (stride_n0, stride_k0, stride_klane, stride_nlane)
+    return fx.make_layout((c_mn1, c_k1, c4, c16), stride=stride_b_scale)
+
 
 @functools.lru_cache(maxsize=None)
 def compile_mixed_moe_gemm1(
@@ -84,9 +115,11 @@ def compile_mixed_moe_gemm1(
     _state = {}
 
     if a_dtype not in ("fp8", "fp16", "int8", "fp4"):
-        raise ValueError(f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {in_dtype!r}")
+        raise ValueError(f"a_dtype must be one of ('fp8','fp16','int8','fp4'), got {a_dtype!r}")
     if b_dtype not in ("fp8", "fp16", "int8", "int4", "fp4"):
-        raise ValueError(f"in_dtype must be one of ('fp8','fp16','int8','int4', 'fp4'), got {in_dtype!r}")
+        raise ValueError(
+            f"b_dtype must be one of ('fp8','fp16','int8','int4','fp4'), got {b_dtype!r}"
+        )
 
     is_f16_a = a_dtype == "fp16"
     is_f16_b = b_dtype == "fp16"
@@ -136,25 +169,25 @@ def compile_mixed_moe_gemm1(
 
     def _x_elem_type():
         if is_f4_b:
-            return I.f8 if is_f8_a else I.ui8
-        return I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
+            return T.f8 if is_f8_a else T.ui8
+        return T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
 
     def _w_elem_type():
         if is_f4_b:
-            return I.ui8
-        return I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)
+            return T.ui8
+        return T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
 
     def _scale_elem_type():
-        return I.i32
+        return T.i32
 
     def _out_elem_type():
-        return I.bf16 if out_dtype == "bf16" else I.i32
+        return T.bf16 if out_dtype == "bf16" else T.i32
 
     def _out_lds_elem_type():
-        return I.f32
+        return T.f32
 
     def _out_vec_type():
-        return I.bf16x1 if out_dtype == "bf16" else I.f8x1
+        return T.bf16x1 if out_dtype == "bf16" else T.f8x1
 
     # size_out = tokens * topk * inter_dim
     # size_x = tokens * model_dim
@@ -178,10 +211,10 @@ def compile_mixed_moe_gemm1(
         )
     bytes_per_thread_x = bytes_x_per_tile // total_threads
     # Keep MoE stage1 X gmem->LDS pipeline consistent with the optimized GEMM kernel:
-    # split into <=16B pieces and use `flir.copy(load-only)` for buffer_load_dwordx4.
+    # split into <=16B pieces and use buffer-load dwordx4 for gmem prefetch.
     # (Compute the split lens inside the kernel so the code matches GEMM structure.)
 
-    # LDS128 mode:
+    # CK-style LDS128 mode (same idea as test_preshuffle_gemm.py):
     # - LDS stride == tile_k (no extra padding) + XOR16 swizzle
     # - Use ds_{read,write}_b128 (16B) and extract 8B halves for MFMA steps
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
@@ -194,67 +227,81 @@ def compile_mixed_moe_gemm1(
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
     module_name = f"mfma_moe1_a{a_dtype}_w{b_dtype}_{epilog_tag}".replace("-", "_")
 
-    class _MOE1(flir.MlirModule):
-        GPU_MODULE_NAME = module_name
-        GPU_MODULE_TARGETS = [
-            f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-        ]
+    # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
+    # Reuse the same LDS bytes for both:
+    # - ping-pong X tiles (2 * tile_m * lds_stride * elem_bytes bytes)
+    # - optional CShuffle tile (stage1 uses 2xf16 vector store, sized in 4B pairs)
+    _use_cshuffle_epilog = bool(use_cshuffle_epilog)
+    lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
+    lds_out_bytes = 4 * int(tile_m) * (int(tile_n) // 2) if _use_cshuffle_epilog else 0
+    lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
+    lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
+    x_lds_elem = T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
 
-        def init_gpu_module(self):
-            # Optional epilogue CShuffle (LDS + vectorized buffer stores).
-            # Reuse the same LDS bytes for both:
-            # - ping-pong X tiles (2 * tile_m * lds_stride bytes; fp8/int8)
-            # - epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
-            _use_cshuffle_epilog = bool(use_cshuffle_epilog)
-            lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
-            lds_out_bytes = 4 * tile_m * (tile_n // 2) if _use_cshuffle_epilog else 0
-            lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
-            lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
-            x_lds_elem = I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
-            _state["lds_x_decl"] = allocator.allocate_array(x_lds_elem, lds_total_elems)
-            allocator.finalize()
+    lds_alloc_bytes = int(lds_total_elems) * int(a_elem_bytes)
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
-        @flir.kernel
+    if True:
+        @flyc.kernel
         def moe_gemm1(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(DYN, _out_elem_type()),
-            arg_x: lambda: T.memref(DYN, _x_elem_type()),
-            arg_w: lambda: T.memref(DYN, _w_elem_type()),
-            arg_scale_x: lambda: T.memref(DYN, _scale_elem_type()),
-            arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), _scale_elem_type()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
-            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
-            arg_max_token_ids: lambda: T.memref(DYN, T.i32()),
-            arg_bias: lambda: T.memref(DYN, T.f32()),
-            tokens_in: lambda: T.index(),
-            inter_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            arg_out: fx.Tensor,
+            arg_x: fx.Tensor,
+            arg_w: fx.Tensor,
+            arg_scale_x: fx.Tensor,
+            arg_scale_w: fx.Tensor,
+            arg_sorted_token_ids: fx.Tensor,
+            arg_expert_ids: fx.Tensor,
+            arg_sorted_weights: fx.Tensor,
+            arg_max_token_ids: fx.Tensor,
+            arg_bias: fx.Tensor,
+            i32_tokens_in: fx.Int32,
+            i32_inter_in: fx.Int32,
+            i32_k_in: fx.Int32,
+            i32_size_expert_ids_in: fx.Int32,
         ):
-            x_elem = I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
+            # unwrap tensor handles to memrefs for ext dialect helpers
+            arg_out = arg_out.value
+            arg_x = arg_x.value
+            arg_w = arg_w.value
+            arg_scale_x = arg_scale_x.value
+            arg_scale_w = arg_scale_w.value
+            arg_sorted_token_ids = arg_sorted_token_ids.value
+            arg_expert_ids = arg_expert_ids.value
+            arg_sorted_weights = arg_sorted_weights.value
+            arg_max_token_ids = arg_max_token_ids.value
+            arg_bias = arg_bias.value
+
+            tokens_in = arith.index_cast(ir.IndexType.get(), i32_tokens_in.ir_value())
+            inter_in = arith.index_cast(ir.IndexType.get(), i32_inter_in.ir_value())
+            k_in = arith.index_cast(ir.IndexType.get(), i32_k_in.ir_value())
+            size_expert_ids_in = arith.index_cast(
+                ir.IndexType.get(), i32_size_expert_ids_in.ir_value()
+            )
+
+            x_elem = T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
-            w_elem = I.f16 if is_f16_b else (I.i8 if is_int8 else I.f8)
-            f16 = I.f16
-            f32 = I.f32
-            i32 = I.i32
-            i64 = I.i64
-            vec4_f32 = I.vec(4, f32)
-            vec4_i32 = I.vec(4, i32)
-            vec4_f16 = I.vec(4, f16)
-            vec4_f8 = I.vec(4, I.f8)
-            vec1_f16 = I.vec(1, f16)
-            vec1_f32 = I.vec(1, f32)
+            w_elem = T.f16 if is_f16_b else (T.i8 if is_int8 else T.f8)
+            f16 = T.f16
+            f32 = T.f32
+            i32 = T.i32
+            i64 = T.i64
+            vec4_f32 = T.vec(4, f32)
+            vec4_i32 = T.vec(4, i32)
+            vec4_f16 = T.vec(4, f16)
+            vec4_f8 = T.vec(4, T.f8)
+            vec1_f16 = T.vec(1, f16)
+            vec1_f32 = T.vec(1, f32)
             vec16_elems = 16 if a_elem_bytes == 1 else 8
             vec8_elems = 8 if a_elem_bytes == 1 else 4
             vec4_elems = 4 if a_elem_bytes == 1 else 2
-            vec8_x = I.vec(vec8_elems, x_elem)
-            vec16_x = I.vec(vec16_elems, x_elem)
-            vec1_i64 = I.vec(1, i64)
-            vec2_i64 = I.vec(2, i64)
+            vec8_x = T.vec(vec8_elems, x_elem)
+            vec16_x = T.vec(vec16_elems, x_elem)
+            vec1_i64 = T.vec(1, i64)
+            vec2_i64 = T.vec(2, i64)
 
             def silu(x):
-                # Device fast path:
+                # Align with CK's device fast path:
                 #   emu = exp(-x)  ~= exp2(log2e * (-x))  -> v_exp_f32
                 #   sig = rcp(1 + emu)                   -> v_rcp_f32
                 #   y = x * sig
@@ -268,7 +315,7 @@ def compile_mixed_moe_gemm1(
                 return x * sig
 
             def swiglu(gate, up, alpha=1.702, limit=7.0):
-                # Device fast path
+                # Align with CK's device fast path
                 #
                 # Using llvm.amdgcn intrinsics prevents lowering to the div_scale/div_fixup
                 # sequences that introduce extra compares/cndmasks.
@@ -289,13 +336,13 @@ def compile_mixed_moe_gemm1(
             )
 
             # Lccouts
-            layout_x = flir.make_layout((tokens_in, k_in), stride=(k_in, 1))
+            layout_x = fx.make_layout((tokens_in, k_in), stride=(k_in, 1))
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
             kpack_bytes = 8 if is_int4 else 16
             b_layout = make_preshuffle_b_layout(
-                flir, arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes
+                arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes
             )
             layout_b = b_layout.layout_b
 
@@ -303,19 +350,12 @@ def compile_mixed_moe_gemm1(
             k_unroll = tile_k_bytes // 128  # K64-byte micro-step
 
             # A&B's scale preshuffle layout
-            layout_a_scale = make_preshuffle_scale_layout(
-                flir, arith, c_mn=tokens_in, c_k=k_in,
-            )
-            layout_b_scale = make_preshuffle_scale_layout(
-                flir, arith, c_mn=c_n_total, c_k=k_in,
-            )
+            layout_a_scale = make_preshuffle_scale_layout(arith, c_mn=tokens_in, c_k=k_in)
+            layout_b_scale = make_preshuffle_scale_layout(arith, c_mn=c_n_total, c_k=k_in)
 
-            # Only used by fp8/int8 path (16B gmem -> regs). Kept for backwards compat.
-            atom_w_g2r16 = flir.make_copy_atom(w_elem, vector_size=16)
-
-            shape_lds = flir.make_shape(tile_m, tile_k)
-            stride_lds = flir.make_stride(lds_stride, 1)
-            layout_lds = flir.make_layout(shape_lds, stride_lds)
+            shape_lds = fx.make_shape(tile_m, tile_k)
+            stride_lds = fx.make_stride(lds_stride, 1)
+            layout_lds = fx.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
             # Align with Aiter launch mapping (NSwizzle==false):
@@ -342,21 +382,20 @@ def compile_mixed_moe_gemm1(
             by_n_i32 = arith.index_cast(i32, by_n)
             blk_valid = arith.cmpu(bx_m_i32, max_token_id_i32, "ult")
             # Common constants/atoms (hoisted): keep IR small like GEMM.
-            # XOR16 swizzle parameter (constant, power-of-two in our configs).
+            # CK-style XOR16 swizzle parameter (constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k_bytes // 16, index=True)
-            atom_x_s16 = flir.make_copy_atom(x_elem, vector_size=16)
-            atom_x_s8 = flir.make_copy_atom(x_elem, vector_size=8)
-            atom_x_s4 = flir.make_copy_atom(x_elem, vector_size=4)
-            atom_x_g2r16 = flir.make_copy_atom(x_elem, vector_size=vec16_elems)
-            atom_x_g2r8 = flir.make_copy_atom(x_elem, vector_size=vec8_elems)
-            atom_x_g2r4 = flir.make_copy_atom(x_elem, vector_size=vec4_elems)
-            layout_tx_wave_lane = flir.make_layout((4, 64), stride=(64, 1))
-            layout_lane16 = flir.make_layout((4, 16), stride=(16, 1))
+            layout_tx_wave_lane = fx.make_layout((4, 64), stride=(64, 1))
+            layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
 
             _if_blk = scf.IfOp(blk_valid)
             with _if_blk.then():
                 base_ptr = allocator.get_base()
-                lds_x_ptr = _state["lds_x_decl"](base_ptr)
+                lds_x_ptr = SmemPtr(
+                    base_ptr,
+                    lds_alloc_offset,
+                    x_lds_elem,
+                    shape=(lds_total_elems,),
+                )
                 lds_x = lds_x_ptr.get()
                 # Alias LDS bytes as fp16 for optional CShuffle epilogue.
                 _use_cshuffle_epilog = bool(use_cshuffle_epilog)
@@ -368,7 +407,7 @@ def compile_mixed_moe_gemm1(
                 )
 
                 # Use logical buffer sizes (descriptor num_records) so hardware OOB checking can be
-                # used directly. This allows us to avoid `select`-based masking for
+                # used directly (CK-style). This allows us to avoid `select`-based masking for
                 # invalid lanes and rely on the buffer instruction's built-in bounds behavior.
                 x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=tokens_in*model_dim)
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
@@ -398,35 +437,20 @@ def compile_mixed_moe_gemm1(
                     bx_m = bx * arith.constant(tile_m, index=True)
 
                     # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                    # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                    # 16, fall back to 8B (dwordx2) or 4B (dword) loads. This broadens supported tilings
-                    # (e.g. tile_m=16, tile_k=192 -> 12B/thread) at some performance cost.
-                    if is_f16_a:
-                        # fp16 path keeps the same fixed 16B gmem->reg schedule.
-                        if bytes_per_thread_x % 16 != 0:
-                            raise ValueError(
-                                f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
-                            )
-                        x_load_bytes = 16
-                    else:
-                        if bytes_per_thread_x % 16 == 0:
-                            x_load_bytes = 16
-                        elif bytes_per_thread_x % 8 == 0:
-                            x_load_bytes = 8
-                        elif bytes_per_thread_x % 4 == 0:
-                            x_load_bytes = 4
-                        else:
-                            raise ValueError(
-                                f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
-                            )
+                    # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm_flyc.py.
+                    if bytes_per_thread_x % 16 != 0:
+                        raise ValueError(
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
+                        )
+                    x_load_bytes = 16
                     num_x_loads = bytes_per_thread_x // x_load_bytes
                     chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
 
                     # Work in dword units along K: K_dwords = (K_bytes)/4.
                     c_k_div4 = (k_in * arith.constant(int(elem_bytes), index=True)) / arith.index(4)
-                    layout_x_div4 = flir.make_layout((tokens_in, c_k_div4), stride=(c_k_div4, 1))
+                    layout_x_div4 = fx.make_layout((tokens_in, c_k_div4), stride=(c_k_div4, 1))
                     tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
-                    layout_x_tile_div4 = flir.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
+                    layout_x_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
                     c_chunk_i32 = arith.constant(chunk_i32, index=True)
                     tx_i32_base = tx * c_chunk_i32
                     mask24 = arith.i32(0xFFFFFF)
@@ -437,7 +461,6 @@ def compile_mixed_moe_gemm1(
 
                     def x_tile_chunk_coord_i32(i: int):
                         return tile_chunk_coord_i32(
-                            flir,
                             arith,
                             tx_i32_base=tx_i32_base,
                             i=i,
@@ -446,7 +469,7 @@ def compile_mixed_moe_gemm1(
                             chunk_i32=chunk_i32,
                         )
 
-                    # Decode token once (per thread's M-slice) and build a base row offset.
+                    # CK-aligned: decode token once (per thread's M-slice) and build a base row offset.
                     x_row_base_div4 = []
                     x_col_local_i32 = []
                     x_row_local = []
@@ -461,45 +484,24 @@ def compile_mixed_moe_gemm1(
                         t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
                         x_row_base_div4.append(t_idx * c_k_div4)
 
-                    vec1_i32 = I.vec(1, i32)
-                    vec2_i32 = I.vec(2, i32)
-                    vec4_i32 = I.vec(4, i32)
-                    vec4_x = I.vec(4, x_elem)
+                    vec1_i32 = T.vec(1, i32)
+                    vec2_i32 = T.vec(2, i32)
+                    vec4_i32 = T.vec(4, i32)
+                    vec4_x = T.vec(4, x_elem)
 
                     def load_x(idx_i32):
                         """Load `x_load_bytes` bytes from X (gmem) into regs.
 
                         For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                         """
-                        if x_load_bytes == 16:
-                            idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
-                            return buffer_copy_gmem16_dwordx4(
-                                flir,
-                                arg=arg_x,
-                                elem_type=x_elem,
-                                # idx_i32=idx_elem + 0x80000000,
-                                idx_i32=idx_elem,
-                                atom_g2r16=atom_x_g2r16,
-                                rsrc=x_rsrc,
-                                vec_elems=vec16_elems,
-                            )
-                        idx_bytes = idx_i32 * arith.index(4)
-                        atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
-                        view = flir.TensorView(
-                            arg_x,
-                            (x_load_bytes,),
-                            strides=(1,),
-                            base_indices=(idx_bytes,),
-                            element_type=x_elem,
-                        )
-                        return flir.copy(
-                            atom,
-                            view,
-                            None,
-                            alignment=x_load_bytes,
-                            return_vector=True,
-                            src_buffer_resource=x_rsrc,
-                            src_buffer_offset_in_bytes=True,
+                        idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
+                        return buffer_copy_gmem16_dwordx4(
+                            buffer_ops,
+                            vector,
+                            elem_type=x_elem,
+                            idx_i32=idx_elem,
+                            rsrc=x_rsrc,
+                            vec_elems=vec16_elems,
                         )
 
                     def load_x_tile(base_k):
@@ -513,12 +515,12 @@ def compile_mixed_moe_gemm1(
                         return parts
 
                     # tx -> wave/lane (GEMM-style decomposition).
-                    coord_wl = flir.idx2crd(tx, layout_tx_wave_lane)
-                    wave_id = flir.get(coord_wl, 0)
-                    lane_id = flir.get(coord_wl, 1)
-                    coord_l16 = flir.idx2crd(lane_id, layout_lane16)
-                    lane_div_16 = flir.get(coord_l16, 0)
-                    lane_mod_16 = flir.get(coord_l16, 1)
+                    coord_wl = idx2crd(tx, layout_tx_wave_lane)
+                    wave_id = layout_get(coord_wl, 0)
+                    lane_id = layout_get(coord_wl, 1)
+                    coord_l16 = idx2crd(lane_id, layout_lane16)
+                    lane_div_16 = layout_get(coord_l16, 0)
+                    lane_mod_16 = layout_get(coord_l16, 1)
 
                     # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16*16B (KPackBytes=16).
                     row_a_lds = lane_mod_16
@@ -544,7 +546,7 @@ def compile_mixed_moe_gemm1(
                     inter_idx = arith.constant(inter_dim, index=True)
                     # layout for (row -> (blk,intra)) where intra is 0..15
                     c_n0 = c_n_total / arith.index(16)
-                    layout_n_blk_intra = flir.make_layout((c_n0, 16), stride=(16, 1))
+                    layout_n_blk_intra = fx.make_layout((c_n0, 16), stride=(16, 1))
                     n_intra_list = []
                     n_blk_list = []
                     for i in range_constexpr(num_acc_n):
@@ -558,45 +560,48 @@ def compile_mixed_moe_gemm1(
                         c_offset = arith.constant(offset, index=True)
                         global_n = by_n + n_tile_base + c_offset + lane_mod_16
                         row_w = expert_off_idx + global_n
-                        coord_n = flir.idx2crd(row_w, layout_n_blk_intra)
-                        n_blk_list.append(flir.get(coord_n, 0))
-                        n_intra_list.append(flir.get(coord_n, 1))
+                        coord_n = idx2crd(row_w, layout_n_blk_intra)
+                        n_blk_list.append(layout_get(coord_n, 0))
+                        n_intra_list.append(layout_get(coord_n, 1))
 
                     # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
                     def load_b_packs_k64(base_k, ku: int, ni: int):
-                        base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
-                        k0_base = base_k_bytes / 64
-                        k0 = k0_base + ku
-                        k1 = lane_div_16
-                        coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], 0)
-                        idx_pack = flir.crd2idx(coord_pack, layout_b)
-                        
-                        # Calculate mask for boundary check
-                        c_offset = arith.constant(ni * 16, index=True)
-                        global_n = by_n + n_tile_base + c_offset + lane_mod_16
-
-                        vec_elems = 16 
-                        b_view = flir.TensorView(
-                            arg_w,
-                            (vec_elems,),
-                            strides=(1,),
-                            base_indices=(idx_pack,),
-                            element_type=_w_elem_type(),
+                        # K64 micro-step = 2x K32 MFMA steps. Reuse the shared helper.
+                        b0 = load_b_pack_k32(
+                            buffer_ops,
+                            arith,
+                            vector,
+                            arg_b=arg_w,
+                            b_rsrc=w_rsrc,
+                            layout_b=layout_b,
+                            base_k=base_k,
+                            ki_step=ku * 2,
+                            n_blk=n_blk_list[ni],
+                            n_intra=n_intra_list[ni],
+                            lane_div_16=lane_div_16,
+                            elem_type=_w_elem_type(),
+                            kpack_bytes=kpack_bytes,
+                            elem_bytes=b_elem_bytes,
+                            unpack_int4=bool(is_int4),
                         )
-                        b16 = flir.copy(
-                            flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
-                            b_view,
-                            None,
-                            alignment=8,
-                            return_vector=True,
-                            src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
-                            src_buffer_offset_in_bytes=(elem_bytes == 1),
+                        b1 = load_b_pack_k32(
+                            buffer_ops,
+                            arith,
+                            vector,
+                            arg_b=arg_w,
+                            b_rsrc=w_rsrc,
+                            layout_b=layout_b,
+                            base_k=base_k,
+                            ki_step=ku * 2 + 1,
+                            n_blk=n_blk_list[ni],
+                            n_intra=n_intra_list[ni],
+                            lane_div_16=lane_div_16,
+                            elem_type=_w_elem_type(),
+                            kpack_bytes=kpack_bytes,
+                            elem_bytes=b_elem_bytes,
+                            unpack_int4=bool(is_int4),
                         )
-                        # Split 16B pack into two 8B halves.
-                        b_i64x2 = vector.bitcast(I.i64x2, b16)
-                        b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
-                        b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-                        return b0_i64, b1_i64
+                        return b0, b1
 
                     def load_b_tile(base_k):
                         b_tile = []
@@ -613,26 +618,10 @@ def compile_mixed_moe_gemm1(
                     def load_scale(arg_scale, rsrc, layout, ku, mni):
                         k_lane = lane_div_16
                         n_lane = lane_mod_16
-                        coord_pack = flir.make_coord(mni, ku, k_lane, n_lane)
-                        idx_pack = flir.crd2idx(coord_pack, layout)
-                        scale_view = flir.TensorView(
-                            arg_scale,
-                            (1,),
-                            strides=(1,),
-                            base_indices=(idx_pack,),
-                            element_type=_scale_elem_type(),
-                        )
-                        scale = flir.copy(
-                            flir.make_copy_atom(_scale_elem_type(), vector_size=1),
-                            scale_view,
-                            None,
-                            alignment=8,
-                            return_vector=True,
-                            src_buffer_resource=rsrc,
-                            src_buffer_offset_in_bytes=False,
-                        )
-                        # Split 16B pack into two 8B halves.
-                        return scale
+                        coord_pack = fx.make_coord(mni, ku, k_lane, n_lane)
+                        idx_pack = crd2idx(coord_pack, layout)
+                        s = buffer_ops.buffer_load(rsrc, idx_pack, vec_width=1, dtype=T.i32)
+                        return vector.from_elements(T.vec(1, T.i32), [s])
 
                     def load_b_scale_tile(base_k):
                         b_scale_tile = []
@@ -675,13 +664,10 @@ def compile_mixed_moe_gemm1(
                             col_local_i32 = x_col_local_i32[i]
                             if x_load_bytes == 16:
                                 lds_store_16b_xor16(
-                                    flir,
                                     arith,
                                     vector,
                                     lds_memref=lds_x,
                                     vec16_ty=vec16_x,
-                                    elem_type=x_elem,
-                                    atom_s16=atom_x_s16,
                                     layout_lds=layout_lds,
                                     row_local=row_local,
                                     col_local_i32=col_local_i32,
@@ -695,10 +681,10 @@ def compile_mixed_moe_gemm1(
                     # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
                     def lds_load_packs_k64(curr_row_a_lds, col_base, lds_base):
                         # Swizzle in bytes, then convert to element offset for memref indexing.
-                        col_base_swz_bytes = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
+                        col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                         col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / arith.index(2))
-                        coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swz)
-                        idx_a16 = flir.crd2idx(coord_a16, layout_lds)
+                        coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
+                        idx_a16 = crd2idx(coord_a16, layout_lds)
                         idx_a16 = idx_a16 + lds_base
                         loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                         a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
@@ -751,10 +737,10 @@ def compile_mixed_moe_gemm1(
                                 f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
                             )
 
-                        mfma_res_ty = I.f32x4
-                        vec4_i64 = I.vec(4, I.i64)
-                        vec8_i32 = I.vec(8, I.i32)
-                        c0_i64 = arith.constant(0, type=I.i64)
+                        mfma_res_ty = T.f32x4
+                        vec4_i64 = T.vec(4, T.i64)
+                        vec8_i32 = T.vec(8, T.i32)
+                        c0_i64 = arith.constant(0, type=T.i64)
 
                         def pack_i64x4_to_i32x8(x0, x1, x2, x3):
                             v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
@@ -835,7 +821,7 @@ def compile_mixed_moe_gemm1(
                         mfma_per_iter = 2 * mfma_group
                         sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
-                        # DS-read preload (2); clamp to non-negative.
+                        # DS-read preload (CK default is 2); clamp to non-negative.
                         rocdl.sched_dsrd(2)
                         rocdl.sched_mfma(2)
                         rocdl.sched_dsrd(1)
@@ -979,7 +965,7 @@ def compile_mixed_moe_gemm1(
                     lane_div_16_mul4 = lane_div_16 * arith.index(4)
                     inter_i32_local = inter_i32_v
 
-                    # Optional: CShuffle epilogue for better global store coalescing.
+                    # Optional: CK-style CShuffle epilogue for better global store coalescing.
                     # Uses EVec=4 (buffer store "x4" of fp16 elements).
                     _use_cshuffle_epilog = (out_dtype == "fp8") or bool(use_cshuffle_epilog)
 
@@ -1057,8 +1043,8 @@ def compile_mixed_moe_gemm1(
                                 frag3 = vector.extract(frag, static_position=[3], dynamic_position=[])
 
                                 out_fp8 = arith.i32(0)
-                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag0), src_b=arith._unwrap_value(frag1), old=arith._unwrap_value(out_fp8), word_sel=0, res=I.i32)
-                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag2), src_b=arith._unwrap_value(frag3), old=arith._unwrap_value(out_fp8), word_sel=1, res=I.i32)
+                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag0), src_b=arith._unwrap_value(frag1), old=arith._unwrap_value(out_fp8), word_sel=0, res=T.i32)
+                                out_fp8 = rocdl.cvt_pk_fp8_f32(src_a=arith._unwrap_value(frag2), src_b=arith._unwrap_value(frag3), old=arith._unwrap_value(out_fp8), word_sel=1, res=T.i32)
 
                                 idx0 = row_ctx
                                 col_i32 = arith.index_cast(i32, col_g0)
@@ -1083,7 +1069,7 @@ def compile_mixed_moe_gemm1(
                             by_n=by_n // 2,
                             n_tile_base=n_tile_base // 2,
                             lds_out=lds_out,
-                            frag_elem_type=I.f32,
+                            frag_elem_type=T.f32,
                             write_row_to_lds=write_row_to_lds,
                             precompute_row=precompute_row,
                             store_pair=store_pair,
@@ -1145,58 +1131,74 @@ def compile_mixed_moe_gemm1(
                         body_row=_stage1_store_row,
                     )
 
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(DYN, _out_elem_type()),
-            arg_x: lambda: T.memref(DYN, _x_elem_type()),
-            arg_w: lambda: T.memref(DYN, _w_elem_type()),
-            arg_scale_x: lambda: T.memref(DYN, _scale_elem_type()),
-            arg_scale_w: lambda: T.memref(experts * (2 * inter_dim), _scale_elem_type()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(DYN, T.i32()),
-            arg_sorted_weights: lambda: T.memref(DYN, T.f32()),
-            arg_max_token_ids: lambda: T.memref(DYN, T.i32()),
-            arg_bias: lambda: T.memref(DYN, T.f32()),
-            tokens_in: lambda: T.index(),
-            inter_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
-            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
-        ):
-            bdx = 256
-            gx = 2 * inter_in / arith.index(tile_n)
-            # Use host-provided upper bound for M blocks (same as aiter moe_sorting allocation).
-            # This avoids device->host sync on num_valid_ids.
-            gy = size_expert_ids_in
+    # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
+    _cache_tag = (
+        module_name,
+        a_dtype,
+        b_dtype,
+        out_dtype,
+        tile_m,
+        tile_n,
+        tile_k,
+        doweight_stage1,
+        act,
+        enable_bias,
+        model_dim_pad,
+        inter_dim_pad,
+        use_cshuffle_epilog,
+    )
 
-            stream_token = stream_ptr_to_async_token(stream_ptr)
-            flir.gpu_ext.LaunchFuncOp(
-                [module_name, "moe_gemm1"],
-                grid_size=(gx, gy, 1),
-                block_size=(bdx, 1, 1),
-                kernel_operands=[
-                    arg_out,
-                    arg_x,
-                    arg_w,
-                    arg_scale_x,
-                    arg_scale_w,
-                    arg_sorted_token_ids,
-                    arg_expert_ids,
-                    arg_sorted_weights,
-                    arg_max_token_ids,
-                    arg_bias,
-                    tokens_in,
-                    inter_in,
-                    k_in,
-                    size_expert_ids_in,
-                ],
-                async_dependencies=[stream_token],
-            )
+    @flyc.jit
+    def launch_mixed_moe_gemm1(
+        arg_out: fx.Tensor,
+        arg_x: fx.Tensor,
+        arg_w: fx.Tensor,
+        arg_scale_x: fx.Tensor,
+        arg_scale_w: fx.Tensor,
+        arg_sorted_token_ids: fx.Tensor,
+        arg_expert_ids: fx.Tensor,
+        arg_sorted_weights: fx.Tensor,
+        arg_max_token_ids: fx.Tensor,
+        arg_bias: fx.Tensor,
+        i32_tokens_in: fx.Int32,
+        i32_inter_in: fx.Int32,
+        i32_k_in: fx.Int32,
+        i32_size_expert_ids_in: fx.Int32,
+        stream_ptr: int,
+    ):
+        _ = _cache_tag
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
 
-    m = _MOE1()
-    exe = flydsl.compile(m)
-    return exe
+        inter_in = arith.index_cast(ir.IndexType.get(), i32_inter_in.ir_value())
+        gx = (arith.constant(2, index=True) * inter_in) / arith.constant(tile_n, index=True)
+        gy = arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value())
+        stream_token = stream_ptr_to_async_token(stream_ptr)
+
+        moe_gemm1(
+            arg_out,
+            arg_x,
+            arg_w,
+            arg_scale_x,
+            arg_scale_w,
+            arg_sorted_token_ids,
+            arg_expert_ids,
+            arg_sorted_weights,
+            arg_max_token_ids,
+            arg_bias,
+            i32_tokens_in,
+            i32_inter_in,
+            i32_k_in,
+            i32_size_expert_ids_in,
+        ).launch(
+            grid=(gx, gy, 1),
+            block=(256, 1, 1),
+            stream=stream_token,
+        )
+
+    return launch_mixed_moe_gemm1
 
 
 @functools.lru_cache(maxsize=None)
@@ -1306,16 +1308,16 @@ def compile_mixed_moe_gemm2(
 
     def _x_elem_type():
         if is_f4_b:
-            return I.f8 if is_f8_a else I.ui8
-        return I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
+            return T.f8 if is_f8_a else T.ui8
+        return T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
 
     def _w_elem_type():
         if is_f4_b:
-            return I.ui8
-        return I.f16 if is_f16_b else (I.i8 if is_int8 else I.f8)
+            return T.ui8
+        return T.f16 if is_f16_b else (T.i8 if is_int8 else T.f8)
 
     def _scale_elem_type():
-        return I.i32
+        return T.i32
 
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
@@ -1379,63 +1381,74 @@ def compile_mixed_moe_gemm2(
         f"_t{tile_m}x{tile_n}x{tile_k}"
     ).replace("-", "_")
 
-    class _MOE2(flir.MlirModule):
-        GPU_MODULE_NAME = module_name
-        GPU_MODULE_TARGETS = [
-            f'#rocdl.target<chip = "{gpu_arch}", abi = "500", features = "+sramecc,+xnack">'
-        ]
+    # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
+    # Reuse a single allocation for both:
+    # - ping-pong A2 tiles (2 * tile_m * lds_stride * elem_bytes bytes)
+    # - epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
+    lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
+    lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0  # f16 bytes
+    lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
+    lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
+    x_lds_elem = T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
 
-        def init_gpu_module(self):
-            # LDS scratch: reuse a single allocation for both
-            # - ping-pong A2 tiles (2 * tile_m * lds_stride * elem_bytes bytes)
-            # - epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
-            #
-            # This reduces LDS usage from sum(...) to max(...).
-            lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(a_elem_bytes)
-            lds_out_bytes = 2 * tile_m * tile_n if _use_cshuffle_epilog else 0  # f16 bytes
-            lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
-            lds_total_elems = lds_total_bytes if a_elem_bytes == 1 else (lds_total_bytes // 2)
-            x_lds_elem = I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
-            _state["lds_x_decl"] = allocator.allocate_array(x_lds_elem, lds_total_elems)
-            allocator.finalize()
+    lds_alloc_bytes = int(lds_total_elems) * int(a_elem_bytes)
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
-        @flir.kernel
+    if True:
+        @flyc.kernel
         def moe_gemm2(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, out_elem()),
-            arg_x: lambda: T.memref(size_x, _x_elem_type()),
-            arg_w: lambda: T.memref(size_w, _w_elem_type()),
-            arg_scale_x: lambda: T.memref(size_scale_x, _scale_elem_type()),
-            arg_scale_w: lambda: T.memref(experts * model_dim, _scale_elem_type()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
-            arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
-            arg_bias: lambda: T.memref(DYN, T.f32()),
-            tokens_in: lambda: T.index(),
-            n_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
+            arg_out: fx.Tensor,
+            arg_x: fx.Tensor,
+            arg_w: fx.Tensor,
+            arg_scale_x: fx.Tensor,
+            arg_scale_w: fx.Tensor,
+            arg_sorted_token_ids: fx.Tensor,
+            arg_expert_ids: fx.Tensor,
+            arg_sorted_weights: fx.Tensor,
+            arg_num_valid_ids: fx.Tensor,
+            arg_bias: fx.Tensor,
+            i32_tokens_in: fx.Int32,
+            i32_n_in: fx.Int32,
+            i32_k_in: fx.Int32,
+            i32_size_expert_ids_in: fx.Int32,
         ):
-            x_elem = I.f16 if is_f16_a else (I.i8 if is_int8 else I.f8)
+            arg_out = arg_out.value
+            arg_x = arg_x.value
+            arg_w = arg_w.value
+            arg_scale_x = arg_scale_x.value
+            arg_scale_w = arg_scale_w.value
+            arg_sorted_token_ids = arg_sorted_token_ids.value
+            arg_expert_ids = arg_expert_ids.value
+            arg_sorted_weights = arg_sorted_weights.value
+            arg_num_valid_ids = arg_num_valid_ids.value
+            arg_bias = arg_bias.value
+
+            tokens_in = arith.index_cast(ir.IndexType.get(), i32_tokens_in.ir_value())
+            n_in = arith.index_cast(ir.IndexType.get(), i32_n_in.ir_value())
+            k_in = arith.index_cast(ir.IndexType.get(), i32_k_in.ir_value())
+            size_expert_ids_in = arith.index_cast(
+                ir.IndexType.get(), i32_size_expert_ids_in.ir_value()
+            )
+            x_elem = T.f16 if is_f16_a else (T.i8 if is_int8 else T.f8)
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
-            w_elem = I.f16 if is_f16_b else (I.i8 if is_int8 else I.f8)
-            f16 = I.f16
-            f32 = I.f32
-            i32 = I.i32
-            i64 = I.i64
-            vec4_f32 = I.vec(4, f32)
-            vec4_i32 = I.vec(4, i32)
-            vec1_f16 = I.vec(1, f16)
-            vec2_f16 = I.vec(2, f16)
-            vec4_f16 = I.vec(4, f16)
+            w_elem = T.f16 if is_f16_b else (T.i8 if is_int8 else T.f8)
+            f16 = T.f16
+            f32 = T.f32
+            i32 = T.i32
+            i64 = T.i64
+            vec4_f32 = T.vec(4, f32)
+            vec4_i32 = T.vec(4, i32)
+            vec1_f16 = T.vec(1, f16)
+            vec2_f16 = T.vec(2, f16)
+            vec4_f16 = T.vec(4, f16)
             vec16_elems = 16 if a_elem_bytes == 1 else 8
             vec8_elems = 8 if a_elem_bytes == 1 else 4
             vec4_elems = 4 if a_elem_bytes == 1 else 2
-            vec8_x = I.vec(vec8_elems, x_elem)
-            vec16_x = I.vec(vec16_elems, x_elem)
-            vec1_i64 = I.vec(1, i64)
-            vec2_i64 = I.vec(2, i64)
+            vec8_x = T.vec(vec8_elems, x_elem)
+            vec16_x = T.vec(vec16_elems, x_elem)
+            vec1_i64 = T.vec(1, i64)
+            vec2_i64 = T.vec(2, i64)
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
@@ -1446,13 +1459,13 @@ def compile_mixed_moe_gemm2(
             # A2 layout (flatten token-slot -> M).
             topk_idx = arith.constant(topk, index=True)
             m_in = tokens_in * topk_idx
-            layout_x = flir.make_layout((m_in, k_in), stride=(k_in, 1))
+            layout_x = fx.make_layout((m_in, k_in), stride=(k_in, 1))
 
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.constant(experts * model_dim, index=True)
             kpack_bytes = 8 if is_int4 else 16
             b_layout = make_preshuffle_b_layout(
-                flir, arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes
+                arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.constant(int(a_elem_bytes), index=True)) / arith.index(64)
@@ -1466,16 +1479,12 @@ def compile_mixed_moe_gemm2(
 
 
             # A&B's scale preshuffle layout
-            layout_a_scale = make_preshuffle_scale_layout(
-                flir, arith, c_mn=m_in, c_k=k_in,
-            )
-            layout_b_scale = make_preshuffle_scale_layout(
-                flir, arith, c_mn=c_n_total, c_k=k_in,
-            )
+            layout_a_scale = make_preshuffle_scale_layout(arith, c_mn=m_in, c_k=k_in)
+            layout_b_scale = make_preshuffle_scale_layout(arith, c_mn=c_n_total, c_k=k_in)
 
-            shape_lds = flir.make_shape(tile_m, tile_k)
-            stride_lds = flir.make_stride(lds_stride, 1)
-            layout_lds = flir.make_layout(shape_lds, stride_lds)
+            shape_lds = fx.make_shape(tile_m, tile_k)
+            stride_lds = fx.make_stride(lds_stride, 1)
+            layout_lds = fx.make_layout(shape_lds, stride_lds)
 
             tx = gpu.thread_id("x")
             # Align with Aiter launch mapping:
@@ -1486,25 +1495,24 @@ def compile_mixed_moe_gemm2(
 
             # XOR16 swizzle parameter (in bytes; constant, power-of-two in our configs).
             k_blocks16 = arith.constant(tile_k_bytes // 16, index=True)
-            atom_x_s16 = flir.make_copy_atom(x_elem, vector_size=vec16_elems)
-            atom_x_s8 = flir.make_copy_atom(x_elem, vector_size=8)
-            atom_x_s4 = flir.make_copy_atom(x_elem, vector_size=4)
-            atom_x_g2r16 = flir.make_copy_atom(x_elem, vector_size=vec16_elems)
-            atom_x_g2r8 = flir.make_copy_atom(x_elem, vector_size=vec8_elems)
-            atom_x_g2r4 = flir.make_copy_atom(x_elem, vector_size=vec4_elems)
-            layout_tx_wave_lane = flir.make_layout((4, 64), stride=(64, 1))
-            layout_lane16 = flir.make_layout((4, 16), stride=(16, 1))
-            layout_lin_rowcol = flir.make_layout((tile_m, tile_k), stride=(tile_k, 1))
+            layout_tx_wave_lane = fx.make_layout((4, 64), stride=(64, 1))
+            layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
+            layout_lin_rowcol = fx.make_layout((tile_m, tile_k), stride=(tile_k, 1))
 
             base_ptr = allocator.get_base()
-            lds_x_ptr = _state["lds_x_decl"](base_ptr)
+            lds_x_ptr = SmemPtr(
+                base_ptr,
+                lds_alloc_offset,
+                x_lds_elem,
+                shape=(lds_total_elems,),
+            )
             lds_x = lds_x_ptr.get()
             # Alias the same underlying LDS bytes as f16/bf16 for epilogue shuffle.
             lds_out = (
                 SmemPtr(
                     base_ptr,
                     lds_x_ptr.byte_offset,
-                    (I.bf16 if out_is_bf16 else I.f16),
+                    (T.bf16 if out_is_bf16 else T.f16),
                     shape=(tile_m * tile_n,),
                 ).get()
                 if _use_cshuffle_epilog
@@ -1556,7 +1564,7 @@ def compile_mixed_moe_gemm2(
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
-            # sorted_token_ids / sorted_weights: [blocks*tile_m] (padded length)
+            # sorted_token_ids / sorted_weights: [blocks*tile_m] (CK-style padded length)
             sorted_nbytes_idx = (
                 size_expert_ids_in
                 * arith.constant(tile_m, index=True)
@@ -1600,33 +1608,20 @@ def compile_mixed_moe_gemm2(
                 expert_off_idx = expert_idx * n_idx  # index
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
-                if is_f16_a:
-                    if bytes_per_thread_x % 16 != 0:
-                        raise ValueError(
-                            f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
-                        )
-                    x_load_bytes = 16
-                else:
-                    if bytes_per_thread_x % 16 == 0:
-                        x_load_bytes = 16
-                    elif bytes_per_thread_x % 8 == 0:
-                        x_load_bytes = 8
-                    elif bytes_per_thread_x % 4 == 0:
-                        x_load_bytes = 4
-                    else:
-                        raise ValueError(
-                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
-                        )
+                # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm_flyc.py.
+                if bytes_per_thread_x % 16 != 0:
+                    raise ValueError(
+                        f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
+                    )
+                x_load_bytes = 16
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
-                vec4_i32 = I.vec(4, i32)
+                vec4_i32 = T.vec(4, i32)
     
                 c_k_div4 = (k_in * arith.constant(int(a_elem_bytes), index=True)) / arith.index(4)
-                layout_x_div4 = flir.make_layout((m_in, c_k_div4), stride=(c_k_div4, 1))
+                layout_x_div4 = fx.make_layout((m_in, c_k_div4), stride=(c_k_div4, 1))
                 tile_k_dwords = (int(tile_k) * int(a_elem_bytes)) // 4
-                layout_x_tile_div4 = flir.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
+                layout_x_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
                 c_chunk_i32 = arith.constant(chunk_i32, index=True)
                 tx_i32_base = tx * c_chunk_i32
     
@@ -1637,7 +1632,6 @@ def compile_mixed_moe_gemm2(
     
                 def x_tile_chunk_coord_i32(i: int):
                     return tile_chunk_coord_i32(
-                        flir,
                         arith,
                         tx_i32_base=tx_i32_base,
                         i=i,
@@ -1646,39 +1640,19 @@ def compile_mixed_moe_gemm2(
                         chunk_i32=chunk_i32,
                     )
     
-                vec1_i32 = I.vec(1, i32)
-                vec2_i32 = I.vec(2, i32)
-                vec4_x = I.vec(4, x_elem)
+                vec1_i32 = T.vec(1, i32)
+                vec2_i32 = T.vec(2, i32)
+                vec4_x = T.vec(4, x_elem)
     
                 def load_x(idx_i32):
-                    if x_load_bytes == 16:
-                        idx_elem = idx_i32 if a_elem_bytes == 1 else (idx_i32 * arith.index(2))
-                        return buffer_copy_gmem16_dwordx4(
-                            flir,
-                            arg=arg_x,
-                            elem_type=x_elem,
-                            idx_i32=idx_elem,
-                            atom_g2r16=atom_x_g2r16,
-                            rsrc=x_rsrc,
-                            vec_elems=vec16_elems,
-                        )
-                    idx_bytes = idx_i32 * arith.index(4)
-                    atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
-                    view = flir.TensorView(
-                        arg_x,
-                        (x_load_bytes,),
-                        strides=(1,),
-                        base_indices=(idx_bytes,),
-                        element_type=x_elem,
-                    )
-                    return flir.copy(
-                        atom,
-                        view,
-                        None,
-                        alignment=x_load_bytes,
-                        return_vector=True,
-                        src_buffer_resource=x_rsrc,
-                        src_buffer_offset_in_bytes=True,
+                    idx_elem = idx_i32 if a_elem_bytes == 1 else (idx_i32 * arith.index(2))
+                    return buffer_copy_gmem16_dwordx4(
+                        buffer_ops,
+                        vector,
+                        elem_type=x_elem,
+                        idx_i32=idx_elem,
+                        rsrc=x_rsrc,
+                        vec_elems=vec16_elems,
                     )
     
                 # decode routed token once (per thread's M-slice) and build a base offset.
@@ -1723,12 +1697,12 @@ def compile_mixed_moe_gemm2(
                     return parts
     
                 # tx -> wave/lane (GEMM-style decomposition).
-                coord_wl = flir.idx2crd(tx, layout_tx_wave_lane)
-                wave_id = flir.get(coord_wl, 0)
-                lane_id = flir.get(coord_wl, 1)
-                coord_l16 = flir.idx2crd(lane_id, layout_lane16)
-                lane_div_16 = flir.get(coord_l16, 0)
-                lane_mod_16 = flir.get(coord_l16, 1)
+                coord_wl = idx2crd(tx, layout_tx_wave_lane)
+                wave_id = layout_get(coord_wl, 0)
+                lane_id = layout_get(coord_wl, 1)
+                coord_l16 = idx2crd(lane_id, layout_lane16)
+                lane_div_16 = layout_get(coord_l16, 0)
+                lane_mod_16 = layout_get(coord_l16, 1)
     
                 row_a_lds = lane_mod_16
 
@@ -1748,7 +1722,7 @@ def compile_mixed_moe_gemm2(
                 n_blk_list = []
                 col_g_list = []
                 c_n0 = c_n_total / arith.index(16)
-                layout_n_blk_intra = flir.make_layout((c_n0, 16), stride=(16, 1))
+                layout_n_blk_intra = fx.make_layout((c_n0, 16), stride=(16, 1))
 
                 for i in range_constexpr(num_acc_n):
                     offset = i * 16
@@ -1761,9 +1735,9 @@ def compile_mixed_moe_gemm2(
                     c_offset = arith.constant(offset, index=True)
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
                     row_w = expert_off_idx + global_n
-                    coord_n = flir.idx2crd(row_w, layout_n_blk_intra)
-                    n_blk_list.append(flir.get(coord_n, 0))
-                    n_intra_list.append(flir.get(coord_n, 1))
+                    coord_n = idx2crd(row_w, layout_n_blk_intra)
+                    n_blk_list.append(layout_get(coord_n, 0))
+                    n_intra_list.append(layout_get(coord_n, 1))
     
                 m_repeat = tile_m // 16
                 k_unroll = tile_k_bytes // 128  # K64-byte micro-step (2x MFMA)
@@ -1775,47 +1749,41 @@ def compile_mixed_moe_gemm2(
     
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
                 def load_b_packs_k64(base_k, ku: int, ni: int):
-                    base_k_bytes = base_k * arith.constant(int(b_elem_bytes), index=True)
-                    k0_base = base_k_bytes / 64
-                    k0 = k0_base + ku
-                    k1 = lane_div_16
-                    coord_pack = flir.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], 0)
-                    idx_pack = flir.crd2idx(coord_pack, layout_b)
-                    
-                    # Calculate mask for boundary check
-                    c_offset = arith.constant(ni * 16, index=True)
-                    global_n = by_n + n_tile_base + c_offset + lane_mod_16
-                    n_valid = check_c_n_valid_gate(global_n)
-                    
-                    k_coord = (k0 * arith.constant(64 // b_elem_bytes, index=True) +
-                              lane_div_16 * arith.constant(16 // b_elem_bytes, index=True))
-                    k_valid = check_c_k_valid_gate(k_coord)
-                    
-                    w_mask = arith.andi(n_valid, k_valid)
-                    
-                    vec_elems = 16 
-                    b_view = flir.TensorView(
-                        arg_w,
-                        (vec_elems,),
-                        strides=(1,),
-                        base_indices=(idx_pack,),
-                        element_type=_w_elem_type(),
+                    b0 = load_b_pack_k32(
+                        buffer_ops,
+                        arith,
+                        vector,
+                        arg_b=arg_w,
+                        b_rsrc=w_rsrc,
+                        layout_b=layout_b,
+                        base_k=base_k,
+                        ki_step=ku * 2,
+                        n_blk=n_blk_list[ni],
+                        n_intra=n_intra_list[ni],
+                        lane_div_16=lane_div_16,
+                        elem_type=_w_elem_type(),
+                        kpack_bytes=kpack_bytes,
+                        elem_bytes=b_elem_bytes,
+                        unpack_int4=bool(is_int4),
                     )
-                    b16 = flir.copy(
-                        flir.make_copy_atom(_w_elem_type(), vector_size=vec_elems),
-                        b_view,
-                        None,
-                        # pred=w_mask,
-                        alignment=8,
-                        return_vector=True,
-                        src_buffer_resource=(w_rsrc if elem_bytes == 1 else None),
-                        src_buffer_offset_in_bytes=(elem_bytes == 1),
+                    b1 = load_b_pack_k32(
+                        buffer_ops,
+                        arith,
+                        vector,
+                        arg_b=arg_w,
+                        b_rsrc=w_rsrc,
+                        layout_b=layout_b,
+                        base_k=base_k,
+                        ki_step=ku * 2 + 1,
+                        n_blk=n_blk_list[ni],
+                        n_intra=n_intra_list[ni],
+                        lane_div_16=lane_div_16,
+                        elem_type=_w_elem_type(),
+                        kpack_bytes=kpack_bytes,
+                        elem_bytes=b_elem_bytes,
+                        unpack_int4=bool(is_int4),
                     )
-                    # Split 16B pack into two 8B halves.
-                    b_i64x2 = vector.bitcast(I.i64x2, b16)
-                    b0_i64 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
-                    b1_i64 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
-                    return b0_i64, b1_i64
+                    return b0, b1
 
                 def load_b_tile(base_k):
                     b_tile = []
@@ -1832,26 +1800,10 @@ def compile_mixed_moe_gemm2(
                 def load_scale(arg_scale, rsrc, layout, ku, mni):
                     k_lane = lane_div_16
                     n_lane = lane_mod_16
-                    coord_pack = flir.make_coord(mni, ku, k_lane, n_lane)
-                    idx_pack = flir.crd2idx(coord_pack, layout)
-                    vec_elems = 1
-                    scale_view = flir.TensorView(
-                        arg_scale,
-                        (1,),
-                        strides=(1,),
-                        base_indices=(idx_pack,),
-                        element_type=_scale_elem_type(),
-                    )
-                    scale = flir.copy(
-                        flir.make_copy_atom(_scale_elem_type(), vector_size=1),
-                        scale_view,
-                        None,
-                        alignment=8,
-                        return_vector=True,
-                        src_buffer_resource=rsrc,
-                        src_buffer_offset_in_bytes=False,
-                    )
-                    return scale
+                    coord_pack = fx.make_coord(mni, ku, k_lane, n_lane)
+                    idx_pack = crd2idx(coord_pack, layout)
+                    s = buffer_ops.buffer_load(rsrc, idx_pack, vec_width=1, dtype=T.i32)
+                    return vector.from_elements(T.vec(1, T.i32), [s])
 
                 def load_b_scale_tile(base_k):
                     b_scale_tile = []
@@ -1892,13 +1844,10 @@ def compile_mixed_moe_gemm2(
                         col_local_i32 = x_col_local_i32[i]
                         if x_load_bytes == 16:
                             lds_store_16b_xor16(
-                                flir,
                                 arith,
                                 vector,
                                 lds_memref=lds_x,
                                 vec16_ty=vec16_x,
-                                elem_type=x_elem,
-                                atom_s16=atom_x_s16,
                                 layout_lds=layout_lds,
                                 row_local=row_local,
                                 col_local_i32=col_local_i32,
@@ -1912,10 +1861,10 @@ def compile_mixed_moe_gemm2(
                 # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
                 def lds_load_packs_k64(curr_row_a_lds, col_base, lds_base):
                     # Swizzle in bytes, then convert to element offset for memref indexing.
-                    col_base_swz_bytes = flir.swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
+                    col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                     col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / arith.index(2))
-                    coord_a16 = flir.make_coord(curr_row_a_lds, col_base_swz)
-                    idx_a16 = flir.crd2idx(coord_a16, layout_lds)
+                    coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
+                    idx_a16 = crd2idx(coord_a16, layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
@@ -1958,8 +1907,8 @@ def compile_mixed_moe_gemm2(
 
     
                     c0_i64 = arith.i64(0)
-                    vec4_i64 = I.vec(4, I.i64)
-                    vec8_i32 = I.vec(8, I.i32)
+                    vec4_i64 = T.vec(4, T.i64)
+                    vec8_i32 = T.vec(8, T.i32)
     
                     def pack_i64x4_to_i32x8(x0, x1, x2, x3):
                         v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
@@ -2249,7 +2198,7 @@ def compile_mixed_moe_gemm2(
                         v_out = arith.trunc_f(out_elem(), v)
 
                         lds_idx = row_base_lds + col_local
-                        vec1_out = I.vec(1, out_elem())
+                        vec1_out = T.vec(1, out_elem())
                         v1 = vector.from_elements(vec1_out, [v_out])
 
                         vector.store(v1, lds_out, [lds_idx], alignment=2)
@@ -2257,7 +2206,7 @@ def compile_mixed_moe_gemm2(
                 def precompute_row(*, row_local, row):
                     # Precompute row context for cshuffle stores.
                     # Return (fused_i32, row_valid_i1) so the epilogue can skip the entire row
-                    # for invalid tail rows, avoiding per-store branching.
+                    # for invalid tail rows (CK-style), avoiding per-store branching.
                     fused2 = buffer_ops.buffer_load(sorted_rsrc, row, vec_width=1, dtype=i32)
 
                     row_i32 = arith.index_cast(i32, row)
@@ -2285,7 +2234,7 @@ def compile_mixed_moe_gemm2(
                     vv2 = vector.extract(frag, static_position=[0], dynamic_position=[])
                     if out_is_bf16:
                         if bool(accumulate):
-                            # Use global atomicrmw fadd on <2 x bf16>.
+                            # Use global atomicrmw fadd on <2 x bf16> (CK path).
                             # Row-valid gating is handled at the row level by c_shuffle_epilog via `precompute_row`.
                             byte_off = idx_elem_even * c2_i32
                             byte_off_idx = arith.index_cast(ir.IndexType.get(), byte_off)
@@ -2341,53 +2290,72 @@ def compile_mixed_moe_gemm2(
                 with _ifexpert_of.then():
                     _moe_gemm2_then_body()
 
-        @flir.jit
-        def __call__(
-            self: flir.T.i64,
-            arg_out: lambda: T.memref(size_out, out_elem()),
-            arg_x: lambda: T.memref(size_x, _x_elem_type()),
-            arg_w: lambda: T.memref(size_w, _w_elem_type()),
-            arg_scale_x: lambda: T.memref(size_scale_x, _scale_elem_type()),
-            arg_scale_w: lambda: T.memref(experts * model_dim, _scale_elem_type()),
-            arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
-            arg_expert_ids: lambda: T.memref(size_expert_ids_shape, T.i32()),
-            arg_sorted_weights: lambda: T.memref(size_sorted, T.f32()),
-            arg_num_valid_ids: lambda: T.memref(DYN, T.i32()),
-            arg_bias: lambda: T.memref(DYN, T.f32()),
-            tokens_in: lambda: T.index(),
-            n_in: lambda: T.index(),
-            k_in: lambda: T.index(),
-            size_expert_ids_in: lambda: T.index(),
-            stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
-        ):
-            bdx = 256
-            gx = n_in / arith.index(tile_n)
-            gy = size_expert_ids_in
-            stream_token = stream_ptr_to_async_token(stream_ptr)
-            flir.gpu_ext.LaunchFuncOp(
-                [module_name, "moe_gemm2"],
-                grid_size=(gx, gy, 1),
-                block_size=(bdx, 1, 1),
-                kernel_operands=[
-                    arg_out,
-                    arg_x,
-                    arg_w,
-                    arg_scale_x,
-                    arg_scale_w,
-                    arg_sorted_token_ids,
-                    arg_expert_ids,
-                    arg_sorted_weights,
-                    arg_num_valid_ids,
-                    arg_bias,
-                    tokens_in,
-                    n_in,
-                    k_in,
-                    size_expert_ids_in,
-                ],
-                async_dependencies=[stream_token],
-            )
+    # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
+    _cache_tag = (
+        module_name,
+        a_dtype,
+        b_dtype,
+        out_dtype,
+        tile_m,
+        tile_n,
+        tile_k,
+        doweight_stage2,
+        accumulate,
+        enable_bias,
+        model_dim_pad,
+        inter_dim_pad,
+        use_cshuffle_epilog,
+    )
 
-    m = _MOE2()
-    exe = flydsl.compile(m)
-    return exe
+    @flyc.jit
+    def launch_mixed_moe_gemm2(
+        arg_out: fx.Tensor,
+        arg_x: fx.Tensor,
+        arg_w: fx.Tensor,
+        arg_scale_x: fx.Tensor,
+        arg_scale_w: fx.Tensor,
+        arg_sorted_token_ids: fx.Tensor,
+        arg_expert_ids: fx.Tensor,
+        arg_sorted_weights: fx.Tensor,
+        arg_num_valid_ids: fx.Tensor,
+        arg_bias: fx.Tensor,
+        i32_tokens_in: fx.Int32,
+        i32_n_in: fx.Int32,
+        i32_k_in: fx.Int32,
+        i32_size_expert_ids_in: fx.Int32,
+        stream_ptr: int,
+    ):
+        _ = _cache_tag
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
+
+        n_in = arith.index_cast(ir.IndexType.get(), i32_n_in.ir_value())
+        gx = n_in / arith.constant(tile_n, index=True)
+        gy = arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value())
+        stream_token = stream_ptr_to_async_token(stream_ptr)
+
+        moe_gemm2(
+            arg_out,
+            arg_x,
+            arg_w,
+            arg_scale_x,
+            arg_scale_w,
+            arg_sorted_token_ids,
+            arg_expert_ids,
+            arg_sorted_weights,
+            arg_num_valid_ids,
+            arg_bias,
+            i32_tokens_in,
+            i32_n_in,
+            i32_k_in,
+            i32_size_expert_ids_in,
+        ).launch(
+            grid=(gx, gy, 1),
+            block=(256, 1, 1),
+            stream=stream_token,
+        )
+
+    return launch_mixed_moe_gemm2
 

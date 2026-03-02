@@ -710,6 +710,9 @@ template <class IntTuple>
 IntTuple intTupleSelect(const IntTupleBuilder<IntTuple> &builder, IntTuple val,
                         ArrayRef<int32_t> indices) {
   assert(!val.isLeaf() && "intTupleSelect expects a non-leaf tuple");
+  if (indices.size() == 1) {
+    return builder.at(val, indices[0]);
+  }
   typename IntTupleBuilder<IntTuple>::ElemCollector collector;
   for (int32_t idx : indices) {
     collector.push_back(builder.at(val, idx));

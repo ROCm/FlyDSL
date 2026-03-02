@@ -1,16 +1,26 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
-try:
-    from flydsl.compiler.pipeline import Pipeline, run_pipeline
-except ImportError:
-    Pipeline = run_pipeline = None
 from flydsl.runtime.device import get_rocm_arch
-from flydsl._mlir import ir
 import os
 import torch
 import functools
 import time
 from typing import Optional
+
+
+def _resolve_pipeline_api():
+    """Resolve Pipeline/run_pipeline from available FlyDSL APIs.
+
+    Newer trees may not expose `flydsl.compiler.pipeline`; older test helpers still
+    rely on the FLIR pass pipeline builder. Resolve lazily so modules that only use
+    quant helpers (e.g. moe tests) don't fail at import time.
+    """
+    try:
+        from flydsl.compiler.pipeline import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
+    except Exception:
+        from flydsl.passes import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """
@@ -51,6 +61,9 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
 
 def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """Implementation of compile_to_hsaco; assumes an MLIR context is already active."""
+    from flydsl._mlir import ir
+
+    Pipeline, run_pipeline = _resolve_pipeline_api()
     # Check environment variables for IR dumping
     dump_ir = os.environ.get('FLIR_DUMP_IR', '0') == '1'
     dump_dir = os.environ.get('FLIR_DUMP_DIR', '/tmp/flir_dump')
@@ -326,30 +339,3 @@ def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Te
     x_ = x_.view(x_type)
     x_.is_shuffled = True
     return x_
-
-
-def shuffle_scale_for_int4(scale: torch.Tensor, group_size: int = 32, layout=(16, 16)) -> torch.Tensor:
-    """Prepare scale tensor for W4A16 groupwise scale kernel.
-
-    NOTE: Despite the name, this function does NOT shuffle the scale tensor.
-    The kernel uses the [E, num_groups, N] layout (Opt 0: cache-friendly) where
-    adjacent threads read adjacent N elements (stride-1 access).
-
-    Scale indexing uses: scale_idx = expert_offset*(G-1) + n_global + group_idx*N_pe
-
-    Args:
-        scale: Scale tensor of shape [E, num_groups, N] where num_groups = K_dim // group_size
-        group_size: Group size for quantization (must be 32 for FlyDSL)
-        layout: Tile layout (unused, kept for API compatibility)
-
-    Returns:
-        Scale tensor in [E, num_groups, N] layout, ready for kernel consumption.
-    """
-    if group_size != 32:
-        raise ValueError(
-            f"shuffle_scale_for_int4 only supports group_size=32, got {group_size}. "
-            f"This is due to int4 preshuffle layout constraints."
-        )
-
-    # No shuffle needed - return original scale (ensure contiguous)
-    return scale.contiguous()
