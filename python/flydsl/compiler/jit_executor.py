@@ -103,7 +103,7 @@ class CompiledArtifact:
     def __call__(self, *args, **kwargs):
         func_exe = self._get_func_exe()
 
-        all_c_ptrs: List[ctypes.c_void_p] = []
+        ptrs: List[ctypes.c_void_p] = []
         for arg in args:
             all_c_ptrs.extend(fly_pointers(arg))
 

@@ -369,7 +369,7 @@ def get_flat_coord(index, layout, loc=None, ip=None):
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
-@dsl_api_wrapper
+@traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
         IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
@@ -377,7 +377,7 @@ def idx2crd(idx, layout, loc=None, ip=None):
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
 
 
-@dsl_api_wrapper
+@traced_op
 def get(int_tuple, mode, loc=None, ip=None):
     if isinstance(int_tuple, (list, tuple)):
         return int_tuple[mode]
