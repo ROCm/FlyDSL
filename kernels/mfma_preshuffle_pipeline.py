@@ -588,6 +588,8 @@ __all__ = [
     "unpack_b_w4a16",
     "load_b_raw_w4a16_groupwise",
     "unpack_b_w4a16_groupwise",
+    "load_b_raw_w4a8_groupwise",
+    "unpack_b_w4a8",
 ]
 
 
@@ -769,5 +771,116 @@ def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
     directly with the ``scale_val`` keyword.
     """
     return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val)
+
+
+# ---------------------------------------------------------------------------
+# Split load / unpack for W4A8 groupwise latency hiding
+# ---------------------------------------------------------------------------
+
+def load_b_raw_w4a8_groupwise(
+    buffer_ops,
+    flir,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k: "ir.Value",
+    ki_step: int,
+    n_blk: "ir.Value",
+    n_intra: "ir.Value",
+    lane_div_16: "ir.Value",
+    elem_type: "ir.Type",
+    scale_rsrc,
+    expert_offset: "ir.Value",
+    num_groups: int,
+    group_size: int,
+    n_per_expert: int,
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A8 groupwise B load: issue buffer_loads for weight + scale.
+
+    Uses the same addressing as ``load_b_pack_k32(unpack_int4=True)`` for the
+    weight, plus per-group scale loading (same indexing as W4A16 groupwise).
+
+    Returns ``(packed32, scale_val)`` to be passed to :func:`unpack_b_w4a8`.
+    """
+    if kpack_bytes != 8:
+        raise ValueError(f"W4A8 requires kpack_bytes=8, got {kpack_bytes!r}")
+
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+
+    c64 = arith.constant(64, index=True)
+    k0_base = base_k / c64
+    k0 = k0_base + arith.constant(ki_step // 2, index=True)
+    k1 = lane_div_16
+    half_bytes = kpack_bytes // 2
+    k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
+
+    coord_pack = flir.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
+    idx_pack = flir.crd2idx(coord_pack, layout_b)
+    idx_bytes = idx_pack + k2_base
+
+    atom = flir.make_copy_atom(elem_type, vector_size=4)
+    b_view = flir.TensorView(
+        arg_b, (4,), strides=(1,),
+        base_indices=(idx_bytes,),
+        element_type=elem_type,
+    )
+    b4 = flir.copy(
+        atom, b_view, None,
+        alignment=4, return_vector=True,
+        src_buffer_resource=b_rsrc, src_buffer_offset_in_bytes=True,
+    )
+    vec1_i32 = ir.VectorType.get([1], i32)
+    packed32 = vector.extract(
+        vector.bitcast(vec1_i32, b4),
+        static_position=[0], dynamic_position=[],
+    )
+
+    c_ki_elems = arith.constant(ki_step * 32, index=True)
+    k_pos_base = base_k + c_ki_elems
+
+    c_group_size = arith.constant(group_size, index=True)
+    group_idx = k_pos_base / c_group_size
+
+    c16 = arith.constant(16, index=True)
+    n_global = n_blk * c16 + n_intra
+
+    c_gm1 = arith.constant(num_groups - 1, index=True)
+    c_npe = arith.constant(n_per_expert, index=True)
+    scale_idx = expert_offset * c_gm1 + n_global + group_idx * c_npe
+    scale_idx_i32 = arith.index_cast(i32, scale_idx)
+
+    scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=f32)
+
+    return (packed32, scale_val)
+
+
+def unpack_b_w4a8(packed32, arith, vector):
+    """Phase 2 of W4A8 B load: 7-op unpack from packed int4 to int8 i64.
+
+    Takes the raw ``packed32`` from :func:`load_b_raw_w4a8_groupwise` and
+    produces one i64 value containing 8 signed int8 bytes for one MFMA K32 step.
+    """
+    c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
+    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
+    c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
+    c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
+
+    s0 = (packed32 & c_08080808) * c_1e
+    even = (packed32 & c_0f0f0f0f) | s0
+
+    t = packed32 >> c_4_i32
+    s1 = (t & c_08080808) * c_1e
+    odd = (t & c_0f0f0f0f) | s1
+
+    vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+    v2 = vector.from_elements(vec2_i32, [even, odd])
+    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+    v64 = vector.bitcast(vec1_i64, v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 

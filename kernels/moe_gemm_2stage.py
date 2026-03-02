@@ -38,6 +38,8 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     unpack_b_w4a16,
     load_b_raw_w4a16_groupwise,
     unpack_b_w4a16_groupwise,
+    load_b_raw_w4a8_groupwise,
+    unpack_b_w4a8,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from flydsl.kernels.kernels_common import stream_ptr_to_async_token
@@ -111,21 +113,25 @@ def compile_moe_gemm1(
     # - fp8/int8/int4: both scales needed
     needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16
     needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
-    # Group-wise scale support for W4A16
+    # Group-wise scale support for W4A16 and W4A8
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
     # The int4 preshuffle uses K=32 blocks, which aligns perfectly with group_size=32.
     # Other group sizes would require per-K scale (not per-group), significantly
     # increasing memory usage. For other group sizes, fallback to Triton kernel.
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    use_groupwise_scale = (is_int4_bf16 or is_int4) and group_size > 0
     if use_groupwise_scale and group_size != 32:
         raise ValueError(
-            f"FlyDSL W4A16 groupwise scale only supports group_size=32, got {group_size}. "
+            f"FlyDSL groupwise scale only supports group_size=32, got {group_size}. "
             f"This is due to int4 preshuffle layout constraints. "
             f"Please use Triton kernel for other group sizes."
         )
+    is_int4_groupwise = is_int4 and use_groupwise_scale
     num_groups = model_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage1 = experts * (2 * inter_dim) * num_groups
-    # For W4A16 with groupwise scale, scale is applied in load_b, so epilogue can skip scale multiplication entirely
+    # For groupwise scale, weight scale is applied per-group (in load_b for W4A16,
+    # in the K loop for W4A8), so epilogue can skip weight scale multiplication.
+    # For W4A16 groupwise: skip entirely (bf16 activations have no scale_x).
+    # For W4A8 groupwise: still need scale_x in epilogue.
     skip_epilogue_scale = use_groupwise_scale and (not needs_scale_x)
 
     mfma_i32_k32 = None
@@ -186,10 +192,12 @@ def compile_moe_gemm1(
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
+    _gs_tag = f"_g{group_size}" if use_groupwise_scale else ""
     module_name = (
         f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi3"  # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
+        f"{_gs_tag}"
+        f"_abi3"
     ).replace("-", "_")
 
     class _MOE1(flir.MlirModule):
@@ -268,9 +276,10 @@ def compile_moe_gemm1(
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
-                if is_int8
+                if (is_int8 and not is_int4_groupwise)
                 else arith.constant_vector(0.0, vec4_f32)
             )
+            zero_i32_acc = arith.constant_vector(0, vec4_i32) if is_int4_groupwise else None
 
             # Layouts
             layout_x = flir.make_layout((tokens_in, k_in), stride=(k_in, 1))
@@ -653,6 +662,46 @@ def compile_moe_gemm1(
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
                         return b_tile
+                    elif is_int4_groupwise:
+                        # ---- W4A8 groupwise: 2-phase load+unpack per K32 step ----
+                        # Phase 1: Issue ALL buffer_loads (weight + group scale).
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ki_half in range_constexpr(2):
+                                ki_step = ku * 2 + ki_half
+                                raw_half = []
+                                for ni in range_constexpr(num_acc_n):
+                                    raw = load_b_raw_w4a8_groupwise(
+                                        buffer_ops, flir, arith, vector,
+                                        arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                        base_k=base_k, ki_step=ki_step,
+                                        n_blk=blk_list[ni], n_intra=intra_list[ni],
+                                        lane_div_16=lane_div_16, elem_type=w_elem,
+                                        scale_rsrc=sw_rsrc,
+                                        expert_offset=expert_off_idx,
+                                        num_groups=num_groups,
+                                        group_size=group_size,
+                                        n_per_expert=2*inter_dim,
+                                        kpack_bytes=kpack_bytes,
+                                    )
+                                    raw_half.append(raw)
+                                raw_ku.append(raw_half)
+                            raw_data.append(raw_ku)
+                        # Phase 2: Unpack ALL.
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            scales0, scales1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                packed32_0, sc0 = raw_data[ku][0][ni]
+                                packed32_1, sc1 = raw_data[ku][1][ni]
+                                packs0.append(unpack_b_w4a8(packed32_0, arith, vector))
+                                packs1.append(unpack_b_w4a8(packed32_1, arith, vector))
+                                scales0.append(sc0)
+                                scales1.append(sc1)
+                            b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
                     else:
                         # ---- fp8/int8/bf16: original code, completely unchanged ----
                         b_tile = []
@@ -830,38 +879,78 @@ def compile_moe_gemm1(
                         # fp8/int8: both A and B are raw i64.
                         acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
                         return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
-    
-                    for ku in range_constexpr(k_unroll):
-                        b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
-                        b_up_packs0, b_up_packs1 = b_up_tile_in[ku]
-                        ki64 = arith.constant(ku * 64, index=True)
-                        col_base = col_offset_base_bytes + ki64
-    
-                        for mi in range_constexpr(m_repeat):
-                            mi_val = arith.constant(mi * 16, index=True)
-                            curr_row_a_lds = row_a_lds + mi_val
-    
-                            if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
-    
-                            for ni in range_constexpr(num_acc_n):
-                                acc_idx = mi * num_acc_n + ni
-                                gate_list[acc_idx] = mfma_k64(
-                                    gate_list[acc_idx],
-                                    a0,
-                                    a1,
-                                    b_gate_packs0[ni],
-                                    b_gate_packs1[ni],
-                                )
-                                up_list[acc_idx] = mfma_k64(
-                                    up_list[acc_idx],
-                                    a0,
-                                    a1,
-                                    b_up_packs0[ni],
-                                    b_up_packs1[ni],
-                                )
+
+                    def _acc_scaled_i32_to_f32(f32_acc_vec, i32_partial_vec, scale_val):
+                        """i32 MFMA partial → sitofp → scale → add to f32 accumulator."""
+                        new_vals = []
+                        for ii in range_constexpr(4):
+                            vi = vector.extract(i32_partial_vec, static_position=[ii], dynamic_position=[])
+                            vf = arith.sitofp(f32, vi) * scale_val
+                            old = vector.extract(f32_acc_vec, static_position=[ii], dynamic_position=[])
+                            new_vals.append(old + vf)
+                        return vector.from_elements(vec4_f32, new_vals)
+
+                    if is_int4_groupwise:
+                        # W4A8 groupwise: per-K32 MFMA with fresh i32 acc → f32 scale → f32 running acc.
+                        for ku in range_constexpr(k_unroll):
+                            b_gate_packs0, b_gate_packs1, b_gate_scales0, b_gate_scales1 = b_gate_tile_in[ku]
+                            b_up_packs0, b_up_packs1, b_up_scales0, b_up_scales1 = b_up_tile_in[ku]
+                            ki64 = arith.constant(ku * 64, index=True)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.constant(mi * 16, index=True)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    # K32 half 0: fresh i32 MFMA, then scale and accumulate into f32
+                                    i32_g0 = mfma_i32_k32(vec4_i32, [a0, b_gate_packs0[ni], zero_i32_acc, 0, 0, 0])
+                                    gate_list[acc_idx] = _acc_scaled_i32_to_f32(gate_list[acc_idx], i32_g0, b_gate_scales0[ni])
+                                    i32_u0 = mfma_i32_k32(vec4_i32, [a0, b_up_packs0[ni], zero_i32_acc, 0, 0, 0])
+                                    up_list[acc_idx] = _acc_scaled_i32_to_f32(up_list[acc_idx], i32_u0, b_up_scales0[ni])
+                                    # K32 half 1
+                                    i32_g1 = mfma_i32_k32(vec4_i32, [a1, b_gate_packs1[ni], zero_i32_acc, 0, 0, 0])
+                                    gate_list[acc_idx] = _acc_scaled_i32_to_f32(gate_list[acc_idx], i32_g1, b_gate_scales1[ni])
+                                    i32_u1 = mfma_i32_k32(vec4_i32, [a1, b_up_packs1[ni], zero_i32_acc, 0, 0, 0])
+                                    up_list[acc_idx] = _acc_scaled_i32_to_f32(up_list[acc_idx], i32_u1, b_up_scales1[ni])
+                    else:
+                        for ku in range_constexpr(k_unroll):
+                            b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
+                            b_up_packs0, b_up_packs1 = b_up_tile_in[ku]
+                            ki64 = arith.constant(ku * 64, index=True)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.constant(mi * 16, index=True)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    gate_list[acc_idx] = mfma_k64(
+                                        gate_list[acc_idx],
+                                        a0,
+                                        a1,
+                                        b_gate_packs0[ni],
+                                        b_gate_packs1[ni],
+                                    )
+                                    up_list[acc_idx] = mfma_k64(
+                                        up_list[acc_idx],
+                                        a0,
+                                        a1,
+                                        b_up_packs0[ni],
+                                        b_up_packs1[ni],
+                                    )
                     return gate_list, up_list, epilogue_pf
     
                 # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
@@ -1105,10 +1194,12 @@ def compile_moe_gemm1(
                                 acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                             )
 
-                            if is_int8:
+                            if is_int8 and not is_int4_groupwise:
                                 vg = arith.sitofp(f32, vg)
                                 vu = arith.sitofp(f32, vu)
-                            # For W4A16 with groupwise scale, scale is already applied in load_b
+                            # For groupwise scale, weight scale is already applied per-group.
+                            # W4A16: skip_epilogue_scale=True (no scale_x needed either).
+                            # W4A8: skip_epilogue_scale=False, but sw_gate/sw_up are 1.0.
                             if not skip_epilogue_scale:
                                 vg = vg * sx * sw_gate
                                 vu = vu * sx * sw_up
@@ -1225,10 +1316,9 @@ def compile_moe_gemm1(
                                 acc_up[acc_idx], static_position=[ii], dynamic_position=[]
                             )
         
-                            if is_int8:
+                            if is_int8 and not is_int4_groupwise:
                                 vg = arith.sitofp(f32, vg)
                                 vu = arith.sitofp(f32, vu)
-                            # For W4A16 with groupwise scale, scale is already applied in load_b
                             if not skip_epilogue_scale:
                                 vg = vg * sx * sw_gate
                                 vu = vu * sx * sw_up
@@ -1370,19 +1460,20 @@ def compile_moe_gemm2(
     # - fp8/int8/int4: both scales needed
     needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16
     needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
-    # Group-wise scale support for W4A16
+    # Group-wise scale support for W4A16 and W4A8
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    use_groupwise_scale = (is_int4_bf16 or is_int4) and group_size > 0
     if use_groupwise_scale and group_size != 32:
         raise ValueError(
-            f"FlyDSL W4A16 groupwise scale only supports group_size=32, got {group_size}. "
+            f"FlyDSL groupwise scale only supports group_size=32, got {group_size}. "
             f"This is due to int4 preshuffle layout constraints. "
             f"Please use Triton kernel for other group sizes."
         )
+    is_int4_groupwise = is_int4 and use_groupwise_scale
     # Stage 2: K dimension is inter_dim (not model_dim)
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage2 = experts * model_dim * num_groups
-    # For W4A16 with groupwise scale, scale is applied in load_b, so epilogue can skip scale multiplication entirely
+    # For groupwise scale, weight scale is applied per-group.
     skip_epilogue_scale = use_groupwise_scale and (not needs_scale_x)
 
     mfma_i32_k32 = None
@@ -1469,10 +1560,12 @@ def compile_moe_gemm2(
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
     # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
+    _gs_tag = f"_g{group_size}" if use_groupwise_scale else ""
     module_name = (
         f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
-        f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
+        f"{_gs_tag}"
+        f"_abi2"
     ).replace("-", "_")
 
     class _MOE2(flir.MlirModule):
@@ -1538,9 +1631,10 @@ def compile_moe_gemm2(
 
             acc_init = (
                 arith.constant_vector(0, vec4_i32)
-                if is_int8
+                if (is_int8 and not is_int4_groupwise)
                 else arith.constant_vector(0.0, vec4_f32)
             )
+            zero_i32_acc = arith.constant_vector(0, vec4_i32) if is_int4_groupwise else None
 
             # A2 layout (flatten token-slot -> M).
             topk_idx = arith.constant(topk, index=True)
@@ -1917,6 +2011,44 @@ def compile_moe_gemm2(
                                 packs1.append(b1)
                             b_tile.append((packs0, packs1))
                         return b_tile
+                    elif is_int4_groupwise:
+                        # ---- W4A8 groupwise: 2-phase load+unpack per K32 step ----
+                        raw_data = []
+                        for ku in range_constexpr(k_unroll):
+                            raw_ku = []
+                            for ki_half in range_constexpr(2):
+                                ki_step = ku * 2 + ki_half
+                                raw_half = []
+                                for ni in range_constexpr(num_acc_n):
+                                    raw = load_b_raw_w4a8_groupwise(
+                                        buffer_ops, flir, arith, vector,
+                                        arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                        base_k=base_k, ki_step=ki_step,
+                                        n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                        lane_div_16=lane_div_16, elem_type=w_elem,
+                                        scale_rsrc=sw_rsrc,
+                                        expert_offset=expert_idx * arith.constant(model_dim, index=True),
+                                        num_groups=num_groups,
+                                        group_size=group_size,
+                                        n_per_expert=model_dim,
+                                        kpack_bytes=kpack_bytes,
+                                    )
+                                    raw_half.append(raw)
+                                raw_ku.append(raw_half)
+                            raw_data.append(raw_ku)
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            scales0, scales1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                packed32_0, sc0 = raw_data[ku][0][ni]
+                                packed32_1, sc1 = raw_data[ku][1][ni]
+                                packs0.append(unpack_b_w4a8(packed32_0, arith, vector))
+                                packs1.append(unpack_b_w4a8(packed32_1, arith, vector))
+                                scales0.append(sc0)
+                                scales1.append(sc1)
+                            b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
                     else:
                         # ---- fp8/int8/bf16: original code, completely unchanged ----
                         b_tile = []
@@ -2089,30 +2221,62 @@ def compile_moe_gemm2(
                         # fp8/int8: both A and B are raw i64.
                         acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
                         return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
-    
-                    for ku in range_constexpr(k_unroll):
-                        b_packs0, b_packs1 = b_tile_in[ku]
-                        ki64 = arith.constant(ku * 64, index=True)
-                        col_base = col_offset_base_bytes + ki64
-    
-                        for mi in range_constexpr(m_repeat):
-                            mi_val = arith.constant(mi * 16, index=True)
-                            curr_row_a_lds = row_a_lds + mi_val
-    
-                            if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
-                                a0, a1 = a0_prefetch
-                            else:
-                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
-    
-                            for ni in range_constexpr(num_acc_n):
-                                acc_idx = mi * num_acc_n + ni
-                                acc_list[acc_idx] = mfma_k64(
-                                    acc_list[acc_idx],
-                                    a0,
-                                    a1,
-                                    b_packs0[ni],
-                                    b_packs1[ni],
-                                )
+
+                    def _acc_scaled_i32_to_f32(f32_acc_vec, i32_partial_vec, scale_val):
+                        """i32 MFMA partial → sitofp → scale → add to f32 accumulator."""
+                        new_vals = []
+                        for ii in range_constexpr(4):
+                            vi = vector.extract(i32_partial_vec, static_position=[ii], dynamic_position=[])
+                            vf = arith.sitofp(f32, vi) * scale_val
+                            old = vector.extract(f32_acc_vec, static_position=[ii], dynamic_position=[])
+                            new_vals.append(old + vf)
+                        return vector.from_elements(vec4_f32, new_vals)
+
+                    if is_int4_groupwise:
+                        for ku in range_constexpr(k_unroll):
+                            b_packs0, b_packs1, b_scales0, b_scales1 = b_tile_in[ku]
+                            ki64 = arith.constant(ku * 64, index=True)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.constant(mi * 16, index=True)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    i32_p0 = mfma_i32_k32(vec4_i32, [a0, b_packs0[ni], zero_i32_acc, 0, 0, 0])
+                                    acc_list[acc_idx] = _acc_scaled_i32_to_f32(acc_list[acc_idx], i32_p0, b_scales0[ni])
+                                    i32_p1 = mfma_i32_k32(vec4_i32, [a1, b_packs1[ni], zero_i32_acc, 0, 0, 0])
+                                    acc_list[acc_idx] = _acc_scaled_i32_to_f32(acc_list[acc_idx], i32_p1, b_scales1[ni])
+                    else:
+                        for ku in range_constexpr(k_unroll):
+                            b_packs0, b_packs1 = b_tile_in[ku]
+                            ki64 = arith.constant(ku * 64, index=True)
+                            col_base = col_offset_base_bytes + ki64
+
+                            for mi in range_constexpr(m_repeat):
+                                mi_val = arith.constant(mi * 16, index=True)
+                                curr_row_a_lds = row_a_lds + mi_val
+
+                                if (a0_prefetch is not None) and (ku == 0) and (mi == 0):
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    acc_list[acc_idx] = mfma_k64(
+                                        acc_list[acc_idx],
+                                        a0,
+                                        a1,
+                                        b_packs0[ni],
+                                        b_packs1[ni],
+                                    )
                     return acc_list, epilogue_pf
     
                 # ---------------- 2-stage pipeline (ping-pong LDS + B tile prefetch) ----------------
@@ -2390,9 +2554,8 @@ def compile_moe_gemm2(
                             sw = sw_vals[ni]
                             acc_idx = mi * num_acc_n + ni
                             v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
-                            if is_int8:
+                            if is_int8 and not is_int4_groupwise:
                                 v = arith.sitofp(f32, v)
-                            # For W4A16 with groupwise scale, scale is already applied in load_b
                             if not skip_epilogue_scale:
                                 v = v * sx * sw
                             if doweight_stage2:
@@ -2468,9 +2631,8 @@ def compile_moe_gemm2(
                             sw = sw_vals[ni]
                             acc_idx = mi * num_acc_n + ni
                             v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
-                            if is_int8:
+                            if is_int8 and not is_int4_groupwise:
                                 v = arith.sitofp(f32, v)
-                            # For W4A16 with groupwise scale, scale is already applied in load_b
                             if not skip_epilogue_scale:
                                 v = v * sx * sw
                             if doweight_stage2:
