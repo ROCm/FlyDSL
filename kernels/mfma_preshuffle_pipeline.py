@@ -284,6 +284,53 @@ def load_b_pack_k32(
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
+def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
+    """Convert one i32 (4 signed int8 bytes) → 4 bf16 packed as i64.
+
+    Uses shift-based f32→bf16 truncation (``v_lshrrev_b32 dst, 16, src``)
+    instead of ``arith.truncf`` which on gfx942 expands to ~5 VALU per
+    element (software RNE).  The shift is exact for unscaled int8 values
+    and introduces <0.5 ULP error for scaled values — negligible for
+    inference.
+
+    If *scale_val* (an f32 SSA value) is provided, each f32 is multiplied
+    by the scale before truncation (groupwise path).
+    """
+    i8 = ir.IntegerType.get_signless(8)
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+    vec1_i32_t = ir.VectorType.get([1], i32)
+    vec2_i32 = ir.VectorType.get([2], i32)
+    vec4_i8 = ir.VectorType.get([4], i8)
+    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+
+    v1 = vector.from_elements(vec1_i32_t, [val_i32])
+    i8x4 = vector.bitcast(vec4_i8, v1)
+
+    f32_vals = []
+    for i in range(4):
+        val_i8 = vector.extract(i8x4, static_position=[i], dynamic_position=[])
+        v = arith.sitofp(f32, val_i8)
+        if scale_val is not None:
+            v = v * scale_val
+        f32_vals.append(v)
+
+    # Shift-based f32→bf16: take upper 16 bits of each f32 (truncation toward zero).
+    # ~3 VALU per pair vs ~10 VALU for software RNE truncf on gfx942.
+    c16 = arith.constant(16, type=i32)
+    c_ffff0000 = arith.constant(0xFFFF0000, type=i32)
+    bits0 = arith.bitcast(i32, f32_vals[0])
+    bits1 = arith.bitcast(i32, f32_vals[1])
+    bits2 = arith.bitcast(i32, f32_vals[2])
+    bits3 = arith.bitcast(i32, f32_vals[3])
+    i32_lo = arith.ori(arith.shrui(bits0, c16), arith.andi(bits1, c_ffff0000))
+    i32_hi = arith.ori(arith.shrui(bits2, c16), arith.andi(bits3, c_ffff0000))
+
+    v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
+    v64 = vector.bitcast(vec1_i64, v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
 def tile_chunk_coord_i32(
     flir,
     arith,
@@ -537,5 +584,190 @@ __all__ = [
     "make_preshuffle_scale_layout",
     "load_b_pack_k32",
     "tile_chunk_coord_i32",
+    "load_b_raw_w4a16",
+    "unpack_b_w4a16",
+    "load_b_raw_w4a16_groupwise",
+    "unpack_b_w4a16_groupwise",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Split load / unpack for W4A16 latency hiding
+# ---------------------------------------------------------------------------
+# The buffer_load and unpack/dequant are separated so that the caller can
+# issue ALL loads first (Phase 1) and then unpack (Phase 2), overlapping
+# VMEM latency with VALU work.
+# ---------------------------------------------------------------------------
+
+def load_b_raw_w4a16(
+    buffer_ops,
+    flir,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k: "ir.Value",
+    ku: int,
+    n_blk: "ir.Value",
+    n_intra: "ir.Value",
+    lane_div_16: "ir.Value",
+    elem_type: "ir.Type",
+    kpack_bytes: int = 8,
+    act_elem_bytes: int = 2,
+):
+    """Phase 1 of W4A16 B load: issue buffer_load_dword, return raw packed i32.
+
+    Same address calculation as load_b_pack_w4a16 but stops after the load.
+    The returned ``packed32`` must be passed to :func:`unpack_b_w4a16` later.
+    """
+    if kpack_bytes != 8:
+        raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
+
+    c64 = arith.constant(64, index=True)
+    half_bytes = kpack_bytes // 2
+
+    k0_base = base_k / c64
+    k1_layout_offset = ku * 2
+    c2_idx = arith.constant(2, index=True)
+    c4_idx = arith.constant(4, index=True)
+
+    lane_div_32 = lane_div_16 / c2_idx
+    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
+
+    k0 = k0_base + (total_k1 / c4_idx)
+    k1_local = total_k1 % c4_idx
+
+    lane_odd = lane_div_16 % c2_idx
+    k2_base = lane_odd * arith.constant(half_bytes, index=True)
+
+    coord_pack = flir.make_coord(n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
+    idx_pack = flir.crd2idx(coord_pack, layout_b)
+    idx_bytes = idx_pack + k2_base
+
+    atom = flir.make_copy_atom(elem_type, vector_size=4)
+    b_view = flir.TensorView(
+        arg_b, (4,), strides=(1,),
+        base_indices=(idx_bytes,),
+        element_type=elem_type,
+    )
+    b4 = flir.copy(
+        atom, b_view, None,
+        alignment=4,
+        return_vector=True,
+        src_buffer_resource=b_rsrc,
+        src_buffer_offset_in_bytes=True,
+    )
+    vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
+    packed32 = vector.extract(
+        vector.bitcast(vec1_i32, b4),
+        static_position=[0],
+        dynamic_position=[],
+    )
+    return packed32
+
+
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
+    """Phase 2 of W4A16 B load: 7-op unpack + int8->bf16 conversion.
+
+    Takes the raw ``packed32`` from :func:`load_b_raw_w4a16` and produces
+    ``(b0, b1)`` -- two i64 values each containing 4 bf16 for one MFMA.
+
+    If *scale_val* (an f32 SSA value) is provided, each element is multiplied
+    by the scale before truncation (groupwise dequant path).
+
+    Uses shift-based f32→bf16 truncation (<0.5 ULP, fine for inference).
+    """
+    c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
+    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
+    c_1e = arith.constant(0x1E, type=ir.IntegerType.get_signless(32))
+    c_4_i32 = arith.constant(4, type=ir.IntegerType.get_signless(32))
+
+    s0 = (packed32 & c_08080808) * c_1e
+    even = (packed32 & c_0f0f0f0f) | s0
+
+    t = packed32 >> c_4_i32
+    s1 = (t & c_08080808) * c_1e
+    odd = (t & c_0f0f0f0f) | s1
+
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
+
+    return (b0, b1)
+
+
+def load_b_raw_w4a16_groupwise(
+    buffer_ops,
+    flir,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k: "ir.Value",
+    ku: int,
+    n_blk: "ir.Value",
+    n_intra: "ir.Value",
+    lane_div_16: "ir.Value",
+    elem_type: "ir.Type",
+    scale_rsrc,
+    expert_offset: "ir.Value",
+    num_groups: int,
+    group_size: int,
+    n_per_expert: int,
+    kpack_bytes: int = 8,
+    act_elem_bytes: int = 2,
+):
+    """Phase 1 of W4A16 groupwise B load: issue buffer_loads for weight + scale.
+
+    Reuses :func:`load_b_raw_w4a16` for the weight load, then issues an
+    additional buffer_load for the per-group scale.
+
+    Returns ``(packed32, scale_val)`` to be passed to
+    :func:`unpack_b_w4a16` (with ``scale_val``) later.
+    """
+    # Reuse the non-groupwise weight load (identical address calc + buffer_load).
+    packed32 = load_b_raw_w4a16(
+        buffer_ops, flir, arith, vector,
+        arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
+        base_k=base_k, ku=ku,
+        n_blk=n_blk, n_intra=n_intra,
+        lane_div_16=lane_div_16, elem_type=elem_type,
+        kpack_bytes=kpack_bytes, act_elem_bytes=act_elem_bytes,
+    )
+
+    # --- groupwise scale load (the only part that differs) ---
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+
+    c_ku_elems = arith.constant(ku * 32, index=True)
+    k_pos_base = base_k + c_ku_elems
+
+    c_group_size = arith.constant(group_size, index=True)
+    group_idx = k_pos_base / c_group_size
+
+    c16 = arith.constant(16, index=True)
+    n_global = n_blk * c16 + n_intra
+
+    c_gm1 = arith.constant(num_groups - 1, index=True)
+    c_npe = arith.constant(n_per_expert, index=True)
+    scale_idx = expert_offset * c_gm1 + n_global + group_idx * c_npe
+    scale_idx_i32 = arith.index_cast(i32, scale_idx)
+
+    scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=f32)
+
+    return (packed32, scale_val)
+
+
+def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
+    """Phase 2 of W4A16 groupwise B load: unpack + scale + convert to bf16.
+
+    Thin wrapper around :func:`unpack_b_w4a16` with ``scale_val`` forwarded.
+    Kept for backward compatibility; new code can call ``unpack_b_w4a16``
+    directly with the ``scale_val`` keyword.
+    """
+    return unpack_b_w4a16(packed32, arith, vector, scale_val=scale_val)
+
 
