@@ -176,15 +176,31 @@ def _coerce_operands(a, b, widen_bool=False):
             dest)
 
 
+def _try_coerce_rhs(rhs):
+    """Try converting *rhs* to a Numeric; return None on failure."""
+    if isinstance(rhs, Numeric):
+        return rhs
+    if isinstance(rhs, ArithValue):
+        if isinstance(rhs.type, ir.VectorType):
+            return None
+        return as_numeric(rhs)
+    if isinstance(rhs, (int, float, bool)):
+        return as_numeric(rhs)
+    return None
+
+
+def _extract_arith(val, signed):
+    """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
+    v = val.value
+    return v.with_signedness(signed) if isinstance(v, ArithValue) else v
+
+
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
     """Create a binary-operator closure for Numeric subclasses."""
     def _apply(lhs, rhs, *, loc=None, ip=None):
-        if not isinstance(rhs, Numeric):
-            if not isinstance(rhs, (ArithValue, int, float, bool)):
-                return NotImplemented
-            if isinstance(rhs, ArithValue) and isinstance(rhs.type, ir.VectorType):
-                return NotImplemented
-            rhs = as_numeric(rhs)
+        rhs = _try_coerce_rhs(rhs)
+        if rhs is None:
+            return NotImplemented
 
         out_type = type(lhs)
         if promote:
@@ -197,9 +213,7 @@ def _make_binop(op, promote=True, widen_bool=False, swap=False):
         elif op is operator.truediv and isinstance(lhs, Integer):
             out_type = Float64 if out_type.width > 32 else Float32
 
-        lv = lhs.value.with_signedness(lhs.signed) if isinstance(lhs.value, ArithValue) else lhs.value
-        rv = rhs.value.with_signedness(rhs.signed) if isinstance(rhs.value, ArithValue) else rhs.value
-
+        lv, rv = _extract_arith(lhs, lhs.signed), _extract_arith(rhs, rhs.signed)
         if swap:
             lv, rv = rv, lv
         return out_type(op(lv, rv), loc=loc, ip=ip)
