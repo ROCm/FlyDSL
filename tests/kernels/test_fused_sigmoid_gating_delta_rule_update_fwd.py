@@ -39,6 +39,7 @@ def torch_ref_sigmoid_gating_update_fwd(
     state_pool,
     state_indices,
     scale,
+    use_qk_l2norm_in_kernel=False,
     softplus_beta=1.0,
     softplus_threshold=20.0,
 ):
@@ -64,8 +65,12 @@ def torch_ref_sigmoid_gating_update_fwd(
             h_idx = hv // (HV // H)
             h = state_after[state_idx, hv].clone()  # [K, V]
             for t in range(T_seq):
-                q_t = q[n, t, h_idx, :].float() * scale
+                q_t = q[n, t, h_idx, :].float()
                 k_t = k[n, t, h_idx, :].float()
+                if use_qk_l2norm_in_kernel:
+                    q_t = q_t / torch.sqrt((q_t * q_t).sum() + 1e-6)
+                    k_t = k_t / torch.sqrt((k_t * k_t).sum() + 1e-6)
+                q_t = q_t * scale
                 v_t = v[n, t, hv, :].float().clone()
 
                 x = a[n, t, hv].float() + dt_bias[hv].float()
@@ -120,6 +125,7 @@ def _run_kernel(
     b,
     state_pool,
     state_indices,
+    use_qk_l2norm_in_kernel=False,
     disable_state_update=False,
     disable_output_calculation=False,
 ):
@@ -132,6 +138,7 @@ def _run_kernel(
         V=V,
         N_STATE=N_STATE,
         dtype_str="f32",
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         disable_state_update=disable_state_update,
         disable_output_calculation=disable_output_calculation,
     )
@@ -165,15 +172,16 @@ def _print_minmax(name, x):
 
 
 @pytest.mark.parametrize(
-    "B,T_seq,H,HV,K,V,N_STATE,state_indices",
+    "B,T_seq,H,HV,K,V,N_STATE,state_indices,use_qk_l2norm_in_kernel",
     [
-        (1, 4, 1, 1, 8, 8, 2, [1]),  # MVP baseline
-        (1, 4, 2, 4, 8, 8, 3, [2]),  # HV > H mapping
-        (2, 3, 2, 2, 8, 8, 4, [3, 1]),  # multi-batch + state-pool indirection
+        (1, 4, 1, 1, 8, 8, 2, [1], False),  # MVP baseline
+        (1, 4, 2, 4, 8, 8, 3, [2], False),  # HV > H mapping
+        (2, 3, 2, 2, 8, 8, 4, [3, 1], False),  # multi-batch + state-pool indirection
+        (1, 4, 1, 1, 8, 8, 2, [1], True),  # qk l2norm
     ],
 )
 def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
-    ctx, B, T_seq, H, HV, K, V, N_STATE, state_indices
+    ctx, B, T_seq, H, HV, K, V, N_STATE, state_indices, use_qk_l2norm_in_kernel
 ):
     A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
         B, T_seq, H, HV, K, V, N_STATE, state_indices
@@ -190,6 +198,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
         state_pool=state_pool,
         state_indices=state_indices,
         scale=scale,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     got_o, got_state = _run_kernel(
         B=B,
@@ -208,6 +217,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
         b=b,
         state_pool=state_pool,
         state_indices=state_indices,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     _print_minmax("got_o", got_o)
     _print_minmax("ref_o", ref_o)
@@ -215,7 +225,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_core(
     _print_minmax("ref_state", ref_state)
     out_err = (got_o - ref_o).abs().max().item()
     state_err = (got_state - ref_state).abs().max().item()
-    print(f"shape(B,T,H,HV,K,V)=({B},{T_seq},{H},{HV},{K},{V})")
+    print(f"shape(B,T,H,HV,K,V)=({B},{T_seq},{H},{HV},{K},{V}), qk_l2={use_qk_l2norm_in_kernel}")
     print(f"max output error: {out_err:.3e}")
     print(f"max state  error: {state_err:.3e}")
     assert out_err < 1e-4

@@ -32,6 +32,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
     V: int,
     N_STATE: int,
     dtype_str: str = "f32",
+    use_qk_l2norm_in_kernel: bool = False,
     disable_state_update: bool = False,
     disable_output_calculation: bool = False,
 ):
@@ -115,6 +116,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             c_softplus_beta = arith.constant(SOFTPLUS_BETA, type=comp)
             c_inv_softplus_beta = arith.constant(1.0 / SOFTPLUS_BETA, type=comp)
             c_softplus_threshold = arith.constant(SOFTPLUS_THRESHOLD, type=comp)
+            c_eps = arith.constant(1e-6, type=comp)
             fm_fast = flir.arith.FastMathFlags.fast
 
             c_TH = arith.as_value(arith.index(T_seq * H))
@@ -176,6 +178,54 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                 for ik in range_constexpr(K):
                     q_vals.append(memref.load(q, [arith.as_value(row_qt), arith.index(ik)]))
                     k_vals.append(memref.load(k, [arith.as_value(row_qt), arith.index(ik)]))
+
+                if use_qk_l2norm_in_kernel:
+                    q_norm_sq = arith.constant(0.0, type=comp)
+                    k_norm_sq = arith.constant(0.0, type=comp)
+                    for ik in range_constexpr(K):
+                        q_sq = flir.arith.MulFOp(
+                            arith.as_value(q_vals[ik]),
+                            arith.as_value(q_vals[ik]),
+                            fastmath=fm_fast,
+                        ).result
+                        k_sq = flir.arith.MulFOp(
+                            arith.as_value(k_vals[ik]),
+                            arith.as_value(k_vals[ik]),
+                            fastmath=fm_fast,
+                        ).result
+                        q_norm_sq = flir.arith.AddFOp(
+                            arith.as_value(q_norm_sq), arith.as_value(q_sq), fastmath=fm_fast
+                        ).result
+                        k_norm_sq = flir.arith.AddFOp(
+                            arith.as_value(k_norm_sq), arith.as_value(k_sq), fastmath=fm_fast
+                        ).result
+                    q_inv_norm = flir.math.rsqrt(
+                        arith.as_value(
+                            flir.arith.AddFOp(
+                                arith.as_value(q_norm_sq), arith.as_value(c_eps), fastmath=fm_fast
+                            ).result
+                        ),
+                        fastmath=fm_fast,
+                    )
+                    k_inv_norm = flir.math.rsqrt(
+                        arith.as_value(
+                            flir.arith.AddFOp(
+                                arith.as_value(k_norm_sq), arith.as_value(c_eps), fastmath=fm_fast
+                            ).result
+                        ),
+                        fastmath=fm_fast,
+                    )
+                    for ik in range_constexpr(K):
+                        q_vals[ik] = flir.arith.MulFOp(
+                            arith.as_value(q_vals[ik]),
+                            arith.as_value(q_inv_norm),
+                            fastmath=fm_fast,
+                        ).result
+                        k_vals[ik] = flir.arith.MulFOp(
+                            arith.as_value(k_vals[ik]),
+                            arith.as_value(k_inv_norm),
+                            fastmath=fm_fast,
+                        ).result
 
                 v_vals = []
                 for iv in range_constexpr(V):
