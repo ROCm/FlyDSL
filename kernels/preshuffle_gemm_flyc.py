@@ -1008,32 +1008,28 @@ def compile_preshuffle_gemm_a8(
             b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
 
             next_k1 = k_iv + tile_k
-            b_tile_ping = prefetch_b_tile(next_k1)
             _sc_pong = load_fp4_scales(k_iv / arith.index(tile_k) * arith.index(_fp4_scale_k_stride)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k1, lds_a_ping)
             else:
-                a_regs_ping = prefetch_a_tile(next_k1)
+                store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
+            b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_a_pong,
                                       a0_prefetch=a0pf_in, fp4_scales=_sc_pong)
-            if not use_async_copy:
-                store_a_tile_to_lds(a_regs_ping, lds_a_ping)
             hot_loop_scheduler()
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
             next_k2 = k_iv + (tile_k * 2)
-            b_tile_pong_new = prefetch_b_tile(next_k2)
             _sc_ping = load_fp4_scales((k_iv + arith.index(tile_k)) / arith.index(tile_k) * arith.index(_fp4_scale_k_stride)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k2, lds_a_pong)
             else:
-                a_regs_pong = prefetch_a_tile(next_k2)
+                store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
+            b_tile_pong_new = prefetch_b_tile(next_k2)
             accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_a_ping,
                                       a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_ping)
-            if not use_async_copy:
-                store_a_tile_to_lds(a_regs_pong, lds_a_pong)
             hot_loop_scheduler()
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
