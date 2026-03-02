@@ -58,9 +58,9 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
-      - name: Read LLVM commit from cmake/llvm-hash.txt
+      - name: Read LLVM commit from thirdparty/llvm-hash.txt
         run: |
-          LLVM_COMMIT=$(cat flydsl-test/cmake/llvm-hash.txt | tr -d '[:space:]' | cut -c1-12)
+          LLVM_COMMIT=$(cat flydsl-test/thirdparty/llvm-hash.txt | tr -d '[:space:]' | cut -c1-12)
           echo "LLVM_COMMIT=${LLVM_COMMIT}" >> $GITHUB_ENV
           echo "Using LLVM commit: ${LLVM_COMMIT}"
 
