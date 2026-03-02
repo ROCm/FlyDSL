@@ -1,4 +1,4 @@
-#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
+#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 
 #include "mlir/Conversion/AsyncToLLVM/AsyncToLLVM.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"

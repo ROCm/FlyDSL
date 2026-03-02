@@ -3,7 +3,7 @@
 #define FLYDSL_CONVERSION_PASSES_H
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
-#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
+#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 
 namespace mlir {
 

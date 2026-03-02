@@ -1,5 +1,5 @@
-add_mlir_conversion_library(MLIRFlyGpuStreamInject
-  FlyGpuStreamInject.cpp
+add_mlir_conversion_library(MLIRFlyGpuToLLVM
+  FlyGpuToLLVM.cpp
 
   DEPENDS
   FlyConversionPassIncGen

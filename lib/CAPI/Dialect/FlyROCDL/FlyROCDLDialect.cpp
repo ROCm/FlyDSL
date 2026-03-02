@@ -1,7 +1,7 @@
 #include "flydsl-c/FlyROCDLDialect.h"
 
+#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
-#include "flydsl/Conversion/FlyGpuStreamInject/FlyGpuStreamInject.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
@@ -15,7 +15,8 @@ namespace mlir {
 using namespace mlir;
 using namespace mlir::fly_rocdl;
 
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl,
+                                      mlir::fly_rocdl::FlyROCDLDialect)
 
 //===----------------------------------------------------------------------===//
 // MmaAtomCDNA3_MFMAType
@@ -29,10 +30,12 @@ MlirTypeID mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID(void) {
   return wrap(MmaAtomCDNA3_MFMAType::getTypeID());
 }
 
-MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k, MlirType elemTyA,
-                                              MlirType elemTyB, MlirType elemTyAcc) {
-  return wrap(
-      MmaAtomCDNA3_MFMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB), unwrap(elemTyAcc)));
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k,
+                                              MlirType elemTyA,
+                                              MlirType elemTyB,
+                                              MlirType elemTyAcc) {
+  return wrap(MmaAtomCDNA3_MFMAType::get(m, n, k, unwrap(elemTyA),
+                                         unwrap(elemTyB), unwrap(elemTyAcc)));
 }
 
 int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(MlirType type) {
@@ -71,6 +74,4 @@ void mlirRegisterFlyToROCDLConversionPass(void) {
   mlir::registerFlyToROCDLConversionPass();
 }
 
-void mlirRegisterFlyGpuToLLVMPass(void) {
-  mlir::registerFlyGpuToLLVMPass();
-}
+void mlirRegisterFlyGpuToLLVMPass(void) { mlir::registerFlyGpuToLLVMPass(); }
