@@ -31,9 +31,9 @@ def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, ele
     vec_width = load_bytes // 4
 
     if offset_in_bytes:
-        idx_i32 = idx // 4
+        idx_i32 = idx / 4
     elif elem_bytes == 2:
-        idx_i32 = (idx * 2) // 4
+        idx_i32 = (idx * 2) / 4
     else:
         idx_i32 = idx
 
