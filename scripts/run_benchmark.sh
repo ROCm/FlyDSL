@@ -41,12 +41,21 @@ fp8,16,40960,5120,16,128,256
 fp8,16,77824,5120,16,128,256
 fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
+fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,64,256,128
+'
+
+GEMM_SHAPES_ASYNC='
+fp8,5120,5120,8320,128,256,128
+fp8,9728,8192,8320,128,256,128
+fp8,8192,8192,8192,128,256,128
+int8,9728,8192,8320,128,256,128
 '
 
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
+8192,8192,8192,64,256,128
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -373,6 +382,49 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       _show_fail_log "${log}" "gemm"
     fi
     row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+
+  GEMM_USE_ASYNC_COPY="${GEMM_USE_ASYNC_COPY:-1}"  # 0/1 (or "true"/"false")
+  GEMM_WAVES_PER_EU="${GEMM_WAVES_PER_EU:-2}"      # 0..4 (0 means "no hint")
+
+  for shape in $GEMM_SHAPES_ASYNC; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
+
+    async_copy_tag="async_copy"
+    if [ "${GEMM_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_USE_ASYNC_COPY}" = "true" ]; then
+      async_copy_flag="--use_async_copy"
+      async_copy_tag="async_copy"
+    fi
+    waves_per_eu_tag="${GEMM_WAVES_PER_EU}"
+
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --in_dtype "$dtype" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      ${async_copy_flag} \
+      --waves_per_eu "${GEMM_WAVES_PER_EU}" >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "gemm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "gemm"
+    fi
+    shape_tag="${M}x${N}x${K}"
+    row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
