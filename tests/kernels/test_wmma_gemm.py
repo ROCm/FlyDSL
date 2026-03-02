@@ -20,6 +20,7 @@ if _PYFLIR_SRC not in sys.path:
 
 from flydsl.runtime.device import get_rocm_arch
 from kernels.wmma_gemm_flyc import compile_wmma_gemm
+from tests.test_common import verify_output
 
 
 if not torch.cuda.is_available():
@@ -28,23 +29,27 @@ if not torch.cuda.is_available():
 
 @pytest.mark.parametrize("in_dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "M, N, K",
+    "M, N, K, tile_m, tile_n, block_threads",
     [
-        (16, 16, 32),
-        (33, 33, 32),
-        (127, 65, 64),
+        (32, 32, 32, 32, 32, 32),
+        (64, 64, 32, 64, 64, 128),
+        (128, 128, 32, 64, 128, 256),
+        (128, 128, 64, 64, 128, 256),
+        (256, 256, 32, 64, 64, 128),
+        (200, 180, 64, 64, 64, 128),
     ],
 )
-def test_wmma_gemm(in_dtype, M, N, K):
+def test_wmma_gemm(in_dtype, M, N, K, tile_m, tile_n, block_threads):
     if str(get_rocm_arch()) != "gfx1250":
-        pytest.skip(f"WMMA baseline requires gfx1250, got {get_rocm_arch()}")
+        pytest.skip(f"WMMA requires gfx1250, got {get_rocm_arch()}")
 
     torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
     device = torch.device("cuda")
     torch.manual_seed(0)
 
-    mpad = (M + 15) // 16 * 16
-    npad = (N + 15) // 16 * 16
+    # Pad M/N to tile boundaries
+    mpad = (M + tile_m - 1) // tile_m * tile_m
+    npad = (N + tile_n - 1) // tile_n * tile_n
 
     a = torch.randn((M, K), dtype=torch_dtype, device=device)
     b = torch.randn((K, N), dtype=torch_dtype, device=device)
@@ -58,11 +63,11 @@ def test_wmma_gemm(in_dtype, M, N, K):
         M=mpad,
         N=npad,
         K=K,
-        tile_m=16,
-        tile_n=16,
+        tile_m=tile_m,
+        tile_n=tile_n,
         tile_k=32,
         in_dtype=in_dtype,
-        block_threads=32,
+        block_threads=block_threads,
     )
     launch_fn(
         c_pad.contiguous().view(-1),
@@ -75,4 +80,4 @@ def test_wmma_gemm(in_dtype, M, N, K):
     torch.cuda.synchronize()
 
     ref = torch.matmul(a.to(torch.float32), b.to(torch.float32))
-    assert torch.allclose(c_pad[:M, :N], ref, rtol=3e-2, atol=3e-2)
+    assert verify_output(c_pad[:M, :N], ref, rtol=3e-2, atol=3e-2)

@@ -3,13 +3,17 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir import ir
-from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+
+from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
+WAVE_SIZE = 32
 
 
 def compile_wmma_gemm(
@@ -17,11 +21,11 @@ def compile_wmma_gemm(
     M: int = 0,
     N: int = 0,
     K: int,
-    tile_m: int = 16,
-    tile_n: int = 16,
-    tile_k: int = 32,
+    tile_m: int = 64,
+    tile_n: int = 128,
+    tile_k: int = WMMA_K,
     in_dtype: str = "fp16",
-    block_threads: int = 32,
+    block_threads: int = 128,
 ):
     """Compile a WMMA GEMM kernel using the @flyc.kernel API.
 
@@ -31,6 +35,7 @@ def compile_wmma_gemm(
     Compile-time constants: K, tile_m/n/k, in_dtype (determine loop structure).
     Runtime parameters: M, N (passed as i32 kernel args).
     """
+    _ = (M, N)
     if in_dtype not in ("fp16", "bf16"):
         raise ValueError(f"in_dtype must be 'fp16' or 'bf16', got {in_dtype!r}")
     is_fp4 = in_dtype == "fp4"
@@ -43,23 +48,45 @@ def compile_wmma_gemm(
 
     if K % tile_k != 0:
         raise ValueError(f"K must be divisible by tile_k={tile_k}, got K={K}")
+    if tile_m % WMMA_M != 0:
+        raise ValueError(f"tile_m must be a multiple of {WMMA_M}, got {tile_m}")
+
+    waves_per_block = block_threads // WAVE_SIZE
+    if tile_n % (waves_per_block * WMMA_N) != 0:
+        raise ValueError(
+            f"tile_n must be a multiple of waves_per_block*{WMMA_N}={waves_per_block * WMMA_N}, got {tile_n}"
+        )
 
     gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected a gfx1250 architecture, got {gpu_arch}"
 
-    lds_a_offset = 0
-    lds_a_elems = tile_m * tile_k
-    lds_b_offset = lds_a_offset + lds_a_elems * elem_bytes
-    lds_b_elems = tile_k * tile_n
-
-    allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_gemm_smem")
-    allocator.ptr = lds_b_offset + lds_b_elems * elem_bytes
+    wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16
 
     def _elem_type():
         return T.f16 if is_f16 else T.bf16
 
-    def _wmma_op():
-        return rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16
+    warp_tile_n = tile_n // waves_per_block
+    wmma_m_rep = tile_m // WMMA_M
+    wmma_n_rep = warp_tile_n // WMMA_N
+    n_accs = wmma_m_rep * wmma_n_rep
+
+    lds_a_elems = tile_m * tile_k
+    lds_b_elems = tile_k * tile_n
+    lds_a_offset = 0
+    lds_b_offset = lds_a_elems * elem_bytes
+
+    allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_gemm_smem")
+    allocator.ptr = lds_b_offset + lds_b_elems * elem_bytes
+
+    total_vec_a = tile_m * (tile_k // 4)
+    total_vec_b = tile_k * (tile_n // 4)
+    if total_vec_a % block_threads != 0 or total_vec_b % block_threads != 0:
+        raise ValueError(
+            f"vectorized copy requires vec slots divisible by block_threads: "
+            f"A={total_vec_a}, B={total_vec_b}, block_threads={block_threads}"
+        )
+    vec_iters_a = total_vec_a // block_threads
+    vec_iters_b = total_vec_b // block_threads
 
     @flyc.kernel
     def kernel_wmma_gemm(
@@ -73,82 +100,119 @@ def compile_wmma_gemm(
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
 
-        lane = tx
-        n_idx = arith.index_cast(T.index, i32_n.ir_value())
+        n_stride = arith.index_cast(T.index, i32_n.ir_value())
+        blk_m = bx * arith.index(tile_m)
+        blk_n = by * arith.index(tile_n)
 
-        tile_m_base = bx * arith.index(tile_m)
-        tile_n_base = by * arith.index(tile_n)
+        layout_thr = fx.make_layout((waves_per_block, WAVE_SIZE), (WAVE_SIZE, 1))
+        layout_lane = fx.make_layout((2, 16), (16, 1))
+        layout_lds_a = fx.make_layout((tile_m, tile_k), (tile_k, 1))
+        layout_lds_b = fx.make_layout((tile_k, tile_n), (tile_n, 1))
+        layout_vec_a = fx.make_layout((tile_m, tile_k // 4), (tile_k // 4, 1))
+        layout_vec_b = fx.make_layout((tile_k, tile_n // 4), (tile_n // 4, 1))
 
+        thr = idx2crd(tx, layout_thr)
+        wave_id = layout_get(thr, 0)
+        lane = layout_get(thr, 1)
+
+        lc = idx2crd(lane, layout_lane)
+        lane_kgrp = layout_get(lc, 0)  # 0/1
+        lane16 = layout_get(lc, 1)  # 0..15
+        warp_n_off = wave_id * arith.index(warp_tile_n)
+
+        elem_ty = _elem_type()
         base_ptr = allocator.get_base()
-        lds_a_ptr = SmemPtr(base_ptr, lds_a_offset, _elem_type(), shape=(lds_a_elems,))
-        lds_b_ptr = SmemPtr(base_ptr, lds_b_offset, _elem_type(), shape=(lds_b_elems,))
+        lds_a = SmemPtr(base_ptr, lds_a_offset, elem_ty, shape=(lds_a_elems,))
+        lds_b = SmemPtr(base_ptr, lds_b_offset, elem_ty, shape=(lds_b_elems,))
+        lds_a_mem = lds_a.get()
+        lds_b_mem = lds_b.get()
 
-        c_frag = arith.constant_vector(0.0, T.vec(8, T.f32))
+        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=True)
+        b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
+        vec4_elem_ty = T.vec(4, elem_ty)
+
+        acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
+        accs = [acc_zero] * n_accs
 
         for kblk in range_constexpr(K // tile_k):
             k_base = arith.index(kblk * tile_k)
 
-            for t in range_constexpr((tile_m * tile_k) // 32):
-                idx = lane + arith.index(t * 32)
-                lm = idx // arith.index(tile_k)
-                lk = idx % arith.index(tile_k)
-                g_row = tile_m_base + lm
-                g_col = k_base + lk
-                g_off = g_row * arith.index(K) + g_col
-                v = fx.memref_load(arg_a, g_off)
-                l_off = lm * arith.index(tile_k) + lk
-                lds_a_ptr.store(v, [l_off])
+            for t in range_constexpr(vec_iters_a):
+                vec_idx = tx + arith.index(t * block_threads)
+                a_crd = idx2crd(vec_idx, layout_vec_a)
+                a_m = layout_get(a_crd, 0)
+                a_kv = layout_get(a_crd, 1)
+                a_k = a_kv * arith.index(4)
 
-            for t in range_constexpr((tile_k * tile_n) // 32):
-                idx = lane + arith.index(t * 32)
-                lk = idx // arith.index(tile_n)
-                ln = idx % arith.index(tile_n)
-                g_row = k_base + lk
-                g_col = tile_n_base + ln
-                g_off = g_row * n_idx + g_col
-                v = fx.memref_load(arg_b, g_off)
-                l_off = lk * arith.index(tile_n) + ln
-                lds_b_ptr.store(v, [l_off])
+                g_off = (blk_m + a_m) * arith.index(K) + (k_base + a_k)
+                v_i16 = buffer_ops.buffer_load(a_rsrc, g_off, vec_width=4, dtype=T.i16)
+                v = vector.bitcast(vec4_elem_ty, v_i16)
+                lds_off = crd2idx((a_m, a_k), layout_lds_a)
+                vector.store(v, lds_a_mem, [lds_off])
 
-            gpu.barrier()
+            for t in range_constexpr(vec_iters_b):
+                vec_idx = tx + arith.index(t * block_threads)
+                b_crd = idx2crd(vec_idx, layout_vec_b)
+                b_k = layout_get(b_crd, 0)
+                b_nv = layout_get(b_crd, 1)
+                b_n = b_nv * arith.index(4)
 
-            lane16 = lane % arith.index(16)
-            lane_kgrp = lane // arith.index(16)
-            a_vals = []
-            b_vals = []
-            for k0 in range_constexpr(2):
-                for k1 in range_constexpr(8):
-                    kk = (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                    a_off = lane16 * arith.index(tile_k) + kk
-                    b_off = kk * arith.index(tile_n) + lane16
-                    a_vals.append(lds_a_ptr.load([a_off]))
-                    b_vals.append(lds_b_ptr.load([b_off]))
-
-            a_frag = fx.vector.from_elements(T.vec(16, _elem_type()), a_vals)
-            b_frag = fx.vector.from_elements(T.vec(16, _elem_type()), b_vals)
-
-            c_frag = _wmma_op()(
-                T.vec(8, T.f32),
-                a_frag,
-                b_frag,
-                c_frag,
-                signA=False,
-                signB=False,
-                modC=0,
-                reuseA=False,
-                reuseB=False,
-            ).result
+                g_off = (k_base + b_k) * n_stride + (blk_n + b_n)
+                v_i16 = buffer_ops.buffer_load(b_rsrc, g_off, vec_width=4, dtype=T.i16)
+                v = vector.bitcast(vec4_elem_ty, v_i16)
+                lds_off = crd2idx((b_k, b_n), layout_lds_b)
+                vector.store(v, lds_b_mem, [lds_off])
 
             gpu.barrier()
 
-        lane_n = lane % arith.index(16)
-        lane_mgrp = lane // arith.index(16)
-        for mi in range_constexpr(8):
-            row = tile_m_base + lane_mgrp * arith.index(8) + arith.index(mi)
-            col = tile_n_base + lane_n
-            c_off = row * n_idx + col
-            c_val = fx.vector.extract(c_frag, static_position=[mi], dynamic_position=[])
-            fx.memref_store(c_val, arg_c, c_off)
+            b_frags = []
+            for wn in range_constexpr(wmma_n_rep):
+                n_off = warp_n_off + arith.index(wn * WMMA_N)
+                vals = []
+                for k0 in range_constexpr(2):
+                    for k1 in range_constexpr(8):
+                        kk = (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
+                        off = crd2idx((kk, n_off + lane16), layout_lds_b)
+                        vals.append(lds_b.load([off]))
+                b_frags.append(vector.from_elements(T.vec(16, elem_ty), vals))
+
+            for wm in range_constexpr(wmma_m_rep):
+                m_off = arith.index(wm * WMMA_M)
+                a_vals = []
+                for k0 in range_constexpr(2):
+                    for k1 in range_constexpr(8):
+                        kk = (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
+                        off = crd2idx((m_off + lane16, kk), layout_lds_a)
+                        a_vals.append(lds_a.load([off]))
+                a_frag = vector.from_elements(T.vec(16, elem_ty), a_vals)
+
+                for wn in range_constexpr(wmma_n_rep):
+                    acc_idx = wm * wmma_n_rep + wn
+                    accs[acc_idx] = wmma_op(
+                        T.vec(8, T.f32),
+                        a_frag,
+                        b_frags[wn],
+                        accs[acc_idx],
+                        signA=False,
+                        signB=False,
+                        modC=0,
+                        reuseA=False,
+                        reuseB=False,
+                    ).result
+
+            gpu.barrier()
+
+        for wm in range_constexpr(wmma_m_rep):
+            for wn in range_constexpr(wmma_n_rep):
+                acc_idx = wm * wmma_n_rep + wn
+                m_base = blk_m + arith.index(wm * WMMA_M)
+                n_base = blk_n + warp_n_off + arith.index(wn * WMMA_N)
+                for mi in range_constexpr(8):
+                    row = m_base + lane_kgrp * arith.index(8) + arith.index(mi)
+                    col = n_base + lane16
+                    c_off = row * n_stride + col
+                    c_val = vector.extract(accs[acc_idx], static_position=[mi], dynamic_position=[])
+                    fx.memref_store(c_val, arg_c, c_off)
 
     cache_tag = (in_dtype, K, tile_m, tile_n, tile_k, block_threads)
 
