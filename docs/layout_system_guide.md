@@ -399,7 +399,7 @@ Supports:
 - `ir.Value` — dynamic values
 - `int`, `float`, `bool` — auto-converted to constants
 - `str`, `type` — embedded as static text
-- DSL types with `__extract_ir_values__` — auto-unwrapped
+- DSL types with `__fly_values__` — auto-unwrapped
 
 ---
 
@@ -452,8 +452,9 @@ Which layout operation do I need?
 | `python/flydsl/expr/derived.py` | `CopyAtom`, `MmaAtom`, `TiledCopy` wrapper classes |
 | `python/flydsl/expr/typing.py` | `IntTupleType`, `LayoutType`, type definitions |
 | `kernels/layout_utils.py` | Pure-arith helpers: `crd2idx`, `idx2crd`, `get` for static layouts |
-| `flir/include/flir/FlirOps.td` | FLIR op definitions (legacy dialect) |
-| `flir/lib/Dialect/Flir/FlirLayoutAlgebra.cpp` | Type inference for composition, product, divide (FLIR) |
+| `include/flydsl/Dialect/Fly/IR/FlyOps.td` | Fly dialect op definitions |
+| `lib/Dialect/Fly/IR/FlyOps.cpp` | Type inference for composition, product, divide (Fly) |
+| `include/flydsl/Dialect/Fly/Utils/LayoutUtils.h` | Layout algebra algorithms (composition, product, divide) |
 | `tests/pyir/test_layout_algebra.py` | Layout algebra tests |
 | `tests/pyir/test_product_divide.py` | Product and divide operation tests |
 | `tests/pyir/test_nested_layouts.py` | Nested/hierarchical layout tests |
