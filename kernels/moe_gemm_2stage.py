@@ -38,7 +38,8 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     unpack_b_w4a16,
     load_b_raw_w4a16_groupwise,
     unpack_b_w4a16_groupwise,
-    load_b_raw_w4a8_groupwise,
+    load_b_raw_w4a8_k64,
+    load_b_raw_w4a8_groupwise_k64,
     unpack_b_w4a8,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
@@ -663,44 +664,48 @@ def compile_moe_gemm1(
                             b_tile.append((packs0, packs1))
                         return b_tile
                     elif is_int4_groupwise:
-                        # ---- W4A8 groupwise: 2-phase load+unpack per K32 step ----
-                        # Phase 1: Issue ALL buffer_loads (weight + group scale).
-                        raw_data = []
-                        for ku in range_constexpr(k_unroll):
-                            raw_ku = []
-                            for ki_half in range_constexpr(2):
-                                ki_step = ku * 2 + ki_half
-                                raw_half = []
-                                for ni in range_constexpr(num_acc_n):
-                                    raw = load_b_raw_w4a8_groupwise(
-                                        buffer_ops, flir, arith, vector,
-                                        arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
-                                        base_k=base_k, ki_step=ki_step,
-                                        n_blk=blk_list[ni], n_intra=intra_list[ni],
-                                        lane_div_16=lane_div_16, elem_type=w_elem,
-                                        scale_rsrc=sw_rsrc,
-                                        expert_offset=expert_off_idx,
-                                        num_groups=num_groups,
-                                        group_size=group_size,
-                                        n_per_expert=2*inter_dim,
-                                        kpack_bytes=kpack_bytes,
-                                    )
-                                    raw_half.append(raw)
-                                raw_ku.append(raw_half)
-                            raw_data.append(raw_ku)
-                        # Phase 2: Unpack ALL.
+                        # ---- W4A8 groupwise: 8B K64 weight load + 2 scale loads + unpack ----
                         b_tile = []
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             scales0, scales1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                packed32_0, sc0 = raw_data[ku][0][ni]
-                                packed32_1, sc1 = raw_data[ku][1][ni]
-                                packs0.append(unpack_b_w4a8(packed32_0, arith, vector))
-                                packs1.append(unpack_b_w4a8(packed32_1, arith, vector))
+                                h0, h1, sc0, sc1 = load_b_raw_w4a8_groupwise_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=blk_list[ni], n_intra=intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    scale_rsrc=sw_rsrc,
+                                    expert_offset=expert_off_idx,
+                                    num_groups=num_groups,
+                                    group_size=group_size,
+                                    n_per_expert=2*inter_dim,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a8(h0, arith, vector))
+                                packs1.append(unpack_b_w4a8(h1, arith, vector))
                                 scales0.append(sc0)
                                 scales1.append(sc1)
                             b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
+                    elif is_int4:
+                        # ---- W4A8 per-row: 8B K64 loads (buffer_load_dwordx2) + unpack ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                h0, h1 = load_b_raw_w4a8_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=blk_list[ni], n_intra=intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a8(h0, arith, vector))
+                                packs1.append(unpack_b_w4a8(h1, arith, vector))
+                            b_tile.append((packs0, packs1))
                         return b_tile
                     else:
                         # ---- fp8/int8/bf16: original code, completely unchanged ----
@@ -2012,42 +2017,48 @@ def compile_moe_gemm2(
                             b_tile.append((packs0, packs1))
                         return b_tile
                     elif is_int4_groupwise:
-                        # ---- W4A8 groupwise: 2-phase load+unpack per K32 step ----
-                        raw_data = []
-                        for ku in range_constexpr(k_unroll):
-                            raw_ku = []
-                            for ki_half in range_constexpr(2):
-                                ki_step = ku * 2 + ki_half
-                                raw_half = []
-                                for ni in range_constexpr(num_acc_n):
-                                    raw = load_b_raw_w4a8_groupwise(
-                                        buffer_ops, flir, arith, vector,
-                                        arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
-                                        base_k=base_k, ki_step=ki_step,
-                                        n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
-                                        lane_div_16=lane_div_16, elem_type=w_elem,
-                                        scale_rsrc=sw_rsrc,
-                                        expert_offset=expert_idx * arith.constant(model_dim, index=True),
-                                        num_groups=num_groups,
-                                        group_size=group_size,
-                                        n_per_expert=model_dim,
-                                        kpack_bytes=kpack_bytes,
-                                    )
-                                    raw_half.append(raw)
-                                raw_ku.append(raw_half)
-                            raw_data.append(raw_ku)
+                        # ---- W4A8 groupwise: 8B K64 weight load + 2 scale loads + unpack ----
                         b_tile = []
                         for ku in range_constexpr(k_unroll):
                             packs0, packs1 = [], []
                             scales0, scales1 = [], []
                             for ni in range_constexpr(num_acc_n):
-                                packed32_0, sc0 = raw_data[ku][0][ni]
-                                packed32_1, sc1 = raw_data[ku][1][ni]
-                                packs0.append(unpack_b_w4a8(packed32_0, arith, vector))
-                                packs1.append(unpack_b_w4a8(packed32_1, arith, vector))
+                                h0, h1, sc0, sc1 = load_b_raw_w4a8_groupwise_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    scale_rsrc=sw_rsrc,
+                                    expert_offset=expert_idx * arith.constant(model_dim, index=True),
+                                    num_groups=num_groups,
+                                    group_size=group_size,
+                                    n_per_expert=model_dim,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a8(h0, arith, vector))
+                                packs1.append(unpack_b_w4a8(h1, arith, vector))
                                 scales0.append(sc0)
                                 scales1.append(sc1)
                             b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
+                    elif is_int4:
+                        # ---- W4A8 per-row: 8B K64 loads (buffer_load_dwordx2) + unpack ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                h0, h1 = load_b_raw_w4a8_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a8(h0, arith, vector))
+                                packs1.append(unpack_b_w4a8(h1, arith, vector))
+                            b_tile.append((packs0, packs1))
                         return b_tile
                     else:
                         # ---- fp8/int8/bf16: original code, completely unchanged ----

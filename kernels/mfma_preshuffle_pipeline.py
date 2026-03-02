@@ -588,7 +588,8 @@ __all__ = [
     "unpack_b_w4a16",
     "load_b_raw_w4a16_groupwise",
     "unpack_b_w4a16_groupwise",
-    "load_b_raw_w4a8_groupwise",
+    "load_b_raw_w4a8_k64",
+    "load_b_raw_w4a8_groupwise_k64",
     "unpack_b_w4a8",
 ]
 
@@ -774,10 +775,10 @@ def unpack_b_w4a16_groupwise(packed32, scale_val, arith, vector):
 
 
 # ---------------------------------------------------------------------------
-# Split load / unpack for W4A8 groupwise latency hiding
+# W4A8 load / unpack helpers (8B K64 loads)
 # ---------------------------------------------------------------------------
 
-def load_b_raw_w4a8_groupwise(
+def load_b_raw_w4a8_k64(
     buffer_ops,
     flir,
     arith,
@@ -787,7 +788,60 @@ def load_b_raw_w4a8_groupwise(
     b_rsrc,
     layout_b,
     base_k: "ir.Value",
-    ki_step: int,
+    ku: int,
+    n_blk: "ir.Value",
+    n_intra: "ir.Value",
+    lane_div_16: "ir.Value",
+    elem_type: "ir.Type",
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A8 per-row B load: 8-byte buffer_load_dwordx2 for one K64 step.
+
+    Loads both K32 halves in a single VMEM instruction (``buffer_load_dwordx2``).
+    Returns ``(packed32_half0, packed32_half1)`` for :func:`unpack_b_w4a8`.
+    """
+    if kpack_bytes != 8:
+        raise ValueError(f"W4A8 requires kpack_bytes=8, got {kpack_bytes!r}")
+
+    i32 = ir.IntegerType.get_signless(32)
+
+    c64 = arith.constant(64, index=True)
+    k0_base = base_k / c64
+    k0 = k0_base + arith.constant(ku, index=True)
+    k1 = lane_div_16
+
+    coord_pack = flir.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
+    idx_pack = flir.crd2idx(coord_pack, layout_b)
+
+    atom = flir.make_copy_atom(elem_type, vector_size=8)
+    b_view = flir.TensorView(
+        arg_b, (8,), strides=(1,),
+        base_indices=(idx_pack,),
+        element_type=elem_type,
+    )
+    b8 = flir.copy(
+        atom, b_view, None,
+        alignment=8, return_vector=True,
+        src_buffer_resource=b_rsrc, src_buffer_offset_in_bytes=True,
+    )
+    vec2_i32 = ir.VectorType.get([2], i32)
+    b_i32x2 = vector.bitcast(vec2_i32, b8)
+    half0 = vector.extract(b_i32x2, static_position=[0], dynamic_position=[])
+    half1 = vector.extract(b_i32x2, static_position=[1], dynamic_position=[])
+    return (half0, half1)
+
+
+def load_b_raw_w4a8_groupwise_k64(
+    buffer_ops,
+    flir,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k: "ir.Value",
+    ku: int,
     n_blk: "ir.Value",
     n_intra: "ir.Value",
     lane_div_16: "ir.Value",
@@ -799,12 +853,13 @@ def load_b_raw_w4a8_groupwise(
     n_per_expert: int,
     kpack_bytes: int = 8,
 ):
-    """Phase 1 of W4A8 groupwise B load: issue buffer_loads for weight + scale.
+    """Phase 1 of W4A8 groupwise B load: 8B weight + two scale loads per K64.
 
-    Uses the same addressing as ``load_b_pack_k32(unpack_int4=True)`` for the
-    weight, plus per-group scale loading (same indexing as W4A16 groupwise).
+    One ``buffer_load_dwordx2`` for both K32 weight halves, plus two
+    ``buffer_load_dword`` for the per-group scales (each K32 half may
+    belong to a different group).
 
-    Returns ``(packed32, scale_val)`` to be passed to :func:`unpack_b_w4a8`.
+    Returns ``(half0, half1, scale0, scale1)``.
     """
     if kpack_bytes != 8:
         raise ValueError(f"W4A8 requires kpack_bytes=8, got {kpack_bytes!r}")
@@ -812,58 +867,57 @@ def load_b_raw_w4a8_groupwise(
     i32 = ir.IntegerType.get_signless(32)
     f32 = ir.F32Type.get()
 
+    # --- 8B weight load (both K32 halves) ---
     c64 = arith.constant(64, index=True)
     k0_base = base_k / c64
-    k0 = k0_base + arith.constant(ki_step // 2, index=True)
+    k0 = k0_base + arith.constant(ku, index=True)
     k1 = lane_div_16
-    half_bytes = kpack_bytes // 2
-    k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
     coord_pack = flir.make_coord(n_blk, k0, k1, n_intra, arith.constant(0, index=True))
     idx_pack = flir.crd2idx(coord_pack, layout_b)
-    idx_bytes = idx_pack + k2_base
 
-    atom = flir.make_copy_atom(elem_type, vector_size=4)
+    atom = flir.make_copy_atom(elem_type, vector_size=8)
     b_view = flir.TensorView(
-        arg_b, (4,), strides=(1,),
-        base_indices=(idx_bytes,),
+        arg_b, (8,), strides=(1,),
+        base_indices=(idx_pack,),
         element_type=elem_type,
     )
-    b4 = flir.copy(
+    b8 = flir.copy(
         atom, b_view, None,
-        alignment=4, return_vector=True,
+        alignment=8, return_vector=True,
         src_buffer_resource=b_rsrc, src_buffer_offset_in_bytes=True,
     )
-    vec1_i32 = ir.VectorType.get([1], i32)
-    packed32 = vector.extract(
-        vector.bitcast(vec1_i32, b4),
-        static_position=[0], dynamic_position=[],
-    )
+    vec2_i32 = ir.VectorType.get([2], i32)
+    b_i32x2 = vector.bitcast(vec2_i32, b8)
+    half0 = vector.extract(b_i32x2, static_position=[0], dynamic_position=[])
+    half1 = vector.extract(b_i32x2, static_position=[1], dynamic_position=[])
 
-    c_ki_elems = arith.constant(ki_step * 32, index=True)
-    k_pos_base = base_k + c_ki_elems
-
-    c_group_size = arith.constant(group_size, index=True)
-    group_idx = k_pos_base / c_group_size
-
+    # --- scale loads (one per K32 half, potentially different groups) ---
     c16 = arith.constant(16, index=True)
     n_global = n_blk * c16 + n_intra
-
+    c_group_size = arith.constant(group_size, index=True)
     c_gm1 = arith.constant(num_groups - 1, index=True)
     c_npe = arith.constant(n_per_expert, index=True)
-    scale_idx = expert_offset * c_gm1 + n_global + group_idx * c_npe
-    scale_idx_i32 = arith.index_cast(i32, scale_idx)
+    base_scale = expert_offset * c_gm1 + n_global
 
-    scale_val = buffer_ops.buffer_load(scale_rsrc, scale_idx_i32, vec_width=1, dtype=f32)
+    k_pos0 = base_k + arith.constant(ku * 2 * 32, index=True)
+    group_idx0 = k_pos0 / c_group_size
+    s0_i32 = arith.index_cast(i32, base_scale + group_idx0 * c_npe)
+    scale0 = buffer_ops.buffer_load(scale_rsrc, s0_i32, vec_width=1, dtype=f32)
 
-    return (packed32, scale_val)
+    k_pos1 = base_k + arith.constant((ku * 2 + 1) * 32, index=True)
+    group_idx1 = k_pos1 / c_group_size
+    s1_i32 = arith.index_cast(i32, base_scale + group_idx1 * c_npe)
+    scale1 = buffer_ops.buffer_load(scale_rsrc, s1_i32, vec_width=1, dtype=f32)
+
+    return (half0, half1, scale0, scale1)
 
 
 def unpack_b_w4a8(packed32, arith, vector):
     """Phase 2 of W4A8 B load: 7-op unpack from packed int4 to int8 i64.
 
-    Takes the raw ``packed32`` from :func:`load_b_raw_w4a8_groupwise` and
-    produces one i64 value containing 8 signed int8 bytes for one MFMA K32 step.
+    Takes a raw ``packed32`` (one dword of packed int4) and produces one i64
+    value containing 8 signed int8 bytes for one MFMA K32 step.
     """
     c_08080808 = arith.constant(0x08080808, type=ir.IntegerType.get_signless(32))
     c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=ir.IntegerType.get_signless(32))
