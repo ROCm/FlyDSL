@@ -1,23 +1,23 @@
-"""FlyDSL Fused Recurrent Gated Delta Rule Forward kernel.
+"""FlyDSL fused recurrent gated delta rule forward kernel.
 
-Phase 1: Minimal skeleton - grid/block setup, index computation only.
-Target algorithm (SGLang fused_recurrent_gated_delta_rule_fwd):
-- g and beta are precomputed inputs
+Phase 2: single-step update logic implemented in the timestep loop:
 - h *= exp(g)
-- v -= sum(h * k, dim=0)   [Delta rule step 1]
+- v -= sum(h * k, dim=0)
 - v *= beta
-- h += k ⊗ v               [Delta rule step 2]
+- h += k ⊗ v
 - o = sum(h * q * scale, dim=0)
 
-Simplified scope: IS_BETA_HEADWISE=False, no h0/ht, dtype=f32.
-Layout: q,k [B*T*H,K], v [B*T*HV,V], g,beta [B*T,HV], o [B*T*HV,V]
+Simplified scope:
+- IS_BETA_HEADWISE = False (beta is scalar per (t, hv))
+- no h0 / ht
+- dtype: f32 main path
 """
 
-from _mlir import ir
 from flydsl.dialects.ext import flir, arith, gpu
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import memref
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils import SmemAllocator
 import _mlir.extras.types as T
 
 
@@ -27,15 +27,21 @@ KERNEL_NAME = "fused_recurrent_gated_delta_rule_fwd_kernel"
 def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dtype_str="f32"):
     """Build the fused recurrent gated delta rule forward kernel module.
 
-    Phase 1: Minimal skeleton - only index computation, placeholder output.
-
     Args:
         B, T_seq, H, HV, K, V: compile-time dimensions
         dtype_str: "f32" or "f16" (MVP: f32 only)
     """
     gpu_arch = get_hip_arch()
+    compute_type = T.f32()
     elem_type = T.f32() if dtype_str == "f32" else T.f16()
-    comp = T.f32()
+    scale = K ** (-0.5)
+    h_smem_size = K * V
+
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {
+        "elem_type": elem_type,
+        "compute_type": compute_type,
+    }
 
     BT = B * T_seq
     BTH = B * T_seq * H
@@ -46,7 +52,8 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
         def init_gpu_module(self):
-            pass
+            _state["smem_h"] = allocator.allocate_array(compute_type, h_smem_size)
+            allocator.finalize()
 
         @flir.kernel
         def fused_recurrent_gated_delta_rule_fwd_kernel(
@@ -65,12 +72,30 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
             i_hv = arith.as_value(flir.arith.RemUIOp(arith.as_value(i_nh), c_hv).result)
             i_h = i_hv  # H==HV for simplified scope
 
+            base_ptr = allocator.get_base()
+            s_h = _state["smem_h"](base_ptr).get()
+            layout_h = flir.make_layout(flir.make_shape(K, V), flir.make_stride(V, 1))
+
+            comp = compute_type
+            c_log2e = arith.constant(1.4426950408889634, type=comp)
+            c_scale = arith.constant(scale, type=comp)
+            fm_fast = flir.arith.FastMathFlags.fast
+
             c_TH = arith.as_value(arith.index(T_seq * H))
             c_THV = arith.as_value(arith.index(T_seq * HV))
             c_T = arith.as_value(arith.index(T_seq))
             c_H = arith.as_value(arith.index(H))
 
-            # Time loop: index computation only, placeholder write to o
+            # Initialize recurrent state h to zeros.
+            for ik in range_constexpr(K):
+                for iv in range_constexpr(V):
+                    crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                    idx = flir.crd2idx(crd, layout_h)
+                    memref.store(arith.constant(0.0, type=comp), s_h, [arith.as_value(idx)])
+
+            gpu.barrier()
+
+            # Time loop: apply update-fwd logic each step.
             for t in range_constexpr(T_seq):
                 t_idx = arith.as_value(arith.index(t))
 
@@ -90,15 +115,87 @@ def build_fused_recurrent_gated_delta_rule_fwd_module(B, T_seq, H, HV, K, V, dty
                 m5 = flir.arith.MulIOp(arith.as_value(i_n), c_T).result
                 row_gb = arith.as_value(flir.arith.AddIOp(arith.as_value(m5), t_idx).result)
 
-                # Placeholder: write 0 to o (verifies indexing + launch)
-                zero = arith.constant(0.0, type=comp)
+                # Load g and beta (already precomputed).
+                g_val = memref.load(g, [arith.as_value(row_gb), arith.as_value(i_hv)])
+                beta_val = memref.load(beta, [arith.as_value(row_gb), arith.as_value(i_hv)])
+                if dtype_str != "f32":
+                    g_val = flir.arith.extf(comp, arith.as_value(g_val))
+                    beta_val = flir.arith.extf(comp, arith.as_value(beta_val))
+
+                # exp(g) via exp2(g * log2(e))
+                g_log2e = flir.arith.MulFOp(arith.as_value(g_val), arith.as_value(c_log2e), fastmath=fm_fast).result
+                exp_g = flir.math.exp2(arith.as_value(g_log2e), fastmath=fm_fast)
+
+                # h *= exp(g)
+                for ik in range_constexpr(K):
+                    for iv in range_constexpr(V):
+                        crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                        idx = flir.crd2idx(crd, layout_h)
+                        old_h = memref.load(s_h, [arith.as_value(idx)])
+                        h_scaled = flir.arith.MulFOp(arith.as_value(old_h), arith.as_value(exp_g), fastmath=fm_fast).result
+                        memref.store(h_scaled, s_h, [arith.as_value(idx)])
+
+                # Load q, k vectors.
+                q_vals = []
+                k_vals = []
+                for ik in range_constexpr(K):
+                    qv = memref.load(q, [arith.as_value(row_qt), arith.index(ik)])
+                    kv = memref.load(k, [arith.as_value(row_qt), arith.index(ik)])
+                    if dtype_str != "f32":
+                        qv = flir.arith.extf(comp, arith.as_value(qv))
+                        kv = flir.arith.extf(comp, arith.as_value(kv))
+                    q_vals.append(qv)
+                    k_vals.append(kv)
+
+                # Load v vector.
+                v_vals = []
                 for iv in range_constexpr(V):
-                    val = (
-                        zero
-                        if dtype_str == "f32"
-                        else flir.arith.truncf(elem_type, arith.as_value(zero))
-                    )
-                    memref.store(arith.as_value(val), o, [arith.as_value(row_vt), arith.index(iv)])
+                    vv = memref.load(v, [arith.as_value(row_vt), arith.index(iv)])
+                    if dtype_str != "f32":
+                        vv = flir.arith.extf(comp, arith.as_value(vv))
+                    v_vals.append(vv)
+
+                # v -= sum(h * k, dim=0)
+                for iv in range_constexpr(V):
+                    s = arith.constant(0.0, type=comp)
+                    for ik in range_constexpr(K):
+                        crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                        idx = flir.crd2idx(crd, layout_h)
+                        h_ikv = memref.load(s_h, [arith.as_value(idx)])
+                        prod = flir.arith.MulFOp(arith.as_value(h_ikv), arith.as_value(k_vals[ik]), fastmath=fm_fast).result
+                        s = flir.arith.AddFOp(arith.as_value(s), arith.as_value(prod), fastmath=fm_fast).result
+                    v_vals[iv] = flir.arith.SubFOp(arith.as_value(v_vals[iv]), arith.as_value(s)).result
+
+                # v *= beta
+                for iv in range_constexpr(V):
+                    v_vals[iv] = flir.arith.MulFOp(
+                        arith.as_value(v_vals[iv]), arith.as_value(beta_val), fastmath=fm_fast
+                    ).result
+
+                # h += k ⊗ v
+                for ik in range_constexpr(K):
+                    for iv in range_constexpr(V):
+                        crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                        idx = flir.crd2idx(crd, layout_h)
+                        old_h = memref.load(s_h, [arith.as_value(idx)])
+                        prod = flir.arith.MulFOp(arith.as_value(k_vals[ik]), arith.as_value(v_vals[iv]), fastmath=fm_fast).result
+                        upd = flir.arith.AddFOp(arith.as_value(old_h), arith.as_value(prod), fastmath=fm_fast).result
+                        memref.store(upd, s_h, [arith.as_value(idx)])
+
+                # o = sum(h * q * scale, dim=0)
+                for iv in range_constexpr(V):
+                    s = arith.constant(0.0, type=comp)
+                    for ik in range_constexpr(K):
+                        crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                        idx = flir.crd2idx(crd, layout_h)
+                        h_ikv = memref.load(s_h, [arith.as_value(idx)])
+                        q_scaled = flir.arith.MulFOp(
+                            arith.as_value(q_vals[ik]), arith.as_value(c_scale), fastmath=fm_fast
+                        ).result
+                        prod = flir.arith.MulFOp(arith.as_value(h_ikv), arith.as_value(q_scaled), fastmath=fm_fast).result
+                        s = flir.arith.AddFOp(arith.as_value(s), arith.as_value(prod), fastmath=fm_fast).result
+                    out_val = s if dtype_str == "f32" else flir.arith.truncf(elem_type, arith.as_value(s))
+                    memref.store(arith.as_value(out_val), o, [arith.as_value(row_vt), arith.index(iv)])
 
         @flir.jit
         def __call__(

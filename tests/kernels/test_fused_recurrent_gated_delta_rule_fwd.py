@@ -150,8 +150,8 @@ def test_fused_recurrent_gated_delta_rule_fwd_torch_ref():
     print("PyTorch reference OK")
 
 
-def test_fused_recurrent_gated_delta_rule_fwd_skeleton(ctx):
-    """Phase 1: Skeleton build + launch only (no correctness check)."""
+def test_fused_recurrent_gated_delta_rule_fwd_phase2_launch(ctx):
+    """Phase 2: Build + launch with single-step logic enabled."""
     if flydsl is None:
         pytest.skip("flydsl not available")
     try:
@@ -165,19 +165,20 @@ def test_fused_recurrent_gated_delta_rule_fwd_skeleton(ctx):
     m = build_fused_recurrent_gated_delta_rule_fwd_module(B, T, H, HV, K, V, "f32")
     exe = flydsl.compile(m)
 
-    g_flat = torch.zeros(B * T, HV, device="cuda", dtype=torch.float32)
-    beta_flat = torch.zeros(B * T, HV, device="cuda", dtype=torch.float32)
-    q_flat = torch.zeros(B * T * H, K, device="cuda", dtype=torch.float32)
-    k_flat = torch.zeros(B * T * H, K, device="cuda", dtype=torch.float32)
-    v_flat = torch.zeros(B * T * HV, V, device="cuda", dtype=torch.float32)
+    torch.manual_seed(0)
+    g_flat = torch.randn(B * T, HV, device="cuda", dtype=torch.float32) * 0.1
+    beta_flat = torch.sigmoid(torch.randn(B * T, HV, device="cuda", dtype=torch.float32))
+    q_flat = torch.randn(B * T * H, K, device="cuda", dtype=torch.float32) * 0.1
+    k_flat = torch.randn(B * T * H, K, device="cuda", dtype=torch.float32) * 0.1
+    v_flat = torch.randn(B * T * HV, V, device="cuda", dtype=torch.float32) * 0.1
     o_flat = torch.empty(B * T * HV, V, device="cuda", dtype=torch.float32).fill_(-1.0)
 
     exe(q_flat, k_flat, v_flat, g_flat, beta_flat, o_flat)
     torch.cuda.synchronize()
 
-    # Skeleton writes 0 to o
-    assert (o_flat == 0.0).all().item(), "Skeleton should write 0 to o"
-    print("Phase 1 skeleton: build + launch OK")
+    assert torch.isfinite(o_flat).all().item(), "Output should be finite"
+    assert not torch.all(o_flat == -1.0).item(), "Output should be updated by kernel"
+    print("Phase 2 launch OK")
 
 
 def test_fused_recurrent_gated_delta_rule_fwd_flydsl(ctx):
