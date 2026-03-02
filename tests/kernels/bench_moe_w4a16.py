@@ -2,15 +2,14 @@
 Benchmark: FlyDSL MoE kernels (W4A16, W4A8, bf16, hybrid)
 
 Usage:
-  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16
-  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --w4a8
-  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --compare-w4a8-w4a16
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16           # W4A16 per-row + g32
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --w4a8   # W4A8  per-row + g32
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --all-w4   # all W4 variants
   HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --bf16
   HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --hybrid-w2-bf16
 
 Notes:
-  - FlyDSL W4A16/W4A8 only support group_size=32 (int4 preshuffle constraint).
-    When --group-size != 32, FlyDSL falls back to per-row scale (group_size=-1).
+  - W4A16 and W4A8 automatically run both per-row and groupwise (g32) in one invocation.
   - W4A8 (int4): int8 activations, int4 weights, mfma_i32_16x16x32_i8.
   - W4A16 (int4_bf16): bf16 activations, int4 weights, mfma_f32_16x16x16_bf16.
 """
@@ -189,8 +188,9 @@ def main():
     dtype_group = parser.add_mutually_exclusive_group()
     dtype_group.add_argument("--bf16", action="store_true", help="Benchmark pure bf16 instead of W4A16")
     dtype_group.add_argument("--w4a8", action="store_true", help="Benchmark W4A8 (int4 weights, int8 activations)")
-    dtype_group.add_argument("--compare-w4a8-w4a16", action="store_true",
-                             help="Compare W4A8 groupwise vs W4A16 groupwise at same shape")
+    dtype_group.add_argument("--all-w4", "--compare-w4a8-w4a16", action="store_true",
+                             dest="compare_w4a8_w4a16",
+                             help="Run all W4 variants: W4A8/W4A16 x per-row/g32")
     dtype_group.add_argument("--hybrid-w2-bf16", action="store_true",
                              help="Benchmark hybrid: stage1 W4A16, stage2 bf16 (compare vs pure W4A16)")
     parser.add_argument("--tokens", type=int, default=5231)
@@ -230,8 +230,23 @@ def main():
         flydsl_in_dtype = "int4_bf16"
         dtype_name = "W4A16"
 
+    supports_groupwise = flydsl_in_dtype in ("int4", "int4_bf16")
+
     M = tokens * topk
     total_flops = M * (2 * inter_dim) * model_dim * 2 + M * model_dim * inter_dim * 2
+
+    def _run_and_collect(in_dtype, group_size, label):
+        """Run benchmark, return (label, ms, tflops)."""
+        print(f"  Running {label} ...")
+        ms = benchmark_flydsl(
+            tokens, model_dim, inter_dim, experts, topk,
+            in_dtype=in_dtype, group_size=group_size,
+            num_warmup=args.num_warmup, num_iters=args.num_iters,
+        )
+        torch.cuda.empty_cache()
+        gc.collect()
+        tflops = total_flops / (ms / 1000) / 1e12
+        return (label, ms, tflops)
 
     print("=" * 70)
     print(f"    FlyDSL MoE Benchmark: {dtype_name} (group_size={group_size})")
@@ -241,46 +256,40 @@ def main():
     print(f"Total FLOPs: {total_flops / 1e12:.4f} TFLOPs\n")
 
     if is_compare:
-        print("Running FlyDSL W4A8 (int4, int8 act, mfma_i32_16x16x32_i8)...")
-        w4a8_ms = benchmark_flydsl(
-            tokens, model_dim, inter_dim, experts, topk,
-            in_dtype="int4", group_size=group_size,
-            num_warmup=args.num_warmup, num_iters=args.num_iters,
-        )
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        print("Running FlyDSL W4A16 (int4_bf16, bf16 act, mfma_f32_16x16x16_bf16)...")
-        w4a16_ms = benchmark_flydsl(
-            tokens, model_dim, inter_dim, experts, topk,
-            in_dtype="int4_bf16", group_size=group_size,
-            num_warmup=args.num_warmup, num_iters=args.num_iters,
-        )
-        torch.cuda.empty_cache()
-        gc.collect()
+        results = []
+        configs = [
+            ("int4",      -1, "W4A8",  "per-row"),
+            ("int4",      32, "W4A8",  "g32"),
+            ("int4_bf16", -1, "W4A16", "per-row"),
+            ("int4_bf16", 32, "W4A16", "g32"),
+        ]
+        results = []
+        for dtype, gs, tag, scale in configs:
+            results.append((*_run_and_collect(dtype, gs, f"{tag} {scale}"), tag, scale))
 
         print("\n" + "=" * 70)
         print("                         RESULTS")
         print("=" * 70)
-        w4a8_tflops = total_flops / (w4a8_ms / 1000) / 1e12
-        w4a16_tflops = total_flops / (w4a16_ms / 1000) / 1e12
         print(f"\n{'Kernel':<30s} {'Latency':>10s} {'TFLOPS':>10s}")
         print("-" * 52)
-        print(f"{'FlyDSL W4A8  (g' + str(group_size) + ')':<30s} {w4a8_ms:>8.2f} ms {w4a8_tflops:>8.2f}")
-        print(f"{'FlyDSL W4A16 (g' + str(group_size) + ')':<30s} {w4a16_ms:>8.2f} ms {w4a16_tflops:>8.2f}")
+        for label, ms, tflops, _, _ in results:
+            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {tflops:>8.2f}")
 
-        diff_ms = w4a8_ms - w4a16_ms
-        pct = diff_ms / w4a16_ms * 100
+        by_key = {(r[3], r[4]): r[1] for r in results}
         print()
-        if diff_ms > 0:
-            print(f">>> W4A8 is {diff_ms:.2f} ms slower ({pct:+.1f}%) than W4A16 <<<")
-        else:
-            print(f">>> W4A8 is {-diff_ms:.2f} ms faster ({pct:+.1f}%) than W4A16 <<<")
+        for tag in ("W4A8", "W4A16"):
+            pr = by_key[(tag, "per-row")]
+            g = by_key[(tag, "g32")]
+            d = g - pr
+            print(f"  {tag}: g32 vs per-row  {d:+.2f} ms ({d / pr * 100:+.1f}%)")
+        pr8 = by_key[("W4A8", "per-row")]
+        pr16 = by_key[("W4A16", "per-row")]
+        d = pr8 - pr16
+        print(f"  per-row: W4A8 vs W4A16  {d:+.2f} ms ({d / pr16 * 100:+.1f}%)")
         print()
 
     elif is_hybrid:
-        # --- Hybrid: stage1 W4A16 + stage2 bf16 ---
-        print("Running FlyDSL hybrid (stage1=W4A16, stage2=bf16)...")
+        print("  Running hybrid (stage1=W4A16, stage2=bf16) ...")
         h_s1, h_s2, hybrid_ms = benchmark_flydsl_hybrid_w2_bf16(
             tokens, model_dim, inter_dim, experts, topk,
             group_size=group_size,
@@ -289,17 +298,8 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
 
-        # --- Baseline: pure W4A16 ---
-        print("Running FlyDSL pure W4A16 (baseline)...")
-        w4a16_ms = benchmark_flydsl(
-            tokens, model_dim, inter_dim, experts, topk,
-            in_dtype="int4_bf16", group_size=group_size,
-            num_warmup=args.num_warmup, num_iters=args.num_iters,
-        )
-        torch.cuda.empty_cache()
-        gc.collect()
+        _, w4a16_ms, _ = _run_and_collect("int4_bf16", group_size, "pure W4A16 (baseline)")
 
-        # --- Results ---
         print("\n" + "=" * 70)
         print("                         RESULTS")
         print("=" * 70)
@@ -319,24 +319,32 @@ def main():
             print(f">>> Hybrid is {-diff_ms:.2f} ms faster ({pct:+.1f}%) than pure W4A16 <<<")
         print()
     else:
-        # --- FlyDSL ---
-        print(f"Running FlyDSL {dtype_name}...")
-        flydsl_ms = benchmark_flydsl(
-            tokens, model_dim, inter_dim, experts, topk,
-            in_dtype=flydsl_in_dtype, group_size=group_size,
-            num_warmup=args.num_warmup, num_iters=args.num_iters,
-        )
-        torch.cuda.empty_cache()
-        gc.collect()
+        results = []
 
-        # --- Results ---
+        if supports_groupwise:
+            results.append(_run_and_collect(flydsl_in_dtype, -1, f"{dtype_name} per-row"))
+            results.append(_run_and_collect(flydsl_in_dtype, 32, f"{dtype_name} g32"))
+        else:
+            results.append(_run_and_collect(flydsl_in_dtype, group_size, dtype_name))
+
         print("\n" + "=" * 70)
         print("                         RESULTS")
         print("=" * 70)
-        flydsl_tflops = total_flops / (flydsl_ms / 1000) / 1e12
-        print(f"\n{'Kernel':<20s} {'Latency':>10s} {'TFLOPS':>10s}")
-        print("-" * 42)
-        print(f"{'FlyDSL ' + dtype_name:<20s} {flydsl_ms:>8.2f} ms {flydsl_tflops:>8.2f}")
+        print(f"\n{'Kernel':<30s} {'Latency':>10s} {'TFLOPS':>10s}")
+        print("-" * 52)
+        for label, ms, tflops in results:
+            print(f"{'FlyDSL ' + label:<30s} {ms:>8.2f} ms {tflops:>8.2f}")
+
+        if len(results) == 2:
+            perrow_ms = results[0][1]
+            g32_ms = results[1][1]
+            diff_ms = g32_ms - perrow_ms
+            pct = diff_ms / perrow_ms * 100
+            print()
+            if diff_ms > 0:
+                print(f">>> g32 is {diff_ms:.2f} ms slower ({pct:+.1f}%) than per-row <<<")
+            else:
+                print(f">>> g32 is {-diff_ms:.2f} ms faster ({pct:+.1f}%) than per-row <<<")
         print()
 
 
