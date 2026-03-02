@@ -1,23 +1,29 @@
-name: FlyDSL Nightly CI
+name: FlyDSL CI
 
 on:
-  # schedule:
-  #   - cron: '0 2 * * *'
-  pull_request:
-    branches:
-      - main
+  schedule:
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       release_type:
-        description: 'Release type: "nightlies" publishes to S3, "dev" skips S3 upload'
+        description: 'Release type determines target S3 bucket'
         type: choice
         options:
+          - devreleases
           - nightlies
-          - dev
-        default: "nightlies"
+          - release
+        default: "devreleases"
+      skip_tests:
+        description: 'Skip test job for faster iteration'
+        type: boolean
+        default: false
+      skip_promote:
+        description: 'Skip promote job (build + test only)'
+        type: boolean
+        default: false
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -31,13 +37,16 @@ jobs:
 
   test:
     needs: build
+    if: ${{ !(inputs.skip_tests || false) }}
     uses: ./.github/workflows/test-whl.yaml
     permissions:
       contents: read
 
   promote:
     needs: [build, test]
-    if: ${{ (inputs.release_type || 'nightlies') == 'nightlies' }}
+    if: >-
+      ${{ github.repository_owner == 'ROCm'
+          && !(inputs.skip_promote || false) }}
     uses: ./.github/workflows/promote.yaml
     with:
       release_type: ${{ inputs.release_type || 'nightlies' }}

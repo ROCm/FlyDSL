@@ -4,9 +4,9 @@ on:
   workflow_call:
     inputs:
       release_type:
-        description: 'Release type: "nightlies" publishes to S3, "dev" skips S3 upload'
+        description: 'Release type determines target S3 bucket (devreleases, nightlies, release)'
         type: string
-        default: "dev"
+        required: true
     outputs:
       wheel_names:
         description: 'Space-separated list of built wheel filenames'
@@ -101,18 +101,18 @@ jobs:
         run: python3 flydsl/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
-        if: inputs.release_type == 'nightlies'
+        if: ${{ github.repository_owner == 'ROCm' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: us-east-1
           role-to-assume: ${{ env.OIDC_ROLE }}
 
       - name: Install AWS CLI
-        if: inputs.release_type == 'nightlies'
+        if: ${{ github.repository_owner == 'ROCm' }}
         run: bash ./flydsl/scripts/install_awscli.sh
 
       - name: Upload wheels to S3 staging
-        if: inputs.release_type == 'nightlies'
+        if: ${{ github.repository_owner == 'ROCm' }}
         run: |
           aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
             --recursive --exclude "*" --include "*.whl"
