@@ -41,6 +41,7 @@ from flydsl.kernels.mfma_preshuffle_pipeline import (
     load_b_raw_w4a8_k64,
     load_b_raw_w4a8_groupwise_k64,
     unpack_b_w4a8,
+    unpack_b_w4a_fp8,
 )
 from flydsl.kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from flydsl.kernels.kernels_common import stream_ptr_to_async_token
@@ -74,17 +75,20 @@ def compile_moe_gemm1(
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
       - "int4_bf16": W4A16 path: X is bf16, W is packed int4 unpacked to bf16 in-kernel
+      - "int4_fp8": W4A_FP8 path: X is fp8, W is packed int4 unpacked to fp8 in-kernel
     """
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "int4_fp8")
+    if in_dtype not in _valid_dtypes:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_int4_fp8 = in_dtype == "int4_fp8"    # W4A_FP8: fp8 activations, packed int4 weights
     is_f16 = in_dtype == "fp16"
     is_bf16 = is_int4_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
     is_f16_or_bf16 = is_f16 or is_bf16
@@ -106,13 +110,15 @@ def compile_moe_gemm1(
     x_is_token_slot = in_dtype == "int8smooth"
     # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
     is_int8 = is_int8 or x_is_token_slot
-    # Weight element bytes for addressing: 1 for packed int4 (W4A8/W4A16), otherwise same as activation.
-    w_elem_bytes = 1 if (is_int4 or is_int4_bf16) else elem_bytes
+    # w_is_int4: True for any variant where weights are packed int4.
+    w_is_int4 = is_int4 or is_int4_bf16 or is_int4_fp8
+    # Weight element bytes for addressing: 1 for packed int4, otherwise same as activation.
+    w_elem_bytes = 1 if w_is_int4 else elem_bytes
     # Scale flags for epilogue:
     # - fp16/bf16: no scales needed (pure float types)
     # - int4_bf16: scale_w needed (weight dequant), scale_x not needed (bf16 activations)
-    # - fp8/int8/int4: both scales needed
-    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4, False for fp16/bf16/int4_bf16
+    # - fp8/int8/int4/int4_fp8: both scales needed
+    needs_scale_x = not is_f16_or_bf16  # True for fp8/int8/int4/int4_fp8
     needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
     # Group-wise scale support for W4A16 and W4A8
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
@@ -162,7 +168,7 @@ def compile_moe_gemm1(
     size_out = DYN
     size_x = DYN
     # W is packed int4 for W4A8/W4A16: 2 values per byte.
-    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if (is_int4 or is_int4_bf16) else (experts * (2 * inter_dim) * model_dim)
+    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if w_is_int4 else (experts * (2 * inter_dim) * model_dim)
     size_sorted = DYN
     size_expert_ids = DYN
 
@@ -226,7 +232,7 @@ def compile_moe_gemm1(
             self: flir.T.i64,
             arg_out: lambda: T.memref(DYN, out_mlir()),
             arg_x: lambda: T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
-            arg_w: lambda: T.memref(size_w, I.i8) if (is_int4 or is_int4_bf16) else T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
+            arg_w: lambda: T.memref(size_w, I.i8) if w_is_int4 else T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(scale_w_size_stage1, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
@@ -241,7 +247,7 @@ def compile_moe_gemm1(
             x_elem = I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             # W4A16: x_elem is bf16, but w_elem is still i8 (packed int4 storage).
-            w_elem = I.i8 if (is_int4 or is_int4_bf16) else (I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)))
+            w_elem = I.i8 if w_is_int4 else (I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)))
             f16 = I.f16
             bf16 = I.bf16
             f32 = I.f32
@@ -288,7 +294,7 @@ def compile_moe_gemm1(
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
             # For packed int4 (W4A8/W4A16), kpack_bytes=8 (4 bytes per half-step).
-            kpack_bytes = 8 if (is_int4 or is_int4_bf16) else 16
+            kpack_bytes = 8 if w_is_int4 else 16
             b_layout = make_preshuffle_b_layout(
                 flir, arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=w_elem_bytes
             )
@@ -688,6 +694,24 @@ def compile_moe_gemm1(
                                 scales0.append(sc0)
                                 scales1.append(sc1)
                             b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
+                    elif is_int4_fp8:
+                        # ---- W4A_FP8 per-row: 8B K64 loads + unpack to fp8 ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                h0, h1 = load_b_raw_w4a8_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=blk_list[ni], n_intra=intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a_fp8(h0, arith, vector, rocdl))
+                                packs1.append(unpack_b_w4a_fp8(h1, arith, vector, rocdl))
+                            b_tile.append((packs0, packs1))
                         return b_tile
                     elif is_int4:
                         # ---- W4A8 per-row: 8B K64 loads (buffer_load_dwordx2) + unpack ----
@@ -1351,7 +1375,7 @@ def compile_moe_gemm1(
             self: flir.T.i64,
             arg_out: lambda: T.memref(DYN, out_mlir()),
             arg_x: lambda: T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
-            arg_w: lambda: T.memref(size_w, I.i8) if (is_int4 or is_int4_bf16) else T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
+            arg_w: lambda: T.memref(size_w, I.i8) if w_is_int4 else T.memref(DYN, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
             arg_scale_x: lambda: T.memref(DYN, T.f32()),
             arg_scale_w: lambda: T.memref(scale_w_size_stage1, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(DYN, T.i32()),
@@ -1438,11 +1462,13 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "int4_fp8")
+    if in_dtype not in _valid_dtypes:
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
+            f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}"
         )
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_int4_fp8 = in_dtype == "int4_fp8"    # W4A_FP8: fp8 activations, packed int4 weights
     is_f16 = in_dtype == "fp16"
     is_bf16 = is_int4_bf16 or in_dtype == "bf16"  # For bf16 activations and MFMA selection
     is_f16_or_bf16 = is_f16 or is_bf16
@@ -1457,8 +1483,10 @@ def compile_moe_gemm2(
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
-    # Weight element bytes for addressing: 1 for packed int4 (W4A8/W4A16), otherwise same as activation.
-    w_elem_bytes = 1 if (is_int4 or is_int4_bf16) else elem_bytes
+    # w_is_int4: True for any variant where weights are packed int4.
+    w_is_int4 = is_int4 or is_int4_bf16 or is_int4_fp8
+    # Weight element bytes for addressing: 1 for packed int4, otherwise same as activation.
+    w_elem_bytes = 1 if w_is_int4 else elem_bytes
     # Scale flags for epilogue:
     # - fp16/bf16: no scales needed (pure float types)
     # - int4_bf16: scale_w needed (weight dequant), scale_x not needed (bf16 activations)
@@ -1511,7 +1539,7 @@ def compile_moe_gemm2(
     size_expert_ids_shape = DYN
     size_scale_x = DYN
     # W is packed int4 for W4A8/W4A16: 2 values per byte.
-    size_w = (experts * model_dim * inter_dim) // 2 if (is_int4 or is_int4_bf16) else (experts * model_dim * inter_dim)
+    size_w = (experts * model_dim * inter_dim) // 2 if w_is_int4 else (experts * model_dim * inter_dim)
 
     total_threads = 256
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -1598,7 +1626,7 @@ def compile_moe_gemm2(
             self: flir.T.i64,
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
-            arg_w: lambda: T.memref(size_w, I.i8) if (is_int4 or is_int4_bf16) else T.memref(size_w, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
+            arg_w: lambda: T.memref(size_w, I.i8) if w_is_int4 else T.memref(size_w, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(scale_w_size_stage2, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),
@@ -1613,7 +1641,7 @@ def compile_moe_gemm2(
             x_elem = I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))
             # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
             # W4A16: x_elem is bf16, but w_elem is still i8 (packed int4 storage).
-            w_elem = I.i8 if (is_int4 or is_int4_bf16) else (I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)))
+            w_elem = I.i8 if w_is_int4 else (I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8)))
             f16 = I.f16
             bf16 = I.bf16
             f32 = I.f32
@@ -1649,7 +1677,7 @@ def compile_moe_gemm2(
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.constant(experts * model_dim, index=True)
             # For packed int4 (W4A8/W4A16), kpack_bytes=8 (4 bytes per half-step).
-            kpack_bytes = 8 if (is_int4 or is_int4_bf16) else 16
+            kpack_bytes = 8 if w_is_int4 else 16
             b_layout = make_preshuffle_b_layout(
                 flir, arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=w_elem_bytes
             )
@@ -2041,6 +2069,24 @@ def compile_moe_gemm2(
                                 scales0.append(sc0)
                                 scales1.append(sc1)
                             b_tile.append((packs0, packs1, scales0, scales1))
+                        return b_tile
+                    elif is_int4_fp8:
+                        # ---- W4A_FP8 per-row: 8B K64 loads + unpack to fp8 ----
+                        b_tile = []
+                        for ku in range_constexpr(k_unroll):
+                            packs0, packs1 = [], []
+                            for ni in range_constexpr(num_acc_n):
+                                h0, h1 = load_b_raw_w4a8_k64(
+                                    buffer_ops, flir, arith, vector,
+                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
+                                    base_k=base_k, ku=ku,
+                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
+                                    lane_div_16=lane_div_16, elem_type=w_elem,
+                                    kpack_bytes=kpack_bytes,
+                                )
+                                packs0.append(unpack_b_w4a_fp8(h0, arith, vector, rocdl))
+                                packs1.append(unpack_b_w4a_fp8(h1, arith, vector, rocdl))
+                            b_tile.append((packs0, packs1))
                         return b_tile
                     elif is_int4:
                         # ---- W4A8 per-row: 8B K64 loads (buffer_load_dwordx2) + unpack ----
@@ -2740,7 +2786,7 @@ def compile_moe_gemm2(
             self: flir.T.i64,
             arg_out: lambda: T.memref(size_out, out_elem()),
             arg_x: lambda: T.memref(size_x, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
-            arg_w: lambda: T.memref(size_w, I.i8) if (is_int4 or is_int4_bf16) else T.memref(size_w, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
+            arg_w: lambda: T.memref(size_w, I.i8) if w_is_int4 else T.memref(size_w, I.bf16 if is_bf16 else (I.f16 if is_f16 else (I.i8 if is_int8 else I.f8))),
             arg_scale_x: lambda: T.memref(size_scale_x, T.f32()),
             arg_scale_w: lambda: T.memref(scale_w_size_stage2, T.f32()),
             arg_sorted_token_ids: lambda: T.memref(size_sorted, T.i32()),

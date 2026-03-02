@@ -2,8 +2,9 @@
 Benchmark: FlyDSL MoE kernels (W4A16, W4A8, bf16, hybrid)
 
 Usage:
-  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16           # W4A16 per-row + g32
-  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --w4a8   # W4A8  per-row + g32
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16             # W4A16 per-row + g32
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --w4a8     # W4A8  per-row + g32
+  HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --w4a-fp8  # W4A_FP8 per-row
   HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --all-w4   # all W4 variants
   HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --bf16
   HIP_VISIBLE_DEVICES=4 python -m tests.kernels.bench_moe_w4a16 --hybrid-w2-bf16
@@ -12,6 +13,7 @@ Notes:
   - W4A16 and W4A8 automatically run both per-row and groupwise (g32) in one invocation.
   - W4A8 (int4): int8 activations, int4 weights, mfma_i32_16x16x32_i8.
   - W4A16 (int4_bf16): bf16 activations, int4 weights, mfma_f32_16x16x16_bf16.
+  - W4A_FP8 (int4_fp8): fp8 activations, int4 weights, mfma_f32_16x16x32_fp8_fp8.
 """
 import argparse
 import os
@@ -53,6 +55,7 @@ def benchmark_flydsl(
     device = "cuda"
 
     # FlyDSL only supports group_size=32 for W4A16/W4A8; fall back to per-row otherwise.
+    # int4_fp8 is per-row only.
     if in_dtype in ("int4_bf16", "int4") and group_size == 32:
         flydsl_group_size = 32
     else:
@@ -80,13 +83,14 @@ def benchmark_flydsl(
     )
 
     # Prepare stage2 input.
-    from tests.kernels.test_moe_gemm import pertoken_quant
+    from tests.kernels.test_moe_gemm import pertoken_quant, DTYPE_FP8
     if in_dtype in ("int4_bf16", "bf16"):
         a2 = out1.to(torch.bfloat16)
         a2_scale = None
     elif in_dtype == "int4":
-        # W4A8: quantize stage1 output to int8 for stage2 input.
         a2, a2_scale = pertoken_quant(out1.to(torch.float32), quant_dtype=torch.int8)
+    elif in_dtype == "int4_fp8":
+        a2, a2_scale = pertoken_quant(out1.to(torch.float32), quant_dtype=DTYPE_FP8)
     else:
         a2 = out1.to(torch.float16)
         a2_scale = None
@@ -188,6 +192,8 @@ def main():
     dtype_group = parser.add_mutually_exclusive_group()
     dtype_group.add_argument("--bf16", action="store_true", help="Benchmark pure bf16 instead of W4A16")
     dtype_group.add_argument("--w4a8", action="store_true", help="Benchmark W4A8 (int4 weights, int8 activations)")
+    dtype_group.add_argument("--w4a-fp8", action="store_true", dest="w4a_fp8",
+                             help="Benchmark W4A_FP8 (int4 weights, fp8 activations)")
     dtype_group.add_argument("--all-w4", "--compare-w4a8-w4a16", action="store_true",
                              dest="compare_w4a8_w4a16",
                              help="Run all W4 variants: W4A8/W4A16 x per-row/g32")
@@ -220,6 +226,9 @@ def main():
     elif args.w4a8:
         flydsl_in_dtype = "int4"
         dtype_name = "W4A8"
+    elif args.w4a_fp8:
+        flydsl_in_dtype = "int4_fp8"
+        dtype_name = "W4A_FP8"
     elif is_hybrid:
         flydsl_in_dtype = "int4_bf16"
         dtype_name = "hybrid(s1:W4A16+s2:bf16)"
@@ -248,8 +257,9 @@ def main():
         tflops = total_flops / (ms / 1000) / 1e12
         return (label, ms, tflops)
 
+    effective_gs = group_size if supports_groupwise else -1
     print("=" * 70)
-    print(f"    FlyDSL MoE Benchmark: {dtype_name} (group_size={group_size})")
+    print(f"    FlyDSL MoE Benchmark: {dtype_name} (group_size={effective_gs})")
     print("=" * 70)
     print(f"\nParams: tokens={tokens}, model_dim={model_dim}, inter_dim={inter_dim}")
     print(f"        experts={experts}, topk={topk}, M_effective={M}")

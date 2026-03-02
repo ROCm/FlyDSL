@@ -591,6 +591,7 @@ __all__ = [
     "load_b_raw_w4a8_k64",
     "load_b_raw_w4a8_groupwise_k64",
     "unpack_b_w4a8",
+    "unpack_b_w4a_fp8",
 ]
 
 
@@ -933,6 +934,66 @@ def unpack_b_w4a8(packed32, arith, vector):
 
     vec2_i32 = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
     v2 = vector.from_elements(vec2_i32, [even, odd])
+    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+    v64 = vector.bitcast(vec1_i64, v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def unpack_b_w4a_fp8(packed32, arith, vector, rocdl):
+    """Unpack packed int4 (i32) to fp8 i64 for mfma_f32_16x16x32_fp8_fp8.
+
+    Pipeline: int4 -> int8 (7-op unpack) -> f32 (byte extract + sitofp)
+              -> fp8 (cvt_pk_fp8_f32) -> i64.
+    """
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+
+    # Step 1: 7-op int4->int8 unpack (same as unpack_b_w4a8).
+    c_08080808 = arith.constant(0x08080808, type=i32)
+    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=i32)
+    c_1e = arith.constant(0x1E, type=i32)
+    c_4_i32 = arith.constant(4, type=i32)
+
+    s0 = (packed32 & c_08080808) * c_1e
+    even = (packed32 & c_0f0f0f0f) | s0
+
+    t = packed32 >> c_4_i32
+    s1 = (t & c_08080808) * c_1e
+    odd = (t & c_0f0f0f0f) | s1
+
+    # Step 2: Convert 4 signed int8 bytes in an i32 to 4 fp8 bytes in an i32.
+    c_8 = arith.constant(8, type=i32)
+    c_16 = arith.constant(16, type=i32)
+    c_24 = arith.constant(24, type=i32)
+
+    from _mlir.dialects._arith_ops_gen import ShRSIOp as _ShRSIOp
+    _uw = arith._unwrap_value
+    _av = arith.ArithValue
+
+    def _i32_int8x4_to_fp8x4(val):
+        """Convert i32 containing 4 signed int8 bytes -> i32 containing 4 fp8 bytes."""
+        def _sext_byte(src, shl_amount, shr_amount):
+            shifted = src << shl_amount
+            shrsi_result = _ShRSIOp(_uw(shifted), _uw(shr_amount)).result
+            return _uw(arith.sitofp(f32, _av(shrsi_result)))
+
+        f0 = _sext_byte(val, c_24, c_24)
+        f1 = _sext_byte(val, c_16, c_24)
+        f2 = _sext_byte(val, c_8, c_24)
+        b3 = _ShRSIOp(_uw(val), _uw(c_24)).result
+        f3 = _uw(arith.sitofp(f32, _av(b3)))
+
+        zero = _uw(arith.constant(0, type=i32))
+        pk = rocdl.cvt_pk_fp8_f32(src_a=f0, src_b=f1, old=zero, word_sel=0, res=i32)
+        pk = rocdl.cvt_pk_fp8_f32(src_a=f2, src_b=f3, old=_uw(pk), word_sel=1, res=i32)
+        return pk
+
+    even_fp8 = _i32_int8x4_to_fp8x4(even)
+    odd_fp8 = _i32_int8x4_to_fp8x4(odd)
+
+    # Step 3: Pack [even_fp8, odd_fp8] into i64.
+    vec2_i32 = ir.VectorType.get([2], i32)
+    v2 = vector.from_elements(vec2_i32, [even_fp8, odd_fp8])
     vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
     v64 = vector.bitcast(vec1_i64, v2)
     return vector.extract(v64, static_position=[0], dynamic_position=[])
