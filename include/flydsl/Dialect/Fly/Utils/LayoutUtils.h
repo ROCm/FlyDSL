@@ -27,6 +27,11 @@ std::pair<IntTuple, IntTuple> canonicalizeStridePair(const IntTupleBuilder<IntTu
     }
     return {shape, stride};
   }
+  // Canonicalize singleton tuple wrappers so rank-1 trees print as leaf modes.
+  // Example: ((4), 4):((1), 4) -> (4, 4):(1, 4).
+  if (shape.rank() == 1) {
+    return canonicalizeStridePair(builder, builder.at(shape, 0), builder.at(stride, 0));
+  }
   typename IntTupleBuilder<IntTuple>::ElemCollector shapeElems;
   typename IntTupleBuilder<IntTuple>::ElemCollector strideElems;
   for (int i = 0; i < shape.rank(); ++i) {
@@ -511,7 +516,9 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout, Lay
   auto [retShape, retStride] =
       detail::compositionImpl(builder, coalShape, coalStride, builder.getShape(innerLayout),
                               builder.getStride(innerLayout));
-  return builder.makeLayout(retShape, retStride);
+  auto [canonicalShape, canonicalStride] =
+      detail::canonicalizeStridePair(builder, retShape, retStride);
+  return builder.makeLayout(canonicalShape, canonicalStride);
 }
 template <class Layout>
 Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
@@ -548,7 +555,9 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
       retStride.push_back(builder.at(lhsStride, i));
     }
   }
-  return builder.makeLayout(builder.makeTuple(retShape), builder.makeTuple(retStride));
+  auto [canonicalShape, canonicalStride] =
+      detail::canonicalizeStridePair(builder, builder.makeTuple(retShape), builder.makeTuple(retStride));
+  return builder.makeLayout(canonicalShape, canonicalStride);
 }
 
 template <class Layout>
@@ -945,7 +954,9 @@ Layout layoutLogicalProduct(LayoutBuilder<Layout> &builder, Layout blockLayout,
   retStrideElems.push_back(builder.getStride(blockLayout));
   retStrideElems.push_back(builder.getStride(composed));
 
-  return builder.makeLayout(builder.makeTuple(retShapeElems), builder.makeTuple(retStrideElems));
+  auto [canonicalShape, canonicalStride] = detail::canonicalizeStridePair(
+      builder, builder.makeTuple(retShapeElems), builder.makeTuple(retStrideElems));
+  return builder.makeLayout(canonicalShape, canonicalStride);
 }
 
 template <class Layout>

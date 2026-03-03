@@ -68,14 +68,85 @@ func.func @test_raked_product(%base: !fly.layout<(4, 8) : (1, 4)>,
 }
 
 // CHECK-LABEL: @test_logical_product_1d
-func.func @test_logical_product_1d() -> !fly.layout<((8), (4)) : ((1), (8))> {
-  // 1D base with 1D tile preserves nesting structure
+func.func @test_logical_product_1d() -> !fly.layout<(8, 4) : (1, 8)> {
+  // 1D base with 1D tile canonicalizes singleton tuple wrappers
   %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
   %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
   %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
   %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
   %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
   %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
-  %result = fly.logical_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<((8), (4)) : ((1), (8))>
-  return %result : !fly.layout<((8), (4)) : ((1), (8))>
+  %result = fly.logical_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(8, 4) : (1, 8)>
+  return %result : !fly.layout<(8, 4) : (1, 8)>
+}
+
+// CHECK-LABEL: @test_zipped_product_1d
+func.func @test_zipped_product_1d() -> !fly.layout<(8, 4) : (1, 8)> {
+  %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
+  %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
+  %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.zipped_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(8, 4) : (1, 8)>
+  return %result : !fly.layout<(8, 4) : (1, 8)>
+}
+
+// CHECK-LABEL: @test_tiled_product_1d
+func.func @test_tiled_product_1d() -> !fly.layout<(8, 4) : (1, 8)> {
+  %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
+  %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
+  %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.tiled_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(8, 4) : (1, 8)>
+  return %result : !fly.layout<(8, 4) : (1, 8)>
+}
+
+// CHECK-LABEL: @test_flat_product_1d
+func.func @test_flat_product_1d() -> !fly.layout<(8, 4) : (1, 8)> {
+  %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
+  %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
+  %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.flat_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(8, 4) : (1, 8)>
+  return %result : !fly.layout<(8, 4) : (1, 8)>
+}
+
+// CHECK-LABEL: @test_blocked_product_1d
+func.func @test_blocked_product_1d() -> !fly.layout<(8, 4) : (1, 8)> {
+  %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
+  %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
+  %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.blocked_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(8, 4) : (1, 8)>
+  return %result : !fly.layout<(8, 4) : (1, 8)>
+}
+
+// CHECK-LABEL: @test_raked_product_1d
+func.func @test_raked_product_1d() -> !fly.layout<(4, 8) : (8, 1)> {
+  %s1 = fly.static {elems = [8 : i32]} : () -> !fly.int_tuple<(8)>
+  %d1 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(8)>, !fly.int_tuple<(1)>) -> !fly.layout<(8) : (1)>
+  %s2 = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %d2 = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.raked_product(%base, %tile) : (!fly.layout<(8) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 8) : (8, 1)>
+  return %result : !fly.layout<(4, 8) : (8, 1)>
+}
+
+// CHECK-LABEL: @test_logical_product_wrapped_tuple_1d
+func.func @test_logical_product_wrapped_tuple_1d(
+    %base: !fly.layout<((8, 1)) : ((1, 8))>,
+    %tile: !fly.layout<((4, 1)) : ((1, 4))>) -> !fly.layout<((8, 1), (4, 1)) : ((1, 0), (8, 0))> {
+  // Outer singleton wrappers are accepted and handled in inference.
+  %result = fly.logical_product(%base, %tile)
+      : (!fly.layout<((8, 1)) : ((1, 8))>, !fly.layout<((4, 1)) : ((1, 4))>)
+      -> !fly.layout<((8, 1), (4, 1)) : ((1, 0), (8, 0))>
+  return %result : !fly.layout<((8, 1), (4, 1)) : ((1, 0), (8, 0))>
 }
