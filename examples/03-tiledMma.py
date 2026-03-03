@@ -37,7 +37,7 @@ def gemm_kernel(
     tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
     thr_mma = tiled_mma.thr_slice(tid)
 
-    copy_atom = fx.make_copy_atom(fx.rocdl.BufferLDST32b(), fx.Float32)
+    copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
     tiled_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma)
     tiled_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma)
     tiled_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma)
