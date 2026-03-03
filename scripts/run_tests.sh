@@ -1,5 +1,5 @@
 #!/bin/bash
-# GEMM Test Suite - runs preshuffle GEMM tests via pytest
+# Kernel Test Suite - GEMM, LayerNorm, RMSNorm, Softmax, Examples, FileCheck
 #
 # Prerequisites: bash scripts/build.sh && pip install -e .
 #   (or: export PYTHONPATH=build-fly/python_packages:$REPO_ROOT)
@@ -44,6 +44,44 @@ skipped=$(echo "$summary" | grep -oP '\d+(?= skipped)' || echo "0")
 echo ""
 echo "========================================================================"
 echo "GEMM Tests: ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "========================================================================"
+
+# ---------------------------------------------------------------------------
+# Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Norm & Softmax Kernels"
+echo "========================================================================"
+echo ""
+
+norm_pass=0
+norm_fail=0
+
+for test_script in \
+    tests/kernels/test_layernorm.py \
+    tests/kernels/test_rmsnorm.py \
+    tests/kernels/test_softmax.py; do
+
+    test_name=$(basename "$test_script" .py | sed 's/test_//')
+    if [ ! -f "$test_script" ]; then
+        echo "  SKIP  ${test_name} (file not found)"
+        continue
+    fi
+    if python3 "$test_script" > /tmp/test_${test_name}.log 2>&1; then
+        echo "  PASS  ${test_name}"
+        norm_pass=$((norm_pass + 1))
+    else
+        echo "  FAIL  ${test_name}"
+        tail -5 /tmp/test_${test_name}.log | sed 's/^/        /'
+        norm_fail=$((norm_fail + 1))
+        exit_code=1
+    fi
+done
+
+echo ""
+echo "========================================================================"
+echo "Norm & Softmax: ${norm_pass} passed, ${norm_fail} failed"
 echo "========================================================================"
 
 # ---------------------------------------------------------------------------
@@ -110,6 +148,7 @@ echo ""
 echo "========================================================================"
 echo "Summary"
 echo "  GEMM:      ${passed} passed, ${failed} failed, ${skipped} skipped"
+echo "  Norm/SM:   ${norm_pass} passed, ${norm_fail} failed"
 echo "  Examples:  ${example_passed} passed, ${example_failed} failed"
 echo "  FileCheck: ${mlir_pass} passed, ${mlir_fail} failed"
 echo "========================================================================"

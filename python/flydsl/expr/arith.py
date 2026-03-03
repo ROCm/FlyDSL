@@ -24,3 +24,15 @@ from .utils.arith import (  # noqa: F401
     unwrap,
     _to_raw,
 )
+
+# Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
+from .._mlir.dialects import arith as _mlir_arith  # noqa: E402
+
+
+def cmpi(predicate, lhs, rhs, **kwargs):
+    return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+
+
+def cmpf(predicate, lhs, rhs, **kwargs):
+    return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+
