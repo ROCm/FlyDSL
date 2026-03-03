@@ -42,6 +42,8 @@ def _flydsl_key() -> str:
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
     bindings will produce a different key, invalidating stale disk caches.
     """
+    import flydsl
+
     contents = []
 
     flydsl_root = Path(flydsl.__file__).resolve().parent

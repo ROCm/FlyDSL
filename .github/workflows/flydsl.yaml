@@ -5,10 +5,14 @@ on:
     branches:
       - main
       - pre_v0.1
+      - pr/v0.1
+      - pr/v0.1-debug
   pull_request:
     branches:
       - main
       - pre_v0.1
+      - pr/v0.1
+      - pr/v0.1-debug
   workflow_dispatch:
 
 concurrency:
