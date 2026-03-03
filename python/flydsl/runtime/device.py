@@ -4,13 +4,13 @@ import subprocess
 from typing import Optional
 
 
-def _arch_from_rocm_agent_enumerator() -> Optional[str]:
+def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
     """Query rocm_agent_enumerator (standard ROCm tool) for the first GPU arch."""
     try:
         out = subprocess.check_output(
             ["rocm_agent_enumerator", "-name"],
             text=True,
-            timeout=5,
+            timeout=timeout_s,
             stderr=subprocess.DEVNULL,
         )
         for line in out.splitlines():
@@ -33,7 +33,7 @@ def get_rocm_arch() -> str:
             parts = env.split(".")
             return f"gfx{parts[0]}{parts[1]}{parts[2]}"
 
-    arch = _arch_from_rocm_agent_enumerator()
+    arch = _arch_from_rocm_agent_enumerator(timeout_s=timeout_s)
     if arch:
         return arch.split(":", 1)[0]
 
