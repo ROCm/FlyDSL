@@ -515,7 +515,7 @@ if __name__ == "__main__":
         type=str,
         default="fp16",
         choices=["fp16", "bf16"],
-        help="Output dtype (default: bf16).",
+        help="Output dtype (default: fp16).",
     )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
