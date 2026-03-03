@@ -69,6 +69,23 @@ from flydsl.expr import arith, vector, gpu, buffer_ops, rocdl
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 
+def _vt_swizzle(f16_idx):
+    """XOR swizzle on VT f16 element index to avoid LDS bank conflicts.
+
+    Maps byte-address bits [9:7] (row index) into bits [6:4] (bank group).
+    Preserves 16-byte (8×f16) contiguity required by ds_read_b128.
+    """
+    raw = _raw(f16_idx) if not isinstance(f16_idx, ir.Value) else f16_idx
+    i32_ty = ir.IntegerType.get_signless(32)
+    idx32 = _std_arith.IndexCastOp(i32_ty, raw).result
+    c3 = _std_arith.ConstantOp(i32_ty, ir.IntegerAttr.get(i32_ty, 3)).result
+    c0x38 = _std_arith.ConstantOp(i32_ty, ir.IntegerAttr.get(i32_ty, 0x38)).result
+    shifted = _std_arith.ShRUIOp(idx32, c3).result
+    masked = _std_arith.AndIOp(shifted, c0x38).result
+    swizzled = _std_arith.XOrIOp(idx32, masked).result
+    return _std_arith.IndexCastOp(ir.IndexType.get(), swizzled).result
+
+
 def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
     """Encode s_waitcnt bitfield for CDNA3 (gfx94x).
 
@@ -262,18 +279,18 @@ def compile_mla_decode(
     STRIDE_TOKEN_KV = NUM_KV_HEADS * HEAD_DIM_QK
     STRIDE_PAGE = PAGE_BLOCK_SIZE * STRIDE_TOKEN_KV
 
-    K_STRIDE = (
+    K_STRIDE_ALIGNED = (
         (HEAD_DIM_QK + 2 * WARP_SIZE - 1)
         // (2 * WARP_SIZE) * (2 * WARP_SIZE)
     )
+    K_CALLS_PER_ROW = K_STRIDE_ALIGNED // (2 * WARP_SIZE)
+    K_STRIDE = K_STRIDE_ALIGNED + 8  # +8 f16: 324 dwords, 324%32=4, keeps 16B align for ds_read_b128
     VT_STRIDE = (BLOCK_N // 4) * 8
 
     K_BUF_ELEMS = BLOCK_N * K_STRIDE
     VT_BUF_ELEMS = (HEAD_DIM_V // 2) * VT_STRIDE
     VT_BUF_OFFSET = 2 * K_BUF_ELEMS
     KV_LDS_SIZE = 2 * K_BUF_ELEMS + VT_BUF_ELEMS
-
-    K_CALLS_PER_ROW = K_STRIDE // (2 * WARP_SIZE)
     K_ROWS_PER_WAVE = BLOCK_N // NUM_WAVES
 
     MAX_SEQLEN_Q = 4
@@ -686,7 +703,7 @@ def compile_mla_decode(
                         + arith.index(dp_idx * VT_STRIDE)
                         + arith.index(g_pair * 16)
                     )
-                    vector.store(vec, lds_vt, [_raw(vt_idx)])
+                    vector.store(vec, lds_vt, [_raw(_vt_swizzle(vt_idx))])
 
         def coop_transpose_v_from_lds(k_buf):
             v_raw = coop_load_v(k_buf)
@@ -826,17 +843,12 @@ def compile_mla_decode(
         N_DP = D_CHUNKS // 2
 
         def _vt_idx(dp):
-            return (
+            idx = (
                 (arith.index(dp * 16) + lane_mod_16)
                 * arith.index(VT_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
-
-        vt_byte_base = (
-            _memref.ExtractAlignedPointerAsIndexOp(lds_vt).result
-            + (lane_mod_16 * arith.index(VT_STRIDE)
-               + lane_div_16 * arith.index(8)) * arith.index(2)
-        )
+            return _vt_swizzle(idx)
 
         def vgpr_pin(val):
             return llvm.InlineAsmOp(
@@ -978,9 +990,9 @@ def compile_mla_decode(
             v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf[ks] = _lds_load_prefer_agpr(
-                        vt_byte_base, v8f16_type,
-                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
+                    v_buf[ks] = vector.load_op(
+                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
+                        nontemporal=True)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
@@ -1008,27 +1020,26 @@ def compile_mla_decode(
             )
 
             rescale_vec = _make_rescale_vec(rescale)
+            rocdl.sched_barrier(0)
 
             k_next_base_idx = (
                 lane_mod_16 * arith.index(K_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
-            k_next_byte_base = (
-                _memref.ExtractAlignedPointerAsIndexOp(k_next_buf).result
-                + k_next_base_idx * arith.index(2)
-            )
             k_buf_next = [None] * K_STEPS
             EXTRA_K = K_STEPS - N_DP
             k_block = 0
             for dp in range_constexpr(N_DP):
-                k_buf_next[k_block] = _lds_load_prefer_agpr(
-                    k_next_byte_base, v8f16_type,
-                    static_byte_offset=k_block * 64)
+                k_next_idx = k_next_base_idx + arith.index(k_block * 32)
+                k_buf_next[k_block] = vector.load_op(
+                    v8f16_type, k_next_buf, [_raw(k_next_idx)],
+                    nontemporal=True)
                 k_block += 1
                 if dp < EXTRA_K:
-                    k_buf_next[k_block] = _lds_load_prefer_agpr(
-                        k_next_byte_base, v8f16_type,
-                        static_byte_offset=k_block * 64)
+                    k_extra_idx = k_next_base_idx + arith.index(k_block * 32)
+                    k_buf_next[k_block] = vector.load_op(
+                        v8f16_type, k_next_buf, [_raw(k_extra_idx)],
+                        nontemporal=True)
                     k_block += 1
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec)
@@ -1101,9 +1112,9 @@ def compile_mla_decode(
             v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf[ks] = _lds_load_prefer_agpr(
-                        vt_byte_base, v8f16_type,
-                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
+                    v_buf[ks] = vector.load_op(
+                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
+                        nontemporal=True)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
@@ -1118,6 +1129,19 @@ def compile_mla_decode(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
+            
+            # dsread 16, vmem 22, mfma 36
+            for i in range_constexpr(36 - 16):
+                rocdl.sched_vmem(1)
+                rocdl.sched_mfma(1)
+            # for i in range_constexpr(16):
+            #     rocdl.sched_dsrd(1)
+            #     rocdl.sched_mfma(1)
+                # rocdl.sched_vmem(1)
+                # rocdl.sched_mfma(1)
+            
+            #
+            # rocdl.sched_vmem(22 - 20)
 
             rocdl.sched_barrier(0)
 
@@ -1134,22 +1158,20 @@ def compile_mla_decode(
                 lane_mod_16 * arith.index(K_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
-            k_b_byte_base = (
-                _memref.ExtractAlignedPointerAsIndexOp(k_next_buf).result
-                + k_b_base * arith.index(2)
-            )
             k_buf = [None] * K_STEPS
             EXTRA_K = K_STEPS - N_DP
             k_block = 0
             for dp in range_constexpr(N_DP):
-                k_buf[k_block] = _lds_load_prefer_agpr(
-                    k_b_byte_base, v8f16_type,
-                    static_byte_offset=k_block * 64)
+                k_b_idx = k_b_base + arith.index(k_block * 32)
+                k_buf[k_block] = vector.load_op(
+                    v8f16_type, k_next_buf, [_raw(k_b_idx)],
+                    nontemporal=True)
                 k_block += 1
                 if dp < EXTRA_K:
-                    k_buf[k_block] = _lds_load_prefer_agpr(
-                        k_b_byte_base, v8f16_type,
-                        static_byte_offset=k_block * 64)
+                    k_b_extra_idx = k_b_base + arith.index(k_block * 32)
+                    k_buf[k_block] = vector.load_op(
+                        v8f16_type, k_next_buf, [_raw(k_b_extra_idx)],
+                        nontemporal=True)
                     k_block += 1
 
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec_a)
@@ -1179,9 +1201,9 @@ def compile_mla_decode(
             v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf[ks] = _lds_load_prefer_agpr(
-                        vt_byte_base, v8f16_type,
-                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
+                    v_buf[ks] = vector.load_op(
+                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
+                        nontemporal=True)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
