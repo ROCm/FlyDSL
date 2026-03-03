@@ -2,6 +2,7 @@ import hashlib
 import inspect
 import os
 import pickle
+import pkgutil
 import types
 from functools import lru_cache
 from pathlib import Path
@@ -26,23 +27,72 @@ from .kernel_function import (
 from .protocol import fly_types, fly_construct
 
 
-@lru_cache(maxsize=1)
-def _get_llvm_version() -> str:
-    _FLYDSL_ROOT = Path(__file__).resolve().parents[4]
-    llvm_hash_file = _FLYDSL_ROOT / "thirdparty" / "llvm-hash.txt"
-    if llvm_hash_file.exists():
-        llvm_hash = llvm_hash_file.read_text()
-    else:
-        llvm_hash = "release_version"
-    log().debug(f"LLVM version: {llvm_hash}")
-    return llvm_hash
-
 
 @lru_cache(maxsize=1)
-def _flydsl_verison_key() -> str:
-    import flydsl
+def _flydsl_key() -> str:
+    """Compute a hash fingerprint of the entire FlyDSL compiler toolchain.
 
-    return f"flydsl:{flydsl.__version__}|llvm:{_get_llvm_version()}"
+    Covers:
+      1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
+         flydsl.runtime.*, flydsl.lang.*, flydsl.utils.*
+      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
+         libmlir_rocm_runtime.so)
+      3. flydsl.__version__
+
+    Any change to compiler code, pass pipeline, runtime wrappers, or C++
+    bindings will produce a different key, invalidating stale disk caches.
+    """
+    contents = []
+
+    flydsl_root = Path(flydsl.__file__).resolve().parent
+
+    # 1) Hash all Python source files in key sub-packages.
+    pkg_prefixes = [
+        (str(flydsl_root / "compiler"), "flydsl.compiler."),
+        (str(flydsl_root / "expr"), "flydsl.expr."),
+        (str(flydsl_root / "runtime"), "flydsl.runtime."),
+        (str(flydsl_root / "lang"), "flydsl.lang."),
+        (str(flydsl_root / "utils"), "flydsl.utils."),
+    ]
+    for pkg_path, prefix in pkg_prefixes:
+        if not os.path.isdir(pkg_path):
+            continue
+        for lib in pkgutil.walk_packages([pkg_path], prefix=prefix):
+            try:
+                spec = lib.module_finder.find_spec(lib.name)
+                if spec and spec.origin and os.path.isfile(spec.origin):
+                    with open(spec.origin, "rb") as f:
+                        contents.append(hashlib.sha256(f.read()).hexdigest())
+            except Exception:
+                pass
+
+    # Also hash flydsl/__init__.py and _version.py.
+    for name in ("__init__.py", "_version.py"):
+        p = flydsl_root / name
+        if p.is_file():
+            with open(p, "rb") as f:
+                contents.append(hashlib.sha256(f.read()).hexdigest())
+
+    # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
+    mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
+    if mlir_libs_dir.is_dir():
+        so_patterns = ["_fly*.so", "_fly_rocdl*.so", "libFly*.so",
+                       "libfly_jit_runtime.so", "libmlir_rocm_runtime.so",
+                       "_mlirRegisterEverything*.so"]
+        for pattern in so_patterns:
+            for so_file in sorted(mlir_libs_dir.glob(pattern)):
+                h = hashlib.sha256()
+                with open(so_file, "rb") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        h.update(chunk)
+                contents.append(h.hexdigest())
+
+    key = f"flydsl:{flydsl.__version__}-" + "-".join(contents)
+    log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
+    return key
 
 
 def _get_underlying_func(obj):
@@ -86,7 +136,7 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
 
 def _jit_function_cache_key(func: Callable) -> str:
     parts = []
-    parts.append(_flydsl_verison_key())
+    parts.append(_flydsl_key())
     try:
         source = inspect.getsource(func)
     except OSError:
