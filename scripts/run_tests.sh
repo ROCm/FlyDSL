@@ -16,11 +16,6 @@ MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
 # Ensure REPO_ROOT and build packages are always on PYTHONPATH.
 export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
 
-# Always ensure REPO_ROOT is on PYTHONPATH so `from tests.xxx` works.
-if [[ ":${PYTHONPATH:-}:" != *":${REPO_ROOT}:"* ]]; then
-  export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-fi
-
 # Ensure MLIR runtime shared libraries are discoverable.
 if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
@@ -96,7 +91,7 @@ echo ""
 python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
 
 # ---------------------------------------------------------------------------
-# MLIR FileCheck Tests (test/**/*.mlir)
+# MLIR FileCheck Tests (tests/mlir/**/*.mlir)
 # ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"
@@ -109,27 +104,14 @@ FILECHECK="${MLIR_PATH:+${MLIR_PATH}/bin/FileCheck}"
 if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
     FILECHECK="$(which FileCheck 2>/dev/null || true)"
 fi
-if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
-    for _candidate in \
-        "${REPO_ROOT}/../llvm-project/build-flydsl/bin/FileCheck" \
-        "${REPO_ROOT}/../llvm-project/build-flydsl/mlir_install/bin/FileCheck" \
-        "${REPO_ROOT}/../llvm-project/build/bin/FileCheck"; do
-        if [ -x "${_candidate}" ]; then
-            FILECHECK="${_candidate}"
-            break
-        fi
-    done
-fi
-mlir_pass=0
-mlir_fail=0
 
 if [ ! -x "${FLY_OPT}" ]; then
     echo "[SKIP] fly-opt not found at ${FLY_OPT}"
 elif [ ! -x "${FILECHECK}" ]; then
     echo "[SKIP] FileCheck not found at ${FILECHECK}"
 else
-    for test_file in $(find "${REPO_ROOT}/test" -name "*.mlir" -type f 2>/dev/null | sort); do
-        test_name="${test_file#${REPO_ROOT}/test/}"
+    for test_file in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
+        test_name="${test_file#${REPO_ROOT}/tests/mlir/}"
         run_line=$(grep '^// RUN:' "$test_file" | head -1 | sed 's|^// RUN: *||')
         if [ -z "$run_line" ]; then
             continue
