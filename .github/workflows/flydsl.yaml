@@ -6,13 +6,13 @@ on:
       - main
       - pre_v0.1
       - pr/v0.1
-      - pr/v0.1-debug
+      - pr/v0.1_debug
   pull_request:
     branches:
       - main
       - pre_v0.1
       - pr/v0.1
-      - pr/v0.1-debug
+      - pr/v0.1_debug
   workflow_dispatch:
 
 concurrency:
