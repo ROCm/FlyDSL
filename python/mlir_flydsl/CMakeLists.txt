@@ -186,27 +186,6 @@ add_custom_target(CopyFlyPythonSources ALL
 
 add_dependencies(CopyFlyPythonSources FlyPythonModules)
 
-################################################################################
-# Custom JIT runtime with CUDA graph capture support
-################################################################################
-
-find_package(hip QUIET CONFIG PATHS /opt/rocm)
-if(hip_FOUND)
-  add_library(FlyJitRuntime SHARED
-    ${PROJECT_SOURCE_DIR}/flir/python_bindings/runtime/FlirRocmRuntimeWrappers.cpp
-  )
-  target_include_directories(FlyJitRuntime PRIVATE
-    ${LLVM_INCLUDE_DIRS}
-    ${MLIR_INCLUDE_DIRS}
-  )
-  target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
-  target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
-  set_target_properties(FlyJitRuntime PROPERTIES
-    OUTPUT_NAME "fly_jit_runtime"
-    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
-  )
-  add_dependencies(FlyPythonCAPI FlyJitRuntime)
-endif()
 
 ################################################################################
 # Create symlinks to MLIR runtime libraries

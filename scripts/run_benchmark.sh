@@ -9,11 +9,8 @@ cd "$(dirname "$0")/.."
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
-# Locate the build directory (default: .flir/build; fallback: build/).
-BUILD_DIR="${FLIR_BUILD_DIR:-${REPO_ROOT}/.flir/build}"
-if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build-fly" ]; then
-  BUILD_DIR="${REPO_ROOT}/build-fly"
-fi
+# Locate the build directory (default: build-fly; fallback: build/).
+BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
   BUILD_DIR="${REPO_ROOT}/build"
 fi
@@ -35,11 +32,14 @@ FAIL_COUNT=0
 # Benchmark Configuration
 # ============================================================================
 
-# Softmax/LayerNorm shapes: "M,N,dtype"
+# Softmax/LayerNorm/RMSNorm shapes: "M,N,dtype"
 SOFTMAX_SHAPES='
 32768,8192,bf16
 '
 LAYERNORM_SHAPES='
+32768,8192,bf16
+'
+RMSNORM_SHAPES='
 32768,8192,bf16
 '
 
@@ -92,10 +92,7 @@ Usage:
   bash scripts/run_benchmark.sh --list
 
 Supported ops:
-  softmax | layernorm | gemm | moe
-
-Notes:
-  - `layernorm` is accepted as an alias of `layernorm` (script runs layernorm).
+  softmax | layernorm | rmsnorm | gemm | moe
 USAGE
 }
 
@@ -153,16 +150,18 @@ _normalize_op() {
   esac
 }
 
-# Default: run only GEMM unless user selected a subset.
-# Use positional args or --only to enable others: softmax, layernorm, moe
-RUN_SOFTMAX=0
-RUN_LAYERNORM=0
+# Default: run softmax, norms, and GEMM unless user selected a subset.
+# Use positional args or --only to enable others: softmax, layernorm, rmsnorm, gemm, moe
+RUN_SOFTMAX=1
+RUN_LAYERNORM=1
+RUN_RMSNORM=1
 RUN_PRESHUFFLE_GEMM=1
 RUN_MOE=0
 
 _enable_only_ops() {
   RUN_SOFTMAX=0
   RUN_LAYERNORM=0
+  RUN_RMSNORM=0
   RUN_PRESHUFFLE_GEMM=0
   RUN_MOE=0
   for op in "$@"; do
@@ -170,6 +169,7 @@ _enable_only_ops() {
     case "${op}" in
       softmax) RUN_SOFTMAX=1 ;;
       layernorm) RUN_LAYERNORM=1 ;;
+      rmsnorm) RUN_RMSNORM=1 ;;
       gemm) RUN_PRESHUFFLE_GEMM=1 ;;
       moe) RUN_MOE=1 ;;
       "" ) ;;
@@ -205,6 +205,7 @@ if [ "$#" -gt 0 ]; then
       --list)
         echo "softmax"
         echo "layernorm"
+        echo "rmsnorm"
         echo "gemm"
         echo "moe"
         exit 0
@@ -355,6 +356,30 @@ if [ "${RUN_LAYERNORM}" -eq 1 ]; then
       _show_fail_log "${log}" "layernorm"
     fi
     row="$(_py_parse_and_emit layernorm "${M}x${N}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
+fi
+
+# RMSNorm
+if [ "${RUN_RMSNORM}" -eq 1 ]; then
+  for shape in $RMSNORM_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; dtype=$3
+    export ROCDSL_RMSNORM_SHAPES="$shape"
+    log="${BENCH_LOG_DIR}/rmsnorm_${M}x${N}_${dtype}.log"
+    if python3 tests/kernels/test_rmsnorm.py >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "rmsnorm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "rmsnorm"
+    fi
+    row="$(_py_parse_and_emit rmsnorm "${M}x${N}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
