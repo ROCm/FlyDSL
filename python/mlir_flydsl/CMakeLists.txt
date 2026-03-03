@@ -142,17 +142,17 @@ set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
 
 add_custom_command(
   OUTPUT "${_STUB_MARKER_FILE}"
-  COMMAND ${CMAKE_COMMAND} -E env
-    "PYTHONPATH=${_FLYDSL_PYTHON_PACKAGES_DIR}"
-    ${Python3_EXECUTABLE} -m nanobind.stubgen
-    -q
-    -r
-    -m flydsl._mlir._mlir_libs._mlir
-    -m flydsl._mlir._mlir_libs._fly
-    -m flydsl._mlir._mlir_libs._fly_rocdl
-    -m flydsl._mlir._mlir_libs._mlirDialectsGPU
-    -m flydsl._mlir._mlir_libs._mlirDialectsLLVM
-    -O "${_MLIR_LIBS_DIR}"
+  COMMAND /bin/bash -c "\
+    PYTHONPATH='${_FLYDSL_PYTHON_PACKAGES_DIR}' \
+    '${Python3_EXECUTABLE}' -m nanobind.stubgen \
+      -q -r \
+      -m flydsl._mlir._mlir_libs._mlir \
+      -m flydsl._mlir._mlir_libs._fly \
+      -m flydsl._mlir._mlir_libs._fly_rocdl \
+      -m flydsl._mlir._mlir_libs._mlirDialectsGPU \
+      -m flydsl._mlir._mlir_libs._mlirDialectsLLVM \
+      -O '${_MLIR_LIBS_DIR}' \
+    || echo 'Warning: nanobind.stubgen not available -- skipping stub generation'"
   COMMAND ${CMAKE_COMMAND} -E touch "${_STUB_MARKER_FILE}"
   DEPENDS CopyFlyPythonSources
   COMMENT "Generating Python stub files for all extension modules"
