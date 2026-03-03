@@ -297,15 +297,17 @@ class Tensor:
 class Stream:
     def __init__(self, value=None):
         self.value = value
+        self._stream_storage = None
 
     def __fly_types__(self):
         return [gpu.AsyncTokenType.get()]
 
     def __fly_ptrs__(self):
         if self.value is None:
-            # default nullptr stream
-            return [ctypes.cast(ctypes.pointer(ctypes.c_void_p(0)), ctypes.c_void_p)]
-        return [ctypes.cast(ctypes.pointer(ctypes.c_void_p(self.value.cuda_stream)), ctypes.c_void_p)]
+            self._stream_storage = ctypes.c_void_p(0)
+        else:
+            self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
+        return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
 
     @classmethod
     def __fly_construct__(cls, values):
