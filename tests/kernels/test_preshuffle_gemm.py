@@ -122,6 +122,7 @@ def test_mfma_a8_flir_preshuffle(
     *,
     use_async_copy,
     test_graph,
+    out_dtype: str = "bf16",
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
@@ -142,6 +143,7 @@ def test_mfma_a8_flir_preshuffle(
         )
     waves_per_eu = int(waves_per_eu) if waves_per_eu is not None else 0
     waves_per_eu = None if waves_per_eu <= 0 else waves_per_eu
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     exe = compile_preshuffle_gemm_a8(
         M=M,
         N=N,
@@ -150,13 +152,14 @@ def test_mfma_a8_flir_preshuffle(
         tile_n=tile_n,
         tile_k=tile_k,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         waves_per_eu=waves_per_eu,
         use_async_copy=bool(use_async_copy),
     )
     print(
-        f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={waves_per_eu})"
+        f"✓ Compiled (out_dtype={out_dtype}, lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={waves_per_eu})"
     )
 
     size_c = M * N
@@ -232,8 +235,7 @@ def test_mfma_a8_flir_preshuffle(
     # Reference (dequant + matmul).
     c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
 
-    # Run kernel (f16 output, in-kernel scaling).
-    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
+    c_out_raw = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
         # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
@@ -274,7 +276,7 @@ def test_mfma_a8_flir_preshuffle(
         print("Running Aiter Benchmark...")
         try:
             def launch_aiter(a, b, sa, sb):
-                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
+                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch_out_dtype)
 
             c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, num_iters= bench_iters, testGraph=test_graph)
             c_aiter_f32 = c_aiter.to(torch.float32)
@@ -508,6 +510,13 @@ if __name__ == "__main__":
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
         help="Input dtype",
     )
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="fp16",
+        choices=["fp16", "bf16"],
+        help="Output dtype (default: bf16).",
+    )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
     parser.add_argument("-K", type=int, default=8192, help="K dimension")
@@ -592,6 +601,7 @@ if __name__ == "__main__":
                 tile_m=args.tile_m,
                 tile_n=args.tile_n,
                 tile_k=args.tile_k,
+                out_dtype=args.out_dtype,
                 lds_stage=args.lds_stage,
                 bench_iters=args.num_iters,
                 bench_warmup=args.num_warmup,

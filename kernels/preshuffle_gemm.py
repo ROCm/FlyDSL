@@ -46,6 +46,7 @@ def compile_preshuffle_gemm_a8(
     tile_n: int,
     tile_k: int,
     in_dtype: str = "fp8",
+    out_dtype: str = "bf16",
     lds_stage: int = 2,
     # Epilogue options
     use_cshuffle_epilog: bool = False,
@@ -63,6 +64,7 @@ def compile_preshuffle_gemm_a8(
           - "fp8": A/B are fp8 (1B/elem)
           - "int8": A/B are int8 (1B/elem)
           - "int4": W4A8 path: A is int8, B is packed int4 (2 values per byte) and unpacked to int8 in-kernel.
+        out_dtype: Output element type ("bf16" or "fp16"). Default: "bf16".
         lds_stage: 
           - 2: ping-pong LDS for A (2 LDS buffers), tuned schedule (original).
           - 1: single LDS buffer for A .
@@ -85,6 +87,10 @@ def compile_preshuffle_gemm_a8(
     is_bf16 = in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
     elem_bytes = 1 if (in_dtype in ("fp8", "int8", "int4")) else 2
+
+    if out_dtype not in ("fp16", "bf16"):
+        raise ValueError(f"out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}")
+    is_out_bf16 = out_dtype == "bf16"
 
     # Pipeline is byte-addressed along K (16B loads, XOR16 swizzle in bytes).
     # For fp16/bf16 (2B/elem), user passes tile_k halved so tile_k_bytes stays constant.
@@ -170,6 +176,9 @@ def compile_preshuffle_gemm_a8(
             return T.bf16
         return T.i8 if is_int8 else T.f8
 
+    def _out_type():
+        return T.bf16 if is_out_bf16 else T.f16
+
     def _vec16_type():
         if is_f16:
             return T.f16x8  # 16B
@@ -240,7 +249,7 @@ def compile_preshuffle_gemm_a8(
         @flir.kernel
         def kernel_gemm(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_type()),
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
@@ -312,7 +321,7 @@ def compile_preshuffle_gemm_a8(
                 # CShuffle output buffer: REUSE pong buffer (A tiles are dead after mainloop)
                 if use_cshuffle_epilog:
                     lds_out = SmemPtr(
-                        base_ptr, lds_a_pong_ptr.byte_offset, T.f16, shape=(tile_m * tile_n,)
+                        base_ptr, lds_a_pong_ptr.byte_offset, _out_type(), shape=(tile_m * tile_n,)
                     ).get()
                 else:
                     lds_out = None
@@ -322,7 +331,7 @@ def compile_preshuffle_gemm_a8(
                 lds_a_pong = lds_a_ptr.get()
                 lds_a_ping = lds_a_pong  # Reuse same buffer
                 lds_out = (
-                    SmemPtr(base_ptr, lds_a_ptr.byte_offset, T.f16, shape=(tile_m * tile_n,)).get()
+                    SmemPtr(base_ptr, lds_a_ptr.byte_offset, _out_type(), shape=(tile_m * tile_n,)).get()
                     if use_cshuffle_epilog
                     else None
                 )
@@ -333,7 +342,7 @@ def compile_preshuffle_gemm_a8(
             c_n_i32 = arith.index_cast(_i32, c_n)
             c_k_i32 = arith.index_cast(_i32, c_k)
             a_bytes = c_m_i32 * c_k_i32 * arith.i32(int(elem_bytes))
-            c_bytes = c_m_i32 * c_n_i32 * arith.i32(2)  # f16 output = 2B
+            c_bytes = c_m_i32 * c_n_i32 * arith.i32(2)  # f16/bf16 output = 2B
             a_rsrc = buffer_ops.create_buffer_resource(arg_a, num_records_bytes=a_bytes)
             c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_bytes)
             if is_f16_or_bf16:
@@ -820,7 +829,8 @@ def compile_preshuffle_gemm_a8(
                             )
                 return current_accs_list, scales_pf
 
-            vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
+            out_ir_scalar = ir.BF16Type.get() if is_out_bf16 else ir.F16Type.get()
+            vec1_out = ir.VectorType.get([1], out_ir_scalar)
 
             def store_output(final_accs, scales):
                 # fp16/bf16: no scale fetch, no scale multiply in epilogue.
@@ -854,7 +864,7 @@ def compile_preshuffle_gemm_a8(
                         lds_out,
                     ):
                         # CShuffle write (non-pack):
-                        # - Each lane computes one f16 element for its `col_local`
+                        # - Each lane computes one f16/bf16 element for its `col_local`
                         # - Write directly to LDS in row-major [tile_m, tile_n] order
                         # - The shuffle/remap happens in the LDS read phase
                         if not is_f16_or_bf16:
@@ -873,21 +883,21 @@ def compile_preshuffle_gemm_a8(
                                 val_s = val
                             else:
                                 val_s = (val * s_a) * s_b_vals[ni]
-                            v16 = arith.trunc_f(T.f16, val_s)
+                            v16 = arith.trunc_f(_out_type(), val_s)
 
                             lds_idx = row_base_lds + col_local
-                            v1 = vector.from_elements(vec1_f16, [v16])
+                            v1 = vector.from_elements(vec1_out, [v16])
                             vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
-                        # Store vector<EVecxf16> to C at (row, col_g0).
+                        # Store vector<EVecx out_type> to C at (row, col_g0).
                         #
                         # IMPORTANT:
                         # RawPtrBufferStoreOp offsets are in BYTES. `buffer_ops.buffer_store()`
-                        # will scale by element bytes based on the *data type*. For f16 vectors,
+                        # will scale by element bytes based on the *data type*. For f16/bf16 vectors,
                         # some backends/paths can be fragile. We explicitly bitcast to i32
                         # and pass a byte offset to keep the store well-defined.
-                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16 element offset
+                        idx_out = flir.crd2idx(flir.make_coord(row, col_g0), layout_c)  # f16/bf16 element offset
                         byte_off = idx_out * arith.constant(2, index=True)  # bytes
 
                         if e_vec == 4:
@@ -927,6 +937,7 @@ def compile_preshuffle_gemm_a8(
                         by_n=by_n,
                         n_tile_base=n_tile_base,
                         lds_out=lds_out,
+                        frag_elem_type=out_ir_scalar,
                         write_row_to_lds=write_row_to_lds,
                         store_pair=store_pair,
                     )
@@ -948,9 +959,9 @@ def compile_preshuffle_gemm_a8(
                             val_s = val
                         else:
                             val_s = (val * s_a) * s_b_vals[ni]
-                        val_f16 = arith.trunc_f(T.f16, val_s)
+                        val_out = arith.trunc_f(_out_type(), val_s)
                         idx_out = idx_base + arith.constant(ni * 16, index=True)
-                        buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                        buffer_ops.buffer_store(val_out, c_rsrc, idx_out)
 
                 mfma_epilog(
                     use_cshuffle=False,
@@ -1250,7 +1261,7 @@ def compile_preshuffle_gemm_a8(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            arg_c: lambda: memref(DYN, T.f16),
+            arg_c: lambda: memref(DYN, _out_type()),
             arg_a: lambda: memref(DYN, _elem_type()),
             arg_b: lambda: memref(DYN, _elem_type()),
             arg_scale_a: lambda: memref(DYN, T.f32),
