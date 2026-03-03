@@ -252,7 +252,7 @@ class ReplaceIfWithDispatch(Transformer):
 
         has_else = else_fn is not None
         loc = ir.Location.unknown()
-        if_op = scf.IfOp(ReplaceIfWithDispatch._to_i1(cond), [], hasElse=has_else, loc=loc)
+        if_op = scf.IfOp(ReplaceIfWithDispatch._to_i1(cond), [], has_else=has_else, loc=loc)
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
             then_fn()
             scf.YieldOp([])

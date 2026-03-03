@@ -2,6 +2,7 @@ import hashlib
 import inspect
 import os
 import pickle
+import re
 import types
 from functools import lru_cache
 from pathlib import Path
@@ -116,35 +117,55 @@ def _jit_function_cache_key(func: Callable) -> str:
 
 
 class MlirCompiler:
-    LOWERING_PIPELINE = (
-        "builtin.module("
-        "gpu-kernel-outlining{{data-layout-str=}},"
-        "fly-canonicalize,"
-        "fly-layout-lowering,"
-        "convert-fly-to-rocdl,"
-        "canonicalize,"
-        "gpu.module("
-        "convert-scf-to-cf,"
-        "convert-vector-to-llvm,"
-        "canonicalize,"
-        "convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}}"
-        "),"
-        "rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}},"
-        "convert-scf-to-cf,"
-        "convert-cf-to-llvm,"
-        "gpu-to-llvm{{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}},"
-        "convert-arith-to-llvm,"
-        "convert-func-to-llvm,"
-        "reconcile-unrealized-casts"
-        ")"
-    )
-
     BINARY_PIPELINE = "builtin.module(gpu-module-to-binary{format=fatbin})"
-
     ISA_PIPELINE = "builtin.module(gpu-module-to-binary{format=isa})"
 
+    @staticmethod
+    def _lowering_fragments(chip: str) -> list:
+        return [
+            "gpu-kernel-outlining{data-layout-str=}",
+            "fly-canonicalize",
+            "fly-layout-lowering",
+            "convert-fly-to-rocdl",
+            "canonicalize",
+            "gpu.module("
+            "convert-scf-to-cf,"
+            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
+            "convert-vector-to-llvm,"
+            "canonicalize"
+            ")",
+            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false"
+            f" features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+            "convert-scf-to-cf",
+            "convert-cf-to-llvm",
+            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            "convert-arith-to-llvm",
+            "convert-func-to-llvm",
+            "reconcile-unrealized-casts",
+        ]
+
+    @staticmethod
+    def _build_pipeline_str(chip: str) -> str:
+        frags = MlirCompiler._lowering_fragments(chip)
+        return f"builtin.module({','.join(frags)})"
+
+    @staticmethod
+    def _stage_label(fragment: str) -> str:
+        base = fragment.strip()
+        if base.startswith("gpu.module(") and base.endswith(")"):
+            base = base[len("gpu.module("):-1].strip()
+        base = base.split("{", 1)[0].strip()
+        return re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower() or "stage"
+
     @classmethod
-    def _dump_asm(cls, module_asm: str, func_name: str):
+    def _dump_ir_file(cls, stage: str, *, dump_dir: Path, asm: str) -> Path:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        out = dump_dir / f"{stage}.mlir"
+        out.write_text(asm, encoding="utf-8")
+        return out
+
+    @classmethod
+    def _dump_asm(cls, module_asm: str, func_name: str, dump_dir: Path = None):
         try:
             from .._mlir._mlir_libs._mlirDialectsGPU import ObjectAttr
 
@@ -159,11 +180,12 @@ class MlirCompiler:
                         obj_attr = ObjectAttr(objects[i])
                         isa_bytes = obj_attr.object
 
-                        dump_dir = Path(env.debug.dump_dir)
+                        if dump_dir is None:
+                            dump_dir = Path(env.debug.dump_dir)
                         dump_dir.mkdir(parents=True, exist_ok=True)
                         out_path = dump_dir / f"{func_name}.s"
                         out_path.write_bytes(isa_bytes)
-                        log().info(f"Dumped ASM to {out_path}")
+                        print(f"[dump_ir] ASM -> {out_path}")
                         return
             log().warning("No gpu.binary op found, cannot dump ASM")
         except Exception as e:
@@ -181,13 +203,41 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        lowering_pm = PassManager.parse(cls.LOWERING_PIPELINE.format(chip=chip))
-        lowering_pm.enable_verifier(env.debug.enable_verifier)
-        lowering_pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-        lowering_pm.run(module.operation)
+        dump_enabled = env.debug.dump_ir
+        dump_dir = Path(env.debug.dump_dir) / (func_name or "module")
 
-        if env.debug.dump_asm:
-            cls._dump_asm(module.operation.get_asm(), func_name)
+        if dump_enabled:
+            cls._dump_ir_file(
+                "00_origin",
+                dump_dir=dump_dir,
+                asm=module.operation.get_asm(enable_debug_info=True),
+            )
+            print(f"[dump_ir] IR dumps -> {dump_dir}")
+
+            frags = cls._lowering_fragments(chip)
+            asm_for_isa = None
+            for idx, frag in enumerate(frags, start=1):
+                stage_name = f"{idx:02d}_{cls._stage_label(frag)}"
+                pm = PassManager.parse(f"builtin.module({frag})")
+                pm.enable_verifier(env.debug.enable_verifier)
+                pm.run(module.operation)
+                stage_asm = module.operation.get_asm(enable_debug_info=True)
+                out = cls._dump_ir_file(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                print(f"[dump_ir] {stage_name} -> {out}")
+                if frag.strip() == "reconcile-unrealized-casts":
+                    asm_for_isa = stage_asm
+
+            if env.debug.dump_asm and asm_for_isa is not None:
+                cls._dump_asm(asm_for_isa, func_name, dump_dir=dump_dir)
+        else:
+            pipeline = cls._build_pipeline_str(chip)
+            lowering_pm = PassManager.parse(pipeline)
+            lowering_pm.enable_verifier(env.debug.enable_verifier)
+            lowering_pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+            lowering_pm.run(module.operation)
+
+            if env.debug.dump_asm:
+                cls._dump_asm(module.operation.get_asm(), func_name)
 
         binary_pm = PassManager.parse(cls.BINARY_PIPELINE)
         binary_pm.enable_verifier(env.debug.enable_verifier)

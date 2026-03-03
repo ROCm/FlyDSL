@@ -133,6 +133,25 @@ def _get_element_ptr(
         ).result
 
 
+def _lds_load_prefer_agpr(byte_addr_index, vec_type, static_byte_offset=0):
+    """LDS load with AGPR allocation hint via the nontemporal flag.
+
+    The nontemporal attribute is a hardware no-op for DS (LDS) instructions
+    (they have no cache-control bits).  Our custom LLVM backend pass
+    (AMDGPUPreferAGPRForDSRead) detects the flag on DS loads and sets an
+    AGPR register-allocation hint on the destination virtual register.
+    """
+    raw_addr = _raw(byte_addr_index) if not isinstance(byte_addr_index, ir.Value) else byte_addr_index
+    i64_type = ir.IntegerType.get_signless(64)
+    addr_i64 = _std_arith.IndexCastOp(i64_type, raw_addr).result
+    lds_ptr = _inttoptr_lds(addr_i64)
+    if static_byte_offset != 0:
+        lds_ptr = _get_element_ptr(
+            lds_ptr, static_byte_offset=static_byte_offset
+        )
+    return llvm.LoadOp(vec_type, lds_ptr, alignment=16, nontemporal=True).result
+
+
 KERNEL_NAME = "mla_decode_kernel"
 
 
@@ -156,7 +175,12 @@ def _set_mfma_vgpr_form():
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.c_char_p,
     ]
-    argv = [b'mlir', b'-amdgpu-mfma-vgpr-form']
+    argv = [
+        b'mlir',
+        b'-amdgpu-mfma-vgpr-form',
+        b'--amdgpu-schedule-metric-bias=0',
+        b'--enable-deferred-spilling',
+    ]
     argv_arr = (ctypes.c_char_p * len(argv))(*argv)
     parse_fn(len(argv), argv_arr, None)
 
@@ -335,6 +359,7 @@ def compile_mla_decode(
 
         v4f16_type = ir.VectorType.get([4], elem_type)
         v4f32_type = ir.VectorType.get([4], compute_type)
+        v2f32_type = ir.VectorType.get([2], compute_type)
         v8f16_type = ir.VectorType.get([8], elem_type)
         i32_type = ir.IntegerType.get_signless(32)
         v2f16_type = ir.VectorType.get([2], elem_type)
@@ -685,7 +710,7 @@ def compile_mla_decode(
         lds_base_byte_idx = _memref.ExtractAlignedPointerAsIndexOp(lds_k_cur_buf).result
         c_dword_sz = arith.constant(4, type=T.i32)
         c_zero_i32 = arith.constant(0, type=T.i32)
-        aux = arith.constant(1, type=T.i32)
+        aux = arith.constant(0, type=T.i32)
 
         q_b_packs_lo = [None] * K_STEPS
         q_b_packs_hi = [None] * K_STEPS
@@ -775,24 +800,13 @@ def compile_mla_decode(
                        * arith.index(Q_TILE_DIM)
                        + lane_div_16 * arith.index(8)) * arith.index(2)
                 )
-                q_tile_addr_i32 = _index_cast_to_i32(
-                    q_tile_byte_base
-                )
                 for local_ks in range_constexpr(2):
                     global_ks = d_tile * 2 + local_ks
                     _base_off = local_ks * 64
-                    _ds_128 = llvm.InlineAsmOp(
-                        res=v8f16_type,
-                        operands_=[q_tile_addr_i32],
-                        asm_string=(
-                            f"ds_read_b128 $0, $1"
-                            f" offset:{_base_off}"
-                        ),
-                        constraints="=a,v",
-                        has_side_effects=True,
-                        is_align_stack=False,
+                    q_wide = _lds_load_prefer_agpr(
+                        q_tile_byte_base, v8f16_type,
+                        static_byte_offset=_base_off,
                     )
-                    q_wide = _ds_128.result
                     q_b_packs_lo[global_ks] = vector.shuffle(
                         q_wide, q_wide, [0, 1, 2, 3])
                     q_b_packs_hi[global_ks] = vector.shuffle(
@@ -806,7 +820,7 @@ def compile_mla_decode(
         c_zero_f = arith.constant(0.0, type=compute_type)
         c_one_f = arith.constant(1.0, type=compute_type)
         c_sm_scale = arith.constant(sm_scale, type=compute_type)
-        c_log2e = arith.constant(1.4426950408889634, type=compute_type)
+        c_sm_scale_log2e = arith.constant(sm_scale * 1.4426950408889634, type=compute_type)
         c_zero_v4f32 = arith.constant_vector(0.0, v4f32_type)
 
         N_DP = D_CHUNKS // 2
@@ -817,6 +831,12 @@ def compile_mla_decode(
                 * arith.index(VT_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
+
+        vt_byte_base = (
+            _memref.ExtractAlignedPointerAsIndexOp(lds_vt).result
+            + (lane_mod_16 * arith.index(VT_STRIDE)
+               + lane_div_16 * arith.index(8)) * arith.index(2)
+        )
 
         def vgpr_pin(val):
             return llvm.InlineAsmOp(
@@ -830,14 +850,11 @@ def compile_mla_decode(
 
         def softmax_and_pack(s_acc, m_old, l_old,
                              kv_pos=None, do_causal=False):
-            s_vals = [None] * 4
+            s_vals = []
             for ii in range_constexpr(4):
                 s_val = vector.extract(
                     s_acc, static_position=[ii], dynamic_position=[],
                 )
-                s_val = _std_arith.MulFOp(
-                    _raw(s_val), _raw(c_sm_scale), fastmath=fm_fast,
-                ).result
                 if CAUSAL and do_causal:
                     kv_abs = kv_pos + lane_div_16 * arith.index(4) + arith.index(ii)
                     q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
@@ -850,12 +867,13 @@ def compile_mla_decode(
                     s_val = _std_arith.SelectOp(
                         is_masked, _raw(c_neg_large), _raw(s_val),
                     ).result
-                s_vals[ii] = s_val
+                s_vals.append(s_val)
 
             local_max = s_vals[0]
             for ii in range_constexpr(3):
                 local_max = _std_arith.MaximumFOp(
-                    _raw(local_max), _raw(s_vals[ii + 1])
+                    _raw(local_max), _raw(s_vals[ii + 1]),
+                    fastmath=fm_fast,
                 ).result
 
             red_wr_idx = (
@@ -877,30 +895,40 @@ def compile_mla_decode(
                     max_vec, static_position=[g], dynamic_position=[],
                 )
                 global_max = _std_arith.MaximumFOp(
-                    _raw(global_max), _raw(max_g)
+                    _raw(global_max), _raw(max_g),
+                    fastmath=fm_fast,
                 ).result
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-            m_new = _std_arith.MaximumFOp(_raw(m_old), _raw(global_max)).result
+            m_new = _std_arith.MaximumFOp(
+                _raw(m_old), _raw(global_max), fastmath=fm_fast,
+            ).result
 
-            m_diff = _std_arith.SubFOp(
-                _raw(m_old), _raw(m_new), fastmath=fm_fast
+            scaled_m_new = _std_arith.MulFOp(
+                _raw(c_sm_scale_log2e), _raw(m_new), fastmath=fm_fast,
             ).result
-            m_diff_scaled = _std_arith.MulFOp(
-                _raw(m_diff), _raw(c_log2e), fastmath=fm_fast,
+
+            rescale_arg = _std_arith.SubFOp(
+                _std_arith.MulFOp(
+                    _raw(m_old), _raw(c_sm_scale_log2e), fastmath=fm_fast,
+                ).result,
+                _raw(scaled_m_new),
+                fastmath=fm_fast,
             ).result
-            rescale = _math_exp2(m_diff_scaled, fastmath=fm_fast)
+            rescale = _math_exp2(rescale_arg, fastmath=fm_fast)
 
             p_vals = [None] * 4
             local_sum = c_zero_f
             for ii in range_constexpr(4):
-                diff = _std_arith.SubFOp(
-                    _raw(s_vals[ii]), _raw(m_new), fastmath=fm_fast
+                exp_arg = _std_arith.SubFOp(
+                    _std_arith.MulFOp(
+                        _raw(s_vals[ii]), _raw(c_sm_scale_log2e),
+                        fastmath=fm_fast,
+                    ).result,
+                    _raw(scaled_m_new),
+                    fastmath=fm_fast,
                 ).result
-                diff_s = _std_arith.MulFOp(
-                    _raw(diff), _raw(c_log2e), fastmath=fm_fast,
-                ).result
-                p = _math_exp2(diff_s, fastmath=fm_fast)
+                p = _math_exp2(exp_arg)
                 p_vals[ii] = p
                 local_sum = _std_arith.AddFOp(
                     _raw(local_sum), _raw(p), fastmath=fm_fast
@@ -950,8 +978,9 @@ def compile_mla_decode(
             v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf[ks] = vector.load_op(
-                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))])
+                    v_buf[ks] = _lds_load_prefer_agpr(
+                        vt_byte_base, v8f16_type,
+                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
@@ -984,18 +1013,22 @@ def compile_mla_decode(
                 lane_mod_16 * arith.index(K_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
+            k_next_byte_base = (
+                _memref.ExtractAlignedPointerAsIndexOp(k_next_buf).result
+                + k_next_base_idx * arith.index(2)
+            )
             k_buf_next = [None] * K_STEPS
             EXTRA_K = K_STEPS - N_DP
             k_block = 0
             for dp in range_constexpr(N_DP):
-                k_next_idx = k_next_base_idx + arith.index(k_block * 32)
-                k_buf_next[k_block] = vector.load_op(
-                    v8f16_type, k_next_buf, [_raw(k_next_idx)])
+                k_buf_next[k_block] = _lds_load_prefer_agpr(
+                    k_next_byte_base, v8f16_type,
+                    static_byte_offset=k_block * 64)
                 k_block += 1
                 if dp < EXTRA_K:
-                    k_extra_idx = k_next_base_idx + arith.index(k_block * 32)
-                    k_buf_next[k_block] = vector.load_op(
-                        v8f16_type, k_next_buf, [_raw(k_extra_idx)])
+                    k_buf_next[k_block] = _lds_load_prefer_agpr(
+                        k_next_byte_base, v8f16_type,
+                        static_byte_offset=k_block * 64)
                     k_block += 1
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec)
@@ -1018,9 +1051,10 @@ def compile_mla_decode(
             return m_new, l_new, o_accs, k_buf_next
 
         def do_kv_pair(kv_pos, m_old, l_old, o_accs,
-                       k_cur_buf, k_next_buf, k_buf_a,
+                       k_cur_buf, k_next_buf, k_buf,
                        nn_a_phys_in=None,
                        load_knn=True, do_vt_final=True):
+
             rocdl.sched_barrier(0)
 
             nn_a_phys_next = None
@@ -1063,31 +1097,32 @@ def compile_mla_decode(
                 coop_load_k(nn_a_base, nn_a_poff, k_cur_buf)
 
             # ============ TILE A ============
-            s_a = [c_zero_v4f32]
-            v_buf_a = [None] * N_DP
+            s = [c_zero_v4f32]
+            v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf_a[ks] = vector.load_op(
-                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))])
+                    v_buf[ks] = _lds_load_prefer_agpr(
+                        vt_byte_base, v8f16_type,
+                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
-                    k_buf_a[ks], k_buf_a[ks], [0, 1, 2, 3])
+                    k_buf[ks], k_buf[ks], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
-                    k_buf_a[ks], k_buf_a[ks], [4, 5, 6, 7])
-                s_a[0] = rocdl.mfma_f32_16x16x16f16(
+                    k_buf[ks], k_buf[ks], [4, 5, 6, 7])
+                s[0] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
-                    [k_lo, q_lo, s_a[0], 0, 0, 0],
+                    [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s_a[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
-                    [k_hi, q_hi, s_a[0], 0, 0, 0],
+                    [k_hi, q_hi, s[0], 0, 0, 0],
                 )
 
             rocdl.sched_barrier(0)
 
-            m_a, l_a, p_pack_a, rescale_a = softmax_and_pack(
-                s_a[0], m_old, l_old,
+            m, l, p_pack_a, rescale_a = softmax_and_pack(
+                s[0], m_old, l_old,
             )
 
             rescale_vec_a = _make_rescale_vec(rescale_a)
@@ -1099,26 +1134,30 @@ def compile_mla_decode(
                 lane_mod_16 * arith.index(K_STRIDE)
                 + lane_div_16 * arith.index(8)
             )
-            k_buf_b = [None] * K_STEPS
+            k_b_byte_base = (
+                _memref.ExtractAlignedPointerAsIndexOp(k_next_buf).result
+                + k_b_base * arith.index(2)
+            )
+            k_buf = [None] * K_STEPS
             EXTRA_K = K_STEPS - N_DP
             k_block = 0
             for dp in range_constexpr(N_DP):
-                k_b_idx = k_b_base + arith.index(k_block * 32)
-                k_buf_b[k_block] = vector.load_op(
-                    v8f16_type, k_next_buf, [_raw(k_b_idx)])
+                k_buf[k_block] = _lds_load_prefer_agpr(
+                    k_b_byte_base, v8f16_type,
+                    static_byte_offset=k_block * 64)
                 k_block += 1
                 if dp < EXTRA_K:
-                    k_b_extra = k_b_base + arith.index(k_block * 32)
-                    k_buf_b[k_block] = vector.load_op(
-                        v8f16_type, k_next_buf, [_raw(k_b_extra)])
+                    k_buf[k_block] = _lds_load_prefer_agpr(
+                        k_b_byte_base, v8f16_type,
+                        static_byte_offset=k_block * 64)
                     k_block += 1
 
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec_a)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec_a)
                 v_lo = vector.shuffle(
-                    v_buf_a[dp], v_buf_a[dp], [0, 1, 2, 3])
+                    v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
-                    v_buf_a[dp], v_buf_a[dp], [4, 5, 6, 7])
+                    v_buf[dp], v_buf[dp], [4, 5, 6, 7])
                 o_accs[dp * 2] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
                     [v_lo, p_pack_a, o_accs[dp * 2], 0, 0, 0],
@@ -1136,30 +1175,31 @@ def compile_mla_decode(
                 nn_b_base = lookup_page_resolve(nn_b_phys)
                 coop_load_k(nn_b_base, nn_b_poff, k_next_buf)
 
-            s_b = [c_zero_v4f32]
-            v_buf_b = [None] * N_DP
+            s = [c_zero_v4f32]
+            v_buf = [None] * N_DP
             for ks in range_constexpr(K_STEPS):
                 if ks < N_DP:
-                    v_buf_b[ks] = vector.load_op(
-                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))])
+                    v_buf[ks] = _lds_load_prefer_agpr(
+                        vt_byte_base, v8f16_type,
+                        static_byte_offset=ks * 16 * VT_STRIDE * 2)
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
-                    k_buf_b[ks], k_buf_b[ks], [0, 1, 2, 3])
+                    k_buf[ks], k_buf[ks], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
-                    k_buf_b[ks], k_buf_b[ks], [4, 5, 6, 7])
-                s_b[0] = rocdl.mfma_f32_16x16x16f16(
+                    k_buf[ks], k_buf[ks], [4, 5, 6, 7])
+                s[0] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
-                    [k_lo, q_lo, s_b[0], 0, 0, 0],
+                    [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s_b[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
-                    [k_hi, q_hi, s_b[0], 0, 0, 0],
+                    [k_hi, q_hi, s[0], 0, 0, 0],
                 )
 
             rocdl.sched_barrier(0)
-            m_b, l_b, p_pack_b, rescale_b = softmax_and_pack(
-                s_b[0], m_a, l_a,
+            m, l, p_pack_b, rescale_b = softmax_and_pack(
+                s[0], m, l,
             )
             if do_vt_final:
                 v_raw_next = coop_load_v(k_cur_buf)
@@ -1174,21 +1214,21 @@ def compile_mla_decode(
             k_block = 0
             for dp in range_constexpr(N_DP):
                 k_nn_idx = k_nn_base + arith.index(k_block * 32)
-                k_buf_a[k_block] = vector.load_op(
+                k_buf[k_block] = vector.load_op(
                     v8f16_type, k_cur_buf, [_raw(k_nn_idx)])
                 k_block += 1
                 if dp < EXTRA_K:
                     k_nn_extra = k_nn_base + arith.index(k_block * 32)
-                    k_buf_a[k_block] = vector.load_op(
+                    k_buf[k_block] = vector.load_op(
                         v8f16_type, k_cur_buf, [_raw(k_nn_extra)])
                     k_block += 1
 
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec_b)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec_b)
                 v_lo = vector.shuffle(
-                    v_buf_b[dp], v_buf_b[dp], [0, 1, 2, 3])
+                    v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
-                    v_buf_b[dp], v_buf_b[dp], [4, 5, 6, 7])
+                    v_buf[dp], v_buf[dp], [4, 5, 6, 7])
                 o_accs[dp * 2] = rocdl.mfma_f32_16x16x16f16(
                     v4f32_type,
                     [v_lo, p_pack_b, o_accs[dp * 2], 0, 0, 0],
@@ -1204,7 +1244,9 @@ def compile_mla_decode(
             if nn_a_phys_next is not None:
                 nn_a_phys_next = rocdl.readfirstlane(
                     T.i32, nn_a_phys_next)
-            return (m_b, l_b, o_accs, k_buf_a,
+
+            rocdl.sched_barrier(0)
+            return (m, l, o_accs, k_buf,
                     nn_a_phys_next)
 
         has_kv_work = _std_arith.CmpIOp(
@@ -1230,21 +1272,13 @@ def compile_mla_decode(
             lds_base_byte_idx
             + k_base_idx_init * arith.index(2)
         )
-        k_byte_base_i32 = _index_cast_to_i32(k_byte_base)
         k_buf_init = []
         for ks in range_constexpr(K_STEPS):
             _off = ks * 64
-            _ds_k = llvm.InlineAsmOp(
-                res=v8f16_type,
-                operands_=[_raw(k_byte_base_i32)],
-                asm_string=(
-                    f"ds_read_b128 $0, $1 offset:{_off}"
-                ),
-                constraints="=a,v",
-                has_side_effects=True,
-                is_align_stack=False,
-            )
-            k_buf_init.append(_ds_k.result)
+            k_buf_init.append(_lds_load_prefer_agpr(
+                k_byte_base, v8f16_type,
+                static_byte_offset=_off,
+            ))
 
         if has_kv_work:
             o_accs_init = [
@@ -1374,7 +1408,7 @@ def compile_mla_decode(
             ]
             k_body_cur = body_results[2 + D_CHUNKS]
             k_body_next = body_results[3 + D_CHUNKS]
-            k_buf_body = [
+            k_bufody = [
                 body_results[_KB + ks]
                 for ks in range_constexpr(K_STEPS)
             ]
@@ -1391,7 +1425,7 @@ def compile_mla_decode(
             ).result
             penult_init = ([m_body, l_body] + list(o_body)
                            + [k_body_cur, k_body_next]
-                           + list(k_buf_body))
+                           + list(k_bufody))
             for kv_pos_p, penult_ia, penult_results in _scf.for_(
                 _raw(body_end), penult_ub, _raw(arith.index(BLOCK_N)),
                 iter_args=penult_init
@@ -1494,40 +1528,45 @@ def compile_mla_decode(
                 ).result
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-            l_gt_zero = _std_arith.CmpFOp(
-                _std_arith.CmpFPredicate.OGT,
-                _raw(l_final), _raw(c_zero_f),
+            l_rcp = _std_arith.DivFOp(
+                _raw(c_one_f), _raw(l_final),
+                fastmath=fm_fast,
             ).result
-            safe_inv_l = _std_arith.SelectOp(
-                l_gt_zero,
-                _std_arith.DivFOp(
-                    _raw(c_one_f), _raw(l_final),
+            inv_l_vec = vector.broadcast(v4f32_type, l_rcp)
+
+            for dc_pair in range_constexpr(D_CHUNKS // 2):
+                dc_even = dc_pair * 2
+                dc_odd = dc_pair * 2 + 1
+                o_even = _std_arith.MulFOp(
+                    _raw(o_finals[dc_even]), _raw(inv_l_vec),
                     fastmath=fm_fast,
-                ).result,
-                _raw(c_zero_f),
-            ).result
-            inv_l_vec = vector.broadcast(v4f32_type, safe_inv_l)
-
-            for dc in range_constexpr(D_CHUNKS):
-                o_norm = _std_arith.MulFOp(
-                    _raw(o_finals[dc]), _raw(inv_l_vec), fastmath=fm_fast
                 ).result
-                for ii in range_constexpr(4):
-                    o_val = vector.extract(
-                        o_norm, static_position=[ii], dynamic_position=[],
-                    )
-                    d_col = (
-                        arith.index((dc // 2) * 32 + dc % 2)
-                        + lane_div_16 * arith.index(8)
-                        + arith.index(ii * 2)
-                    )
-                    o_g_idx = mid_o_global_idx(q_row, d_col)
-                    o_off_i32 = _index_cast_to_i32(o_g_idx)
-                    buffer_ops.buffer_store(o_val, mid_o_rsrc, o_off_i32)
+                o_odd = _std_arith.MulFOp(
+                    _raw(o_finals[dc_odd]), _raw(inv_l_vec),
+                    fastmath=fm_fast,
+                ).result
+                v4_lo = vector.shuffle(
+                    o_even, o_odd, [0, 4, 1, 5])
+                v4_hi = vector.shuffle(
+                    o_even, o_odd, [2, 6, 3, 7])
+                d_col = (
+                    arith.index(dc_pair * 32)
+                    + lane_div_16 * arith.index(8)
+                )
+                o_g_idx = mid_o_global_idx(q_row, d_col)
+                o_off_i32 = _index_cast_to_i32(o_g_idx)
+                buffer_ops.buffer_store(
+                    v4_lo, mid_o_rsrc, o_off_i32)
+                buffer_ops.buffer_store(
+                    v4_hi, mid_o_rsrc, o_off_i32,
+                    soffset_bytes=16)
 
+            m_final_scaled = _std_arith.MulFOp(
+                _raw(m_final), _raw(c_sm_scale), fastmath=fm_fast
+            ).result
             log_l = _math_log(l_final, fastmath=fm_fast)
             lse_val = _std_arith.AddFOp(
-                _raw(m_final), _raw(log_l), fastmath=fm_fast
+                _raw(m_final_scaled), _raw(log_l), fastmath=fm_fast
             ).result
             lse_idx = mid_lse_global_idx(q_row)
             lse_off_i32 = _index_cast_to_i32(lse_idx)

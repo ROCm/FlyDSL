@@ -27,10 +27,13 @@ from .._mlir.extras import types as T
 from typing import Optional, Union
 
 __all__ = [
+    'create_llvm_ptr',
+    'get_element_ptr',
     'create_buffer_resource',
     'buffer_load',
     'buffer_store',
     'BufferResourceDescriptor',
+    'index_cast_to_i32',
 ]
 
 
@@ -55,12 +58,97 @@ def _unwrap_value(value):
     return value
 
 
-def _create_i64_constant(value: int) -> ir.Value:
-    """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = ir.IntegerType.get_signless(64)
-    attr = ir.IntegerAttr.get(i64_type, value)
-    op = std_arith.ConstantOp(i64_type, attr)
-    return op.result
+def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
+    """Convert an index/integer value to LLVM pointer.
+
+    Args:
+        value: Index or integer value (e.g. from memref.extract_aligned_pointer_as_index).
+               Can be ir.Value or ArithValue wrapper.
+        address_space: LLVM address space (0=generic, 3=LDS, 8=buffer descriptor).
+
+    Returns:
+        LLVM pointer value.
+    """
+    value = _unwrap_value(value)
+    if isinstance(value.type, ir.IndexType):
+        i64_type = ir.IntegerType.get_signless(64)
+        value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
+    if address_space == 0:
+        ptr_type = ir.Type.parse('!llvm.ptr')
+    else:
+        ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
+    return llvm.IntToPtrOp(ptr_type, value).result
+
+
+def get_element_ptr(
+    base_ptr,
+    byte_offset: Union[int, ir.Value, None] = None,
+    static_byte_offset: int = 0,
+    elem_type: Optional[ir.Type] = None,
+) -> ir.Value:
+    """GEP-based pointer arithmetic that preserves provenance.
+
+    Uses llvm.getelementptr (i8 element type by default) so the compiler
+    can track that the result derives from *base_ptr*.  This avoids
+    false-dependency vmcnt(0) between buffer_load_lds and ds_read when
+    both touch the same LDS allocation.
+
+    Args:
+        base_ptr: LLVM pointer (e.g. ``!llvm.ptr<3>``).
+        byte_offset: Dynamic byte offset (``None``, Python ``int``, or SSA value).
+        static_byte_offset: Extra constant byte offset (Python ``int``).
+        elem_type: GEP element type (default i8 for byte addressing).
+
+    Returns:
+        LLVM pointer with same type as *base_ptr*.
+    """
+    _GEP_DYN = -(2**31)
+
+    base_ptr = _unwrap_value(base_ptr)
+    if elem_type is None:
+        elem_type = ir.IntegerType.get_signless(8)
+
+    if byte_offset is None:
+        return llvm.GEPOp(
+            base_ptr.type, base_ptr, [], [int(static_byte_offset)],
+            elem_type, None,
+        ).result
+    elif isinstance(byte_offset, int):
+        return llvm.GEPOp(
+            base_ptr.type, base_ptr, [],
+            [int(byte_offset) + int(static_byte_offset)],
+            elem_type, None,
+        ).result
+    else:
+        offset_val = _unwrap_value(byte_offset)
+        if isinstance(offset_val.type, ir.IndexType):
+            i64_type = ir.IntegerType.get_signless(64)
+            offset_val = _unwrap_value(
+                std_arith.IndexCastOp(i64_type, offset_val).result
+            )
+
+        if static_byte_offset != 0:
+            static_attr = ir.IntegerAttr.get(offset_val.type, int(static_byte_offset))
+            static_const = _unwrap_value(
+                std_arith.ConstantOp(offset_val.type, static_attr).result
+            )
+            offset_val = _unwrap_value(
+                std_arith.AddIOp(offset_val, static_const).result
+            )
+
+        return llvm.GEPOp(
+            base_ptr.type, base_ptr, [offset_val], [_GEP_DYN],
+            elem_type, None,
+        ).result
+
+
+def index_cast_to_i32(value) -> ir.Value:
+    """Cast an index or integer value to i32."""
+    value = _unwrap_value(value)
+    i32_type = ir.IntegerType.get_signless(32)
+    if isinstance(value.type, ir.IntegerType) and value.type.width == 32:
+        return value
+    return _unwrap_value(std_arith.IndexCastOp(i32_type, value).result)
 
 
 def _create_i32_constant(value: int) -> ir.Value:
