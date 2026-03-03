@@ -157,7 +157,8 @@ def build_flash_decode_attention_module(
                         fastmath=fm_fast,
                     ).result
                     partial = flir.arith.AddFOp(
-                        arith.as_value(partial), qk, fastmath=fm_fast
+                        arith.as_value(partial), arith.as_value(qk),
+                        fastmath=fm_fast,
                     ).result
 
                 # Warp-wide sum reduction (xor-shuffle, wave64).
@@ -191,20 +192,28 @@ def build_flash_decode_attention_module(
                 ).result
 
                 diff_m = flir.arith.SubFOp(
-                    arith.as_value(m), m_new, fastmath=fm_fast
+                    arith.as_value(m), arith.as_value(m_new),
+                    fastmath=fm_fast,
                 ).result
                 corr_arg = flir.arith.MulFOp(
-                    diff_m, arith.as_value(c_log2e), fastmath=fm_fast
+                    arith.as_value(diff_m), arith.as_value(c_log2e),
+                    fastmath=fm_fast,
                 ).result
-                correction = flir.math.exp2(corr_arg, fastmath=fm_fast)
+                correction = flir.math.exp2(
+                    arith.as_value(corr_arg), fastmath=fm_fast
+                )
 
                 diff_s = flir.arith.SubFOp(
-                    arith.as_value(score), m_new, fastmath=fm_fast
+                    arith.as_value(score), arith.as_value(m_new),
+                    fastmath=fm_fast,
                 ).result
                 p_arg = flir.arith.MulFOp(
-                    diff_s, arith.as_value(c_log2e), fastmath=fm_fast
+                    arith.as_value(diff_s), arith.as_value(c_log2e),
+                    fastmath=fm_fast,
                 ).result
-                p = flir.math.exp2(p_arg, fastmath=fm_fast)
+                p = flir.math.exp2(
+                    arith.as_value(p_arg), fastmath=fm_fast
+                )
 
                 l_corr = flir.arith.MulFOp(
                     arith.as_value(l),
@@ -212,7 +221,8 @@ def build_flash_decode_attention_module(
                     fastmath=fm_fast,
                 ).result
                 l = flir.arith.AddFOp(
-                    l_corr, arith.as_value(p), fastmath=fm_fast
+                    arith.as_value(l_corr), arith.as_value(p),
+                    fastmath=fm_fast,
                 ).result
 
                 # Update accumulator with weighted V.
@@ -239,7 +249,10 @@ def build_flash_decode_attention_module(
                         fastmath=fm_fast,
                     ).result
                     new_acc.append(
-                        flir.arith.AddFOp(a_corr, pv, fastmath=fm_fast).result
+                        flir.arith.AddFOp(
+                            arith.as_value(a_corr), arith.as_value(pv),
+                            fastmath=fm_fast,
+                        ).result
                     )
 
                 acc = new_acc
@@ -253,7 +266,7 @@ def build_flash_decode_attention_module(
                     fastmath=fm_fast,
                 ).result
                 if dtype_str != "f32":
-                    out_e = flir.arith.truncf(elem_type, out_f32)
+                    out_e = flir.arith.truncf(elem_type, arith.as_value(out_f32))
                 else:
                     out_e = out_f32
                 flir.memref.store(
