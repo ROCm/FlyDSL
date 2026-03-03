@@ -301,7 +301,7 @@ class JitFunction:
             return
         self.manager_key = _jit_function_cache_key(self.func)
         cache_root = env.runtime.cache_dir
-        if cache_root:
+        if cache_root and env.runtime.enable_cache:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
@@ -338,7 +338,7 @@ class JitFunction:
         if not hasattr(self, '_mem_cache'):
             self._mem_cache = {}
         cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and not env.debug.dump_ir:
+        if cached_func is None and not env.debug.dump_ir and env.runtime.enable_cache:
             cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
 
         if cached_func is not None:

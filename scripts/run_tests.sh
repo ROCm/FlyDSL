@@ -7,7 +7,6 @@
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
-
 BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
 
@@ -19,6 +18,8 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
+# disable cache for testing
+export FLYDSL_RUNTIME_ENABLE_CACHE=false
 echo "========================================================================"
 echo "GEMM Test Suite"
 echo "========================================================================"
