@@ -11,10 +11,8 @@ cd "${REPO_ROOT}"
 BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
 
-# If flydsl is not importable (no pip install -e .), fall back to PYTHONPATH.
-if ! python3 -c "import flydsl" 2>/dev/null; then
-  export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
-fi
+# Ensure REPO_ROOT and build packages are always on PYTHONPATH.
+export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
 
 # Ensure MLIR runtime shared libraries are discoverable.
 if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
@@ -55,34 +53,15 @@ echo "Norm & Softmax Kernels"
 echo "========================================================================"
 echo ""
 
-norm_pass=0
-norm_fail=0
+python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short 2>&1 | tee /tmp/test_norm_softmax.log
+norm_exit=${PIPESTATUS[0]}
+if [ $norm_exit -ne 0 ]; then
+    exit_code=1
+fi
 
-for test_script in \
-    tests/kernels/test_layernorm.py \
-    tests/kernels/test_rmsnorm.py \
-    tests/kernels/test_softmax.py; do
-
-    test_name=$(basename "$test_script" .py | sed 's/test_//')
-    if [ ! -f "$test_script" ]; then
-        echo "  SKIP  ${test_name} (file not found)"
-        continue
-    fi
-    if python3 "$test_script" > /tmp/test_${test_name}.log 2>&1; then
-        echo "  PASS  ${test_name}"
-        norm_pass=$((norm_pass + 1))
-    else
-        echo "  FAIL  ${test_name}"
-        tail -5 /tmp/test_${test_name}.log | sed 's/^/        /'
-        norm_fail=$((norm_fail + 1))
-        exit_code=1
-    fi
-done
-
-echo ""
-echo "========================================================================"
-echo "Norm & Softmax: ${norm_pass} passed, ${norm_fail} failed"
-echo "========================================================================"
+norm_summary=$(grep -P '^\s*=+\s+.*(passed|failed|error|skipped|no tests ran).*=+\s*$' /tmp/test_norm_softmax.log | tail -1)
+norm_pass=$(echo "$norm_summary" | grep -oP '\d+(?= passed)' || echo "0")
+norm_fail=$(echo "$norm_summary" | grep -oP '\d+(?= failed)' || echo "0")
 
 # ---------------------------------------------------------------------------
 # Python Examples (tests/python/examples/) via pytest
