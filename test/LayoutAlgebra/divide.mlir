@@ -50,14 +50,61 @@ func.func @test_flat_divide(%layout: !fly.layout<(4, 8) : (1, 4)>,
 }
 
 // CHECK-LABEL: @test_logical_divide_1d
-func.func @test_logical_divide_1d() -> !fly.layout<((4), 4) : ((1), 4)> {
-  // Divide a 1D contiguous layout: (16):(1) / (4):(1) -> ((4),4):((1),4)
+func.func @test_logical_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
+  // Divide a 1D contiguous layout: (16):(1) / (4):(1) -> (4,4):(1,4)
   %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
   %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
   %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
   %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
-  %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<((4), 4) : ((1), 4)>
-  return %result : !fly.layout<((4), 4) : ((1), 4)>
+  %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
+  return %result : !fly.layout<(4, 4) : (1, 4)>
+}
+
+// CHECK-LABEL: @test_zipped_divide_1d
+func.func @test_zipped_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
+  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
+  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
+  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.zipped_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
+  return %result : !fly.layout<(4, 4) : (1, 4)>
+}
+
+// CHECK-LABEL: @test_tiled_divide_1d
+func.func @test_tiled_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
+  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
+  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
+  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.tiled_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
+  return %result : !fly.layout<(4, 4) : (1, 4)>
+}
+
+// CHECK-LABEL: @test_flat_divide_1d
+func.func @test_flat_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
+  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
+  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
+  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %result = fly.flat_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
+  return %result : !fly.layout<(4, 4) : (1, 4)>
+}
+
+// CHECK-LABEL: @test_logical_divide_wrapped_tuple_1d
+func.func @test_logical_divide_wrapped_tuple_1d(
+    %layout: !fly.layout<((16, 1)) : ((1, 16))>,
+    %divisor: !fly.layout<((4, 1)) : ((1, 4))>) -> !fly.layout<((4, 1), 4) : ((1, 0), 4)> {
+  // Outer singleton wrappers are accepted and handled in inference.
+  %result = fly.logical_divide(%layout, %divisor)
+      : (!fly.layout<((16, 1)) : ((1, 16))>, !fly.layout<((4, 1)) : ((1, 4))>)
+      -> !fly.layout<((4, 1), 4) : ((1, 0), 4)>
+  return %result : !fly.layout<((4, 1), 4) : ((1, 0), 4)>
 }
