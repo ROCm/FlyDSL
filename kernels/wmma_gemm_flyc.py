@@ -1,4 +1,4 @@
-"""WMMA GEMM kernel for gfx1250. """
+"""WMMA GEMM kernel for gfx1250."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -12,6 +12,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
 
@@ -48,6 +49,8 @@ def compile_wmma_gemm(
 
     if K % tile_k != 0:
         raise ValueError(f"K must be divisible by tile_k={tile_k}, got K={K}")
+    if tile_k % WMMA_K != 0:
+        raise ValueError(f"tile_k must be a multiple of {WMMA_K}, got {tile_k}")
     if tile_m % WMMA_M != 0:
         raise ValueError(f"tile_m must be a multiple of {WMMA_M}, got {tile_m}")
 
@@ -57,10 +60,11 @@ def compile_wmma_gemm(
             f"tile_n must be a multiple of waves_per_block*{WMMA_N}={waves_per_block * WMMA_N}, got {tile_n}"
         )
 
-    gpu_arch = str(get_hip_arch())
+    gpu_arch = str(get_hip_arch(timeout_s=300))
     assert gpu_arch.startswith("gfx1250"), f"Expected a gfx1250 architecture, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16
+    k_wmma_steps = tile_k // WMMA_K
 
     def _elem_type():
         return T.f16 if is_f16 else T.bf16
@@ -165,40 +169,43 @@ def compile_wmma_gemm(
 
             gpu.barrier()
 
-            b_frags = []
-            for wn in range_constexpr(wmma_n_rep):
-                n_off = warp_n_off + arith.index(wn * WMMA_N)
-                vals = []
-                for k0 in range_constexpr(2):
-                    for k1 in range_constexpr(8):
-                        kk = (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                        off = crd2idx((kk, n_off + lane16), layout_lds_b)
-                        vals.append(lds_b.load([off]))
-                b_frags.append(vector.from_elements(T.vec(16, elem_ty), vals))
+            for ks in range_constexpr(k_wmma_steps):
+                k_step = arith.index(ks * WMMA_K)
 
-            for wm in range_constexpr(wmma_m_rep):
-                m_off = arith.index(wm * WMMA_M)
-                a_vals = []
-                for k0 in range_constexpr(2):
-                    for k1 in range_constexpr(8):
-                        kk = (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                        off = crd2idx((m_off + lane16, kk), layout_lds_a)
-                        a_vals.append(lds_a.load([off]))
-                a_frag = vector.from_elements(T.vec(16, elem_ty), a_vals)
-
+                b_frags = []
                 for wn in range_constexpr(wmma_n_rep):
-                    acc_idx = wm * wmma_n_rep + wn
-                    accs[acc_idx] = wmma_op(
-                        T.vec(8, T.f32),
-                        a_frag,
-                        b_frags[wn],
-                        accs[acc_idx],
-                        signA=False,
-                        signB=False,
-                        modC=0,
-                        reuseA=False,
-                        reuseB=False,
-                    ).result
+                    n_off = warp_n_off + arith.index(wn * WMMA_N)
+                    vals = []
+                    for k0 in range_constexpr(2):
+                        for k1 in range_constexpr(8):
+                            kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
+                            off = crd2idx((kk, n_off + lane16), layout_lds_b)
+                            vals.append(lds_b.load([off]))
+                    b_frags.append(vector.from_elements(T.vec(16, elem_ty), vals))
+
+                for wm in range_constexpr(wmma_m_rep):
+                    m_off = arith.index(wm * WMMA_M)
+                    a_vals = []
+                    for k0 in range_constexpr(2):
+                        for k1 in range_constexpr(8):
+                            kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
+                            off = crd2idx((m_off + lane16, kk), layout_lds_a)
+                            a_vals.append(lds_a.load([off]))
+                    a_frag = vector.from_elements(T.vec(16, elem_ty), a_vals)
+
+                    for wn in range_constexpr(wmma_n_rep):
+                        acc_idx = wm * wmma_n_rep + wn
+                        accs[acc_idx] = wmma_op(
+                            T.vec(8, T.f32),
+                            a_frag,
+                            b_frags[wn],
+                            accs[acc_idx],
+                            signA=False,
+                            signB=False,
+                            modC=0,
+                            reuseA=False,
+                            reuseB=False,
+                        ).result
 
             gpu.barrier()
 
