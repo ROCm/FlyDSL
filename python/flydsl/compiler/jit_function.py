@@ -659,7 +659,7 @@ class JitFunction:
         if not env.runtime.enable_cache:
             return
         cache_root = env.runtime.cache_dir
-        if cache_root:
+        if cache_root and env.runtime.enable_cache:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
