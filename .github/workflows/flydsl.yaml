@@ -7,6 +7,7 @@ on:
       - pre_v0.1
       - pr/v0.1
       - pr/v0.1_debug
+      - pr/v0.1-graph-debug
   pull_request:
     branches:
       - main
