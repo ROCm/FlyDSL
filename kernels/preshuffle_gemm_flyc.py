@@ -82,6 +82,14 @@ def compile_preshuffle_gemm_a8(
             f"(tile_k={tile_k}, elem_bytes={elem_bytes})"
         )
 
+    _min_k_unroll = tile_k_bytes // a_elem_vec_pack // 64
+    if is_fp4 and _min_k_unroll < 2:
+        raise ValueError(
+            f"FP4 requires tile_k >= {64 * 2 * a_elem_vec_pack} "
+            f"(mfma_scale_f32_16x16x128 needs k_unroll >= 2), "
+            f"got tile_k={tile_k} (k_unroll={_min_k_unroll})"
+        )
+
     mfma_i32_k32 = None
     if is_int8:
         mfma_i32_k32 = getattr(rocdl, "mfma_i32_16x16x32i8", None) or getattr(

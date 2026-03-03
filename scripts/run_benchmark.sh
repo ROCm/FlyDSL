@@ -65,7 +65,7 @@ int8,9728,8192,8320,128,256,128
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
-8192,8192,8192,64,256,128
+8192,8192,8192,64,256,256
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -499,6 +499,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
         echo "gemm fp4 failed. Log: ${log}" >&2
         _show_fail_log "${log}" "gemm_fp4"
       fi
+
     fi
   done
 fi
