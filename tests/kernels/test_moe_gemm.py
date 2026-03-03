@@ -1106,9 +1106,12 @@ def run_moe_stage2(
     ],
 )
 @pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
-@pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
-@pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
-@pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
+@pytest.mark.parametrize("out_dtype, use_reduce, use_valid_mask", [
+    pytest.param("f16", False, False, id="atomic-out_f16-nomask"),
+    pytest.param("f32", False, False, id="atomic-out_f32-nomask"),
+    pytest.param("f16", True, False, id="reduce-out_f16-nomask"),
+    pytest.param("f16", True, True, id="reduce-out_f16-mask"),
+])
 @pytest.mark.parametrize("test_graph", [
     pytest.param(False, id="eager"),
     pytest.param(True, id="graph"),
@@ -1141,11 +1144,6 @@ def test_moe_gemm_2stage(
     w_fp4_kernel: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
-    if (not bool(use_reduce)) and bool(use_valid_mask):
-        pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
-    out_s = str(out_dtype).strip().lower()
-    if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
-        pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
