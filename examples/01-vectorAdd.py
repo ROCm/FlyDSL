@@ -14,6 +14,9 @@ def vectorAddKernel(
     bid = fx.block_idx.x
     tid = fx.thread_idx.x
 
+    A = fx.rocdl.make_buffer_tensor(A)
+    print(A)
+
     tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
     tB = fx.logical_divide(B, fx.make_layout(block_dim, 1))
     tC = fx.logical_divide(C, fx.make_layout(block_dim, 1))
@@ -26,12 +29,15 @@ def vectorAddKernel(
     tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
     RABMemRefTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
-    copyAtom = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(32))
+
+    copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
+    copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferLDST32b(), fx.Float32)
+
     rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
     rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
     rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
 
-    fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
+    fx.copy_atom_call(copyAtomBuffer, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
 
     vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))

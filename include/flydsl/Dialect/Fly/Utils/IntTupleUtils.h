@@ -45,11 +45,13 @@ private:
                        int32_t dyncIdxEnd = -1)
       : value(value), attr(attr), dyncIdxStart(dyncIdxStart), dyncIdxEnd(dyncIdxEnd) {}
 
-  Value value;
-  IntTupleAttr attr;
-  int32_t dyncIdxStart, dyncIdxEnd;
+  Value value = nullptr;
+  IntTupleAttr attr = nullptr;
+  int32_t dyncIdxStart = 0, dyncIdxEnd = -1;
 
 public:
+  IntTupleValueAdaptor() = default;
+
   template <class Builder>
   static IntTupleValueAdaptor create(Builder &builder, Value value, IntTupleAttr attr) {
     auto defOp = value.getDefiningOp<MakeIntTupleOp>();
@@ -111,6 +113,10 @@ public:
   ArithValue safeDiv(ArithValue lhs, ArithValue rhs) const { return intSafeDiv(lhs, rhs); }
   ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const { return intCeilDiv(lhs, rhs); }
   ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const { return intShapeDiv(lhs, rhs); }
+
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const { return lhs ^ rhs; }
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const { return lhs & rhs; }
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const { return lhs >> rhs; }
 
   IntTupleAttr getAttr(IntTupleAttr attr) const { return attr; }
   ArithValue getArithValue(IntTupleAttr attr) const { return attr.getLeafAsInt(); }
@@ -224,6 +230,10 @@ public:
   ArithValue safeDiv(ArithValue lhs, ArithValue rhs) const { return div(lhs, rhs); }
   ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const;
   ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const;
+
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const;
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const;
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const;
 
   IntTupleAttr getAttr(IntTupleValueAdaptor adaptor) const { return adaptor.attr; }
 
@@ -710,6 +720,9 @@ template <class IntTuple>
 IntTuple intTupleSelect(const IntTupleBuilder<IntTuple> &builder, IntTuple val,
                         ArrayRef<int32_t> indices) {
   assert(!val.isLeaf() && "intTupleSelect expects a non-leaf tuple");
+  if (indices.size() == 1) {
+    return builder.at(val, indices[0]);
+  }
   typename IntTupleBuilder<IntTuple>::ElemCollector collector;
   for (int32_t idx : indices) {
     collector.push_back(builder.at(val, idx));
@@ -996,6 +1009,46 @@ template <class IntTuple>
 IntTuple intTupleElemGreaterEqual(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs,
                                   IntTuple rhs) {
   return builder.makeInt(builder.logicalNot(detail::intTupleElemLessImpl(builder, lhs, rhs)));
+}
+
+//===----------------------------------------------------------------------===//
+// Compact stride generation
+//===----------------------------------------------------------------------===//
+
+namespace detail {
+
+template <class IntTuple>
+std::pair<IntTuple, typename IntTupleBuilder<IntTuple>::ArithValue>
+intTupleCompactColMajorImpl(IntTupleBuilder<IntTuple> &builder, IntTuple shape,
+                            typename IntTupleBuilder<IntTuple>::ArithValue current) {
+  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+  if (shape.isLeaf()) {
+    ArithValue nextCurrent = builder.mul(current, builder.getArithValue(shape));
+    return {builder.makeInt(current), nextCurrent};
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  ArithValue running = current;
+  for (int i = 0; i < shape.rank(); ++i) {
+    auto [childStride, nextRunning] =
+        intTupleCompactColMajorImpl(builder, builder.at(shape, i), running);
+    collector.push_back(childStride);
+    running = nextRunning;
+  }
+  return {builder.makeTuple(collector), running};
+}
+
+} // namespace detail
+
+template <class IntTuple>
+IntTuple intTupleCompactColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple shape,
+                                 typename IntTupleBuilder<IntTuple>::ArithValue current) {
+  auto [stride, finalProduct] = detail::intTupleCompactColMajorImpl(builder, shape, current);
+  return stride;
+}
+
+template <class IntTuple>
+IntTuple intTupleCompactColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple shape) {
+  return intTupleCompactColMajor(builder, shape, builder.materializeConstantArith(1));
 }
 
 //===----------------------------------------------------------------------===//

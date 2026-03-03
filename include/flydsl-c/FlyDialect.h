@@ -96,17 +96,31 @@ MLIR_CAPI_EXPORTED int32_t mlirFlyMemRefTypeGetAlignment(MlirType type);
 MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGetSwizzle(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// CopyAtomUniversalCopyType
+// CopyOpUniversalCopyType
 //===----------------------------------------------------------------------===//
 
-MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomUniversalCopyType(MlirType type);
-MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomUniversalCopyTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyOpUniversalCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyOpUniversalCopyTypeGetTypeID(void);
 
-// Constructor
-MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize);
 
-// Accessors
-MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomUniversalCopyTypeGetBitSize(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// CopyAtomType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomTypeGetValBits(MlirType type);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutSrc(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutDst(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutRef(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // MmaAtomUniversalFMAType
@@ -120,6 +134,35 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, M
 
 // Accessors
 MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// TiledCopyType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyTiledCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyTiledCopyTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetCopyAtom(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetLayoutThrVal(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTileMN(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutSrc(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutDst(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// TiledMmaType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyTiledMmaType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyTiledMmaTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetMmaAtom(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetAtomLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetPermutation(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutA(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutB(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // Pass Registration

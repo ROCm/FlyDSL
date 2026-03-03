@@ -321,9 +321,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
 
-            copy_atom_s = fx.make_copy_atom(
-                fx.CopyAtomUniversalCopyType.get(elem_bits)
-            )
+            copy_atom_s = fx.make_copy_atom(fx.UniversalCopy(elem_bits), elem_bits)
             scalar_reg_ty = fx.MemRefType.get(
                 elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register
             )

@@ -210,7 +210,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             row_a = fx.slice(A, (bid, None))
             row_c = fx.slice(C, (bid, None))
 
-            copy_atom_s = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(elem_bits))
+            copy_atom_s = fx.make_copy_atom(fx.UniversalCopy(elem_bits), elem_bits)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 

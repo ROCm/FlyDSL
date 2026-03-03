@@ -38,11 +38,21 @@ def : Pat<(Fly_SelectOp Fly_Layout:$layout, DenseI32ArrayAttr:$indices),
             (Fly_SelectOp (Fly_GetShapeOp $layout), $indices),
             (Fly_SelectOp (Fly_GetStrideOp $layout), $indices)
         )>;
+def : Pat<(Fly_SelectOp Fly_MemRef:$memref, DenseI32ArrayAttr:$indices),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $memref),
+            (Fly_SelectOp (Fly_GetLayoutOp $memref), $indices)
+        )>;
 
 def : Pat<(Fly_GroupOp Fly_Layout:$layout, I32Attr:$begin, I32Attr:$end),
           (Fly_MakeLayoutOp
             (Fly_GroupOp (Fly_GetShapeOp $layout), $begin, $end),
             (Fly_GroupOp (Fly_GetStrideOp $layout), $begin, $end)
+        )>;
+def : Pat<(Fly_GroupOp Fly_MemRef:$memref, I32Attr:$begin, I32Attr:$end),
+          (Fly_MakeViewOp
+            (Fly_GetIterOp $memref),
+            (Fly_GroupOp (Fly_GetLayoutOp $memref), $begin, $end)
         )>;
 
 def : Pat<(Fly_RightInverseOp Fly_MemRef:$mem),

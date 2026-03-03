@@ -127,10 +127,11 @@ bool isNormalForm(TypedValue<MemRefType> value) {
   if (isa<StaticOp>(defOp)) {
     return true;
   }
-  // MakeFragmentLikeOp with normal layout source
-  if (auto makeFragmentOp = dyn_cast<MakeFragmentLikeOp>(defOp)) {
-    return isNormalForm(makeFragmentOp.getSrc());
-  }
+
+  // TODO: maybe we don't need this check
+  // if (auto makeViewOp = dyn_cast<MakeViewOp>(defOp)) {
+  //   return isNormalForm(makeViewOp.getLayout());
+  // }
   return true;
 }
 

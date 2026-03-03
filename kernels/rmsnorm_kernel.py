@@ -246,7 +246,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             row_in = fx.slice(Input, (bid, None))
             row_out = fx.slice(Output, (bid, None))
 
-            copy_atom_s = fx.make_copy_atom(fx.CopyAtomUniversalCopyType.get(elem_bits))
+            copy_atom_s = fx.make_copy_atom(fx.UniversalCopy(elem_bits), elem_bits)
             scalar_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
             scalar_reg_lay = fx.make_layout(1, 1)
 

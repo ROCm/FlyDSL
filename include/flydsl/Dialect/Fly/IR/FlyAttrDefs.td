@@ -22,7 +22,8 @@ def Fly_CachePolicyAttr : EnumAttr<Fly_Dialect, Fly_CachePolicy, "cache_policy">
 def Fly_AddressSpace : I32EnumAttr<"AddressSpace", "", [
   I32EnumAttrCase<"Global", 0, "global">,
   I32EnumAttrCase<"Shared", 1, "shared">,
-  I32EnumAttrCase<"Register", 2, "register">
+  I32EnumAttrCase<"Register", 2, "register">,
+  I32EnumAttrCase<"BufferDesc", 8, "buffer_desc">
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = Fly_Dialect.cppNamespace;

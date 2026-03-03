@@ -36,20 +36,20 @@ def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
 }
 
 
-def Fly_CopyAtomTypeInterface : TypeInterface<"CopyAtomTypeInterface", [Fly_MayStaticTypeInterface]> {
+def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutSrc", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutDst", (ins)>,
-    InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutRef", (ins)>
+    InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutSrc", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutDst", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrBitLayoutRef", (ins)>
   ];
 }
 
 def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface", [Fly_MayStaticTypeInterface]> {
   let cppNamespace = "::mlir::fly";
   let methods = [
-    InterfaceMethod<"", "::mlir::Attribute", "getThrSize", (ins)>,
+    InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getShapeMNK", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,

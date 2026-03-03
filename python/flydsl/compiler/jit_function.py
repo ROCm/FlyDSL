@@ -7,11 +7,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-import flydsl
-
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..runtime.device import get_rocm_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from ..expr.typing import Stream
@@ -25,7 +24,7 @@ from .kernel_function import (
     get_gpu_module_body,
 )
 from .protocol import fly_types, fly_construct
-from flydsl.runtime.device import get_rocm_arch
+
 
 @lru_cache(maxsize=1)
 def _get_llvm_version() -> str:
@@ -41,6 +40,8 @@ def _get_llvm_version() -> str:
 
 @lru_cache(maxsize=1)
 def _flydsl_verison_key() -> str:
+    import flydsl
+
     return f"flydsl:{flydsl.__version__}|llvm:{_get_llvm_version()}"
 
 
@@ -115,44 +116,6 @@ def _jit_function_cache_key(func: Callable) -> str:
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 
-
-def _stage_label_from_fragment(fragment: str) -> str:
-    """Extract pass name from a pipeline fragment for use as a filename."""
-    base = fragment.strip()
-    if base.startswith("gpu.module(") and base.endswith(")"):
-        base = base[len("gpu.module(") : -1].strip()
-    return base.split("{", 1)[0].strip()
-
-
-def _dump_ir_to_file(stage: str, *, dump_dir: Path, asm: str) -> Path:
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    out = dump_dir / f"{stage}.mlir"
-    out.write_text(asm, encoding="utf-8")
-    return out
-
-
-def _dump_isa(*, dump_dir: Path, asm: str, verify: bool) -> Optional[Path]:
-    """Best-effort dump of final ISA assembly (.s) from the post-reconcile IR."""
-    try:
-        from .._mlir.dialects import gpu
-        mod = ir.Module.parse(asm)
-        pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})"
-        )
-        pm.enable_verifier(verify)
-        pm.run(mod.operation)
-        for op in mod.body:
-            if isinstance(op, gpu.BinaryOp):
-                objects = list(map(gpu.ObjectAttr, op.objects))
-                isa_bytes = objects[-1].object
-                out = dump_dir / "final_isa.s"
-                out.write_bytes(isa_bytes)
-                return out
-    except Exception:
-        pass
-    return None
-
-
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
@@ -187,42 +150,12 @@ class MlirCompiler:
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
-        if env.debug.dump_ir:
-            dump_dir = Path(env.debug.dump_dir)
-            if func_name:
-                dump_dir = dump_dir / func_name
 
-            out = _dump_ir_to_file("00_original", dump_dir=dump_dir, asm=str(module))
-            print(f"[flydsl] DUMP_IR enabled, dir={dump_dir}")
-            print(f"[flydsl] dump 00_original -> {out}")
-
-            asm_for_isa = None
-            isa_stage_idx = len(fragments) - 1
-            for idx, frag in enumerate(fragments, start=1):
-                stage_name = f"{idx:02d}_{_stage_label_from_fragment(frag)}"
-                pm = PassManager.parse(f"builtin.module({frag})")
-                pm.enable_verifier(env.debug.enable_verifier)
-                pm.run(module.operation)
-                stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = _dump_ir_to_file(stage_name, dump_dir=dump_dir, asm=stage_asm)
-                print(f"[flydsl] dump {stage_name} -> {out}")
-                if idx == isa_stage_idx:
-                    asm_for_isa = stage_asm
-
-            if asm_for_isa is not None:
-                isa_out = _dump_isa(
-                    dump_dir=dump_dir,
-                    asm=asm_for_isa,
-                    verify=env.debug.enable_verifier,
-                )
-                if isa_out is not None:
-                    print(f"[flydsl] dump final_isa -> {isa_out}")
-        else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
+        pipeline = f"builtin.module({','.join(fragments)})"
+        pm = PassManager.parse(pipeline)
+        pm.enable_verifier(env.debug.enable_verifier)
+        pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+        pm.run(module.operation)
 
         return module
 
@@ -300,8 +233,10 @@ class JitFunction:
         if self.manager_key is not None:
             return
         self.manager_key = _jit_function_cache_key(self.func)
+        if not env.runtime.enable_cache:
+            return
         cache_root = env.runtime.cache_dir
-        if cache_root and env.runtime.enable_cache:
+        if cache_root:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
@@ -327,7 +262,7 @@ class JitFunction:
 
         self._ensure_cache_manager()
 
-        if not hasattr(self, '_sig'):
+        if not hasattr(self, "_sig"):
             self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
@@ -335,14 +270,18 @@ class JitFunction:
 
         cache_key = self._make_cache_key(bound.arguments)
 
-        if not hasattr(self, '_mem_cache'):
-            self._mem_cache = {}
-        cached_func = self._mem_cache.get(cache_key)
-        if cached_func is None and not env.debug.dump_ir and env.runtime.enable_cache:
-            cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+        cached_func = None
+        if env.runtime.enable_cache:
+            if not hasattr(self, "_mem_cache"):
+                self._mem_cache = {}
+            compiled_func = self._mem_cache.get(cache_key)
+            if compiled_func is None:
+                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            else:
+                cached_func = compiled_func
 
         if cached_func is not None:
-            if not hasattr(self, '_cached_ctx'):
+            if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
             with self._cached_ctx:
@@ -402,9 +341,10 @@ class JitFunction:
                 original_ir,
             )
 
-            self._mem_cache[cache_key] = compiled_func
-            if self.cache_manager:
-                self.cache_manager.set(cache_key, compiled_func)
+            if env.runtime.enable_cache:
+                self._mem_cache[cache_key] = compiled_func
+                if self.cache_manager:
+                    self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
 
