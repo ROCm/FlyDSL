@@ -142,6 +142,10 @@ public:
   IntTupleAttr shapeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
   IntTupleAttr applySwizzle(IntTupleAttr v, SwizzleAttr swizzle) const;
 
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const { return lhs ^ rhs; }
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const { return lhs & rhs; }
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const { return lhs >> rhs; }
+
   IntTupleAttr getAttr(IntTupleAttr attr) const { return attr; }
 
   int32_t getStaticValue(IntTupleAttr attr) const {
@@ -256,6 +260,10 @@ public:
   IntTupleValueAdaptor ceilDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor shapeDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
   IntTupleValueAdaptor applySwizzle(IntTupleValueAdaptor v, SwizzleAttr swizzle) const;
+
+  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const;
+  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const;
+  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const;
 
   IntTupleAttr getAttr(IntTupleValueAdaptor adaptor) const { return adaptor.attr; }
 

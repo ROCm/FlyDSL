@@ -337,6 +337,12 @@ def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
   let assemblyFormat = "attr-dict `:` type($result)";
 }
 
+def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
+  let arguments = (ins I32Attr:$valBits);
+  let results = (outs Fly_CopyAtom:$result);
+  let assemblyFormat = "attr-dict `:` functional-type(operands, results)";
+}
+
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
   let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
 }

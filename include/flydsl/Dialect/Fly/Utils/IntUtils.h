@@ -23,6 +23,16 @@ inline int32_t divisibilityApplySwizzle(int32_t lhs, SwizzleAttr swizzle) {
   return std::gcd(lhs, 1 << swizzle.getBase());
 }
 
+inline int32_t divisibilityBitwiseXor(int32_t lhs, int32_t rhs) {
+  return std::min(pow2Factor(lhs), pow2Factor(rhs));
+}
+inline int32_t divisibilityBitwiseAnd(int32_t lhs, int32_t rhs) {
+  return std::max(pow2Factor(lhs), pow2Factor(rhs));
+}
+inline int32_t divisibilityShiftRight(int32_t lhsDiv, int32_t shiftAmt) {
+  return std::max(1, pow2Factor(lhsDiv) >> shiftAmt);
+}
+
 } // namespace utils
 
 //===----------------------------------------------------------------------===//
@@ -45,6 +55,10 @@ IntAttr operator>(IntAttr lhs, IntAttr rhs);
 IntAttr operator>=(IntAttr lhs, IntAttr rhs);
 IntAttr operator==(IntAttr lhs, IntAttr rhs);
 IntAttr operator!=(IntAttr lhs, IntAttr rhs);
+
+IntAttr operator^(IntAttr lhs, IntAttr rhs);
+IntAttr operator&(IntAttr lhs, IntAttr rhs);
+IntAttr operator>>(IntAttr lhs, IntAttr rhs);
 
 IntAttr intMin(IntAttr lhs, IntAttr rhs);
 IntAttr intMax(IntAttr lhs, IntAttr rhs);

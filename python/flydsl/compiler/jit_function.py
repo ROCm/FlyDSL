@@ -405,10 +405,6 @@ class MlirCompiler:
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
-        if env.debug.dump_ir:
-            dump_dir = Path(env.debug.dump_dir)
-            if func_name:
-                dump_dir = dump_dir / func_name
 
         dump_enabled = env.debug.dump_ir
         dump_dir = Path(env.debug.dump_dir).resolve()
@@ -659,7 +655,7 @@ class JitFunction:
         if not env.runtime.enable_cache:
             return
         cache_root = env.runtime.cache_dir
-        if cache_root and env.runtime.enable_cache:
+        if cache_root:
             cache_dir = Path(cache_root) / f"{self.func.__name__}_{self.manager_key}"
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()

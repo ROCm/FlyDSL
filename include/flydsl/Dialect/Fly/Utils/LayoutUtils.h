@@ -1304,8 +1304,8 @@ Layout layoutUpcast(LayoutBuilder<Layout> &builder, Layout layout, int32_t facto
   if (factor == 1) {
     return layout;
   }
-  auto [newShape, newStride] =
-      detail::layoutUpcastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  auto [newShape, newStride] = detail::layoutUpcastImpl(builder, builder.getShape(layout),
+                                                        builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
@@ -1315,8 +1315,8 @@ Layout layoutDowncast(LayoutBuilder<Layout> &builder, Layout layout, int32_t fac
   if (factor == 1) {
     return layout;
   }
-  auto [newShape, newStride] =
-      detail::layoutDowncastImpl(builder, builder.getShape(layout), builder.getStride(layout), factor);
+  auto [newShape, newStride] = detail::layoutDowncastImpl(builder, builder.getShape(layout),
+                                                          builder.getStride(layout), factor);
   return builder.makeLayout(newShape, newStride);
 }
 
@@ -1569,7 +1569,8 @@ Layout layoutZippedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, L
 
   Layout logicalProd = layoutLogicalProduct(builder, blockLayout, tilerLayout);
 
-  IntTupleAttr guide = builder.getLayoutAttr(tilerLayout).getShape();
+  auto *ctx = builder.getLayoutAttr(blockLayout).getContext();
+  IntTupleAttr guide = IntTupleAttr::getLeafStatic(ctx, 1);
   IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalProd), guide);
   IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalProd), guide);
   return builder.makeLayout(retShape, retStride);

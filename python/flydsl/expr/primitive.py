@@ -121,7 +121,7 @@ def range_constexpr(*args):
 #     "AddressSpace",
 #     "CachePolicy",
 #     # Types
-#     "CopyAtomUniversalCopyType",
+#     "CopyOpUniversalCopyType",
 #     "IntTupleType",
 #     "LayoutType",
 #     "MemRefType",
@@ -368,6 +368,7 @@ def get_flat_coord(index, layout, loc=None, ip=None):
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
+
 
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
