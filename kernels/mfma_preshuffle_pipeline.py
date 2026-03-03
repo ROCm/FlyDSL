@@ -83,8 +83,18 @@ def make_preshuffle_b_layout(
     stride_k0 = c4 * stride_klane
     stride_n0 = c_k0 * stride_k0
 
-    stride_b = (stride_n0, stride_k0, stride_klane, stride_nlane, arith.constant(1, index=True))
-    layout_b = fx.make_layout((n0, c_k0, c4, c16, c_kpack_elems), stride_b)
+    # fly.make_shape requires i32/i64 for dynamic operands (not index).
+    # Convert dynamic index values to i32; use Python ints for static constants.
+    kpack_elems_static = kpack_bytes if elem_bytes == 1 else kpack_bytes // elem_bytes
+    n0_i32 = arith.index_cast(T.i32, n0)
+    c_k0_i32 = arith.index_cast(T.i32, c_k0)
+    stride_n0_i32 = arith.index_cast(T.i32, stride_n0)
+    stride_k0_i32 = arith.index_cast(T.i32, stride_k0)
+    stride_klane_i32 = arith.index_cast(T.i32, stride_klane)
+    stride_nlane_i32 = arith.index_cast(T.i32, stride_nlane)
+
+    stride_b = (stride_n0_i32, stride_k0_i32, stride_klane_i32, stride_nlane_i32, 1)
+    layout_b = fx.make_layout((n0_i32, c_k0_i32, 4, 16, kpack_elems_static), stride_b)
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 

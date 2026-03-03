@@ -1,5 +1,5 @@
 #!/bin/bash
-# Kernel Test Suite - GEMM, LayerNorm, RMSNorm, Softmax, Examples, FileCheck
+# Kernel Test Suite - GEMM, MoE GEMM, LayerNorm, RMSNorm, Softmax, VecAdd, Quant, Examples, FileCheck
 # Fail-fast: exits immediately on first test failure.
 #
 # Prerequisites: bash scripts/build.sh && pip install -e .
@@ -36,6 +36,17 @@ fi
 python3 -m pytest tests/kernels/test_preshuffle_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
 
 # ---------------------------------------------------------------------------
+# MoE GEMM Kernels (2-stage: gemm1 -> quantize -> gemm2 + reduce)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "MoE GEMM Kernels"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/kernels/test_moe_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
 # Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
 # ---------------------------------------------------------------------------
 echo ""
@@ -45,6 +56,28 @@ echo "========================================================================"
 echo ""
 
 python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Vector Addition Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Vector Addition"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/kernels/test_vec_add.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Per-Token Quantization Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Per-Token Quantization"
+echo "========================================================================"
+echo ""
+
+FLYDSL_RUN_QUANT=1 python3 -m pytest tests/kernels/test_quant.py -v --no-header --tb=short
 
 # ---------------------------------------------------------------------------
 # Python Examples (tests/python/examples/) via pytest

@@ -234,6 +234,9 @@ def compile_moe_gemm1(
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
             )
+            # i32 versions for layout construction (fly.make_shape requires i32/i64)
+            tokens_i32_v = i32_tokens_in.ir_value()
+            k_i32_v = i32_k_in.ir_value()
             x_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
             w_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
@@ -273,8 +276,8 @@ def compile_moe_gemm1(
                 else arith.constant_vector(0.0, vec4_f32)
             )
 
-            # Layouts
-            layout_x = fx.make_layout((tokens_in, k_in), stride=(k_in, 1))
+            # Layouts (use i32 values; fly.make_shape requires i32/i64, not index)
+            layout_x = fx.make_layout((tokens_i32_v, k_i32_v), stride=(k_i32_v, 1))
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.index(experts * (2 * inter_dim))
@@ -407,13 +410,13 @@ def compile_moe_gemm1(
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
     
                 c_k_div4 = (k_in * arith.index(int(elem_bytes))) / arith.index(4)
-                layout_x_div4 = fx.make_layout((tokens_in, c_k_div4), stride=(c_k_div4, 1))
+                c_k_div4_i32 = arith.index_cast(i32, c_k_div4)
+                layout_x_div4 = fx.make_layout((tokens_i32_v, c_k_div4_i32), stride=(c_k_div4_i32, 1))
                 tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
                 layout_x_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
                 c_chunk_i32 = arith.index(chunk_i32)
                 tx_i32_base = tx * c_chunk_i32
                 mask24 = arith.constant(0xFFFFFF, type=T.i32)
-                # Keep i32 constants available for epilogue index math.
                 tokens_i32 = arith.index_cast(i32, tokens_in)
                 topk_i32 = arith.constant(topk, type=T.i32)
     
@@ -536,9 +539,9 @@ def compile_moe_gemm1(
                 n_blk_up = []
                 col_g_list = []
                 inter_idx = arith.index(inter_dim)
-                # layout for (row -> (blk,intra)) where intra is 0..15
                 c_n0 = c_n_total / arith.index(16)
-                layout_n_blk_intra = fx.make_layout((c_n0, 16), stride=(16, 1))
+                c_n0_static = experts * (2 * inter_dim) // 16
+                layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
                     offset = arith.index(ni * 16)
                     col_g = by_n + n_tile_base
@@ -1353,6 +1356,20 @@ def compile_moe_gemm2(
         f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
     ).replace("-", "_")
 
+    # ── CShuffle epilogue e_vec (pure Python; must be computed before @flyc.kernel
+    # because the AST rewriter intercepts `if` statements inside kernel bodies and
+    # turns them into closure dispatches, which breaks variable reassignment) ────
+    _cshuffle_nlane = 32
+    if bool(accumulate):
+        _e_vec = 2
+    else:
+        _e_vec = 8 if int(tile_n) % (_cshuffle_nlane * 8) == 0 else 2
+        _cshuffle_stride = _cshuffle_nlane * _e_vec
+        if int(tile_n) % _cshuffle_stride != 0:
+            raise ValueError(
+                f"tile_n={tile_n} must be divisible by {_cshuffle_stride} when accumulate=False"
+            )
+
     # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
     lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(elem_bytes)
     lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0  # f16 bytes
@@ -1386,6 +1403,9 @@ def compile_moe_gemm2(
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
             )
+            # i32 versions for layout construction (fly.make_shape requires i32/i64)
+            tokens_i32_v = i32_tokens_in.ir_value()
+            k_i32_v = i32_k_in.ir_value()
             x_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
             # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
             w_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
@@ -1412,10 +1432,11 @@ def compile_moe_gemm2(
                 else arith.constant_vector(0.0, vec4_f32)
             )
 
-            # A2 layout (flatten token-slot -> M).
+            # A2 layout (flatten token-slot -> M; use i32 for fly.make_shape).
             topk_idx = arith.index(topk)
             m_in = tokens_in * topk_idx
-            layout_x = fx.make_layout((m_in, k_in), stride=(k_in, 1))
+            m_i32_v = arith.index_cast(i32, m_in)
+            layout_x = fx.make_layout((m_i32_v, k_i32_v), stride=(k_i32_v, 1))
 
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.index(experts * model_dim)
@@ -1567,7 +1588,8 @@ def compile_moe_gemm2(
                 vec4_i32 = T.vec(4, i32)
     
                 c_k_div4 = (k_in * arith.index(int(elem_bytes))) / arith.index(4)
-                layout_x_div4 = fx.make_layout((m_in, c_k_div4), stride=(c_k_div4, 1))
+                c_k_div4_i32 = arith.index_cast(i32, c_k_div4)
+                layout_x_div4 = fx.make_layout((m_i32_v, c_k_div4_i32), stride=(c_k_div4_i32, 1))
                 tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
                 layout_x_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
                 c_chunk_i32 = arith.index(chunk_i32)
@@ -1679,7 +1701,8 @@ def compile_moe_gemm2(
                 n_blk_list = []
                 col_g_list = []
                 c_n0 = c_n_total / arith.index(16)
-                layout_n_blk_intra = fx.make_layout((c_n0, 16), stride=(16, 1))
+                c_n0_static = experts * model_dim // 16
+                layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
                     offset = arith.index(ni * 16)
                     col_g = by_n + n_tile_base + offset + lane_mod_16
@@ -2060,21 +2083,7 @@ def compile_moe_gemm2(
                 c2_i32 = arith.constant(2, type=T.i32)  # 2B element size for f16/bf16
                 mask_even_i32 = arith.constant(0xFFFFFFFE, type=T.i32)  # align element index to even for half2 atomics
 
-                if bool(accumulate):
-                    e_vec = 2
-                else:
-                    # Reduce mode: e_vec must satisfy tile_n % (cshuffle_nlane * e_vec) == 0.
-                    # Pick the largest power-of-2 e_vec (up to 8) that divides tile_n/32.
-                    cshuffle_nlane = 32
-                    e_vec = 8
-                    # backoff to 2
-                    if int(tile_n) % (cshuffle_nlane * e_vec) != 0:
-                        e_vec = 2
-                    cshuffle_stride = cshuffle_nlane * e_vec
-                    if (int(tile_n) % cshuffle_stride) != 0:
-                        raise ValueError(
-                            f"tile_n={tile_n} must be divisible by {cshuffle_stride} when accumulate=False"
-                        )
+                e_vec = _e_vec
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(

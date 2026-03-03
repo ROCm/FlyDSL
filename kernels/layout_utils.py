@@ -93,7 +93,16 @@ def crd2idx(crd, layout):
     parsed = _parse_layout(layout)
 
     if parsed is None or _has_dynamic_strides(parsed[1]):
-        coord_val = fx.make_coord(*crd)
+        # fly.make_coord requires i32/i64, not index
+        crd_i32 = []
+        for c in crd:
+            cv = c
+            if isinstance(cv, ArithValue):
+                cv = cv.ir_value() if hasattr(cv, 'ir_value') else cv
+            if isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
+                cv = arith.index_cast(T.i32, cv)
+            crd_i32.append(cv)
+        coord_val = fx.make_coord(*crd_i32)
         result = fx.crd2idx(coord_val, layout)
         scalar = fx.get_scalar(result)
         if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
