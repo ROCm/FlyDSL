@@ -9,21 +9,7 @@ Implementation of a Block-wise RMSNorm:
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 """
 
-import sys
 import os
-from pathlib import Path
-
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-# Repo root is two levels above `tests/kernels/`.
-_repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
-if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
-    sys.path.insert(0, str(_embedded))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
-sys.path.insert(0, str(_repo))
 
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
@@ -44,10 +30,8 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-import flydsl
-
 EPS: float = 1e-5
-from flydsl.kernels.rmsnorm_kernel import (
+from kernels.rmsnorm_kernel import (
     build_rmsnorm_module,
     KERNEL_NAME as RMSNORM_KERNEL_NAME,
     BLOCK_THREADS,
@@ -60,11 +44,8 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        m = build_rmsnorm_module(M, N, dtype)
-        exe = flydsl.compile(m)
+        launch_fn = build_rmsnorm_module(M, N, dtype)
     except Exception as e:
-        # Treat compile-time failures as test failures so wrapper scripts (run_tests.sh)
-        # can detect them via a non-zero exit code.
         print(f"[FAIL] Compile failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
     torch.manual_seed(42)
@@ -105,9 +86,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     expected = expected.to(DTYPE_FP32)
 
     print("Launching kernel...")
+    stream = torch.cuda.current_stream()
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, output_dev, M)
+        launch_fn(input_dev, gamma_dev, output_dev, M, stream=stream)
 
     # run_perftest returns (data, avg_us)
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)

@@ -285,6 +285,8 @@ def _invert_op(self, *, loc=None, ip=None):
 @ir.register_value_caster(ir.VectorType.static_typeid)
 class ArithValue(ir.Value):
     def __init__(self, v, signed=None, *, loc=None, ip=None):
+        if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
+            v = v.ir_value()
         super().__init__(v)
         elem_ty = element_type(self.type)
         self.is_float = not is_integer_like_type(elem_ty)
@@ -332,6 +334,55 @@ class ArithValue(ir.Value):
     __rlshift__ = partialmethod(_shift_op, op="shl", reverse=True)
     __rrshift__ = partialmethod(_shift_op, op="shr", reverse=True)
 
+    def select(self, true_value, false_value, *, loc=None):
+        """Ternary select: self (i1 condition) ? true_value : false_value."""
+        return arith.SelectOp(_to_raw(self), _to_raw(true_value),
+                              _to_raw(false_value), loc=loc).result
+
+    def extf(self, target_type, *, loc=None):
+        """Extend float precision (e.g. bf16 → f32)."""
+        return arith.ExtFOp(target_type, self, loc=loc).result
+
+    def truncf(self, target_type, *, loc=None):
+        """Truncate float precision (e.g. f32 → bf16)."""
+        return arith.TruncFOp(target_type, self, loc=loc).result
+
+    def bitcast(self, target_type, *, loc=None):
+        """Reinterpret bits as different type (same bit width)."""
+        return arith.BitcastOp(target_type, self, loc=loc).result
+
+    def shrui(self, amount, *, loc=None):
+        """Unsigned right shift (zero-fills high bits)."""
+        return arith.ShRUIOp(self, _to_raw(amount), loc=loc).result
+
+    def addf(self, other, *, fastmath=None, loc=None):
+        """Float add with optional fastmath flags."""
+        return arith.addf(self, _to_raw(other), fastmath=fastmath, loc=loc)
+
+    def maximumf(self, other, *, loc=None):
+        """Float maximum (NaN-propagating)."""
+        return arith.maximumf(self, _to_raw(other), loc=loc)
+
+    def rsqrt(self, *, fastmath=None, loc=None):
+        """Reciprocal square root: 1/sqrt(self)."""
+        from ..._mlir.dialects import math as _math
+        return _math.rsqrt(self, fastmath=fastmath, loc=loc)
+
+    def exp2(self, *, fastmath=None, loc=None):
+        """Base-2 exponential: 2^self."""
+        from ..._mlir.dialects import math as _math
+        return _math.exp2(self, fastmath=fastmath, loc=loc)
+
+    def shuffle_xor(self, offset, width, *, loc=None):
+        """GPU warp shuffle with XOR mode."""
+        from ..._mlir.dialects.gpu import ShuffleOp
+        return ShuffleOp(_to_raw(self), _to_raw(offset),
+                         _to_raw(width), mode="xor", loc=loc).shuffleResult
+
+    def index_cast(self, target_type, *, loc=None):
+        """Cast between index and integer types."""
+        return arith.IndexCastOp(target_type, self, loc=loc).result
+
     def __hash__(self):
         return super().__hash__()
 
@@ -347,9 +398,11 @@ class ArithValue(ir.Value):
 # =========================================================================
 
 def _to_raw(v):
-    """Convert ArithValue to raw ir.Value for nanobind MLIR ops."""
+    """Convert ArithValue / Numeric (Int32, Boolean, …) to raw ir.Value."""
     if isinstance(v, ir.Value):
         return v
+    if hasattr(v, "ir_value"):
+        return _to_raw(v.ir_value())
     return ir.Value._CAPICreate(v._CAPIPtr)
 
 

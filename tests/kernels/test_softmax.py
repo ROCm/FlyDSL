@@ -8,21 +8,7 @@ Implementation based on high-performance C++ kernel logic:
 - Shared Memory Block Reductions
 """
 
-import sys
 import os
-from pathlib import Path
-
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-# Repo root is two levels above `tests/kernels/`.
-_repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
-if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
-    sys.path.insert(0, str(_embedded))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
-sys.path.insert(0, str(_repo))
 
 import pytest
 try:
@@ -36,7 +22,6 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-import flydsl
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
     PerfRow,
@@ -48,7 +33,7 @@ from tests.kernels.benchmark_common import (
 def next_power_of_2(x: int) -> int:
     return 1 if x == 0 else 2 ** (x - 1).bit_length()
 
-from flydsl.kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
+from kernels.softmax_kernel import build_softmax_module, KERNEL_NAME as SOFTMAX_KERNEL_NAME
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 100
@@ -57,8 +42,7 @@ def run_test(M, N, dtype_str):
     print(f"\nTesting Softmax (Vectorized): M={M}, N={N}, dtype={dtype_str}")
 
     try:
-        m = build_softmax_module(M, N, dtype_str)
-        exe = flydsl.compile(m)
+        launch_fn = build_softmax_module(M, N, dtype_str)
     except Exception as e:
         print(f"Compilation Failed: {e}")
         import traceback
@@ -81,8 +65,10 @@ def run_test(M, N, dtype_str):
         a_dev = a_t.to(DTYPE_BF16).contiguous()
         c_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_BF16)
     
+    stream = torch.cuda.current_stream()
+
     def kernel_launch():
-        exe(a_dev, c_dev, M)
+        launch_fn(a_dev, c_dev, M, stream=stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()

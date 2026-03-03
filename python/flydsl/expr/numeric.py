@@ -234,6 +234,11 @@ class Numeric(metaclass=NumericMeta):
     def __hash__(self):
         return hash(type(self)) ^ hash(self.value)
 
+    def select(self, true_value, false_value, *, loc=None):
+        """Ternary select (for Boolean conditions from Int32 comparisons)."""
+        from .utils.arith import ArithValue
+        return ArithValue(self).select(true_value, false_value, loc=loc)
+
     @property
     def dtype(self) -> Type["Numeric"]:
         return type(self)
