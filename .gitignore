@@ -9,7 +9,6 @@ gpucore.*
 
 # IR dumps
 my_ir_dumps*/
-*.mlir
 
 # git 
 *.log
