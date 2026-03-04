@@ -5,7 +5,7 @@ MVP scope:
 - scalar beta only: b[B*T, HV], beta = sigmoid(b)
 - reads/writes recurrent states from/to state pool via state indices
 - compile-time output/state write switches
-- dtype: f32
+- dtype: f32 / bf16
 """
 
 from flydsl.dialects.ext import flir, arith, gpu
@@ -51,8 +51,8 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
     - initial_state_indices: [B] (int32)
     - o: [B*T_seq*HV, V]
     """
-    if dtype_str != "f32":
-        raise NotImplementedError("MVP currently supports dtype_str='f32' only.")
+    if dtype_str not in {"f32", "bf16"}:
+        raise NotImplementedError("Supported dtype_str values are 'f32' and 'bf16'.")
     if HV % H != 0:
         raise ValueError("HV must be divisible by H for hv->h mapping.")
     if BV <= 0:
@@ -60,7 +60,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
 
     gpu_arch = get_hip_arch()
     compute_type = T.f32()
-    elem_type = T.f32()
+    elem_type = T.f32() if dtype_str == "f32" else T.bf16()
     scale = K ** (-0.5)
     h_smem_size = K * BV
 
@@ -86,16 +86,16 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
         @flir.kernel
         def fused_sigmoid_gating_delta_rule_update_fwd_kernel(
             self: flir.T.i64,
-            A_log: lambda: T.memref(HV, T.f32()),
-            a: lambda: T.memref(BT, HV, T.f32()),
-            dt_bias: lambda: T.memref(HV, T.f32()),
-            q: lambda: T.memref(BTH, K, T.f32()),
-            k: lambda: T.memref(BTH, K, T.f32()),
-            v: lambda: T.memref(BTHV, V, T.f32()),
-            b: lambda: T.memref(BT, HV, T.f32()),
-            initial_state_source: lambda: T.memref(STATEHV, K, V, T.f32()),
+            A_log: lambda: T.memref(HV, elem_type),
+            a: lambda: T.memref(BT, HV, elem_type),
+            dt_bias: lambda: T.memref(HV, elem_type),
+            q: lambda: T.memref(BTH, K, elem_type),
+            k: lambda: T.memref(BTH, K, elem_type),
+            v: lambda: T.memref(BTHV, V, elem_type),
+            b: lambda: T.memref(BT, HV, elem_type),
+            initial_state_source: lambda: T.memref(STATEHV, K, V, elem_type),
             initial_state_indices: lambda: T.memref(B, T.i32()),
-            o: lambda: T.memref(BTHV, V, T.f32()),
+            o: lambda: T.memref(BTHV, V, elem_type),
         ):
             i_k_tile = flir.const_index(flir.block_idx("x"))
             i_v_tile = flir.const_index(flir.block_idx("y"))
@@ -187,6 +187,8 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                         initial_state_source,
                         [arith.as_value(row_state), arith.index(ik), arith.as_value(iv_safe)],
                     )
+                    if dtype_str != "f32":
+                        h_init = flir.arith.extf(comp, arith.as_value(h_init))
                     h_init = arith.select(
                         arith.as_value(state_idx_nonneg),
                         arith.as_value(h_init),
@@ -232,8 +234,13 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                 q_vals = []
                 k_vals = []
                 for ik in range_constexpr(K):
-                    q_vals.append(memref.load(q, [arith.as_value(row_qt), arith.index(ik)]))
-                    k_vals.append(memref.load(k, [arith.as_value(row_qt), arith.index(ik)]))
+                    q_i = memref.load(q, [arith.as_value(row_qt), arith.index(ik)])
+                    k_i = memref.load(k, [arith.as_value(row_qt), arith.index(ik)])
+                    if dtype_str != "f32":
+                        q_i = flir.arith.extf(comp, arith.as_value(q_i))
+                        k_i = flir.arith.extf(comp, arith.as_value(k_i))
+                    q_vals.append(q_i)
+                    k_vals.append(k_i)
 
                 if use_qk_l2norm_in_kernel:
                     q_norm_sq = arith.constant(0.0, type=comp)
@@ -300,6 +307,8 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                         arith.as_value(c_zero_idx),
                     )
                     v_i = memref.load(v, [arith.as_value(row_vt), arith.as_value(iv_safe)])
+                    if dtype_str != "f32":
+                        v_i = flir.arith.extf(comp, arith.as_value(v_i))
                     v_i = arith.select(
                         arith.as_value(iv_valid),
                         arith.as_value(v_i),
@@ -311,6 +320,10 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                 a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
                 dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
                 a_val = memref.load(a, [arith.as_value(row_ab), arith.as_value(i_hv)])
+                if dtype_str != "f32":
+                    a_log_val = flir.arith.extf(comp, arith.as_value(a_log_val))
+                    dt_bias_val = flir.arith.extf(comp, arith.as_value(dt_bias_val))
+                    a_val = flir.arith.extf(comp, arith.as_value(a_val))
                 x = flir.arith.AddFOp(
                     arith.as_value(a_val), arith.as_value(dt_bias_val), fastmath=fm_fast
                 ).result
@@ -361,6 +374,8 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
 
                 # beta = sigmoid(b)
                 b_val = memref.load(b, [arith.as_value(row_ab), arith.as_value(i_hv)])
+                if dtype_str != "f32":
+                    b_val = flir.arith.extf(comp, arith.as_value(b_val))
                 neg_b = flir.arith.MulFOp(
                     arith.as_value(c_neg_one), arith.as_value(b_val), fastmath=fm_fast
                 ).result
@@ -467,9 +482,14 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                             arith.as_value(c_zero_idx),
                         )
                         old_o = memref.load(o, [arith.as_value(row_vt), arith.as_value(iv_safe)])
+                        out_elem = (
+                            s
+                            if dtype_str == "f32"
+                            else flir.arith.truncf(elem_type, arith.as_value(s))
+                        )
                         out_o = arith.select(
                             arith.as_value(iv_valid),
-                            arith.as_value(s),
+                            arith.as_value(out_elem),
                             arith.as_value(old_o),
                         )
                         memref.store(
@@ -499,13 +519,18 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                         crd = flir.make_coord(arith.index(ik), arith.index(iv))
                         idx = flir.crd2idx(crd, layout_h)
                         h_fin = memref.load(s_h, [arith.as_value(idx)])
+                        h_fin_elem = (
+                            h_fin
+                            if dtype_str == "f32"
+                            else flir.arith.truncf(elem_type, arith.as_value(h_fin))
+                        )
                         old_h = memref.load(
                             initial_state_source,
                             [arith.as_value(row_state), arith.index(ik), arith.as_value(iv_safe)],
                         )
                         new_h = arith.select(
                             arith.as_value(iv_valid),
-                            arith.as_value(h_fin),
+                            arith.as_value(h_fin_elem),
                             arith.as_value(old_h),
                         )
                         new_h = arith.select(
@@ -522,16 +547,16 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A_log: lambda: T.memref(HV, T.f32()),
-            a: lambda: T.memref(BT, HV, T.f32()),
-            dt_bias: lambda: T.memref(HV, T.f32()),
-            q: lambda: T.memref(BTH, K, T.f32()),
-            k: lambda: T.memref(BTH, K, T.f32()),
-            v: lambda: T.memref(BTHV, V, T.f32()),
-            b: lambda: T.memref(BT, HV, T.f32()),
-            initial_state_source: lambda: T.memref(STATEHV, K, V, T.f32()),
+            A_log: lambda: T.memref(HV, elem_type),
+            a: lambda: T.memref(BT, HV, elem_type),
+            dt_bias: lambda: T.memref(HV, elem_type),
+            q: lambda: T.memref(BTH, K, elem_type),
+            k: lambda: T.memref(BTH, K, elem_type),
+            v: lambda: T.memref(BTHV, V, elem_type),
+            b: lambda: T.memref(BT, HV, elem_type),
+            initial_state_source: lambda: T.memref(STATEHV, K, V, elem_type),
             initial_state_indices: lambda: T.memref(B, T.i32()),
-            o: lambda: T.memref(BTHV, V, T.f32()),
+            o: lambda: T.memref(BTHV, V, elem_type),
         ):
             c1 = flir.const_index(1)
             gx = flir.const_index(1)
