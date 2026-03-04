@@ -16,6 +16,14 @@ import sys
 from pathlib import Path
 
 
+DOMAIN_MAP = {
+    "nightlies": "rocm.frameworks-nightlies.amd.com",
+    "devreleases": "rocm.frameworks-devreleases.amd.com",
+    "prereleases": "rocm.frameworks-prereleases.amd.com",
+    "release": "rocm.frameworks.amd.com",
+}
+
+
 def _out(path: Path, line: str = "") -> None:
     with open(path, "a") as f:
         f.write(line + "\n")
@@ -160,6 +168,18 @@ def promote_summary(summary: Path) -> None:
         _out(summary, "```")
         for whl in wheel_names.split():
             _out(summary, f"  {whl}")
+        _out(summary, "```")
+        _out(summary)
+
+    domain = DOMAIN_MAP.get(release_type)
+    if domain:
+        index_url = f"https://{domain}/whl/gfx942-gfx950/"
+        _out(summary, "### Wheels Available At")
+        _out(summary, f"- {index_url}")
+        _out(summary)
+        _out(summary, "### Install")
+        _out(summary, "```bash")
+        _out(summary, f"pip install --index-url {index_url} flydsl")
         _out(summary, "```")
         _out(summary)
 
