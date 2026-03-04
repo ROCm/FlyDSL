@@ -91,6 +91,31 @@ echo ""
 python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
 
 # ---------------------------------------------------------------------------
+# Examples (examples/*.py)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Examples (examples/)"
+echo "========================================================================"
+echo ""
+
+for example in "${REPO_ROOT}"/examples/*.py; do
+    [ -f "${example}" ] || continue
+    example_name="$(basename "${example}")"
+    output=$(python3 "${example}" 2>&1) || {
+        echo "  FAIL  ${example_name}"
+        echo "$output" | tail -10 | sed 's/^/        /'
+        exit 1
+    }
+    if echo "$output" | grep -qE "Result correct: False|All passed: False"; then
+        echo "  FAIL  ${example_name}"
+        echo "$output" | tail -10 | sed 's/^/        /'
+        exit 1
+    fi
+    echo "  PASS  ${example_name}"
+done
+
+# ---------------------------------------------------------------------------
 # MLIR FileCheck Tests (tests/mlir/**/*.mlir)
 # ---------------------------------------------------------------------------
 echo ""
