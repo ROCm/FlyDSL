@@ -23,6 +23,18 @@ from kernels.fused_sigmoid_gating_delta_rule_update_fwd_kernel import (
     build_fused_sigmoid_gating_delta_rule_update_fwd_module,
 )
 
+_sglang_py = Path("/sgl-workspace/sglang/python")
+if _sglang_py.exists() and str(_sglang_py) not in sys.path:
+    sys.path.insert(0, str(_sglang_py))
+
+try:
+    from sglang.srt.layers.attention.fla.fused_sigmoid_gating_recurrent import (
+        fused_sigmoid_gating_delta_rule_update,
+    )
+    HAS_TRITON_KERNEL = True
+except ImportError:
+    HAS_TRITON_KERNEL = False
+
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available.", allow_module_level=True)
@@ -169,6 +181,31 @@ def _run_kernel(
     return o_flat.reshape(B, T_seq, HV, V), state_flat.reshape(N_STATE, HV, K, V)
 
 
+def _run_triton_kernel(
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices,
+    scale, softplus_beta=1.0, softplus_threshold=20.0,
+    use_qk_l2norm_in_kernel=False,
+):
+    state_clone = state_pool.clone()
+    triton_o = fused_sigmoid_gating_delta_rule_update(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        softplus_beta=softplus_beta,
+        softplus_threshold=softplus_threshold,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        initial_state_source=state_clone,
+        initial_state_indices=state_indices,
+        scale=scale,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+    )
+    torch.cuda.synchronize()
+    return triton_o, state_clone
+
+
 def _print_minmax(name, x):
     x_f = x.float()
     finite_mask = torch.isfinite(x_f)
@@ -242,7 +279,10 @@ def _print_minmax(name, x):
 
 @pytest.mark.large_shape
 def test_fused_sigmoid_gating_delta_rule_update_fwd_large_shape_case(ctx):
-    """Large-shape BF16 case."""
+    """Large-shape BF16 case: accuracy + performance (FlyDSL vs Triton)."""
+    WARMUP = 10
+    LOOP = 1000
+
     batch_size = 64
     seqlen = 1
     num_heads_qk = 4
@@ -251,74 +291,155 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_large_shape_case(ctx):
     softplus_beta = 1.0
     softplus_threshold = 20.0
     scale = head_dim ** -0.5
+    BV = 8
 
     B, T_seq, H, HV, K, V = (
-        batch_size,
-        seqlen,
-        num_heads_qk,
-        num_heads_v,
-        head_dim,
-        head_dim,
+        batch_size, seqlen, num_heads_qk, num_heads_v, head_dim, head_dim,
     )
     N_STATE = 64
     state_indices_list = list(range(B))
 
     A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
-        B=B,
-        T_seq=T_seq,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        N_STATE=N_STATE,
-        state_indices=state_indices_list,
-        seed=2026,
-        dtype=torch.bfloat16,
+        B=B, T_seq=T_seq, H=H, HV=HV, K=K, V=V,
+        N_STATE=N_STATE, state_indices=state_indices_list,
+        seed=2026, dtype=torch.bfloat16,
     )
+
+    # ==================== Accuracy ====================
+
+    # --- PyTorch reference ---
     ref_o, ref_state = torch_ref_sigmoid_gating_update_fwd(
-        A_log=A_log,
-        a=a,
-        dt_bias=dt_bias,
-        q=q,
-        k=k,
-        v=v,
-        b=b,
-        state_pool=state_pool,
-        state_indices=state_indices,
-        scale=scale,
-        softplus_beta=softplus_beta,
+        A_log=A_log, a=a, dt_bias=dt_bias, q=q, k=k, v=v, b=b,
+        state_pool=state_pool, state_indices=state_indices,
+        scale=scale, softplus_beta=softplus_beta,
         softplus_threshold=softplus_threshold,
     )
-    got_o, got_state = _run_kernel(
-        B=B,
-        T_seq=T_seq,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        N_STATE=N_STATE,
-        A_log=A_log,
-        a=a,
-        dt_bias=dt_bias,
-        q=q,
-        k=k,
-        v=v,
-        b=b,
-        state_pool=state_pool,
-        state_indices=state_indices,
-        BV=8,
-        dtype_str="bf16",
+
+    # --- FlyDSL kernel (compile once, reuse for benchmark) ---
+    m = build_fused_sigmoid_gating_delta_rule_update_fwd_module(
+        B=B, T_seq=T_seq, H=H, HV=HV, K=K, V=V,
+        N_STATE=N_STATE, dtype_str="bf16", BV=BV,
     )
-    _print_minmax("got_o", got_o)
+    fly_exe = flydsl.compile(m)
+
+    a_flat = a.reshape(B * T_seq, HV).contiguous()
+    b_flat = b.reshape(B * T_seq, HV).contiguous()
+    q_flat = q.reshape(B * T_seq * H, K).contiguous()
+    k_flat = k.reshape(B * T_seq * H, K).contiguous()
+    v_flat = v.reshape(B * T_seq * HV, V).contiguous()
+    state_pool_flat_orig = state_pool.reshape(N_STATE * HV, K, V).contiguous()
+    state_flat_fly = state_pool_flat_orig.clone()
+    o_flat_fly = torch.empty(B * T_seq * HV, V, device="cuda", dtype=torch.bfloat16)
+
+    fly_exe(A_log, a_flat, dt_bias, q_flat, k_flat, v_flat, b_flat,
+            state_flat_fly, state_indices, o_flat_fly)
+    torch.cuda.synchronize()
+    got_o = o_flat_fly.reshape(B, T_seq, HV, V)
+    got_state = state_flat_fly.reshape(N_STATE, HV, K, V)
+
+    # --- FlyDSL vs Reference ---
+    _print_minmax("fly_o", got_o)
     _print_minmax("ref_o", ref_o)
-    _print_minmax("got_state", got_state)
+    _print_minmax("fly_state", got_state)
     _print_minmax("ref_state", ref_state)
-    out_err = (got_o.float() - ref_o).abs().max().item()
-    state_err = (got_state.float() - ref_state).abs().max().item()
-    print(f"max output error (large-shape bf16): {out_err:.3e}")
-    print(f"max state  error (large-shape bf16): {state_err:.3e}")
-    assert out_err < 1e-3
-    assert state_err < 1e-3
+    fly_out_err = (got_o.float() - ref_o).abs().max().item()
+    fly_state_err = (got_state.float() - ref_state).abs().max().item()
+    print(f"[FlyDSL vs Ref] max output error: {fly_out_err:.3e}")
+    print(f"[FlyDSL vs Ref] max state  error: {fly_state_err:.3e}")
+    assert fly_out_err < 1e-3
+    assert fly_state_err < 1e-3
+
+    # --- Triton accuracy & performance ---
+    if not HAS_TRITON_KERNEL:
+        pytest.skip("Triton kernel (sglang) not available for comparison")
+
+    triton_o, triton_state = _run_triton_kernel(
+        A_log=A_log, a=a, dt_bias=dt_bias, q=q, k=k, v=v, b=b,
+        state_pool=state_pool, state_indices=state_indices,
+        scale=scale, softplus_beta=softplus_beta,
+        softplus_threshold=softplus_threshold,
+    )
+    _print_minmax("triton_o", triton_o)
+    _print_minmax("triton_state", triton_state)
+
+    triton_ref_out_err = (triton_o.float() - ref_o).abs().max().item()
+    triton_ref_state_err = (triton_state.float() - ref_state).abs().max().item()
+    print(f"[Triton vs Ref]    max output error: {triton_ref_out_err:.3e}")
+    print(f"[Triton vs Ref]    max state  error: {triton_ref_state_err:.3e}")
+
+    fly_triton_out_err = (got_o.float() - triton_o.float()).abs().max().item()
+    fly_triton_state_err = (got_state.float() - triton_state.float()).abs().max().item()
+    print(f"[FlyDSL vs Triton] max output error: {fly_triton_out_err:.3e}")
+    print(f"[FlyDSL vs Triton] max state  error: {fly_triton_state_err:.3e}")
+
+    assert triton_ref_out_err < 1e-3
+    assert triton_ref_state_err < 1e-3
+    assert fly_triton_out_err < 1e-3
+    assert fly_triton_state_err < 1e-3
+
+    # ==================== Performance ====================
+
+    # --- Benchmark FlyDSL ---
+    for _ in range(WARMUP):
+        state_flat_fly.copy_(state_pool_flat_orig)
+        fly_exe(A_log, a_flat, dt_bias, q_flat, k_flat, v_flat, b_flat,
+                state_flat_fly, state_indices, o_flat_fly)
+    torch.cuda.synchronize()
+
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    start_ev.record()
+    for _ in range(LOOP):
+        state_flat_fly.copy_(state_pool_flat_orig)
+        fly_exe(A_log, a_flat, dt_bias, q_flat, k_flat, v_flat, b_flat,
+                state_flat_fly, state_indices, o_flat_fly)
+    end_ev.record()
+    torch.cuda.synchronize()
+    fly_ms = start_ev.elapsed_time(end_ev) / LOOP
+
+    # --- Benchmark Triton ---
+    state_triton = state_pool.clone()
+    for _ in range(WARMUP):
+        state_triton.copy_(state_pool)
+        fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log, a=a, dt_bias=dt_bias,
+            softplus_beta=softplus_beta, softplus_threshold=softplus_threshold,
+            q=q, k=k, v=v, b=b,
+            initial_state_source=state_triton,
+            initial_state_indices=state_indices, scale=scale,
+        )
+    torch.cuda.synchronize()
+
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    start_ev.record()
+    for _ in range(LOOP):
+        state_triton.copy_(state_pool)
+        fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log, a=a, dt_bias=dt_bias,
+            softplus_beta=softplus_beta, softplus_threshold=softplus_threshold,
+            q=q, k=k, v=v, b=b,
+            initial_state_source=state_triton,
+            initial_state_indices=state_indices, scale=scale,
+        )
+    end_ev.record()
+    torch.cuda.synchronize()
+    triton_ms = start_ev.elapsed_time(end_ev) / LOOP
+
+    # --- Report ---
+    print(f"\n{'='*60}")
+    print(f"  Performance (warmup={WARMUP}, loop={LOOP})")
+    print(f"  Shape: B={B}, T={T_seq}, H={H}, HV={HV}, K={K}, V={V}")
+    print(f"{'='*60}")
+    print(f"  FlyDSL : {fly_ms:.4f} ms/iter")
+    print(f"  Triton : {triton_ms:.4f} ms/iter")
+    speedup = triton_ms / fly_ms if fly_ms > 0 else float("inf")
+    if speedup >= 1.0:
+        print(f"  FlyDSL is {speedup:.2f}x faster than Triton")
+    else:
+        print(f"  Triton is {1.0/speedup:.2f}x faster than FlyDSL")
+    print(f"{'='*60}\n")
+
 
 # def test_fused_sigmoid_gating_delta_rule_update_fwd_softplus_threshold_branch(ctx):
 #     """Cover softplus threshold branch with extreme positive inputs."""
