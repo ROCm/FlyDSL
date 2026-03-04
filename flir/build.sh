@@ -132,6 +132,19 @@ find "${PYTHON_PACKAGE_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name "include" \
     -exec rm -rf {} +
 
+# Dereference symlinks in _mlir so the build output is self-contained.
+# CMake's mlir_python_sources creates symlinks into the MLIR source tree;
+# these break when the source tree is absent (e.g. Docker runtime images).
+echo "Resolving symlinks in _mlir..."
+_MLIR_DIR="${PYTHON_PACKAGE_DIR}/_mlir"
+if [ -d "${_MLIR_DIR}" ]; then
+    _TMP_DIR=$(mktemp -d)
+    cp -rL "${_MLIR_DIR}" "${_TMP_DIR}/_mlir"
+    rm -rf "${_MLIR_DIR}"
+    mv "${_TMP_DIR}/_mlir" "${_MLIR_DIR}"
+    rmdir "${_TMP_DIR}"
+fi
+
 cd "${REPO_ROOT}"
 
 echo ""

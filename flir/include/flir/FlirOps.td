@@ -170,7 +170,7 @@ def Flir_SwizzleXor16Op : Flir_Op<"swizzle_xor16", [Pure]> {
       %mask    = %row_mod * 16
       %out     = %col xor %mask
 
-    This matches the common CK/ROCDSL-style LDS swizzle used for fp8/f16 tiles where
+    This matches the LDS swizzle used for fp8/f16 tiles where
     the K dimension is permuted at 16B granularity (preserving intra-16B order).
   }];
   let arguments = (ins Index:$row, Index:$col, Index:$kBlocks16);

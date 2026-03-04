@@ -350,7 +350,7 @@ col_swizzled = flir.swizzle_xor16(row, col, k_blocks16)
     : (index, index, index) -> index
 ```
 
-This matches the CK/ROCDSL-style LDS swizzle used for FP8/F16 tiles where the K dimension is permuted at 16-byte granularity while preserving intra-16B order.
+This matches the LDS swizzle used for FP8/F16 tiles where the K dimension is permuted at 16-byte granularity while preserving intra-16B order.
 
 **Usage in kernels**: Applied when storing tiles to LDS to avoid bank conflicts:
 

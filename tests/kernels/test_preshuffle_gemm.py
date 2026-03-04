@@ -30,8 +30,8 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
+from flydsl.kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from flydsl.kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm 
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
@@ -122,14 +122,14 @@ def test_mfma_a8_flir_preshuffle(
     *,
     use_async_copy,
     test_graph,
+    out_dtype: str = "bf16",
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
+    waves_per_eu: int = 0,
 ):
-    if use_async_copy and get_hip_arch() != "gfx950":
-        pytest.skip("async copy is only supported in gfx950")
     print("=" * 80)
     print(
         f"MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k}) [Torch Optimized]"
@@ -141,6 +141,9 @@ def test_mfma_a8_flir_preshuffle(
         raise ValueError(
             f"lds_stage must be 1 or 2, got {lds_stage!r}"
         )
+    waves_per_eu = int(waves_per_eu) if waves_per_eu is not None else 0
+    waves_per_eu = None if waves_per_eu <= 0 else waves_per_eu
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     exe = compile_preshuffle_gemm_a8(
         M=M,
         N=N,
@@ -149,11 +152,15 @@ def test_mfma_a8_flir_preshuffle(
         tile_n=tile_n,
         tile_k=tile_k,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        waves_per_eu=waves_per_eu,
         use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy})")
+    print(
+        f"✓ Compiled (out_dtype={out_dtype}, lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={waves_per_eu})"
+    )
 
     size_c = M * N
     size_a = M * K
@@ -199,7 +206,7 @@ def test_mfma_a8_flir_preshuffle(
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
 
-    # Preshuffle B to CK/aiter layout.
+    # Preshuffle B.
     b_shuffled = shuffle_weight(b_q, layout=(16, 16))
 
     def _pack_shuffled_int8_to_packed_int4_no_perm(x_shuf_i8: torch.Tensor) -> torch.Tensor:
@@ -228,8 +235,7 @@ def test_mfma_a8_flir_preshuffle(
     # Reference (dequant + matmul).
     c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
 
-    # Run kernel (f16 output, in-kernel scaling).
-    c_out_raw = torch.zeros((M, N), dtype=torch.float16, device=device)
+    c_out_raw = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
     def launch_kernel(c, a, b, sa, sb):
         # Keep kernel ABI consistent: for fp16/bf16, pass empty scale tensors (kernel ignores them).
@@ -259,16 +265,20 @@ def test_mfma_a8_flir_preshuffle(
     c_out_scaled = c_out_raw.to(torch.float32)
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
-
-
+    
+    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
+    flops = 2 * M * N * K
+    tflops = flops / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
         try:
             def launch_aiter(a, b, sa, sb):
-                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch.float16)
+                return aiter.gemm_a8w8_bpreshuffle(a, b, sa, sb, None, torch_out_dtype)
 
-            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, testGraph=test_graph)
+            c_aiter, us1 = run_perftest(launch_aiter, a_q, b_shuffled, scale_a, scale_b, num_iters= bench_iters, testGraph=test_graph)
             c_aiter_f32 = c_aiter.to(torch.float32)
             verify_output(c_aiter_f32, c_ref, rtol=0.1, atol=0.1)
 
@@ -291,22 +301,16 @@ def test_mfma_a8_flir_preshuffle(
         print("Skipping Aiter benchmark (pass --run_aiter_bench to enable)")
         print("-" * 40)
 
-    bytes_moved = (size_a * elem_bytes) + size_b + size_c * 2 + (M + N) * 4
-    flops = 2 * M * N * K
-    tflops = flops / (us / 1e6) / 1e12
-    tbps = bytes_moved / 1e12 / (us / 1e6)
-    print(f"Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
-
-
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k", 
     [
-        # MXFP4 constraints (same as CK: KPerBlock=256 fp4, NPerBlock>=128):
-        #   tile_k >= 256 (pack_K=2), tile_n >= 128 (pack_N=2 with 4 waves)
+        # MXFP4 constraints (KPerBlock=256 fp4, NPerBlock>=128):
+        #   tile_k >= 256 (pack_K=2) OR tile_k == 128 (pack_K_eff=1), tile_n >= 128 (pack_N=2 with 4 waves)
         #   K must be a multiple of tile_k
-        # Tile configs aligned with CK kernels (see aiter gemm_a4w4_blockscale_common.py)
+        # Tile configs
+        (64, 8192, 8192, 64, 128, 128),                                                      # tile_k=128 (pack_K_eff=1)
         (32, 8192, 8192, 32, 128, 256),                                                      # decode, ~1.03x CK
         pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),           # prefill, ~0.78x CK
         pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),          # prefill, ~0.98x CK
@@ -506,6 +510,13 @@ if __name__ == "__main__":
         choices=["fp8", "int8", "int4", "fp16", "bf16", "fp4"],
         help="Input dtype",
     )
+    parser.add_argument(
+        "--out_dtype",
+        type=str,
+        default="bf16",
+        choices=["fp16", "bf16"],
+        help="Output dtype (default: bf16).",
+    )
     parser.add_argument("-M", type=int, default=16, help="M dimension")
     parser.add_argument("-N", type=int, default=10240, help="N dimension")
     parser.add_argument("-K", type=int, default=8192, help="K dimension")
@@ -557,6 +568,13 @@ if __name__ == "__main__":
         help="Enable async copy for A tile prefetch (global-to-LDS). Default: off.",
     )
     parser.add_argument(
+        "--waves_per_eu",
+        type=int,
+        default=0,
+        choices=[0, 1, 2, 3, 4],
+        help="Occupancy hint (waves per EU). 0 means 'no hint' (default).",
+    )
+    parser.add_argument(
         "--test_graph",
         "-tg",
         action="store_true",
@@ -583,12 +601,14 @@ if __name__ == "__main__":
                 tile_m=args.tile_m,
                 tile_n=args.tile_n,
                 tile_k=args.tile_k,
+                out_dtype=args.out_dtype,
                 lds_stage=args.lds_stage,
                 bench_iters=args.num_iters,
                 bench_warmup=args.num_warmup,
                 run_aiter_bench=bool(args.run_aiter_bench),
                 use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
                 use_async_copy=bool(args.use_async_copy),
+                waves_per_eu=int(args.waves_per_eu),
                 test_graph=bool(args.test_graph),
             )
         else:

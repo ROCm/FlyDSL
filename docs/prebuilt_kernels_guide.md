@@ -24,7 +24,7 @@ Computes `LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta` for each r
 
 **Builder:**
 ```python
-from kernels.layernorm_kernel import build_layernorm_module
+from flydsl.kernels.layernorm_kernel import build_layernorm_module
 
 executor = build_layernorm_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -63,7 +63,7 @@ Computes `RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma`.
 
 **Builder:**
 ```python
-from kernels.rmsnorm_kernel import build_rmsnorm_module
+from flydsl.kernels.rmsnorm_kernel import build_rmsnorm_module
 
 executor = build_rmsnorm_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -93,7 +93,7 @@ Computes row-wise softmax: `softmax(x)_i = exp(x_i - max(x)) / sum(exp(x - max(x
 
 **Builder:**
 ```python
-from kernels.softmax_kernel import build_softmax_module
+from flydsl.kernels.softmax_kernel import build_softmax_module
 
 executor = build_softmax_module(M=32768, N=8192, dtype_str="bf16")
 ```
@@ -131,7 +131,7 @@ MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]
 
 **Builder:**
 ```python
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from flydsl.kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 
 executor = compile_preshuffle_gemm_a8(
     M=16, N=5120, K=8192,
@@ -149,7 +149,7 @@ executor = compile_preshuffle_gemm_a8(
 | `tile_m, tile_n, tile_k` | int | Block tile sizes |
 | `in_dtype` | str | `"fp8"`, `"int8"`, `"int4"`, `"fp16"`, `"bf16"` |
 | `lds_stage` | int | `2` = ping-pong LDS (tuned), `1` = single LDS buffer |
-| `use_cshuffle_epilog` | bool | CK-style LDS CShuffle epilogue |
+| `use_cshuffle_epilog` | bool | LDS CShuffle epilogue |
 
 **Key constraints:**
 - `tile_m * tile_k * elem_bytes` must be divisible by `total_threads` (256)
@@ -158,7 +158,7 @@ executor = compile_preshuffle_gemm_a8(
 
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
-- **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
+- **lds_stage=1 (single)**: Intrawave schedule with single LDS buffer
 - **K64-byte micro-step**: Each step issues 2x K32 MFMA operations (fp8/int8: 64 elements, fp16/bf16: 32 elements)
 - **XOR16 swizzle**: Byte-level swizzle on LDS to avoid bank conflicts
 - **B-preshuffle**: Shape (N0, K0, KLane, NLane, KPackBytes) = (N/16, K/64, 4, 16, kpack_bytes)
@@ -170,7 +170,7 @@ MXFP4 mixed-precision GEMM with separate A/B quantization scales.
 
 **Builder:**
 ```python
-from kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm
+from flydsl.kernels.mixed_preshuffle_gemm import compile_mxfp4_preshuffle_gemm
 
 executor = compile_mxfp4_preshuffle_gemm(
     M=16, N=5120, K=8192,
@@ -204,7 +204,7 @@ Mixture-of-Experts GEMM with dual accumulators for gate/up projections and SiLU 
 
 **Stage 1 Builder:**
 ```python
-from kernels.moe_gemm_2stage import compile_moe_gemm1
+from flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
 
 executor = compile_moe_gemm1(
     model_dim=8192, inter_dim=8192,
@@ -251,7 +251,7 @@ MXFP4 variant of MoE GEMM combining dual-accumulator pattern with mixed-precisio
 
 **Builder:**
 ```python
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
+from flydsl.kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
 executor = compile_mixed_moe_gemm1(
     model_dim=8192, inter_dim=8192,
@@ -292,7 +292,7 @@ Configurable epilogue strategies for MFMA 16x16 kernels.
 | Function | Description |
 |---|---|
 | `default_epilog(...)` | Standard row-iterator: `row = bx_m + mi*16 + lane_div_16*4 + ii` |
-| `c_shuffle_epilog(...)` | CK-style LDS CShuffle: write to LDS → barrier → remap threads (8,32) → half2 store |
+| `c_shuffle_epilog(...)` | LDS CShuffle: write to LDS → barrier → remap threads (8,32) → half2 store |
 | `mfma_epilog(use_cshuffle, ...)` | Dispatcher: calls default or CShuffle based on flag |
 
 ### 5.3 Preshuffle Pipeline (`kernels/mfma_preshuffle_pipeline.py`)

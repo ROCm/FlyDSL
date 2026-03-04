@@ -41,18 +41,33 @@ fp8,16,40960,5120,16,128,256
 fp8,16,77824,5120,16,128,256
 fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
+fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,64,256,128
+'
+
+GEMM_SHAPES_ASYNC='
+fp8,5120,5120,8320,128,256,128
+fp8,9728,8192,8320,128,256,128
+fp8,8192,8192,8192,128,256,128
+int8,9728,8192,8320,128,256,128
 '
 
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
+8192,8192,8192,64,256,128
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
 MOE_SHAPES='
 32768,8192,8192,16,4,64,128,128,256,128
 64,6144,1024,128,8,16,64,256,64,256
+'
+
+# MoE shapes (W4A16 / bf16): "in_dtype,tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2,group_size"
+MOE_EXTRA_SHAPES='
+int4_bf16,5231,7168,512,384,8,64,64,128,256,128,32
+bf16,5231,7168,512,384,8,64,64,128,256,128,-1
 '
 
 
@@ -370,6 +385,49 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
+
+  GEMM_USE_ASYNC_COPY="${GEMM_USE_ASYNC_COPY:-1}"  # 0/1 (or "true"/"false")
+  GEMM_WAVES_PER_EU="${GEMM_WAVES_PER_EU:-2}"      # 0..4 (0 means "no hint")
+
+  for shape in $GEMM_SHAPES_ASYNC; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
+
+    async_copy_tag="async_copy"
+    if [ "${GEMM_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_USE_ASYNC_COPY}" = "true" ]; then
+      async_copy_flag="--use_async_copy"
+      async_copy_tag="async_copy"
+    fi
+    waves_per_eu_tag="${GEMM_WAVES_PER_EU}"
+
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --in_dtype "$dtype" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      ${async_copy_flag} \
+      --waves_per_eu "${GEMM_WAVES_PER_EU}" >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "gemm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "gemm"
+    fi
+    shape_tag="${M}x${N}x${K}"
+    row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
+    set -- $row
+    _emit_row "$1" "$2" "$3" "$4" "$5"
+  done
   
   # FP4 GEMM (gfx950 only)
   for shape in $GEMM_FP4_SHAPES; do
@@ -457,6 +515,54 @@ if [ "${RUN_MOE}" -eq 1 ]; then
     tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
+    fi
+  done
+
+  # MoE (W4A16 / bf16)
+  for shape in $MOE_EXTRA_SHAPES; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    in_dtype=$1; tokens=$2; model_dim=$3; inter_dim=$4; experts=$5; topk=$6; tile_m=$7; tile_n=$8; tile_k=$9; tile_n2=${10}; tile_k2=${11}; group_size=${12}
+    log="${BENCH_LOG_DIR}/moe_${in_dtype}_t${tokens}_md${model_dim}_id${inter_dim}_e${experts}_k${topk}.log"
+    if python3 tests/kernels/test_moe_gemm.py \
+      --in_dtype "$in_dtype" \
+      -dim "$model_dim,$inter_dim" \
+      -t "$tokens" \
+      -e "$experts" \
+      -k "$topk" \
+      --num_warmup 10 \
+      --num_iters 100 \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      --tile_n2 "$tile_n2" \
+      --tile_k2 "$tile_k2" \
+      --group_size "$group_size" \
+      --skip_ref false \
+      --compare_aiter_ck false >"${log}" 2>&1; then
+      SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "moe ${in_dtype} failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "moe_${in_dtype}"
+    fi
+    shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
+
+    dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
+      _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
+    fi
+
+    dt_s2="$(grep -Eo 'FLIR MoE stage2 \[' "${log}" | tail -1 || true)"
+    tf_s2="$(grep -Eo 'FLIR MoE stage2 .*([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FLIR MoE stage2 .*([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    if [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
+      _emit_row "moe_gemm2" "${shape_moe}" "${in_dtype}" "${tb_s2}" "${tf_s2}"
     fi
   done
 fi
