@@ -31,7 +31,9 @@ def dtype_to_elem_type(dtype_str: str):
 
 
 BLOCK_THREADS = 256
-WARP_SIZE = 64
+from kernels.kernels_common import get_warp_size
+
+WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 USE_NONTEMPORAL = True
 VEC_ALIGN = 16
@@ -58,7 +60,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
         def init_gpu_module(self):
             elem_type = dtype_to_elem_type(dtype_str)
-            compute_type = T.f32()  # compute in fp32 for stability (and to keep bf16 safe on backend)
+            compute_type = (
+                T.f32()
+            )  # compute in fp32 for stability (and to keep bf16 safe on backend)
             _state["elem_type"] = elem_type
             _state["compute_type"] = compute_type
             _state["smem_red_sum"] = allocator.allocate_array(T.f32(), RED_SLOTS)
@@ -103,8 +107,11 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             val_layout = flir.make_ordered_layout((1, VEC_WIDTH), order=(1, 0))
             copy_atom_e = flir.make_copy_atom(elem_type, vector_size=VEC_WIDTH)
             tiled_copy_e = flir.make_tiled_copy_tv(
-                copy_atom_e, thr_layout, val_layout,
-                thr_shape=(1, BLOCK_THREADS), val_shape=(1, VEC_WIDTH)
+                copy_atom_e,
+                thr_layout,
+                val_layout,
+                thr_shape=(1, BLOCK_THREADS),
+                val_shape=(1, VEC_WIDTH),
             )
             thr_copy_e = tiled_copy_e.get_slice((tid))
             block_reduce_add = reduce_utils.make_block_reduce_add(
@@ -140,10 +147,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Read Input once into registers (each thread holds 32 fp32 values = 4 vectors),
                 # then reuse those registers for reduction + normalize + writeback.
                 c_zero = arith.constant(0.0, type=compute_type)
-                thread_sum = (c_zero)
-                thread_sumsq = (c_zero)
+                thread_sum = c_zero
+                thread_sumsq = c_zero
                 # Reduce VGPR pressure by caching bf16/f16 payload vectors when possible.
-                cache_as_elem = (dtype_str != "f32")
+                cache_as_elem = dtype_str != "f32"
                 in_local = []  # bf16/f16: list[vector<VEC_WIDTH x elem_type>]; f32: list[vector<VEC_WIDTH x f32>]
 
                 vec_type_c = ir.VectorType.get([VEC_WIDTH], compute_type)
@@ -183,7 +190,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     thread_sum = thread_sum + red
                     thread_sumsq = thread_sumsq + red2
 
-                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
+                sum_val, sumsq_val = block_reduce_add2(
+                    thread_sum, thread_sumsq, s_sum, s_sumsq
+                )
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
                 sum_val = arith.ArithValue(arith.as_value(sum_val))
@@ -219,10 +228,22 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 curr_idx0 = flir.arith.AddIOp(
                     arith.as_value(c_base0), arith.as_value(thread_offset_base)
                 ).result
-                g_e_cur = flir.vector.load(vec_type_e, Gamma, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
-                b_e_cur = flir.vector.load(vec_type_e, Beta, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN)
-                g_cur = g_e_cur if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e_cur))
-                b_cur = b_e_cur if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(b_e_cur))
+                g_e_cur = flir.vector.load(
+                    vec_type_e, Gamma, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN
+                )
+                b_e_cur = flir.vector.load(
+                    vec_type_e, Beta, [arith.as_value(curr_idx0)], alignment=VEC_ALIGN
+                )
+                g_cur = (
+                    g_e_cur
+                    if dtype_str == "f32"
+                    else flir.arith.extf(vec_type_c, arith.as_value(g_e_cur))
+                )
+                b_cur = (
+                    b_e_cur
+                    if dtype_str == "f32"
+                    else flir.arith.extf(vec_type_c, arith.as_value(b_e_cur))
+                )
 
                 for tile_i in range_constexpr(num_tiles_py):
                     base_idx_int = tile_i * tile_cols
@@ -238,12 +259,31 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         next_base_idx_int = (tile_i + 1) * tile_cols
                         c_base_next = flir.const_index(next_base_idx_int)
                         next_idx = flir.arith.AddIOp(
-                            arith.as_value(c_base_next), arith.as_value(thread_offset_base)
+                            arith.as_value(c_base_next),
+                            arith.as_value(thread_offset_base),
                         ).result
-                        g_e_next = flir.vector.load(vec_type_e, Gamma, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
-                        b_e_next = flir.vector.load(vec_type_e, Beta, [arith.as_value(next_idx)], alignment=VEC_ALIGN)
-                        g_next = g_e_next if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(g_e_next))
-                        b_next = b_e_next if dtype_str == "f32" else flir.arith.extf(vec_type_c, arith.as_value(b_e_next))
+                        g_e_next = flir.vector.load(
+                            vec_type_e,
+                            Gamma,
+                            [arith.as_value(next_idx)],
+                            alignment=VEC_ALIGN,
+                        )
+                        b_e_next = flir.vector.load(
+                            vec_type_e,
+                            Beta,
+                            [arith.as_value(next_idx)],
+                            alignment=VEC_ALIGN,
+                        )
+                        g_next = (
+                            g_e_next
+                            if dtype_str == "f32"
+                            else flir.arith.extf(vec_type_c, arith.as_value(g_e_next))
+                        )
+                        b_next = (
+                            b_e_next
+                            if dtype_str == "f32"
+                            else flir.arith.extf(vec_type_c, arith.as_value(b_e_next))
+                        )
                     else:
                         g_next = g_cur
                         b_next = b_cur
@@ -269,30 +309,55 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                             vec4_i32_ty = ir.VectorType.get([VEC_WIDTH // 2], T.i32())
                             vec_bf16_ty = ir.VectorType.get([VEC_WIDTH], elem_type)
                             c16_i32 = arith.constant(16, type=T.i32())
-                            c16_i32_v = flir.vector.splat(vec_i32_ty, arith.as_value(c16_i32))
+                            c16_i32_v = flir.vector.splat(
+                                vec_i32_ty, arith.as_value(c16_i32)
+                            )
 
                             u = flir.arith.bitcast(vec_i32_ty, (y))
                             u = arith.as_value(u)
 
-                            upper = arith.shrui(u, c16_i32_v)  # i32 vector (upper 16 bits in low bits)
+                            upper = arith.shrui(
+                                u, c16_i32_v
+                            )  # i32 vector (upper 16 bits in low bits)
                             c1_i32 = arith.constant(1, type=T.i32())
                             c1_v = flir.vector.splat(vec_i32_ty, arith.as_value(c1_i32))
                             lsb = arith.andi(upper, arith.as_value(c1_v))
 
                             c7fff_i32 = arith.constant(0x7FFF, type=T.i32())
-                            c7fff_v = flir.vector.splat(vec_i32_ty, arith.as_value(c7fff_i32))
-                            bias = arith.ArithValue(arith.as_value(c7fff_v)) + arith.ArithValue(arith.as_value(lsb))
+                            c7fff_v = flir.vector.splat(
+                                vec_i32_ty, arith.as_value(c7fff_i32)
+                            )
+                            bias = arith.ArithValue(
+                                arith.as_value(c7fff_v)
+                            ) + arith.ArithValue(arith.as_value(lsb))
                             u_round = arith.ArithValue(u) + bias
 
                             bf16_bits = arith.as_value(arith.shrui(u_round, c16_i32_v))
 
-                            even = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[0, 2, 4, 6])
-                            odd = flir.vector.shuffle(bf16_bits, bf16_bits, mask=[1, 3, 5, 7])
-                            odd_sh = arith.as_value(arith.shli(arith.as_value(odd), flir.vector.splat(vec4_i32_ty, arith.as_value(c16_i32))))
-                            packed = arith.as_value(arith.ori(arith.as_value(even), odd_sh))
+                            even = flir.vector.shuffle(
+                                bf16_bits, bf16_bits, mask=[0, 2, 4, 6]
+                            )
+                            odd = flir.vector.shuffle(
+                                bf16_bits, bf16_bits, mask=[1, 3, 5, 7]
+                            )
+                            odd_sh = arith.as_value(
+                                arith.shli(
+                                    arith.as_value(odd),
+                                    flir.vector.splat(
+                                        vec4_i32_ty, arith.as_value(c16_i32)
+                                    ),
+                                )
+                            )
+                            packed = arith.as_value(
+                                arith.ori(arith.as_value(even), odd_sh)
+                            )
                             out_e = flir.vector.bitcast(vec_bf16_ty, (packed))
                     else:
-                        out_e = y if dtype_str == "f32" else flir.arith.truncf(vec_type_e, (y))
+                        out_e = (
+                            y
+                            if dtype_str == "f32"
+                            else flir.arith.truncf(vec_type_e, (y))
+                        )
 
                     blkOut = gOut[((row), tile_i)]
                     thrOut = thr_copy_e.partition_S(blkOut)
@@ -318,27 +383,35 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Generic path: 2-pass global implementation supporting arbitrary N (incl. tail).
                 # For these small/unaligned-N test cases, correctness & robustness matter more than peak perf.
                 c_N = flir.const_index(N)
-                c_zero = (arith.constant(0.0, type=compute_type))
-                thread_sum = (c_zero)
-                thread_sumsq = (c_zero)
+                c_zero = arith.constant(0.0, type=compute_type)
+                thread_sum = c_zero
+                thread_sumsq = c_zero
 
                 # Pass1: sum + sumsq
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = flir.arith.AddIOp(arith.as_value(c_base), arith.as_value(tid)).result
+                    idx = flir.arith.AddIOp(
+                        arith.as_value(c_base), arith.as_value(tid)
+                    ).result
                     is_valid = arith.ult(idx, c_N)
                     thread_sum_next = thread_sum
                     thread_sumsq_next = thread_sumsq
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
+                        x = (
+                            (x_e)
+                            if dtype_str == "f32"
+                            else flir.arith.extf(compute_type, arith.as_value(x_e))
+                        )
                         x_av = arith.ArithValue(arith.as_value(x))
                         x2 = x_av * x_av
                         thread_sum_next = thread_sum + x
                         thread_sumsq_next = thread_sumsq + x2
                     thread_sum, thread_sumsq = thread_sum_next, thread_sumsq_next
 
-                sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq, s_sum, s_sumsq)
+                sum_val, sumsq_val = block_reduce_add2(
+                    thread_sum, thread_sumsq, s_sum, s_sumsq
+                )
 
                 inv_n = arith.constant(1.0 / float(N), type=compute_type)
                 sum_val = arith.ArithValue(arith.as_value(sum_val))
@@ -357,15 +430,29 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 # Pass2: normalize + affine + store
                 for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                     c_base = flir.const_index(base_idx_int)
-                    idx = flir.arith.AddIOp(arith.as_value(c_base), arith.as_value(tid)).result
+                    idx = flir.arith.AddIOp(
+                        arith.as_value(c_base), arith.as_value(tid)
+                    ).result
                     is_valid = arith.ult(idx, c_N)
                     if is_valid:
                         x_e = flir.memref.load(Input, [(row), arith.as_value(idx)])
                         g_e = flir.memref.load(Gamma, [arith.as_value(idx)])
                         b_e = flir.memref.load(Beta, [arith.as_value(idx)])
-                        x = (x_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(x_e))
-                        g = (g_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(g_e))
-                        b = (b_e) if dtype_str == "f32" else flir.arith.extf(compute_type, arith.as_value(b_e))
+                        x = (
+                            (x_e)
+                            if dtype_str == "f32"
+                            else flir.arith.extf(compute_type, arith.as_value(x_e))
+                        )
+                        g = (
+                            (g_e)
+                            if dtype_str == "f32"
+                            else flir.arith.extf(compute_type, arith.as_value(g_e))
+                        )
+                        b = (
+                            (b_e)
+                            if dtype_str == "f32"
+                            else flir.arith.extf(compute_type, arith.as_value(b_e))
+                        )
                         diff = x - mean
                         norm = diff * rstd
                         scaled = norm * g
@@ -373,7 +460,11 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                         if dtype_str == "bf16":
                             y_e = flir.arith.truncf(elem_type, (y))
                         else:
-                            y_e = y if dtype_str == "f32" else flir.arith.truncf(elem_type, (y))
+                            y_e = (
+                                y
+                                if dtype_str == "f32"
+                                else flir.arith.truncf(elem_type, (y))
+                            )
                         flir.memref.store((y_e), Output, [(row), (idx)])
 
         @flir.jit
@@ -385,9 +476,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             Output: lambda: T.memref(DYN, N, _state["elem_type"]),
             m_in: lambda: T.index(),
         ):
-            c1 = (flir.arith_ext.index(1))
-            gx = (m_in)
-            bx = (flir.arith_ext.index(BLOCK_THREADS))
+            c1 = flir.arith_ext.index(1)
+            gx = m_in
+            bx = flir.arith_ext.index(BLOCK_THREADS)
             flir.gpu_ext.LaunchFuncOp(
                 ["layernorm_module", "layernorm_kernel"],
                 grid_size=(gx, c1, c1),
@@ -396,5 +487,3 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             )
 
     return _LayerNorm()
-
-

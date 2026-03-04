@@ -16,7 +16,13 @@ from flydsl.compiler.context import ensure_flir_python_extensions
 from flydsl.runtime.device import get_rocm_arch
 
 from .executor import default_shared_libs
-from .cache import FileCache, cache_enabled, cache_rebuild_requested, default_key_payload, make_cache_key
+from .cache import (
+    FileCache,
+    cache_enabled,
+    cache_rebuild_requested,
+    default_key_payload,
+    make_cache_key,
+)
 
 if TYPE_CHECKING:
     from .executor import ExecutionEngineExecutor as Executor
@@ -29,6 +35,15 @@ class CompileOptions:
     opt_level: int = 3
     shared_libs: Optional[Sequence[str]] = None
     backend: Literal["execution_engine"] = "execution_engine"
+
+
+def _is_wave32_arch(chip: str) -> bool:
+    """Return True if the GPU architecture uses wavefront size 32 (RDNA)."""
+    # RDNA architectures (gfx10xx, gfx11xx, gfx12xx) use wave32 natively.
+    # CDNA architectures (gfx9xx) use wave64.
+    return (
+        chip.startswith("gfx10") or chip.startswith("gfx11") or chip.startswith("gfx12")
+    )
 
 
 def _pipeline_fragments(
@@ -50,6 +65,7 @@ def _pipeline_fragments(
     rocdl_bare_ptr_opt = b2s(use_bare_ptr_memref_call_conv)
     llvm_bare_host_opt = b2s(use_bare_pointers_for_host)
     llvm_bare_kern_opt = b2s(use_bare_pointers_for_kernels)
+    wave64_opt = b2s(not _is_wave32_arch(chip))
     return [
         "flir-to-standard",
         "trivial-dce",
@@ -63,7 +79,7 @@ def _pipeline_fragments(
         "gpu.module(reconcile-unrealized-casts)",
         # Keep this as a formatted string so the chip is visible in dumps and matches
         # the non-dump compilation pipeline.
-        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+        f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64_opt}}}",
         "gpu-to-llvm{intersperse-sizes-for-kernels=false "
         + f"use-bare-pointers-for-host={llvm_bare_host_opt} "
         + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
@@ -137,7 +153,9 @@ def _dump_ir(stage: str, *, dump_dir: Path, asm: str) -> Path:
     return out
 
 
-def _dump_isa_from_rocdl_module_asm(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool) -> Optional[Path]:
+def _dump_isa_from_rocdl_module_asm(
+    *, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool
+) -> Optional[Path]:
     """Best-effort dump final ISA/assembly (.s) for the current GPU module.
 
     This is only used for debug dumps. It intentionally does not affect the main
@@ -151,7 +169,10 @@ def _dump_isa_from_rocdl_module_asm(*, dump_dir: Path, ctx: ir.Context, asm: str
     try:
         # Parse a fresh clone so we don't mutate the main compilation module.
         mod = ir.Module.parse(asm, context=ctx)
-        pm = PassManager.parse("builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})", context=ctx)
+        pm = PassManager.parse(
+            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            context=ctx,
+        )
         pm.enable_verifier(bool(verify))
         pm.run(mod.operation)
         isa_bytes = get_compile_object_bytes(mod)
@@ -239,7 +260,9 @@ def _apply_waves_per_eu_hint(mlir_module, waves_per_eu: int):
         # Best-effort: if attribute injection fails, log and continue
         # This prevents breaking existing functionality
         import warnings
+
         warnings.warn(f"Failed to apply waves_per_eu hint: {e}", RuntimeWarning)
+
 
 def compile(
     flir_module_or_ir: Union[object, ir.Module],
@@ -272,12 +295,16 @@ def compile(
     if mlir_module is None:
         mlir_module = flir_module_or_ir
     if not isinstance(mlir_module, ir.Module):
-        raise TypeError(f"Expected an MLIR module or flir.lang.MlirModule; got {type(flir_module_or_ir)}")
+        raise TypeError(
+            f"Expected an MLIR module or flir.lang.MlirModule; got {type(flir_module_or_ir)}"
+        )
 
     ctx = mlir_module.context
     ensure_flir_python_extensions(ctx)
 
-    compile_only = _env_truthy("FLYDSL_COMPILE_ONLY", "0") or _env_truthy("COMPILE_ONLY", "0")
+    compile_only = _env_truthy("FLYDSL_COMPILE_ONLY", "0") or _env_truthy(
+        "COMPILE_ONLY", "0"
+    )
     dump_enabled = _env_truthy("FLIR_DUMP_IR", "0")
     dump_root_dir = Path(os.environ.get("FLIR_DUMP_DIR", "my_ir_dumps")).resolve()
     dump_prefix_base = (
@@ -311,7 +338,9 @@ def compile(
                 module = mlir_module
 
     # Allow overriding target arch via env var (useful for cross-compilation or FLYDSL_COMPILE_ONLY mode)
-    chip = (os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or "").strip() or get_rocm_arch()
+    chip = (
+        os.environ.get("FLYDSL_TARGET_ARCH") or os.environ.get("ARCH") or ""
+    ).strip() or get_rocm_arch()
 
     pipeline = _build_pipeline_str(
         chip=chip,
@@ -355,12 +384,17 @@ def compile(
                             print(f"[flir.compile] cache hit key={cache_key}")
                         if compile_only:
                             if dump_enabled or print_final_module:
-                                print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+                                print(
+                                    f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})"
+                                )
                             return None
                         from .executor import ExecutionEngineExecutor as Executor
+
                         if shared_libs is None:
                             shared_libs = default_shared_libs().as_list()
-                        return Executor(cached_mod, opt_level=opt_level, shared_libs=shared_libs)
+                        return Executor(
+                            cached_mod, opt_level=opt_level, shared_libs=shared_libs
+                        )
                     except Exception:
                         # Treat cache parse failures as misses.
                         pass
@@ -433,7 +467,9 @@ def compile(
     # In compile-only mode, skip executor creation and return None
     if compile_only:
         if dump_enabled or print_final_module:
-            print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
+            print(
+                f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})"
+            )
         return None
 
     from .executor import ExecutionEngineExecutor as Executor
@@ -441,5 +477,3 @@ def compile(
     if shared_libs is None:
         shared_libs = default_shared_libs().as_list()
     return Executor(module, opt_level=opt_level, shared_libs=shared_libs)
-
-
