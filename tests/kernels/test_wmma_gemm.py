@@ -58,8 +58,10 @@ def test_wmma_gemm(in_dtype, M, N, K, tile_m, tile_n, tile_k, block_threads):
     mpad = (M + tile_m - 1) // tile_m * tile_m
     npad = (N + tile_n - 1) // tile_n * tile_n
 
-    a = torch.randn((M, K), dtype=torch_dtype, device=device)
-    b = torch.randn((K, N), dtype=torch_dtype, device=device)
+    # torch gpu randn has some issues on gfx1250 AM simulator
+    a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
+    b = torch.randn((K, N), dtype=torch_dtype, device='cpu').cuda()
+
     a_pad = torch.zeros((mpad, K), dtype=torch_dtype, device=device)
     b_pad = torch.zeros((K, npad), dtype=torch_dtype, device=device)
     a_pad[:M, :] = a
@@ -86,8 +88,8 @@ def test_wmma_gemm(in_dtype, M, N, K, tile_m, tile_n, tile_k, block_threads):
     )
     torch.cuda.synchronize()
 
-    ref = torch.matmul(a.to(torch.float32), b.to(torch.float32))
-    assert verify_output(c_pad[:M, :N], ref, rtol=3e-2, atol=3e-2)
+    ref = torch.matmul(a.cpu().to(torch.float32), b.cpu().to(torch.float32))
+    assert verify_output(c_pad[:M, :N].cpu(), ref, rtol=3e-2, atol=3e-2)
     print("✓ PASSED")
 
 
