@@ -291,7 +291,7 @@ def test_fused_sigmoid_gating_delta_rule_update_fwd_large_shape_case(ctx):
     softplus_beta = 1.0
     softplus_threshold = 20.0
     scale = head_dim ** -0.5
-    BV = 8
+    BV = 64
 
     B, T_seq, H, HV, K, V = (
         batch_size, seqlen, num_heads_qk, num_heads_v, head_dim, head_dim,
