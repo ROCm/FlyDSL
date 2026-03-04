@@ -8,11 +8,11 @@
 // CHECK-LABEL: @test_logical_divide
 func.func @test_logical_divide() -> !fly.layout<((2, 4), 4) : ((1, 2), 8)> {
   // logical_divide partitions the layout by a divisor tile
-  %s = fly.static {elems = [4 : i32, 8 : i32]} : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.static {elems = [1 : i32, 4 : i32]} : () -> !fly.int_tuple<(1, 4)>
+  %s = fly.static : () -> !fly.int_tuple<(4, 8)>
+  %d = fly.static : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  %ds = fly.static {elems = [2 : i32, 4 : i32]} : () -> !fly.int_tuple<(2, 4)>
-  %dd = fly.static {elems = [1 : i32, 2 : i32]} : () -> !fly.int_tuple<(1, 2)>
+  %ds = fly.static : () -> !fly.int_tuple<(2, 4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1, 2)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(2, 4)>, !fly.int_tuple<(1, 2)>) -> !fly.layout<(2, 4) : (1, 2)>
   // CHECK: fly.logical_divide
   %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 4) : (1, 2)>) -> !fly.layout<((2, 4), 4) : ((1, 2), 8)>
@@ -21,11 +21,11 @@ func.func @test_logical_divide() -> !fly.layout<((2, 4), 4) : ((1, 2), 8)> {
 
 // CHECK-LABEL: @test_zipped_divide
 func.func @test_zipped_divide() -> !fly.layout<((2, 4), 4) : ((1, 2), 8)> {
-  %s = fly.static {elems = [4 : i32, 8 : i32]} : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.static {elems = [1 : i32, 4 : i32]} : () -> !fly.int_tuple<(1, 4)>
+  %s = fly.static : () -> !fly.int_tuple<(4, 8)>
+  %d = fly.static : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  %ds = fly.static {elems = [2 : i32, 4 : i32]} : () -> !fly.int_tuple<(2, 4)>
-  %dd = fly.static {elems = [1 : i32, 2 : i32]} : () -> !fly.int_tuple<(1, 2)>
+  %ds = fly.static : () -> !fly.int_tuple<(2, 4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1, 2)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(2, 4)>, !fly.int_tuple<(1, 2)>) -> !fly.layout<(2, 4) : (1, 2)>
   // CHECK: fly.zipped_divide
   %result = fly.zipped_divide(%layout, %divisor) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 4) : (1, 2)>) -> !fly.layout<((2, 4), 4) : ((1, 2), 8)>
@@ -52,11 +52,11 @@ func.func @test_flat_divide(%layout: !fly.layout<(4, 8) : (1, 4)>,
 // CHECK-LABEL: @test_logical_divide_1d
 func.func @test_logical_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
   // Divide a 1D contiguous layout: (16):(1) / (4):(1) -> (4,4):(1,4)
-  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
-  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %s = fly.static : () -> !fly.int_tuple<(16)>
+  %d = fly.static : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
-  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
-  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %ds = fly.static : () -> !fly.int_tuple<(4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
   %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
   return %result : !fly.layout<(4, 4) : (1, 4)>
@@ -64,11 +64,11 @@ func.func @test_logical_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
 
 // CHECK-LABEL: @test_zipped_divide_1d
 func.func @test_zipped_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
-  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
-  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %s = fly.static : () -> !fly.int_tuple<(16)>
+  %d = fly.static : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
-  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
-  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %ds = fly.static : () -> !fly.int_tuple<(4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
   %result = fly.zipped_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
   return %result : !fly.layout<(4, 4) : (1, 4)>
@@ -76,11 +76,11 @@ func.func @test_zipped_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
 
 // CHECK-LABEL: @test_tiled_divide_1d
 func.func @test_tiled_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
-  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
-  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %s = fly.static : () -> !fly.int_tuple<(16)>
+  %d = fly.static : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
-  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
-  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %ds = fly.static : () -> !fly.int_tuple<(4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
   %result = fly.tiled_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
   return %result : !fly.layout<(4, 4) : (1, 4)>
@@ -88,11 +88,11 @@ func.func @test_tiled_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
 
 // CHECK-LABEL: @test_flat_divide_1d
 func.func @test_flat_divide_1d() -> !fly.layout<(4, 4) : (1, 4)> {
-  %s = fly.static {elems = [16 : i32]} : () -> !fly.int_tuple<(16)>
-  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %s = fly.static : () -> !fly.int_tuple<(16)>
+  %d = fly.static : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(16)>, !fly.int_tuple<(1)>) -> !fly.layout<(16) : (1)>
-  %ds = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
-  %dd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %ds = fly.static : () -> !fly.int_tuple<(4)>
+  %dd = fly.static : () -> !fly.int_tuple<(1)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
   %result = fly.flat_divide(%layout, %divisor) : (!fly.layout<(16) : (1)>, !fly.layout<(4) : (1)>) -> !fly.layout<(4, 4) : (1, 4)>
   return %result : !fly.layout<(4, 4) : (1, 4)>
@@ -114,12 +114,60 @@ func.func @test_logical_divide_wrapped_tuple_1d(
 
 // CHECK-LABEL: @pyir_logical_divide_with_complement
 func.func @pyir_logical_divide_with_complement() -> !fly.layout<(3, 4) : (1, 3)> {
-  %s = fly.static {elems = [12 : i32]} : () -> !fly.int_tuple<(12)>
-  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %s = fly.static : () -> !fly.int_tuple<(12)>
+  %d = fly.static : () -> !fly.int_tuple<(1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(12)>, !fly.int_tuple<(1)>) -> !fly.layout<(12) : (1)>
-  %ts = fly.static {elems = [3 : i32]} : () -> !fly.int_tuple<(3)>
-  %td = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %ts = fly.static : () -> !fly.int_tuple<(3)>
+  %td = fly.static : () -> !fly.int_tuple<(1)>
   %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(3)>, !fly.int_tuple<(1)>) -> !fly.layout<(3) : (1)>
   %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(12) : (1)>, !fly.layout<(3) : (1)>) -> !fly.layout<(3, 4) : (1, 3)>
   return %result : !fly.layout<(3, 4) : (1, 3)>
+}
+
+// CHECK-LABEL: @pyir_logical_divide_1d
+func.func @pyir_logical_divide_1d() -> !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))> {
+  %s = fly.static : () -> !fly.int_tuple<(14, 6, 9)>
+  %d = fly.static : () -> !fly.int_tuple<(19, 69, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, 6, 9)>, !fly.int_tuple<(19, 69, 1)>) -> !fly.layout<(14, 6, 9) : (19, 69, 1)>
+  %ts = fly.static : () -> !fly.int_tuple<(2, 3, 6)>
+  %td = fly.static : () -> !fly.int_tuple<(7, 14, 1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2, 3, 6)>, !fly.int_tuple<(7, 14, 1)>) -> !fly.layout<(2, 3, 6) : (7, 14, 1)>
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(14, 6, 9) : (19, 69, 1)>, !fly.layout<(2, 3, 6) : (7, 14, 1)>) -> !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))>
+  return %result : !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))>
+}
+
+// CHECK-LABEL: @pyir_zipped_divide_1d
+func.func @pyir_zipped_divide_1d() -> !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))> {
+  %s = fly.static : () -> !fly.int_tuple<(14, 6, 9)>
+  %d = fly.static : () -> !fly.int_tuple<(19, 69, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, 6, 9)>, !fly.int_tuple<(19, 69, 1)>) -> !fly.layout<(14, 6, 9) : (19, 69, 1)>
+  %ts = fly.static : () -> !fly.int_tuple<(2, 3, 6)>
+  %td = fly.static : () -> !fly.int_tuple<(7, 14, 1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2, 3, 6)>, !fly.int_tuple<(7, 14, 1)>) -> !fly.layout<(2, 3, 6) : (7, 14, 1)>
+  %result = fly.zipped_divide(%layout, %tiler) : (!fly.layout<(14, 6, 9) : (19, 69, 1)>, !fly.layout<(2, 3, 6) : (7, 14, 1)>) -> !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))>
+  return %result : !fly.layout<((2, 3, 6), (2, 9)) : ((133, 69, 19), (207, 1))>
+}
+
+// CHECK-LABEL: @pyir_tiled_divide_1d
+func.func @pyir_tiled_divide_1d() -> !fly.layout<((2, 3, 6), 2, 9) : ((133, 69, 19), 207, 1)> {
+  %s = fly.static : () -> !fly.int_tuple<(14, 6, 9)>
+  %d = fly.static : () -> !fly.int_tuple<(19, 69, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, 6, 9)>, !fly.int_tuple<(19, 69, 1)>) -> !fly.layout<(14, 6, 9) : (19, 69, 1)>
+  %ts = fly.static : () -> !fly.int_tuple<(2, 3, 6)>
+  %td = fly.static : () -> !fly.int_tuple<(7, 14, 1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2, 3, 6)>, !fly.int_tuple<(7, 14, 1)>) -> !fly.layout<(2, 3, 6) : (7, 14, 1)>
+  %result = fly.tiled_divide(%layout, %tiler) : (!fly.layout<(14, 6, 9) : (19, 69, 1)>, !fly.layout<(2, 3, 6) : (7, 14, 1)>) -> !fly.layout<((2, 3, 6), 2, 9) : ((133, 69, 19), 207, 1)>
+  return %result : !fly.layout<((2, 3, 6), 2, 9) : ((133, 69, 19), 207, 1)>
+}
+
+// CHECK-LABEL: @pyir_flat_divide_1d
+func.func @pyir_flat_divide_1d() -> !fly.layout<(2, 3, 6, 2, 9) : (133, 69, 19, 207, 1)> {
+  %s = fly.static : () -> !fly.int_tuple<(14, 6, 9)>
+  %d = fly.static : () -> !fly.int_tuple<(19, 69, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(14, 6, 9)>, !fly.int_tuple<(19, 69, 1)>) -> !fly.layout<(14, 6, 9) : (19, 69, 1)>
+  %ts = fly.static : () -> !fly.int_tuple<(2, 3, 6)>
+  %td = fly.static : () -> !fly.int_tuple<(7, 14, 1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(2, 3, 6)>, !fly.int_tuple<(7, 14, 1)>) -> !fly.layout<(2, 3, 6) : (7, 14, 1)>
+  %result = fly.flat_divide(%layout, %tiler) : (!fly.layout<(14, 6, 9) : (19, 69, 1)>, !fly.layout<(2, 3, 6) : (7, 14, 1)>) -> !fly.layout<(2, 3, 6, 2, 9) : (133, 69, 19, 207, 1)>
+  return %result : !fly.layout<(2, 3, 6, 2, 9) : (133, 69, 19, 207, 1)>
 }
