@@ -108,3 +108,18 @@ func.func @test_logical_divide_wrapped_tuple_1d(
       -> !fly.layout<((4, 1), 4) : ((1, 0), 4)>
   return %result : !fly.layout<((4, 1), 4) : ((1, 0), 4)>
 }
+
+// -----
+// PyIR-aligned divide tests from tests/pyir/test_layout_algebra.py
+
+// CHECK-LABEL: @pyir_logical_divide_with_complement
+func.func @pyir_logical_divide_with_complement() -> !fly.layout<(3, 4) : (1, 3)> {
+  %s = fly.static {elems = [12 : i32]} : () -> !fly.int_tuple<(12)>
+  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(12)>, !fly.int_tuple<(1)>) -> !fly.layout<(12) : (1)>
+  %ts = fly.static {elems = [3 : i32]} : () -> !fly.int_tuple<(3)>
+  %td = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(3)>, !fly.int_tuple<(1)>) -> !fly.layout<(3) : (1)>
+  %result = fly.logical_divide(%layout, %tiler) : (!fly.layout<(12) : (1)>, !fly.layout<(3) : (1)>) -> !fly.layout<(3, 4) : (1, 3)>
+  return %result : !fly.layout<(3, 4) : (1, 3)>
+}

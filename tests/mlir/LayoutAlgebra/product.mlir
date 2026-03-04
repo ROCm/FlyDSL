@@ -150,3 +150,45 @@ func.func @test_logical_product_wrapped_tuple_1d(
       -> !fly.layout<((8, 1), (4, 1)) : ((1, 0), (8, 0))>
   return %result : !fly.layout<((8, 1), (4, 1)) : ((1, 0), (8, 0))>
 }
+
+// -----
+// PyIR-aligned product tests from tests/pyir/test_layout_algebra.py
+
+// CHECK-LABEL: @pyir_logical_product_1d
+func.func @pyir_logical_product_1d() -> !fly.layout<((6, 9), 9) : ((9, 1), 54)> {
+  %s = fly.static {elems = [6 : i32, 9 : i32]} : () -> !fly.int_tuple<(6, 9)>
+  %d = fly.static {elems = [9 : i32, 1 : i32]} : () -> !fly.int_tuple<(9, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(6, 9)>, !fly.int_tuple<(9, 1)>) -> !fly.layout<(6, 9) : (9, 1)>
+  %ts = fly.static {elems = [9 : i32]} : () -> !fly.int_tuple<(9)>
+  %td = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(9)>, !fly.int_tuple<(1)>) -> !fly.layout<(9) : (1)>
+  // CHECK: fly.logical_product
+  %result = fly.logical_product(%layout, %tiler) : (!fly.layout<(6, 9) : (9, 1)>, !fly.layout<(9) : (1)>) -> !fly.layout<((6, 9), 9) : ((9, 1), 54)>
+  return %result : !fly.layout<((6, 9), 9) : ((9, 1), 54)>
+}
+
+// CHECK-LABEL: @pyir_blocked_product
+func.func @pyir_blocked_product() -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))> {
+  %s = fly.static {elems = [3 : i32, 6 : i32]} : () -> !fly.int_tuple<(3, 6)>
+  %d = fly.static {elems = [6 : i32, 1 : i32]} : () -> !fly.int_tuple<(6, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(6, 1)>) -> !fly.layout<(3, 6) : (6, 1)>
+  %ts = fly.static {elems = [4 : i32, 5 : i32]} : () -> !fly.int_tuple<(4, 5)>
+  %td = fly.static {elems = [1 : i32, 4 : i32]} : () -> !fly.int_tuple<(1, 4)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(4, 5)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 5) : (1, 4)>
+  // CHECK: fly.blocked_product
+  %result = fly.blocked_product(%layout, %tiler) : (!fly.layout<(3, 6) : (6, 1)>, !fly.layout<(4, 5) : (1, 4)>) -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
+  return %result : !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
+}
+
+// CHECK-LABEL: @pyir_flat_product
+func.func @pyir_flat_product() -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))> {
+  %s = fly.static {elems = [3 : i32, 6 : i32]} : () -> !fly.int_tuple<(3, 6)>
+  %d = fly.static {elems = [6 : i32, 1 : i32]} : () -> !fly.int_tuple<(6, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(6, 1)>) -> !fly.layout<(3, 6) : (6, 1)>
+  %ts = fly.static {elems = [4 : i32, 5 : i32]} : () -> !fly.int_tuple<(4, 5)>
+  %td = fly.static {elems = [1 : i32, 4 : i32]} : () -> !fly.int_tuple<(1, 4)>
+  %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(4, 5)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 5) : (1, 4)>
+  // CHECK: fly.flat_product
+  %result = fly.flat_product(%layout, %tiler) : (!fly.layout<(3, 6) : (6, 1)>, !fly.layout<(4, 5) : (1, 4)>) -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
+  return %result : !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
+}

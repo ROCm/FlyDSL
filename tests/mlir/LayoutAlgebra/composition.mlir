@@ -79,3 +79,63 @@ func.func @test_left_inverse() -> !fly.layout<(4, 8) : (1, 4)> {
   %result = fly.left_inverse(%layout) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   return %result : !fly.layout<(4, 8) : (1, 4)>
 }
+
+// -----
+// PyIR-aligned composition/complement tests from tests/pyir/test_layout_algebra.py
+
+// CHECK-LABEL: @pyir_composition_basic
+func.func @pyir_composition_basic() -> !fly.layout<((2, 3), 3) : ((57, 69), 19)> {
+  %as = fly.static {elems = [6 : i32, 9 : i32]} : () -> !fly.int_tuple<(6, 9)>
+  %ad = fly.static {elems = [19 : i32, 69 : i32]} : () -> !fly.int_tuple<(19, 69)>
+  %a = fly.make_layout(%as, %ad) : (!fly.int_tuple<(6, 9)>, !fly.int_tuple<(19, 69)>) -> !fly.layout<(6, 9) : (19, 69)>
+  %bs = fly.static {elems = [6 : i32, 3 : i32]} : () -> !fly.int_tuple<(6, 3)>
+  %bd = fly.static {elems = [3 : i32, 1 : i32]} : () -> !fly.int_tuple<(3, 1)>
+  %b = fly.make_layout(%bs, %bd) : (!fly.int_tuple<(6, 3)>, !fly.int_tuple<(3, 1)>) -> !fly.layout<(6, 3) : (3, 1)>
+  // CHECK: fly.composition
+  %result = fly.composition(%a, %b) : (!fly.layout<(6, 9) : (19, 69)>, !fly.layout<(6, 3) : (3, 1)>) -> !fly.layout<((2, 3), 3) : ((57, 69), 19)>
+  return %result : !fly.layout<((2, 3), 3) : ((57, 69), 19)>
+}
+
+// CHECK-LABEL: @pyir_composition_static
+func.func @pyir_composition_static() -> !fly.layout<(3, 5) : (19, 51)> {
+  %as = fly.static {elems = [5 : i32, 15 : i32]} : () -> !fly.int_tuple<(5, 15)>
+  %ad = fly.static {elems = [19 : i32, 51 : i32]} : () -> !fly.int_tuple<(19, 51)>
+  %a = fly.make_layout(%as, %ad) : (!fly.int_tuple<(5, 15)>, !fly.int_tuple<(19, 51)>) -> !fly.layout<(5, 15) : (19, 51)>
+  %bs = fly.static {elems = [3 : i32, 5 : i32]} : () -> !fly.int_tuple<(3, 5)>
+  %bd = fly.static {elems = [1 : i32, 5 : i32]} : () -> !fly.int_tuple<(1, 5)>
+  %b = fly.make_layout(%bs, %bd) : (!fly.int_tuple<(3, 5)>, !fly.int_tuple<(1, 5)>) -> !fly.layout<(3, 5) : (1, 5)>
+  %result = fly.composition(%a, %b) : (!fly.layout<(5, 15) : (19, 51)>, !fly.layout<(3, 5) : (1, 5)>) -> !fly.layout<(3, 5) : (19, 51)>
+  return %result : !fly.layout<(3, 5) : (19, 51)>
+}
+
+// CHECK-LABEL: @pyir_composition_with_tuple
+func.func @pyir_composition_with_tuple() -> !fly.layout<2 : 1> {
+  %as = fly.static {elems = [4 : i32]} : () -> !fly.int_tuple<(4)>
+  %ad = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %a = fly.make_layout(%as, %ad) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
+  %bs = fly.static {elems = [2 : i32]} : () -> !fly.int_tuple<(2)>
+  %bd = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %b = fly.make_layout(%bs, %bd) : (!fly.int_tuple<(2)>, !fly.int_tuple<(1)>) -> !fly.layout<(2) : (1)>
+  %result = fly.composition(%a, %b) : (!fly.layout<(4) : (1)>, !fly.layout<(2) : (1)>) -> !fly.layout<2 : 1>
+  return %result : !fly.layout<2 : 1>
+}
+
+// CHECK-LABEL: @pyir_complement_rank1
+func.func @pyir_complement_rank1() -> !fly.layout<4 : 3> {
+  %s = fly.static {elems = [3 : i32]} : () -> !fly.int_tuple<(3)>
+  %d = fly.static {elems = [1 : i32]} : () -> !fly.int_tuple<(1)>
+  %tiler = fly.make_layout(%s, %d) : (!fly.int_tuple<(3)>, !fly.int_tuple<(1)>) -> !fly.layout<(3) : (1)>
+  %codom = fly.static {elems = [12 : i32]} : () -> !fly.int_tuple<12>
+  %result = fly.complement(%tiler, %codom) : (!fly.layout<(3) : (1)>, !fly.int_tuple<12>) -> !fly.layout<4 : 3>
+  return %result : !fly.layout<4 : 3>
+}
+
+// CHECK-LABEL: @pyir_complement_rank2
+func.func @pyir_complement_rank2() -> !fly.layout<2 : 6> {
+  %s = fly.static {elems = [3 : i32, 2 : i32]} : () -> !fly.int_tuple<(3, 2)>
+  %d = fly.static {elems = [2 : i32, 1 : i32]} : () -> !fly.int_tuple<(2, 1)>
+  %tiler = fly.make_layout(%s, %d) : (!fly.int_tuple<(3, 2)>, !fly.int_tuple<(2, 1)>) -> !fly.layout<(3, 2) : (2, 1)>
+  %codom = fly.static {elems = [12 : i32]} : () -> !fly.int_tuple<12>
+  %result = fly.complement(%tiler, %codom) : (!fly.layout<(3, 2) : (2, 1)>, !fly.int_tuple<12>) -> !fly.layout<2 : 6>
+  return %result : !fly.layout<2 : 6>
+}
