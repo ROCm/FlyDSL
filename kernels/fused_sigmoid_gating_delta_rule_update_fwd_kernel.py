@@ -32,6 +32,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
     V: int,
     N_STATE: int,
     dtype_str: str = "f32",
+    BV: int = 64,
     use_qk_l2norm_in_kernel: bool = False,
     disable_state_update: bool = False,
     disable_output_calculation: bool = False,
@@ -54,12 +55,14 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
         raise NotImplementedError("MVP currently supports dtype_str='f32' only.")
     if HV % H != 0:
         raise ValueError("HV must be divisible by H for hv->h mapping.")
+    if BV <= 0:
+        raise ValueError("BV must be positive.")
 
     gpu_arch = get_hip_arch()
     compute_type = T.f32()
     elem_type = T.f32()
     scale = K ** (-0.5)
-    h_smem_size = K * V
+    h_smem_size = K * BV
 
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {
@@ -94,7 +97,9 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             initial_state_indices: lambda: T.memref(B, T.i32()),
             o: lambda: T.memref(BTHV, V, T.f32()),
         ):
-            i_nh = flir.const_index(flir.block_idx("x"))
+            i_k_tile = flir.const_index(flir.block_idx("x"))
+            i_v_tile = flir.const_index(flir.block_idx("y"))
+            i_nh = flir.const_index(flir.block_idx("z"))
             c_hv = arith.as_value(arith.index(HV))
             i_n = arith.as_value(flir.arith.DivUIOp(arith.as_value(i_nh), c_hv).result)
             i_hv = arith.as_value(flir.arith.RemUIOp(arith.as_value(i_nh), c_hv).result)
@@ -102,10 +107,16 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             i_h = arith.as_value(
                 flir.arith.DivUIOp(arith.as_value(i_hv), c_hv_per_h).result
             )
+            c_bv = arith.as_value(arith.index(BV))
+            iv_base = arith.as_value(
+                flir.arith.MulIOp(arith.as_value(i_v_tile), c_bv).result
+            )
+            # Phase-1: NK == 1, keep x-dimension reserved.
+            _ = i_k_tile
 
             base_ptr = allocator.get_base()
             s_h = _state["smem_h"](base_ptr).get()
-            layout_h = flir.make_layout(flir.make_shape(K, V), flir.make_stride(V, 1))
+            layout_h = flir.make_layout(flir.make_shape(K, BV), flir.make_stride(BV, 1))
 
             comp = compute_type
             c_log2e = arith.constant(1.4426950408889634, type=comp)
@@ -123,23 +134,68 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             c_THV = arith.as_value(arith.index(T_seq * HV))
             c_T = arith.as_value(arith.index(T_seq))
             c_H = arith.as_value(arith.index(H))
+            c_V = arith.as_value(arith.index(V))
+            c_zero_idx = arith.as_value(arith.index(0))
 
             # state row = state_idx * HV + hv
             state_idx_i32 = memref.load(initial_state_indices, [arith.as_value(i_n)])
+            c_zero_i32 = arith.constant(0, type=T.i32())
+            state_idx_nonneg = arith.CmpIOp(
+                arith.CmpIPredicate.sge,
+                arith.as_value(state_idx_i32),
+                arith.as_value(c_zero_i32),
+            )
+            state_idx_i32_safe = arith.select(
+                arith.as_value(state_idx_nonneg),
+                arith.as_value(state_idx_i32),
+                arith.as_value(c_zero_i32),
+            )
             state_idx = arith.as_value(
-                flir.arith.IndexCastOp(T.index(), arith.as_value(state_idx_i32)).result
+                flir.arith.IndexCastOp(T.index(), arith.as_value(state_idx_i32_safe)).result
             )
             state_mul = flir.arith.MulIOp(arith.as_value(state_idx), c_hv).result
             row_state = arith.as_value(
                 flir.arith.AddIOp(arith.as_value(state_mul), arith.as_value(i_hv)).result
             )
 
-            # Load initial recurrent state h from the state pool.
+            # Default to zero state for invalid V-tail and idx < 0.
+            c_zero_f32 = arith.constant(0.0, type=comp)
             for ik in range_constexpr(K):
-                for iv in range_constexpr(V):
+                for iv in range_constexpr(BV):
+                    crd = flir.make_coord(arith.index(ik), arith.index(iv))
+                    idx = flir.crd2idx(crd, layout_h)
+                    memref.store(arith.as_value(c_zero_f32), s_h, [arith.as_value(idx)])
+
+            # Load initial recurrent state h from the pool (predicated by idx>=0 and iv<V).
+            for ik in range_constexpr(K):
+                for iv in range_constexpr(BV):
+                    iv_off = arith.as_value(arith.index(iv))
+                    iv_global = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(iv_base), arith.as_value(iv_off)).result
+                    )
+                    iv_valid = arith.CmpIOp(
+                        arith.CmpIPredicate.ult,
+                        arith.as_value(iv_global),
+                        arith.as_value(c_V),
+                    )
+                    iv_safe = arith.select(
+                        arith.as_value(iv_valid),
+                        arith.as_value(iv_global),
+                        arith.as_value(c_zero_idx),
+                    )
                     h_init = memref.load(
                         initial_state_source,
-                        [arith.as_value(row_state), arith.index(ik), arith.index(iv)],
+                        [arith.as_value(row_state), arith.index(ik), arith.as_value(iv_safe)],
+                    )
+                    h_init = arith.select(
+                        arith.as_value(state_idx_nonneg),
+                        arith.as_value(h_init),
+                        arith.as_value(c_zero_f32),
+                    )
+                    h_init = arith.select(
+                        arith.as_value(iv_valid),
+                        arith.as_value(h_init),
+                        arith.as_value(c_zero_f32),
                     )
                     crd = flir.make_coord(arith.index(ik), arith.index(iv))
                     idx = flir.crd2idx(crd, layout_h)
@@ -228,8 +284,28 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                         ).result
 
                 v_vals = []
-                for iv in range_constexpr(V):
-                    v_vals.append(memref.load(v, [arith.as_value(row_vt), arith.index(iv)]))
+                for iv in range_constexpr(BV):
+                    iv_off = arith.as_value(arith.index(iv))
+                    iv_global = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(iv_base), arith.as_value(iv_off)).result
+                    )
+                    iv_valid = arith.CmpIOp(
+                        arith.CmpIPredicate.ult,
+                        arith.as_value(iv_global),
+                        arith.as_value(c_V),
+                    )
+                    iv_safe = arith.select(
+                        arith.as_value(iv_valid),
+                        arith.as_value(iv_global),
+                        arith.as_value(c_zero_idx),
+                    )
+                    v_i = memref.load(v, [arith.as_value(row_vt), arith.as_value(iv_safe)])
+                    v_i = arith.select(
+                        arith.as_value(iv_valid),
+                        arith.as_value(v_i),
+                        arith.as_value(c_zero_f32),
+                    )
+                    v_vals.append(v_i)
 
                 # g = -exp(A_log) * softplus(a + dt_bias)
                 a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
@@ -307,7 +383,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                 ).result
                 exp_g = flir.math.exp2(arith.as_value(g_log2e), fastmath=fm_fast)
                 for ik in range_constexpr(K):
-                    for iv in range_constexpr(V):
+                    for iv in range_constexpr(BV):
                         crd = flir.make_coord(arith.index(ik), arith.index(iv))
                         idx = flir.crd2idx(crd, layout_h)
                         old_h = memref.load(s_h, [arith.as_value(idx)])
@@ -317,7 +393,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                         memref.store(h_scaled, s_h, [arith.as_value(idx)])
 
                 # v -= sum(h * k, dim=0)
-                for iv in range_constexpr(V):
+                for iv in range_constexpr(BV):
                     s = arith.constant(0.0, type=comp)
                     for ik in range_constexpr(K):
                         crd = flir.make_coord(arith.index(ik), arith.index(iv))
@@ -334,7 +410,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                     ).result
 
                 # v *= beta
-                for iv in range_constexpr(V):
+                for iv in range_constexpr(BV):
                     v_vals[iv] = flir.arith.MulFOp(
                         arith.as_value(v_vals[iv]),
                         arith.as_value(beta_val),
@@ -343,7 +419,7 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
 
                 # h += k ⊗ v
                 for ik in range_constexpr(K):
-                    for iv in range_constexpr(V):
+                    for iv in range_constexpr(BV):
                         crd = flir.make_coord(arith.index(ik), arith.index(iv))
                         idx = flir.crd2idx(crd, layout_h)
                         old_h = memref.load(s_h, [arith.as_value(idx)])
@@ -359,7 +435,16 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
 
                 # o = sum(h * q * scale, dim=0)
                 if not disable_output_calculation:
-                    for iv in range_constexpr(V):
+                    for iv in range_constexpr(BV):
+                        iv_off = arith.as_value(arith.index(iv))
+                        iv_global = arith.as_value(
+                            flir.arith.AddIOp(arith.as_value(iv_base), arith.as_value(iv_off)).result
+                        )
+                        iv_valid = arith.CmpIOp(
+                            arith.CmpIPredicate.ult,
+                            arith.as_value(iv_global),
+                            arith.as_value(c_V),
+                        )
                         s = arith.constant(0.0, type=comp)
                         for ik in range_constexpr(K):
                             crd = flir.make_coord(arith.index(ik), arith.index(iv))
@@ -376,21 +461,62 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
                             s = flir.arith.AddFOp(
                                 arith.as_value(s), arith.as_value(prod), fastmath=fm_fast
                             ).result
+                        iv_safe = arith.select(
+                            arith.as_value(iv_valid),
+                            arith.as_value(iv_global),
+                            arith.as_value(c_zero_idx),
+                        )
+                        old_o = memref.load(o, [arith.as_value(row_vt), arith.as_value(iv_safe)])
+                        out_o = arith.select(
+                            arith.as_value(iv_valid),
+                            arith.as_value(s),
+                            arith.as_value(old_o),
+                        )
                         memref.store(
-                            arith.as_value(s), o, [arith.as_value(row_vt), arith.index(iv)]
+                            arith.as_value(out_o),
+                            o,
+                            [arith.as_value(row_vt), arith.as_value(iv_safe)],
                         )
 
-            # Write final recurrent state back to the shared state pool.
+            # Write final recurrent state back to the shared state pool (predicated).
             if not disable_state_update:
                 for ik in range_constexpr(K):
-                    for iv in range_constexpr(V):
+                    for iv in range_constexpr(BV):
+                        iv_off = arith.as_value(arith.index(iv))
+                        iv_global = arith.as_value(
+                            flir.arith.AddIOp(arith.as_value(iv_base), arith.as_value(iv_off)).result
+                        )
+                        iv_valid = arith.CmpIOp(
+                            arith.CmpIPredicate.ult,
+                            arith.as_value(iv_global),
+                            arith.as_value(c_V),
+                        )
+                        iv_safe = arith.select(
+                            arith.as_value(iv_valid),
+                            arith.as_value(iv_global),
+                            arith.as_value(c_zero_idx),
+                        )
                         crd = flir.make_coord(arith.index(ik), arith.index(iv))
                         idx = flir.crd2idx(crd, layout_h)
                         h_fin = memref.load(s_h, [arith.as_value(idx)])
-                        memref.store(
-                            arith.as_value(h_fin),
+                        old_h = memref.load(
                             initial_state_source,
-                            [arith.as_value(row_state), arith.index(ik), arith.index(iv)],
+                            [arith.as_value(row_state), arith.index(ik), arith.as_value(iv_safe)],
+                        )
+                        new_h = arith.select(
+                            arith.as_value(iv_valid),
+                            arith.as_value(h_fin),
+                            arith.as_value(old_h),
+                        )
+                        new_h = arith.select(
+                            arith.as_value(state_idx_nonneg),
+                            arith.as_value(new_h),
+                            arith.as_value(old_h),
+                        )
+                        memref.store(
+                            arith.as_value(new_h),
+                            initial_state_source,
+                            [arith.as_value(row_state), arith.index(ik), arith.as_value(iv_safe)],
                         )
 
         @flir.jit
@@ -408,11 +534,13 @@ def build_fused_sigmoid_gating_delta_rule_update_fwd_module(
             o: lambda: T.memref(BTHV, V, T.f32()),
         ):
             c1 = flir.const_index(1)
-            gx = flir.const_index(B * HV)
+            gx = flir.const_index(1)
+            gy = flir.const_index((V + BV - 1) // BV)
+            gz = flir.const_index(B * HV)
             bx = flir.const_index(1)
             flir.gpu_ext.LaunchFuncOp(
                 [self.GPU_MODULE_NAME, "fused_sigmoid_gating_delta_rule_update_fwd_kernel"],
-                grid_size=(gx, c1, c1),
+                grid_size=(gx, gy, gz),
                 block_size=(bx, c1, c1),
                 kernel_operands=[
                     A_log,
