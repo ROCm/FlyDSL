@@ -167,8 +167,15 @@ __all__ = [
     's_setprio', 's_sleep',
     'sched_barrier', 'sched_group_barrier',
     'iglp_opt',
-    
+
     # Type conversions
     'cvt_f32_bf8', 'cvt_f32_fp8',
     'cvt_pk_f32_bf8', 'cvt_pk_f32_fp8',
+
+    # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
+    'tensor_load_to_lds',       # 4-group, up to 5D tensor
+    'tensor_load_to_lds_d2',    # 2-group, up to 2D tensor
+    'tensor_store_from_lds',    # 4-group store
+    'tensor_store_from_lds_d2', # 2-group store
+    's_wait_tensorcnt',
 ]
