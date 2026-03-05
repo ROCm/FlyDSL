@@ -1,13 +1,12 @@
 """Custom all-reduce kernel + Python-facing shim.
 
-This file provides FlyDSL-generated allreduce kernels that follow the AIter
-signal protocol for multi-GPU communication on ROCm.
+Provides FlyDSL-generated allreduce kernels following the AIter signal
+protocol for multi-GPU communication on ROCm.
 """
 
 from contextlib import contextmanager
 import torch
 
-# ---- AIter ROCm Signal layout constants ----
 _AITER_KMAXBLOCKS = 80
 
 
@@ -28,6 +27,9 @@ def _is_weak_contiguous(t) -> bool:
         return storage_nbytes - storage_offset_elems * elem_size == int(t.numel()) * elem_size
     except Exception:
         return False
+
+
+_FLYDSL_AITER_GLOO_GROUP = None
 
 
 def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bool, out=None):
@@ -58,12 +60,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     if not dist.is_initialized():
         raise RuntimeError("backend=aiter requires torch.distributed to be initialized")
 
-    # Create gloo group for control-plane exchange (AIter requires non-NCCL group)
     global _FLYDSL_AITER_GLOO_GROUP
-    try:
-        _FLYDSL_AITER_GLOO_GROUP
-    except NameError:
-        _FLYDSL_AITER_GLOO_GROUP = None
     if _FLYDSL_AITER_GLOO_GROUP is None:
         try:
             _FLYDSL_AITER_GLOO_GROUP = dist.new_group(backend="gloo")
@@ -73,7 +70,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     dev = getattr(rank_data, "device", None) or torch.device(f"cuda:{rank}")
     max_size = int(os.environ.get("FLYDSL_AITER_MAX_SIZE_BYTES", str(64 * 1024 * 1024)))
 
-    # Import AIter CustomAllreduce
     try:
         from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce
     except ModuleNotFoundError:
@@ -211,7 +207,6 @@ class FlyDSLAllreduce:
         if self.world_size <= 1:
             raise ValueError("world_size must be > 1")
 
-        # Allocate meta buffer (signal + tmp)
         self.meta = aiter_ops.allocate_meta_buffer(int(aiter_ops.meta_size()) + int(self.max_size))
         try:
             self.meta.zero_()
@@ -219,7 +214,6 @@ class FlyDSLAllreduce:
             pass
         self._meta_size = int(aiter_ops.meta_size())
 
-        # Exchange meta buffers
         my_meta_h = aiter_ops.get_meta_buffer_ipc_handle(self.meta)
         my_meta_bytes = bytes(my_meta_h.detach().cpu().numpy().tobytes())
         all_meta = self._gather_object_list_via_broadcast(self.group, (my_meta_bytes, 0))
@@ -243,11 +237,9 @@ class FlyDSLAllreduce:
         self._self_sg = self._sg_ptrs[self.rank]
         self._gpu_sg_ptrs_array = torch.tensor(self._sg_ptrs[:8], dtype=torch.int64, device=self.device)
 
-        # Allocate eager buffers
         self.input_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
         self.output_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
-        
-        # Register input_buffer
+
         inp_buf_storage = self.input_buffer.untyped_storage() if hasattr(self.input_buffer, "untyped_storage") else self.input_buffer.storage()
         inp_buf_base = int(inp_buf_storage.data_ptr())
         inp_buf_off = int(self.input_buffer.data_ptr()) - inp_buf_base
@@ -266,16 +258,13 @@ class FlyDSLAllreduce:
         for i in range(self.world_size, 8):
             self._input_buffer_ptrs[i] = self._input_buffer_ptrs[0]
 
-        # Rotated input_buffer ptrs for eager kernel
         ws, rk = self.world_size, self.rank
         rotated_input_buf_ptrs = [self._input_buffer_ptrs[(rk + i) % ws] for i in range(8)]
         self._gpu_input_buffer_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
 
-        # Rotated tmp ptrs (computed once, shared by eager and CUDAGraph)
         rotated_tmp_ptrs = [self._tmp_ptrs[(rk + i) % ws] for i in range(8)]
         self._gpu_tmp_ptrs_array = torch.tensor(rotated_tmp_ptrs, dtype=torch.int64, device=self.device)
 
-        # Register output_buffer (for write_mode kernel)
         out_buf_storage = self.output_buffer.untyped_storage() if hasattr(self.output_buffer, "untyped_storage") else self.output_buffer.storage()
         out_buf_base = int(out_buf_storage.data_ptr())
         out_buf_off = int(self.output_buffer.data_ptr()) - out_buf_base
@@ -294,23 +283,14 @@ class FlyDSLAllreduce:
         for i in range(self.world_size, 8):
             self._output_buffer_ptrs[i] = self._output_buffer_ptrs[0]
 
-        # NON-rotated output_buffer ptrs for write_mode kernel
-        # write_mode uses direct rank indexing (warp_id maps to rank=warp_id)
         self._gpu_output_buffer_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
-        
-        # NON-rotated tmp ptrs for write_mode kernel
         self._gpu_tmp_ptrs_nonrotated_array = torch.tensor(self._tmp_ptrs[:8], dtype=torch.int64, device=self.device)
 
-        # CUDAGraph state
         self._IS_CAPTURING = False
         self._graph_inp = None
         self._graph_out = None
-        # Pre-allocate graph input pointer array with input_buffer addresses (updated at capture end)
-        # Initialize with input_buffer ptrs so warmup works; updated to user tensor ptrs after capture
         self._gpu_graph_in_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
         self._graph_in_bases = []
-        # Pre-allocate graph output pointer array with output_buffer addresses (NON-rotated, updated at capture end)
-        # write_mode uses direct rank indexing
         self._gpu_graph_out_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
         self._graph_out_bases = []
 
@@ -336,14 +316,7 @@ class FlyDSLAllreduce:
 
     @contextmanager
     def capture(self):
-        """Context manager for CUDA graph capture.
-        
-        Usage:
-            with fa.capture():
-                with torch.cuda.graph(g):
-                    fa.custom_all_reduce(inp, out=out)
-            # After exiting capture(), IPC handles are exchanged for recorded tensors
-        """
+        """Context manager for CUDA graph capture."""
         try:
             self._IS_CAPTURING = True
             self._graph_inp = None
@@ -355,15 +328,9 @@ class FlyDSLAllreduce:
                 self._register_graph_tensors()
 
     def _register_graph_tensors(self):
-        """Register input/output tensors for CUDAGraph replay (called at capture end).
-        
-        Updates _gpu_graph_in_ptrs_array and _gpu_graph_out_ptrs_array with correct 
-        cross-process pointers to user tensors. The kernel loads pointers from these 
-        arrays during execution, so replay uses user tensor addresses.
-        """
+        """Exchange IPC handles for captured tensors; update pointer arrays for replay."""
         ws, rk = self.world_size, self.rank
-        
-        # Exchange IPC handles for inp tensor across all ranks
+
         inp = self._graph_inp
         if inp is not None:
             storage = inp.untyped_storage() if hasattr(inp, "untyped_storage") else inp.storage()
@@ -371,7 +338,7 @@ class FlyDSLAllreduce:
             off = int(inp.data_ptr()) - base_ptr
             my_handle = self._get_mem_handle_bytes(base_ptr)
             all_graph_in = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
-            
+
             self._graph_in_bases = [None] * self.world_size
             graph_in_ptrs = [0] * 8
             for r in range(self.world_size):
@@ -384,12 +351,9 @@ class FlyDSLAllreduce:
                     graph_in_ptrs[r] = peer_base + o
             for i in range(self.world_size, 8):
                 graph_in_ptrs[i] = graph_in_ptrs[0]
-            
-            # Update _gpu_graph_in_ptrs_array with rotated user tensor pointers for replay
             rotated_in = [graph_in_ptrs[(rk + i) % ws] for i in range(8)]
             self._gpu_graph_in_ptrs_array.copy_(torch.tensor(rotated_in, dtype=torch.int64, device=self.device))
-        
-        # Exchange IPC handles for out tensor across all ranks (for write_mode kernel)
+
         out = self._graph_out
         if out is not None:
             storage = out.untyped_storage() if hasattr(out, "untyped_storage") else out.storage()
@@ -397,7 +361,7 @@ class FlyDSLAllreduce:
             off = int(out.data_ptr()) - base_ptr
             my_handle = self._get_mem_handle_bytes(base_ptr)
             all_graph_out = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
-            
+
             self._graph_out_bases = [None] * self.world_size
             graph_out_ptrs = [0] * 8
             for r in range(self.world_size):
@@ -410,9 +374,6 @@ class FlyDSLAllreduce:
                     graph_out_ptrs[r] = peer_base + o
             for i in range(self.world_size, 8):
                 graph_out_ptrs[i] = graph_out_ptrs[0]
-            
-            # Update _gpu_graph_out_ptrs_array with NON-rotated user tensor pointers for replay
-            # write_mode uses direct rank indexing (warp_id maps to rank=warp_id)
             self._gpu_graph_out_ptrs_array.copy_(torch.tensor(graph_out_ptrs[:8], dtype=torch.int64, device=self.device))
 
     def __del__(self):
@@ -421,18 +382,15 @@ class FlyDSLAllreduce:
         except Exception:
             pass
 
-    # Class-level cache for dtype string conversion
     _DTYPE_STR_CACHE = {}
 
     def _dtype_str(self, t):
         dtype = getattr(t, "dtype", None)
-        # Fast path: check cache first
         if dtype in self._DTYPE_STR_CACHE:
             return self._DTYPE_STR_CACHE[dtype]
         return self._dtype_str_from_torch(dtype)
 
     def _dtype_str_from_torch(self, dtype):
-        # Check cache first
         if dtype in self._DTYPE_STR_CACHE:
             return self._DTYPE_STR_CACHE[dtype]
         name = str(dtype)
@@ -442,7 +400,6 @@ class FlyDSLAllreduce:
             result = "f32"
         else:
             raise ValueError(f"unsupported dtype: {name}")
-        # Cache the result
         self._DTYPE_STR_CACHE[dtype] = result
         return result
 
@@ -459,8 +416,6 @@ class FlyDSLAllreduce:
             dtype_str=dtype_str,
             world_size=self.world_size,
             threads=self._threads,
-            meta_size_bytes=self._meta_size,
-            max_spin=self._max_spin,
         )
         exe = flydsl.compile(m)
         self._exe_cache[key] = exe
@@ -478,17 +433,7 @@ class FlyDSLAllreduce:
         use_write_mode: bool = False,
         stream_ptr: int | None = None,
     ):
-        """Launch 2-stage allreduce kernel (unified for eager and CUDAGraph).
-        
-        Normal mode (use_write_mode=False):
-            Uses run_2stage_arr which loads input pointers from device arrays, writes to out_ptr.
-        
-        Write mode (use_write_mode=True, for N > 512*4096 and world_size=8):
-            Uses run_2stage_write_mode with different algorithm:
-            - Stage1: Write local input (inp_ptr) to remote tmp buffers
-            - Stage2: Read local tmp, reduce, write to remote output (gpu_out_ptrs_array)
-        """
-        # Cache grid_x for stable shapes (common in training loops).
+        """Launch 2-stage allreduce kernel."""
         try:
             grid_x = self._grid_x_cache[(int(N), str(dtype_str))]
         except Exception:
@@ -504,24 +449,15 @@ class FlyDSLAllreduce:
         exe = self._compile(N=N, dtype_str=dtype_str)
 
         if use_write_mode:
-            # Write mode: inp_ptr is actual input, gpu_out_ptrs_array is output pointer array
-            # Use NON-rotated tmp ptrs (write_mode uses direct rank indexing)
-            # tmp_self_ptr is this rank's tmp buffer address (passed directly)
-            tmp_self_ptr = self._tmp_ptrs[self.rank]
-            # Create debug buffer (kernel writes entry/stage2 addresses here)
-            debug_buf = torch.zeros(4, dtype=torch.int32, device=f'cuda:{self.rank}')
             exe.run_2stage_write_mode(
                 self.rank, grid_x, self._self_sg,
                 int(self._gpu_sg_ptrs_array.data_ptr()),
                 inp_ptr,
                 int(gpu_out_ptrs_array.data_ptr()),
                 int(self._gpu_tmp_ptrs_nonrotated_array.data_ptr()),
-                tmp_self_ptr,
-                int(debug_buf.data_ptr()),
                 stream_ptr,
             )
         else:
-            # Normal mode: run_2stage_arr loads pointers from device arrays inside kernel
             exe.run_2stage_arr(
                 self.rank, grid_x, self._self_sg,
                 int(self._gpu_sg_ptrs_array.data_ptr()),
@@ -540,14 +476,13 @@ class FlyDSLAllreduce:
         validate: bool = True,
         stream_ptr: int | None = None,
     ):
-        """Unified interface for all_reduce (eager and cudagraph).
+        """Unified all-reduce (eager and cudagraph).
 
-        Automatically selects between eager and registered paths based on context.
-        Uses write_mode kernel when N > 512*4096 and world_size == 8.
+        Selects write_mode kernel when N > 512*4096 and world_size == 8.
         """
         _ = use_new
         _ = open_fp8_quant
-        
+
         if out is None:
             if self._reuse_out_default and (self._cached_out is not None) and self._cached_out.shape == inp.shape and self._cached_out.dtype == inp.dtype and self._cached_out.device == inp.device:
                 out = self._cached_out
@@ -574,31 +509,32 @@ class FlyDSLAllreduce:
             bytes_n = int(inp.numel()) * int(inp.element_size())
         N = int(out.numel())
 
-        # Determine if write_mode should be used: N > 512*4096 and world_size == 8
         use_write_mode = (N > 512 * 4096 and self.world_size == 8)
-        
-        
 
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                # Capture phase: record tensors for IPC handle exchange after capture
                 self._graph_inp = inp
                 self._graph_out = out
                 self._graph_bytes_n = bytes_n
-                
+
                 if use_write_mode:
-                    # Write mode: use graph input/output pointer arrays
+                    # write_mode 把 allreduce 结果通过 XGMI 写入远端 GPU 的内存（直达 HBM，
+                    # 绕过目标 GPU 的 L2 cache）。若 graph replay 后直接读 out，会命中 L2
+                    # 中的 stale 数据。解决方案：仍写预分配的 output_buffer（地址固定），
+                    # replay + synchronize + barrier 后由调用方执行本地 DMA copy
+                    # (output_buffer → out)，DMA 直接读 HBM，同时刷新 L2，确保数据正确。
+                    # 调用方须在 barrier 后执行：
+                    #   out.view(torch.uint8)[:bytes_n].copy_(fa.output_buffer[:bytes_n])
+                    self._graph_use_write_mode = True
                     self._run_kernel(
                         N, dtype_str,
-                        gpu_in_ptrs_array=self._gpu_graph_in_ptrs_array,
-                        gpu_out_ptrs_array=self._gpu_graph_out_ptrs_array,
+                        gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
                         inp_ptr=int(inp.data_ptr()),
-                        out_ptr=int(out.data_ptr()),
                         use_write_mode=True,
                         stream_ptr=stream_ptr,
                     )
                 else:
-                    # Normal mode
+                    self._graph_use_write_mode = False
                     self._run_kernel(
                         N, dtype_str,
                         gpu_in_ptrs_array=self._gpu_graph_in_ptrs_array,
@@ -608,10 +544,7 @@ class FlyDSLAllreduce:
                     )
                 return out
             else:
-                # Warmup inside capture context but before actual capture
                 if use_write_mode:
-                    # Write mode warmup: kernel reads from input, writes to output_buffer ptrs
-                    # After kernel, copy from local output_buffer to out
                     self._run_kernel(
                         N, dtype_str,
                         gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
@@ -621,9 +554,7 @@ class FlyDSLAllreduce:
                     )
                     out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
                 else:
-                    # Normal mode warmup
-                    inp_u8 = inp.view(torch.uint8)
-                    self.input_buffer[:bytes_n].copy_(inp_u8)
+                    self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))
                     self._run_kernel(
                         N, dtype_str,
                         gpu_in_ptrs_array=self._gpu_input_buffer_ptrs_array,
@@ -634,10 +565,7 @@ class FlyDSLAllreduce:
                     out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
                 return out
 
-        # Eager path
         if use_write_mode:
-            # Write mode eager: kernel reads directly from inp, writes to remote output_buffers
-            # via IPC. Host-side synchronization replaces kernel _end_sync which hangs on ROCm.
             self._run_kernel(
                 N, dtype_str,
                 gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
@@ -645,17 +573,13 @@ class FlyDSLAllreduce:
                 use_write_mode=True,
                 stream_ptr=stream_ptr,
             )
-            # Host-side synchronization: ensure all GPU writes complete and are visible to all ranks
-            # This replaces the kernel-side _end_sync which causes GPU hang on ROCm.
+            # Host-side barrier replaces kernel-side end_sync (which hangs on ROCm).
             torch.cuda.current_stream().synchronize()
             import torch.distributed as dist
             dist.barrier(group=self.group)
-            # Copy from local output_buffer (now contains data from all ranks) to user output
             out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
         else:
-            # Normal mode eager: copy inp to input_buffer, kernel writes directly to out
-            inp_u8 = inp.view(torch.uint8)
-            self.input_buffer[:bytes_n].copy_(inp_u8)
+            self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))
             self._run_kernel(
                 N, dtype_str,
                 gpu_in_ptrs_array=self._gpu_input_buffer_ptrs_array,
