@@ -429,8 +429,6 @@ def _dist_worker(
                         "num_warmup": num_warmup, "error": str(cap_e),
                     }
                 else:
-                    # Replay: write new data directly to x_flat, read result from out
-                    # No copy needed - kernel reads from user tensor addresses directly
                     torch.manual_seed(42 + rank)
                     x_flat.copy_(torch.randn_like(x_flat, device=device, dtype=dtype))
                     out.fill_(0)
@@ -440,7 +438,16 @@ def _dist_worker(
                     graph.replay()
                     torch.cuda.synchronize()
                     dist.barrier(device_ids=[rank])
-                    
+
+                    # write_mode（大 tensor）通过 XGMI 将 allreduce 结果写入各 GPU 的
+                    # output_buffer（直达 HBM，绕过 L2 cache）。replay 后须执行本地 DMA
+                    # copy（output_buffer → out），DMA 直接读 HBM 并刷新 L2，确保 out
+                    # 中的数据正确可见（与 eager 模式 barrier 后 out.copy_(output_buffer)
+                    # 的原理一致）。
+                    if getattr(fa, '_graph_use_write_mode', False):
+                        _gbytes = fa._graph_bytes_n
+                        out.view(torch.uint8)[:_gbytes].copy_(fa.output_buffer[:_gbytes])
+
                     if not skip_check:
                         gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
                         dist.all_gather(gathered, x_flat, group=group)
