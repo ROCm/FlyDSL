@@ -25,11 +25,14 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
     globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
     or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 )
+mask_valu = 0x002
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
 mask_dswr = 0x200
 
+def sched_valu(cnt):
+    sched_group_barrier(mask_valu, cnt, 0)
 def sched_mfma(cnt):
     sched_group_barrier(mask_mfma, cnt, 0)
 def sched_vmem(cnt):
