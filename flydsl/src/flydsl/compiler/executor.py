@@ -27,8 +27,9 @@ class SharedLibs:
 
 
 def _default_mlir_lib_dir() -> Optional[Path]:
+    """Locate the installed flydsl._mlir._mlir_libs directory (libfly_jit_runtime.so)."""
     try:
-        spec = importlib.util.find_spec("_mlir._mlir_libs")
+        spec = importlib.util.find_spec("flydsl._mlir._mlir_libs")
         if spec:
             if spec.submodule_search_locations:
                 embedded_lib_dir = Path(next(iter(spec.submodule_search_locations)))
@@ -42,7 +43,7 @@ def _default_mlir_lib_dir() -> Optional[Path]:
             for cand in (embedded_lib_dir, embedded_lib_dir / "lib"):
                 if not cand.exists():
                     continue
-                if (cand / "libflir_jit_runtime.so").exists() or any(cand.glob("libflir_jit_runtime.so.*")):
+                if (cand / "libfly_jit_runtime.so").exists() or any(cand.glob("libfly_jit_runtime.so.*")):
                     return cand
     except Exception:
         pass
@@ -55,25 +56,24 @@ def default_shared_libs(lib_dir: Optional[Path] = None) -> SharedLibs:
         lib_dir = _default_mlir_lib_dir()
     if lib_dir is None:
         raise FileNotFoundError(
-            "Could not locate FLIR JIT runtime library (expected `libflir_jit_runtime.so` "
-            "under the embedded `_mlir/_mlir_libs/`).\n\n"
-            "Fix:\n"
-            "  - Build with `./flir/build.sh` and use the embedded package root on PYTHONPATH, or\n"
-            "  - Install the built wheel so `_mlir/_mlir_libs/libflir_jit_runtime.so` is present."
+            "Could not locate FlyDSL JIT runtime library (expected `libfly_jit_runtime.so` "
+            "under `flydsl._mlir._mlir_libs/`).\n\n"
+            "Fix: install the flydsl wheel so `flydsl/_mlir/_mlir_libs/libfly_jit_runtime.so` is present."
         )
 
-    flir_rt = lib_dir / "libflir_jit_runtime.so"
-    if not flir_rt.exists():
-        cands = sorted(lib_dir.glob("libflir_jit_runtime.so.*"))
+    fly_rt = lib_dir / "libfly_jit_runtime.so"
+    if not fly_rt.exists():
+        cands = sorted(lib_dir.glob("libfly_jit_runtime.so.*"))
         if cands:
-            flir_rt = cands[-1]
-    if flir_rt.exists():
-        # Thin ROCm runtime (mgpu* wrappers).
-        return SharedLibs(str(flir_rt), str(flir_rt))
+            fly_rt = cands[-1]
+    if fly_rt.exists():
+        # libfly_jit_runtime.so provides mgpu* HIP wrappers and is self-contained.
+        # Avoid libmlir_c_runner_utils.so which has versioned so dependencies.
+        return SharedLibs(str(fly_rt), str(fly_rt))
 
     raise FileNotFoundError(
-        f"Missing FLIR JIT runtime lib in {lib_dir}. Expected "
-        "`libflir_jit_runtime.so` (or `libflir_jit_runtime.so.*`)."
+        f"Missing FlyDSL JIT runtime lib in {lib_dir}. Expected "
+        "`libfly_jit_runtime.so` (or `libfly_jit_runtime.so.*`)."
     )
 
 
@@ -115,7 +115,7 @@ class ExecutionEngineExecutor:
         opt_level: int = 3,
         shared_libs: Optional[Sequence[str]] = None,
     ):
-        from _mlir._mlir_libs._mlirExecutionEngine import ExecutionEngine  # type: ignore
+        from flydsl._mlir._mlir_libs._mlirExecutionEngine import ExecutionEngine  # type: ignore
 
         if shared_libs is None:
             shared_libs = default_shared_libs().as_list()
