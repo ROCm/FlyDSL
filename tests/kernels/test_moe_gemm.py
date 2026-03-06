@@ -1639,8 +1639,8 @@ if __name__ == "__main__":
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
+    parser.add_argument("--num_iters", type=int, default=10, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=3, help="Benchmark warmup iters")
 
     # graph mode test
     parser.add_argument(
