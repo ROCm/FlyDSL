@@ -26,9 +26,9 @@ for _p in reversed(_PYTHON_CANDIDATES):
 
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
-from tests.kernels.utils import fp4_utils
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
+from tests.kernels.utils import fp4_utils
 
 ARCH = get_rocm_arch()
 # GFX950 (MI350) and newer typically use OCP standard float8_e4m3fn
@@ -224,7 +224,7 @@ def build_routing_buffers(
     tile_m: int,
     moe_sort_mode: Optional[str] = None,
 ) -> RoutingBuffers:
-    """Build routing buffers once (aiter format), reusable across stage1 + stage2.
+    """Build routing buffers once, reusable across stage1 + stage2.
 
     NOTE:
     - `moe_sort_mode="aiter"` aligns with `aiter/aiter/test_moe_flydsl.py` (swap path):
@@ -246,7 +246,7 @@ def build_routing_buffers(
             num_experts=int(experts),
             block_size=int(tile_m),
         )
-        # num_valid_ids[0] == total padded rows (aiter-style); kernels use this for early-exit.
+        # num_valid_ids[0] == total padded rows; kernels use this for early-exit.
         num_valid_ids = num_tokens_post_pad[:1].contiguous()
         sorted_size = int(sorted_token_ids.numel())
         blocks = int(sorted_expert_ids.numel())
@@ -320,6 +320,7 @@ def run_moe_stage1(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
     test_graph: bool = False,
+    # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
     scale_w1_groups_in: Optional[torch.Tensor] = None,
 ):
     assert model_dim % 64 == 0
@@ -424,7 +425,7 @@ def run_moe_stage1(
         scale_x = amax / 127.0
         scale_x[scale_x == 0] = 1.0
         x_q = (x_route / scale_x).to(torch.int8)
-        # Match aiter moe_smoothquant layout: slot-major [topk*tokens, K].
+        # Match moe_smoothquant layout: slot-major [topk*tokens, K].
         x_q = x_q.permute(1, 0, 2).contiguous()
         scale_x = scale_x.permute(1, 0, 2).contiguous()
         # W quantization is unchanged for this harness (same as aiter perf tests: smooth scales
@@ -432,42 +433,44 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
     elif in_dtype == "int4_bf16":
-        # W4A16: X is bf16, W is int4 packed with groupwise scales.
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
         x_q = x_fp32.to(torch.bfloat16)
-        scale_x = None
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Groupwise scale logic for int4_bf16.
-    scale_w1_groups = scale_w1_groups_in
-    if group_size > 0 and is_int4_bf16:
-        if scale_w1_groups is None:
-            # Create per-group scales: [E, num_groups, 2*inter_dim]
-            num_groups = model_dim // group_size
-            w1_grp = w1_q.view(experts, 2 * inter_dim, num_groups, group_size)
-            amax = torch.amax(torch.abs(w1_grp.to(torch.float32)), dim=-1)
-            scale_w1_groups = (amax / 7.0).clamp(min=1e-6)
-            scale_w1_groups = shuffle_scale_for_int4(scale_w1_groups, group_size=group_size)
-        scale_w1_flat = None  # Use groupwise; per-row scale ignored
-    elif scale_w1 is not None:
-        scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), 1)
-    else:
-        scale_w1_flat = None
+    # --- Groupwise scale for W4A16 ---
+    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
+    if use_groupwise_scale:
+        N_total = 2 * inter_dim
+        num_groups_s1 = model_dim // group_size
+        if scale_w1_groups_in is not None:
+            scale_w1_groups = scale_w1_groups_in
+        else:
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            scale_w1_groups = (
+                torch.rand(experts, num_groups_s1, N_total, device=device, dtype=torch.float32)
+                * 0.05 + 0.005
+            )
+        # Prepare scale for kernel (no-op shuffle, returns contiguous).
+        scale_w1_prepared = shuffle_scale_for_int4(scale_w1_groups, group_size=group_size)
+        # Override per-row scale (kernel uses groupwise scale instead).
+        scale_w1 = None
 
-    # Preshuffle weights (aiter layout) on the *unpacked* tensor.
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
-    w2_shuffled = shuffle_weight(w2_q) if in_dtype in ("fp8", "fp16", "bf16") else None
+    w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
 
     # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
-    if group_size <= 0 or not is_int4_bf16:
-        scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
+    scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
 
     # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
     x_q = (
@@ -475,6 +478,8 @@ def run_moe_stage1(
         if is_int8smooth
         else x_q.contiguous().view(tokens, model_dim)
     )
+    # Pack weights for int4 variants (W4A8 and W4A16).
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
     use_packed_int4 = is_int4 or is_int4_bf16
     w_kernel = (
         _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if use_packed_int4 else w1_shuffled_flat
@@ -487,11 +492,13 @@ def run_moe_stage1(
         scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_x_1d = scale_x.view(-1).contiguous()  # [tokens] or [tokens*topk] for int8smooth
-    if scale_w1_flat is None:
+    if use_groupwise_scale:
+        # Groupwise scale: flatten [E, num_groups, N] -> 1D for kernel memref.
+        scale_w1_1d = scale_w1_prepared.view(-1).contiguous()
+    elif scale_w1_flat is None:
         scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_w1_1d = scale_w1_flat.view(-1).contiguous()  # [rows]
-    # For groupwise int4_bf16, kernel uses scale_w1_groups (passed separately if needed).
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     # Output: [tokens, topk, inter_dim] fp16
@@ -504,12 +511,12 @@ def run_moe_stage1(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
         doweight_stage1=bool(doweight_stage1),
         use_cshuffle_epilog=False,
-        group_size=group_size,
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -565,7 +572,7 @@ def run_moe_stage1(
             inter_dim=inter_dim,
             doweight_stage1=doweight_stage1,
             group_size=group_size,
-            scale_w1_groups=scale_w1_groups if (group_size > 0 and is_int4_bf16) else None,
+            scale_w1_groups=scale_w1_groups,
         )
 
         rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
@@ -578,8 +585,8 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    x_elem_bytes = 2 if in_dtype in ("fp16", "bf16") else 1
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x
+    x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else 1  # bf16/fp16 activations
+    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
     bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
@@ -714,6 +721,7 @@ def run_moe_stage2(
     use_valid_mask: bool = False,
     # graph mode
     test_graph: bool = False,
+    # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
     scale_w2_groups_in: Optional[torch.Tensor] = None,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
@@ -846,46 +854,40 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
     elif in_dtype == "int4_bf16":
-        # W4A16: A2 is bf16, W2 is int4 packed with groupwise scales.
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
         x_q = x_fp32.to(torch.bfloat16)
-        scale_x = None
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: A2 is int8, W2 is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Groupwise scale logic for int4_bf16.
-    scale_w2_groups = scale_w2_groups_in
-    if group_size > 0 and is_int4_bf16:
-        if scale_w2_groups is None:
-            num_groups = inter_dim // group_size
-            w2_grp = w2_q.view(experts, model_dim, num_groups, group_size)
-            amax = torch.amax(torch.abs(w2_grp.to(torch.float32)), dim=-1)
-            scale_w2_groups = (amax / 7.0).clamp(min=1e-6)
-            scale_w2_groups = shuffle_scale_for_int4(scale_w2_groups, group_size=group_size)
-        scale_w2_flat = None
-    elif scale_w2 is not None:
-        scale_w2_flat = scale_w2.view(experts * model_dim, 1)
-    else:
-        scale_w2_flat = None
+    # --- Groupwise scale for W4A16 (stage 2) ---
+    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
+    if use_groupwise_scale:
+        num_groups_s2 = inter_dim // group_size
+        if scale_w2_groups_in is not None:
+            scale_w2_groups = scale_w2_groups_in
+        else:
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            scale_w2_groups = (
+                torch.rand(experts, num_groups_s2, model_dim, device=device, dtype=torch.float32)
+                * 0.05 + 0.005
+            )
+        scale_w2_prepared = shuffle_scale_for_int4(scale_w2_groups, group_size=group_size)
+        # Override per-row scale (kernel uses groupwise scale instead).
+        scale_w2 = None
 
-    # For int4_bf16 stage2 building a2 from ref: need scale_w1_groups when group_size > 0.
-    scale_w1_groups = None
-    if group_size > 0 and is_int4_bf16:
-        num_groups_w1 = model_dim // group_size
-        w1_grp = w1_q.view(experts, 2 * inter_dim, num_groups_w1, group_size)
-        amax_w1 = torch.amax(torch.abs(w1_grp.to(torch.float32)), dim=-1)
-        scale_w1_groups = (amax_w1 / 7.0).clamp(min=1e-6)
-        scale_w1_groups = shuffle_scale_for_int4(scale_w1_groups, group_size=group_size)
-
-    # Preshuffle weights (aiter layout) on the *unpacked* tensor.
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
+    # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
     if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
@@ -907,15 +909,17 @@ def run_moe_stage2(
             topk_weights,
             inter_dim=inter_dim,
             doweight_stage1=bool(doweight_stage1),
-            group_size=group_size,
-            scale_w1_groups=scale_w1_groups if (group_size > 0 and is_int4_bf16) else None,
         )  # [tokens, topk, inter] fp32
         if in_dtype == "fp8":
             a2_q, a2_scale = pertoken_quant(out1_ref, quant_dtype=DTYPE_FP8)
-        elif in_dtype in ("fp16", "bf16"):
-            a2_q = out1_ref.to(torch.float16 if in_dtype == "fp16" else torch.bfloat16)
+        elif in_dtype == "fp16":
+            a2_q = out1_ref.to(torch.float16)
+            a2_scale = None
+        elif in_dtype == "bf16":
+            a2_q = out1_ref.to(torch.bfloat16)
             a2_scale = None
         elif in_dtype == "int4_bf16":
+            # W4A16: A2 is bf16 (no quant).
             a2_q = out1_ref.to(torch.bfloat16)
             a2_scale = None
         else:
@@ -927,10 +931,10 @@ def run_moe_stage2(
 
     # Flatten weights/scales for the kernel.
     w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
-    if group_size <= 0 or not is_int4_bf16:
-        scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
+    scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8/W4A16, pack preshuffled int8 weights into packed int4 bytes.
+    # For W4A8 and W4A16, pack preshuffled int8 weights into packed int4 bytes.
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
     use_packed_int4 = is_int4 or is_int4_bf16
     w2_kernel = w2_shuffled_flat
     if use_packed_int4:
@@ -946,12 +950,10 @@ def run_moe_stage2(
         a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         a2_scale_1d = a2_scale.view(-1).contiguous()  # [tokens*topk]
-    if scale_w2_flat is None:
-        w2_scale_1d = (
-            scale_w2_groups.view(-1).contiguous()
-            if (group_size > 0 and is_int4_bf16 and scale_w2_groups is not None)
-            else torch.empty((0,), device=device, dtype=torch.float32)
-        )
+    if use_groupwise_scale:
+        w2_scale_1d = scale_w2_prepared.view(-1).contiguous()
+    elif scale_w2_flat is None:
+        w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
@@ -975,11 +977,11 @@ def run_moe_stage2(
         topk=topk,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
-        group_size=group_size,
     )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
@@ -1064,13 +1066,13 @@ def run_moe_stage2(
             a2_q,
             w2_q,
             a2_scale,
-            scale_w2 if (group_size <= 0 or not is_int4_bf16) else None,
+            scale_w2,
             topk_ids.to(torch.int64),
             topk_weights,
             model_dim=model_dim,
             doweight_stage2=doweight_stage2,
             group_size=group_size,
-            scale_w2_groups=scale_w2_groups if (group_size > 0 and is_int4_bf16) else None,
+            scale_w2_groups=scale_w2_groups,
         )
         assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
@@ -1079,9 +1081,9 @@ def run_moe_stage2(
     tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
-    a2_elem_bytes = 2 if in_dtype in ("fp16", "bf16", "int4_bf16") else 1
+    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
-    bytes_moved += (experts * model_dim * inter_dim) // (2 if use_packed_int4 else 1)  # w2 (packed for int4)
+    bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
@@ -1245,8 +1247,6 @@ def test_moe_gemm_2stage(
         pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16")
-    if group_size > 0 and in_dtype == "int4_bf16":
-        pytest.skip("int4_bf16 groupwise scale kernel not yet implemented")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1329,6 +1329,7 @@ def test_moe_gemm_2stage(
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
     elif in_dtype == "int4_bf16":
+        # W4A16: A2 is bf16 (no quant)
         a2_q = out1_fp16.to(torch.bfloat16)
         a2_scale = None
     else:
@@ -1379,7 +1380,7 @@ def test_moe_gemm_2stage(
 # Test Helpers for MoE GEMM2 Mode Comparison
 def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask: bool = False):
     """Create a compile function that forces reduce mode.
-
+    
     Args:
         use_flydsl_reduce: If True, use FlyDSL reduce kernel.
                           If False, use torch.sum (for baseline comparison).
@@ -1391,11 +1392,11 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         experts: int,
         topk: int,
         tile_m: int,
-        group_size: int = -1,
         tile_n: int,
         tile_k: int,
         doweight_stage2: bool,
         in_dtype: str = "fp8",
+        group_size: int = -1,
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
@@ -1413,7 +1414,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 out_dtype=out_dtype,
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
-                zero_intermediate=False,
+                zero_intermediate=False, # test non-zeroed performance
             )
         else:
             gemm2_exe = compile_moe_gemm2(
@@ -1606,9 +1607,10 @@ if __name__ == "__main__":
         type=str,
         default="fp8",
         choices=["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "all"],
-        help="Kernel input dtype: fp8 / fp16 / bf16 / int8 / int8smooth / int4 / int4_bf16 / all (default: all). "
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / int4_bf16 / all (default: all). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
-        "int4 means W4A8: A int8, W packed int4. int4_bf16: W4A16.",
+        "int4 means W4A8: A int8, W packed int4. "
+        "int4_bf16 means W4A16: A bf16, W packed int4.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1643,12 +1645,11 @@ if __name__ == "__main__":
         help="Stage2 output dtype: f16 (half2 atomics) or f32 (scalar fp32 atomics).",
     )
     parser.add_argument("--use_valid_mask", type=_str2bool, nargs="?", const=True, default=False, help="Use valid mask for optimization when reduce or not.")
-    parser.add_argument("--group_size", type=int, default=-1, help="Group size for int4_bf16 groupwise scale (-1 for per-row).")
 
     # Benchmark knobs
     parser.add_argument("--seed", type=int, default=0, help="torch.manual_seed(seed)")
-    parser.add_argument("--num_iters", type=int, default=10, help="Benchmark iters")
-    parser.add_argument("--num_warmup", type=int, default=3, help="Benchmark warmup iters")
+    parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
+    parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
 
     # graph mode test
     parser.add_argument(
@@ -1665,6 +1666,14 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Use weight fp4 gemm.",
+    )
+
+    # Groupwise scale for W4A16
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        default=-1,
+        help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
     )
 
     args = parser.parse_args()
@@ -1704,6 +1713,7 @@ if __name__ == "__main__":
             doweight_stage1=bool(args.doweight_stage1),
             in_dtype=dt,
             out_dtype=str(args.out_dtype),
+            group_size=int(args.group_size),
             seed=int(args.seed),
             num_iters=int(args.num_iters),
             num_warmup=int(args.num_warmup),
@@ -1714,15 +1724,13 @@ if __name__ == "__main__":
             use_reduce=use_reduce,
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
-            group_size=int(args.group_size),
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    dtypes_to_run = (
-        ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"]
-        if args.in_dtype == "all"
-        else args.in_dtype.split(",")
-    )
-    for dt in dtypes_to_run:
+    # Expand "all" to all supported dtypes.
+    in_dtypes = args.in_dtype.split(",")
+    if "all" in in_dtypes:
+        in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16"]
+    for dt in in_dtypes:
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)
