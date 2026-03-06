@@ -58,7 +58,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
         raise ValueError(f"unsupported FLYDSL_AITER_IMPL={impl!r}")
 
     if not dist.is_initialized():
-        raise RuntimeError("backend=aiter requires torch.distributed to be initialized")
+        raise RuntimeError("torch.distributed must be initialized")
 
     global _FLYDSL_AITER_GLOO_GROUP
     if _FLYDSL_AITER_GLOO_GROUP is None:
@@ -70,6 +70,17 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
     dev = getattr(rank_data, "device", None) or torch.device(f"cuda:{rank}")
     max_size = int(os.environ.get("FLYDSL_AITER_MAX_SIZE_BYTES", str(64 * 1024 * 1024)))
 
+    if impl == "flydsl":
+        return FlyDSLAllreduce(
+            group=_FLYDSL_AITER_GLOO_GROUP,
+            device=dev,
+            max_size=max_size,
+            world_size=world_size,
+            rank=rank,
+            full_nvlink=bool(full_nvlink),
+        )
+
+    # impl == "aiter"
     try:
         from aiter.dist.device_communicators.custom_all_reduce import CustomAllreduce as AIterCustomAllreduce
     except ModuleNotFoundError:
@@ -79,7 +90,6 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
             raise ModuleNotFoundError("Cannot import AIter CustomAllreduce") from e
 
     aiter_ar = AIterCustomAllreduce(_FLYDSL_AITER_GLOO_GROUP, dev, max_size=max_size)
-
     try:
         if hasattr(rank_data, "is_cuda") and bool(rank_data.is_cuda):
             aiter_ar.register_input_buffer(rank_data)
@@ -87,18 +97,7 @@ def init_custom_ar(meta, rank_data, handles, offsets, rank: int, full_nvlink: bo
             aiter_ar.register_output_buffer(out)
     except Exception:
         pass
-
-    if impl == "aiter":
-        return aiter_ar
-
-    return FlyDSLAllreduce(
-        group=_FLYDSL_AITER_GLOO_GROUP,
-        device=dev,
-        max_size=max_size,
-        world_size=world_size,
-        rank=rank,
-        full_nvlink=bool(full_nvlink),
-    )
+    return aiter_ar
 
 
 class FlyDSLAllreduce:
@@ -404,7 +403,8 @@ class FlyDSLAllreduce:
         return result
 
     def _compile(self, *, N: int, dtype_str: str):
-        import flydsl
+        from flydsl.compiler.jit_function import MlirCompiler
+        from flydsl.compiler.executor import ExecutionEngineExecutor
         from kernels.aiter_signal_all_reduce_raw import build_aiter_signal_allreduce_raw_module
 
         key = (N, dtype_str, self.world_size, "flydsl_allreduce")
@@ -417,7 +417,9 @@ class FlyDSLAllreduce:
             world_size=self.world_size,
             threads=self._threads,
         )
-        exe = flydsl.compile(m)
+        with m.context:
+            lowered = MlirCompiler.compile(m)
+        exe = ExecutionEngineExecutor(lowered)
         self._exe_cache[key] = exe
         return exe
 
