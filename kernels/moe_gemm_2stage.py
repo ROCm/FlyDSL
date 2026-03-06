@@ -2578,6 +2578,16 @@ def compile_moe_reduction(
         ty = T.f32 if elem_type_tag == "f32" else (T.f16 if elem_type_tag == "f16" else T.bf16)
         return ty() if callable(ty) else ty
 
+    # Vectorized load width: 4 x i32 = 16 bytes = 8 x f16.
+    # This matches flydsl-internal's global_load_dwordx4 throughput.
+    VEC_LOAD_DWORDS = 4  # buffer_load vec_width in i32 units
+    VEC_F16 = VEC_LOAD_DWORDS * 2  # 8 f16 elements per vector load
+
+    # Compute model_dim tiling at compile time (unrolled inside kernel, not grid Y).
+    # Each tile processes BLOCK_SIZE * VEC_F16 f16 elements = 256 * 8 = 2048 f16.
+    tile_cols = BLOCK_SIZE * VEC_F16  # f16 elements per tile
+    num_tiles = (model_dim + tile_cols - 1) // tile_cols
+
     if True:
         @flyc.kernel
         def moe_reduction_kernel(
@@ -2604,7 +2614,6 @@ def compile_moe_reduction(
             )
 
             token_idx = gpu.block_id("x")
-            tile_idx = gpu.block_id("y")
             tid = gpu.thread_id("x")
 
             # Guard: token in range
@@ -2613,107 +2622,115 @@ def compile_moe_reduction(
             tok_ok = arith.cmpi(arith.CmpIPredicate.ult, token_i32, m_tokens_i32)
             _if_tok = scf.IfOp(tok_ok)
             with _if_then(_if_tok):
-                tile_cols = BLOCK_SIZE * VEC_WIDTH
                 c_tile_cols = arith.index(tile_cols)
-                c_vecw = arith.index(VEC_WIDTH)
+                c_vecf16 = arith.index(VEC_F16)
+                c2_i32 = arith.constant(2, type=i32_type())
+                token_base = token_idx * c_topk
 
-                col_base = tile_idx * c_tile_cols + tid * c_vecw
+                # Types for vectorized load/accumulate
+                vec8_f16_ty = ir.VectorType.get([VEC_F16], elem_type())
+                vec4_i32_ty = ir.VectorType.get([VEC_LOAD_DWORDS], i32_type())
+                vec8_f32_ty = ir.VectorType.get([VEC_F16], compute_type())
 
-                # Guard: any work in bounds
-                col_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                    arith.index_cast(i32_type(), col_base),
-                    arith.index_cast(i32_type(), c_model_dim),
-                )
-                _if_col = scf.IfOp(col_ok)
-                with _if_then(_if_col):
-                    acc = [arith.constant(0.0, type=compute_type()) for _ in range(VEC_WIDTH)]
+                # Unroll model_dim tiles inside the kernel (like flydsl-internal)
+                for tile_i in range_constexpr(num_tiles):
+                    col_base = arith.index(tile_i * tile_cols) + tid * c_vecf16
 
-                    # Fast path: full vector in-bounds -> vector load/store.
-                    end_ok = arith.cmpi(arith.CmpIPredicate.ule,
-                        arith.index_cast(i32_type(), col_base + c_vecw),
-                        arith.index_cast(i32_type(), c_model_dim),
-                    )
+                    # Compute end column for this vector
+                    col_end_i32 = arith.index_cast(i32_type(), col_base + c_vecf16)
+                    c_model_dim_i32 = arith.index_cast(i32_type(), c_model_dim)
+
+                    # Check if full vector is in-bounds
+                    end_ok = arith.cmpi(arith.CmpIPredicate.ule, col_end_i32, c_model_dim_i32)
                     _if_full = scf.IfOp(end_ok, has_else=True)
                     with _if_then(_if_full):
-                        c0_i8 = arith.constant(0, type=i8_type())
-                        token_base = token_idx * c_topk
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + arith.index(lane)
-                            a = arith.constant(0.0, type=compute_type())
-                            for k in range_constexpr(topk):
-                                k_idx = arith.index(k)
-                                x_idx = (token_base + k_idx) * c_model_dim + col
-                                x_idx_i32 = arith.index_cast(i32_type(), x_idx)
-                                if use_mask:
-                                    m_idx = token_base + k_idx
-                                    m_idx_i32 = arith.index_cast(i32_type(), m_idx)
-                                    mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
-                                    mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                    v = arith.select(
-                                        mv_ok,
-                                        buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
-                                        arith.constant(0.0, type=elem_type()),
-                                    )
-                                else:
-                                    v = buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type())
-                                if dtype_str in ("f16", "bf16"):
-                                    v = arith.extf(compute_type(), v)
-                                a = a + v
-                            v = a
-                            if dtype_str in ("f16", "bf16"):
-                                v = arith.trunc_f(elem_type(), v)
-                            y_idx = token_idx * c_model_dim + col
-                            y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                            buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
+                        # Fast path: vectorized load/store (buffer_load_dwordx4)
+                        acc = arith.constant_vector(0.0, vec8_f32_ty)
+
+                        for k in range_constexpr(topk):
+                            k_idx = arith.index(k)
+                            x_row_base = (token_base + k_idx) * c_model_dim
+                            x_off_f16 = x_row_base + col_base
+                            x_off_i32 = arith.index_cast(i32_type(), x_off_f16)
+                            x_off_dword = arith.divui(x_off_i32, c2_i32)
+
+                            if use_mask:
+                                c0_i8 = arith.constant(0, type=i8_type())
+                                m_idx = token_base + k_idx
+                                m_idx_i32 = arith.index_cast(i32_type(), m_idx)
+                                mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
+                                mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
+                                loaded_i32x4 = buffer_ops.buffer_load(
+                                    x_rsrc, x_off_dword, vec_width=VEC_LOAD_DWORDS,
+                                    dtype=i32_type(), mask=mv_ok,
+                                )
+                            else:
+                                loaded_i32x4 = buffer_ops.buffer_load(
+                                    x_rsrc, x_off_dword, vec_width=VEC_LOAD_DWORDS,
+                                    dtype=i32_type(),
+                                )
+
+                            loaded_f16x8 = vector.bitcast(vec8_f16_ty, loaded_i32x4)
+                            loaded_f32x8 = arith.extf(vec8_f32_ty, loaded_f16x8)
+                            acc = acc + loaded_f32x8
+
+                        out_f16x8 = arith.trunc_f(vec8_f16_ty, acc)
+                        out_i32x4 = vector.bitcast(vec4_i32_ty, out_f16x8)
+
+                        y_off_f16 = token_idx * c_model_dim + col_base
+                        y_off_i32 = arith.index_cast(i32_type(), y_off_f16)
+                        y_off_dword = arith.divui(y_off_i32, c2_i32)
+                        buffer_ops.buffer_store(out_i32x4, y_rsrc, y_off_dword)
 
                     with _if_else(_if_full):
-                        # Tail path: scalar load/store per lane.
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + arith.index(lane)
-                            lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                                arith.index_cast(i32_type(), col),
-                                arith.index_cast(i32_type(), c_model_dim),
-                            )
-                            _if_lane = scf.IfOp(lane_ok)
-                            with _if_then(_if_lane):
-                                a = arith.constant(0.0, type=compute_type())
-                                token_base = token_idx * c_topk
-                                c0_i8 = arith.constant(0, type=i8_type())
-                                for k in range_constexpr(topk):
-                                    k_idx = arith.index(k)
-                                    x_idx = (token_base + k_idx) * c_model_dim + col
-                                    x_idx_i32 = arith.index_cast(i32_type(), x_idx)
-                                    if use_mask:
-                                        m_idx = token_base + k_idx
-                                        m_idx_i32 = arith.index_cast(i32_type(), m_idx)
-                                        mv = buffer_ops.buffer_load(
-                                            mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type()
-                                        )
-                                        mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                        v = arith.select(
-                                            mv_ok,
-                                            buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
-                                            arith.constant(0.0, type=elem_type()),
-                                        )
-                                    else:
-                                        v = buffer_ops.buffer_load(
-                                            x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()
-                                        )
-                                    if dtype_str in ("f16", "bf16"):
-                                        v = arith.extf(compute_type(), v)
-                                    a = a + v
+                        # Tail path: scalar load/store per element
+                        col_base_i32 = arith.index_cast(i32_type(), col_base)
+                        col_ok = arith.cmpi(arith.CmpIPredicate.ult, col_base_i32, c_model_dim_i32)
+                        _if_col = scf.IfOp(col_ok)
+                        with _if_then(_if_col):
+                            for lane in range_constexpr(VEC_F16):
+                                col = col_base + arith.index(lane)
+                                lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
+                                    arith.index_cast(i32_type(), col),
+                                    c_model_dim_i32,
+                                )
+                                _if_lane = scf.IfOp(lane_ok)
+                                with _if_then(_if_lane):
+                                    a = arith.constant(0.0, type=compute_type())
+                                    c0_i8 = arith.constant(0, type=i8_type())
+                                    for k in range_constexpr(topk):
+                                        k_idx = arith.index(k)
+                                        x_idx = (token_base + k_idx) * c_model_dim + col
+                                        x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                                        if use_mask:
+                                            m_idx = token_base + k_idx
+                                            m_idx_i32 = arith.index_cast(i32_type(), m_idx)
+                                            mv = buffer_ops.buffer_load(
+                                                mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type()
+                                            )
+                                            mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
+                                            v = arith.select(
+                                                mv_ok,
+                                                buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
+                                                arith.constant(0.0, type=elem_type()),
+                                            )
+                                        else:
+                                            v = buffer_ops.buffer_load(
+                                                x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()
+                                            )
+                                        if dtype_str in ("f16", "bf16"):
+                                            v = arith.extf(compute_type(), v)
+                                        a = a + v
 
-                                out = a
-                                if dtype_str in ("f16", "bf16"):
-                                    out = arith.trunc_f(elem_type(), out)
-                                y_idx = token_idx * c_model_dim + col
-                                y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                                buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
+                                    out = a
+                                    if dtype_str in ("f16", "bf16"):
+                                        out = arith.trunc_f(elem_type(), out)
+                                    y_idx = token_idx * c_model_dim + col
+                                    y_idx_i32 = arith.index_cast(i32_type(), y_idx)
+                                    buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
     _cache_tag = (topk, model_dim, dtype_str, use_mask)
-    tile_size = BLOCK_SIZE * VEC_WIDTH
-    gy_static = (model_dim + tile_size - 1) // tile_size
 
     @flyc.jit
     def launch_moe_reduction(
@@ -2726,7 +2743,7 @@ def compile_moe_reduction(
         _ = _cache_tag
         gx = arith.index_cast(T.index, i32_m_tokens.ir_value())
         moe_reduction_kernel(X, Y, valid_mask, i32_m_tokens).launch(
-            grid=(gx, gy_static, 1),
+            grid=(gx, 1, 1),
             block=(BLOCK_SIZE, 1, 1),
             stream=stream,
         )
