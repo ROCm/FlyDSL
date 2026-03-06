@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
-from _mlir import ir
+from flydsl._mlir import ir
 
 
 _AITER_KMAXBLOCKS = 80
@@ -50,28 +50,27 @@ def _i64() -> ir.Type:
 
 
 def _c_i32(v: int):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.ConstantOp(_i32(), v).result)
 
 
 def _c_i64(v: int):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.ConstantOp(_i64(), v).result)
 
 
 def _c_index(v: int):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.ConstantOp(ir.IndexType.get(), v).result)
 
 
 def _compute_allreduce_vector(ins, out, base_idx, world_size, vec_e_ty, vec_f32_ty, elem_ty):
     """Reduce vectors from all ranks and store result."""
-    from flydsl.dialects.ext import vector as flir_vector
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith, vector
 
     acc = None
     for r in range(world_size):
-        v_e_raw = _res(flir_vector.load_op(vec_e_ty, ins[r], [base_idx]))
+        v_e_raw = _res(vector.LoadOp(vec_e_ty, ins[r], [base_idx]))
         if elem_ty == ir.F32Type.get():
             v_f = _res(v_e_raw)
         else:
@@ -85,7 +84,7 @@ def _compute_allreduce_vector(ins, out, base_idx, world_size, vec_e_ty, vec_f32_
         out_v = _res(acc)
     else:
         out_v = _res(arith.TruncFOp(vec_e_ty, _res(acc)))
-    flir_vector.store(_res(out_v), out, [base_idx], alignment=16)
+    vector.StoreOp(_res(out_v), out, [base_idx], alignment=16)
 
 
 def _res(x):
@@ -113,27 +112,27 @@ def _res(x):
 
 
 def _addi(a, b):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.AddIOp(_res(a), _res(b)))
 
 
 def _subi(a, b):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.SubIOp(_res(a), _res(b)))
 
 
 def _muli(a, b):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.MulIOp(_res(a), _res(b)))
 
 
 def _cmp(pred, a, b):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.CmpIOp(pred, _res(a), _res(b)))
 
 
 def _select(cond, t, f):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.SelectOp(_res(cond), _res(t), _res(f)))
 
 
@@ -146,7 +145,7 @@ def _select(cond, t, f):
 
 def _global_ld_u32(addr_i64):
     """Load u32 from a raw global pointer (signal buffer, L1-bypassed)."""
-    from _mlir.dialects import llvm, rocdl
+    from flydsl._mlir.dialects import llvm, rocdl
     v = llvm.InlineAsmOp(
         _i32(), [_res(addr_i64)],
         "global_load_dword $0, $1, off sc1", "=v,v",
@@ -158,7 +157,7 @@ def _global_ld_u32(addr_i64):
 
 def _global_st_u32(addr_i64, val_i32):
     """Store u32 to peer GPU's signal buffer (flush L2 for XGMI visibility)."""
-    from _mlir.dialects import llvm, rocdl
+    from flydsl._mlir.dialects import llvm, rocdl
     llvm.InlineAsmOp(None, [], "buffer_wbl2 sc0 sc1", "", has_side_effects=True)
     llvm.InlineAsmOp(
         None, [_res(addr_i64), _res(val_i32)],
@@ -170,7 +169,7 @@ def _global_st_u32(addr_i64, val_i32):
 
 def _global_ld_16b(addr_i64):
     """Load 16 bytes (vector<4xi32>) from a raw global pointer."""
-    from _mlir.dialects import llvm, rocdl
+    from flydsl._mlir.dialects import llvm, rocdl
     v4i32 = ir.VectorType.get([4], _i32())
     v = llvm.InlineAsmOp(
         v4i32, [_res(addr_i64)],
@@ -183,7 +182,7 @@ def _global_ld_16b(addr_i64):
 
 def _global_st_16b(addr_i64, v4i32_val):
     """Store 16 bytes (vector<4xi32>) to a raw global pointer."""
-    from _mlir.dialects import llvm, rocdl
+    from flydsl._mlir.dialects import llvm, rocdl
     llvm.InlineAsmOp(
         None, [_res(addr_i64), _res(v4i32_val)],
         "global_store_dwordx4 $0, $1, off", "v,v",
@@ -194,7 +193,7 @@ def _global_st_16b(addr_i64, v4i32_val):
 
 def _same_gpu_st_u32(addr_i64, val_i32):
     """Store u32 to local (same-GPU) signal buffer (no XGMI flush needed)."""
-    from _mlir.dialects import llvm, rocdl
+    from flydsl._mlir.dialects import llvm, rocdl
     llvm.InlineAsmOp(
         None, [_res(addr_i64), _res(val_i32)],
         "global_store_dword $0, $1, off", "v,v",
@@ -205,7 +204,7 @@ def _same_gpu_st_u32(addr_i64, val_i32):
 
 def _select_i64_by_lane(lane_i32, vals_i64):
     """Select one of vals_i64[0..7] by lane value via chained arith.select."""
-    from _mlir.dialects import arith as _arith
+    from flydsl._mlir.dialects import arith as _arith
 
     assert len(vals_i64) == 8
     out = vals_i64[0]
@@ -217,7 +216,7 @@ def _select_i64_by_lane(lane_i32, vals_i64):
 
 def _load_ptr_from_array(array_base_i64, index_i32):
     """Load an i64 pointer value from a device memory array at index_i32."""
-    from _mlir.dialects import llvm, arith
+    from flydsl._mlir.dialects import llvm, arith
 
     index_i64 = _res(arith.ExtUIOp(_i64(), _res(index_i32)))
     elem_addr_i64 = _addi(array_base_i64, _muli(index_i64, _c_i64(8)))
@@ -227,7 +226,7 @@ def _load_ptr_from_array(array_base_i64, index_i32):
 
 def _spin_wait_ge_u32(addr_i64, target_u32):
     """Spin-wait until *addr >= target (uncachable signal buffer, no cache flush needed)."""
-    from _mlir.dialects import arith, scf
+    from flydsl._mlir.dialects import arith, scf
 
     init_cur = _global_ld_u32(addr_i64)
     w = scf.WhileOp([_i32()], [_res(init_cur)])
@@ -245,23 +244,23 @@ def _spin_wait_ge_u32(addr_i64, target_u32):
 
 
 def _addr_add(base_i64, off_bytes_i64):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.AddIOp(_res(base_i64), _res(off_bytes_i64)))
 
 
 def _mul_i64(a_i64, b_i64):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.MulIOp(_res(a_i64), _res(b_i64)))
 
 
 def _extui_i64(x_i32):
-    from _mlir.dialects import arith
+    from flydsl._mlir.dialects import arith
     return _res(arith.ExtUIOp(_i64(), _res(x_i32)))
 
 
 def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """AIter ROCm start_sync: write start flag to all peers, wait for all to arrive."""
-    from _mlir.dialects import arith, gpu, scf
+    from flydsl._mlir.dialects import arith, gpu, scf
 
     lane_i32 = _res(lane_i32)
     rank_i32 = _res(rank_i32)
@@ -281,7 +280,7 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
     start_rank_off = _addr_add(_c_i64(_AITER_START_OFF_B), _mul_i64(_extui_i64(lin_rank), _c_i64(4)))
 
     is_lane = _cmp(arith.CmpIPredicate.ult, lane_i32, _c_i32(ngpus))
-    if_op = scf.IfOp(_res(is_lane), results_=[], hasElse=False)
+    if_op = scf.IfOp(_res(is_lane), results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
         _global_st_u32(_addr_add(peer_sg, start_rank_off), flag)  # cross-GPU write
@@ -290,7 +289,7 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
 
     gpu.BarrierOp()
     is_t0 = _cmp(arith.CmpIPredicate.eq, lane_i32, _c_i32(0))
-    if_t0 = scf.IfOp(_res(is_t0), results_=[], hasElse=False)
+    if_t0 = scf.IfOp(_res(is_t0), results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
         _same_gpu_st_u32(flag_addr, flag)  # same-GPU write (no XGMI flush needed)
         scf.YieldOp([])
@@ -299,7 +298,7 @@ def _start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int
 
 def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     """AIter ROCm end_sync: write end flag to all peers, wait for all to finish."""
-    from _mlir.dialects import arith, gpu, scf
+    from flydsl._mlir.dialects import arith, gpu, scf
 
     lane_i32 = _res(lane_i32)
     rank_i32 = _res(rank_i32)
@@ -320,7 +319,7 @@ def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
     end_rank_off = _addr_add(_c_i64(_AITER_END_OFF_B), _mul_i64(_extui_i64(lin_rank), _c_i64(4)))
 
     is_lane = _cmp(arith.CmpIPredicate.ult, lane_i32, _c_i32(ngpus))
-    if_op = scf.IfOp(_res(is_lane), results_=[], hasElse=False)
+    if_op = scf.IfOp(_res(is_lane), results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = _select_i64_by_lane(lane_i32, sgs_i64)
         _global_st_u32(_addr_add(peer_sg, end_rank_off), flag)  # cross-GPU write
@@ -329,7 +328,7 @@ def _end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
 
     gpu.BarrierOp()
     is_t0 = _cmp(arith.CmpIPredicate.eq, lane_i32, _c_i32(0))
-    if_t0 = scf.IfOp(_res(is_t0), results_=[], hasElse=False)
+    if_t0 = scf.IfOp(_res(is_t0), results_=[], has_else=False)
     with ir.InsertionPoint(if_t0.then_block):
         _same_gpu_st_u32(flag_addr, flag)  # same-GPU write (no XGMI flush needed)
         scf.YieldOp([])
@@ -349,13 +348,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
     if N <= 0:
         raise ValueError("N must be > 0")
 
-    from flydsl.compiler.compiler import ensure_flir_python_extensions
-    from kernels.kernels_common import stream_ptr_to_async_token
-    from _mlir.dialects import arith, func, gpu, memref, scf, vector
-    from flydsl.dialects.ext import flir as flir_ext
+    from kernels.kernels_common import stream_i64_to_llvm_ptr
+    from flydsl._mlir.dialects import arith, func, gpu, memref, scf, vector
 
     ctx = ir.Context()
-    ensure_flir_python_extensions(ctx)
+    ctx.load_all_available_dialects()
     with ctx, ir.Location.unknown():
         elem_ty = _elem_type(dtype_str)
         pack_elems = _pack_elems(dtype_str)
@@ -423,9 +420,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 # ---- Kernel: 1-stage all-reduce ----
                 k1_args = [i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_out_ty]
                 k1_fty = ir.FunctionType.get(k1_args, [])
-                k1 = gpu.GPUFuncOp(ir.TypeAttr.get(k1_fty))
-                k1.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_1stage_ws{world_size}")
-                k1.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k1 = gpu.GPUFuncOp(ir.TypeAttr.get(k1_fty), sym_name=f"aiter_signal_all_reduce_1stage_ws{world_size}", kernel=True)
                 k1.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
                 k1.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k1_entry = ir.Block.create_at_start(k1.operation.regions[0], k1_args)
@@ -470,9 +465,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 # ---- Kernel: 2-stage (reduce-scatter + all-gather) ----
                 k2_args = [i32, i64] + [i64] * 8 + [mem_in_ty] * 8 + [mem_tmp_ty] * 8 + [mem_out_ty]
                 k2_fty = ir.FunctionType.get(k2_args, [])
-                k2 = gpu.GPUFuncOp(ir.TypeAttr.get(k2_fty))
-                k2.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_ws{world_size}")
-                k2.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k2 = gpu.GPUFuncOp(ir.TypeAttr.get(k2_fty), sym_name=f"aiter_signal_all_reduce_2stage_ws{world_size}", kernel=True)
                 k2.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
                 k2.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k2_entry = ir.Block.create_at_start(k2.operation.regions[0], k2_args)
@@ -514,7 +507,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                     tmp_out_i64 = _res(arith.IndexCastOp(i64, _res(tmp_out_ptr)))
 
                     is_t0 = _cmp(arith.CmpIPredicate.eq, lane_i32, _c_i32(0))
-                    if_t0 = scf.IfOp(_res(is_t0), results_=[], hasElse=False)
+                    if_t0 = scf.IfOp(_res(is_t0), results_=[], has_else=False)
                     with ir.InsertionPoint(if_t0.then_block):
                         for i in range(world_size):
                             ip = memref.ExtractAlignedPointerAsIndexOp(ins[i]).result
@@ -551,7 +544,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         gpu.BarrierOp()
 
                         is_w0 = _cmp(arith.CmpIPredicate.eq, warp_id, _c_i32(0))
-                        ifw0 = scf.IfOp(_res(is_w0), results_=[], hasElse=False)
+                        ifw0 = scf.IfOp(_res(is_w0), results_=[], has_else=False)
                         with ir.InsertionPoint(ifw0.then_block):
                             acc = None
                             for i in range(world_size):
@@ -619,14 +612,14 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                                     return _res(vector.BitCastOp(v4i32, _res(vf)))
                                 else:
                                     v16 = _res(vector.LoadOp(v8f16, memref_val, [_res(idx_val)]))
-                                    from _mlir.dialects import llvm
+                                    from flydsl._mlir.dialects import llvm
                                     return llvm.BitcastOp(v4i32, _res(v16)).result
 
                             tmp_if_chain = None
                             for i in range(world_size - 1, -1, -1):
                                 is_match = _cmp(arith.CmpIPredicate.eq, warp_id, _c_i32(i))
                                 if tmp_if_chain is None:
-                                    if_op = scf.IfOp(_res(is_match), results_=[v4i32], hasElse=True)
+                                    if_op = scf.IfOp(_res(is_match), results_=[v4i32], has_else=True)
                                     with ir.InsertionPoint(if_op.then_block):
                                         v = _load_from_tmp_memref(tmps[i], cur_idx)
                                         scf.YieldOp([_res(v)])
@@ -635,7 +628,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                                         scf.YieldOp([_res(v_fallback)])
                                     tmp_if_chain = if_op.results[0]
                                 else:
-                                    if_op = scf.IfOp(_res(is_match), results_=[v4i32], hasElse=True)
+                                    if_op = scf.IfOp(_res(is_match), results_=[v4i32], has_else=True)
                                     with ir.InsertionPoint(if_op.then_block):
                                         v = _load_from_tmp_memref(tmps[i], cur_idx)
                                         scf.YieldOp([_res(v)])
@@ -669,7 +662,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                                     ok = _res(arith.ConstantOp(ir.IntegerType.get_signless(1), 1).result)
                                 else:
                                     ok = _cmp(arith.CmpIPredicate.ult, cur, _c_i32(part_p))
-                                ifp = scf.IfOp(_res(ok), results_=[], hasElse=False)
+                                ifp = scf.IfOp(_res(ok), results_=[], has_else=False)
                                 with ir.InsertionPoint(ifp.then_block):
                                     src_elem_i32 = _muli(cur, _c_i32(pack_elems))
                                     src_idx = _res(arith.IndexCastOp(idx, _res(src_elem_i32)))
@@ -687,9 +680,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 # ---- Kernel: 2-stage arr (CUDAGraph-compatible, loads pointers inside kernel) ----
                 k2a_args = [i32, i64, i64, i64, i64, i64]
                 k2a_fty = ir.FunctionType.get(k2a_args, [])
-                k2a = gpu.GPUFuncOp(ir.TypeAttr.get(k2a_fty))
-                k2a.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_arr_ws{world_size}")
-                k2a.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k2a = gpu.GPUFuncOp(ir.TypeAttr.get(k2a_fty), sym_name=f"aiter_signal_all_reduce_2stage_arr_ws{world_size}", kernel=True)
                 k2a.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
                 k2a.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k2a_entry = ir.Block.create_at_start(k2a.operation.regions[0], k2a_args)
@@ -747,7 +738,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         gpu.BarrierOp()
 
                         is_w0 = _cmp(arith.CmpIPredicate.eq, warp_id, _c_i32(0))
-                        ifw0 = scf.IfOp(_res(is_w0), results_=[], hasElse=False)
+                        ifw0 = scf.IfOp(_res(is_w0), results_=[], has_else=False)
                         with ir.InsertionPoint(ifw0.then_block):
                             acc = None
                             for i in range(world_size):
@@ -766,7 +757,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                                 out_raw = _res(vector.BitCastOp(v4i32, _res(acc)))
                             else:
                                 out16 = arith.TruncFOp(v8f16, _res(acc)).result
-                                from _mlir.dialects import llvm
+                                from flydsl._mlir.dialects import llvm
                                 out_raw = llvm.BitcastOp(v4i32, _res(out16)).result
 
                             rel_p = _subi(cur, start_p)
@@ -818,9 +809,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 # end_sync is omitted (causes GPU hang); host-side barrier handles visibility.
                 k2w_args = [i32, i64, i64, i64, i64, i64]
                 k2w_fty = ir.FunctionType.get(k2w_args, [])
-                k2w = gpu.GPUFuncOp(ir.TypeAttr.get(k2w_fty))
-                k2w.operation.attributes["sym_name"] = ir.StringAttr.get(f"aiter_signal_all_reduce_2stage_write_mode_ws{world_size}")
-                k2w.operation.attributes["gpu.kernel"] = ir.UnitAttr.get()
+                k2w = gpu.GPUFuncOp(ir.TypeAttr.get(k2w_fty), sym_name=f"aiter_signal_all_reduce_2stage_write_mode_ws{world_size}", kernel=True)
                 k2w.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
                 k2w.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
                 k2w_entry = ir.Block.create_at_start(k2w.operation.regions[0], k2w_args)
@@ -854,7 +843,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                     # Stage1: write local input to REMOTE tmp buffers
                     start_w = _muli(warp_id, _c_i32(part_p))
                     is_last_w = _cmp(arith.CmpIPredicate.eq, warp_id, _c_i32(world_size - 1))
-                    end_w_if = scf.IfOp(_res(is_last_w), results_=[i32], hasElse=True)
+                    end_w_if = scf.IfOp(_res(is_last_w), results_=[i32], has_else=True)
                     with ir.InsertionPoint(end_w_if.then_block):
                         scf.YieldOp([_res(_c_i32(num_packs))])
                     with ir.InsertionPoint(end_w_if.else_block):
@@ -947,7 +936,7 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                         scf.YieldOp([_res(nxt), _res(stride_pack_loop)])
 
                     gpu.BarrierOp()
-                    from _mlir.dialects import rocdl
+                    from flydsl._mlir.dialects import rocdl
                     rocdl.s_waitcnt(0)
                     gpu.ReturnOp([])
 
@@ -970,11 +959,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in ins] + [_res(out)]
-                stream_token = stream_ptr_to_async_token(stream_ptr)
-                flir_ext.gpu_ext.LaunchFuncOp(
+                stream_obj = stream_i64_to_llvm_ptr(stream_ptr)
+                gpu.LaunchFuncOp(
                     ["aiter_signal", f"aiter_signal_all_reduce_1stage_ws{world_size}"],
                     grid_size=(gx, one, one), block_size=(bx, one, one),
-                    kernel_operands=kops, async_dependencies=[stream_token],
+                    kernel_operands=kops, async_object=stream_obj,
                 )
                 func.ReturnOp([])
 
@@ -996,11 +985,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg)] + [_res(x) for x in sgs] + [_res(x) for x in ins] + [_res(x) for x in tmps] + [_res(out)]
-                stream_token = stream_ptr_to_async_token(stream_ptr)
-                flir_ext.gpu_ext.LaunchFuncOp(
+                stream_obj = stream_i64_to_llvm_ptr(stream_ptr)
+                gpu.LaunchFuncOp(
                     ["aiter_signal", f"aiter_signal_all_reduce_2stage_ws{world_size}"],
                     grid_size=(gx, one, one), block_size=(bx, one, one),
-                    kernel_operands=kops, async_dependencies=[stream_token],
+                    kernel_operands=kops, async_object=stream_obj,
                 )
                 func.ReturnOp([])
 
@@ -1022,11 +1011,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg), _res(sg_ptrs_array_base), _res(in_ptrs_array_base), _res(tmp_ptrs_array_base), _res(out_ptr_i64)]
-                stream_token = stream_ptr_to_async_token(stream_ptr)
-                flir_ext.gpu_ext.LaunchFuncOp(
+                stream_obj = stream_i64_to_llvm_ptr(stream_ptr)
+                gpu.LaunchFuncOp(
                     ["aiter_signal", f"aiter_signal_all_reduce_2stage_arr_ws{world_size}"],
                     grid_size=(gx, one, one), block_size=(bx, one, one),
-                    kernel_operands=kops, async_dependencies=[stream_token],
+                    kernel_operands=kops, async_object=stream_obj,
                 )
                 func.ReturnOp([])
 
@@ -1049,11 +1038,11 @@ def build_aiter_signal_allreduce_raw_module(*, N: int, dtype_str: str, world_siz
                 one = _c_index(1)
                 bx = _c_index(threads)
                 kops = [_res(rank), _res(self_sg), _res(sg_ptrs_array_base), _res(inp_ptr_i64), _res(out_ptrs_array_base), _res(tmp_ptrs_array_base)]
-                stream_token = stream_ptr_to_async_token(stream_ptr)
-                flir_ext.gpu_ext.LaunchFuncOp(
+                stream_obj = stream_i64_to_llvm_ptr(stream_ptr)
+                gpu.LaunchFuncOp(
                     ["aiter_signal", f"aiter_signal_all_reduce_2stage_write_mode_ws{world_size}"],
                     grid_size=(gx, one, one), block_size=(bx, one, one),
-                    kernel_operands=kops, async_dependencies=[stream_token],
+                    kernel_operands=kops, async_object=stream_obj,
                 )
                 func.ReturnOp([])
 
