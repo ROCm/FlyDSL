@@ -111,6 +111,14 @@ def build_pa_decode_module(
     _ps_mode = ps_num_splits > 0
     _max_pps = _math.ceil(num_partitions / ps_num_splits) if _ps_mode else 1
 
+    _use_large_block = (_bs > KV_BLOCK_SIZE)
+    _partitions_per_block = _bs // KV_COMPUTE_BLOCK if _use_large_block else 1
+    _blocks_per_partition = KV_COMPUTE_BLOCK // _bs if not _use_large_block else 1
+
+    import math as _math
+    _ps_mode = ps_num_splits > 0
+    _max_pps = _math.ceil(num_partitions / ps_num_splits) if _ps_mode else 1
+
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_smem")
     q_off = 0
     allocator.ptr = Q_LDS_BYTES
