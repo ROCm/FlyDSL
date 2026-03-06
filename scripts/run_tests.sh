@@ -21,11 +21,6 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-echo "========================================================================"
-echo "GEMM Test Suite"
-echo "========================================================================"
-echo ""
-
 # By default, skip large_shape-marked tests (slow).
 # Set RUN_TESTS_FULL=1 to run all parametrized cases (CI).
 pytest_extra_args=()
@@ -33,65 +28,46 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
     pytest_extra_args+=(-m "not large_shape")
 fi
 
-python3 -m pytest tests/kernels/test_preshuffle_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
+# ---------------------------------------------------------------------------
+# Helper: run a pytest group with a banner
+# ---------------------------------------------------------------------------
+run_pytest() {
+    local title="$1"; shift
+    echo ""
+    echo "========================================================================"
+    echo "${title}"
+    echo "========================================================================"
+    echo ""
+    python3 -m pytest "$@" -v --no-header --tb=short
+}
 
 # ---------------------------------------------------------------------------
-# MoE GEMM Kernels (2-stage: gemm1 -> quantize -> gemm2 + reduce)
+# Pytest-based tests
 # ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "MoE GEMM Kernels"
-echo "========================================================================"
-echo ""
+run_pytest "GEMM Test Suite" \
+    tests/kernels/test_preshuffle_gemm.py "${pytest_extra_args[@]}"
 
-python3 -m pytest tests/kernels/test_moe_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
+run_pytest "MoE GEMM Kernels" \
+    tests/kernels/test_moe_gemm.py "${pytest_extra_args[@]}"
 
-# ---------------------------------------------------------------------------
-# Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Norm & Softmax Kernels"
-echo "========================================================================"
-echo ""
+run_pytest "Norm & Softmax Kernels" \
+    tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py
 
-python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short
+run_pytest "Vector Addition" \
+    tests/kernels/test_vec_add.py
 
-# ---------------------------------------------------------------------------
-# Vector Addition Kernel
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Vector Addition"
-echo "========================================================================"
-echo ""
+FLYDSL_RUN_QUANT=1 \
+run_pytest "Per-Token Quantization" \
+    tests/kernels/test_quant.py
 
-python3 -m pytest tests/kernels/test_vec_add.py -v --no-header --tb=short
+run_pytest "Python Examples" \
+    tests/python/examples/*.py
+
+run_pytest "Layout Algebra & PyIR Tests" \
+    tests/pyir/test_layout_algebra.py tests/pyir/test_static_vs_dynamic.py tests/pyir/test_rocir_print.py
 
 # ---------------------------------------------------------------------------
-# Per-Token Quantization Kernel
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Per-Token Quantization"
-echo "========================================================================"
-echo ""
-
-FLYDSL_RUN_QUANT=1 python3 -m pytest tests/kernels/test_quant.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Python Examples (tests/python/examples/) via pytest
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Python Examples"
-echo "========================================================================"
-echo ""
-
-python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Examples (examples/*.py)
+# Examples (examples/*.py) — standalone scripts, not pytest
 # ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"

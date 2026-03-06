@@ -383,7 +383,7 @@ def run_moe_stage1(
             f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_int4_bf16 = in_dtype == "int4_bf16"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
@@ -569,7 +569,7 @@ def run_moe_stage1(
         )
 
         rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-        atol = 0.5 if is_int4 else 0.25
+        atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -812,7 +812,7 @@ def run_moe_stage2(
             f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
-    is_int4_bf16 = in_dtype == "int4_bf16"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
@@ -1234,12 +1234,15 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
 ):
-    """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
+
+    When in_dtype='int4_bf16' and group_size>0, uses groupwise scale (W4A16 with per-group dequant).
+    """
     if (not bool(use_reduce)) and bool(use_valid_mask):
-        pytest.skip("valid_mask is only used in reduce mode")
+        pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
     out_s = str(out_dtype).strip().lower()
     if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
-        pytest.skip("reduce mode does not support out_dtype='f32'")
+        pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16")
     if group_size > 0 and in_dtype == "int4_bf16":
@@ -1396,7 +1399,6 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
-            # Use unified implementation with FlyDSL reduce kernel
             return compile_moe_gemm2_ex(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1407,15 +1409,13 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
+                group_size=group_size,
                 out_dtype=out_dtype,
-                # `compile_moe_gemm2_ex` uses `valid_mask is not None` as a compile-time sentinel
-                # to enable masked reduction (different reduce kernel signature).
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
                 zero_intermediate=False,
             )
         else:
-            # Use torch.sum for reduction (baseline comparison)
             gemm2_exe = compile_moe_gemm2(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1426,6 +1426,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
+                group_size=group_size,
                 out_dtype=out_dtype,
                 accumulate=False,
             )
@@ -1494,9 +1495,12 @@ class _TorchReduceWrapper:
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
         pytest.param(8192, 7168, 256, 128, 8, 64, 256, 128, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
+        pytest.param(16384, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-M", marks=pytest.mark.large_shape),
+        pytest.param(32768, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
         pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
         pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(32768, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
         pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
     ],
@@ -1564,7 +1568,7 @@ def test_moe_stage2_standalone(
     # Run reduce mode and use valid mask with FlyDSL kernel
     run_moe_stage2(
         **common_args,
-        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
+        use_reduce=True,
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )

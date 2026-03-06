@@ -1,133 +1,147 @@
 #!/usr/bin/env python3
-"""Static vs dynamic layout types test (mirrors a reference notebook Cell 11)"""
+"""Static vs dynamic layout types test (mirrors a reference notebook Cell 11).
 
-from flydsl.compiler.pipeline import Pipeline, run_pipeline
-from flydsl.dialects.ext import flir, arith
-from flydsl.dialects.ext.arith import Index
+Ported from legacy FLIR dialect to Fly dialect API.
+"""
+
+import pytest
+
+from flydsl._mlir.passmanager import PassManager
+from flydsl._mlir.ir import (
+    Context, Location, Module, InsertionPoint,
+    FunctionType, IntegerType, IndexType, BlockArgument,
+)
+from flydsl._mlir.dialects.fly import IntTupleType
+from flydsl._mlir.dialects import fly, arith, func
 
 
-_PIPELINE = Pipeline().flir_to_standard().canonicalize().cse()
+FLY_PIPELINE = (
+    "builtin.module("
+    "fly-canonicalize,"
+    "fly-layout-lowering,"
+    "fly-canonicalize,"
+    "convert-fly-to-rocdl,"
+    "canonicalize,"
+    "cse)"
+)
 
 
-class _StaticDynamic(flir.MlirModule):
-    @flir.jit
-    def static_layout(self: flir.T.i64):
-        layout = flir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
-        shape = flir.get_shape(layout)
-        stride = flir.get_stride(layout)
-        return [
-            flir.get(shape, Index(0)),
-            flir.get(shape, Index(1)),
-            flir.get(stride, Index(0)),
-            flir.get(stride, Index(1)),
-            flir.size(layout),
-        ]
-    
-    @flir.jit
-    def dynamic_layout(
-        self: flir.T.i64,
-        dim0: flir.T.index,
-        dim1: flir.T.index,
-        stride0: flir.T.index,
-        stride1: flir.T.index,
-    ):
-        layout = flir.make_layout((dim0, dim1), stride=(stride0, stride1))
-        shape = flir.get_shape(layout)
-        stride = flir.get_stride(layout)
-        flir.printf("Dynamic layout: ({},{}):({}{})\n", dim0, dim1, stride0, stride1)
-        return [
-            flir.get(shape, Index(0)),
-            flir.get(shape, Index(1)),
-            flir.get(stride, Index(0)),
-            flir.get(stride, Index(1)),
-            flir.size(layout),
-        ]
-    
-    @flir.jit
-    def static_composition(self: flir.T.i64):
-        A = flir.make_layout((Index(10), Index(2)), stride=(Index(16), Index(4)))
-        B = flir.make_layout((Index(5), Index(4)), stride=(Index(1), Index(5)))
-        R = flir.composition(A, B)
-        shape = flir.get_shape(R)
-        stride = flir.get_stride(R)
-        vals = []
-        for i in range(3):
-            vals.append(flir.get(shape, Index(i)))
-        for i in range(3):
-            vals.append(flir.get(stride, Index(i)))
-        return vals
-    
-    @flir.jit
-    def dynamic_composition(
-        self: flir.T.i64,
-        a_d0: flir.T.index,
-        a_d1: flir.T.index,
-        a_s0: flir.T.index,
-        a_s1: flir.T.index,
-        b_d0: flir.T.index,
-        b_d1: flir.T.index,
-        b_s0: flir.T.index,
-        b_s1: flir.T.index,
-    ):
-        A = flir.make_layout((a_d0, a_d1), stride=(a_s0, a_s1))
-        B = flir.make_layout((b_d0, b_d1), stride=(b_s0, b_s1))
-        R = flir.composition(A, B)
-        flir.printf("Composition: A({},{}) o B({},{})\n", a_d0, a_d1, b_d0, b_d1)
-        shape = flir.get_shape(R)
-        stride = flir.get_stride(R)
-        vals = []
-        for i in range(3):
-            vals.append(flir.get(shape, Index(i)))
-        for i in range(3):
-            vals.append(flir.get(stride, Index(i)))
-        return vals
+def _S(spec):
+    return fly.static(IntTupleType.get(spec))
 
-    @flir.jit
-    def mixed_layout(
-        self: flir.T.i64,
-        runtime_extent: flir.T.index,
-        runtime_stride: flir.T.index,
-    ):
-        layout = flir.make_layout((runtime_extent, Index(8)), stride=(Index(16), runtime_stride))
-        shape = flir.get_shape(layout)
-        stride = flir.get_stride(layout)
-        flir.printf("Mixed: ({},8):(16,{})\n", runtime_extent, runtime_stride)
-        return [
-            flir.get(shape, Index(0)),
-            flir.get(shape, Index(1)),
-            flir.get(stride, Index(0)),
-            flir.get(stride, Index(1)),
-        ]
-    
+
+def _L(shape_spec, stride_spec):
+    return fly.make_layout(_S(shape_spec), stride=_S(stride_spec))
+
 
 def test_layout_static_types():
-    """Test static layout with Index() - all values become arith.constant"""
-    m = _StaticDynamic()
-    with m._context, m._location:
-        run_pipeline(m.module, _PIPELINE)
-        assert m.module.operation.verify()
+    """All-static layout: values become arith.constant after lowering."""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            idx = IndexType.get()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("static_layout", FunctionType.get([], [idx] * 5))
+                with InsertionPoint(f.add_entry_block()):
+                    layout = _L((10, 2), (16, 4))
+                    shape = fly.get_shape(layout)
+                    stride = fly.get_stride(layout)
+                    sz = fly.size(layout)
+                    vals = [
+                        fly.get_scalar(fly.select(shape, indices=[0])),
+                        fly.get_scalar(fly.select(shape, indices=[1])),
+                        fly.get_scalar(fly.select(stride, indices=[0])),
+                        fly.get_scalar(fly.select(stride, indices=[1])),
+                        fly.get_scalar(sz),
+                    ]
+                    func.ReturnOp([arith.IndexCastOp(idx, v).result for v in vals])
+
+            pm = PassManager.parse(FLY_PIPELINE, ctx)
+            pm.run(module.operation)
+            assert module.operation.verify()
+
+            func_op = list(module.body.operations)[0]
+            ret_op = list(func_op.entry_block.operations)[-1]
+            actuals = [int(op.owner.attributes["value"]) for op in ret_op.operands]
+            assert actuals == [10, 2, 16, 4, 20]
 
 
 def test_layout_dynamic_types():
-    """Test dynamic layout with function args - values remain as block arguments"""
-    m = _StaticDynamic()
-    with m._context, m._location:
-        run_pipeline(m.module, _PIPELINE)
-        assert m.module.operation.verify()
+    """Dynamic layout: function args remain as block arguments after lowering."""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            i32 = IntegerType.get_signless(32)
+            idx = IndexType.get()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("dynamic_layout", FunctionType.get([i32] * 4, [idx]))
+                entry = f.add_entry_block()
+                with InsertionPoint(entry):
+                    dim0, dim1, stride0, stride1 = entry.arguments
+                    import flydsl.expr as fx
+                    shape = fx.make_shape(dim0, dim1)
+                    stride = fx.make_stride(stride0, stride1)
+                    layout = fx.make_layout(shape, stride)
+                    sz = fx.size(layout)
+                    sc = fx.get_scalar(sz)
+                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+
+            pm = PassManager.parse(FLY_PIPELINE, ctx)
+            pm.run(module.operation)
+            assert module.operation.verify()
 
 
-def test_composition_static_vs_dynamic():
-    """Test composition: static (Index) vs dynamic (function args)"""
-    m = _StaticDynamic()
-    with m._context, m._location:
-        run_pipeline(m.module, _PIPELINE)
-        assert m.module.operation.verify()
+def test_composition_static():
+    """Static composition: (10,2):(16,4) o (5,4):(1,5) => size = 20"""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            idx = IndexType.get()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("comp_static", FunctionType.get([], [idx]))
+                with InsertionPoint(f.add_entry_block()):
+                    A = _L((10, 2), (16, 4))
+                    B = _L((5, 4), (1, 5))
+                    R = fly.composition(A, B)
+                    sz = fly.size(R)
+                    sc = fly.get_scalar(sz)
+                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+
+            pm = PassManager.parse(FLY_PIPELINE, ctx)
+            pm.run(module.operation)
+            assert module.operation.verify()
+
+            func_op = list(module.body.operations)[0]
+            ret_op = list(func_op.entry_block.operations)[-1]
+            assert int(ret_op.operands[0].owner.attributes["value"]) == 20
 
 
 def test_mixed_static_dynamic():
-    """Test mixed layout: (arg, 8):(16, arg) - some static, some dynamic"""
-    m = _StaticDynamic()
-    with m._context, m._location:
-        run_pipeline(m.module, _PIPELINE)
-        assert m.module.operation.verify()
+    """Mixed layout: some static (fly.static), some dynamic (function args)."""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            i32 = IntegerType.get_signless(32)
+            idx = IndexType.get()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("mixed_layout", FunctionType.get([i32, i32], [idx]))
+                entry = f.add_entry_block()
+                with InsertionPoint(entry):
+                    runtime_extent, runtime_stride = entry.arguments
+                    c8 = arith.ConstantOp(i32, 8).result
+                    c16 = arith.ConstantOp(i32, 16).result
+                    import flydsl.expr as fx
+                    shape = fx.make_shape(runtime_extent, c8)
+                    stride = fx.make_stride(c16, runtime_stride)
+                    layout = fx.make_layout(shape, stride)
+                    sz = fx.size(layout)
+                    sc = fx.get_scalar(sz)
+                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
 
+            pm = PassManager.parse(FLY_PIPELINE, ctx)
+            pm.run(module.operation)
+            assert module.operation.verify()
