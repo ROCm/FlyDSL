@@ -65,6 +65,11 @@ try:
 except Exception:
     HAS_AITER = False
 
+# aiter's __init__.py prepends its own directories to sys.path, which can shadow
+# the repo-local `kernels/` package.  Re-insert _REPO_ROOT at the front.
+if _REPO_ROOT not in sys.path[:2]:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Kernel implementations live under `kernels/`; this test file is the harness.
 from kernels.moe_gemm_2stage import (
     compile_moe_gemm1,

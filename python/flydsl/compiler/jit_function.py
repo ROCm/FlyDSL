@@ -190,6 +190,54 @@ class MlirCompiler:
             "gpu-module-to-binary{format=fatbin}",
         ]
 
+    @staticmethod
+    def _dump_ir(stage: str, *, dump_dir: Path, asm: str) -> Path:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        out = dump_dir / f"{stage}.mlir"
+        out.write_text(asm, encoding="utf-8")
+        return out
+
+    @staticmethod
+    def _dump_isa(*, dump_dir: Path, asm: str, chip: str, verify: bool) -> "Optional[Path]":
+        """Best-effort dump final ISA/assembly (.s) from the post-reconcile IR.
+
+        Parses a fresh clone of the module and runs gpu-module-to-binary with
+        format=isa to produce readable GCN assembly.
+        """
+        try:
+            from .._mlir.dialects import gpu as _gpu_mod
+            ObjectAttr = _gpu_mod.ObjectAttr
+            BinaryOp = _gpu_mod.BinaryOp
+        except Exception:
+            return None
+        try:
+            ctx = ir.Context()
+            ctx.load_all_available_dialects()
+            with ctx:
+                mod = ir.Module.parse(asm, context=ctx)
+                pm = PassManager.parse(
+                    "builtin.module(gpu-module-to-binary{format=isa})", context=ctx
+                )
+                pm.enable_verifier(verify)
+                pm.run(mod.operation)
+                # Extract ISA bytes from the gpu.binary op (top-level in module body).
+                for op in mod.body:
+                    if op.operation.name == "gpu.binary":
+                        objs_attr = op.attributes["objects"]
+                        if len(objs_attr) > 0:
+                            oa = ObjectAttr(objs_attr[len(objs_attr) - 1])
+                            isa_bytes = oa.object
+                            dump_dir.mkdir(parents=True, exist_ok=True)
+                            out = dump_dir / "15_final_isa.s"
+                            if isinstance(isa_bytes, bytes):
+                                out.write_bytes(isa_bytes)
+                            else:
+                                out.write_text(str(isa_bytes), encoding="utf-8")
+                            return out
+        except Exception as e:
+            print(f"[flydsl.compile] ISA dump failed: {e}")
+        return None
+
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -203,11 +251,57 @@ class MlirCompiler:
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
 
-        pipeline = f"builtin.module({','.join(fragments)})"
-        pm = PassManager.parse(pipeline)
-        pm.enable_verifier(env.debug.enable_verifier)
-        pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-        pm.run(module.operation)
+        dump_enabled = env.debug.dump_ir
+        dump_dir = Path(env.debug.dump_dir)
+
+        if dump_enabled:
+            # Infer a subdirectory name from func_name or the gpu module name.
+            subdir = func_name or "module"
+            # Sanitize: replace non-alphanumeric chars with underscore
+            subdir = "".join(c if c.isalnum() or c in "_-." else "_" for c in subdir)
+            dump_dir = dump_dir / subdir
+            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
+
+            # Dump initial IR (after target override / before passes).
+            out = cls._dump_ir(
+                "00_initial",
+                dump_dir=dump_dir,
+                asm=module.operation.get_asm(enable_debug_info=True),
+            )
+            print(f"[flydsl.compile] dump 00_initial -> {out}")
+
+            # Run each pass fragment separately and dump intermediate IR.
+            asm_for_isa = None
+            for stage_num, frag in enumerate(fragments, start=1):
+                stage_label = frag.split("{")[0].split("(")[-1].strip()
+                stage_name = f"{stage_num:02d}_{stage_label}"
+                pm = PassManager.parse(f"builtin.module({frag})")
+                pm.enable_verifier(env.debug.enable_verifier)
+                pm.run(module.operation)
+                stage_asm = module.operation.get_asm(enable_debug_info=True)
+                out = cls._dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                print(f"[flydsl.compile] dump {stage_name} -> {out}")
+                # Capture IR right after reconcile-unrealized-casts (before gpu-module-to-binary)
+                # for ISA generation — this is the last stage with readable GPU module IR.
+                if "reconcile-unrealized-casts" in frag:
+                    asm_for_isa = stage_asm
+
+            # Dump ISA assembly from the post-reconcile IR.
+            if asm_for_isa is not None:
+                isa_out = cls._dump_isa(
+                    dump_dir=dump_dir,
+                    asm=asm_for_isa,
+                    chip=chip,
+                    verify=env.debug.enable_verifier,
+                )
+                if isa_out is not None:
+                    print(f"[flydsl.compile] dump 15_final_isa -> {isa_out}")
+        else:
+            pipeline = f"builtin.module({','.join(fragments)})"
+            pm = PassManager.parse(pipeline)
+            pm.enable_verifier(env.debug.enable_verifier)
+            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+            pm.run(module.operation)
 
         return module
 

@@ -174,7 +174,12 @@ class BufferResourceDescriptor:
                 v = _unwrap_value(num_records_bytes)
                 i64_type = ir.IntegerType.get_signless(64)
                 if not isinstance(v.type, ir.IntegerType) or v.type.width != 64:
-                    op = std_arith.IndexCastOp(i64_type, v)
+                    if isinstance(v.type, ir.IndexType):
+                        op = std_arith.IndexCastOp(i64_type, v)
+                    elif isinstance(v.type, ir.IntegerType) and v.type.width < 64:
+                        op = std_arith.ExtUIOp(i64_type, v)
+                    else:
+                        op = std_arith.IndexCastOp(i64_type, v)
                     v = _unwrap_value(op.result)
                 num_records = v
         elif max_size:

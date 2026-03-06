@@ -88,21 +88,31 @@ def crd2idx(crd, layout):
     For static layouts, computes with plain arith ops.
     For dynamic layouts, falls back to fx.crd2idx with fx.make_coord.
     """
-    if not isinstance(crd, (list, tuple)):
+    # If crd is already an MLIR value (e.g. from fx.make_coord), keep it as-is
+    # for the dynamic path; only wrap scalars in a list for the static path.
+    crd_is_mlir = isinstance(crd, (ir.Value, ArithValue)) and not isinstance(crd, (list, tuple))
+    if not crd_is_mlir and not isinstance(crd, (list, tuple)):
         crd = [crd]
     parsed = _parse_layout(layout)
 
-    if parsed is None or _has_dynamic_strides(parsed[1]):
-        # fly.make_coord requires i32/i64, not index
-        crd_i32 = []
-        for c in crd:
-            cv = c
-            if isinstance(cv, ArithValue):
-                cv = cv.ir_value() if hasattr(cv, 'ir_value') else cv
-            if isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
-                cv = arith.index_cast(T.i32, cv)
-            crd_i32.append(cv)
-        coord_val = fx.make_coord(*crd_i32)
+    if crd_is_mlir or parsed is None or _has_dynamic_strides(parsed[1]):
+        if crd_is_mlir:
+            # crd is already an MLIR coord value (e.g. from fx.make_coord),
+            # pass it directly to fx.crd2idx without re-wrapping.
+            coord_val = crd
+            if isinstance(coord_val, ArithValue):
+                coord_val = coord_val.ir_value() if hasattr(coord_val, 'ir_value') else coord_val
+        else:
+            # fly.make_coord requires i32/i64, not index
+            crd_i32 = []
+            for c in crd:
+                cv = c
+                if isinstance(cv, ArithValue):
+                    cv = cv.ir_value() if hasattr(cv, 'ir_value') else cv
+                if isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
+                    cv = arith.index_cast(T.i32, cv)
+                crd_i32.append(cv)
+            coord_val = fx.make_coord(*crd_i32)
         result = fx.crd2idx(coord_val, layout)
         scalar = fx.get_scalar(result)
         if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):

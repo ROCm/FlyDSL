@@ -20,6 +20,17 @@ _FLOAT8_DTYPES = tuple(
     if dt is not None
 )
 
+_FLOAT4_DTYPES = tuple(
+    dt
+    for dt in (
+        getattr(torch, "float4_e2m1fn_x2", None),
+        getattr(torch, "float8_e8m0fnu", None),
+    )
+    if dt is not None
+)
+
+_EXOTIC_DTYPES = _FLOAT8_DTYPES + _FLOAT4_DTYPES
+
 
 class JitArgumentRegistry:
     registry: Dict[type, Tuple[Callable, Type[DslType]]] = {}
@@ -131,7 +142,7 @@ class TensorAdaptor:
     ):
         self._tensor_keepalive = tensor
         dlpack_tensor = tensor
-        if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
+        if _EXOTIC_DTYPES and tensor.dtype in _EXOTIC_DTYPES:
             dlpack_tensor = tensor.view(torch.uint8)
             self._tensor_keepalive = dlpack_tensor
 
