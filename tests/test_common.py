@@ -11,6 +11,7 @@ import pandas as pd
 import logging
 
 logger = logging.getLogger("flir")
+
 pd.set_option("display.max_rows", 200)
 ## debug ##
 # pd.set_option("display.max_rows", None)
@@ -64,6 +65,17 @@ def perftest(
                     latencies.append(start_event.elapsed_time(end_event))
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+                with_modules=True,
+            ) as prof:
+                data = run_iters_rotate(num_iters, func, rotate_args)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            avg = get_trace_perf(prof, num_iters)
+
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
@@ -77,23 +89,7 @@ def perftest(
                     run_iters(1, graph.replay)
                 avg = get_trace_perf(prof, num_iters)
                 logger.info(f"avg: {avg} us/iter with hipgraph")
-            with tpf.profile(
-                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
-                profile_memory=False,
-                with_stack=False,
-                with_modules=True,
-                # record_shapes=True,
-                on_trace_ready=(
-                    tpf.tensorboard_trace_handler(f"./flir_logs/gpu_id_{gpu_id}")
-                    if needTrace
-                    else None
-                ),
-            ) as prof:
-                data = run_iters_rotate(num_iters, func, rotate_args)
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
 
-            avg = get_trace_perf(prof, num_iters)
             return data, avg
 
         return wrapper
@@ -422,7 +418,7 @@ def checkAllclose(
         return percent
 
 
-def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg=''):
+def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg='', logits_diff_threshold=2e-3):
     if checkAllclose(c_out, c_ref, rtol=atol, atol=atol) < 0.05:
         return True
     
@@ -443,10 +439,9 @@ def verify_output(c_out, c_ref, atol=1e-2, rtol=1e-2, msg=''):
 
     logits_diff = calc_diff(c_out, c_ref)
     print(f"Logits Diff: {logits_diff:.6f}, Max Diff: {max_diff:.6f}, Mean Diff: {mean_diff:.6f}")
-    # Relax threshold for FP8 due to quantization error and NaN masking
-    if logits_diff > 2e-3:
-        print(f"✗ Check failed: logits_diff {logits_diff} > 1e-3")
-        logging.error(f"logits_diff: {logits_diff} is too large, please check the implementation")
+    if logits_diff > logits_diff_threshold:
+        print(f"✗ Check failed: logits_diff {logits_diff} > {logits_diff_threshold}")
+        logging.error(f"logits_diff: {logits_diff} is too large (threshold: {logits_diff_threshold})")
         return False
     print(f"{msg} ✓ Check passed")
     return True

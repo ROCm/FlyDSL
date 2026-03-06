@@ -1,274 +1,158 @@
 #!/bin/bash
-# Flir Test Suite - Organized by test type
+# Kernel Test Suite - GEMM, MoE GEMM, LayerNorm, RMSNorm, Softmax, VecAdd, Quant, Examples, FileCheck
+# Fail-fast: exits immediately on first test failure.
+#
+# Prerequisites: bash scripts/build.sh && pip install -e .
+#   (or: export PYTHONPATH=build-fly/python_packages:$REPO_ROOT)
+
+set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
-COMPARE_AITER_CK=0
-# Locate the build directory (default: .flir/build; fallback: build/).
-BUILD_DIR="${FLIR_BUILD_DIR:-${FLIR_BUILD_DIR:-${REPO_ROOT}/.flir/build}}"
-if [ ! -d "${BUILD_DIR}" ] && [ -d "${REPO_ROOT}/build" ]; then
-  BUILD_DIR="${REPO_ROOT}/build"
+BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
+MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
+
+# Ensure REPO_ROOT and build packages are always on PYTHONPATH.
+export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
+
+# Ensure MLIR runtime shared libraries are discoverable.
+if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
+  export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-# Prefer the new tool location (LLVM_RUNTIME_OUTPUT_INTDIR = build/bin),
-# but keep a fallback for older build layouts.
-FLIR_OPT="${BUILD_DIR}/bin/flir-opt"
-if [ ! -x "${FLIR_OPT}" ]; then
-  FLIR_OPT="${BUILD_DIR}/tools/flir-opt/flir-opt"
-fi
-if [ ! -x "${FLIR_OPT}" ]; then
-  if [ -d "${BUILD_DIR}" ]; then
-    echo "flir-opt not found. Building it..."
-    cmake --build "${BUILD_DIR}" --target flir-opt -j"$(nproc)" || {
-      echo "Error: failed to build flir-opt"
-      exit 1
-    }
-  fi
-  # Re-detect after build: modern builds place it under ${BUILD_DIR}/bin.
-  FLIR_OPT="${BUILD_DIR}/bin/flir-opt"
-  if [ ! -x "${FLIR_OPT}" ]; then
-    FLIR_OPT="${BUILD_DIR}/tools/flir-opt/flir-opt"
-  fi
-  if [ ! -x "${FLIR_OPT}" ]; then
-    echo "Error: flir-opt not found."
-    echo "  Try: ./flir/build.sh"
-    echo "  Or:  cmake --build build --target flir-opt -j\$(nproc)"
-    exit 1
-  fi
-fi
-PASS="--flir-to-standard"
-
 echo "========================================================================"
-echo "Flir Test Suite"
+echo "GEMM Test Suite"
 echo "========================================================================"
 echo ""
 
-PYTHON_PACKAGE_ROOT="${BUILD_DIR}/python_packages/flydsl"
-export PYTHONPATH="${REPO_ROOT}/flydsl/src:${PYTHON_PACKAGE_ROOT}:${REPO_ROOT}:${PYTHONPATH}"
-echo "Using in-tree Python sources + embedded build packages via PYTHONPATH."
-
-
-#=============================================================================
-MLIR_TEST_COUNT=0
-MLIR_PASS_COUNT=0
-
-for test_file in tests/mlir/*.mlir; do
-    if [ -f "$test_file" ]; then
-        MLIR_TEST_COUNT=$((MLIR_TEST_COUNT + 1))
-        test_name=$(basename "$test_file" .mlir)
-        echo "Running: $test_name"
-        $FLIR_OPT $PASS "$test_file" > /tmp/${test_name}.log 2>&1
-        if [ $? -eq 0 ]; then
-            echo "   PASS"
-            MLIR_PASS_COUNT=$((MLIR_PASS_COUNT + 1))
-        else
-            echo "   FAIL"
-            echo "      Log: /tmp/${test_name}.log"
-        fi
-    fi
-done
-
-echo ""
-echo "MLIR Tests: $MLIR_PASS_COUNT/$MLIR_TEST_COUNT passed"
-echo ""
-#=============================================================================
-# Part 2: Python IR Tests (MLIR IR generation via Python)
-#=============================================================================
-echo "========================================================================"
-echo "Part 2: Python IR Tests (MLIR generation, no GPU execution)"
-echo "========================================================================"
-echo ""
-
-IR_TEST_COUNT=0
-IR_PASS_COUNT=0
-
-for test_file in tests/pyir/test_*.py; do
-    if [ -f "$test_file" ]; then
-        IR_TEST_COUNT=$((IR_TEST_COUNT + 1))
-        test_name=$(basename "$test_file" .py)
-        echo "Running: $test_name"
-        python3 "$test_file" > /tmp/${test_name}.log 2>&1
-        if [ $? -eq 0 ]; then
-            echo "   PASS"
-            IR_PASS_COUNT=$((IR_PASS_COUNT + 1))
-        else
-            echo "   FAIL"
-            echo "      Log: /tmp/${test_name}.log"
-        fi
-    fi
-done
-
-echo ""
-echo "IR Tests: $IR_PASS_COUNT/$IR_TEST_COUNT passed"
-echo ""
-
-#=============================================================================
-# Part 3: Example Tests (ROCDL dialect operations)
-#=============================================================================
-echo "========================================================================"
-echo "Part 3: Example Tests (ROCDL Dialect Operations)"
-echo "========================================================================"
-echo ""
-
-EXAMPLE_TEST_COUNT=0
-
-
-#=============================================================================
-# Part 4: GPU Execution Tests (Real GPU kernels)
-#=============================================================================
-echo "========================================================================"
-echo "Part 4: GPU Execution Tests (Compile + Run on GPU)"
-echo "========================================================================"
-echo ""
-
-if command -v rocm-smi &> /dev/null; then
-    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
-    if [ -n "$GPU_NAME" ]; then
-        echo "GPU detected: $GPU_NAME"
-    else
-        echo "GPU detected (ROCm available)"
-    fi
-    echo ""
-    
-    GPU_TEST_COUNT=0
-    GPU_PASS_COUNT=0
-    
-    for test_file in tests/kernels/test_*.py; do
-        if [ -f "$test_file" ]; then
-            GPU_TEST_COUNT=$((GPU_TEST_COUNT + 1))
-            test_name=$(basename "$test_file" .py)
-            echo "Running: $test_name"
-            python3 "$test_file" > /tmp/${test_name}.log 2>&1
-            if [ $? -eq 0 ]; then
-                echo "   PASS"
-                GPU_PASS_COUNT=$((GPU_PASS_COUNT + 1))
-                # Show key metrics if available
-                if grep -q "TFLOPS" /tmp/${test_name}.log; then
-                    grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-                if grep -q "Bandwidth:" /tmp/${test_name}.log; then
-                    grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-            else
-                echo "   FAIL"
-                echo "      Log: /tmp/${test_name}.log"
-            fi
-        fi
-    done
-    
-    echo ""
-    echo "GPU Tests: $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
-    
-    ALL_GPU_PASSED=$((GPU_PASS_COUNT == GPU_TEST_COUNT))
-else
-    echo "No GPU detected (ROCm not found)"
-    echo "   Install ROCm to run GPU execution tests"
-    echo ""
-    ALL_GPU_PASSED=0
-    GPU_TEST_COUNT=0
-    GPU_PASS_COUNT=0
+# By default, skip large_shape-marked tests (slow).
+# Set RUN_TESTS_FULL=1 to run all parametrized cases (CI).
+pytest_extra_args=()
+if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
+    pytest_extra_args+=(-m "not large_shape")
 fi
 
+python3 -m pytest tests/kernels/test_preshuffle_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
 
-#=============================================================================
-# Part 5: GPU Execution Tests With HIPGraph Mode (Real GPU kernels)
-#=============================================================================
+# ---------------------------------------------------------------------------
+# MoE GEMM Kernels (2-stage: gemm1 -> quantize -> gemm2 + reduce)
+# ---------------------------------------------------------------------------
+echo ""
 echo "========================================================================"
-echo "Part 5: GPU Execution Tests With HIPGraph Mode (Compile + Run on GPU)"
+echo "MoE GEMM Kernels"
 echo "========================================================================"
 echo ""
 
-if command -v rocm-smi &> /dev/null; then
-    GPU_NAME=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'GPU\[\d+\].*' | grep 'SKU' | head -1)
-    if [ -n "$GPU_NAME" ]; then
-        echo "GPU detected: $GPU_NAME"
-    else
-        echo "GPU detected (ROCm available)"
-    fi
-    echo ""
-    
-    GPU_GRAPH_TEST_COUNT=0
-    GPU_GRAPH_PASS_COUNT=0
-    
-    GPU_GRAPH_TEST_FILES=(
-        tests/kernels/test_preshuffle_gemm.py
-        tests/kernels/test_moe_gemm.py
-    )
-    for test_file in "${GPU_GRAPH_TEST_FILES[@]}"; do
-        if [ -f "$test_file" ]; then
-            GPU_GRAPH_TEST_COUNT=$((GPU_GRAPH_TEST_COUNT + 1))
-            test_name=$(basename "$test_file" .py)
-            echo "Running: $test_name"
-            python3 "$test_file" -tg > /tmp/${test_name}.log 2>&1
-            if [ $? -eq 0 ]; then
-                echo "   PASS"
-                GPU_GRAPH_PASS_COUNT=$((GPU_GRAPH_PASS_COUNT + 1))
-                # Show key metrics if available
-                if grep -q "TFLOPS" /tmp/${test_name}.log; then
-                    grep "TFLOPS" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-                if grep -q "Bandwidth:" /tmp/${test_name}.log; then
-                    grep "Bandwidth:" /tmp/${test_name}.log | tail -1 | sed 's/^/      /'
-                fi
-            else
-                echo "   FAIL"
-                echo "      Log: /tmp/${test_name}.log"
-            fi
-        fi
-    done
-    
-    echo ""
-    echo "GPU HIPGraph Tests: $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
-    
-    ALL_GPU_GRAPH_PASSED=$((GPU_GRAPH_PASS_COUNT == GPU_GRAPH_TEST_COUNT))
-else
-    echo "No GPU detected (ROCm not found)"
-    echo "   Install ROCm to run GPU HIPGraph execution tests"
-    echo ""
-    ALL_GPU_GRAPH_PASSED=0
-    GPU_GRAPH_TEST_COUNT=0
-    GPU_GRAPH_PASS_COUNT=0
-fi
+python3 -m pytest tests/kernels/test_moe_gemm.py "${pytest_extra_args[@]}" -v --no-header --tb=short
 
-
-#=============================================================================
-# Final Summary
-#=============================================================================
+# ---------------------------------------------------------------------------
+# Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
+# ---------------------------------------------------------------------------
+echo ""
 echo "========================================================================"
-echo "Test Summary"
+echo "Norm & Softmax Kernels"
 echo "========================================================================"
 echo ""
-echo "MLIR IR Tests (Lowering):        $MLIR_PASS_COUNT/$MLIR_TEST_COUNT passed"
-echo "Python IR Tests (Generation):    $IR_PASS_COUNT/$IR_TEST_COUNT passed"
 
-if command -v rocm-smi >/dev/null 2>&1; then
-    echo "GPU Execution Tests:             $GPU_PASS_COUNT/$GPU_TEST_COUNT passed"
-    echo "GPU HIPGraph Execution Tests:    $GPU_GRAPH_PASS_COUNT/$GPU_GRAPH_TEST_COUNT passed"
-else
-    echo "GPU Execution Tests:             Skipped (no GPU)"
-    echo "GPU HIPGraph Execution Tests:    Skipped (no GPU)"
-fi
+python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short
 
-if [ $GPU_PASS_COUNT -eq $GPU_TEST_COUNT ] && [ $IR_PASS_COUNT -eq $IR_TEST_COUNT ]; then
-    echo ""
-    echo ""
-    echo "Verified Capabilities:"
-    echo "  * Flir IR generation and lowering"
-    echo "  * GPU kernel compilation and execution (MLIR → HSACO)"
-    echo ""
-    exit 0
-else
-    if command -v rocm-smi >/dev/null 2>&1; then
-        echo ""
-        if [ $GPU_PASS_COUNT -ne $GPU_TEST_COUNT ]; then
-            echo "Some GPU tests failed"
-        fi
+# ---------------------------------------------------------------------------
+# Vector Addition Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Vector Addition"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/kernels/test_vec_add.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Per-Token Quantization Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Per-Token Quantization"
+echo "========================================================================"
+echo ""
+
+FLYDSL_RUN_QUANT=1 python3 -m pytest tests/kernels/test_quant.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Python Examples (tests/python/examples/) via pytest
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Python Examples"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Examples (examples/*.py)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Examples (examples/)"
+echo "========================================================================"
+echo ""
+
+for example in "${REPO_ROOT}"/examples/*.py; do
+    [ -f "${example}" ] || continue
+    example_name="$(basename "${example}")"
+    output=$(python3 "${example}" 2>&1) || {
+        echo "  FAIL  ${example_name}"
+        echo "$output" | tail -10 | sed 's/^/        /'
         exit 1
-    else
-        echo ""
-        echo "All available tests passed"
-        echo "   (GPU tests skipped - no ROCm GPU detected)"
-        exit 0
+    }
+    if echo "$output" | grep -qE "Result correct: False|All passed: False"; then
+        echo "  FAIL  ${example_name}"
+        echo "$output" | tail -10 | sed 's/^/        /'
+        exit 1
     fi
+    echo "  PASS  ${example_name}"
+done
+
+# ---------------------------------------------------------------------------
+# MLIR FileCheck Tests (tests/mlir/**/*.mlir)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "MLIR FileCheck Tests"
+echo "========================================================================"
+echo ""
+
+FLY_OPT="${BUILD_DIR}/bin/fly-opt"
+FILECHECK="${MLIR_PATH:+${MLIR_PATH}/bin/FileCheck}"
+if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
+    FILECHECK="$(which FileCheck 2>/dev/null || true)"
 fi
+
+if [ ! -x "${FLY_OPT}" ]; then
+    echo "[SKIP] fly-opt not found at ${FLY_OPT}"
+elif [ ! -x "${FILECHECK}" ]; then
+    echo "[SKIP] FileCheck not found at ${FILECHECK}"
+else
+    for test_file in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
+        test_name="${test_file#${REPO_ROOT}/tests/mlir/}"
+        run_line=$(grep '^// RUN:' "$test_file" | head -1 | sed 's|^// RUN: *||')
+        if [ -z "$run_line" ]; then
+            continue
+        fi
+        cmd=$(echo "$run_line" | sed "s|%fly-opt|${FLY_OPT}|g; s|%FileCheck|${FILECHECK}|g; s|%s|${test_file}|g; s|FileCheck|${FILECHECK}|g")
+        if eval "$cmd" > /tmp/filecheck_out.log 2>&1; then
+            echo "  PASS  ${test_name}"
+        else
+            echo "  FAIL  ${test_name}"
+            tail -5 /tmp/filecheck_out.log | sed 's/^/        /'
+            exit 1
+        fi
+    done
+fi
+
+echo ""
+echo "========================================================================"
+echo "All tests passed."
+echo "========================================================================"

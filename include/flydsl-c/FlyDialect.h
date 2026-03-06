@@ -1,0 +1,178 @@
+#ifndef FLYDSL_C_FLYDIALECT_H
+#define FLYDSL_C_FLYDIALECT_H
+
+#include "mlir-c/IR.h"
+#include "mlir-c/Support.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+MLIR_DECLARE_CAPI_DIALECT_REGISTRATION(Fly, fly);
+
+//===----------------------------------------------------------------------===//
+// IntTupleType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyIntTupleType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyIntTupleTypeGetTypeID(void);
+
+// Accessors
+MLIR_CAPI_EXPORTED bool mlirFlyIntTupleTypeIsLeaf(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetRank(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetDepth(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirFlyIntTupleTypeIsStatic(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyIntTupleTypeGetStaticValue(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// LayoutType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyLayoutType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyLayoutTypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyLayoutTypeGet(MlirType shape, MlirType stride);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyLayoutTypeGetShape(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyLayoutTypeGetStride(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirFlyLayoutTypeIsLeaf(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyLayoutTypeGetRank(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyLayoutTypeGetDepth(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirFlyLayoutTypeIsStatic(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirFlyLayoutTypeIsStaticShape(MlirType type);
+MLIR_CAPI_EXPORTED bool mlirFlyLayoutTypeIsStaticStride(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// SwizzleType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlySwizzleType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlySwizzleTypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlySwizzleTypeGet(MlirContext ctx, int32_t mask, int32_t base,
+                                                  int32_t shift);
+
+// Accessors
+MLIR_CAPI_EXPORTED int32_t mlirFlySwizzleTypeGetMask(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlySwizzleTypeGetBase(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlySwizzleTypeGetShift(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// PointerType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyPointerType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyPointerTypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyPointerTypeGet(MlirType elemType, int32_t addressSpace,
+                                                  int32_t alignment);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyPointerTypeGetElementType(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyPointerTypeGetAddressSpace(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyPointerTypeGetAlignment(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyPointerTypeGetSwizzle(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// MemRefType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyMemRefType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyMemRefTypeGetTypeID(void);
+
+// Constructor - layout must be LayoutType
+MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGet(MlirType elemType, MlirType layout,
+                                                 int32_t addressSpace, int32_t alignment);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGetElementType(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGetLayout(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyMemRefTypeGetAddressSpace(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyMemRefTypeGetAlignment(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyMemRefTypeGetSwizzle(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// CopyOpUniversalCopyType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyOpUniversalCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyOpUniversalCopyTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyOpUniversalCopyTypeGet(MlirContext ctx, int32_t bitSize);
+
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// CopyAtomType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyCopyAtomType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetCopyOp(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyCopyAtomTypeGetValBits(MlirType type);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutSrc(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutDst(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyCopyAtomTypeGetThrValLayoutRef(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// MmaAtomUniversalFMAType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyMmaAtomUniversalFMAType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyMmaAtomUniversalFMATypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGet(MlirContext ctx, MlirType elemTy);
+
+// Accessors
+MLIR_CAPI_EXPORTED MlirType mlirFlyMmaAtomUniversalFMATypeGetElemTy(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// TiledCopyType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyTiledCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyTiledCopyTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetCopyAtom(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetLayoutThrVal(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTileMN(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutSrc(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledCopyTypeGetTiledTVLayoutDst(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// TiledMmaType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyTiledMmaType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyTiledMmaTypeGetTypeID(void);
+
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetMmaAtom(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetAtomLayout(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetPermutation(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetThrLayoutVMNK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutA(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutB(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type);
+
+//===----------------------------------------------------------------------===//
+// Pass Registration
+//===----------------------------------------------------------------------===//
+
+/// Register all Fly dialect passes (fly-canonicalize, fly-layout-lowering).
+MLIR_CAPI_EXPORTED void mlirRegisterFlyPasses(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // FLYDSL_C_FLYDIALECT_H
