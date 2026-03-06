@@ -85,7 +85,7 @@ def _pipeline_fragments(
         + f"use-bare-pointers-for-kernels={llvm_bare_kern_opt}"
         + "}",
         "reconcile-unrealized-casts",
-        "gpu-module-to-binary{format=fatbin opts= section= toolkit=}",
+        f"gpu-module-to-binary{{format=fatbin opts={os.environ.get('FLYDSL_LLC_OPTS', '')} section= toolkit=}}",
     ]
 
 
@@ -170,7 +170,7 @@ def _dump_isa_from_rocdl_module_asm(
         # Parse a fresh clone so we don't mutate the main compilation module.
         mod = ir.Module.parse(asm, context=ctx)
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",  # ISA dump always without custom opts
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
