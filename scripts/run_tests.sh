@@ -56,6 +56,9 @@ run_pytest "Norm & Softmax Kernels" \
 run_pytest "Vector Addition" \
     tests/kernels/test_vec_add.py
 
+run_pytest "MoE Reduce Kernel" \
+    tests/kernels/test_moe_reduce.py
+
 FLYDSL_RUN_QUANT=1 \
 run_pytest "Per-Token Quantization" \
     tests/kernels/test_quant.py
@@ -67,7 +70,51 @@ run_pytest "Layout Algebra & PyIR Tests" \
     tests/pyir/test_layout_algebra.py tests/pyir/test_static_vs_dynamic.py tests/pyir/test_rocir_print.py
 
 # ---------------------------------------------------------------------------
-# Examples (examples/*.py) — standalone scripts, not pytest
+# Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Norm & Softmax Kernels"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Vector Addition Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Vector Addition"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/kernels/test_vec_add.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Per-Token Quantization Kernel
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Per-Token Quantization"
+echo "========================================================================"
+echo ""
+
+FLYDSL_RUN_QUANT=1 python3 -m pytest tests/kernels/test_quant.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Python Examples (tests/python/examples/) via pytest
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================================"
+echo "Python Examples"
+echo "========================================================================"
+echo ""
+
+python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
+
+# ---------------------------------------------------------------------------
+# Examples (examples/*.py)
 # ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"
