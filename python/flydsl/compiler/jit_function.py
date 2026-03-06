@@ -168,6 +168,123 @@ def _jit_function_cache_key(func: Callable) -> str:
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 
 
+def _stage_label_from_fragment(fragment: str) -> str:
+    """Make a stable, filename-friendly label from a pipeline fragment."""
+    import re as _re
+    base = fragment.strip()
+    if base.startswith("gpu.module(") and base.endswith(")"):
+        base = base[len("gpu.module("):-1].strip()
+    base = base.split("{", 1)[0].strip()
+    base = _re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower()
+    return base or "stage"
+
+
+def _dump_ir(stage: str, *, dump_dir: Path, asm: str) -> Path:
+    """Write one compilation stage's MLIR assembly to a .mlir file."""
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    out = dump_dir / f"{stage}.mlir"
+    out.write_text(asm, encoding="utf-8")
+    return out
+
+
+def _extract_isa_text(mlir_asm: str) -> str:
+    """Extract human-readable ISA from MLIR gpu.binary assembly attribute.
+
+    The ``gpu-module-to-binary{format=isa}`` pass embeds the ISA inside an MLIR
+    attribute like ``assembly = "..."`` with MLIR string escapes (``\\0A`` for
+    newline, ``\\09`` for tab, ``\\22`` for double-quote).  This function
+    locates that string and un-escapes it so the output is a normal ``.s`` file.
+    """
+    import re as _re
+
+    m = _re.search(r'assembly\s*=\s*"', mlir_asm)
+    if not m:
+        return mlir_asm
+
+    start = m.end()
+    # Walk forward to find the closing unescaped quote.
+    i = start
+    chars = []
+    while i < len(mlir_asm):
+        ch = mlir_asm[i]
+        if ch == '"':
+            break
+        if ch == '\\' and i + 1 < len(mlir_asm):
+            nxt = mlir_asm[i + 1]
+            if nxt == '\\':
+                chars.append('\\')
+                i += 2
+                continue
+            if nxt == '"':
+                chars.append('"')
+                i += 2
+                continue
+            # MLIR hex escape: \XX
+            if i + 3 <= len(mlir_asm):
+                hex_str = mlir_asm[i + 1:i + 3]
+                try:
+                    chars.append(chr(int(hex_str, 16)))
+                    i += 3
+                    continue
+                except ValueError:
+                    pass
+        chars.append(ch)
+        i += 1
+
+    return ''.join(chars)
+
+
+def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str,
+              verify: bool, stage_name: str = "15_final_isa"):
+    """Best-effort dump of final GPU ISA/assembly (.s).
+
+    Runs ``gpu-module-to-binary{format=isa}`` on a *cloned* module so the
+    main compilation is not affected.  The raw ISA text is extracted from the
+    MLIR ``assembly = "..."`` attribute and written as a clean ``.s`` file.
+    """
+    try:
+        mod = ir.Module.parse(asm, context=ctx)
+        pm = PassManager.parse(
+            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            context=ctx,
+        )
+        pm.enable_verifier(bool(verify))
+        pm.run(mod.operation)
+
+        raw_mlir = mod.operation.get_asm(enable_debug_info=False)
+        isa_text = _extract_isa_text(raw_mlir)
+
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        out = dump_dir / f"{stage_name}.s"
+        out.write_text(isa_text, encoding="utf-8")
+        return out
+    except Exception as exc:
+        log().debug(f"[dump_isa] failed: {exc}")
+        return None
+
+
+def _infer_kernel_names_from_asm(asm: str) -> list:
+    """Extract gpu.func kernel names from MLIR assembly."""
+    names = []
+    for line in asm.splitlines():
+        if "gpu.func @" not in line or " kernel" not in line:
+            continue
+        try:
+            after = line.split("gpu.func @", 1)[1]
+            name = after.split("(", 1)[0].strip()
+            if name:
+                names.append(name)
+        except Exception:
+            pass
+    return names
+
+
+def _sanitize_path_component(s: str) -> str:
+    import re as _re
+    s = str(s).strip()
+    return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
+
+
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
@@ -190,54 +307,6 @@ class MlirCompiler:
             "gpu-module-to-binary{format=fatbin}",
         ]
 
-    @staticmethod
-    def _dump_ir(stage: str, *, dump_dir: Path, asm: str) -> Path:
-        dump_dir.mkdir(parents=True, exist_ok=True)
-        out = dump_dir / f"{stage}.mlir"
-        out.write_text(asm, encoding="utf-8")
-        return out
-
-    @staticmethod
-    def _dump_isa(*, dump_dir: Path, asm: str, chip: str, verify: bool) -> "Optional[Path]":
-        """Best-effort dump final ISA/assembly (.s) from the post-reconcile IR.
-
-        Parses a fresh clone of the module and runs gpu-module-to-binary with
-        format=isa to produce readable GCN assembly.
-        """
-        try:
-            from .._mlir.dialects import gpu as _gpu_mod
-            ObjectAttr = _gpu_mod.ObjectAttr
-            BinaryOp = _gpu_mod.BinaryOp
-        except Exception:
-            return None
-        try:
-            ctx = ir.Context()
-            ctx.load_all_available_dialects()
-            with ctx:
-                mod = ir.Module.parse(asm, context=ctx)
-                pm = PassManager.parse(
-                    "builtin.module(gpu-module-to-binary{format=isa})", context=ctx
-                )
-                pm.enable_verifier(verify)
-                pm.run(mod.operation)
-                # Extract ISA bytes from the gpu.binary op (top-level in module body).
-                for op in mod.body:
-                    if op.operation.name == "gpu.binary":
-                        objs_attr = op.attributes["objects"]
-                        if len(objs_attr) > 0:
-                            oa = ObjectAttr(objs_attr[len(objs_attr) - 1])
-                            isa_bytes = oa.object
-                            dump_dir.mkdir(parents=True, exist_ok=True)
-                            out = dump_dir / "15_final_isa.s"
-                            if isinstance(isa_bytes, bytes):
-                                out.write_bytes(isa_bytes)
-                            else:
-                                out.write_text(str(isa_bytes), encoding="utf-8")
-                            return out
-        except Exception as e:
-            print(f"[flydsl.compile] ISA dump failed: {e}")
-        return None
-
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -252,50 +321,45 @@ class MlirCompiler:
             log().info(f"Origin IR: \n{module}")
 
         dump_enabled = env.debug.dump_ir
-        dump_dir = Path(env.debug.dump_dir)
+        dump_dir = Path(env.debug.dump_dir).resolve()
 
         if dump_enabled:
-            # Infer a subdirectory name from func_name or the gpu module name.
-            subdir = func_name or "module"
-            # Sanitize: replace non-alphanumeric chars with underscore
-            subdir = "".join(c if c.isalnum() or c in "_-." else "_" for c in subdir)
-            dump_dir = dump_dir / subdir
+            asm = module.operation.get_asm(enable_debug_info=True)
+            kernel_names = _infer_kernel_names_from_asm(asm)
+            subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+            dump_dir = dump_dir / _sanitize_path_component(subdir)
             print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 dir={dump_dir}")
 
-            # Dump initial IR (after target override / before passes).
-            out = cls._dump_ir(
-                "00_initial",
-                dump_dir=dump_dir,
-                asm=module.operation.get_asm(enable_debug_info=True),
-            )
-            print(f"[flydsl.compile] dump 00_initial -> {out}")
+            out = _dump_ir("00_origin", dump_dir=dump_dir, asm=asm)
+            print(f"[flydsl.compile] dump 00_origin -> {out}")
 
-            # Run each pass fragment separately and dump intermediate IR.
             asm_for_isa = None
-            for stage_num, frag in enumerate(fragments, start=1):
-                stage_label = frag.split("{")[0].split("(")[-1].strip()
-                stage_name = f"{stage_num:02d}_{stage_label}"
+            stage_num_base = 1
+            for idx, frag in enumerate(fragments):
+                stage_num = stage_num_base + idx
+                stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                 pm = PassManager.parse(f"builtin.module({frag})")
                 pm.enable_verifier(env.debug.enable_verifier)
                 pm.run(module.operation)
+
                 stage_asm = module.operation.get_asm(enable_debug_info=True)
-                out = cls._dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
+                out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
                 print(f"[flydsl.compile] dump {stage_name} -> {out}")
-                # Capture IR right after reconcile-unrealized-casts (before gpu-module-to-binary)
-                # for ISA generation — this is the last stage with readable GPU module IR.
-                if "reconcile-unrealized-casts" in frag:
+
+                if frag.strip() == "reconcile-unrealized-casts":
                     asm_for_isa = stage_asm
 
-            # Dump ISA assembly from the post-reconcile IR.
             if asm_for_isa is not None:
-                isa_out = cls._dump_isa(
+                isa_stage = f"{stage_num_base + len(fragments):02d}_final_isa"
+                isa_out = _dump_isa(
                     dump_dir=dump_dir,
+                    ctx=module.context,
                     asm=asm_for_isa,
-                    chip=chip,
                     verify=env.debug.enable_verifier,
+                    stage_name=isa_stage,
                 )
                 if isa_out is not None:
-                    print(f"[flydsl.compile] dump 15_final_isa -> {isa_out}")
+                    print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
         else:
             pipeline = f"builtin.module({','.join(fragments)})"
             pm = PassManager.parse(pipeline)
@@ -417,14 +481,16 @@ class JitFunction:
         cache_key = self._make_cache_key(bound.arguments)
 
         cached_func = None
-        if env.runtime.enable_cache:
-            if not hasattr(self, "_mem_cache"):
-                self._mem_cache = {}
+        dump_ir = env.debug.dump_ir
+        use_cache = env.runtime.enable_cache
+        if not hasattr(self, "_mem_cache"):
+            self._mem_cache = {}
+        if use_cache:
             compiled_func = self._mem_cache.get(cache_key)
-            if compiled_func is None:
-                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
-            else:
+            if compiled_func is not None:
                 cached_func = compiled_func
+            elif not dump_ir:
+                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
 
         if cached_func is not None:
             if not hasattr(self, "_cached_ctx"):
@@ -487,9 +553,9 @@ class JitFunction:
                 original_ir,
             )
 
-            if env.runtime.enable_cache:
+            if use_cache:
                 self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager:
+                if self.cache_manager and not dump_ir:
                     self.cache_manager.set(cache_key, compiled_func)
 
             return compiled_func(*jit_args)
