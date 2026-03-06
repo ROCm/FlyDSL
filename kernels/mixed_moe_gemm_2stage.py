@@ -676,7 +676,7 @@ def compile_mixed_moe_gemm1(
                         return a_scale_tile
 
                     def prefetch_ab_scale_tile(base_k):
-                        return [None, load_b_scale_tile(base_k)]
+                        return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
 
                     acc_gate = [acc_init] * (num_acc_n // 2 * m_repeat)
                     acc_up = [acc_init] * (num_acc_n // 2 * m_repeat)
@@ -772,8 +772,8 @@ def compile_mixed_moe_gemm1(
 
                         for ku128 in range_constexpr(k_unroll_packed):
                             for mi in range_constexpr(m_repeat_packed):
-                                # a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
-                                # a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+                                a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
+                                a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
                                 for ni in range_constexpr(num_acc_n_packed):
                                     b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
                                     b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
@@ -820,9 +820,8 @@ def compile_mixed_moe_gemm1(
                                                         current_accs_list[acc_idx],
                                                         cbsz,
                                                         blgp,
-                                                        # use per tensor quant a1 for now,
-                                                        0,
-                                                        0x3F800000,
+                                                        ikxdl * pack_M + imxdl,
+                                                        a_scale_val,
                                                         ikxdl * pack_N + inxdl,
                                                         b_scale_val,
                                                     ],
@@ -872,10 +871,7 @@ def compile_mixed_moe_gemm1(
                     x_regs0 = load_x_tile(k0)
                     w_regs0 = load_b_tile(k0)
 
-                    a_scale_pong = None
-                    a_scale_ping = None
-                    # a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
-                    _, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
+                    a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // 2)
                     store_x_tile_to_lds(x_regs0, lds_base_cur)
                     gpu.barrier()
 
@@ -897,7 +893,7 @@ def compile_mixed_moe_gemm1(
                         next_k1 = k_iv + tile_k
                         x_regs_ping = load_x_tile(next_k1)
                         w_regs_ping = load_b_tile(next_k1 // 2)
-                        _, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
+                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
 
                         acc_gate, acc_up, _ = compute_f8f6f4_tile(
                             acc_gate,
@@ -920,7 +916,7 @@ def compile_mixed_moe_gemm1(
                         next_k2 = k_iv + c2_tile_k
                         x_regs_pong = load_x_tile(next_k2)
                         w_regs_pong = load_b_tile(next_k2 // 2)
-                        _, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
+                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
 
                         acc_gate, acc_up, _ = compute_f8f6f4_tile(
                             acc_gate,
@@ -943,7 +939,7 @@ def compile_mixed_moe_gemm1(
                     k_tail1 = k_in - tile_k
                     x_regs_ping = load_x_tile(k_tail1)
                     w_regs_ping = load_b_tile(k_tail1 // 2)
-                    _, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
+                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
 
                     acc_gate, acc_up, _ = compute_f8f6f4_tile(
                         acc_gate,
@@ -1870,8 +1866,7 @@ def compile_mixed_moe_gemm2(
                     return a_scale_tile
 
                 def prefetch_ab_scale_tile(base_k):
-                    # return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
-                    return [None, load_b_scale_tile(base_k)]
+                    return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
     
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
@@ -1953,6 +1948,8 @@ def compile_mixed_moe_gemm2(
                     # fp4 path
                     for ku128 in range_constexpr(k_unroll_packed):
                         for mi in range_constexpr(m_repeat_packed):
+                            a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
+                            a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
                             for ni in range_constexpr(num_acc_n_packed):
                                 b_scale_i32 = b_scale[ku128 * num_acc_n_packed + ni]
                                 b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
@@ -1997,9 +1994,8 @@ def compile_mixed_moe_gemm2(
                                                     acc_list[acc_idx],
                                                     cbsz,
                                                     blgp,
-                                                    # as gemm1
-                                                    0,
-                                                    0x3F800000,
+                                                    ikxdl * pack_M + imxdl,
+                                                    a_scale_val,
                                                     ikxdl * pack_N + inxdl,
                                                     b_scale_val,
                                                 ],
@@ -2060,8 +2056,8 @@ def compile_mixed_moe_gemm2(
                 k0 = arith.index(0)
                 x_regs0 = load_x_tile(k0)
                 b_cur = load_b_tile(k0)
-                a_scale_ping, a_scale_pong = None, None
-                _, b_scale_pong = prefetch_ab_scale_tile(k0 // pack_K // 128)
+                a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(k0 // pack_K // 128)
+                a_scale_ping = None
                 store_x_tile_to_lds(x_regs0, lds_base_cur)
                 gpu.barrier()
     
@@ -2098,7 +2094,7 @@ def compile_mixed_moe_gemm2(
                         next_k1 = k_iv + tile_k
                         x_regs_ping = load_x_tile(next_k1)
                         b_ping = load_b_tile(next_k1 // 2)
-                        _, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
+                        a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(next_k1 // pack_K // 128)
 
                         acc, _ = compute_tile(acc, b_pong, lds_base_pong, a_scale_pong, b_scale_pong, a0_prefetch=a0_prefetch_pong)
                         store_x_tile_to_lds(x_regs_ping, lds_base_ping)
@@ -2111,7 +2107,7 @@ def compile_mixed_moe_gemm2(
                         next_k2 = k_iv + c2_tile_k
                         x_regs_pong = load_x_tile(next_k2)
                         b_pong = load_b_tile(next_k2 // 2)
-                        _, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
+                        a_scale_pong, b_scale_pong = prefetch_ab_scale_tile(next_k2 // pack_K // 128)
 
                         acc, _ = compute_tile(acc, b_ping, lds_base_ping, a_scale_ping, b_scale_ping, a0_prefetch=a0_prefetch_ping)
                         store_x_tile_to_lds(x_regs_pong, lds_base_pong)
@@ -2138,8 +2134,8 @@ def compile_mixed_moe_gemm2(
                     k_tail1 = (k_in + tile_k -1 )// tile_k * tile_k - tile_k
                     x_regs_ping = load_x_tile(k_tail1)
                     b_ping = load_b_tile(k_tail1 // 2)
-                    _, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
-    
+                    a_scale_ping, b_scale_ping = prefetch_ab_scale_tile(k_tail1 // pack_K // 128)
+
                     acc, _ = compute_tile(acc, b_pong, lds_base_pong, a_scale_pong, b_scale_pong, a0_prefetch=a0_prefetch_pong)
 
                     store_x_tile_to_lds(x_regs_ping, lds_base_ping)
