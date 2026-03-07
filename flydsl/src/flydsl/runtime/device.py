@@ -1,4 +1,5 @@
 import os
+import subprocess
 from typing import Optional
 
 
@@ -22,11 +23,28 @@ def get_rocm_arch() -> str:
 
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(torch.cuda.current_device())
-            arch = getattr(props, "gcnArchName", None) or getattr(props, "gcn_arch_name", None)
+            arch = getattr(props, "gcnArchName", None) or getattr(
+                props, "gcn_arch_name", None
+            )
             if arch:
                 # MLIR/LLVM expects the processor name without feature suffixes.
                 # Example: "gfx942:sramecc+:xnack-" -> "gfx942".
                 return str(arch).split(":", 1)[0]
+    except Exception:
+        pass
+
+    # Try rocminfo as fallback to detect GPU arch.
+    try:
+        result = subprocess.run(
+            ["rocminfo"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Name:") and "gfx" in line:
+                return line.split(":", 1)[1].strip().split()[0]
     except Exception:
         pass
 
@@ -47,5 +65,3 @@ def supports_bf16_global_atomics(arch: str) -> bool:
 def bf16_global_atomics_arch_description() -> str:
     """Human-readable list of archs that support bf16 global atomics (for error messages)."""
     return "/".join(_BF16_GLOBAL_ATOMICS_ARCH_PREFIXES)
-
-

@@ -93,7 +93,8 @@ def GfxArchEnum : I32EnumAttr<"GfxArch",
       I32EnumAttrCase<"GFX940", 2, "gfx940">,
       I32EnumAttrCase<"GFX941", 3, "gfx941">,
       I32EnumAttrCase<"GFX942", 4, "gfx942">,
-      I32EnumAttrCase<"GFX950", 5, "gfx950">
+      I32EnumAttrCase<"GFX950", 5, "gfx950">,
+      I32EnumAttrCase<"GFX1201", 6, "gfx1201">
     ]> {
   let cppNamespace = "::mlir::flir::rocm";
 }

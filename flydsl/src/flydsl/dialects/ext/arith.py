@@ -7,35 +7,57 @@ import os
 import numpy as np
 
 from _mlir.ir import (
-    Type, Value, IntegerType, IndexType, F32Type, F64Type, F16Type,
-    DenseElementsAttr, Location, InsertionPoint, ShapedType, VectorType
+    Type,
+    Value,
+    IntegerType,
+    IndexType,
+    F32Type,
+    F64Type,
+    F16Type,
+    BF16Type,
+    DenseElementsAttr,
+    Location,
+    InsertionPoint,
+    ShapedType,
+    VectorType,
 )
 from _mlir.dialects import arith as _arith
 from _mlir.dialects._ods_common import get_op_result_or_op_results
 
 from ._loc import maybe_default_loc
 
+
 def _is_integer_like_type(t: Type) -> bool:
     """Check if type is integer-like (including index)."""
     return IntegerType.isinstance(t) or IndexType.isinstance(t)
 
+
 def _is_floating_point_type(t: Type) -> bool:
     """Check if type is floating point."""
-    return F32Type.isinstance(t) or F64Type.isinstance(t) or F16Type.isinstance(t)
+    return (
+        F32Type.isinstance(t)
+        or F64Type.isinstance(t)
+        or F16Type.isinstance(t)
+        or BF16Type.isinstance(t)
+    )
+
 
 def _is_index_type(t: Type) -> bool:
     """Check if type is index."""
     return IndexType.isinstance(t)
 
+
 def _is_vector_type(t: Type) -> bool:
     """Check if type is a vector."""
     return VectorType.isinstance(t)
+
 
 def _get_element_type(t: Type) -> Type:
     """Get element type from vector or return the type itself for scalars."""
     if _is_vector_type(t):
         return VectorType(t).element_type
     return t
+
 
 def _infer_mlir_type(value, vector=False):
     """Infer MLIR type from Python value."""
@@ -52,6 +74,7 @@ def _infer_mlir_type(value, vector=False):
     else:
         raise ValueError(f"Cannot infer MLIR type from {type(value)}")
 
+
 def constant(
     value: Union[int, float, bool],
     *,
@@ -61,14 +84,14 @@ def constant(
     ip: InsertionPoint = None,
 ) -> "ArithValue":
     """Create a constant with type inference.
-    
+
     Args:
         value: Python value (int, float, bool)
         type: Optional explicit MLIR type
         index: If True, create index type constant
         loc: Location for the operation
         ip: Insertion point
-        
+
     Returns:
         ArithValue wrapping the constant
     """
@@ -78,7 +101,7 @@ def constant(
         mlir_type = type
     else:
         mlir_type = _infer_mlir_type(value)
-    
+
     if _is_floating_point_type(mlir_type) and not isinstance(value, float):
         value = float(value)
 
@@ -126,45 +149,68 @@ def constant(
     result = _arith.ConstantOp(mlir_type, value, loc=loc, ip=ip).result
     return ArithValue(result)
 
-def index(value: int, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+
+def index(
+    value: int, *, loc: Location = None, ip: InsertionPoint = None
+) -> "ArithValue":
     """Create an index constant."""
     return constant(value, index=True, loc=loc, ip=ip)
+
 
 def i32(value: int, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
     """Create an i32 constant."""
     return constant(value, type=IntegerType.get_signless(32), loc=loc, ip=ip)
 
+
 def i64(value: int, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
     """Create an i64 constant."""
     return constant(value, type=IntegerType.get_signless(64), loc=loc, ip=ip)
 
-def f16(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+
+def f16(
+    value: float, *, loc: Location = None, ip: InsertionPoint = None
+) -> "ArithValue":
     """Create an f16 constant."""
     return constant(value, type=F16Type.get(), loc=loc, ip=ip)
 
-def f16(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+
+def f16(
+    value: float, *, loc: Location = None, ip: InsertionPoint = None
+) -> "ArithValue":
     """Create an f16 constant."""
     return constant(value, type=F16Type.get(), loc=loc, ip=ip)
 
-def f32(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+
+def f32(
+    value: float, *, loc: Location = None, ip: InsertionPoint = None
+) -> "ArithValue":
     """Create an f32 constant."""
     return constant(value, type=F32Type.get(), loc=loc, ip=ip)
 
-def f64(value: float, *, loc: Location = None, ip: InsertionPoint = None) -> "ArithValue":
+
+def f64(
+    value: float, *, loc: Location = None, ip: InsertionPoint = None
+) -> "ArithValue":
     """Create an f64 constant."""
     return constant(value, type=F64Type.get(), loc=loc, ip=ip)
 
-def maximum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def maximum(
+    lhs: Union["ArithValue", Value],
+    rhs: Union["ArithValue", Value],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Compute maximum of two values (automatically handles float/int types).
-    
+
     Args:
         lhs: Left operand (ArithValue, Value, or Python number)
         rhs: Right operand (ArithValue, Value, or Python number)
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the maximum result
-        
+
     Example:
         >>> a = arith.f32(1.5)
         >>> b = arith.f32(2.3)
@@ -173,17 +219,23 @@ def maximum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *,
     """
     return _minmax_op(lhs, rhs, op_type="max", loc=loc)
 
-def minimum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def minimum(
+    lhs: Union["ArithValue", Value],
+    rhs: Union["ArithValue", Value],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Compute minimum of two values (automatically handles float/int types).
-    
+
     Args:
         lhs: Left operand (ArithValue, Value, or Python number)
         rhs: Right operand (ArithValue, Value, or Python number)
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the minimum result
-        
+
     Example:
         >>> a = arith.f32(1.5)
         >>> b = arith.f32(2.3)
@@ -192,41 +244,58 @@ def minimum(lhs: Union["ArithValue", Value], rhs: Union["ArithValue", Value], *,
     """
     return _minmax_op(lhs, rhs, op_type="min", loc=loc)
 
-def select(condition: Union["ArithValue", Value], true_value: Union["ArithValue", Value], 
-           false_value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def select(
+    condition: Union["ArithValue", Value],
+    true_value: Union["ArithValue", Value],
+    false_value: Union["ArithValue", Value],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Select between two values based on a condition (ternary operator).
-    
+
     Args:
         condition: Boolean condition (i1 type)
         true_value: Value to return if condition is true
         false_value: Value to return if condition is false
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the selected value
-        
+
     Example:
         >>> cond = a < b
         >>> result = arith.select(cond, a, b)  # Equivalent to: a if cond else b
     """
-    cond_val = _unwrap_value(condition) if isinstance(condition, ArithValue) else condition
-    true_val = _unwrap_value(true_value) if isinstance(true_value, ArithValue) else true_value
-    false_val = _unwrap_value(false_value) if isinstance(false_value, ArithValue) else false_value
-    
+    cond_val = (
+        _unwrap_value(condition) if isinstance(condition, ArithValue) else condition
+    )
+    true_val = (
+        _unwrap_value(true_value) if isinstance(true_value, ArithValue) else true_value
+    )
+    false_val = (
+        _unwrap_value(false_value)
+        if isinstance(false_value, ArithValue)
+        else false_value
+    )
+
     result = _arith.SelectOp(cond_val, true_val, false_val, loc=loc).result
     return ArithValue(result)
 
-def extf(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def extf(
+    result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None
+) -> "ArithValue":
     """Extend floating point value to a wider type (e.g., f16 -> f32).
-    
+
     Args:
         result_type: Target floating point type
         value: Value to extend
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the extended value
-        
+
     Example:
         >>> f16_val = ...  # some f16 value
         >>> f32_val = arith.extf(T.vector(32, T.f32()), f16_val)
@@ -235,17 +304,20 @@ def extf(result_type: Type, value: Union["ArithValue", Value], *, loc: Location 
     result = _arith.ExtFOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
-def fptosi(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def fptosi(
+    result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None
+) -> "ArithValue":
     """Convert floating point value to signed integer.
-    
+
     Args:
         result_type: Target integer type
         value: Floating point value to convert
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the integer result
-        
+
     Example:
         >>> f32_val = arith.f32(3.7)
         >>> i32_val = arith.fptosi(T.i32(), f32_val)  # Result: 3
@@ -255,7 +327,9 @@ def fptosi(result_type: Type, value: Union["ArithValue", Value], *, loc: Locatio
     return ArithValue(result)
 
 
-def sitofp(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+def sitofp(
+    result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None
+) -> "ArithValue":
     """Convert signed integer value to floating point.
 
     Args:
@@ -274,63 +348,76 @@ def sitofp(result_type: Type, value: Union["ArithValue", Value], *, loc: Locatio
     result = _arith.SIToFPOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
-def constant_vector(element_value: Union[int, float], vector_type: Type, *, loc: Location = None) -> "ArithValue":
+
+def constant_vector(
+    element_value: Union[int, float], vector_type: Type, *, loc: Location = None
+) -> "ArithValue":
     """Create a constant vector with all elements set to the same value.
-    
+
     Args:
         element_value: Scalar value to splat across the vector
         vector_type: Vector type (e.g., T.vector(32, T.f32()))
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the constant vector
-        
+
     Example:
         >>> vec_zero = arith.constant_vector(0.0, T.vector(32, T.f16()))
         >>> vec_ones = arith.constant_vector(1.0, T.vector(16, T.f32()))
     """
     from _mlir.ir import FloatAttr, IntegerAttr, DenseElementsAttr
-    
+
     # Get element type from vector type
     element_type = VectorType(vector_type).element_type
-    
+
     # Create attribute for the element value
     if _is_floating_point_type(element_type):
         elem_attr = FloatAttr.get(element_type, float(element_value))
     elif _is_integer_like_type(element_type):
         elem_attr = IntegerAttr.get(element_type, int(element_value))
     else:
-        raise ValueError(f"Unsupported element type for constant vector: {element_type}")
-    
+        raise ValueError(
+            f"Unsupported element type for constant vector: {element_type}"
+        )
+
     # Create dense elements attribute (splat)
     dense_attr = DenseElementsAttr.get_splat(vector_type, elem_attr)
-    
+
     result = _arith.ConstantOp(vector_type, dense_attr, loc=loc).result
     return ArithValue(result)
 
+
 def absf(value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
     """Calculate absolute value (floating point).
-    
+
     Args:
         value: Input value (float or vector of floats)
         loc: Optional source location
-        
+
     Returns:
         Absolute value result wrapped in ArithValue
     """
     from _mlir.dialects import math as _math
+
     val = _unwrap_value(value)
     result = _math.AbsFOp(val, loc=loc).result
     return ArithValue(result)
 
-def andi(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def andi(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Bitwise AND operation on integers.
-    
+
     Args:
         lhs: Left operand
         rhs: Right operand
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the AND result
     """
@@ -344,14 +431,20 @@ def andi(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, i
     result = _arith.AndIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
-def ori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def ori(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Bitwise OR operation on integers.
-    
+
     Args:
         lhs: Left operand
         rhs: Right operand
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the OR result
     """
@@ -365,14 +458,20 @@ def ori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, in
     result = _arith.OrIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
-def xori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def xori(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Bitwise XOR operation on integers.
-    
+
     Args:
         lhs: Left operand
         rhs: Right operand
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the XOR result
     """
@@ -386,14 +485,20 @@ def xori(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, i
     result = _arith.XOrIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
-def shrui(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def shrui(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Logical (unsigned) right shift operation on integers.
-    
+
     Args:
         lhs: Value to shift
         rhs: Number of bits to shift
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the shift result
     """
@@ -407,14 +512,20 @@ def shrui(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, 
     result = _arith.ShRUIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
-def shli(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def shli(
+    lhs: Union["ArithValue", Value, int],
+    rhs: Union["ArithValue", Value, int],
+    *,
+    loc: Location = None,
+) -> "ArithValue":
     """Left shift operation on integers.
-    
+
     Args:
         lhs: Value to shift
         rhs: Number of bits to shift
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the shift result
     """
@@ -428,14 +539,17 @@ def shli(lhs: Union["ArithValue", Value, int], rhs: Union["ArithValue", Value, i
     result = _arith.ShLIOp(lhs_val, rhs_val, loc=loc).result
     return ArithValue(result)
 
-def index_cast(target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def index_cast(
+    target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None
+) -> "ArithValue":
     """Cast between index and integer types.
-    
+
     Args:
         target_type: Target type (index or integer type)
         value: Value to cast
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the cast result
     """
@@ -446,7 +560,10 @@ def index_cast(target_type: Type, value: Union["ArithValue", Value, int], *, loc
     result = _arith.IndexCastOp(target_type, val, loc=loc).result
     return ArithValue(result)
 
-def index_cast_ui(target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None) -> "ArithValue":
+
+def index_cast_ui(
+    target_type: Type, value: Union["ArithValue", Value, int], *, loc: Location = None
+) -> "ArithValue":
     """Cast between index and unsigned integer types.
 
     Args:
@@ -465,21 +582,26 @@ def index_cast_ui(target_type: Type, value: Union["ArithValue", Value, int], *, 
     return ArithValue(result)
 
 
-def bitcast(result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+def bitcast(
+    result_type: Type, value: Union["ArithValue", Value], *, loc: Location = None
+) -> "ArithValue":
     """Reinterpret-cast bits between types of the same width (e.g. f32 <-> i32)."""
     loc = maybe_default_loc(loc)
     val = _unwrap_value(value)
     result = _arith.BitcastOp(result_type, val, loc=loc).result
     return ArithValue(result)
 
-def trunc_f(target_type: Type, value: Union["ArithValue", Value], *, loc: Location = None) -> "ArithValue":
+
+def trunc_f(
+    target_type: Type, value: Union["ArithValue", Value], *, loc: Location = None
+) -> "ArithValue":
     """Truncate floating point value to narrower type (e.g., f32 -> f16).
-    
+
     Args:
         target_type: Target floating point type
         value: Value to truncate
         loc: Optional source location
-        
+
     Returns:
         ArithValue wrapping the truncated result
     """
@@ -488,29 +610,36 @@ def trunc_f(target_type: Type, value: Union["ArithValue", Value], *, loc: Locati
     result = _arith.TruncFOp(target_type, val, loc=loc).result
     return ArithValue(result)
 
-def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optional[Value] = None, loc: Location = None) -> "ArithValue":
+
+def reduce(
+    value: Union["ArithValue", Value],
+    kind: str = "add",
+    *,
+    acc: Optional[Value] = None,
+    loc: Location = None,
+) -> "ArithValue":
     """Perform vector reduction.
-    
+
     Args:
         value: Input vector value
         kind: Reduction kind ("add", "mul", "min", "max", "and", "or", "xor")
         acc: Optional accumulator
         loc: Optional source location
-        
+
     Returns:
         Reduced scalar value wrapped in ArithValue
     """
     from _mlir.dialects import vector as _vector
-    
+
     val = _unwrap_value(value)
-    
+
     # Map string kind to CombiningKind enum
     kind = kind.lower()
     val_type = val.type
     elem_type = _get_element_type(val_type)
-    
+
     is_float = _is_floating_point_type(elem_type)
-    
+
     kind_map = {
         "add": _vector.CombiningKind.ADD,
         "mul": _vector.CombiningKind.MUL,
@@ -518,27 +647,28 @@ def reduce(value: Union["ArithValue", Value], kind: str = "add", *, acc: Optiona
         "or": _vector.CombiningKind.OR,
         "xor": _vector.CombiningKind.XOR,
     }
-    
+
     if kind in ["min", "max"]:
         if is_float:
             kind_map["min"] = _vector.CombiningKind.MINIMUMF
             kind_map["max"] = _vector.CombiningKind.MAXIMUMF
         else:
-            kind_map["min"] = _vector.CombiningKind.MINSI # Default to signed
+            kind_map["min"] = _vector.CombiningKind.MINSI  # Default to signed
             kind_map["max"] = _vector.CombiningKind.MAXSI
-            
+
     if kind not in kind_map:
         raise ValueError(f"Unsupported reduction kind: {kind}")
-        
+
     combining_kind = kind_map[kind]
-    
+
     if acc is not None:
         acc = _unwrap_value(acc)
         op = _vector.ReductionOp(elem_type, combining_kind, val, acc=acc, loc=loc)
     else:
         op = _vector.ReductionOp(elem_type, combining_kind, val, loc=loc)
-        
+
     return ArithValue(op.result)
+
 
 def _unwrap_value(val):
     """递归unwrap ArithValue，获取底层的 ir.Value"""
@@ -573,6 +703,7 @@ def as_value(
     """Alias for `unwrap`, intended for readability at MLIR builder boundaries."""
     return unwrap(val, type=type, index=index, loc=loc)
 
+
 def _binary_op(
     lhs: "ArithValue",
     rhs: "ArithValue",
@@ -604,12 +735,12 @@ def _binary_op(
             rhs = constant(rhs, type=lhs._value.type, loc=loc)
         else:
             rhs = ArithValue(rhs)
-    
+
     # Determine operation suffix based on type
     # For vectors, check the element type
     lhs_type = lhs._value.type if isinstance(lhs, ArithValue) else lhs.type
     element_type = _get_element_type(lhs_type)
-    
+
     op_name = op.capitalize()
     if _is_floating_point_type(element_type):
         op_name += "F"
@@ -630,8 +761,10 @@ def _binary_op(
             else:
                 op_name += "I"
     else:
-        raise NotImplementedError(f"Unsupported operand types for {op}: {lhs_type} (element type: {element_type})")
-    
+        raise NotImplementedError(
+            f"Unsupported operand types for {op}: {lhs_type} (element type: {element_type})"
+        )
+
     # Get the operation class
     op_class = getattr(_arith, f"{op_name}Op")
 
@@ -653,11 +786,13 @@ def _binary_op(
         pass
 
     result = op_class(lhs_val, rhs_val, loc=loc).result
-    
+
     return ArithValue(result)
 
 
-def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = None) -> "ArithValue":
+def _shift_op(
+    lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = None
+) -> "ArithValue":
     """Shift operation for `ArithValue`.
 
     Notes:
@@ -678,8 +813,14 @@ def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = 
         else:
             lhs = ArithValue(lhs)
     elif not isinstance(lhs, ArithValue) and not isinstance(rhs, ArithValue):
-        lhs = constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
-        rhs = constant(rhs, type=lhs._value.type, loc=loc) if isinstance(rhs, (int, float)) else ArithValue(rhs)
+        lhs = (
+            constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
+        )
+        rhs = (
+            constant(rhs, type=lhs._value.type, loc=loc)
+            if isinstance(rhs, (int, float))
+            else ArithValue(rhs)
+        )
 
     lhs_val = _unwrap_value(lhs)
     rhs_val = _unwrap_value(rhs)
@@ -687,7 +828,9 @@ def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = 
     lhs_type = lhs_val.type
     element_type = _get_element_type(lhs_type)
     if not _is_integer_like_type(element_type):
-        raise NotImplementedError(f"Shift not supported for type: {lhs_type} (element type: {element_type})")
+        raise NotImplementedError(
+            f"Shift not supported for type: {lhs_type} (element type: {element_type})"
+        )
 
     if op == "shl":
         op_class = _arith.ShLIOp
@@ -698,9 +841,13 @@ def _shift_op(lhs: "ArithValue", rhs: "ArithValue", op: str, *, loc: Location = 
 
     return ArithValue(op_class(lhs_val, rhs_val, loc=loc).result)
 
-def _rbinary_op(rhs: "ArithValue", lhs: "ArithValue", op: str, *, loc: Location = None) -> "ArithValue":
+
+def _rbinary_op(
+    rhs: "ArithValue", lhs: "ArithValue", op: str, *, loc: Location = None
+) -> "ArithValue":
     """Reverse binary operation (for right-hand operations)."""
     return _binary_op(lhs, rhs, op, loc=loc)
+
 
 def _comparison_op(
     lhs: "ArithValue",
@@ -714,11 +861,17 @@ def _comparison_op(
     # Coerce rhs to ArithValue if needed
     if not isinstance(rhs, ArithValue):
         if isinstance(rhs, (int, float)):
-            rhs = constant(rhs, type=lhs._value.type if isinstance(lhs, ArithValue) else lhs.type, loc=loc)
+            rhs = constant(
+                rhs,
+                type=lhs._value.type if isinstance(lhs, ArithValue) else lhs.type,
+                loc=loc,
+            )
         else:
             rhs = ArithValue(rhs)
-    
-    if _is_floating_point_type(lhs._value.type if isinstance(lhs, ArithValue) else lhs.type):
+
+    if _is_floating_point_type(
+        lhs._value.type if isinstance(lhs, ArithValue) else lhs.type
+    ):
         # Ordered float comparison
         if predicate in {"eq", "ne"}:
             pred_name = "O" + predicate.upper()  # OEQ, ONE
@@ -728,7 +881,9 @@ def _comparison_op(
         lhs_val = _unwrap_value(lhs) if isinstance(lhs, ArithValue) else lhs
         rhs_val = _unwrap_value(rhs) if isinstance(rhs, ArithValue) else rhs
         result = _arith.CmpFOp(pred_attr, lhs_val, rhs_val, loc=loc).result
-    elif _is_integer_like_type(lhs._value.type if isinstance(lhs, ArithValue) else lhs.type):
+    elif _is_integer_like_type(
+        lhs._value.type if isinstance(lhs, ArithValue) else lhs.type
+    ):
         # Signed integer comparison
         if predicate in {"eq", "ne"}:
             pred_name = predicate  # eq, ne (lowercase)
@@ -739,8 +894,10 @@ def _comparison_op(
         rhs_val = _unwrap_value(rhs) if isinstance(rhs, ArithValue) else rhs
         result = _arith.CmpIOp(pred_attr, lhs_val, rhs_val, loc=loc).result
     else:
-        raise NotImplementedError(f"Comparison not supported for type: {lhs._value.type if isinstance(lhs, ArithValue) else lhs.type}")
-    
+        raise NotImplementedError(
+            f"Comparison not supported for type: {lhs._value.type if isinstance(lhs, ArithValue) else lhs.type}"
+        )
+
     return ArithValue(result)
 
 
@@ -762,15 +919,23 @@ def cmpu(
     """
     # Coerce inputs similarly to `_comparison_op`
     if not isinstance(lhs, ArithValue):
-        lhs = constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
+        lhs = (
+            constant(lhs, loc=loc) if isinstance(lhs, (int, float)) else ArithValue(lhs)
+        )
     if not isinstance(rhs, ArithValue):
-        rhs = constant(rhs, type=lhs._value.type, loc=loc) if isinstance(rhs, (int, float)) else ArithValue(rhs)
+        rhs = (
+            constant(rhs, type=lhs._value.type, loc=loc)
+            if isinstance(rhs, (int, float))
+            else ArithValue(rhs)
+        )
 
     lhs_val = _unwrap_value(lhs)
     rhs_val = _unwrap_value(rhs)
 
     if not _is_integer_like_type(_get_element_type(lhs_val.type)):
-        raise NotImplementedError(f"Unsigned compare not supported for type: {lhs_val.type}")
+        raise NotImplementedError(
+            f"Unsigned compare not supported for type: {lhs_val.type}"
+        )
 
     pred_attr = getattr(_arith.CmpIPredicate, predicate)
     return ArithValue(_arith.CmpIOp(pred_attr, lhs_val, rhs_val, loc=loc).result)
@@ -790,6 +955,8 @@ def ugt(lhs, rhs, *, loc: Location = None) -> "ArithValue":
 
 def uge(lhs, rhs, *, loc: Location = None) -> "ArithValue":
     return cmpu(lhs, rhs, "uge", loc=loc)
+
+
 def _minmax_op(
     lhs: "ArithValue",
     rhs: "ArithValue",
@@ -802,14 +969,18 @@ def _minmax_op(
     # Coerce rhs to ArithValue if needed
     if not isinstance(rhs, ArithValue):
         if isinstance(rhs, (int, float)):
-            rhs = constant(rhs, type=lhs._value.type if isinstance(lhs, ArithValue) else lhs.type, loc=loc)
+            rhs = constant(
+                rhs,
+                type=lhs._value.type if isinstance(lhs, ArithValue) else lhs.type,
+                loc=loc,
+            )
         else:
             rhs = ArithValue(rhs)
-    
+
     # Unwrap values
     lhs_val = _unwrap_value(lhs) if isinstance(lhs, ArithValue) else lhs
     rhs_val = _unwrap_value(rhs) if isinstance(rhs, ArithValue) else rhs
-    
+
     if _is_floating_point_type(lhs_val.type):
         # Float min/max
         if op_type == "max":
@@ -827,18 +998,19 @@ def _minmax_op(
         result = op_class(lhs_val, rhs_val, loc=loc).result
     else:
         raise NotImplementedError(f"{op_type} not supported for type: {lhs_val.type}")
-    
+
     return ArithValue(result)
+
 
 class ArithValue:
     """Value wrapper with operator overloading for Pythonic arithmetic.
-    
+
     Allows writing natural Python expressions like:
         c = a + b       # instead of arith.AddIOp(a, b)
         d = a * 2       # instead of arith.MulIOp(a, constant(2))
         e = a < b       # instead of arith.CmpIOp(...)
     """
-    
+
     def __init__(self, value: Value):
         """Wrap an MLIR Value.
 
@@ -848,14 +1020,14 @@ class ArithValue:
         nested wrappers here.
         """
         object.__setattr__(self, "_value", _unwrap_value(value))
-    
+
     def __getattr__(self, name):
         """Delegate attribute access to wrapped value."""
         return getattr(self._value, name)
-    
+
     def __repr__(self):
         return f"ArithValue({self._value})"
-    
+
     # Arithmetic operators
     __add__ = partialmethod(_binary_op, op="add")
     __sub__ = partialmethod(_binary_op, op="sub")
@@ -876,7 +1048,7 @@ class ArithValue:
     # Min/Max methods
     max = partialmethod(_minmax_op, op_type="max")
     min = partialmethod(_minmax_op, op_type="min")
-    
+
     # Reverse arithmetic operators (for when left operand is Python type)
     __radd__ = partialmethod(_rbinary_op, op="add")
     __rsub__ = partialmethod(_rbinary_op, op="sub")
@@ -885,7 +1057,6 @@ class ArithValue:
     __rfloordiv__ = partialmethod(_rbinary_op, op="div")
     __rmod__ = partialmethod(_rbinary_op, op="mod")
 
-    
     # Comparison operators
     __eq__ = partialmethod(_comparison_op, predicate="eq")
     __ne__ = partialmethod(_comparison_op, predicate="ne")
@@ -893,32 +1064,92 @@ class ArithValue:
     __le__ = partialmethod(_comparison_op, predicate="le")
     __gt__ = partialmethod(_comparison_op, predicate="gt")
     __ge__ = partialmethod(_comparison_op, predicate="ge")
-    
+
     # Allow unwrapping for MLIR operations
     @property
     def value(self) -> Value:
         """Get the underlying MLIR Value (递归unwrap)."""
         return _unwrap_value(self)
 
+
 # Re-export commonly used arith operations
 from _mlir.dialects.arith import (
-    AddIOp, AddFOp, SubIOp, SubFOp, MulIOp, MulFOp,
-    DivSIOp, DivFOp, RemSIOp, RemFOp,
-    CmpIOp, CmpFOp, CmpIPredicate, CmpFPredicate,
-    IndexCastOp, ExtSIOp, TruncIOp, ExtFOp, TruncFOp,
-    SIToFPOp, FPToSIOp, SelectOp,
+    AddIOp,
+    AddFOp,
+    SubIOp,
+    SubFOp,
+    MulIOp,
+    MulFOp,
+    DivSIOp,
+    DivFOp,
+    RemSIOp,
+    RemFOp,
+    CmpIOp,
+    CmpFOp,
+    CmpIPredicate,
+    CmpFPredicate,
+    IndexCastOp,
+    ExtSIOp,
+    TruncIOp,
+    ExtFOp,
+    TruncFOp,
+    SIToFPOp,
+    FPToSIOp,
+    SelectOp,
 )
 
 __all__ = [
-    "constant", "unwrap", "as_value", "index", "i32", "i64", "f16", "f32", "f64", "Index",
-    "maximum", "minimum", "select", "extf", "fptosi", "sitofp", "absf", "reduce", "constant_vector",
-    "andi", "ori", "xori", "shrui", "shli", "index_cast", "index_cast_ui", "trunc_f", "bitcast",
+    "constant",
+    "unwrap",
+    "as_value",
+    "index",
+    "i32",
+    "i64",
+    "f16",
+    "f32",
+    "f64",
+    "Index",
+    "maximum",
+    "minimum",
+    "select",
+    "extf",
+    "fptosi",
+    "sitofp",
+    "absf",
+    "reduce",
+    "constant_vector",
+    "andi",
+    "ori",
+    "xori",
+    "shrui",
+    "shli",
+    "index_cast",
+    "index_cast_ui",
+    "trunc_f",
+    "bitcast",
     "ArithValue",
-    "AddIOp", "AddFOp", "SubIOp", "SubFOp", "MulIOp", "MulFOp",
-    "DivSIOp", "DivFOp", "RemSIOp", "RemFOp",
-    "CmpIOp", "CmpFOp", "CmpIPredicate", "CmpFPredicate",
-    "IndexCastOp", "ExtSIOp", "TruncIOp", "ExtFOp", "TruncFOp",
-    "SIToFPOp", "FPToSIOp", "SelectOp",
+    "AddIOp",
+    "AddFOp",
+    "SubIOp",
+    "SubFOp",
+    "MulIOp",
+    "MulFOp",
+    "DivSIOp",
+    "DivFOp",
+    "RemSIOp",
+    "RemFOp",
+    "CmpIOp",
+    "CmpFOp",
+    "CmpIPredicate",
+    "CmpFPredicate",
+    "IndexCastOp",
+    "ExtSIOp",
+    "TruncIOp",
+    "ExtFOp",
+    "TruncFOp",
+    "SIToFPOp",
+    "FPToSIOp",
+    "SelectOp",
 ]
 
 # Alias for convenience

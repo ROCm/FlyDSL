@@ -28,3 +28,8 @@ flydsl/src/*.egg-info/
 
 # Wheels / packaging outputs
 dist/
+
+# Profiling artifacts (rocprofv3)
+.rocprofv3/
+R9700-Workstation-SH/
+*_results.db
