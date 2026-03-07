@@ -63,20 +63,16 @@ def compile_wmma_gemm_tdm(
     m_warp: int = 2,
     n_warp: int = 4,
     in_dtype: str = "fp16",
-    use_double_buffer: bool = True,
     use_cshuffle: bool = True,
-    use_async_copy: bool = False,
     use_preshuffle: bool = False,
     waves_per_eu: int = None,
 ):
-    """Compile a WMMA GEMM kernel with CK TDM V1 tile config.
+    """Compile a WMMA GEMM kernel with TDM async copy and double buffering.
 
     Returns a JitFunction: launch_fn(arg_c, arg_a, arg_b, M, N, stream)
 
     Args:
-        use_double_buffer: Enable ping-pong double buffering for LDS.
         use_cshuffle: Enable CShuffle epilogue for coalesced global writes.
-        use_async_copy: Use TDM GLOBAL_LOAD_ASYNC_TO_LDS for A tile transfer.
         use_preshuffle: B matrix is pre-shuffled; load directly from global
                         to VGPR in WMMA fragment order (bypasses LDS for B).
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
@@ -97,6 +93,9 @@ def compile_wmma_gemm_tdm(
         raise ValueError(f"tile_m must be a multiple of {WMMA_M}, got {tile_m}")
     if tile_n % WMMA_N != 0:
         raise ValueError(f"tile_n must be a multiple of {WMMA_N}, got {tile_n}")
+    # TDM async copy requires power-of-2 tile_k for pad encoding.
+    if (tile_k & (tile_k - 1)) != 0:
+        raise ValueError(f"tile_k must be a power of 2 for TDM async copy, got {tile_k}")
 
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
@@ -110,94 +109,57 @@ def compile_wmma_gemm_tdm(
         )
 
     num_k_tiles = K // tile_k
-    if use_double_buffer and num_k_tiles < 2:
-        use_double_buffer = False
-    # TDM padding: pad_interval is set to tile_k at descriptor creation time
-    # so that TDM inserts one pad per row, matching lds_stride = tile_k + LDS_PAD.
-    # Constraint: tile_k must be a power-of-2 for TDM pad encoding (3-bit field).
-    # Max pad_interval for f16: 512 elements (enc=7).
-    if use_async_copy and (tile_k & (tile_k - 1)) != 0:
-        use_async_copy = False
+    if num_k_tiles < 2:
+        raise ValueError(
+            f"Double buffering requires num_k_tiles >= 2, got {num_k_tiles} "
+            f"(K={K}, tile_k={tile_k})"
+        )
 
     gpu_arch = str(get_hip_arch(timeout_s=300))
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16
-    k_wmma_steps = tile_k // WMMA_K  # 64/32 = 2
+    k_wmma_steps = tile_k // WMMA_K
 
     def _elem_type():
         return T.f16 if is_f16 else T.bf16
 
-    wmma_m_rep = warp_tile_m // WMMA_M  # 64/16 = 4
-    wmma_n_rep = warp_tile_n // WMMA_N  # 32/16 = 2
-    n_accs = wmma_m_rep * wmma_n_rep     # 4*2 = 8
+    wmma_m_rep = warp_tile_m // WMMA_M
+    wmma_n_rep = warp_tile_n // WMMA_N
+    n_accs = wmma_m_rep * wmma_n_rep
 
     # Padded LDS row strides (in elements)
-    # A in LDS: [tile_m, tile_k + pad]  (A is row-major [M, K])
-    # B in LDS: [tile_n, tile_k + pad]  (B is row-major [N, K])
-    lds_a_stride = tile_k + LDS_PAD_A   # 72
-    lds_b_stride = tile_k + LDS_PAD_B   # 72
+    lds_a_stride = tile_k + LDS_PAD_A
+    lds_b_stride = tile_k + LDS_PAD_B
 
-    _tdm_guard = LDS_PAD_A if use_async_copy else 0
-    lds_a_elems = tile_m * lds_a_stride + _tdm_guard
+    # TDM async copy guard padding
+    lds_a_elems = tile_m * lds_a_stride + LDS_PAD_A
 
     if use_preshuffle:
-        lds_b_elems = 0  # B bypasses LDS
+        lds_b_elems = 0
     else:
-        lds_b_elems = tile_n * lds_b_stride + _tdm_guard
+        lds_b_elems = tile_n * lds_b_stride + LDS_PAD_A
 
     lds_single_bytes = (lds_a_elems + lds_b_elems) * elem_bytes
-    lds_cshuffle_elems = tile_m * tile_n if use_cshuffle else 0
-    lds_cshuffle_bytes = lds_cshuffle_elems * 4 if use_cshuffle else 0
+    lds_cshuffle_bytes = tile_m * tile_n * elem_bytes if use_cshuffle else 0
 
-    if use_double_buffer:
-        allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_ping")
-        allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_pong")
+    # Double-buffer LDS allocation (ping/pong)
+    allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_ping")
+    allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_pong")
 
-        buf_size_bytes = max(lds_single_bytes, lds_cshuffle_bytes)
-        buf_size_elems = buf_size_bytes // elem_bytes
+    buf_size_bytes = max(lds_single_bytes, lds_cshuffle_bytes)
+    buf_size_elems = buf_size_bytes // elem_bytes
 
-        ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
-        allocator_ping.ptr = ping_offset + buf_size_elems * elem_bytes
+    ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
+    allocator_ping.ptr = ping_offset + buf_size_elems * elem_bytes
 
-        pong_offset = allocator_pong._align(allocator_pong.ptr, 16)
-        allocator_pong.ptr = pong_offset + buf_size_elems * elem_bytes
+    pong_offset = allocator_pong._align(allocator_pong.ptr, 16)
+    allocator_pong.ptr = pong_offset + buf_size_elems * elem_bytes
 
-        lds_a_offset_ping = ping_offset
-        lds_b_offset_ping = ping_offset + lds_a_elems * elem_bytes
-        lds_a_offset_pong = pong_offset
-        lds_b_offset_pong = pong_offset + lds_a_elems * elem_bytes
-    else:
-        allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_smem")
-        allocator_pong = allocator_ping
-
-        total_bytes = max(lds_single_bytes, lds_cshuffle_bytes)
-        total_elems = total_bytes // elem_bytes
-
-        single_offset = allocator_ping._align(allocator_ping.ptr, 16)
-        allocator_ping.ptr = single_offset + total_elems * elem_bytes
-
-        lds_a_offset_ping = single_offset
-        lds_b_offset_ping = single_offset + lds_a_elems * elem_bytes
-        lds_a_offset_pong = lds_a_offset_ping
-        lds_b_offset_pong = lds_b_offset_ping
-
-        pong_offset = single_offset
-        ping_offset = single_offset
-
-    # Vectorized copy config
-    total_vec_a = tile_m * (tile_k // 4)
-    if total_vec_a % block_threads != 0:
-        raise ValueError(f"vec copy A: {total_vec_a} not divisible by {block_threads}")
-    vec_iters_a = total_vec_a // block_threads
-
-    if not use_preshuffle:
-        total_vec_b = tile_n * (tile_k // 4)
-        if total_vec_b % block_threads != 0:
-            raise ValueError(f"vec copy B: {total_vec_b} not divisible by {block_threads}")
-        vec_iters_b = total_vec_b // block_threads
-    else:
-        vec_iters_b = 0
+    lds_a_offset_ping = ping_offset
+    lds_b_offset_ping = ping_offset + lds_a_elems * elem_bytes
+    lds_a_offset_pong = pong_offset
+    lds_b_offset_pong = pong_offset + lds_a_elems * elem_bytes
 
     num_warps = m_warp * n_warp
 
@@ -220,7 +182,6 @@ def compile_wmma_gemm_tdm(
     ps_b_tile_stride = ps_k_groups * 16 * 16
 
     # B fragment count for preshuffle cross-iteration prefetch.
-    # Each WMMA k-step × n-repeat produces one vec<16, elem_ty> fragment.
     n_b_frags = k_wmma_steps * wmma_n_rep if use_preshuffle else 0
 
     @flyc.kernel
@@ -258,12 +219,7 @@ def compile_wmma_gemm_tdm(
         warp_m_off = wave_m * arith.index(warp_tile_m)
         warp_n_off = wave_n * arith.index(warp_tile_n)
 
-        layout_vec_a = fx.make_layout((tile_m, tile_k // 4), (tile_k // 4, 1))
-        if not use_preshuffle:
-            layout_vec_b = fx.make_layout((tile_n, tile_k // 4), (tile_k // 4, 1))
-
         elem_ty = _elem_type()
-        vec4_elem_ty = T.vec(4, elem_ty)
 
         base_ptr_ping = allocator_ping.get_base()
         base_ptr_pong = allocator_pong.get_base()
@@ -285,28 +241,13 @@ def compile_wmma_gemm_tdm(
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
         a_nrec = m_idx * arith.index(K * elem_bytes)
         b_nrec = n_stride * arith.index(K * elem_bytes)
-        c_nrec = m_idx * n_stride * arith.index(4)
+        c_nrec = m_idx * n_stride * arith.index(elem_bytes)
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, num_records_bytes=a_nrec)
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, num_records_bytes=b_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
-        # --- Copy A tile to LDS (VGPR path) ---
-        def copy_a_to_lds_vgpr(k_base, lds_a_mem_ref):
-            for t in range_constexpr(vec_iters_a):
-                vec_idx = tx + arith.index(t * block_threads)
-                a_crd = idx2crd(vec_idx, layout_vec_a)
-                a_m = layout_get(a_crd, 0)
-                a_kv = layout_get(a_crd, 1)
-                a_k = a_kv * arith.index(4)
-
-                g_off = (blk_m + a_m) * arith.index(K) + (k_base + a_k)
-                v_i16 = buffer_ops.buffer_load(a_rsrc, g_off, vec_width=4, dtype=T.i16)
-                v = vector.bitcast(vec4_elem_ty, v_i16)
-                lds_off = a_m * arith.index(lds_a_stride) + a_k
-                vector.store(v, lds_a_mem_ref, [lds_off])
-
-        # --- Copy A tile to LDS (TDM descriptor async path) ---
-        def copy_a_to_lds_async(k_base, lds_a_mem_ref):
+        # --- TDM async copy: A tile → LDS ---
+        def copy_a_to_lds(k_base, lds_a_mem_ref):
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a,
                 lds_memref=lds_a_mem_ref,
@@ -322,29 +263,8 @@ def compile_wmma_gemm_tdm(
             )
             tdm_ops.tensor_load_2d(desc)
 
-        def copy_a_to_lds(k_base, lds_a_mem_ref):
-            if use_async_copy:
-                copy_a_to_lds_async(k_base, lds_a_mem_ref)
-            else:
-                copy_a_to_lds_vgpr(k_base, lds_a_mem_ref)
-
-        # --- Copy B tile to LDS (VGPR path) ---
-        def copy_b_to_lds_vgpr(k_base, lds_b_mem_ref):
-            for t in range_constexpr(vec_iters_b):
-                vec_idx = tx + arith.index(t * block_threads)
-                b_crd = idx2crd(vec_idx, layout_vec_b)
-                b_n = layout_get(b_crd, 0)
-                b_kv = layout_get(b_crd, 1)
-                b_k = b_kv * arith.index(4)
-
-                g_off = (blk_n + b_n) * arith.index(K) + (k_base + b_k)
-                v_i16 = buffer_ops.buffer_load(b_rsrc, g_off, vec_width=4, dtype=T.i16)
-                v = vector.bitcast(vec4_elem_ty, v_i16)
-                lds_off = b_n * arith.index(lds_b_stride) + b_k
-                vector.store(v, lds_b_mem_ref, [lds_off])
-
-        # --- Copy B tile to LDS (TDM descriptor async path) ---
-        def copy_b_to_lds_async(k_base, lds_b_mem_ref):
+        # --- TDM async copy: B tile → LDS ---
+        def copy_b_to_lds(k_base, lds_b_mem_ref):
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b,
                 lds_memref=lds_b_mem_ref,
@@ -360,24 +280,8 @@ def compile_wmma_gemm_tdm(
             )
             tdm_ops.tensor_load_2d(desc)
 
-        def copy_b_to_lds(k_base, lds_b_mem_ref):
-            if use_async_copy:
-                copy_b_to_lds_async(k_base, lds_b_mem_ref)
-            else:
-                copy_b_to_lds_vgpr(k_base, lds_b_mem_ref)
-
         # --- Load B fragment from preshuffled global (vectorized: 2×dwordx4) ---
         def load_b_frag_preshuffle(kblk_idx, ks, wn):
-            """Load B fragment from preshuffled global memory.
-
-            Each fragment is 16 contiguous-in-groups-of-8 f16 elements.
-            We load each group of 8 as a single dwordx4 (16 bytes).
-
-            Args:
-                kblk_idx: K-tile index, MLIR index value.
-                ks: K-WMMA step (Python int from range_constexpr).
-                wn: N-warp repeat index (Python int from range_constexpr).
-            """
             n_blk = (blk_n + warp_n_off + arith.index(wn * WMMA_N)) / arith.index(16)
             num_k_tiles_c = arith.index(K // tile_k)
             base_off = (n_blk * num_k_tiles_c * arith.index(ps_b_tile_stride)
@@ -405,12 +309,7 @@ def compile_wmma_gemm_tdm(
 
         # --- Prefetch first A fragment (ks=0, wm=0) for latency hiding ---
         def prefetch_a0_frag(lds_a_ptr):
-            """Pre-load A fragment for (ks=0, wm=0) from LDS into VGPRs.
-
-            Issued right after barrier so that LDS read latency is overlapped
-            with B-tile loads / copy-next-tile work.
-            """
-            m_off = warp_m_off  # wm=0
+            m_off = warp_m_off
             vals = []
             for k0 in range_constexpr(2):
                 for k1 in range_constexpr(8):
@@ -482,10 +381,6 @@ def compile_wmma_gemm_tdm(
             return current_accs
 
         # --- Scheduling hints (machine instruction counts) ---
-        # LLVM coalesces 8 scalar ds_load_b16 into 1 ds_load_b128.
-        # a0_prefetch (1 fragment = 2 ds_load_b128) is outside the scheduling region.
-        # B preshuffle VMEM loads happen before sched_barrier(0) in compute_tile,
-        # so they are NOT in this scheduling region.
         _a0_prefetch_machine = 16 // DS_COALESCE  # = 2 ds_load_b128
         _n_dsrd_machine = total_lds_reads // DS_COALESCE
         _n_dsrd_eff = max(0, _n_dsrd_machine - _a0_prefetch_machine)
@@ -522,6 +417,8 @@ def compile_wmma_gemm_tdm(
             rocdl.sched_barrier(0)
 
         # --- Epilogue ---
+        _out_elem_type = _elem_type()
+
         def direct_epilogue(final_accs):
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
@@ -536,13 +433,15 @@ def compile_wmma_gemm_tdm(
                             final_accs[acc_idx],
                             static_position=[mi], dynamic_position=[],
                         )
-                        buffer_ops.buffer_store(c_val, c_rsrc, c_off)
+                        out_val = arith.trunc_f(_out_elem_type, c_val)
+                        buffer_ops.buffer_store(out_val, c_rsrc, c_off)
 
         def cshuffle_epilogue(final_accs):
-            lds_out = SmemPtr(base_ptr_pong, pong_offset, T.f32,
+            lds_out = SmemPtr(base_ptr_pong, pong_offset, _out_elem_type,
                               shape=(tile_m * tile_n,)).get()
             gpu.barrier()
             tile_n_idx = arith.index(tile_n)
+            vec1_out = T.vec(1, _out_elem_type)
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     acc_idx = wm * wmma_n_rep + wn
@@ -556,38 +455,43 @@ def compile_wmma_gemm_tdm(
                             final_accs[acc_idx],
                             static_position=[mi], dynamic_position=[],
                         )
-                        v1 = vector.from_elements(T.vec(1, T.f32), [c_val])
-                        vector.store(v1, lds_out, [lds_idx], alignment=4)
+                        out_val = arith.trunc_f(_out_elem_type, c_val)
+                        v1 = vector.from_elements(vec1_out, [out_val])
+                        vector.store(v1, lds_out, [lds_idx], alignment=2)
             gpu.barrier()
 
             c_nlane = arith.index(CSHUFFLE_NLANE)
             c_evec = arith.index(CSHUFFLE_EVEC)
             m_lane = tx / c_nlane
             n_lane = tx % c_nlane
-            vec_f32 = T.vec(CSHUFFLE_EVEC, T.f32)
+            vec_out = T.vec(CSHUFFLE_EVEC, _out_elem_type)
+            n_i32 = CSHUFFLE_EVEC * elem_bytes // 4
             for mr in range_constexpr(cshuffle_m_reps):
                 row_local = arith.index(mr * cshuffle_mlane) + m_lane
                 row_global = blk_m + row_local
                 for nr in range_constexpr(cshuffle_n_reps):
                     col_local = arith.index(nr * CSHUFFLE_NLANE * CSHUFFLE_EVEC) + n_lane * c_evec
                     lds_idx = row_local * tile_n_idx + col_local
-                    frag_f32 = vector.load_op(vec_f32, lds_out, [lds_idx])
+                    frag = vector.load_op(vec_out, lds_out, [lds_idx])
                     col_global = blk_n + col_local
                     idx_out = row_global * n_stride + col_global
-                    byte_off = idx_out * arith.index(4)
-                    buffer_ops.buffer_store(frag_f32, c_rsrc, byte_off,
-                                            offset_is_bytes=True)
+                    byte_off = idx_out * arith.index(elem_bytes)
+                    if n_i32 >= 2:
+                        frag_i32 = vector.bitcast(T.vec(n_i32, T.i32), frag)
+                        buffer_ops.buffer_store(frag_i32, c_rsrc, byte_off,
+                                                offset_is_bytes=True)
+                    else:
+                        frag_i32x1 = vector.bitcast(T.vec(1, T.i32), frag)
+                        frag_i32 = vector.extract(frag_i32x1,
+                                                  static_position=[0],
+                                                  dynamic_position=[])
+                        buffer_ops.buffer_store(frag_i32, c_rsrc, byte_off,
+                                                offset_is_bytes=True)
 
-        # ====== Main pipeline (SCF for loop) ======
+        # ====== Double-buffer 2-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         accs = [acc_zero] * n_accs
 
-        def wait_and_barrier(outstanding=0):
-            if use_async_copy:
-                tdm_ops.tensor_wait(outstanding)
-            gpu.barrier()
-
-        # --- State pack/unpack for SCF for (carries accs + a0_pf + b_tile) ---
         def _pack_state(accs_list, a0_pf, b_tile=None):
             st = list(accs_list) + [a0_pf]
             if use_preshuffle and b_tile is not None:
@@ -601,131 +505,107 @@ def compile_wmma_gemm_tdm(
             return a_out, a0_out, bt_out
 
         def _initial_b_load(k_base, kblk_idx, lds_b_mem_ref):
-            """Issue initial B data load (preshuffle→VGPR, else→LDS)."""
             if use_preshuffle:
                 return prefetch_b_tile_ps(kblk_idx)
             else:
                 copy_b_to_lds(k_base, lds_b_mem_ref)
                 return None
 
-        if use_double_buffer and num_k_tiles >= 2:
-            # --- Double-buffer 2-stage pipeline (SCF for) ---
-            # Prefetch first tile → pong
-            b_tile_init = _initial_b_load(arith.index(0), arith.index(0), lds_b_pong_mem)
-            copy_a_to_lds(arith.index(0), lds_a_pong_mem)
-            if use_preshuffle:
-                rocdl.s_wait_loadcnt(0)
-            wait_and_barrier()
-            a0_pf_init = prefetch_a0_frag(lds_a_pong)
+        def wait_and_barrier():
+            tdm_ops.tensor_wait(0)
+            gpu.barrier()
 
-            if num_k_tiles >= 3:
-                if (num_k_tiles % 2) == 1:
-                    main_loop_bound = (num_k_tiles - 1) * tile_k
-                else:
-                    main_loop_bound = (num_k_tiles - 2) * tile_k
+        # Prefetch first tile → pong
+        b_tile_init = _initial_b_load(arith.index(0), arith.index(0), lds_b_pong_mem)
+        copy_a_to_lds(arith.index(0), lds_a_pong_mem)
+        if use_preshuffle:
+            rocdl.s_wait_loadcnt(0)
+        wait_and_barrier()
+        a0_pf_init = prefetch_a0_frag(lds_a_pong)
 
-                init_state = _pack_state(accs, a0_pf_init, b_tile_init)
-                for iv, state in range(0, main_loop_bound, tile_k * 2, init=init_state):
-                    accs_in, a0_pf_in, b_tile_pong_in = _unpack_state(state)
-                    kblk_pong = iv / arith.index(tile_k)
-                    kblk_ping = kblk_pong + arith.index(1)
-
-                    # --- Pong tile: prefetch next→ping, compute on pong ---
-                    if use_preshuffle:
-                        b_tile_ping = prefetch_b_tile_ps(kblk_ping)
-                    next_k1 = iv + arith.index(tile_k)
-                    copy_a_to_lds(next_k1, lds_a_ping_mem)
-                    if not use_preshuffle:
-                        copy_b_to_lds(next_k1, lds_b_ping_mem)
-                    accs_in = compute_tile(
-                        accs_in, lds_a_pong,
-                        None if use_preshuffle else lds_b_pong,
-                        kblk_idx=kblk_pong, a0_prefetch=a0_pf_in,
-                        b_tile_prefetch=b_tile_pong_in,
-                    )
-                    hot_loop_scheduler()
-                    if use_preshuffle:
-                        rocdl.s_wait_loadcnt(0)
-                    wait_and_barrier()
-                    a0_pf_ping = prefetch_a0_frag(lds_a_ping)
-
-                    # --- Ping tile: prefetch next→pong, compute on ping ---
-                    kblk_next_pong = kblk_pong + arith.index(2)
-                    if use_preshuffle:
-                        b_tile_next_pong = prefetch_b_tile_ps(kblk_next_pong)
-                    next_k2 = iv + arith.index(tile_k * 2)
-                    copy_a_to_lds(next_k2, lds_a_pong_mem)
-                    if not use_preshuffle:
-                        copy_b_to_lds(next_k2, lds_b_pong_mem)
-                    accs_in = compute_tile(
-                        accs_in, lds_a_ping,
-                        None if use_preshuffle else lds_b_ping,
-                        kblk_idx=kblk_ping, a0_prefetch=a0_pf_ping,
-                        b_tile_prefetch=b_tile_ping if use_preshuffle else None,
-                    )
-                    hot_loop_scheduler()
-                    if use_preshuffle:
-                        rocdl.s_wait_loadcnt(0)
-                    wait_and_barrier()
-                    a0_pf_pong_new = prefetch_a0_frag(lds_a_pong)
-
-                    results = yield _pack_state(
-                        accs_in, a0_pf_pong_new,
-                        b_tile_next_pong if use_preshuffle else None,
-                    )
-
-                accs, a0_pf, b_tile_pong_final = _unpack_state(results)
-
-                if (num_k_tiles % 2) == 1:
-                    # Odd: one remaining pong tile (last tile, no prefetch)
-                    last_kblk = arith.index(num_k_tiles - 1)
-                    accs = compute_tile(
-                        accs, lds_a_pong,
-                        None if use_preshuffle else lds_b_pong,
-                        kblk_idx=last_kblk, a0_prefetch=a0_pf,
-                        b_tile_prefetch=b_tile_pong_final,
-                    )
-                else:
-                    # Even: last pong+ping pair outside loop
-                    last_pong_kblk = arith.index(num_k_tiles - 2)
-                    last_ping_k = arith.index((num_k_tiles - 1) * tile_k)
-                    last_ping_kblk = arith.index(num_k_tiles - 1)
-
-                    if use_preshuffle:
-                        b_tile_last_ping = prefetch_b_tile_ps(last_ping_kblk)
-                    copy_a_to_lds(last_ping_k, lds_a_ping_mem)
-                    if not use_preshuffle:
-                        copy_b_to_lds(last_ping_k, lds_b_ping_mem)
-                    accs = compute_tile(
-                        accs, lds_a_pong,
-                        None if use_preshuffle else lds_b_pong,
-                        kblk_idx=last_pong_kblk, a0_prefetch=a0_pf,
-                        b_tile_prefetch=b_tile_pong_final,
-                    )
-                    hot_loop_scheduler()
-                    if use_preshuffle:
-                        rocdl.s_wait_loadcnt(0)
-                    wait_and_barrier()
-                    a0_pf_ping = prefetch_a0_frag(lds_a_ping)
-
-                    accs = compute_tile(
-                        accs, lds_a_ping,
-                        None if use_preshuffle else lds_b_ping,
-                        kblk_idx=last_ping_kblk, a0_prefetch=a0_pf_ping,
-                        b_tile_prefetch=b_tile_last_ping if use_preshuffle else None,
-                    )
+        if num_k_tiles >= 3:
+            if (num_k_tiles % 2) == 1:
+                main_loop_bound = (num_k_tiles - 1) * tile_k
             else:
-                # num_k_tiles == 2: just 1 pair, no loop needed
+                main_loop_bound = (num_k_tiles - 2) * tile_k
+
+            init_state = _pack_state(accs, a0_pf_init, b_tile_init)
+            for iv, state in range(0, main_loop_bound, tile_k * 2, init=init_state):
+                accs_in, a0_pf_in, b_tile_pong_in = _unpack_state(state)
+                kblk_pong = iv / arith.index(tile_k)
+                kblk_ping = kblk_pong + arith.index(1)
+
+                # --- Pong tile: prefetch next→ping, compute on pong ---
                 if use_preshuffle:
-                    b_tile_1 = prefetch_b_tile_ps(arith.index(1))
-                copy_a_to_lds(arith.index(tile_k), lds_a_ping_mem)
+                    b_tile_ping = prefetch_b_tile_ps(kblk_ping)
+                next_k1 = iv + arith.index(tile_k)
+                copy_a_to_lds(next_k1, lds_a_ping_mem)
                 if not use_preshuffle:
-                    copy_b_to_lds(arith.index(tile_k), lds_b_ping_mem)
+                    copy_b_to_lds(next_k1, lds_b_ping_mem)
+                accs_in = compute_tile(
+                    accs_in, lds_a_pong,
+                    None if use_preshuffle else lds_b_pong,
+                    kblk_idx=kblk_pong, a0_prefetch=a0_pf_in,
+                    b_tile_prefetch=b_tile_pong_in,
+                )
+                hot_loop_scheduler()
+                if use_preshuffle:
+                    rocdl.s_wait_loadcnt(0)
+                wait_and_barrier()
+                a0_pf_ping = prefetch_a0_frag(lds_a_ping)
+
+                # --- Ping tile: prefetch next→pong, compute on ping ---
+                kblk_next_pong = kblk_pong + arith.index(2)
+                if use_preshuffle:
+                    b_tile_next_pong = prefetch_b_tile_ps(kblk_next_pong)
+                next_k2 = iv + arith.index(tile_k * 2)
+                copy_a_to_lds(next_k2, lds_a_pong_mem)
+                if not use_preshuffle:
+                    copy_b_to_lds(next_k2, lds_b_pong_mem)
+                accs_in = compute_tile(
+                    accs_in, lds_a_ping,
+                    None if use_preshuffle else lds_b_ping,
+                    kblk_idx=kblk_ping, a0_prefetch=a0_pf_ping,
+                    b_tile_prefetch=b_tile_ping if use_preshuffle else None,
+                )
+                hot_loop_scheduler()
+                if use_preshuffle:
+                    rocdl.s_wait_loadcnt(0)
+                wait_and_barrier()
+                a0_pf_pong_new = prefetch_a0_frag(lds_a_pong)
+
+                results = yield _pack_state(
+                    accs_in, a0_pf_pong_new,
+                    b_tile_next_pong if use_preshuffle else None,
+                )
+
+            accs, a0_pf, b_tile_pong_final = _unpack_state(results)
+
+            if (num_k_tiles % 2) == 1:
+                # Odd: one remaining pong tile (last tile, no prefetch)
+                last_kblk = arith.index(num_k_tiles - 1)
                 accs = compute_tile(
                     accs, lds_a_pong,
                     None if use_preshuffle else lds_b_pong,
-                    kblk_idx=arith.index(0), a0_prefetch=a0_pf_init,
-                    b_tile_prefetch=b_tile_init,
+                    kblk_idx=last_kblk, a0_prefetch=a0_pf,
+                    b_tile_prefetch=b_tile_pong_final,
+                )
+            else:
+                # Even: last pong+ping pair outside loop
+                last_pong_kblk = arith.index(num_k_tiles - 2)
+                last_ping_k = arith.index((num_k_tiles - 1) * tile_k)
+                last_ping_kblk = arith.index(num_k_tiles - 1)
+
+                if use_preshuffle:
+                    b_tile_last_ping = prefetch_b_tile_ps(last_ping_kblk)
+                copy_a_to_lds(last_ping_k, lds_a_ping_mem)
+                if not use_preshuffle:
+                    copy_b_to_lds(last_ping_k, lds_b_ping_mem)
+                accs = compute_tile(
+                    accs, lds_a_pong,
+                    None if use_preshuffle else lds_b_pong,
+                    kblk_idx=last_pong_kblk, a0_prefetch=a0_pf,
+                    b_tile_prefetch=b_tile_pong_final,
                 )
                 hot_loop_scheduler()
                 if use_preshuffle:
@@ -736,69 +616,34 @@ def compile_wmma_gemm_tdm(
                 accs = compute_tile(
                     accs, lds_a_ping,
                     None if use_preshuffle else lds_b_ping,
-                    kblk_idx=arith.index(1), a0_prefetch=a0_pf_ping,
-                    b_tile_prefetch=b_tile_1 if use_preshuffle else None,
+                    kblk_idx=last_ping_kblk, a0_prefetch=a0_pf_ping,
+                    b_tile_prefetch=b_tile_last_ping if use_preshuffle else None,
                 )
         else:
-            # --- Single-buffer 1-stage pipeline (SCF for) ---
-            if num_k_tiles >= 2:
-                b_tile_0 = _initial_b_load(arith.index(0), arith.index(0), lds_b_pong_mem)
-                copy_a_to_lds(arith.index(0), lds_a_pong_mem)
-                if use_preshuffle:
-                    rocdl.s_wait_loadcnt(0)
-                wait_and_barrier()
-                a0_pf_init = prefetch_a0_frag(lds_a_pong)
+            # num_k_tiles == 2: just 1 pair, no loop needed
+            if use_preshuffle:
+                b_tile_1 = prefetch_b_tile_ps(arith.index(1))
+            copy_a_to_lds(arith.index(tile_k), lds_a_ping_mem)
+            if not use_preshuffle:
+                copy_b_to_lds(arith.index(tile_k), lds_b_ping_mem)
+            accs = compute_tile(
+                accs, lds_a_pong,
+                None if use_preshuffle else lds_b_pong,
+                kblk_idx=arith.index(0), a0_prefetch=a0_pf_init,
+                b_tile_prefetch=b_tile_init,
+            )
+            hot_loop_scheduler()
+            if use_preshuffle:
+                rocdl.s_wait_loadcnt(0)
+            wait_and_barrier()
+            a0_pf_ping = prefetch_a0_frag(lds_a_ping)
 
-                init_state = _pack_state(accs, a0_pf_init, b_tile_0)
-                for iv, state in range(0, K - tile_k, tile_k, init=init_state):
-                    accs_in, a0_pf_in, b_tile_in = _unpack_state(state)
-                    kblk = iv / arith.index(tile_k)
-
-                    accs_in = compute_tile(
-                        accs_in, lds_a_pong,
-                        None if use_preshuffle else lds_b_pong,
-                        kblk_idx=kblk, a0_prefetch=a0_pf_in,
-                        b_tile_prefetch=b_tile_in,
-                    )
-                    hot_loop_scheduler()
-                    gpu.barrier()
-
-                    next_k = iv + arith.index(tile_k)
-                    next_kblk = kblk + arith.index(1)
-                    if use_preshuffle:
-                        b_tile_next = prefetch_b_tile_ps(next_kblk)
-                    else:
-                        copy_b_to_lds(next_k, lds_b_pong_mem)
-                        b_tile_next = None
-                    copy_a_to_lds(next_k, lds_a_pong_mem)
-                    if use_preshuffle:
-                        rocdl.s_wait_loadcnt(0)
-                    wait_and_barrier()
-                    a0_pf_next = prefetch_a0_frag(lds_a_pong)
-
-                    results = yield _pack_state(accs_in, a0_pf_next, b_tile_next)
-
-                accs, a0_pf, b_tile_last = _unpack_state(results)
-                last_kblk = arith.index(num_k_tiles - 1)
-                accs = compute_tile(
-                    accs, lds_a_pong,
-                    None if use_preshuffle else lds_b_pong,
-                    kblk_idx=last_kblk, a0_prefetch=a0_pf,
-                    b_tile_prefetch=b_tile_last,
-                )
-            else:
-                b_tile_0 = _initial_b_load(arith.index(0), arith.index(0), lds_b_pong_mem)
-                copy_a_to_lds(arith.index(0), lds_a_pong_mem)
-                if use_preshuffle:
-                    rocdl.s_wait_loadcnt(0)
-                wait_and_barrier()
-                a0_pf = prefetch_a0_frag(lds_a_pong)
-                accs = compute_tile(
-                    accs, lds_a_pong,
-                    None if use_preshuffle else lds_b_pong,
-                    kblk_idx=arith.index(0), a0_prefetch=a0_pf,
-                    b_tile_prefetch=b_tile_0,
-                )
+            accs = compute_tile(
+                accs, lds_a_ping,
+                None if use_preshuffle else lds_b_ping,
+                kblk_idx=arith.index(1), a0_prefetch=a0_pf_ping,
+                b_tile_prefetch=b_tile_1 if use_preshuffle else None,
+            )
 
         # --- Epilogue ---
         if use_cshuffle:
@@ -807,8 +652,7 @@ def compile_wmma_gemm_tdm(
             direct_epilogue(accs)
 
     cache_tag = (in_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                 use_double_buffer, use_cshuffle, use_async_copy, use_preshuffle,
-                 waves_per_eu)
+                 use_cshuffle, use_preshuffle, waves_per_eu)
 
     @flyc.jit
     def launch_wmma_gemm_tdm(
@@ -821,13 +665,11 @@ def compile_wmma_gemm_tdm(
     ):
         _ = cache_tag
         allocator_ping.finalized = False
-        if allocator_pong is not allocator_ping:
-            allocator_pong.finalized = False
+        allocator_pong.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator_ping.finalize()
-            if allocator_pong is not allocator_ping:
-                allocator_pong.finalize()
+            allocator_pong.finalize()
 
         idx_m = arith.index_cast(T.index, i32_m.ir_value())
         idx_n = arith.index_cast(T.index, i32_n.ir_value())

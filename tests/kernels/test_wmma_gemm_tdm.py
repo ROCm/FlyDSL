@@ -31,23 +31,20 @@ if not torch.cuda.is_available():
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
-        (128, 128, 64, 64, 128, 64),
-        (128, 128, 128, 64, 128, 128),
-        (256, 256, 128, 64, 256, 128),
+        (128, 128, 64, 64, 128, 32),
+        (128, 128, 256, 64, 128, 128),
+        (256, 256, 256, 64, 256, 128),
         (256, 256, 192, 64, 256, 64),
         (256, 512, 256, 64, 256, 128),
         (512, 512, 512, 64, 256, 128),
-        (201, 179, 64, 64, 128, 64),
-        (300, 399, 128, 64, 256, 128),
+        (201, 179, 128, 64, 128, 64),
+        (300, 399, 256, 64, 256, 128),
     ],
 )
-@pytest.mark.parametrize("use_double_buffer", [False, True])
 @pytest.mark.parametrize("use_cshuffle", [False, True])
-@pytest.mark.parametrize("use_async_copy", [False, True])
 @pytest.mark.parametrize("use_preshuffle", [False, True])
 def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
-                        use_double_buffer, use_cshuffle,
-                        use_async_copy, use_preshuffle):
+                        use_cshuffle, use_preshuffle):
     arch = str(get_rocm_arch(timeout_s=300))
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
@@ -55,8 +52,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     m_warp, n_warp = 2, 4
 
     print(f"Running WMMA GEMM TDM: M={M}, N={N}, K={K}, "
-          f"dtype={in_dtype}, db={use_double_buffer}, cs={use_cshuffle}, "
-          f"async={use_async_copy}, ps={use_preshuffle}")
+          f"dtype={in_dtype}, cs={use_cshuffle}, ps={use_preshuffle}")
 
     torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
     device = torch.device("cuda")
@@ -78,15 +74,13 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     else:
         b_input = b_pad
 
-    c_pad = torch.zeros((mpad, npad), dtype=torch.float32, device=device)
+    c_pad = torch.zeros((mpad, npad), dtype=torch_dtype, device=device)
 
     launch_fn = compile_wmma_gemm_tdm(
         M=mpad, N=npad, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         m_warp=m_warp, n_warp=n_warp, in_dtype=in_dtype,
-        use_double_buffer=use_double_buffer,
         use_cshuffle=use_cshuffle,
-        use_async_copy=use_async_copy,
         use_preshuffle=use_preshuffle,
     )
     launch_fn(
@@ -100,7 +94,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     ref = torch.mm(a.cpu().to(torch.float32), b.cpu().to(torch.float32).T)
     rtol = 3e-2
     atol = 3e-2
-    assert verify_output(c_pad[:M, :N].cpu(), ref, rtol=rtol, atol=atol)
+    assert verify_output(c_pad[:M, :N].cpu().to(torch.float32), ref, rtol=rtol, atol=atol)
     print("PASSED")
 
 
@@ -110,22 +104,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-M", type=int, default=256)
     parser.add_argument("-N", type=int, default=256)
-    parser.add_argument("-K", type=int, default=128)
+    parser.add_argument("-K", type=int, default=256)
     parser.add_argument("--tile-m", type=int, default=64)
     parser.add_argument("--tile-n", type=int, default=256)
     parser.add_argument("--tile-k", type=int, default=128)
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
-    parser.add_argument("--no-double-buffer", action="store_true")
     parser.add_argument("--no-cshuffle", action="store_true")
-    parser.add_argument("--async-copy", action="store_true")
-    parser.add_argument("--preshuffle", action="store_true")
+    parser.add_argument("--no-preshuffle", action="store_true")
     args = parser.parse_args()
 
     test_wmma_gemm_tdm(
         args.dtype, args.M, args.N, args.K,
         args.tile_m, args.tile_n, args.tile_k,
-        use_double_buffer=not args.no_double_buffer,
         use_cshuffle=not args.no_cshuffle,
-        use_async_copy=args.async_copy,
-        use_preshuffle=args.preshuffle,
+        use_preshuffle=not args.no_preshuffle,
     )
