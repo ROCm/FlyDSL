@@ -1,0 +1,60 @@
+name: FlyDSL CI
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip test job for faster iteration'
+        type: boolean
+        default: false
+      skip_promote:
+        description: 'Skip promote job (build + test only)'
+        type: boolean
+        default: false
+      docker_image:
+        description: 'Docker base image for build and test'
+        type: string
+        default: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+      llvm_commit:
+        description: 'LLVM commit hash for MLIR build'
+        type: string
+        default: "04f968b02917"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-whl.yaml
+    with:
+      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
+      docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1' }}
+      llvm_commit: ${{ inputs.llvm_commit || '04f968b02917' }}
+    permissions:
+      id-token: write
+      contents: read
+
+  test:
+    needs: build
+    if: ${{ !(inputs.skip_tests || false) }}
+    uses: ./.github/workflows/test-whl.yaml
+    with:
+      docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1' }}
+    permissions:
+      contents: read
+
+  promote:
+    needs: [build, test]
+    if: >-
+      ${{ github.repository_owner == 'ROCm'
+          && !(inputs.skip_promote || false) }}
+    uses: ./.github/workflows/promote.yaml
+    with:
+      release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
+      wheel_names: ${{ needs.build.outputs.wheel_names }}
+    permissions:
+      id-token: write
+      contents: read
