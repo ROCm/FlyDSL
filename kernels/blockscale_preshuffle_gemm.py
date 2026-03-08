@@ -44,6 +44,7 @@ def compile_blockscale_preshuffle_gemm(
     out_dtype: str = "bf16",
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = None,
+    use_async_copy: bool = False,
 ):
     """Compile blockscale preshuffle GEMM. FP8 input, per-block scales, bf16/fp16 output."""
     if out_dtype not in ("fp16", "bf16"):
@@ -75,6 +76,11 @@ def compile_blockscale_preshuffle_gemm(
     is_bf16_out = out_dtype == "bf16"
 
     gpu_arch = get_hip_arch()
+    _is_gfx950 = str(gpu_arch).startswith("gfx95")
+    _is_gfx942 = str(gpu_arch).startswith("gfx942")
+
+    if use_async_copy and gpu_arch not in ("gfx942", "gfx950"):
+        raise ValueError(f"async copy not supported on {gpu_arch}")
 
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
@@ -92,6 +98,17 @@ def compile_blockscale_preshuffle_gemm(
         raise ValueError(
             f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
         )
+    a_async_load_bytes = 4 if _is_gfx942 else 16
+    a_async_load_dword = a_async_load_bytes // 4
+
+    bytes_b_per_tile = tile_n * tile_k * elem_bytes
+    bytes_per_thread_b = bytes_b_per_tile // total_threads
+    b_load_bytes = 16
+    num_b_loads = bytes_per_thread_b // b_load_bytes
+
+    wave_size = 64
+    num_a_lds_load = bytes_a_per_tile // wave_size // a_load_bytes
+    num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
 
     lds_stride_bytes = tile_k_bytes
 
@@ -320,6 +337,58 @@ def compile_blockscale_preshuffle_gemm(
                     vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
                 )
 
+        # ── A DMA async: direct global→LDS transfer ─────────────────────
+        _num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
+        tx_i32_async_base = tx * a_async_load_dword
+        k_bytes_factor = K * elem_bytes
+
+        def a_tile_chunk_coord_i32_async(i: int):
+            return tile_chunk_coord_i32(
+                arith, tx_i32_base=tx_i32_async_base, i=i,
+                total_threads=total_threads,
+                layout_tile_div4=layout_a_tile_div4,
+                chunk_i32=a_async_load_dword,
+            )
+
+        def dma_a_tile_to_lds(base_k_div4, lds_buffer):
+            from flydsl._mlir.dialects import llvm, memref as memref_dialect
+
+            dma_bytes = a_async_load_bytes
+
+            for i in range_constexpr(_num_a_async_loads):
+                row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
+                col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
+                row_a_global = bx_m + row_a_local
+                global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4 + col_a_local_sw)
+                global_offset = arith.index_cast(T.i32, global_byte_idx)
+
+                if i == 0:
+                    lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * 64 * dma_bytes
+                    lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
+                else:
+                    lds_ptr_i64_lane0 += total_threads * dma_bytes
+                lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
+                lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64_lane0)
+
+                size_i32 = arith.constant(dma_bytes, type=T.i32)
+                soffset = arith.constant(0, type=T.i32)
+                offset_imm = arith.constant(0, type=T.i32)
+                aux = arith.constant(1, type=T.i32)
+
+                rocdl.raw_ptr_buffer_load_lds(
+                    a_rsrc,
+                    lds_ptr,
+                    _raw(size_i32),
+                    _raw(global_offset),
+                    _raw(soffset),
+                    _raw(offset_imm),
+                    _raw(aux),
+                )
+
+        def prefetch_a_to_lds(base_k, lds_buffer):
+            base_k_div4 = base_k / 4
+            dma_a_tile_to_lds(base_k_div4, lds_buffer)
+
         def prefetch_a_tile(base_k):
             base_k_div4 = base_k / 4
             return load_a_tile(base_k_div4)
@@ -328,15 +397,25 @@ def compile_blockscale_preshuffle_gemm(
             return load_b_tile(base_k)
 
         # ── MFMA ──────────────────────────────────────────────────────────
-        mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
         mfma_res_ty = T.f32x4
 
-        def mfma_step(acc_in, a, b):
-            return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+        if _is_gfx950:
+            vec4_i64 = T.vec(4, T.i64)
+            vec8_i32 = T.vec(8, T.i32)
+            c0_i64 = arith.constant(0, type=T.i64)
 
-        def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
-            acc_mid = mfma_step(acc_in, a0, b0)
-            return mfma_step(acc_mid, a1, b1)
+            def pack_i64x4_to_i32x8(x0, x1, x2, x3):
+                v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+                return vector.bitcast(vec8_i32, v4)
+        else:
+            mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
+
+            def mfma_step(acc_in, a, b):
+                return mfma_fn(mfma_res_ty, [a, b, acc_in, 0, 0, 0])
+
+            def mfma_k64_bytes(acc_in, a0, a1, b0, b1):
+                acc_mid = mfma_step(acc_in, a0, b0)
+                return mfma_step(acc_mid, a1, b1)
 
         # ── Blockscale compute tile ───────────────────────────────────────
         c_scale_block_k = arith.index(scale_block_k)
@@ -390,34 +469,63 @@ def compile_blockscale_preshuffle_gemm(
 
                 block_accs = [acc_init] * (num_acc_n * m_repeat)
 
-                for ku_local in range_constexpr(ku_per_sb):
-                    ku = sb * ku_per_sb + ku_local
-                    b_packs0, b_packs1 = b_tile_in[ku]
-                    ki64 = ku * 64
-                    col_base = col_offset_base_bytes + ki64
+                if _is_gfx950:
+                    ku0 = sb * ku_per_sb
+                    ku1 = ku0 + 1
+                    b0_packs0, b0_packs1 = b_tile_in[ku0]
+                    b1_packs0, b1_packs1 = b_tile_in[ku1]
+                    col_base0 = col_offset_base_bytes + (ku0 * 64)
+                    col_base1 = col_offset_base_bytes + (ku1 * 64)
 
                     for mi in range_constexpr(m_repeat):
                         curr_row_a_lds = row_a_lds + (mi * 16)
-
-                        if (
-                            a0_prefetch is not None
-                            and sb == 0
-                            and ku_local == 0
-                            and mi == 0
-                        ):
+                        if a0_prefetch is not None and sb == 0 and mi == 0:
                             a0, a1 = a0_prefetch
                         else:
-                            a0, a1 = lds_load_packs_k64(
-                                curr_row_a_lds, col_base, lds_buffer
-                            )
+                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_buffer)
+                        a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_buffer)
+                        a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
 
                         for ni in range_constexpr(num_acc_n):
-                            acc_idx = mi * num_acc_n + ni
-                            block_accs[acc_idx] = mfma_k64_bytes(
-                                block_accs[acc_idx],
-                                a0, a1,
-                                b_packs0[ni], b_packs1[ni],
+                            b128 = pack_i64x4_to_i32x8(
+                                b0_packs0[ni], b0_packs1[ni],
+                                b1_packs0[ni], b1_packs1[ni],
                             )
+                            acc_idx = mi * num_acc_n + ni
+                            block_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                mfma_res_ty,
+                                [a128, b128, block_accs[acc_idx],
+                                 0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F],
+                            )
+                else:
+                    for ku_local in range_constexpr(ku_per_sb):
+                        ku = sb * ku_per_sb + ku_local
+                        b_packs0, b_packs1 = b_tile_in[ku]
+                        ki64 = ku * 64
+                        col_base = col_offset_base_bytes + ki64
+
+                        for mi in range_constexpr(m_repeat):
+                            curr_row_a_lds = row_a_lds + (mi * 16)
+
+                            if (
+                                a0_prefetch is not None
+                                and sb == 0
+                                and ku_local == 0
+                                and mi == 0
+                            ):
+                                a0, a1 = a0_prefetch
+                            else:
+                                a0, a1 = lds_load_packs_k64(
+                                    curr_row_a_lds, col_base, lds_buffer
+                                )
+
+                            for ni in range_constexpr(num_acc_n):
+                                acc_idx = mi * num_acc_n + ni
+                                block_accs[acc_idx] = mfma_k64_bytes(
+                                    block_accs[acc_idx],
+                                    a0, a1,
+                                    b_packs0[ni], b_packs1[ni],
+                                )
 
                 for mi in range_constexpr(m_repeat):
                     for ni in range_constexpr(num_acc_n):
@@ -517,7 +625,10 @@ def compile_blockscale_preshuffle_gemm(
 
         def hot_loop_scheduler():
             mfma_group = num_acc_n
-            mfma_total = (k_unroll * 2) * m_repeat * mfma_group
+            if _is_gfx950:
+                mfma_total = sb_per_tile * m_repeat * mfma_group
+            else:
+                mfma_total = (k_unroll * 2) * m_repeat * mfma_group
             mfma_per_iter = 2 * mfma_group
             sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
 
@@ -556,10 +667,16 @@ def compile_blockscale_preshuffle_gemm(
         def prefetch_a0_pack(lds_buffer):
             return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
 
+        def _load_a_to_lds(base_k, lds_buffer):
+            if use_async_copy:
+                prefetch_a_to_lds(base_k, lds_buffer)
+            else:
+                store_a_tile_to_lds(prefetch_a_tile(base_k), lds_buffer)
+
         # ── Main pipeline: prologue ───────────────────────────────────────
         k0 = arith.index(0)
         b_tile_pong = prefetch_b_tile(k0)
-        store_a_tile_to_lds(prefetch_a_tile(k0), lds_a_pong)
+        _load_a_to_lds(k0, lds_a_pong)
         gpu.barrier()
         global_accs = [acc_init] * (num_acc_n * m_repeat)
 
@@ -571,8 +688,8 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):
                 _k = arith.index(k_iv)
                 next_k1 = _k + tile_k
+                _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
-                store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_pong, lds_a_pong, _k,
@@ -581,12 +698,14 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_pong = None
 
                 hot_loop_scheduler()
+                if use_async_copy:
+                    rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
+                _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
-                store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
 
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_ping, lds_a_ping, next_k1,
@@ -595,6 +714,8 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
+                if use_async_copy:
+                    rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
 
@@ -607,21 +728,23 @@ def compile_blockscale_preshuffle_gemm(
             for k_iv in range_constexpr(0, K - tile_k * 3, tile_k * 2):
                 _k = arith.index(k_iv)
                 next_k1 = _k + tile_k
+                _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
-                store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_pong, lds_a_pong, _k,
                     a0_prefetch=a0_prefetch_pong,
                 )
                 a0_prefetch_pong = None
                 hot_loop_scheduler()
+                if use_async_copy:
+                    rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
 
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
                 next_k2 = _k + tile_k * 2
+                _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
-                store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
                 global_accs = compute_tile_blockscale(
                     global_accs, b_tile_ping, lds_a_ping, next_k1,
                     a0_prefetch=a0_prefetch_ping,
@@ -629,14 +752,16 @@ def compile_blockscale_preshuffle_gemm(
                 a0_prefetch_ping = None
 
                 hot_loop_scheduler()
+                if use_async_copy:
+                    rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
 
             last_k = arith.index(K - tile_k)
             second_last_k = arith.index(K - tile_k * 2)
 
+            _load_a_to_lds(last_k, lds_a_ping)
             b_tile_ping = prefetch_b_tile(last_k)
-            store_a_tile_to_lds(prefetch_a_tile(last_k), lds_a_ping)
 
             global_accs = compute_tile_blockscale(
                 global_accs, b_tile_pong, lds_a_pong, second_last_k,
@@ -645,6 +770,8 @@ def compile_blockscale_preshuffle_gemm(
             a0_prefetch_pong = None
 
             hot_loop_scheduler()
+            if use_async_copy:
+                rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
@@ -657,7 +784,7 @@ def compile_blockscale_preshuffle_gemm(
 
     # ── Host launcher ──────────────────────────────────────────────────────
     _cache_tag = (out_dtype, K, scale_block_k, use_cshuffle_epilog,
-                  tile_m, tile_n, tile_k)
+                  tile_m, tile_n, tile_k, use_async_copy)
 
     @flyc.jit
     def launch_gemm(

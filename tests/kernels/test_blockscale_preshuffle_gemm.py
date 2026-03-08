@@ -41,7 +41,7 @@ try:
     from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
 
     HAS_AITER = True
-except ImportError:
+except Exception:
     HAS_AITER = False
 
 def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
@@ -86,6 +86,7 @@ def test_blockscale_preshuffle_gemm(
     *,
     bench_iters=20,
     bench_warmup=3,
+    use_async_copy=False,
 ):
 
     block_shape_n, block_shape_k = BLOCK_SHAPE
@@ -99,7 +100,7 @@ def test_blockscale_preshuffle_gemm(
     print("=" * 80)
     print(
         f"Blockscale GEMM Test: M={M}, N={N}, K={K}, "
-        f"tile=({tile_m}x{tile_n}x{tile_k}), out={out_dtype}"
+        f"tile=({tile_m}x{tile_n}x{tile_k}), out={out_dtype}, async={use_async_copy}"
     )
     print("=" * 80)
 
@@ -108,6 +109,7 @@ def test_blockscale_preshuffle_gemm(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         scale_block_k=block_shape_k,
         out_dtype=out_dtype,
+        use_async_copy=bool(use_async_copy),
     )
     print(f"  Compiled OK")
 
@@ -174,7 +176,7 @@ def test_blockscale_preshuffle_gemm(
                 f"  Aiter: {us_aiter:.1f} us, {tflops_aiter:.2f} TFLOPS, "
                 f"speedup: {us_aiter/us:.2f}x"
             )
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             msg = str(e).splitlines()[0] if str(e) else repr(e)
             print(f"  Aiter comparison skipped: {msg}")
 
@@ -193,6 +195,7 @@ if __name__ == "__main__":
     parser.add_argument("--out_dtype", type=str, default="bf16", choices=["fp16", "bf16"])
     parser.add_argument("--num_iters", type=int, default=20)
     parser.add_argument("--num_warmup", type=int, default=3)
+    parser.add_argument("--use_async_copy", action="store_true", default=False)
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
@@ -209,4 +212,5 @@ if __name__ == "__main__":
         out_dtype=args.out_dtype,
         bench_iters=args.num_iters,
         bench_warmup=args.num_warmup,
+        use_async_copy=args.use_async_copy,
     )

@@ -35,7 +35,7 @@ if not torch.cuda.is_available():
 try:
     import aiter
     HAS_AITER = True
-except ImportError:
+except Exception:
     HAS_AITER = False
 
 ARCH = str(get_rocm_arch())
