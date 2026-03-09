@@ -168,6 +168,7 @@ build_one() {
   MLIR_PATH="${MLIR_PATH}" \
   FLY_BUILD_DIR="${build_dir_rel}" \
   FLY_REBUILD="${FLY_REBUILD}" \
+  FLYDSL_RELEASE_TYPE="${FLYDSL_RELEASE_TYPE:-}" \
   "${venv}/bin/python" setup.py bdist_wheel
 
   if ! ls -1 "dist/"*"-${py_tag}-${py_tag}-manylinux_"*.whl >/dev/null 2>&1; then
