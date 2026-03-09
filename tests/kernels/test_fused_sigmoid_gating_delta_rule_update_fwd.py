@@ -30,6 +30,7 @@ if _sglang_py.exists() and str(_sglang_py) not in sys.path:
 try:
     from sglang.srt.layers.attention.fla.fused_sigmoid_gating_recurrent import (
         fused_sigmoid_gating_delta_rule_update,
+        fused_sigmoid_gating_delta_rule_update_kernel,
     )
     HAS_TRITON_KERNEL = True
 except ImportError:
@@ -204,6 +205,148 @@ def _run_triton_kernel(
     )
     torch.cuda.synchronize()
     return triton_o, state_clone
+
+
+def _dump_triton_ir_for_fused_sigmoid_gating_delta_rule_update(
+    output_dir: str | Path,
+    best_only: bool = False,
+):
+    """Compile Triton kernel and dump available compiler artifacts."""
+    if not HAS_TRITON_KERNEL:
+        raise RuntimeError("Triton kernel (sglang) is not available.")
+
+    import triton
+
+    # Keep the dump case minimal while preserving the real call path.
+    B, T_seq, H, HV, K, V = 1, 1, 1, 1, 16, 16
+    N_STATE = 2
+    softplus_beta = 1.0
+    softplus_threshold = 20.0
+    use_qk_l2norm_in_kernel = False
+
+    A_log, a, dt_bias, q, k, v, b, state_pool, state_indices = _build_inputs(
+        B=B,
+        T_seq=T_seq,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        N_STATE=N_STATE,
+        state_indices=[1],
+        seed=2026,
+        dtype=torch.float32,
+    )
+    scale = K ** (-0.5)
+
+    BK = triton.next_power_of_2(K)
+    NK = triton.cdiv(K, BK)
+    assert NK == 1, "This helper currently supports NK == 1 only."
+
+    N = B
+    o = q.new_empty(NK, *v.shape)
+    grid = lambda META: (NK, triton.cdiv(V, META["BV"]), N * HV)
+
+    base_kwargs = dict(
+        A_log=A_log,
+        a=a,
+        dt_bias=dt_bias,
+        softplus_beta=softplus_beta,
+        softplus_threshold=softplus_threshold,
+        q=q,
+        k=k,
+        v=v,
+        b=b,
+        o=o,
+        h0_source=state_pool,
+        h0_indices=state_indices,
+        cu_seqlens=None,
+        scale=scale,
+        T=T_seq,
+        B=B,
+        H=H,
+        HV=HV,
+        K=K,
+        V=V,
+        BK=BK,
+        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        USE_INITIAL_STATE=True,
+        IS_VARLEN=False,
+    )
+
+    autotuner = fused_sigmoid_gating_delta_rule_update_kernel.fn
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    compiled_kernels = []
+    if best_only:
+        # Trigger autotune first so that best_config is selected.
+        fused_sigmoid_gating_delta_rule_update(
+            **{
+                k: v
+                for k, v in base_kwargs.items()
+                if k not in {"o", "BK", "USE_INITIAL_STATE", "IS_VARLEN"}
+            }
+        )
+        best_config = autotuner.best_config
+        if best_config is None:
+            raise RuntimeError("Autotuner did not produce best_config.")
+        compiled_kernels = [
+            autotuner.fn.warmup(
+                grid=grid,
+                **base_kwargs,
+                **best_config.all_kwargs(),
+            )
+        ]
+    else:
+        for cfg in autotuner.configs:
+            compiled_kernels.append(
+                autotuner.fn.warmup(
+                    grid=grid,
+                    **base_kwargs,
+                    **cfg.all_kwargs(),
+                )
+            )
+
+    dumped = []
+    for kernel_idx, compiled in enumerate(compiled_kernels):
+        asm_keys = sorted(compiled.asm.keys())
+        print(f"[ir-dump] kernel[{kernel_idx}] asm keys: {asm_keys}")
+        prefix = "best" if best_only else f"cfg{kernel_idx:02d}"
+        for asm_key in asm_keys:
+            payload = compiled.asm[asm_key]
+            file_path = out_dir / f"{prefix}.{asm_key}"
+            if isinstance(payload, bytes):
+                file_path.write_bytes(payload)
+            else:
+                file_path.write_text(payload, encoding="utf-8")
+            dumped.append(file_path)
+
+    ttir_files = sorted(out_dir.glob("*.ttir"))
+    ttgir_files = sorted(out_dir.glob("*.ttgir"))
+    print(
+        f"[ir-dump] dumped={len(dumped)} files, "
+        f"ttir={len(ttir_files)}, ttgir={len(ttgir_files)}, dir={out_dir}"
+    )
+    if not ttir_files or not ttgir_files:
+        raise AssertionError("TTIR/TTGIR files were not generated.")
+    return dumped
+
+
+def test_dump_triton_ir_for_fused_sigmoid_gating_delta_rule_update(ctx):
+    """Optional debug test: dump Triton TTIR/TTGIR artifacts to disk."""
+    if not HAS_TRITON_KERNEL:
+        pytest.skip("Triton kernel (sglang) not available.")
+    if os.environ.get("FLYDSL_DUMP_TRITON_IR", "0") != "1":
+        pytest.skip("Set FLYDSL_DUMP_TRITON_IR=1 to enable IR dump test.")
+
+    best_only = os.environ.get("FLYDSL_DUMP_TRITON_IR_BEST_ONLY", "0") == "1"
+    default_dir = _repo / "trace" / "triton_ir" / "fused_sigmoid_gating_delta_rule_update"
+    dump_dir = Path(os.environ.get("FLYDSL_TRITON_IR_DIR", str(default_dir)))
+    dumped = _dump_triton_ir_for_fused_sigmoid_gating_delta_rule_update(
+        output_dir=dump_dir,
+        best_only=best_only,
+    )
+    assert dumped
 
 
 def _print_minmax(name, x):

@@ -217,6 +217,26 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 )
                 h_reg.append(h_init)
 
+            a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
+            dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
+            if dtype_str != "f32":
+                a_log_val = flir.arith.extf(comp, arith.as_value(a_log_val))
+                dt_bias_val = flir.arith.extf(comp, arith.as_value(dt_bias_val))
+            neg_exp_a = flir.arith.MulFOp(
+                arith.as_value(c_neg_one),
+                arith.as_value(
+                    flir.math.exp2(
+                        arith.as_value(
+                            flir.arith.MulFOp(
+                                arith.as_value(a_log_val), arith.as_value(c_log2e), fastmath=fm_fast
+                            ).result
+                        ),
+                        fastmath=fm_fast,
+                    )
+                ),
+                fastmath=fm_fast,
+            ).result
+
             for t in range_constexpr(T_seq):
                 t_idx = arith.as_value(arith.index(t))
                 m5 = flir.arith.MulIOp(arith.as_value(i_n), c_T).result
@@ -240,12 +260,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                     arith.as_value(c_zero_f32),
                 )
 
-                a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
-                dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
                 a_val = memref.load(a, [arith.as_value(row_ab), arith.as_value(i_hv)])
                 if dtype_str != "f32":
-                    a_log_val = flir.arith.extf(comp, arith.as_value(a_log_val))
-                    dt_bias_val = flir.arith.extf(comp, arith.as_value(dt_bias_val))
                     a_val = flir.arith.extf(comp, arith.as_value(a_val))
                 x = flir.arith.AddFOp(
                     arith.as_value(a_val), arith.as_value(dt_bias_val), fastmath=fm_fast
@@ -281,18 +297,10 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 softplus_x = arith.select(
                     use_exp_branch, arith.as_value(softplus_x), arith.as_value(x)
                 )
-                a_log_log2e = flir.arith.MulFOp(
-                    arith.as_value(a_log_val), arith.as_value(c_log2e), fastmath=fm_fast
-                ).result
-                exp_a_log = flir.math.exp2(arith.as_value(a_log_log2e), fastmath=fm_fast)
                 exp_a_log_softplus = flir.arith.MulFOp(
-                    arith.as_value(exp_a_log), arith.as_value(softplus_x), fastmath=fm_fast
+                    arith.as_value(neg_exp_a), arith.as_value(softplus_x), fastmath=fm_fast
                 ).result
-                g_val = flir.arith.MulFOp(
-                    arith.as_value(c_neg_one),
-                    arith.as_value(exp_a_log_softplus),
-                    fastmath=fm_fast,
-                ).result
+                g_val = exp_a_log_softplus
 
                 b_val = memref.load(b, [arith.as_value(row_ab), arith.as_value(i_hv)])
                 if dtype_str != "f32":
@@ -320,6 +328,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
 
                 acc_hk = arith.constant(0.0, type=comp)
                 k_sq_local = arith.constant(0.0, type=comp)
+                k_vals = []
                 for ik_local in range_constexpr(K // 2):
                     k_idx = arith.as_value(
                         flir.arith.AddIOp(
@@ -335,6 +344,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                     )
                     if dtype_str != "f32":
                         k_ik = flir.arith.extf(comp, arith.as_value(k_ik))
+                    k_vals.append(k_ik)
                     prod = flir.arith.MulFOp(
                         arith.as_value(h_reg[ik_local]), arith.as_value(k_ik), fastmath=fm_fast
                     ).result
@@ -390,20 +400,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 ).result
 
                 for ik_local in range_constexpr(K // 2):
-                    k_idx = arith.as_value(
-                        flir.arith.AddIOp(
-                            arith.as_value(k_base), arith.as_value(arith.index(ik_local))
-                        ).result
-                    )
-                    k_col = arith.as_value(
-                        flir.arith.AddIOp(arith.as_value(c_k_dim_off), arith.as_value(k_idx)).result
-                    )
-                    k_ik = memref.load(
-                        mixed_qkv,
-                        [arith.as_value(i_n), arith.as_value(k_col), arith.as_value(t_idx)],
-                    )
-                    if dtype_str != "f32":
-                        k_ik = flir.arith.extf(comp, arith.as_value(k_ik))
+                    k_ik = k_vals[ik_local]
                     if use_qk_l2norm_in_kernel:
                         k_ik = flir.arith.MulFOp(
                             arith.as_value(k_ik), arith.as_value(k_inv_norm), fastmath=fm_fast
