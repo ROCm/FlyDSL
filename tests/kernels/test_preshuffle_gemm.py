@@ -35,7 +35,7 @@ if not torch.cuda.is_available():
 try:
     import aiter
     HAS_AITER = True
-except ImportError:
+except Exception:
     HAS_AITER = False
 
 ARCH = str(get_rocm_arch())
@@ -75,7 +75,7 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
 @pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
 @pytest.mark.parametrize("test_graph", [
     pytest.param(False, id="eager"),
-    pytest.param(True, id="graph", marks=pytest.mark.large_shape),
+    pytest.param(True, id="graph"),
 ])
 def test_mfma_a8_flyc_preshuffle(
     in_dtype,
