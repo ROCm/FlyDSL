@@ -4,7 +4,7 @@ Optimized for short query sequences (seqlen_q <= 4) with GQA.
 Implements absorbed MLA where the KV cache stores [c_kv || k_rope] per token.
 
 Key design:
-- MFMA 16x16x16f16 for both GEMM stages.
+- MFMA 16x16x16f16 / 16x16x16bf16_1k for both GEMM stages.
 - 4 waves per workgroup, each wave handles one seqlen_q position.
   Each MFMA tile computes 16 Q heads simultaneously (lane_mod_16 = head).
 - No if-else boundary checks for KV loads (assumes seqlen_kv % BLOCK_N == 0).
@@ -285,7 +285,7 @@ def compile_mla_decode(
     assert GQA_GROUP >= HEADS_PER_WAVE
     assert HEAD_DIM_V % 16 == 0
     assert qk_rope_head_dim % 16 == 0
-    assert dtype_str == "f16"
+    assert dtype_str in ("f16", "bf16")
     assert PAGE_BLOCK_SIZE % BLOCK_N == 0, (
         f"page_block_size ({PAGE_BLOCK_SIZE}) must be a multiple of BLOCK_N ({BLOCK_N})"
     )
@@ -416,16 +416,29 @@ def compile_mla_decode(
         num_kv_splits: fx.Int32,
     ):
         compute_type = T.f32
-        elem_type = T.f16
+        elem_type = T.bf16 if dtype_str == "bf16" else T.f16
 
         v4f16_type = ir.VectorType.get([4], elem_type)
         v4f32_type = ir.VectorType.get([4], compute_type)
         v2f32_type = ir.VectorType.get([2], compute_type)
         v8f16_type = ir.VectorType.get([8], elem_type)
         i32_type = ir.IntegerType.get_signless(32)
+        v4i32_type = ir.VectorType.get([4], i32_type)
         v2f16_type = ir.VectorType.get([2], elem_type)
         v1i32_type = ir.VectorType.get([1], i32_type)
         i64_type = ir.IntegerType.get_signless(64)
+
+        if dtype_str == "bf16":
+            _v4i16_type = ir.VectorType.get(
+                [4], ir.IntegerType.get_signless(16))
+            _mfma_raw = rocdl.mfma_f32_16x16x16bf16_1k
+            def _mfma_f32_16x16x16(result_type, operands, **kw):
+                ops = list(operands)
+                ops[0] = vector.bitcast(_v4i16_type, ops[0])
+                ops[1] = vector.bitcast(_v4i16_type, ops[1])
+                return _mfma_raw(result_type, ops, **kw)
+        else:
+            _mfma_f32_16x16x16 = rocdl.mfma_f32_16x16x16f16
 
         batch_size_v = arith.index_cast(T.index, batch_size.ir_value())
         seqlen_q_v = arith.index_cast(T.index, seqlen_q.ir_value())
@@ -438,13 +451,13 @@ def compile_mla_decode(
         base_ptr_red = allocator_red.get_base()
 
         lds_k_cur_buf = SmemPtr(
-            base_ptr, lds_k_cur_offset, T.f16, shape=(K_BUF_ELEMS,)
+            base_ptr, lds_k_cur_offset, elem_type, shape=(K_BUF_ELEMS,)
         ).get()
         lds_k_next_buf = SmemPtr(
-            base_ptr1, lds_k_next_offset, T.f16, shape=(K_BUF_ELEMS,)
+            base_ptr1, lds_k_next_offset, elem_type, shape=(K_BUF_ELEMS,)
         ).get()
         lds_vt = SmemPtr(
-            base_ptr_vt, lds_vt_offset, T.f16, shape=(VT_BUF_ELEMS,)
+            base_ptr_vt, lds_vt_offset, elem_type, shape=(VT_BUF_ELEMS,)
         ).get()
         lds_red = SmemPtr(
             base_ptr_red, lds_red_offset, T.f32, shape=(256,)
@@ -1121,12 +1134,32 @@ def compile_mla_decode(
                 _raw(l_scaled), _raw(local_sum), fastmath=fm_fast
             ).result
 
-            p_f16 = []
-            for ii in range_constexpr(4):
-                p_f16.append(
-                    _std_arith.TruncFOp(elem_type, _raw(p_vals[ii])).result
-                )
-            p_pack = vector.from_elements(v4f16_type, p_f16)
+            if dtype_str == "bf16":
+                _c16 = arith.constant(16, type=T.i32)
+                _cmask = arith.constant(0xFFFF0000, type=T.i32)
+                bits_0 = _std_arith.BitcastOp(T.i32, _raw(p_vals[0])).result
+                bits_1 = _std_arith.BitcastOp(T.i32, _raw(p_vals[1])).result
+                lo_0 = _std_arith.ShRUIOp(bits_0, _raw(_c16)).result
+                hi_1 = _std_arith.AndIOp(bits_1, _raw(_cmask)).result
+                dw0 = _std_arith.OrIOp(hi_1, lo_0).result
+
+                bits_2 = _std_arith.BitcastOp(T.i32, _raw(p_vals[2])).result
+                bits_3 = _std_arith.BitcastOp(T.i32, _raw(p_vals[3])).result
+                lo_2 = _std_arith.ShRUIOp(bits_2, _raw(_c16)).result
+                hi_3 = _std_arith.AndIOp(bits_3, _raw(_cmask)).result
+                dw1 = _std_arith.OrIOp(hi_3, lo_2).result
+
+                v1_0 = vector.from_elements(v1i32_type, [dw0])
+                v1_1 = vector.from_elements(v1i32_type, [dw1])
+                v2_i32 = vector.shuffle(v1_0, v1_1, [0, 1])
+                p_pack = vector.bitcast(v4f16_type, v2_i32)
+            else:
+                p_f16 = []
+                for ii in range_constexpr(4):
+                    p_f16.append(
+                        _std_arith.TruncFOp(elem_type, _raw(p_vals[ii])).result
+                    )
+                p_pack = vector.from_elements(v4f16_type, p_f16)
             return m_new, l_new, p_pack, rescale
 
         def softmax_and_pack(s_acc, m_old, l_old,
@@ -1179,11 +1212,11 @@ def compile_mla_decode(
                     k_buf[ks], k_buf[ks], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks], k_buf[ks], [4, 5, 6, 7])
-                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                s_accs[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s_accs[0], 0, 0, 0],
                 )
-                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                s_accs[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s_accs[0], 0, 0, 0],
                 )
@@ -1230,11 +1263,11 @@ def compile_mla_decode(
                     k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
-                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                s_accs[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s_accs[0], 0, 0, 0],
                 )
-                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                s_accs[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s_accs[0], 0, 0, 0],
                 )
@@ -1304,11 +1337,11 @@ def compile_mla_decode(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp], v_buf[dp], [4, 5, 6, 7])
-                o_accs[dp * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack, o_accs[dp * 2], 0, 0, 0],
                 )
-                o_accs[dp * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack, o_accs[dp * 2 + 1], 0, 0, 0],
                 )
@@ -1359,11 +1392,11 @@ def compile_mla_decode(
                     v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
-                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack, o_accs[dp_inner * 2], 0, 0, 0],
                 )
-                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack, o_accs[dp_inner * 2 + 1], 0, 0, 0],
                 )
@@ -1431,11 +1464,11 @@ def compile_mla_decode(
                     k_buf[ks], k_buf[ks], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks], k_buf[ks], [4, 5, 6, 7])
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
@@ -1476,11 +1509,11 @@ def compile_mla_decode(
                     k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
@@ -1568,11 +1601,11 @@ def compile_mla_decode(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp], v_buf[dp], [4, 5, 6, 7])
-                o_accs[dp * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack_a, o_accs[dp * 2], 0, 0, 0],
                 )
-                o_accs[dp * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack_a, o_accs[dp * 2 + 1], 0, 0, 0],
                 )
@@ -1625,11 +1658,11 @@ def compile_mla_decode(
                     v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
-                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack_a, o_accs[dp_inner * 2], 0, 0, 0],
                 )
-                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack_a, o_accs[dp_inner * 2 + 1], 0, 0, 0],
                 )
@@ -1664,11 +1697,11 @@ def compile_mla_decode(
                     k_buf[ks], k_buf[ks], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks], k_buf[ks], [4, 5, 6, 7])
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
@@ -1710,11 +1743,11 @@ def compile_mla_decode(
                     k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
                 k_hi = vector.shuffle(
                     k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_lo, q_lo, s[0], 0, 0, 0],
                 )
-                s[0] = rocdl.mfma_f32_16x16x16f16(
+                s[0] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
@@ -1782,11 +1815,11 @@ def compile_mla_decode(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp], v_buf[dp], [4, 5, 6, 7])
-                o_accs[dp * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack_b, o_accs[dp * 2], 0, 0, 0],
                 )
-                o_accs[dp * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack_b, o_accs[dp * 2 + 1], 0, 0, 0],
                 )
@@ -1843,11 +1876,11 @@ def compile_mla_decode(
                     v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
                     v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
-                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_lo, p_pack_b, o_accs[dp_inner * 2], 0, 0, 0],
                 )
-                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                o_accs[dp_inner * 2 + 1] = _mfma_f32_16x16x16(
                     v4f32_type,
                     [v_hi, p_pack_b, o_accs[dp_inner * 2 + 1], 0, 0, 0],
                 )
