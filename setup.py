@@ -4,6 +4,7 @@ import os
 import subprocess
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from setuptools import Distribution, find_namespace_packages, find_packages, setup
@@ -120,8 +121,6 @@ def _read_version() -> str:
       release     -> {base}                             (e.g. 0.1.0)
       <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
     """
-    from datetime import datetime, timezone
-
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
     base_version = "0.0.0"
     for line in init_py.splitlines():
