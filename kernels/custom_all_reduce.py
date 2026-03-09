@@ -20,11 +20,8 @@ def _is_weak_contiguous(t) -> bool:
     try:
         if t.is_contiguous():
             return True
-        storage = t.untyped_storage() if hasattr(t, "untyped_storage") else t.storage()
-        storage_nbytes = int(storage.nbytes())
-        storage_offset_elems = int(t.storage_offset())
-        elem_size = int(t.element_size())
-        return storage_nbytes - storage_offset_elems * elem_size == int(t.numel()) * elem_size
+        storage = t.untyped_storage()
+        return int(storage.nbytes()) - int(t.storage_offset()) * int(t.element_size()) == int(t.numel()) * int(t.element_size())
     except Exception:
         return False
 
@@ -239,8 +236,7 @@ class FlyDSLAllreduce:
         self.input_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
         self.output_buffer = torch.empty(self.max_size, dtype=torch.uint8, device=self.device)
 
-        inp_buf_storage = self.input_buffer.untyped_storage() if hasattr(self.input_buffer, "untyped_storage") else self.input_buffer.storage()
-        inp_buf_base = int(inp_buf_storage.data_ptr())
+        inp_buf_base = int(self.input_buffer.untyped_storage().data_ptr())
         inp_buf_off = int(self.input_buffer.data_ptr()) - inp_buf_base
         my_inp_buf_h = self._get_mem_handle_bytes(inp_buf_base)
         all_inp_buf = self._gather_object_list_via_broadcast(self.group, (my_inp_buf_h, inp_buf_off))
@@ -264,8 +260,7 @@ class FlyDSLAllreduce:
         rotated_tmp_ptrs = [self._tmp_ptrs[(rk + i) % ws] for i in range(8)]
         self._gpu_tmp_ptrs_array = torch.tensor(rotated_tmp_ptrs, dtype=torch.int64, device=self.device)
 
-        out_buf_storage = self.output_buffer.untyped_storage() if hasattr(self.output_buffer, "untyped_storage") else self.output_buffer.storage()
-        out_buf_base = int(out_buf_storage.data_ptr())
+        out_buf_base = int(self.output_buffer.untyped_storage().data_ptr())
         out_buf_off = int(self.output_buffer.data_ptr()) - out_buf_base
         my_out_buf_h = self._get_mem_handle_bytes(out_buf_base)
         all_out_buf = self._gather_object_list_via_broadcast(self.group, (my_out_buf_h, out_buf_off))
@@ -332,8 +327,7 @@ class FlyDSLAllreduce:
 
         inp = self._graph_inp
         if inp is not None:
-            storage = inp.untyped_storage() if hasattr(inp, "untyped_storage") else inp.storage()
-            base_ptr = int(storage.data_ptr())
+            base_ptr = int(inp.untyped_storage().data_ptr())
             off = int(inp.data_ptr()) - base_ptr
             my_handle = self._get_mem_handle_bytes(base_ptr)
             all_graph_in = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
@@ -355,8 +349,7 @@ class FlyDSLAllreduce:
 
         out = self._graph_out
         if out is not None:
-            storage = out.untyped_storage() if hasattr(out, "untyped_storage") else out.storage()
-            base_ptr = int(storage.data_ptr())
+            base_ptr = int(out.untyped_storage().data_ptr())
             off = int(out.data_ptr()) - base_ptr
             my_handle = self._get_mem_handle_bytes(base_ptr)
             all_graph_out = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
@@ -383,13 +376,8 @@ class FlyDSLAllreduce:
 
     _DTYPE_STR_CACHE = {}
 
-    def _dtype_str(self, t):
+    def _dtype_str(self, t) -> str:
         dtype = getattr(t, "dtype", None)
-        if dtype in self._DTYPE_STR_CACHE:
-            return self._DTYPE_STR_CACHE[dtype]
-        return self._dtype_str_from_torch(dtype)
-
-    def _dtype_str_from_torch(self, dtype):
         if dtype in self._DTYPE_STR_CACHE:
             return self._DTYPE_STR_CACHE[dtype]
         name = str(dtype)
