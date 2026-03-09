@@ -297,7 +297,7 @@ def compile_mla_decode(
         sm_scale = 1.0 / math.sqrt(HEAD_DIM_QK)
 
     K_STEPS = HEAD_DIM_QK // 32
-    K_PREFETCH = 10
+    K_PREFETCH = 8
     K_REMAINING = K_STEPS - K_PREFETCH
     N_KV_SUBTILES = BLOCK_N // 16  # 1
     D_CHUNKS = HEAD_DIM_V // 16
@@ -307,19 +307,40 @@ def compile_mla_decode(
     STRIDE_TOKEN_KV = NUM_KV_HEADS * HEAD_DIM_QK
     STRIDE_PAGE = PAGE_BLOCK_SIZE * STRIDE_TOKEN_KV
 
-    K_STRIDE_ALIGNED = (
-        (HEAD_DIM_QK + 2 * WARP_SIZE - 1)
-        // (2 * WARP_SIZE) * (2 * WARP_SIZE)
-    )
-    K_CALLS_PER_ROW = K_STRIDE_ALIGNED // (2 * WARP_SIZE)
-    K_STRIDE = K_STRIDE_ALIGNED + 8  # +8 f16: 324 dwords, 324%32=4, keeps 16B align for ds_read_b128
+    CKV_CHUNK_COLS = 64
+    CKV_NUM_CHUNKS = HEAD_DIM_QK // CKV_CHUNK_COLS
+    assert HEAD_DIM_QK % CKV_CHUNK_COLS == 0
+    CKV_CHUNK_BYTES = CKV_CHUNK_COLS * 2 * 2
+    CKV_HALF_BYTES = CKV_NUM_CHUNKS * CKV_CHUNK_BYTES
+    CKV_PAD_BYTES = 32
+    CKV_WAVE_BYTES = CKV_HALF_BYTES * 2 + CKV_PAD_BYTES
+    CKV_HALF_F16 = CKV_HALF_BYTES // 2
+    CKV_WAVE_F16 = CKV_WAVE_BYTES // 2
+    CKV_CHUNK_F16 = CKV_CHUNK_BYTES // 2
+    CKV_TOKEN_F16 = CKV_CHUNK_COLS
+    K_SEQ_STRIDE = NUM_WAVES
+    K_PAIRS_PER_WAVE = 2
+    K_SEQS_PER_WAVE = K_PAIRS_PER_WAVE * 2
+    COOP_K_VMEM_OPS = CKV_NUM_CHUNKS * K_PAIRS_PER_WAVE
+
+    K_LO_CHUNKS = 5
+    K_HI0_CHUNKS = 2
+    K_HI1_CHUNKS = CKV_NUM_CHUNKS - K_LO_CHUNKS - K_HI0_CHUNKS
+    K_LO_OPS = K_LO_CHUNKS * K_PAIRS_PER_WAVE
+    K_HI0_OPS = K_HI0_CHUNKS * K_PAIRS_PER_WAVE
+    K_HI1_OPS = K_HI1_CHUNKS * K_PAIRS_PER_WAVE
+
+    K_STEP_OFFSETS_F16 = [
+        (ks // 2) * CKV_CHUNK_F16 + (ks % 2) * 32
+        for ks in range(K_STEPS)
+    ]
+
     VT_STRIDE = (BLOCK_N // 4) * 8
 
-    K_BUF_ELEMS = BLOCK_N * K_STRIDE
+    K_BUF_ELEMS = CKV_WAVE_BYTES * NUM_WAVES // 2
     VT_BUF_ELEMS = (HEAD_DIM_V // 2) * VT_STRIDE
     VT_BUF_OFFSET = 2 * K_BUF_ELEMS
     KV_LDS_SIZE = 2 * K_BUF_ELEMS + VT_BUF_ELEMS
-    K_ROWS_PER_WAVE = BLOCK_N // NUM_WAVES
 
     MAX_SEQLEN_Q = 4
     Q_TILE_DIM = 64
@@ -336,26 +357,8 @@ def compile_mla_decode(
 
     assert HEAD_DIM_V // 2 == BLOCK_SIZE
 
-    _kload_lines = []
-    for _r in range(K_ROWS_PER_WAVE):
-        _m0off = _r * K_STRIDE * 2
-        if _r == 0:
-            _kload_lines.append("s_mov_b32 m0, $2")
-        else:
-            _kload_lines.append("s_add_i32 m0, $2, " + hex(_m0off))
-        _kload_lines.append("s_nop 0")
-        _soff = "0" if _r == 0 else ("$" + str(_r + 2))
-        for _j in range(K_CALLS_PER_ROW):
-            _off = "" if _j == 0 else (
-                " offset:" + str(_j * 2 * WARP_SIZE * 2))
-            _kload_lines.append(
-                "buffer_load_dword $1, $0, "
-                + _soff + " offen" + _off + " sc0 lds")
-    _KLOAD_ASM = "\n".join(_kload_lines)
-    _KLOAD_CONSTRAINTS = ",".join(
-        ["s", "v", "s"]
-        + ["s"] * (K_ROWS_PER_WAVE - 1)
-        + ["~{m0}"])
+    _KLOAD_ASM = None
+    _KLOAD_CONSTRAINTS = None
 
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
@@ -466,6 +469,17 @@ def compile_mla_decode(
         lane_mod_16 = lane % arith.index(16)
         lane_div_16 = lane / arith.index(16)
 
+        k_seq_wave = lane_mod_16 % arith.index(NUM_WAVES)
+        k_seq_group = lane_mod_16 / arith.index(NUM_WAVES)
+        k_group = k_seq_group / arith.index(2)
+        k_token = k_seq_group % arith.index(2)
+        k_read_base = (
+            k_seq_wave * arith.index(CKV_WAVE_F16)
+            + k_group * arith.index(CKV_HALF_F16)
+            + k_token * arith.index(CKV_TOKEN_F16)
+            + lane_div_16 * arith.index(8)
+        )
+
         lane_mod_16_x2 = lane_mod_16 * arith.index(2)
 
         q_head_idx = head_group_idx * arith.index(HEADS_PER_WAVE) + lane_mod_16
@@ -476,14 +490,15 @@ def compile_mla_decode(
 
         # ---- KV split range ----
         num_kv_splits_v = num_kv_splits_v_raw
-        total_kv_tiles = seqlen_kv_v / arith.index(BLOCK_N)
+        total_kv_tiles = (seqlen_kv_v + arith.index(BLOCK_N - 1)) / arith.index(BLOCK_N)
         tiles_nkv_m1 = num_kv_splits_v - arith.index(1)
         tiles_plus = total_kv_tiles + tiles_nkv_m1
         tiles_per_split = tiles_plus / num_kv_splits_v
         kv_per_split = tiles_per_split * arith.index(BLOCK_N)
         kv_split_start = split_id * kv_per_split
         _kv_split_end_raw = kv_split_start + kv_per_split
-        kv_split_end = _std_arith.MinUIOp(_raw(_kv_split_end_raw), _raw(seqlen_kv_v)).result
+        _aligned_seqlen = total_kv_tiles * arith.index(BLOCK_N)
+        kv_split_end = _std_arith.MinUIOp(_raw(_kv_split_end_raw), _raw(_aligned_seqlen)).result
 
         # ---- Mid_O / Mid_lse strides ----
         stride_mid_o_token = num_kv_splits_v * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
@@ -592,198 +607,135 @@ def compile_mla_decode(
             phys = arith.index_cast(T.index, phys_i32)
             return phys * arith.index(STRIDE_PAGE)
 
-        K_ROW_SOFFSETS = [
-            arith.constant(r * STRIDE_TOKEN_KV * 2, type=T.i32)
-            for r in range(K_ROWS_PER_WAVE)
-        ]
-        K_J_OFFSETS = [
-            arith.constant(j * 2 * WARP_SIZE * 2, type=T.i32)
-            for j in range(K_CALLS_PER_ROW)
+        c_soff_zero = arith.constant(0, type=T.i32)
+
+        K_COL_OFFSETS = [
+            arith.constant(j * 128, type=T.i32)
+            for j in range(CKV_NUM_CHUNKS)
         ]
 
-        def _lds_row0_ptr(k_buf):
-            lds_offset = wave_id * arith.index(K_ROWS_PER_WAVE * K_STRIDE * 2)
+        lane_mod_32_for_k = lane % arith.index(32)
+        lane_div_32_for_k = lane / arith.index(32)
+
+        _wave_id_i32 = _index_cast_to_i32(wave_id)
+        _wave_id_sgpr = rocdl.readfirstlane(i32_type, _wave_id_i32)
+        _ckv_wave_bytes_c = arith.constant(CKV_WAVE_BYTES, type=T.i32)
+        _wave_offset_sgpr = _std_arith.MulIOp(
+            _raw(_wave_id_sgpr), _raw(_ckv_wave_bytes_c),
+        ).result
+
+        def _precompute_wave_base_i32(k_buf):
+            """LDS wave base as i32 SGPR — no GEP, stays scalar."""
             lds_base = memref_dialect.extract_aligned_pointer_as_index(k_buf)
-            lds_base_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_base))
-            lds_ptr_base = _inttoptr_lds(lds_base_lane0)
-            return _get_element_ptr(lds_ptr_base, lds_offset)
+            lds_base_i32 = _index_cast_to_i32(lds_base)
+            lds_base_sgpr = rocdl.readfirstlane(i32_type, lds_base_i32)
+            return _std_arith.AddIOp(
+                _raw(lds_base_sgpr), _raw(_wave_offset_sgpr),
+            ).result
 
-        def coop_load_k(kv_page_base, page_off, k_buf):
-            g_f16_wave_row0 = (
-                kv_page_base
-                + (page_off + wave_id * arith.index(K_ROWS_PER_WAVE))
-                * arith.index(STRIDE_TOKEN_KV)
-                + kv_head_offset
-            )
-            voff_base = (
-                g_f16_wave_row0 * arith.index(2)
-                + lane * arith.index(4)
-            )
-            voff_base_i32 = _index_cast_to_i32(voff_base)
+        lds_wptr_cur = _precompute_wave_base_i32(lds_k_cur_buf)
+        lds_wptr_next = _precompute_wave_base_i32(lds_k_next_buf)
 
-            lds_ptr_row0 = _lds_row0_ptr(k_buf)
-            lds_ptrs = [
-                _get_element_ptr(
-                    lds_ptr_row0,
-                    static_byte_offset=r * (K_STRIDE * 2),
-                )
-                for r in range(K_ROWS_PER_WAVE)
-            ]
-            for j in range_constexpr(K_CALLS_PER_ROW):
-                for r_off in range_constexpr(K_ROWS_PER_WAVE):
-                    rocdl.raw_ptr_buffer_load_lds(
-                        kv_rsrc,
-                        lds_ptrs[r_off],
-                        _raw(c_dword_sz),
-                        voff_base_i32,
-                        _raw(K_ROW_SOFFSETS[r_off]),
-                        _raw(K_J_OFFSETS[j]),
-                        _raw(aux),
-                    )
+        def _i32_to_lds_ptr(i32_val):
+            i64_val = _std_arith.ExtUIOp(i64_type, i32_val).result
+            return _inttoptr_lds(i64_val)
 
-        K_HALF_ROWS = K_ROWS_PER_WAVE // 2
-        K_QUARTER_ROWS = K_ROWS_PER_WAVE // 4
+        C_VOFF_G1_DELTA = 2 * K_SEQ_STRIDE * STRIDE_TOKEN_KV * 2
+        _voff_g0_const = (
+            (wave_id * arith.index(STRIDE_TOKEN_KV) + kv_head_offset)
+            * arith.index(2)
+            + lane_div_32_for_k
+            * arith.index(K_SEQ_STRIDE * STRIDE_TOKEN_KV * 2)
+            + lane_mod_32_for_k * arith.index(4)
+        )
+        _voff_g0_const_i32 = _index_cast_to_i32(_voff_g0_const)
+        _voff_g1_const_i32 = _std_arith.AddIOp(
+            _raw(_voff_g0_const_i32),
+            _raw(arith.constant(C_VOFF_G1_DELTA, type=T.i32)),
+        ).result
 
-        def _coop_load_k_setup(kv_page_base, page_off, k_buf):
-            g_f16_wave_row0 = (
-                kv_page_base
-                + (page_off + wave_id * arith.index(K_ROWS_PER_WAVE))
-                * arith.index(STRIDE_TOKEN_KV)
-                + kv_head_offset
-            )
-            voff_base = (
-                g_f16_wave_row0 * arith.index(2)
-                + lane * arith.index(4)
-            )
-            voff_base_i32 = _index_cast_to_i32(voff_base)
+        def _coop_load_k_setup(kv_page_base, page_off, lds_wave_base_i32):
+            page_byte_base = (
+                kv_page_base + page_off * arith.index(STRIDE_TOKEN_KV)
+            ) * arith.index(2)
+            page_byte_base_i32 = _index_cast_to_i32(page_byte_base)
+            voff_g0_i32 = _std_arith.AddIOp(
+                _raw(page_byte_base_i32), _raw(_voff_g0_const_i32),
+            ).result
+            voff_g1_i32 = _std_arith.AddIOp(
+                _raw(page_byte_base_i32), _raw(_voff_g1_const_i32),
+            ).result
+            return voff_g0_i32, voff_g1_i32, lds_wave_base_i32
 
-            lds_ptr_row0 = _lds_row0_ptr(k_buf)
-            return voff_base_i32, lds_ptr_row0
+        def _emit_k_chunk_pair(lds_wave_base_i32, voff_g0_i32, voff_g1_i32, j):
+            _emit_k_single(lds_wave_base_i32, voff_g0_i32, j, 0)
+            _emit_k_single(lds_wave_base_i32, voff_g1_i32, j, CKV_HALF_BYTES)
 
-        K_LO_ROWS = K_HALF_ROWS
+        def _emit_k_single(lds_wave_base_i32, voff_i32, j, half_offset):
+            m0_val = _std_arith.AddIOp(
+                lds_wave_base_i32,
+                _raw(arith.constant(half_offset + j * 128, type=T.i32)),
+            ).result
+            lds_ptr = _i32_to_lds_ptr(m0_val)
+            rocdl.raw_ptr_buffer_load_lds(
+                kv_rsrc, lds_ptr, _raw(c_dword_sz),
+                voff_i32, _raw(c_soff_zero),
+                _raw(K_COL_OFFSETS[j]), _raw(aux))
 
-        def coop_load_k_lo(kv_page_base, page_off, k_buf):
-            voff_base_i32, lds_ptr_row0 = _coop_load_k_setup(
-                kv_page_base, page_off, k_buf)
-            lds_ptrs_lo = [
-                _get_element_ptr(
-                    lds_ptr_row0,
-                    static_byte_offset=r * (K_STRIDE * 2),
-                )
-                for r in range(K_LO_ROWS)
-            ]
-            for j in range_constexpr(K_CALLS_PER_ROW):
-                for r_off in range_constexpr(K_LO_ROWS):
-                    rocdl.raw_ptr_buffer_load_lds(
-                        kv_rsrc,
-                        lds_ptrs_lo[r_off],
-                        _raw(c_dword_sz),
-                        voff_base_i32,
-                        _raw(K_ROW_SOFFSETS[r_off]),
-                        _raw(K_J_OFFSETS[j]),
-                        _raw(aux),
-                    )
+        def coop_load_k(kv_page_base, page_off, lds_ptr_wave):
+            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+            for j in range_constexpr(CKV_NUM_CHUNKS):
+                _emit_k_chunk_pair(
+                    lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
 
-        def coop_load_k_hi0(kv_page_base, page_off, k_buf):
-            voff_base_i32, lds_ptr_row0 = _coop_load_k_setup(
-                kv_page_base, page_off, k_buf)
-            lds_ptrs = [
-                _get_element_ptr(
-                    lds_ptr_row0,
-                    static_byte_offset=(K_HALF_ROWS + r) * (K_STRIDE * 2),
-                )
-                for r in range(K_QUARTER_ROWS)
-            ]
-            for j in range_constexpr(K_CALLS_PER_ROW):
-                for r_off in range_constexpr(K_QUARTER_ROWS):
-                    rocdl.raw_ptr_buffer_load_lds(
-                        kv_rsrc,
-                        lds_ptrs[r_off],
-                        _raw(c_dword_sz),
-                        voff_base_i32,
-                        _raw(K_ROW_SOFFSETS[K_HALF_ROWS + r_off]),
-                        _raw(K_J_OFFSETS[j]),
-                        _raw(aux),
-                    )
+        def coop_load_k_lo(kv_page_base, page_off, lds_ptr_wave):
+            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+            for j in range_constexpr(K_LO_CHUNKS):
+                _emit_k_chunk_pair(
+                    lds_ptr_wave, voff_g0_i32, voff_g1_i32, j)
 
-        def coop_load_k_hi1(kv_page_base, page_off, k_buf):
-            voff_base_i32, lds_ptr_row0 = _coop_load_k_setup(
-                kv_page_base, page_off, k_buf)
-            hi1_start = K_HALF_ROWS + K_QUARTER_ROWS
-            lds_ptrs = [
-                _get_element_ptr(
-                    lds_ptr_row0,
-                    static_byte_offset=(hi1_start + r) * (K_STRIDE * 2),
-                )
-                for r in range(K_QUARTER_ROWS)
-            ]
-            for j in range_constexpr(K_CALLS_PER_ROW):
-                for r_off in range_constexpr(K_QUARTER_ROWS):
-                    rocdl.raw_ptr_buffer_load_lds(
-                        kv_rsrc,
-                        lds_ptrs[r_off],
-                        _raw(c_dword_sz),
-                        voff_base_i32,
-                        _raw(K_ROW_SOFFSETS[hi1_start + r_off]),
-                        _raw(K_J_OFFSETS[j]),
-                        _raw(aux),
-                    )
+        def coop_load_k_hi0(kv_page_base, page_off, lds_ptr_wave):
+            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+            for j in range_constexpr(K_HI0_CHUNKS):
+                _emit_k_chunk_pair(
+                    lds_ptr_wave, voff_g0_i32, voff_g1_i32,
+                    j + K_LO_CHUNKS)
 
-        def coop_load_k_asm(kv_page_base, page_off, k_buf):
-            g_f16_wave_row0 = (
-                kv_page_base
-                + (page_off + wave_id * arith.index(K_ROWS_PER_WAVE))
-                * arith.index(STRIDE_TOKEN_KV)
-                + kv_head_offset
-            )
-            voff_base = (
-                g_f16_wave_row0 * arith.index(2)
-                + lane * arith.index(4)
-            )
-            voff_base_i32 = _index_cast_to_i32(voff_base)
+        def coop_load_k_hi1(kv_page_base, page_off, lds_ptr_wave):
+            voff_g0_i32, voff_g1_i32, lds_ptr_wave = \
+                _coop_load_k_setup(kv_page_base, page_off, lds_ptr_wave)
+            for j in range_constexpr(K_HI1_CHUNKS):
+                _emit_k_chunk_pair(
+                    lds_ptr_wave, voff_g0_i32, voff_g1_i32,
+                    j + K_LO_CHUNKS + K_HI0_CHUNKS)
 
-            buf_byte_idx = _memref.ExtractAlignedPointerAsIndexOp(k_buf).result
-            lds_row0_byte = (
-                buf_byte_idx
-                + wave_id * arith.index(K_ROWS_PER_WAVE * K_STRIDE * 2)
-            )
-
-            m0_base_i32 = _index_cast_to_i32(lds_row0_byte)
-            m0_base_sgpr = rocdl.readfirstlane(T.i32, m0_base_i32)
-
-            operands = [
-                _raw(kv_rsrc),
-                voff_base_i32,
-                _raw(m0_base_sgpr),
-            ]
-            for r in [1, 2, 3]:
-                operands.append(_raw(K_ROW_SOFFSETS[r]))
-
-            llvm.InlineAsmOp(
-                res=None,
-                operands_=operands,
-                asm_string=_KLOAD_ASM,
-                constraints=_KLOAD_CONSTRAINTS,
-                has_side_effects=True,
-                is_align_stack=False,
-            )
+        def coop_load_k_asm(kv_page_base, page_off, lds_ptr_wave):
+            coop_load_k(kv_page_base, page_off, lds_ptr_wave)
 
         # ---- V transpose: K_buf(LDS) → V^T_buf(LDS) ----
         v2i32_type = ir.VectorType.get([2], i32_type)
 
+        def _vt_col_offset(vt_dim_quad_val):
+            vt_chunk = vt_dim_quad_val / arith.index(CKV_CHUNK_COLS)
+            vt_col_in_chunk = vt_dim_quad_val % arith.index(CKV_CHUNK_COLS)
+            return vt_chunk * arith.index(CKV_CHUNK_F16) + vt_col_in_chunk
+
         def coop_load_v(k_buf):
-            vt_read_base = (
-                tid_div_128 * arith.index(4 * K_STRIDE)
-                + vt_dim_quad
-            )
+            vt_col_off = _vt_col_offset(vt_dim_quad)
+            vt_token_off = tid_div_128 * arith.index(CKV_TOKEN_F16)
             v_raw = []
             for g_pair in range_constexpr(BLOCK_N // 8):
                 dwords_dp0 = []
                 dwords_dp1 = []
                 for s in range_constexpr(4):
                     lds_idx = (
-                        vt_read_base
-                        + arith.index((g_pair * 8 + s) * K_STRIDE)
+                        arith.index(s * CKV_WAVE_F16
+                                    + g_pair * CKV_HALF_F16)
+                        + vt_token_off
+                        + vt_col_off
                     )
                     quad = vector.load_op(v4f16_type, k_buf, [_raw(lds_idx)])
                     dw_pair = vector.bitcast(v2i32_type, quad)
@@ -829,16 +781,16 @@ def compile_mla_decode(
                     vector.store(vec, lds_vt, [_raw(_vt_swizzle(vt_idx))])
 
         def coop_load_v_half(half, k_buf):
-            vt_read_base = (
-                tid_div_128 * arith.index(4 * K_STRIDE)
-                + vt_dim_quad
-            )
+            vt_col_off = _vt_col_offset(vt_dim_quad)
+            vt_token_off = tid_div_128 * arith.index(CKV_TOKEN_F16)
             dwords_dp0 = []
             dwords_dp1 = []
             for s in range_constexpr(4):
                 lds_idx = (
-                    vt_read_base
-                    + arith.index((half * 8 + s) * K_STRIDE)
+                    arith.index(s * CKV_WAVE_F16
+                                + half * CKV_HALF_F16)
+                    + vt_token_off
+                    + vt_col_off
                 )
                 quad = vector.load_op(v4f16_type, k_buf, [_raw(lds_idx)])
                 dw_pair = vector.bitcast(v2i32_type, quad)
@@ -906,7 +858,7 @@ def compile_mla_decode(
         kv_total_blocks = batch_size_v * max_num_blocks_v
         kv_total_elems = kv_total_blocks * arith.index(STRIDE_PAGE)
         kv_size_bytes = kv_total_elems * arith.index(2)
-        c_max_records = arith.index(0x7FFFFFFE)
+        c_max_records = arith.index(0xEFFFFFFE)
         kv_size_capped = _std_arith.MinUIOp(_raw(kv_size_bytes), _raw(c_max_records)).result
         kv_rsrc = buffer_ops.create_buffer_resource(
             KV, num_records_bytes=kv_size_capped
@@ -1051,7 +1003,9 @@ def compile_mla_decode(
                 is_align_stack=False,
             ).result
 
-        def softmax_reduce(s_acc, kv_pos=None, do_causal=False):
+        def _softmax_reduce_issue(s_acc, kv_pos=None, do_causal=False):
+            """Issue ds_write + ds_read for warp reduce; returns
+            (s_vals, max_vec) where max_vec is NOT yet waited on."""
             s_vals = []
             for ii in range_constexpr(4):
                 s_val = vector.extract(
@@ -1084,13 +1038,16 @@ def compile_mla_decode(
                 + lane_div_16
             )
             _memref.StoreOp(local_max, lds_red, [_raw(red_wr_idx)])
-            # rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
             red_rd_base = (
                 wave_id * arith.index(64)
                 + lane_mod_16 * arith.index(4)
             )
             max_vec = vector.load_op(v4f32_type, lds_red, [_raw(red_rd_base)])
+            return s_vals, max_vec
+
+        def _softmax_reduce_collect(max_vec):
+            """Wait for max_vec ds_read and compute global max."""
             global_max = c_neg_large
             for g in range_constexpr(4):
                 max_g = vector.extract(
@@ -1100,8 +1057,12 @@ def compile_mla_decode(
                     _raw(global_max), _raw(max_g),
                     fastmath=fm_fast,
                 ).result
-            # rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+            return global_max
 
+        def softmax_reduce(s_acc, kv_pos=None, do_causal=False):
+            s_vals, max_vec = _softmax_reduce_issue(
+                s_acc, kv_pos=kv_pos, do_causal=do_causal)
+            global_max = _softmax_reduce_collect(max_vec)
             return global_max, s_vals
 
         def softmax_finalize(global_max, s_vals, m_old, l_old):
@@ -1178,40 +1139,26 @@ def compile_mla_decode(
 
         def do_kv_tile(kv_pos, m_old, l_old, o_accs,
                        k_cur_buf, k_next_buf, k_buf,
+                       wptr_cur=None, wptr_next=None,
                        v_raw_h1_in=None,
                        load_knn=True, do_vt=True,
                        do_causal=False):
             rocdl.sched_barrier(0)
 
-            coop_perm_store_v_half(1, v_raw_h1_in)
-            if do_vt:
-                v_raw_h0 = coop_load_v_half(0, k_next_buf)
-
             if load_knn:
                 nn_start = kv_pos + arith.index(2 * BLOCK_N)
                 nn_phys_i32, nn_p_off = lookup_page_issue(nn_start)
 
-            k_rem_base = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
             for ks in range_constexpr(K_REMAINING):
-                _ki = k_rem_base + arith.index((ks + K_PREFETCH) * 32)
+                _ki = k_read_base + arith.index(K_STEP_OFFSETS_F16[ks + K_PREFETCH])
                 k_buf[ks + K_PREFETCH] = vector.load_op(
                     v8f16_type, k_cur_buf, [_raw(_ki)],
                     nontemporal=True)
 
-            if load_knn:
-                nn_page_base = lookup_page_resolve(nn_phys_i32)
-                coop_load_k(nn_page_base, nn_p_off, k_cur_buf)
-
+            # ---- GEMM1 Phase 1 ----
             s_accs = [c_zero_v4f32]
-            v_buf = [None] * N_DP
-            for ks in range_constexpr(K_STEPS):
-                if ks < VT_PREFETCH:
-                    v_buf[ks] = vector.load_op(
-                        v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
-                        nontemporal=True)
+            DS_READ_INTER = 8
+            for ks in range_constexpr(DS_READ_INTER):
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
@@ -1227,36 +1174,118 @@ def compile_mla_decode(
                     [k_hi, q_hi, s_accs[0], 0, 0, 0],
                 )
 
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+
+            coop_perm_store_v_half(1, v_raw_h1_in)
+
+            if load_knn:
+                nn_page_base = lookup_page_resolve(nn_phys_i32)
+                voff_g0_t, voff_g1_t, wbase_t = \
+                    _coop_load_k_setup(nn_page_base, nn_p_off, wptr_cur)
+
+            if do_vt:
+                v_raw_h0 = coop_load_v_half(0, k_next_buf)
+
+            # ---- GEMM1 Phase 2 (with interleaved K loads) ----
+            GEMM1_HALF = K_STEPS - DS_READ_INTER
+            _N_LOADS = K_LO_CHUNKS * 2 if load_knn else 0
+            for ks in range_constexpr(GEMM1_HALF):
+                if load_knn and ks < _N_LOADS:
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(2)
+                    _chunk = ks // 2
+                    if ks % 2 == 0:
+                        _emit_k_single(wbase_t, voff_g0_t, _chunk, 0)
+                    else:
+                        _emit_k_single(wbase_t, voff_g1_t, _chunk,
+                                       CKV_HALF_BYTES)
+                ks_inner = ks + DS_READ_INTER
+                q_lo = q_b_packs_lo[ks_inner]
+                q_hi = q_b_packs_hi[ks_inner]
+                k_lo = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
+                k_hi = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
+                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_lo, q_lo, s_accs[0], 0, 0, 0],
+                )
+                s_accs[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_hi, q_hi, s_accs[0], 0, 0, 0],
+                )
+
             rocdl.sched_barrier(0)
 
-            global_max, s_vals = softmax_reduce(
+            s_vals, max_vec = _softmax_reduce_issue(
                 s_accs[0], kv_pos=kv_pos, do_causal=do_causal)
+
+            if load_knn:
+                coop_load_k_hi0(nn_page_base, nn_p_off, wptr_cur)
+                coop_load_k_hi1(nn_page_base, nn_p_off, wptr_cur)
+
+            global_max = _softmax_reduce_collect(max_vec)
 
             m_new, l_new, p_pack, rescale = softmax_finalize(
                 global_max, s_vals, m_old, l_old)
 
+            v_buf = [None] * N_DP
+            for ks in range_constexpr(VT_PREFETCH):
+                v_buf[ks] = vector.load_op(
+                    v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
+                    nontemporal=True)
+
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_barrier(0)
+
             rescale_vec = _make_rescale_vec(rescale)
+            rocdl.sched_barrier(0)
+
+            for dp in range_constexpr(N_DP):
+                o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec)
+                o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec)
+
+            rocdl.sched_barrier(0)
 
             for vt in range_constexpr(VT_REMAINING):
                 v_buf[vt + VT_PREFETCH] = vector.load_op(
                     v8f16_type, lds_vt, [_raw(_vt_idx(vt + VT_PREFETCH))],
                     nontemporal=True)
 
-            rocdl.sched_barrier(0)
-
-            k_next_base_idx = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
             k_buf_next = [None] * K_STEPS
             for dp in range_constexpr(N_DP):
                 if dp < K_PREFETCH:
-                    _kni = k_next_base_idx + arith.index(dp * 32)
+                    _kni = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf_next[dp] = vector.load_op(
                         v8f16_type, k_next_buf, [_raw(_kni)],
                         nontemporal=True)
-                o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec)
-                o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec)
+
+            N_DP_DS_WRITE_INTER = 1
+            N_DP_LOOP = N_DP - N_DP_DS_WRITE_INTER
+            for dp in range_constexpr(N_DP_LOOP):
                 v_lo = vector.shuffle(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
@@ -1273,16 +1302,76 @@ def compile_mla_decode(
             for ks in range_constexpr(K_REMAINING):
                 k_buf_next[ks + K_PREFETCH] = _k_dummy
 
+            # vt load
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(4)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(4)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3)
+            # v load
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(2)
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(2)
+            # k next load
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(2)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(2)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(2)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(1)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_mfma(1)
+
+            rocdl.sched_barrier(0)
+            _barrier(lgkmcnt=15)
+            rocdl.sched_barrier(0)
+
+            for dp in range_constexpr(N_DP_DS_WRITE_INTER):
+                dp_inner = dp + N_DP_LOOP
+                v_lo = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
+                v_hi = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
+                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_lo, p_pack, o_accs[dp_inner * 2], 0, 0, 0],
+                )
+                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_hi, p_pack, o_accs[dp_inner * 2 + 1], 0, 0, 0],
+                )
+
             if do_vt:
                 coop_perm_store_v_half(0, v_raw_h0)
                 v_raw_h1_out = coop_load_v_half(1, k_next_buf)
             else:
                 v_raw_h1_out = _vh_dummy()
 
+            if do_vt:
+                rocdl.sched_mfma(1)
+                rocdl.sched_dswr(1)
+                rocdl.sched_mfma(1)
+                rocdl.sched_dswr(1)
+                rocdl.sched_dsrd(4)
+
             return m_new, l_new, o_accs, k_buf_next, v_raw_h1_out
 
         def do_kv_pair(kv_pos, m_old, l_old, o_accs,
                        k_cur_buf, k_next_buf, k_buf,
+                       wptr_cur=None, wptr_next=None,
                        nn_a_phys_in=None,
                        v_raw_h1_in=None,
                        load_knn=True, do_vt_final=True):
@@ -1309,6 +1398,87 @@ def compile_mla_decode(
                 nn_b_phys, nn_b_poff = \
                     lookup_page_issue(
                         None, clamp=False, pos_i32=nn_b_pos_i32)
+
+            # ============ TILE A ============
+            nn_a_base = lookup_page_resolve(nn_a_phys)
+            # last half of v_raw_h1_in
+            for ks in range_constexpr(K_REMAINING):
+                _ki = k_read_base + arith.index(K_STEP_OFFSETS_F16[ks + K_PREFETCH])
+                k_buf[ks + K_PREFETCH] = vector.load_op(
+                    v8f16_type, k_cur_buf, [_raw(_ki)],
+                    nontemporal=True)
+
+            s = [c_zero_v4f32]
+            DS_READ_INTER = 8
+            for ks in range_constexpr(DS_READ_INTER):
+                q_lo = q_b_packs_lo[ks]
+                q_hi = q_b_packs_hi[ks]
+                k_lo = vector.shuffle(
+                    k_buf[ks], k_buf[ks], [0, 1, 2, 3])
+                k_hi = vector.shuffle(
+                    k_buf[ks], k_buf[ks], [4, 5, 6, 7])
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_lo, q_lo, s[0], 0, 0, 0],
+                )
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_hi, q_hi, s[0], 0, 0, 0],
+                )
+
+            # asm style interleaved schedule
+            rocdl.sched_mfma(1) # mfma 1
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 4
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 8
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 12
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 15
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 16
+
+            coop_perm_store_v_half(1, v_raw_h1_in)
+            voff_g0_a, voff_g1_a, wbase_a = \
+                _coop_load_k_setup(nn_a_base, nn_a_poff, wptr_cur)
+
+            GEMM1_HALF = K_STEPS - DS_READ_INTER
+            _N_LOADS = K_LO_CHUNKS * 2
+            for ks in range_constexpr(GEMM1_HALF):
+                if ks < _N_LOADS:
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(2)
+                    _chunk = ks // 2
+                    if ks % 2 == 0:
+                        _emit_k_single(wbase_a, voff_g0_a, _chunk, 0)
+                    else:
+                        _emit_k_single(wbase_a, voff_g1_a, _chunk,
+                                       CKV_HALF_BYTES)
+                ks_inner = ks + DS_READ_INTER
+                q_lo = q_b_packs_lo[ks_inner]
+                q_hi = q_b_packs_hi[ks_inner]
+                k_lo = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
+                k_hi = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_lo, q_lo, s[0], 0, 0, 0],
+                )
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_hi, q_hi, s[0], 0, 0, 0],
+                )
+
+            rocdl.sched_barrier(0)
+
+            s_vals_a, max_vec_a = _softmax_reduce_issue(s[0])
+
+            coop_load_k_hi0(nn_a_base, nn_a_poff, wptr_cur)
+            coop_load_k_hi1(nn_a_base, nn_a_poff, wptr_cur)
+
+            if load_knn:
                 _c4_i32 = arith.constant(4, type=T.i32)
                 kv_block_i32 = _std_arith.ShRUIOp(
                     _raw(kv_pos_i32), _raw(_c6_i32),
@@ -1324,151 +1494,34 @@ def compile_mla_decode(
                     _raw(_bt_soff), _raw(_bt_aux),
                 )
 
-
-            # ============ TILE A ============
-            nn_a_base = lookup_page_resolve(nn_a_phys)
-            # last half of v_raw_h1_in
-            coop_perm_store_v_half(1, v_raw_h1_in)
-
-            k_a_rem_base = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
-            for ks in range_constexpr(K_REMAINING):
-                _ki = k_a_rem_base + arith.index((ks + K_PREFETCH) * 32)
-                k_buf[ks + K_PREFETCH] = vector.load_op(
-                    v8f16_type, k_cur_buf, [_raw(_ki)],
-                    nontemporal=True)
-
-            coop_load_k_lo(nn_a_base, nn_a_poff, k_cur_buf)
-
-            s = [c_zero_v4f32]
-            for ks in range_constexpr(K_STEPS):
-                q_lo = q_b_packs_lo[ks]
-                q_hi = q_b_packs_hi[ks]
-                k_lo = vector.shuffle(
-                    k_buf[ks], k_buf[ks], [0, 1, 2, 3])
-                k_hi = vector.shuffle(
-                    k_buf[ks], k_buf[ks], [4, 5, 6, 7])
-                s[0] = rocdl.mfma_f32_16x16x16f16(
-                    v4f32_type,
-                    [k_lo, q_lo, s[0], 0, 0, 0],
-                )
-                s[0] = rocdl.mfma_f32_16x16x16f16(
-                    v4f32_type,
-                    [k_hi, q_hi, s[0], 0, 0, 0],
-                )
-            # dsread 10+8=18 (load_v_half + K_rem + VT_pf), vmem 15, mfma 36, dswrite 2
-            # for i in range_constexpr(2):
-            #     rocdl.sched_dsrd(1)
-            #     rocdl.sched_dswr(1)
-            #     rocdl.sched_vmem(1)
-            #     rocdl.sched_mfma(1)
-            # # # remain 18 dsrd + 34 mfma + 15 vmem
-            # for i in range_constexpr(15):
-            #     rocdl.sched_dsrd(1)
-            #     rocdl.sched_vmem(1)
-            #     rocdl.sched_mfma(1)
-
-            # for i in range_constexpr(36 - 15 - 2):
-            #     rocdl.sched_mfma(1)
-            # rocdl.sched_vmem(1)
-            # # remain 8 dsrd prefetch + 24 mfma + 15 vmem + 2 dsrd for vhalf
-            # for i in range_constexpr(3):
-            #     rocdl.sched_dsrd(1)
-            #     rocdl.sched_mfma(1)
-            #     rocdl.sched_vmem(1)
-            #     rocdl.sched_mfma(1)
-            # rocdl.sched_vmem(1)
-            # for i in range_constexpr(5):
-            #     rocdl.sched_dsrd(1)
-            #     rocdl.sched_mfma(2)
-            # # remain 2 dsrd vhalf + 8 mfma + 7 vmem
-            # rocdl.sched_mfma(2)
-            
-            # asm style interleaved schedule
-            rocdl.sched_mfma(1) # mfma 1
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(1) # mfma 2
-            rocdl.sched_vmem(2)
-            rocdl.sched_mfma(3) # mfma 5
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(4) # mfma 9
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(4) # mfma 13
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(3) # mfma 16
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 17
-            rocdl.sched_dswr(1)
-            rocdl.sched_mfma(2) # mfma 19
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 21
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 22
-            rocdl.sched_dswr(1)
-            rocdl.sched_mfma(3) # mfma 25
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 27
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 29
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 31
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 33
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 35
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 36
-
-            rocdl.sched_barrier(0)
-
-            global_max_a, s_vals_a = softmax_reduce(s[0])
-            # rocdl.sched_barrier(0)
-            # _barrier(lgkmcnt=0)
-            # rocdl.sched_barrier(0)
+            global_max_a = _softmax_reduce_collect(max_vec_a)
 
             m, l, p_pack_a, rescale_a = softmax_finalize(
                 global_max_a, s_vals_a, m_old, l_old)
 
-            coop_load_k_hi0(nn_a_base, nn_a_poff, k_cur_buf)
-            coop_load_k_hi1(nn_a_base, nn_a_poff, k_cur_buf)
+            
             v_buf = [None] * N_DP
             for ks in range_constexpr(VT_PREFETCH):
                 v_buf[ks] = vector.load_op(
                     v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
                     nontemporal=True)
 
-
-            rocdl.sched_valu(2)
-            rocdl.sched_dswr(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(2)
-            
             # _barrier(lgkmcnt=0)
 
             rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
             rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
             rocdl.sched_barrier(0)
 
             rescale_vec_a = _make_rescale_vec(rescale_a)
@@ -1478,46 +1531,25 @@ def compile_mla_decode(
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec_a)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec_a)
 
+            rocdl.sched_barrier(0)
+
             for vt in range_constexpr(VT_REMAINING):
                 v_buf[vt + VT_PREFETCH] = vector.load_op(
                     v8f16_type, lds_vt, [_raw(_vt_idx(vt + VT_PREFETCH))],
                     nontemporal=True)
-            
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-
-            rocdl.sched_barrier(0)
-
-            k_b_base = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
 
             v_raw_b_h0 = coop_load_v_half(0, k_next_buf)
 
             for dp in range_constexpr(N_DP):
                 if dp < K_PREFETCH:
-                    _kbi = k_b_base + arith.index(dp * 32)
+                    _kbi = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf[dp] = vector.load_op(
                         v8f16_type, k_next_buf, [_raw(_kbi)],
                         nontemporal=True)
 
-            for dp in range_constexpr(N_DP - 1):
+            N_DP_DS_WRITE_INTER = 1
+            N_DP_LOOP = N_DP - N_DP_DS_WRITE_INTER
+            for dp in range_constexpr(N_DP_LOOP):
                 v_lo = vector.shuffle(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
@@ -1534,79 +1566,84 @@ def compile_mla_decode(
             for ks in range_constexpr(K_REMAINING):
                 k_buf[ks + K_PREFETCH] = _k_dummy
 
-            # ds read 8 + 2 mfma 30
+            # vt load
             rocdl.sched_mfma(1) # mfma 1
-            rocdl.sched_dsrd(1) # ds 1
-            rocdl.sched_mfma(3) # mfma 4
-            rocdl.sched_dsrd(1) # ds 2
-            rocdl.sched_mfma(3) # mfma 7
-            rocdl.sched_dsrd(1) # ds 3
-            rocdl.sched_mfma(2) # mfma 9
-            rocdl.sched_dsrd(1) # ds 4
-            rocdl.sched_mfma(3) # mfma 11
-            rocdl.sched_dsrd(1) # ds 5
-            rocdl.sched_mfma(3) # mfma 14
-            rocdl.sched_dsrd(1) # ds 6
-            rocdl.sched_mfma(2) # mfma 16
-            rocdl.sched_dsrd(1) # ds 7
-            rocdl.sched_mfma(3) # mfma 19
-            rocdl.sched_dsrd(1) # ds 8
-            rocdl.sched_mfma(3) # mfma 22
-            rocdl.sched_dsrd(1) # ds 9
-            rocdl.sched_mfma(2) # mfma 25
-            rocdl.sched_dsrd(1) # ds 10
-            rocdl.sched_mfma(3) # mfma 28
+            rocdl.sched_dsrd(2) # ds 3
+            rocdl.sched_mfma(4) # mfma 5
+            rocdl.sched_dsrd(2) # ds 4
+            rocdl.sched_mfma(4) # mfma 9
+            rocdl.sched_dsrd(2) # ds 5
+            rocdl.sched_mfma(3) # mfma 12
+            rocdl.sched_dsrd(2) # ds 6
+            rocdl.sched_mfma(3) # mfma 15
 
+            # v laod
+            rocdl.sched_dsrd(2) # ds 7
+            rocdl.sched_mfma(2) # mfma 17
+            rocdl.sched_dsrd(2) # ds 7
+            rocdl.sched_mfma(2) # mfma 19
+            
+            # k next load
+            rocdl.sched_dsrd(1) # ds 8
+            rocdl.sched_mfma(1) # mfma 20
+            rocdl.sched_dsrd(1) # ds 9
+            rocdl.sched_mfma(2) # mfma 22
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(1) # mfma 23
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(2) # mfma 25
+            rocdl.sched_dsrd(1) # ds 8
+            rocdl.sched_mfma(1) # mfma 26
             rocdl.sched_dsrd(1) # ds 9
             rocdl.sched_mfma(2) # mfma 28
             rocdl.sched_dsrd(1) # ds 10
-            rocdl.sched_mfma(1) # mfma 39
+            rocdl.sched_mfma(1) # mfma 29
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(1) # mfma 30
+
+            rocdl.sched_barrier(0)
+            _barrier(lgkmcnt=15)
             rocdl.sched_barrier(0)
 
-            # _barrier(lgkmcnt=10)
-
-
-            v_lo = vector.shuffle(
-                v_buf[N_DP - 1], v_buf[N_DP - 1], [0, 1, 2, 3])
-            v_hi = vector.shuffle(
-                v_buf[N_DP - 1], v_buf[N_DP - 1], [4, 5, 6, 7])
-            o_accs[(N_DP - 1) * 2] = rocdl.mfma_f32_16x16x16f16(
-                v4f32_type,
-                [v_lo, p_pack_a, o_accs[(N_DP - 1) * 2], 0, 0, 0],
-            )
-            o_accs[(N_DP - 1) * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
-                v4f32_type,
-                [v_hi, p_pack_a, o_accs[(N_DP - 1) * 2 + 1], 0, 0, 0],
-            )
+            for dp in range_constexpr(N_DP_DS_WRITE_INTER):
+                dp_inner = dp + N_DP_LOOP
+                v_lo = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
+                v_hi = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
+                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_lo, p_pack_a, o_accs[dp_inner * 2], 0, 0, 0],
+                )
+                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_hi, p_pack_a, o_accs[dp_inner * 2 + 1], 0, 0, 0],
+                )
             coop_perm_store_v_half(0, v_raw_b_h0)
             v_raw_b_h1 = coop_load_v_half(1, k_next_buf)
+
+            rocdl.sched_dswr(1)
             rocdl.sched_mfma(1) # 30
             rocdl.sched_dswr(1)
             rocdl.sched_mfma(1) # 31
-            rocdl.sched_dswr(1)
-            rocdl.sched_dsrd(2)
-            rocdl.sched_barrier(0)
+            rocdl.sched_dsrd(4)
+            # rocdl.sched_barrier(0)
+            # _barrier(lgkmcnt=15)
+            # rocdl.sched_barrier(0)
 
 
             # ============ TILE B ============
             nn_b_base = lookup_page_resolve(nn_b_phys)
-            coop_perm_store_v_half(1, v_raw_b_h1)
 
-            k_b_rem_base = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
             for ks in range_constexpr(K_REMAINING):
-                _ki = k_b_rem_base + arith.index((ks + K_PREFETCH) * 32)
+                _ki = k_read_base + arith.index(K_STEP_OFFSETS_F16[ks + K_PREFETCH])
                 k_buf[ks + K_PREFETCH] = vector.load_op(
                     v8f16_type, k_next_buf, [_raw(_ki)],
                     nontemporal=True)
 
-            coop_load_k_lo(nn_b_base, nn_b_poff, k_next_buf)
-
             s[0] = c_zero_v4f32
-            # v_buf = [None] * N_DP
-            for ks in range_constexpr(K_STEPS):
+            DS_READ_INTER = 8
+            for ks in range_constexpr(DS_READ_INTER):
                 q_lo = q_b_packs_lo[ks]
                 q_hi = q_b_packs_hi[ks]
                 k_lo = vector.shuffle(
@@ -1621,83 +1658,84 @@ def compile_mla_decode(
                     v4f32_type,
                     [k_hi, q_hi, s[0], 0, 0, 0],
                 )
-
-            rocdl.sched_mfma(2) # mfma 1
+            # asm style interleaved schedule
+            rocdl.sched_mfma(1) # mfma 1
             rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(3) # mfma 5
+            rocdl.sched_mfma(3) # mfma 4
             rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(4) # mfma 9
+            rocdl.sched_mfma(3) # mfma 8
             rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(4) # mfma 13
+            rocdl.sched_mfma(3) # mfma 12
+            rocdl.sched_dsrd(2)
+            rocdl.sched_mfma(3) # mfma 15
             rocdl.sched_dsrd(2)
             rocdl.sched_mfma(3) # mfma 16
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 17
-            rocdl.sched_dswr(1)
-            rocdl.sched_mfma(2) # mfma 19
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 21
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 22
-            rocdl.sched_dswr(1)
-            rocdl.sched_mfma(3) # mfma 25
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 27
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 29
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 31
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 33
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(2) # mfma 35
-            rocdl.sched_vmem(1)
-            rocdl.sched_mfma(1) # mfma 36
+            # rocdl.sched_barrier(0)
+            # _barrier(lgkmcnt=15)
+            # rocdl.sched_barrier(0)
+
+            coop_perm_store_v_half(1, v_raw_b_h1)
+            voff_g0_b, voff_g1_b, wbase_b = \
+                _coop_load_k_setup(nn_b_base, nn_b_poff, wptr_next)
+
+            _N_LOADS = K_LO_CHUNKS * 2
+            for ks in range_constexpr(GEMM1_HALF):
+                if ks < _N_LOADS:
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(2)
+                    _chunk = ks // 2
+                    if ks % 2 == 0:
+                        _emit_k_single(wbase_b, voff_g0_b, _chunk, 0)
+                    else:
+                        _emit_k_single(wbase_b, voff_g1_b, _chunk,
+                                       CKV_HALF_BYTES)
+                ks_inner = ks + DS_READ_INTER
+                q_lo = q_b_packs_lo[ks_inner]
+                q_hi = q_b_packs_hi[ks_inner]
+                k_lo = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [0, 1, 2, 3])
+                k_hi = vector.shuffle(
+                    k_buf[ks_inner], k_buf[ks_inner], [4, 5, 6, 7])
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_lo, q_lo, s[0], 0, 0, 0],
+                )
+                s[0] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [k_hi, q_hi, s[0], 0, 0, 0],
+                )
 
             rocdl.sched_barrier(0)
-            global_max_b, s_vals_b = softmax_reduce(s[0])
-            # _barrier(lgkmcnt=0)
-            # rocdl.sched_barrier(0)
+
+            s_vals_b, max_vec_b = _softmax_reduce_issue(s[0])
+
+            coop_load_k_hi0(nn_b_base, nn_b_poff, wptr_next)
+            coop_load_k_hi1(nn_b_base, nn_b_poff, wptr_next)
+
+            global_max_b = _softmax_reduce_collect(max_vec_b)
+
             m, l, p_pack_b, rescale_b = softmax_finalize(
                 global_max_b, s_vals_b, m, l)
-
-            coop_load_k_hi0(nn_b_base, nn_b_poff, k_next_buf)
-            coop_load_k_hi1(nn_b_base, nn_b_poff, k_next_buf)
 
             for ks in range_constexpr(VT_PREFETCH):
                 v_buf[ks] = vector.load_op(
                     v8f16_type, lds_vt, [_raw(_vt_idx(ks))],
                     nontemporal=True)
 
-            rocdl.sched_valu(2)
-            rocdl.sched_dswr(1)
-            rocdl.sched_vmem(1)
             rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(2)
-            
-            # _barrier(lgkmcnt=0)
-
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_vmem(1)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_vmem(1)
             rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
             rocdl.sched_dsrd(1)
-            rocdl.sched_valu(2)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
+            rocdl.sched_dsrd(1)
+            rocdl.sched_valu(4)
             rocdl.sched_barrier(0)
 
             rescale_vec_b = _make_rescale_vec(rescale_b)
@@ -1707,45 +1745,25 @@ def compile_mla_decode(
                 o_accs[dp * 2] = _rescale_acc(o_accs[dp * 2], rescale_vec_b)
                 o_accs[dp * 2 + 1] = _rescale_acc(o_accs[dp * 2 + 1], rescale_vec_b)
 
+            rocdl.sched_barrier(0)
+            # _barrier(lgkmcnt=15)
+            
             for vt in range_constexpr(VT_REMAINING):
                 v_buf[vt + VT_PREFETCH] = vector.load_op(
                     v8f16_type, lds_vt, [_raw(_vt_idx(vt + VT_PREFETCH))],
                     nontemporal=True)
 
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-            rocdl.sched_dsrd(1)
-            rocdl.sched_valu(4)
-
-            rocdl.sched_barrier(0)
-
-            k_nn_base = (
-                lane_mod_16 * arith.index(K_STRIDE)
-                + lane_div_16 * arith.index(8)
-            )
-
             v_raw_next_h0 = coop_load_v_half(0, k_cur_buf)
 
             for dp in range_constexpr(N_DP):
                 if dp < K_PREFETCH:
-                    _kni = k_nn_base + arith.index(dp * 32)
+                    _kni = k_read_base + arith.index(K_STEP_OFFSETS_F16[dp])
                     k_buf[dp] = vector.load_op(
                         v8f16_type, k_cur_buf, [_raw(_kni)])
 
-            for dp in range_constexpr(N_DP - 1):
+            N_DP_DS_WRITE_INTER = 1
+            N_DP_LOOP = N_DP - N_DP_DS_WRITE_INTER
+            for dp in range_constexpr(N_DP_LOOP):
                 v_lo = vector.shuffle(
                     v_buf[dp], v_buf[dp], [0, 1, 2, 3])
                 v_hi = vector.shuffle(
@@ -1762,46 +1780,64 @@ def compile_mla_decode(
             for ks in range_constexpr(K_REMAINING):
                 k_buf[ks + K_PREFETCH] = _k_dummy
 
+            # vt load
             rocdl.sched_mfma(1) # mfma 1
-            rocdl.sched_dsrd(1) # ds 1
-            rocdl.sched_mfma(3) # mfma 4
-            rocdl.sched_dsrd(1) # ds 2
-            rocdl.sched_mfma(3) # mfma 7
-            rocdl.sched_dsrd(1) # ds 3
-            rocdl.sched_mfma(2) # mfma 9
-            rocdl.sched_dsrd(1) # ds 4
-            rocdl.sched_mfma(3) # mfma 11
-            rocdl.sched_dsrd(1) # ds 5
-            rocdl.sched_mfma(3) # mfma 14
-            rocdl.sched_dsrd(1) # ds 6
-            rocdl.sched_mfma(2) # mfma 16
-            rocdl.sched_dsrd(1) # ds 7
-            rocdl.sched_mfma(3) # mfma 19
-            rocdl.sched_dsrd(1) # ds 8
-            rocdl.sched_mfma(3) # mfma 22
-            rocdl.sched_dsrd(1) # ds 9
-            rocdl.sched_mfma(2) # mfma 25
-            rocdl.sched_dsrd(1) # ds 10
-            rocdl.sched_mfma(3) # mfma 28
+            rocdl.sched_dsrd(2) # ds 3
+            rocdl.sched_mfma(4) # mfma 5
+            rocdl.sched_dsrd(2) # ds 4
+            rocdl.sched_mfma(4) # mfma 9
+            rocdl.sched_dsrd(2) # ds 5
+            rocdl.sched_mfma(3) # mfma 12
+            rocdl.sched_dsrd(2) # ds 6
+            rocdl.sched_mfma(3) # mfma 15
 
+            # v laod
+            rocdl.sched_dsrd(2) # ds 7
+            rocdl.sched_mfma(2) # mfma 17
+            rocdl.sched_dsrd(2) # ds 7
+            rocdl.sched_mfma(2) # mfma 19
+            
+            # k next load
+            rocdl.sched_dsrd(1) # ds 8
+            rocdl.sched_mfma(1) # mfma 20
             rocdl.sched_dsrd(1) # ds 9
-            rocdl.sched_mfma(3) # mfma 28
+            rocdl.sched_mfma(2) # mfma 22
             rocdl.sched_dsrd(1) # ds 10
-            rocdl.sched_mfma(1) # mfma 39
+            rocdl.sched_mfma(1) # mfma 23
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(2) # mfma 25
+            rocdl.sched_dsrd(1) # ds 8
+            rocdl.sched_mfma(1) # mfma 26
+            rocdl.sched_dsrd(1) # ds 9
+            rocdl.sched_mfma(2) # mfma 28
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(1) # mfma 29
+            rocdl.sched_dsrd(1) # ds 10
+            rocdl.sched_mfma(1) # mfma 30
+
+            rocdl.sched_barrier(0)
+            _barrier(lgkmcnt=15)
+            rocdl.sched_barrier(0)
+
+
+            _barrier(vmcnt=6, lgkmcnt=15)
             rocdl.sched_barrier(0)
             
-            v_lo = vector.shuffle(
-                v_buf[N_DP - 1], v_buf[N_DP - 1], [0, 1, 2, 3])
-            v_hi = vector.shuffle(
-                v_buf[N_DP - 1], v_buf[N_DP - 1], [4, 5, 6, 7])
-            o_accs[(N_DP - 1) * 2] = rocdl.mfma_f32_16x16x16f16(
-                v4f32_type,
-                [v_lo, p_pack_b, o_accs[(N_DP - 1) * 2], 0, 0, 0],
-            )
-            o_accs[(N_DP - 1) * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
-                v4f32_type,
-                [v_hi, p_pack_b, o_accs[(N_DP - 1) * 2 + 1], 0, 0, 0],
-            )
+            for dp in range_constexpr(N_DP_DS_WRITE_INTER):
+                dp_inner = dp + N_DP_LOOP
+                v_lo = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [0, 1, 2, 3])
+                v_hi = vector.shuffle(
+                    v_buf[dp_inner], v_buf[dp_inner], [4, 5, 6, 7])
+                o_accs[dp_inner * 2] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_lo, p_pack_b, o_accs[dp_inner * 2], 0, 0, 0],
+                )
+                o_accs[dp_inner * 2 + 1] = rocdl.mfma_f32_16x16x16f16(
+                    v4f32_type,
+                    [v_hi, p_pack_b, o_accs[dp_inner * 2 + 1], 0, 0, 0],
+                )
+
             coop_perm_store_v_half(0, v_raw_next_h0)
             v_raw_h1_out = coop_load_v_half(1, k_cur_buf)
 
@@ -1809,9 +1845,8 @@ def compile_mla_decode(
             rocdl.sched_dswr(1)
             rocdl.sched_mfma(1) # 31
             rocdl.sched_dswr(1)
-            rocdl.sched_dsrd(2)
-            rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=15)
+            rocdl.sched_dsrd(4)
+            # rocdl.sched_barrier(0)
 
             return (m, l, o_accs, k_buf,
                     nn_a_phys_next, v_raw_h1_out)
@@ -1821,11 +1856,11 @@ def compile_mla_decode(
             _raw(kv_split_start), _raw(kv_split_end),
         ).result
         page_base_0 = lookup_page_resolve(pf0_phys_i32)
-        coop_load_k(page_base_0, pf0_p_off, lds_k_cur_buf)
+        coop_load_k(page_base_0, pf0_p_off, lds_wptr_cur)
 
         page_base_1 = lookup_page_resolve(pf1_phys_early)
-        coop_load_k(page_base_1, pf1_p_off_early, lds_k_next_buf)
-        COOP_K_VMEM_OPS = K_ROWS_PER_WAVE * K_CALLS_PER_ROW
+        coop_load_k(page_base_1, pf1_p_off_early, lds_wptr_next)
+        # COOP_K_VMEM_OPS already defined in constants as CKV_NUM_CHUNKS * K_PAIRS_PER_WAVE
         _barrier(vmcnt=COOP_K_VMEM_OPS, lgkmcnt=0)
 
         v_raw_h0_init = coop_load_v_half(0, lds_k_cur_buf)
@@ -1835,17 +1870,13 @@ def compile_mla_decode(
 
         rocdl.sched_barrier(0)
 
-        k_base_idx_init = (
-            lane_mod_16 * arith.index(K_STRIDE)
-            + lane_div_16 * arith.index(8)
-        )
         k_byte_base = (
             lds_base_byte_idx
-            + k_base_idx_init * arith.index(2)
+            + k_read_base * arith.index(2)
         )
         k_buf_init = []
         for ks in range_constexpr(K_PREFETCH):
-            _off = ks * 64
+            _off = K_STEP_OFFSETS_F16[ks] * 2
             k_buf_init.append(_lds_load_prefer_agpr(
                 k_byte_base, v8f16_type,
                 static_byte_offset=_off,
@@ -1892,12 +1923,14 @@ def compile_mla_decode(
             _PKB = 5 + D_CHUNKS
             _PNN = _PKB + K_STEPS
             _PVH = _PNN + 1
+            _PWP = _PVH + 8
             pair_init = ([_raw(kv_split_start), _raw(m_init), _raw(l_init)]
                          + [_raw(v) for v in o_accs_init]
                          + [lds_k_cur_buf, lds_k_next_buf]
                          + [_raw(v) for v in k_buf_init]
                          + [_raw(nn_a_pf_phys)]
-                         + _vh_flatten(v_raw_h1_init))
+                         + _vh_flatten(v_raw_h1_init)
+                         + [lds_wptr_cur, lds_wptr_next])
             for pair_pos, pair_ia, pair_results in _scf.for_(
                 _raw(kv_split_start), _raw(pair_ub),
                 _raw(arith.index(2 * BLOCK_N)),
@@ -1917,13 +1950,18 @@ def compile_mla_decode(
                 ]
                 nn_a_p_in = pair_ia[_PNN]
                 v_raw_h1_pair = _vh_unflatten(pair_ia, _PVH)
+                wptr_pair_cur = pair_ia[_PWP]
+                wptr_pair_next = pair_ia[_PWP + 1]
 
                 (m_pr, l_pr, o_pr, kbuf_pr,
                  nn_a_p_out, v_raw_h1_pair_out) = \
                     do_kv_pair(
                         pair_pos, m_pair, l_pair, o_pair,
                         k_pair_cur, k_pair_next,
-                        k_pair_buf, nn_a_p_in,
+                        k_pair_buf,
+                        wptr_cur=wptr_pair_cur,
+                        wptr_next=wptr_pair_next,
+                        nn_a_phys_in=nn_a_p_in,
                         v_raw_h1_in=v_raw_h1_pair,
                     )
                 next_pp = pair_pos + arith.index(2 * BLOCK_N)
@@ -1932,7 +1970,8 @@ def compile_mla_decode(
                        + [k_pair_cur, k_pair_next]
                        + [_raw(v) for v in kbuf_pr]
                        + [_raw(nn_a_p_out)]
-                       + _vh_flatten(v_raw_h1_pair_out))
+                       + _vh_flatten(v_raw_h1_pair_out)
+                       + [wptr_pair_cur, wptr_pair_next])
 
             pair_end = pair_results[0]
             m_from_pair = pair_results[1]
@@ -1948,12 +1987,16 @@ def compile_mla_decode(
                 for ks in range_constexpr(K_STEPS)
             ]
             v_raw_h1_from_pair = _vh_unflatten(pair_results, _PVH)
+            wptr_from_pair_cur = pair_results[_PWP]
+            wptr_from_pair_next = pair_results[_PWP + 1]
 
             _KB = 4 + D_CHUNKS
             _VH = _KB + K_STEPS
+            _BWP = _VH + 8
             body_init = ([m_from_pair, l_from_pair] + list(o_from_pair)
                          + [k_pc, k_pn] + list(kbuf_fp)
-                         + _vh_flatten(v_raw_h1_from_pair))
+                         + _vh_flatten(v_raw_h1_from_pair)
+                         + [wptr_from_pair_cur, wptr_from_pair_next])
             for kv_pos, body_ia, body_results in _scf.for_(
                 pair_end, _raw(body_end), _raw(arith.index(BLOCK_N)),
                 iter_args=body_init
@@ -1971,18 +2014,22 @@ def compile_mla_decode(
                     for ks in range_constexpr(K_STEPS)
                 ]
                 v_raw_h1_loop = _vh_unflatten(body_ia, _VH)
+                wptr_body_cur = body_ia[_BWP]
+                wptr_body_next = body_ia[_BWP + 1]
 
                 m_new, l_new, o_accs, k_buf_new, v_raw_h1_body_out = \
                     do_kv_tile(
                         kv_pos, m_running, l_running, o_accs,
                         k_cur_buf, k_next_buf, k_buf_loop,
+                        wptr_cur=wptr_body_cur, wptr_next=wptr_body_next,
                         v_raw_h1_in=v_raw_h1_loop,
                     )
                 yield ([_raw(m_new), _raw(l_new)]
                        + [_raw(v) for v in o_accs]
                        + [k_next_buf, k_cur_buf]
                        + [_raw(v) for v in k_buf_new]
-                       + _vh_flatten(v_raw_h1_body_out))
+                       + _vh_flatten(v_raw_h1_body_out)
+                       + [wptr_body_next, wptr_body_cur])
 
             m_body = body_results[0]
             l_body = body_results[1]
@@ -1997,6 +2044,8 @@ def compile_mla_decode(
                 for ks in range_constexpr(K_STEPS)
             ]
             v_raw_h1_from_body = _vh_unflatten(body_results, _VH)
+            wptr_from_body_cur = body_results[_BWP]
+            wptr_from_body_next = body_results[_BWP + 1]
 
             two_tiles_end = kv_split_start + arith.index(2 * BLOCK_N)
             has_two = _std_arith.CmpIOp(
@@ -2008,10 +2057,12 @@ def compile_mla_decode(
                 _raw(kv_split_end - arith.index(BLOCK_N)),
                 _raw(body_end),
             ).result
+            _PLWP = _VH + 8
             penult_init = ([m_body, l_body] + list(o_body)
                            + [k_body_cur, k_body_next]
                            + list(k_bufody)
-                           + _vh_flatten(v_raw_h1_from_body))
+                           + _vh_flatten(v_raw_h1_from_body)
+                           + [wptr_from_body_cur, wptr_from_body_next])
             for kv_pos_p, penult_ia, penult_results in _scf.for_(
                 _raw(body_end), penult_ub, _raw(arith.index(BLOCK_N)),
                 iter_args=penult_init
@@ -2029,18 +2080,23 @@ def compile_mla_decode(
                     for ks in range_constexpr(K_STEPS)
                 ]
                 v_raw_h1_p = _vh_unflatten(penult_ia, _VH)
+                wptr_p_cur = penult_ia[_PLWP]
+                wptr_p_next = penult_ia[_PLWP + 1]
 
                 m_pn, l_pn, o_pn, k_buf_pn, v_raw_h1_pn_out = do_kv_tile(
                     kv_pos_p, m_p, l_p, o_p,
                     k_p_cur, k_p_next, k_buf_p,
+                    wptr_cur=wptr_p_cur, wptr_next=wptr_p_next,
                     v_raw_h1_in=v_raw_h1_p,
                     load_knn=False, do_vt=True,
+                    do_causal=True,
                 )
                 yield ([_raw(m_pn), _raw(l_pn)]
                        + [_raw(v) for v in o_pn]
                        + [k_p_next, k_p_cur]
                        + [_raw(v) for v in k_buf_pn]
-                       + _vh_flatten(v_raw_h1_pn_out))
+                       + _vh_flatten(v_raw_h1_pn_out)
+                       + [wptr_p_next, wptr_p_cur])
 
             m_penult = penult_results[0]
             l_penult = penult_results[1]
@@ -2055,11 +2111,15 @@ def compile_mla_decode(
                 for ks in range_constexpr(K_STEPS)
             ]
             v_raw_h1_from_penult = _vh_unflatten(penult_results, _VH)
+            wptr_from_penult_cur = penult_results[_PLWP]
+            wptr_from_penult_next = penult_results[_PLWP + 1]
 
+            _LLWP = _VH + 8
             last_init = ([m_penult, l_penult] + list(o_penult)
                          + [k_last_cur, k_last_next]
                          + list(k_buf_last)
-                         + _vh_flatten(v_raw_h1_from_penult))
+                         + _vh_flatten(v_raw_h1_from_penult)
+                         + [wptr_from_penult_cur, wptr_from_penult_next])
             for kv_pos_l, last_ia, last_results in _scf.for_(
                 penult_ub, _raw(kv_split_end), _raw(arith.index(BLOCK_N)),
                 iter_args=last_init
@@ -2077,10 +2137,13 @@ def compile_mla_decode(
                     for ks in range_constexpr(K_STEPS)
                 ]
                 v_raw_h1_l = _vh_unflatten(last_ia, _VH)
+                wptr_l_cur = last_ia[_LLWP]
+                wptr_l_next = last_ia[_LLWP + 1]
 
                 m_ln, l_ln, o_ln, k_buf_ln, v_raw_h1_ln_out = do_kv_tile(
                     kv_pos_l, m_l, l_l, o_l,
                     k_l_cur, k_l_next, k_buf_l,
+                    wptr_cur=wptr_l_cur, wptr_next=wptr_l_next,
                     v_raw_h1_in=v_raw_h1_l,
                     load_knn=False, do_vt=False,
                     do_causal=True,
@@ -2089,7 +2152,8 @@ def compile_mla_decode(
                        + [_raw(v) for v in o_ln]
                        + [k_l_next, k_l_cur]
                        + [_raw(v) for v in k_buf_ln]
-                       + _vh_flatten(v_raw_h1_ln_out))
+                       + _vh_flatten(v_raw_h1_ln_out)
+                       + [wptr_l_next, wptr_l_cur])
 
             m_final = last_results[0]
             l_partial = last_results[1]
@@ -2122,8 +2186,12 @@ def compile_mla_decode(
                 ).result
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
+            c_eps = arith.constant(1.0e-30, type=compute_type)
+            l_safe = _std_arith.MaximumFOp(
+                _raw(l_final), _raw(c_eps),
+            ).result
             l_rcp = _std_arith.DivFOp(
-                _raw(c_one_f), _raw(l_final),
+                _raw(c_one_f), _raw(l_safe),
                 fastmath=fm_fast,
             ).result
             inv_l_vec = vector.broadcast(v4f32_type, l_rcp)

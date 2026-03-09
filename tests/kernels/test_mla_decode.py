@@ -39,6 +39,24 @@ from aiter.test_common import run_perftest
 DEFAULT_SEED = 42
 UNIFORM_RANGE = (-0.5, 0.5)
 
+SHUFFLE = True
+NUM_WAVES = 4  # seqlen_q
+
+
+def auto_num_kv_splits(bs, skv, num_q_heads):
+    """Adaptive KV split selection (ported from mla.py:get_meta_param)."""
+    cu_num = torch.cuda.get_device_properties(0).multi_processor_count
+    overhead = 84.1
+    best_score, best_sp = -1.0, 1
+    for sp in range(1, 17):
+        wgs = bs * sp
+        occupancy = wgs / (((wgs + cu_num - 1) // cu_num) * cu_num)
+        kv_eff = skv / (skv + overhead * sp)
+        score = occupancy * kv_eff
+        if score > best_score:
+            best_score, best_sp = score, sp
+    return best_sp
+
 
 def setup_seed(seed):
     random.seed(seed)
@@ -371,12 +389,16 @@ def main():
 
     # (B, Sq, Skv, shuffle, num_kv_splits)
     # seqlen_q must be 4 (== NUM_WAVES)
-    # batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    # ctx_lens = [1024, 8192]
-    batch_sizes = [64]
-    ctx_lens = [8192]
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    ctx_lens = [1024, 8192]
+    # batch_sizes = [1, 8, 32, 64, 128]
+    # ctx_lens = [1024, 2048, 4096, 8192]
+    # ctx_lens = [16, 18, 31, 33, 128, 137, 255, 256, 500, 512, 1024, 1999, 2048, 4096, 6000, 8192]
+    # batch_sizes = [128]
+    # ctx_lens = [1024]
     configs = [
-        (bs, 4, ctx, True, 5)
+        (bs, NUM_WAVES, ctx, SHUFFLE,
+         auto_num_kv_splits(bs, ctx, num_q_heads))
         for ctx in ctx_lens
         for bs in batch_sizes
     ]
