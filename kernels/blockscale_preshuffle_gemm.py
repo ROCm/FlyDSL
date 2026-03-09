@@ -23,6 +23,7 @@ from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     lds_store_16b_xor16,
+    lds_store_8b_xor16,
     make_preshuffle_b_layout,
     load_b_pack_k32,
     tile_chunk_coord_i32,
@@ -93,10 +94,15 @@ def compile_blockscale_preshuffle_gemm(
             f"tile_m={tile_m}, tile_k={tile_k}"
         )
     bytes_per_thread_a = bytes_a_per_tile // total_threads
-    a_load_bytes = 16
-    if bytes_per_thread_a % a_load_bytes != 0:
+    if bytes_per_thread_a % 16 == 0:
+        a_load_bytes = 16
+    elif bytes_per_thread_a % 8 == 0:
+        a_load_bytes = 8
+    elif bytes_per_thread_a % 4 == 0:
+        a_load_bytes = 4
+    else:
         raise ValueError(
-            f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by {a_load_bytes}"
+            f"bytes_per_thread_a ({bytes_per_thread_a}) must be divisible by 4"
         )
     a_async_load_bytes = 4 if _is_gfx942 else 16
     a_async_load_dword = a_async_load_bytes // 4
@@ -200,10 +206,16 @@ def compile_blockscale_preshuffle_gemm(
         else:
             lds_out = None
 
-        # ---- Buffer resources ----
-        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False)
-        c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False)
-        scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False)
+        # ---- Buffer resources (explicit num_records_bytes for correct OOB on M tail) ----
+        rt_M = arith.index_cast(T.index, i32_m.ir_value())
+        rt_N = arith.index_cast(T.index, i32_n.ir_value())
+        a_nbytes = rt_M * arith.index(K)  # fp8: 1 byte/elem
+        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes)
+        out_elem_bytes = 2  # bf16/fp16
+        c_nbytes = rt_M * rt_N * arith.index(out_elem_bytes)
+        c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes)
+        sa_nbytes = arith.index(K // 128) * rt_M * arith.index(4)  # [scale_k, M] f32
+        scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=sa_nbytes)
 
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
         scale_b_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
@@ -297,21 +309,27 @@ def compile_blockscale_preshuffle_gemm(
         layout_a_tile_div4 = fx.make_layout(
             (tile_m, tile_k_dwords), (tile_k_dwords, 1)
         )
-        c4 = arith.index(4)
-        tx_i32_base = tx * c4
+        chunk_i32_a = a_load_bytes // 4
+        c_chunk_a = arith.index(chunk_i32_a)
+        tx_i32_base = tx * c_chunk_a
 
-        def load_a_16(idx_elem):
-            return buffer_copy_gmem16_dwordx4(
-                buffer_ops, vector,
-                elem_type=T.f8, idx_i32=idx_elem,
-                rsrc=a_rsrc, vec_elems=16, elem_bytes=elem_bytes,
-            )
+        def load_a(idx_i32):
+            if a_load_bytes == 16:
+                return buffer_copy_gmem16_dwordx4(
+                    buffer_ops, vector,
+                    elem_type=T.f8, idx_i32=idx_i32,
+                    rsrc=a_rsrc, vec_elems=16, elem_bytes=elem_bytes,
+                )
+            if a_load_bytes == 8:
+                return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=2, dtype=T.i32)
+            return buffer_ops.buffer_load(a_rsrc, idx_i32, vec_width=1, dtype=T.i32)
 
         def a_tile_chunk_coord_i32(i: int):
             return tile_chunk_coord_i32(
                 arith, tx_i32_base=tx_i32_base, i=i,
                 total_threads=total_threads,
                 layout_tile_div4=layout_a_tile_div4,
+                chunk_i32=chunk_i32_a,
             )
 
         def load_a_tile(base_k_div4):
@@ -320,22 +338,38 @@ def compile_blockscale_preshuffle_gemm(
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
                 row_a_global = bx_m + row_a_local
                 idx_i32 = row_a_global * _k_div4_factor + (base_k_div4 + col_a_local_i32)
-                a_16B = load_a_16(idx_i32)
-                parts.append(vector.bitcast(T.i32x4, a_16B))
+                a_vec = load_a(idx_i32)
+                if a_load_bytes == 16:
+                    parts.append(vector.bitcast(T.i32x4, a_vec))
+                else:
+                    parts.append(a_vec)
             return parts
+
+        c4_bytes = arith.index(4)  # bytes per dword (always 4, used for LDS byte addressing)
 
         def store_a_tile_to_lds(vec_a_parts, lds_buffer):
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i)
-                lds_store_16b_xor16(
-                    arith, vector,
-                    lds_memref=lds_buffer, vec16_ty=T.f8x16,
-                    layout_lds=layout_lds,
-                    row_local=row_a_local, col_local_i32=col_a_local_i32,
-                    tx_c4=c4, k_blocks16=k_blocks16,
-                    lds_base=arith.index(0),
-                    vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
-                )
+                if a_load_bytes == 16:
+                    lds_store_16b_xor16(
+                        arith, vector,
+                        lds_memref=lds_buffer, vec16_ty=T.f8x16,
+                        layout_lds=layout_lds,
+                        row_local=row_a_local, col_local_i32=col_a_local_i32,
+                        tx_c4=c4_bytes, k_blocks16=k_blocks16,
+                        lds_base=arith.index(0),
+                        vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
+                    )
+                elif a_load_bytes == 8:
+                    lds_store_8b_xor16(
+                        arith, vector,
+                        lds_memref=lds_buffer, vec8_ty=T.f8x8,
+                        layout_lds=layout_lds,
+                        row_local=row_a_local, col_local_i32=col_a_local_i32,
+                        tx_c4=c4_bytes, k_blocks16=k_blocks16,
+                        lds_base=arith.index(0),
+                        vec_part_i32x2=vec_a_parts[i],
+                    )
 
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         _num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
