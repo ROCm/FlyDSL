@@ -131,22 +131,37 @@ def test_moe_blockscale_e2e(
     print("=" * 80)
 
     # ---- Generate data ----
+    # Generate fp8 weights directly per-expert to avoid fp32 OOM at large E.
     s = 0.2
     x_fp32 = torch.randn((token, model_dim), device=device, dtype=torch.float32) * s
-    w1_fp32 = torch.randn((E, inter_dim * 2, model_dim), device=device, dtype=torch.float32) * s
-    w2_fp32 = torch.randn((E, model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+    x_q, x_scale = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
+    del x_fp32
+
     score = torch.rand((token, E), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
-    # ---- Per-token quantize for flydsl (standard per-row scale) ----
-    x_q, x_scale = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
-    w1_q, w1_scale = pertoken_quant(w1_fp32.view(-1, model_dim), quant_dtype=DTYPE_FP8)
-    w1_q = w1_q.view(E, 2 * inter_dim, model_dim)
-    w1_scale = w1_scale.view(E * 2 * inter_dim)
-    w2_q, w2_scale = pertoken_quant(w2_fp32.view(-1, inter_dim), quant_dtype=DTYPE_FP8)
-    w2_q = w2_q.view(E, model_dim, inter_dim)
-    w2_scale = w2_scale.view(E * model_dim)
+    # Per-expert quantize: generate fp32 one expert at a time, quantize, discard fp32.
+    w1_q_list, w1_scale_list = [], []
+    w2_q_list, w2_scale_list = [], []
+    for e_i in range(E):
+        w1e = torch.randn((2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
+        q, sc = pertoken_quant(w1e, quant_dtype=DTYPE_FP8)
+        w1_q_list.append(q)
+        w1_scale_list.append(sc.view(-1))
+        del w1e
+
+        w2e = torch.randn((model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
+        q2, sc2 = pertoken_quant(w2e, quant_dtype=DTYPE_FP8)
+        w2_q_list.append(q2)
+        w2_scale_list.append(sc2.view(-1))
+        del w2e
+
+    w1_q = torch.stack(w1_q_list)
+    w1_scale = torch.cat(w1_scale_list)
+    w2_q = torch.stack(w2_q_list)
+    w2_scale = torch.cat(w2_scale_list)
+    del w1_q_list, w1_scale_list, w2_q_list, w2_scale_list
 
     # Preshuffle weights
     w1_shuf = shuffle_weight(w1_q.view(-1, model_dim), layout=(16, 16)).view(-1)
@@ -167,18 +182,22 @@ def test_moe_blockscale_e2e(
             s_list.append(s.view(-1))
         return torch.stack(w_q_list), torch.stack(s_list)
 
+    # Block-quantize weights from the already-quantized fp8 tensors (re-block from per-row to per-block).
+    # Use the fp8 w1_q/w2_q directly — block_quant_weight calls .float() internally per expert.
     torch.cuda.empty_cache()
-    w1_bq, w1_bscale = block_quant_weight(w1_fp32, scale_blk_n, scale_blk_k)
+    w1_bq, w1_bscale = block_quant_weight(w1_q, scale_blk_n, scale_blk_k)
     torch.cuda.empty_cache()
-    w2_bq, w2_bscale = block_quant_weight(w2_fp32, scale_blk_n, scale_blk_k)
+    w2_bq, w2_bscale = block_quant_weight(w2_q, scale_blk_n, scale_blk_k)
     torch.cuda.empty_cache()
 
-    # Input block quantize
+    # Input block quantize (from x_q fp8 -> re-block)
+    x_f32_for_blk = x_q.float()
     a1_bq, a1_bscale = pertoken_quant(
-        x_fp32.view(-1, model_dim // scale_blk_k, scale_blk_k),
+        x_f32_for_blk.view(-1, model_dim // scale_blk_k, scale_blk_k),
         quant_dtype=DTYPE_FP8)
     a1_bq = a1_bq.view(-1, model_dim)
     a1_bscale = a1_bscale.squeeze(-1)
+    del x_f32_for_blk
 
     # ---- Torch reference (blockscale) ----
     out_ref = torch_moe_blockscale_ref(
