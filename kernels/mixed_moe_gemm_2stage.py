@@ -1946,6 +1946,8 @@ def compile_mixed_moe_gemm2(
                         return vector.bitcast(vec8_i32, v4)
 
                     # fp4 path
+                    force_tilek256_schedule = (not is_f8_a) and (tile_k == 256) and (pack_M == 2) and (pack_K == 2)
+
                     for ku128 in range_constexpr(k_unroll_packed):
                         for mi in range_constexpr(m_repeat_packed):
                             a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
@@ -1959,47 +1961,120 @@ def compile_mixed_moe_gemm2(
                                     b_packs0, b_packs1 = b_tile_in[k_idx]
 
                                     col_base = col_offset_base + (k_idx * 128) // a_elem_vec_pack
-                                    for imxdl in range_constexpr(pack_M):
-                                        col_base0 = col_base
-                                        mi_idx = mi * pack_M + imxdl
-                                        mi_val = arith.constant(mi_idx * 16, index=True)
-                                        curr_row_a_lds = row_a_lds + mi_val
 
-                                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
-                                            a0, a1 = a0_prefetch
+                                    if force_tilek256_schedule:
+                                        # Software pipelining: load BOTH M rows from LDS
+                                        # before issuing any MFMA, so MFMA execution (~64 cycles)
+                                        # covers the LDS read latency (~30 cycles).
+                                        mi_idx0 = mi * pack_M
+                                        mi_idx1 = mi_idx0 + 1
+
+                                        mi0_val = arith.constant(mi_idx0 * 16, index=True)
+                                        mi1_val = arith.constant(mi_idx1 * 16, index=True)
+                                        curr_row0_a_lds = row_a_lds + mi0_val
+                                        curr_row1_a_lds = row_a_lds + mi1_val
+
+                                        # Load both rows from LDS before any MFMA
+                                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx0 == 0):
+                                            a0_0, a0_1 = a0_prefetch
                                         else:
-                                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+                                            a0_0, a0_1 = lds_load_packs_k64(curr_row0_a_lds, col_base, lds_base)
+                                        a1_0, a1_1 = lds_load_packs_k64(curr_row1_a_lds, col_base, lds_base)
 
-                                        if is_f8_a:
-                                            col_base1 = col_base + 64
-                                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
-                                        else:
-                                            a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
+                                        a128_0 = pack_i64x4_to_i32x8(a0_0, a0_1, c0_i64, c0_i64)
+                                        a128_1 = pack_i64x4_to_i32x8(a1_0, a1_1, c0_i64, c0_i64)
 
+                                        # Keep the two LDS reads before MFMA issue
+                                        rocdl.sched_barrier(0)
+
+                                        # Issue all MFMAs for row 0
                                         for inxdl in range_constexpr(pack_N):
                                             ni_idx = ni * pack_N + inxdl
-
                                             b0 = b_packs0[ni_idx]
                                             b1 = b_packs1[ni_idx]
                                             b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
-                                            acc_idx = mi_idx * num_acc_n + ni_idx
-                                            rocdl.sched_barrier(0)
-                                            acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                            acc_idx0 = mi_idx0 * num_acc_n + ni_idx
+                                            acc_list[acc_idx0] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                                 mfma_res_ty,
                                                 [
-                                                    a128,
+                                                    a128_0,
                                                     b128,
-                                                    acc_list[acc_idx],
+                                                    acc_list[acc_idx0],
                                                     cbsz,
                                                     blgp,
-                                                    ikxdl * pack_M + imxdl,
+                                                    ikxdl * pack_M + 0,
                                                     a_scale_val,
                                                     ikxdl * pack_N + inxdl,
                                                     b_scale_val,
                                                 ],
                                             )
+
+                                        # Issue all MFMAs for row 1
+                                        for inxdl in range_constexpr(pack_N):
+                                            ni_idx = ni * pack_N + inxdl
+                                            b0 = b_packs0[ni_idx]
+                                            b1 = b_packs1[ni_idx]
+                                            b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+
+                                            acc_idx1 = mi_idx1 * num_acc_n + ni_idx
+                                            acc_list[acc_idx1] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                                mfma_res_ty,
+                                                [
+                                                    a128_1,
+                                                    b128,
+                                                    acc_list[acc_idx1],
+                                                    cbsz,
+                                                    blgp,
+                                                    ikxdl * pack_M + 1,
+                                                    a_scale_val,
+                                                    ikxdl * pack_N + inxdl,
+                                                    b_scale_val,
+                                                ],
+                                            )
+
+                                    else:
+                                        for imxdl in range_constexpr(pack_M):
+                                            col_base0 = col_base
+                                            mi_idx = mi * pack_M + imxdl
+                                            mi_val = arith.constant(mi_idx * 16, index=True)
+                                            curr_row_a_lds = row_a_lds + mi_val
+
+                                            if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
+                                                a0, a1 = a0_prefetch
+                                            else:
+                                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
+
+                                            if is_f8_a:
+                                                col_base1 = col_base + 64
+                                                a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                                a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                            else:
+                                                a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
+
+                                            for inxdl in range_constexpr(pack_N):
+                                                ni_idx = ni * pack_N + inxdl
+
+                                                b0 = b_packs0[ni_idx]
+                                                b1 = b_packs1[ni_idx]
+                                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+
+                                                acc_idx = mi_idx * num_acc_n + ni_idx
+                                                rocdl.sched_barrier(0)
+                                                acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                                    mfma_res_ty,
+                                                    [
+                                                        a128,
+                                                        b128,
+                                                        acc_list[acc_idx],
+                                                        cbsz,
+                                                        blgp,
+                                                        ikxdl * pack_M + imxdl,
+                                                        a_scale_val,
+                                                        ikxdl * pack_N + inxdl,
+                                                        b_scale_val,
+                                                    ],
+                                                )
 
                     return acc_list, epilogue_pf
 
