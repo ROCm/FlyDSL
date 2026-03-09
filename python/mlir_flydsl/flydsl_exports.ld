@@ -8,7 +8,7 @@
  *   - mlir:: C++ symbols (used by _fly.so, _mlir.so, etc.)
  *   - PyInit_* Python module initializers
  */
-FLYDSL_1.0 {
+FLYDSL_0.1 {
   global:
     /* MLIR C API (un-mangled, lowercase mlir prefix) */
     mlir*;
