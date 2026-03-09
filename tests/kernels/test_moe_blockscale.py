@@ -16,6 +16,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYTHON_CANDIDATES = [
@@ -114,6 +115,15 @@ def torch_moe_blockscale_ref(
     return (out * topk_weight.view(B, -1, 1)).sum(dim=1).to(dtype)
 
 
+@pytest.mark.parametrize(
+    "token, model_dim, inter_dim, E, topk",
+    [
+        pytest.param(16, 7168, 256, 8, 2, id="small-E8"),
+        pytest.param(32, 7168, 256, 8, 2, id="medium-E8"),
+        pytest.param(32, 7168, 256, 256, 8, id="DS-V3-M32", marks=pytest.mark.large_shape),
+        pytest.param(128, 7168, 256, 256, 8, id="DS-V3-M128", marks=pytest.mark.large_shape),
+    ],
+)
 def test_moe_blockscale_e2e(
     token, model_dim, inter_dim, E, topk,
     tile_m=32, tile_n=128, tile_k=128,
