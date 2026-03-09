@@ -15,7 +15,6 @@ def vectorAddKernel(
     tid = fx.thread_idx.x
 
     A = fx.rocdl.make_buffer_tensor(A)
-    print(A)
 
     tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
     tB = fx.logical_divide(B, fx.make_layout(block_dim, 1))
@@ -31,7 +30,7 @@ def vectorAddKernel(
     RABMemRefTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
 
     copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferLDST32b(), fx.Float32)
+    copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
 
     rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
     rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(1, 1))
@@ -56,7 +55,6 @@ def vectorAdd(
     stream: fx.Stream = fx.Stream(None),
 ):
     print("> Compile: n={} const_n={}", n, const_n)
-    fx.printf("> Runtime: n={} const_n={}", n, const_n)
 
     block_dim = 64
     grid_x = (n + block_dim - 1) // block_dim

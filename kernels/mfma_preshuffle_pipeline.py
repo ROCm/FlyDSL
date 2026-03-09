@@ -98,6 +98,123 @@ def make_preshuffle_b_layout(
     return PreshuffleBLayout(layout_b=layout_b, kpack_bytes=kpack_bytes)
 
 
+def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
+    """Convert one i32 (4 signed int8 bytes) to 4 bf16 packed as i64.
+
+    Uses shift-based f32->bf16 truncation (lshr 16) instead of arith.truncf
+    which on gfx942 expands to ~5 VALU per element. The shift is exact for
+    unscaled int8 values and introduces <0.5 ULP error for scaled values.
+    """
+    i8 = ir.IntegerType.get_signless(8)
+    i32 = ir.IntegerType.get_signless(32)
+    f32 = ir.F32Type.get()
+    vec1_i32_t = ir.VectorType.get([1], i32)
+    vec2_i32 = ir.VectorType.get([2], i32)
+    vec4_i8 = ir.VectorType.get([4], i8)
+    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+
+    v1 = vector.from_elements(vec1_i32_t, [val_i32])
+    i8x4 = vector.bitcast(vec4_i8, v1)
+
+    f32_vals = []
+    for i in range(4):
+        val_i8 = vector.extract(i8x4, static_position=[i], dynamic_position=[])
+        v = arith.sitofp(f32, val_i8)
+        if scale_val is not None:
+            v = v * scale_val
+        f32_vals.append(v)
+
+    c16 = arith.constant(16, type=i32)
+    c_ffff0000 = arith.constant(0xFFFF0000, type=i32)
+    bits0 = arith.bitcast(i32, f32_vals[0])
+    bits1 = arith.bitcast(i32, f32_vals[1])
+    bits2 = arith.bitcast(i32, f32_vals[2])
+    bits3 = arith.bitcast(i32, f32_vals[3])
+    i32_lo = arith.ori(arith.shrui(bits0, c16), arith.andi(bits1, c_ffff0000))
+    i32_hi = arith.ori(arith.shrui(bits2, c16), arith.andi(bits3, c_ffff0000))
+
+    v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
+    v64 = vector.bitcast(vec1_i64, v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def load_b_raw_w4a16(
+    buffer_ops,
+    arith,
+    vector,
+    *,
+    arg_b,
+    b_rsrc,
+    layout_b,
+    base_k: ir.Value,
+    ku: int,
+    n_blk: ir.Value,
+    n_intra: ir.Value,
+    lane_div_16: ir.Value,
+    elem_type: ir.Type,
+    kpack_bytes: int = 8,
+):
+    """Phase 1 of W4A16 B load: issue buffer_load_dword, return raw packed i32.
+
+    Same address calculation as the int4 unpack path in load_b_pack_k32
+    but using ku-based indexing for 2-phase latency hiding.
+    """
+    if kpack_bytes != 8:
+        raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
+
+    c64 = arith.constant(64, index=True)
+    half_bytes = kpack_bytes // 2
+    c2_idx = arith.constant(2, index=True)
+    c4_idx = arith.constant(4, index=True)
+
+    k0_base = base_k / c64
+    k1_layout_offset = ku * 2
+    lane_div_32 = lane_div_16 / c2_idx
+    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
+    k0 = k0_base + (total_k1 / c4_idx)
+    k1_local = total_k1 % c4_idx
+    lane_odd = lane_div_16 % c2_idx
+    k2_base = lane_odd * arith.constant(half_bytes, index=True)
+
+    coord_pack = (n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
+    idx_pack = crd2idx(coord_pack, layout_b)
+    idx_bytes = idx_pack + k2_base
+
+    b4 = _buffer_load_vec(
+        buffer_ops, vector, b_rsrc, idx_bytes,
+        elem_type=elem_type, vec_elems=4, elem_bytes=1, offset_in_bytes=True,
+    )
+    packed32 = vector.extract(
+        vector.bitcast(T.vec(1, T.i32), b4),
+        static_position=[0],
+        dynamic_position=[],
+    )
+    return packed32
+
+
+def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
+    """Phase 2 of W4A16 B load: unpack int4->int8 + convert int8->bf16.
+
+    Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
+    two i64 values each containing 4 bf16 for one MFMA.
+    """
+    c_08080808 = arith.constant(0x08080808, type=T.i32)
+    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=T.i32)
+    c_1e = arith.constant(0x1E, type=T.i32)
+    c_4_i32 = arith.constant(4, type=T.i32)
+
+    s0 = (packed32 & c_08080808) * c_1e
+    even = (packed32 & c_0f0f0f0f) | s0
+
+    t = packed32 >> c_4_i32
+    s1 = (t & c_08080808) * c_1e
+    odd = (t & c_0f0f0f0f) | s1
+
+    b0 = _i8x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _i8x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
+    return (b0, b1)
+
+
 def load_b_pack_k32(
     buffer_ops,
     arith,

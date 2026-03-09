@@ -1,12 +1,10 @@
-"""MoE GEMM stage1/stage2 kernel implementations (FLIR MFMA FP8).
+"""MoE Blockscale GEMM stage1/stage2 (FLIR MFMA FP8).
 
-This module intentionally contains the **kernel builder code** for:
-- `moe_gemm1` (stage1)
-- `moe_gemm2` (stage2)
+Per-block scaling (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128).
+FP8-only, g1u1 (gate+up with SiLU).
 
-It is extracted from `tests/kernels/test_moe_gemm.py` so that:
-- `kernels/` holds the implementation
-- `tests/` holds correctness/perf harnesses
+Based on moe_gemm_2stage.py with blockscale compute_tile pattern
+from blockscale_preshuffle_gemm.py.
 """
 
 import logging
@@ -24,24 +22,9 @@ from flydsl.expr import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-try:
-    from flydsl.runtime.device import (
-        supports_bf16_global_atomics,
-        bf16_global_atomics_arch_description,
-    )
-except ImportError:
-    # Backward compatibility for runtime.device versions that only expose get_rocm_arch.
-    def supports_bf16_global_atomics(arch: str) -> bool:
-        return str(arch).startswith(("gfx94", "gfx95", "gfx12"))
-
-    def bf16_global_atomics_arch_description() -> str:
-        return "gfx94+/gfx95+/gfx12+"
-
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf, memref
 from flydsl.expr.typing import T
-
-
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -51,8 +34,6 @@ from kernels.mfma_preshuffle_pipeline import (
     lds_store_16b_xor16,
     make_preshuffle_b_layout,
     load_b_pack_k32,
-    load_b_raw_w4a16,
-    unpack_b_w4a16,
     tile_chunk_coord_i32,
     swizzle_xor16,
 )
@@ -86,9 +67,8 @@ def _if_else(if_op):
                 scf.YieldOp([])
 
 
-
 @functools.lru_cache(maxsize=1024)
-def compile_moe_gemm1(
+def compile_moe_blockscale_gemm1(
     *,
     model_dim: int,
     inter_dim: int,
@@ -97,10 +77,8 @@ def compile_moe_gemm1(
     tile_m: int,
     tile_n: int,
     tile_k: int,
-    # NOTE: aiter swap passes these for API symmetry; stage1 uses dynamic memrefs so they are ignored.
     doweight_stage1: bool,
-    in_dtype: str = "fp8",
-    group_size: int = -1,
+    scale_block_k: int = 128,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
 ):
@@ -109,29 +87,20 @@ def compile_moe_gemm1(
     in_dtype:
       - "fp8": X/W are fp8
       - "fp16": X/W are fp16
-      - "bf16": X/W are bf16
       - "int8": X/W are int8 (X is [tokens, K])
       - "int8smooth": X/W are int8, but X is pre-expanded to [tokens*topk, K] with per-(token,slot)
         quant scales (used to emulate MoE smoothquant behavior where each (token,slot)->expert route can
         have a distinct input scaling before quantization).
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
-      - "int4_bf16": W4A16 path: X is bf16, W is packed int4 unpacked to bf16 in-kernel
     """
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
-    _state = {}  # legacy; kept until stage2/reduction are migrated
+    _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
-        raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
-        )
-    is_int4_bf16 = in_dtype == "int4_bf16"
+    in_dtype = "fp8"  # blockscale is FP8-only
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or in_dtype == "bf16"
-    is_f16_or_bf16 = is_f16 or is_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
-    elem_bytes = 2 if is_f16_or_bf16 else 1
+    elem_bytes = 2 if is_f16 else 1
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
     # NOTE: don't materialize MLIR types outside an active MLIR Context.
@@ -165,22 +134,11 @@ def compile_moe_gemm1(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    mfma_f32_bf16_k16 = None
-    if is_bf16:
-        mfma_f32_bf16_k16 = getattr(rocdl, "mfma_f32_16x16x16bf16_1k", None) or getattr(
-            rocdl, "mfma_f32_16x16x16_bf16_1k", None
-        )
-        if mfma_f32_bf16_k16 is None:
-            raise AttributeError(
-                "BF16 K16 MFMA op not found: expected `rocdl.mfma_f32_16x16x16bf16_1k` "
-                "(or `rocdl.mfma_f32_16x16x16_bf16_1k`)."
-            )
-
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
     size_x = DYN
     # W is packed int4 for W4A8: 2 values per byte.
-    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if (is_int4 or is_int4_bf16) else (experts * (2 * inter_dim) * model_dim)
+    size_w = (experts * (2 * inter_dim) * model_dim) // 2 if is_int4 else (experts * (2 * inter_dim) * model_dim)
     size_sorted = DYN
     size_expert_ids = DYN
 
@@ -193,7 +151,7 @@ def compile_moe_gemm1(
         )
     bytes_per_thread_x = bytes_x_per_tile // total_threads
     # Keep MoE stage1 X gmem->LDS pipeline consistent with the optimized GEMM kernel:
-    # split into <=16B pieces and use direct buffer_load for smaller widths.
+    # split into <=16B pieces and use `flir.copy(load-only)` for buffer_load_dwordx4.
     # (Compute the split lens inside the kernel so the code matches GEMM structure.)
 
     # LDS128 mode (same idea as test_preshuffle_gemm.py):
@@ -212,15 +170,12 @@ def compile_moe_gemm1(
     # IMPORTANT: module name participates in FlyDSL's compile cache key.
     # Keep an explicit ABI tag so signature changes can't accidentally reuse an old binary.
     module_name = (
-        f"mfma_moe1_{in_dtype}_{out_dtype}_{epilog_tag}"
+        f"mfma_moe1_bs_{in_dtype}_{out_dtype}_{epilog_tag}"
         f"_t{tile_m}x{tile_n}x{tile_k}"
         f"_abi3"  # also mask sentinel token ids on loads (X/scale_x) to avoid illegal address faults
     ).replace("-", "_")
 
     # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
-    # Reuse the same LDS bytes for both:
-    # - ping-pong X tiles (2 * tile_m * lds_stride bytes)
-    # - optional epilogue CShuffle tile (tile_m * tile_n f16 -> 2 * tile_m * tile_n bytes)
     _use_cshuffle_epilog = bool(use_cshuffle_epilog)
     lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(elem_bytes)
     lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0
@@ -231,9 +186,8 @@ def compile_moe_gemm1(
     lds_alloc_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
-    if True:
-        @flyc.kernel
-        def moe_gemm1(
+    @flyc.kernel
+    def moe_blockscale_gemm1(
             arg_out: fx.Tensor,
             arg_x: fx.Tensor,
             arg_w: fx.Tensor,
@@ -254,12 +208,13 @@ def compile_moe_gemm1(
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
             )
-            # i32 versions for layout construction (fly.make_shape requires i32/i64)
             tokens_i32_v = i32_tokens_in.ir_value()
             k_i32_v = i32_k_in.ir_value()
-            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
-            # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
-            w_elem = T.i8 if (is_int4 or is_int4_bf16) else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            tokens_i32_v = i32_tokens_in.ir_value()
+            k_i32_v = i32_k_in.ir_value()
+            x_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
+            # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
+            w_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
             f16 = T.f16
             f32 = T.f32
             i32 = T.i32
@@ -268,7 +223,6 @@ def compile_moe_gemm1(
             vec4_i32 = T.vec(4, i32)
             vec1_f16 = T.vec(1, f16)
             vec4_f16 = T.vec(4, f16)
-            vec4_i16 = T.vec(4, T.i16)  # For bf16 MFMA (expects v4i16 bit-pattern)
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec4_elems = 4 if elem_bytes == 1 else 2
@@ -297,16 +251,14 @@ def compile_moe_gemm1(
                 else arith.constant_vector(0.0, vec4_f32)
             )
 
-            # Layouts (use i32 values; fly.make_shape requires i32/i64, not index)
+            # Layouts
             layout_x = fx.make_layout((tokens_i32_v, k_i32_v), stride=(k_i32_v, 1))
 
             # B preshuffle layout: match GEMM test helper exactly.
             c_n_total = arith.index(experts * (2 * inter_dim))
-            # For packed int4 (W4A8/W4A16), kpack_bytes=8.
-            kpack_bytes = 8 if (is_int4 or is_int4_bf16) else 16
-            w_elem_bytes = 1 if (is_int4 or is_int4_bf16) else elem_bytes
+            kpack_bytes = 8 if is_int4 else 16
             b_layout = make_preshuffle_b_layout(
-                arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=w_elem_bytes
+                arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.index(int(elem_bytes))) / arith.index(64)
@@ -326,9 +278,7 @@ def compile_moe_gemm1(
             # setup, LDS pointer math, and gmem prefetch work.
             bx_m = bx * arith.index(tile_m)
             maxids_rsrc = buffer_ops.create_buffer_resource(
-                arg_max_token_ids,
-                max_size=False,
-                num_records_bytes=arith.index(4),
+                arg_max_token_ids, max_size=False, num_records_bytes=arith.index(4)
             )
             max_token_id_i32 = buffer_ops.buffer_load(
                 maxids_rsrc, arith.index(0), vec_width=1, dtype=i32
@@ -349,7 +299,7 @@ def compile_moe_gemm1(
                 lds_x_ptr = SmemPtr(
                     base_ptr,
                     lds_alloc_offset,
-                    (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                    (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)),
                     shape=(lds_total_elems,),
                 )
                 lds_x = lds_x_ptr.get()
@@ -368,7 +318,7 @@ def compile_moe_gemm1(
                 x_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
                 x_nbytes_idx = x_rows * k_in * arith.index(int(elem_bytes))
                 x_rsrc = buffer_ops.create_buffer_resource(
-                    arg_x, max_size=False, num_records_bytes=x_nbytes_idx
+                    arg_x, max_size=False, num_records_bytes=arith.index_cast(i64, x_nbytes_idx)
                 )
 
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
@@ -377,22 +327,20 @@ def compile_moe_gemm1(
                 out_elem_bytes = 2  # f16/bf16
                 out_nbytes_idx = tokens_in * c_topk * inter_in * arith.index(out_elem_bytes)
                 out_rsrc = buffer_ops.create_buffer_resource(
-                    arg_out, max_size=False, num_records_bytes=out_nbytes_idx
+                    arg_out, max_size=False, num_records_bytes=arith.index_cast(i64, out_nbytes_idx)
                 )
 
-                # scale_x: fp16/bf16 path ignores (implicit scale=1.0); int4_bf16 also uses 1.0.
-                if is_f16_or_bf16:
+                # fp16 path ignores scales completely (implicit scale=1.0).
+                if is_f16:
                     sx_rsrc = None
+                    sw_rsrc = None
                 else:
+                    # scale_x: [tokens] f32 -> bytes = tokens*4
                     sx_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
                     sx_nbytes_idx = sx_rows * arith.index(4)
                     sx_rsrc = buffer_ops.create_buffer_resource(
-                        arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_idx
+                        arg_scale_x, max_size=False, num_records_bytes=arith.index_cast(i64, sx_nbytes_idx)
                     )
-                # scale_w: fp16/bf16 (non-int4) path ignores; int4_bf16 needs dequant scale.
-                if not needs_scale_w:
-                    sw_rsrc = None
-                else:
                     sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
                 sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False)
@@ -400,9 +348,7 @@ def compile_moe_gemm1(
 
                 # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
                 expert_rsrc = buffer_ops.create_buffer_resource(
-                    arg_expert_ids,
-                    max_size=False,
-                    num_records_bytes=(size_expert_ids_in * arith.index(4)),
+                    arg_expert_ids, max_size=False, num_records_bytes=arith.index_cast(i64, size_expert_ids_in * arith.index(4))
                 )
 
                 # Expert id for this M tile (keep address math in `index`)
@@ -413,8 +359,8 @@ def compile_moe_gemm1(
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
-                if is_f16_or_bf16:
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
@@ -442,6 +388,7 @@ def compile_moe_gemm1(
                 c_chunk_i32 = arith.index(chunk_i32)
                 tx_i32_base = tx * c_chunk_i32
                 mask24 = arith.constant(0xFFFFFF, type=T.i32)
+                # Keep i32 constants available for epilogue index math.
                 tokens_i32 = arith.index_cast(i32, tokens_in)
                 topk_i32 = arith.constant(topk, type=T.i32)
     
@@ -494,9 +441,8 @@ def compile_moe_gemm1(
     
                 def load_x(idx_i32):
                     """Load `x_load_bytes` bytes from X (gmem) into regs.
-
+    
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
-                    idx_i32 is in dword units; convert to element index for _buffer_load_vec.
                     """
                     if x_load_bytes == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
@@ -509,7 +455,6 @@ def compile_moe_gemm1(
                             vec_elems=vec16_elems,
                             elem_bytes=elem_bytes,
                         )
-                    # For 8B/4B, load raw i32 dwords directly.
                     if x_load_bytes == 8:
                         return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=2, dtype=i32)
                     return buffer_ops.buffer_load(x_rsrc, idx_i32, vec_width=1, dtype=i32)
@@ -537,9 +482,7 @@ def compile_moe_gemm1(
                 lane_div_16 = layout_get(coord_l16, 0)
                 lane_mod_16 = layout_get(coord_l16, 1)
     
-                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16 * a_kpack_elems.
-                # A-side kpack is always 16 bytes (activation elements); B-side kpack_bytes
-                # may differ (e.g. 8 for int4 weights), but that only affects B preshuffle.
+                # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16*16.
                 row_a_lds = lane_mod_16
                 a_kpack_elems = 16 // elem_bytes
                 col_offset_base = lane_div_16 * arith.index(int(a_kpack_elems))
@@ -565,9 +508,10 @@ def compile_moe_gemm1(
                 n_blk_up = []
                 col_g_list = []
                 inter_idx = arith.index(inter_dim)
+                # layout for (row -> (blk,intra)) where intra is 0..15
                 c_n0 = c_n_total / arith.index(16)
-                c_n0_static = experts * (2 * inter_dim) // 16
-                layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
+                c_n0_i32 = arith.index_cast(i32, c_n0)
+                layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
                     offset = arith.index(ni * 16)
                     col_g = by_n + n_tile_base
@@ -606,7 +550,7 @@ def compile_moe_gemm1(
                         lane_div_16=lane_div_16,  # 0..3
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
-                        elem_bytes=w_elem_bytes,
+                        elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                     )
     
@@ -616,34 +560,6 @@ def compile_moe_gemm1(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    if is_int4_bf16:
-                        # W4A16: 2-phase load+unpack for VMEM latency hiding
-                        # Phase 1: Issue ALL buffer_loads first.
-                        raw_data = []
-                        for ku in range_constexpr(k_unroll):
-                            raw_ku = []
-                            for ni in range_constexpr(num_acc_n):
-                                raw = load_b_raw_w4a16(
-                                    buffer_ops, arith, vector,
-                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
-                                    base_k=base_k, ku=ku,
-                                    n_blk=blk_list[ni], n_intra=intra_list[ni],
-                                    lane_div_16=lane_div_16, elem_type=w_elem,
-                                    kpack_bytes=kpack_bytes,
-                                )
-                                raw_ku.append(raw)
-                            raw_data.append(raw_ku)
-                        # Phase 2: Unpack ALL (by now early loads have completed).
-                        b_tile = []
-                        for ku in range_constexpr(k_unroll):
-                            packs0 = []
-                            packs1 = []
-                            for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
-                                packs0.append(b0)
-                                packs1.append(b1)
-                            b_tile.append((packs0, packs1))
-                        return b_tile
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
                         packs0 = []
@@ -742,11 +658,7 @@ def compile_moe_gemm1(
                     mfma_fn = (
                         mfma_i32_k32
                         if is_int8
-                        else (
-                            mfma_f32_bf16_k16
-                            if is_bf16
-                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
-                        )
+                        else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                     )
     
                     # Optional: prefetch epilogue scales while we are about to run the last MFMA tile,
@@ -762,12 +674,12 @@ def compile_moe_gemm1(
                             row_up_idx = row_gate_idx + inter_idx
                             sw_gate_pf.append(
                                 arith.constant(1.0, type=T.f32)
-                                if not needs_scale_w
+                                if is_f16
                                 else buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
                             )
                             sw_up_pf.append(
                                 arith.constant(1.0, type=T.f32)
-                                if not needs_scale_w
+                                if is_f16
                                 else buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
                             )
                         epilogue_pf = (sw_gate_pf, sw_up_pf)
@@ -776,23 +688,12 @@ def compile_moe_gemm1(
                         v1 = vector.from_elements(vec1_i64, [x_i64])
                         return vector.bitcast(vec4_f16, v1)
 
-                    def _i64_to_v4i16(x_i64):
-                        v1 = vector.from_elements(vec1_i64, [x_i64])
-                        return vector.bitcast(vec4_i16, v1)
-
                     def mfma_k64(acc_in, a0, a1, b0, b1):
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
-                        if is_bf16:
-                            a0v = _i64_to_v4i16(a0)
-                            a1v = _i64_to_v4i16(a1)
-                            b0v = _i64_to_v4i16(b0)
-                            b1v = _i64_to_v4i16(b1)
                             acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
                             return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
                         acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
@@ -884,12 +785,10 @@ def compile_moe_gemm1(
                 a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
     
                 # Unrolled ping-pong main loop (2 tiles per iteration), leaving 2 tail tiles.
-                # Keep this as constexpr expansion to avoid SCF child-region dominance issues
-                # when carrying MFMA accumulators/prefetch values into the tail section.
                 c2_tile_k = arith.index(tile_k * 2)
                 total_tiles = int(model_dim) // int(tile_k)
                 pair_iters = max((total_tiles - 2) // 2, 0)
-
+    
                 for pair_i in range_constexpr(pair_iters):
                     k_iv = arith.index(pair_i * (tile_k * 2))
                     # ---- stage 0: prefetch+store ping, compute pong ----
@@ -940,9 +839,9 @@ def compile_moe_gemm1(
                     b_gate_cur = b_gate_next
                     b_up_cur = b_up_next
     
-                # Tail: 2 remaining tiles at (k_in - 2*tile_k) and (k_in - tile_k).
-                # Rebuild prefetch in the current block: values produced inside the `range(...)`
-                # loop body may live in a child region and cannot be used here.
+                # Tail: 2 remaining tiles.
+                # Rebuild prefetch in the current block: values from range_constexpr
+                # loop body are Python-level so they're visible, but reload for clarity.
                 k_tail0 = k_in - c2_tile_k
                 b_gate_cur = load_b_tile(k_tail0, n_blk_gate, n_intra_gate)
                 b_up_cur = load_b_tile(k_tail0, n_blk_up, n_intra_up)
@@ -998,12 +897,12 @@ def compile_moe_gemm1(
                         row_up_idx = row_gate_idx + inter_idx
                         sw_gate_vals.append(
                             arith.constant(1.0, type=T.f32)
-                            if not needs_scale_w
+                            if is_f16
                             else buffer_ops.buffer_load(sw_rsrc, row_gate_idx, vec_width=1, dtype=f32)
                         )
                         sw_up_vals.append(
                             arith.constant(1.0, type=T.f32)
-                            if not needs_scale_w
+                            if is_f16
                             else buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=f32)
                         )
     
@@ -1015,10 +914,7 @@ def compile_moe_gemm1(
                 lane_div_16_mul4 = lane_div_16 * arith.index(4)
                 inter_i32_local = inter_i32_v
     
-                # Uses EVec=4 (buffer store "x4" of fp16 elements).
-                use_cshuffle_epilog_flag = _use_cshuffle_epilog
-
-                if use_cshuffle_epilog_flag:
+                if _use_cshuffle_epilog:
                     if lds_out is None:
                         raise RuntimeError("CShuffle epilogue enabled but lds_out is not allocated/aliased.")
     
@@ -1045,7 +941,7 @@ def compile_moe_gemm1(
                             ts2 = s2 * tokens_i32_v + t2
                             sx = (
                                 arith.constant(1.0, type=T.f32)
-                                if is_f16_or_bf16
+                                if is_f16
                                 else arith.select(
                                     t_valid,
                                     buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
@@ -1055,7 +951,7 @@ def compile_moe_gemm1(
                         else:
                             sx = (
                                 arith.constant(1.0, type=T.f32)
-                                if is_f16_or_bf16
+                                if is_f16
                                 else arith.select(
                                     t_valid,
                                     buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
@@ -1156,7 +1052,7 @@ def compile_moe_gemm1(
                         ts2 = s2 * tokens_i32_v + t2
                         sx0 = (
                             arith.constant(1.0, type=T.f32)
-                            if is_f16_or_bf16
+                            if is_f16
                             else arith.select(
                                 t_valid,
                                 buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
@@ -1166,7 +1062,7 @@ def compile_moe_gemm1(
                     else:
                         sx0 = (
                             arith.constant(1.0, type=T.f32)
-                            if is_f16_or_bf16
+                            if is_f16
                             else arith.select(
                                 t_valid,
                                 buffer_ops.buffer_load(sx_rsrc, t2, vec_width=1, dtype=f32),
@@ -1221,22 +1117,10 @@ def compile_moe_gemm1(
                     bx_m=bx_m,
                     body_row=_stage1_store_row,
                 )
-
+    
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (
-        module_name,
-        in_dtype,
-        out_dtype,
-        tile_m,
-        tile_n,
-        tile_k,
-        doweight_stage1,
-        x_is_token_slot,
-        use_cshuffle_epilog,
-    )
-
     @flyc.jit
-    def launch_moe_gemm1(
+    def launch_moe_blockscale_gemm1(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
         arg_w: fx.Tensor,
@@ -1252,7 +1136,6 @@ def compile_moe_gemm1(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -1265,7 +1148,7 @@ def compile_moe_gemm1(
         gx = inter_in / arith.index(tile_n)
         gy = size_expert_ids_in
 
-        moe_gemm1(
+        moe_blockscale_gemm1(
             arg_out,
             arg_x,
             arg_w,
@@ -1285,11 +1168,11 @@ def compile_moe_gemm1(
             stream=stream,
         )
 
-    return launch_moe_gemm1
+    return launch_moe_blockscale_gemm1
 
 
 @functools.lru_cache(maxsize=1024)
-def compile_moe_gemm2(
+def compile_moe_blockscale_gemm2(
     *,
     model_dim: int,
     inter_dim: int,
@@ -1299,10 +1182,12 @@ def compile_moe_gemm2(
     tile_n: int,
     tile_k: int,
     doweight_stage2: bool,
-    in_dtype: str = "fp8",
-    group_size: int = -1,
+    scale_block_k: int = 128,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
+    # Optional experiment: write per-(token,slot) output (no atomics) into an output shaped
+    # [tokens*topk, model_dim] (or [tokens, topk, model_dim] flattened), then reduce over topk outside.
+    # This can reduce atomic contention for small tokens at the cost of extra bandwidth / reduction.
     accumulate: bool = True,
 ):
     """Compile stage2 kernel (`moe_gemm2`) and return the compiled executable.
@@ -1310,10 +1195,8 @@ def compile_moe_gemm2(
     in_dtype:
       - "fp8": A2/W are fp8
       - "fp16": A2/W are fp16
-      - "bf16": A2/W are bf16
       - "int8": A2/W are int8
       - "int4": W4A8 path: A2 is int8, W is packed int4 unpacked to int8 in-kernel
-      - "int4_bf16": W4A16 path: A2 is bf16, W is packed int4 unpacked to bf16 in-kernel
 
     Stage2 output supports:
       - out_dtype="f16": fp16 half2 atomics (fast, can overflow to +/-inf for bf16 workloads)
@@ -1326,23 +1209,16 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
-        raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
-        )
-    is_int4_bf16 = in_dtype == "int4_bf16"
+    in_dtype = "fp8"  # blockscale is FP8-only
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or in_dtype == "bf16"
-    is_f16_or_bf16 = is_f16 or is_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
-    elem_bytes = 2 if is_f16_or_bf16 else 1
+    elem_bytes = 2 if is_f16 else 1
     out_s = str(out_dtype).strip().lower()
     if out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
         raise ValueError(f"out_dtype must be 'f16', 'bf16', or 'f32', got {out_dtype!r}")
     out_is_f32 = out_s in ("f32", "fp32", "float")
     out_is_bf16 = out_s in ("bf16", "bfloat16")
     if (not bool(accumulate)) and out_is_f32:
-        raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
+        raise ValueError("compile_moe_blockscale_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
@@ -1358,25 +1234,14 @@ def compile_moe_gemm2(
                 "(or `rocdl.mfma_i32_16x16x32_i8`)."
             )
 
-    mfma_f32_bf16_k16 = None
-    if is_bf16:
-        mfma_f32_bf16_k16 = getattr(rocdl, "mfma_f32_16x16x16bf16_1k", None) or getattr(
-            rocdl, "mfma_f32_16x16x16_bf16_1k", None
-        )
-        if mfma_f32_bf16_k16 is None:
-            raise AttributeError(
-                "BF16 K16 MFMA op not found: expected `rocdl.mfma_f32_16x16x16bf16_1k` "
-                "(or `rocdl.mfma_f32_16x16x16_bf16_1k`)."
-            )
-
     DYN = ir.ShapedType.get_dynamic_size()
     size_out = DYN
     size_x = DYN
     size_sorted = DYN
     size_expert_ids_shape = DYN
     size_scale_x = DYN
-    # W is packed int4 for W4A8/W4A16: 2 values per byte.
-    size_w = (experts * model_dim * inter_dim) // 2 if (is_int4 or is_int4_bf16) else (experts * model_dim * inter_dim)
+    # W is packed int4 for W4A8: 2 values per byte.
+    size_w = (experts * model_dim * inter_dim) // 2 if is_int4 else (experts * model_dim * inter_dim)
 
     total_threads = 256
     tile_k_bytes = int(tile_k) * int(elem_bytes)
@@ -1397,10 +1262,8 @@ def compile_moe_gemm2(
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
     if out_is_bf16:
-        if not supports_bf16_global_atomics(gpu_arch):
-            raise ValueError(
-                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
-            )
+        if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950") or gpu_arch.startswith("gfx12")):
+            raise ValueError(f"out_dtype='bf16' requires bf16 global atomics (gfx942/gfx950/gfx12), got arch={gpu_arch!r}")
 
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
@@ -1440,9 +1303,16 @@ def compile_moe_gemm2(
         f"_abi2"  # mask sentinel token ids on loads/stores to avoid illegal address faults
     ).replace("-", "_")
 
-    # ── CShuffle epilogue e_vec (pure Python; must be computed before @flyc.kernel
-    # because the AST rewriter intercepts `if` statements inside kernel bodies and
-    # turns them into closure dispatches, which breaks variable reassignment) ────
+    # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
+    lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(elem_bytes)
+    lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0
+    lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
+    lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
+
+    lds_alloc_bytes = int(lds_total_elems) * int(elem_bytes)
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
+
     _cshuffle_nlane = 32
     if bool(accumulate):
         _e_vec = 2
@@ -1454,19 +1324,9 @@ def compile_moe_gemm2(
                 f"tile_n={tile_n} must be divisible by {_cshuffle_stride} when accumulate=False"
             )
 
-    # ── LDS sizing (pure Python; no MLIR Context needed) ─────────────────────
-    lds_x_bytes = 2 * int(tile_m) * int(lds_stride) * int(elem_bytes)
-    lds_out_bytes = 2 * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0  # f16 bytes
-    lds_total_bytes = max(lds_x_bytes, lds_out_bytes)
-    lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
-
-    lds_alloc_bytes = int(lds_total_elems) * int(elem_bytes)
-    lds_alloc_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
-
     if True:
         @flyc.kernel
-        def moe_gemm2(
+        def moe_blockscale_gemm2(
             arg_out: fx.Tensor,
             arg_x: fx.Tensor,
             arg_w: fx.Tensor,
@@ -1487,12 +1347,14 @@ def compile_moe_gemm2(
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
             )
-            # i32 versions for layout construction (fly.make_shape requires i32/i64)
+            tokens_i32_v = i32_tokens_in.ir_value()
+            n_i32_v = i32_n_in.ir_value()
+            k_i32_v = i32_k_in.ir_value()
             tokens_i32_v = i32_tokens_in.ir_value()
             k_i32_v = i32_k_in.ir_value()
-            x_elem = T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))
-            # For int4/int4_bf16, weights are stored as packed bytes (i8) and unpacked in-kernel.
-            w_elem = T.i8 if (is_int4 or is_int4_bf16) else (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)))
+            x_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
+            # For int4, weights are stored as packed bytes (i8) and unpacked to i8 packs.
+            w_elem = T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)
             f16 = T.f16
             f32 = T.f32
             i32 = T.i32
@@ -1502,7 +1364,6 @@ def compile_moe_gemm2(
             vec1_f16 = T.vec(1, f16)
             vec2_f16 = T.vec(2, f16)
             vec4_f16 = T.vec(4, f16)
-            vec4_i16 = T.vec(4, T.i16)  # For bf16 MFMA (expects v4i16 bit-pattern)
             vec16_elems = 16 if elem_bytes == 1 else 8
             vec8_elems = 8 if elem_bytes == 1 else 4
             vec4_elems = 4 if elem_bytes == 1 else 2
@@ -1517,7 +1378,7 @@ def compile_moe_gemm2(
                 else arith.constant_vector(0.0, vec4_f32)
             )
 
-            # A2 layout (flatten token-slot -> M; use i32 for fly.make_shape).
+            # A2 layout (flatten token-slot -> M).
             topk_idx = arith.index(topk)
             m_in = tokens_in * topk_idx
             m_i32_v = arith.index_cast(i32, m_in)
@@ -1525,10 +1386,9 @@ def compile_moe_gemm2(
 
             # B preshuffle layout: [experts*model_dim, inter_dim]
             c_n_total = arith.index(experts * model_dim)
-            kpack_bytes = 8 if (is_int4 or is_int4_bf16) else 16
-            w_elem_bytes = 1 if (is_int4 or is_int4_bf16) else elem_bytes
+            kpack_bytes = 8 if is_int4 else 16
             b_layout = make_preshuffle_b_layout(
-                arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=w_elem_bytes
+                arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
             layout_b = b_layout.layout_b
             c_k0 = (k_in * arith.index(int(elem_bytes))) / arith.index(64)
@@ -1554,7 +1414,7 @@ def compile_moe_gemm2(
             lds_x_ptr = SmemPtr(
                 base_ptr,
                 lds_alloc_offset,
-                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8)),
                 shape=(lds_total_elems,),
             )
             lds_x = lds_x_ptr.get()
@@ -1578,7 +1438,7 @@ def compile_moe_gemm2(
             # X(A2): [tokens*topk, inter_dim] bytes = tokens*topk*k*elem_bytes
             x_nbytes_idx = (tokens_in * c_topk) * k_in * arith.index(int(elem_bytes))
             x_rsrc = buffer_ops.create_buffer_resource(
-                arg_x, max_size=False, num_records_bytes=x_nbytes_idx
+                arg_x, max_size=False, num_records_bytes=arith.index_cast(i64, x_nbytes_idx)
             )
 
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
@@ -1594,21 +1454,18 @@ def compile_moe_gemm2(
                     * arith.index(out_elem_bytes)
                 )
             out_rsrc = buffer_ops.create_buffer_resource(
-                arg_out, max_size=False, num_records_bytes=out_nbytes_idx
+                arg_out, max_size=False, num_records_bytes=arith.index_cast(i64, out_nbytes_idx)
             )
-            # scale_x: fp16/bf16 path ignores (implicit scale=1.0); int4_bf16 also uses 1.0.
-            if is_f16_or_bf16:
+            # fp16 path ignores scales completely (implicit scale=1.0).
+            if is_f16:
                 sx_rsrc = None
+                sw_rsrc = None
             else:
                 # scale_x (A2 scale): [tokens*topk] f32 -> bytes = tokens*topk*4
                 sx_nbytes_idx = (tokens_in * c_topk) * arith.index(4)
                 sx_rsrc = buffer_ops.create_buffer_resource(
-                    arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_idx
+                    arg_scale_x, max_size=False, num_records_bytes=arith.index_cast(i64, sx_nbytes_idx)
                 )
-            # scale_w: fp16/bf16 (non-int4) path ignores; int4_bf16 needs dequant scale.
-            if not needs_scale_w:
-                sw_rsrc = None
-            else:
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
@@ -1618,26 +1475,25 @@ def compile_moe_gemm2(
                 * arith.index(tile_m)
                 * arith.index(4)
             )
+            sorted_nbytes_i64 = arith.index_cast(i64, sorted_nbytes_idx)
             sorted_rsrc = buffer_ops.create_buffer_resource(
-                arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_idx
+                arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_i64
             )
             sorted_w_rsrc = buffer_ops.create_buffer_resource(
-                arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_idx
+                arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_i64
             )
 
             # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
             eid_nbytes_idx = size_expert_ids_in * arith.index(4)
             expert_rsrc = buffer_ops.create_buffer_resource(
-                arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_idx
+                arg_expert_ids, max_size=False, num_records_bytes=arith.index_cast(i64, eid_nbytes_idx)
             )
             bx_m = bx * arith.index(tile_m)
 
             # Early-exit guard (as in 2ce65fb): some routing paths can produce extra/garbage
             # expert blocks beyond `num_valid_ids`. Skip those blocks entirely to avoid OOB.
             numids_rsrc = buffer_ops.create_buffer_resource(
-                arg_num_valid_ids,
-                max_size=False,
-                num_records_bytes=arith.index(4),
+                arg_num_valid_ids, max_size=False, num_records_bytes=arith.index(4)
             )
             num_valid_i32 = buffer_ops.buffer_load(
                 numids_rsrc, arith.index(0), vec_width=1, dtype=i32
@@ -1654,8 +1510,8 @@ def compile_moe_gemm2(
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
                 # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16/bf16 we require 16B.
-                if is_f16_or_bf16:
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
@@ -1753,9 +1609,9 @@ def compile_moe_gemm2(
                         if x_load_bytes == 16:
                             parts.append(vector.bitcast(vec4_i32, x_vec))
                         elif x_load_bytes == 8:
-                            parts.append(vector.bitcast(vec2_i32, x_vec))
+                            parts.append(x_vec)
                         else:
-                            parts.append(vector.bitcast(vec1_i32, x_vec))
+                            parts.append(x_vec)
                     return parts
     
                 # tx -> wave/lane (GEMM-style decomposition).
@@ -1767,7 +1623,6 @@ def compile_moe_gemm2(
                 lane_mod_16 = layout_get(coord_l16, 1)
     
                 row_a_lds = lane_mod_16
-                # A-side kpack is always 16 bytes; kpack_bytes is B-side (may be 8 for int4).
                 a_kpack_elems = 16 // elem_bytes
                 col_offset_base = lane_div_16 * arith.index(int(a_kpack_elems))
                 col_offset_base_bytes = (
@@ -1790,8 +1645,8 @@ def compile_moe_gemm2(
                 n_blk_list = []
                 col_g_list = []
                 c_n0 = c_n_total / arith.index(16)
-                c_n0_static = experts * model_dim // 16
-                layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
+                c_n0_i32 = arith.index_cast(i32, c_n0)
+                layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
                     offset = arith.index(ni * 16)
                     col_g = by_n + n_tile_base + offset + lane_mod_16
@@ -1821,7 +1676,7 @@ def compile_moe_gemm2(
                         lane_div_16=lane_div_16,  # 0..3
                         elem_type=w_elem,
                         kpack_bytes=kpack_bytes,
-                        elem_bytes=w_elem_bytes,
+                        elem_bytes=elem_bytes,
                         unpack_int4=is_int4,
                     )
     
@@ -1831,32 +1686,6 @@ def compile_moe_gemm2(
                     Returns a list of length `k_unroll`, where each entry is a tuple:
                       (packs_half0[ni], packs_half1[ni])  for the K64 micro-step.
                     """
-                    if is_int4_bf16:
-                        # W4A16: 2-phase load+unpack for VMEM latency hiding
-                        raw_data = []
-                        for ku in range_constexpr(k_unroll):
-                            raw_ku = []
-                            for ni in range_constexpr(num_acc_n):
-                                raw = load_b_raw_w4a16(
-                                    buffer_ops, arith, vector,
-                                    arg_b=arg_w, b_rsrc=w_rsrc, layout_b=layout_b,
-                                    base_k=base_k, ku=ku,
-                                    n_blk=n_blk_list[ni], n_intra=n_intra_list[ni],
-                                    lane_div_16=lane_div_16, elem_type=w_elem,
-                                    kpack_bytes=kpack_bytes,
-                                )
-                                raw_ku.append(raw)
-                            raw_data.append(raw_ku)
-                        b_tile = []
-                        for ku in range_constexpr(k_unroll):
-                            packs0 = []
-                            packs1 = []
-                            for ni in range_constexpr(num_acc_n):
-                                b0, b1 = unpack_b_w4a16(raw_data[ku][ni], arith, vector)
-                                packs0.append(b0)
-                                packs1.append(b1)
-                            b_tile.append((packs0, packs1))
-                        return b_tile
                     b_tile = []
                     for ku in range_constexpr(k_unroll):
                         packs0 = []
@@ -1942,11 +1771,7 @@ def compile_moe_gemm2(
                     mfma_fn = (
                         mfma_i32_k32
                         if is_int8
-                        else (
-                            mfma_f32_bf16_k16
-                            if is_bf16
-                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
-                        )
+                        else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                     )
     
                     epilogue_pf = None
@@ -1958,7 +1783,7 @@ def compile_moe_gemm2(
                             row_w_idx = expert_off_pf + col_g
                             sw_pf.append(
                                 arith.constant(1.0, type=T.f32)
-                                if not needs_scale_w
+                                if is_f16
                                 else buffer_ops.buffer_load(sw_rsrc, row_w_idx, vec_width=1, dtype=f32)
                             )
                         # Also prefetch per-row routed/topk weights (sorted_weights) when enabled.
@@ -1984,23 +1809,12 @@ def compile_moe_gemm2(
                         v1 = vector.from_elements(vec1_i64, [x_i64])
                         return vector.bitcast(vec4_f16, v1)
 
-                    def _i64_to_v4i16(x_i64):
-                        v1 = vector.from_elements(vec1_i64, [x_i64])
-                        return vector.bitcast(vec4_i16, v1)
-
                     def mfma_k64(acc0, a0, a1, b0, b1):
                         if is_f16:
                             a0v = _i64_to_v4f16(a0)
                             a1v = _i64_to_v4f16(a1)
                             b0v = _i64_to_v4f16(b0)
                             b1v = _i64_to_v4f16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
-                        if is_bf16:
-                            a0v = _i64_to_v4i16(a0)
-                            a1v = _i64_to_v4i16(a1)
-                            b0v = _i64_to_v4i16(b0)
-                            b1v = _i64_to_v4i16(b1)
                             acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
                             return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
                         acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
@@ -2239,7 +2053,7 @@ def compile_moe_gemm2(
                         row_w_idx = expert_off + col_g
                         sw_vals.append(
                             arith.constant(1.0, type=T.f32)
-                            if not needs_scale_w
+                            if is_f16
                             else buffer_ops.buffer_load(sw_rsrc, row_w_idx, vec_width=1, dtype=f32)
                         )
     
@@ -2261,36 +2075,17 @@ def compile_moe_gemm2(
                         t2 = fused2 & mask24_i32
                         s2 = fused2 >> 24
 
-                        # Mask sentinel (token_id==tokens, slot==topk) to avoid OOB scale_x loads.
-                        # For invalid rows, force sx=0 so they contribute exactly 0 to output.
-                        t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32)
-                        s_ok = arith.cmpi(arith.CmpIPredicate.ult, s2, topk_i32_v)
-                        ts_ok = arith.andi(t_ok, s_ok)
-                        t2_safe = arith.select(ts_ok, t2, arith.constant(0, type=T.i32))
-                        s2_safe = arith.select(ts_ok, s2, arith.constant(0, type=T.i32))
-                        ts2 = t2_safe * topk_i32_v + s2_safe
-                        sx = (
-                            arith.select(ts_ok, arith.constant(1.0, type=T.f32), arith.constant(0.0, type=T.f32))
-                            if is_f16_or_bf16
-                            else arith.select(
-                                ts_ok,
-                                buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
-                                arith.constant(0.0, type=T.f32),
-                            )
-                        )
+                        ts2 = t2 * topk_i32_v + s2
+                        sx = arith.constant(1.0, type=T.f32) if is_f16 else buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32)
 
                         if doweight_stage2:
                             tw_idx = (mi * 4) + ii
                             if tw_pf is not None:
-                                tw = arith.select(ts_ok, tw_pf[tw_idx], arith.constant(0.0, type=T.f32))
+                                tw = tw_pf[tw_idx]
                             else:
-                                tw = arith.select(
-                                    ts_ok,
-                                    buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32),
-                                    arith.constant(0.0, type=T.f32),
-                                )
+                                tw = buffer_ops.buffer_load(sorted_w_rsrc, row, vec_width=1, dtype=f32)
 
-                        idx0 = t2_safe * model_i32  # i32 element index base (safe for sentinel rows)
+                        idx0 = t2 * model_i32  # i32 element index base
 
                         for ni in range_constexpr(num_acc_n):
                             col_g = col_g_list[ni]
@@ -2351,7 +2146,7 @@ def compile_moe_gemm2(
                         ts2 = t2_safe * topk_i32_v + s2_safe
                         sx = (
                             arith.constant(1.0, type=T.f32)
-                            if is_f16_or_bf16
+                            if is_f16
                             else arith.select(
                                 ts_ok,
                                 buffer_ops.buffer_load(sx_rsrc, ts2, vec_width=1, dtype=f32),
@@ -2465,22 +2260,9 @@ def compile_moe_gemm2(
             _if_blk = scf.IfOp(blk_valid)
             with _if_then(_if_blk):
                 _moe_gemm2_then_body()
-
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (
-        module_name,
-        in_dtype,
-        out_dtype,
-        tile_m,
-        tile_n,
-        tile_k,
-        doweight_stage2,
-        accumulate,
-        use_cshuffle_epilog,
-    )
-
     @flyc.jit
-    def launch_moe_gemm2(
+    def launch_moe_blockscale_gemm2(
         arg_out: fx.Tensor,
         arg_x: fx.Tensor,
         arg_w: fx.Tensor,
@@ -2496,7 +2278,6 @@ def compile_moe_gemm2(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -2509,7 +2290,7 @@ def compile_moe_gemm2(
         gx = n_in / arith.index(tile_n)
         gy = size_expert_ids_in
 
-        moe_gemm2(
+        moe_blockscale_gemm2(
             arg_out,
             arg_x,
             arg_w,
@@ -2529,7 +2310,7 @@ def compile_moe_gemm2(
             stream=stream,
         )
 
-    return launch_moe_gemm2
+    return launch_moe_blockscale_gemm2
 
 
 # MoE Reduction Kernel (reduce sum over topk dimension)
@@ -2549,7 +2330,7 @@ def compile_moe_reduction(
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
     When use_mask=True, only sums slots where valid_mask[t,k]=1.
-    Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
+    Used in conjunction with compile_moe_blockscale_gemm2(accumulate=False) to avoid atomic contention.
     """
     gpu_arch = get_hip_arch()
     DYN = ir.ShapedType.get_dynamic_size()
@@ -2607,7 +2388,6 @@ def compile_moe_reduction(
             tile_idx = gpu.block_id("y")
             tid = gpu.thread_id("x")
 
-            # Guard: token in range
             token_i32 = arith.index_cast(i32_type(), token_idx)
             m_tokens_i32 = arith.index_cast(i32_type(), m_tokens)
             tok_ok = arith.cmpi(arith.CmpIPredicate.ult, token_i32, m_tokens_i32)
@@ -2619,16 +2399,12 @@ def compile_moe_reduction(
 
                 col_base = tile_idx * c_tile_cols + tid * c_vecw
 
-                # Guard: any work in bounds
                 col_ok = arith.cmpi(arith.CmpIPredicate.ult,
                     arith.index_cast(i32_type(), col_base),
                     arith.index_cast(i32_type(), c_model_dim),
                 )
                 _if_col = scf.IfOp(col_ok)
                 with _if_then(_if_col):
-                    acc = [arith.constant(0.0, type=compute_type()) for _ in range(VEC_WIDTH)]
-
-                    # Fast path: full vector in-bounds -> vector load/store.
                     end_ok = arith.cmpi(arith.CmpIPredicate.ule,
                         arith.index_cast(i32_type(), col_base + c_vecw),
                         arith.index_cast(i32_type(), c_model_dim),
@@ -2667,7 +2443,6 @@ def compile_moe_reduction(
                             buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
 
                     with _if_else(_if_full):
-                        # Tail path: scalar load/store per lane.
                         for lane in range_constexpr(VEC_WIDTH):
                             col = col_base + arith.index(lane)
                             lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
@@ -2758,7 +2533,6 @@ class _MoeGemm2ReduceWrapper:
         model_dim: int,
         out_dtype_str: str = "f16",
         use_mask: bool = False,
-        zero_intermediate: bool = True,
     ):
         self._gemm2_exe = gemm2_exe
         self._reduce_exe = reduce_exe
@@ -2766,7 +2540,6 @@ class _MoeGemm2ReduceWrapper:
         self._model_dim = model_dim
         self._out_dtype_str = out_dtype_str
         self._use_mask = use_mask
-        self._zero_intermediate = zero_intermediate
         
     def _get_torch_dtype(self):
         """Convert dtype string to torch dtype."""
@@ -2799,7 +2572,7 @@ class _MoeGemm2ReduceWrapper:
     ):
         """Execute GEMM2 + reduce.
 
-        Args match moe_gemm2 kernel signature (see compile_moe_gemm2).
+        Args match moe_gemm2 kernel signature (see compile_moe_blockscale_gemm2).
         """
         import torch
         if stream is None:
@@ -2809,7 +2582,7 @@ class _MoeGemm2ReduceWrapper:
                 device=arg_out.device,
                 dtype=self._get_torch_dtype()
             )
-        if self._zero_intermediate and not self._use_mask:
+        if not self._use_mask:
             intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
@@ -2835,7 +2608,7 @@ class _MoeGemm2ReduceWrapper:
         return MoeGemm2Mode.REDUCE
 
 
-def compile_moe_gemm2_ex(
+def compile_moe_blockscale_gemm2_ex(
     *,
     model_dim: int,
     inter_dim: int,
@@ -2846,13 +2619,11 @@ def compile_moe_gemm2_ex(
     tile_k: int,
     doweight_stage2: bool,
     in_dtype: str = "fp8",
-    group_size: int = -1,
     out_dtype: str = "f16",
     use_cshuffle_epilog: bool | None = None,
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
-    zero_intermediate: bool = True,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
 
@@ -2862,9 +2633,6 @@ def compile_moe_gemm2_ex(
         mode: Execution mode selection:
             - "atomic": Use atomic accumulation (original behavior)
             - "reduce": Use non-atomic write + reduce kernel
-        
-        zero_intermediate: If all output slots are valid, 
-            set False to increase performance
 
     Returns:
         Compiled executable (either wrapped or raw depending on mode).
@@ -2875,7 +2643,7 @@ def compile_moe_gemm2_ex(
         use_mask = valid_mask is not None
         
         # Compile GEMM2 with accumulate=False
-        gemm2_exe = compile_moe_gemm2(
+        gemm2_exe = compile_moe_blockscale_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
             experts=experts,
@@ -2885,7 +2653,6 @@ def compile_moe_gemm2_ex(
             tile_k=tile_k,
             doweight_stage2=doweight_stage2,
             in_dtype=in_dtype,
-            group_size=group_size,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=False,
@@ -2911,11 +2678,10 @@ def compile_moe_gemm2_ex(
             model_dim=model_dim,
             out_dtype_str=dtype_str,
             use_mask=use_mask,
-            zero_intermediate=zero_intermediate,
         )
     else:
         # Compile GEMM2 with accumulate=True (atomic mode)
-        return compile_moe_gemm2(
+        return compile_moe_blockscale_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
             experts=experts,
@@ -2925,7 +2691,6 @@ def compile_moe_gemm2_ex(
             tile_k=tile_k,
             doweight_stage2=doweight_stage2,
             in_dtype=in_dtype,
-            group_size=group_size,
             out_dtype=out_dtype,
             use_cshuffle_epilog=use_cshuffle_epilog,
             accumulate=True,

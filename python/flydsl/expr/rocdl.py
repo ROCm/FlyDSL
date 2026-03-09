@@ -15,6 +15,72 @@ Example:
 """
 
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
+from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferLDSTType
+
+from .._mlir._mlir_libs._fly_rocdl import MmaAtomCDNA3_MFMAType
+
+BufferLDST = lambda bit_size: CopyOpCDNA3BufferLDSTType.get(bit_size)  # noqa: E731
+BufferLDST32b = lambda: CopyOpCDNA3BufferLDSTType.get(32)  # noqa: E731
+BufferLDST64b = lambda: CopyOpCDNA3BufferLDSTType.get(64)  # noqa: E731
+BufferLDST128b = lambda: CopyOpCDNA3BufferLDSTType.get(128)  # noqa: E731
+
+
+def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
+    """Create an MFMA MMA atom type for CDNA3.
+
+    Args:
+        m, n, k: MFMA tile dimensions.
+        elem_type: Element type (used for A, B, and accumulator if the others
+                   are not specified).
+        elem_type_b: Element type for B operand (defaults to elem_type).
+        elem_type_acc: Element type for accumulator (defaults to elem_type).
+    """
+    from .._mlir import ir
+
+    if isinstance(elem_type, type) and hasattr(elem_type, 'ir_type'):
+        ty = elem_type.ir_type
+    elif isinstance(elem_type, ir.Type):
+        ty = elem_type
+    else:
+        raise TypeError(f"MFMA: unsupported elem_type {elem_type}")
+
+    ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
+    ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
+    return MmaAtomCDNA3_MFMAType.get(m, n, k, ty, ty_b, ty_acc)
+
+
+def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
+    """Convert a global-address-space fly memref to a buffer_desc memref.
+
+    Extracts the raw pointer from the input memref, builds an AMD buffer
+    resource descriptor (base, stride, numRecords, flags), and wraps it
+    back into a fly.memref with BufferDesc address space.
+    """
+    from . import primitive as _prim
+    from .meta import _to_raw_value
+    from .._mlir import ir
+    from .._mlir.dialects import fly, arith as _arith
+
+    raw_memref = _to_raw_value(memref)
+    layout = _prim.get_layout(memref, loc=loc, ip=ip)
+    elem_type = fly.MemRefType(raw_memref.type).element_type
+
+    llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
+    base = fly.extract_aligned_pointer_as_index(llvm_ptr_ty, raw_memref, loc=loc, ip=ip)
+    i16 = ir.IntegerType.get_signless(16)
+    i32 = ir.IntegerType.get_signless(32)
+    i64 = ir.IntegerType.get_signless(64)
+    stride = _arith.ConstantOp(i16, ir.IntegerAttr.get(i16, 0)).result
+    num_records = _arith.ConstantOp(i64, ir.IntegerAttr.get(i64, 0xFFFFFFFF)).result
+    flags = _arith.ConstantOp(i32, ir.IntegerAttr.get(i32, (7 << 12) | (4 << 15))).result
+
+    bd_ptr_type = fly.PointerType.get(
+        elem_type,
+        address_space=int(fly.AddressSpace.BufferDesc),
+        alignment=alignment,
+    )
+    bd_ptr = _prim.make_ptr(bd_ptr_type, [base, stride, num_records, flags], loc=loc, ip=ip)
+    return _prim.make_view(bd_ptr, layout, loc=loc, ip=ip)
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
@@ -171,6 +237,16 @@ __all__ = [
     # Type conversions
     'cvt_f32_bf8', 'cvt_f32_fp8',
     'cvt_pk_f32_bf8', 'cvt_pk_f32_fp8',
+
+    # Copy atom types
+    'CopyOpCDNA3BufferLDSTType',
+    'BufferLDST', 'BufferLDST32b', 'BufferLDST64b', 'BufferLDST128b',
+
+    # MMA atom types
+    'MmaAtomCDNA3_MFMAType', 'MFMA',
+
+    # Convenience wrappers
+    'make_buffer_tensor',
 
     # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
     'tensor_load_to_lds',       # 4-group, up to 5D tensor

@@ -1,0 +1,19 @@
+# Runner label → GPU hardware mapping
+# Used by frameworks-devops-dashboard to display GPU architecture
+# Update this when runners are added/changed in CI workflows
+runners:
+  linux-flydsl-mi325-1:
+    gpu_arch: MI325
+    gpu_count: 1
+
+  linux-flydsl-mi325-8:
+    gpu_arch: MI325
+    gpu_count: 8
+
+  linux-flydsl-mi355-1:
+    gpu_arch: MI355
+    gpu_count: 1
+
+  linux-flydsl-mi355-8:
+    gpu_arch: MI355
+    gpu_count: 8

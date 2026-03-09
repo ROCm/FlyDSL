@@ -214,39 +214,4 @@ else()
   )
 endif()
 
-################################################################################
-# Create symlinks to MLIR runtime libraries
-################################################################################
 
-set(_MLIR_RUNTIME_LIBS
-  mlir_runner_utils
-  mlir_c_runner_utils
-)
-
-get_filename_component(_LLVM_LIB_DIR "${MLIR_DIR}/../../../lib" ABSOLUTE)
-
-foreach(_lib ${_MLIR_RUNTIME_LIBS})
-  set(_src_lib "${_LLVM_LIB_DIR}/lib${_lib}.so")
-  set(_dst_link "${_MLIR_LIBS_DIR}/lib${_lib}.so")
-  add_custom_command(
-    OUTPUT "${_dst_link}"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink "${_src_lib}" "${_dst_link}"
-    DEPENDS FlyPythonModules
-    COMMENT "Creating symlink to lib${_lib}.so"
-  )
-  list(APPEND _RUNTIME_SYMLINKS "${_dst_link}")
-endforeach()
-
-# Symlink upstream libmlir_rocm_runtime.so as fallback (the custom FlyJitRuntime
-# takes precedence at load time via jit_executor.py).
-set(_src_rocm "${_LLVM_LIB_DIR}/libmlir_rocm_runtime.so")
-set(_dst_rocm "${_MLIR_LIBS_DIR}/libmlir_rocm_runtime.so")
-add_custom_command(
-  OUTPUT "${_dst_rocm}"
-  COMMAND ${CMAKE_COMMAND} -E create_symlink "${_src_rocm}" "${_dst_rocm}"
-  DEPENDS FlyPythonModules
-  COMMENT "Creating symlink to libmlir_rocm_runtime.so"
-)
-list(APPEND _RUNTIME_SYMLINKS "${_dst_rocm}")
-
-add_custom_target(MlirRuntimeSymlinks ALL DEPENDS ${_RUNTIME_SYMLINKS})

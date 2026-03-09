@@ -65,13 +65,21 @@ def perftest(
                     latencies.append(start_event.elapsed_time(end_event))
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+                with_modules=True,
+            ) as prof:
+                data = run_iters_rotate(num_iters, func, rotate_args)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            avg = get_trace_perf(prof, num_iters)
+
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
-                capture_stream = torch.cuda.Stream()
-                capture_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(capture_stream):
-                    with torch.cuda.graph(graph, stream=capture_stream):
-                        data = run_iters_rotate(num_iters, func, rotate_args)
+                with torch.cuda.graph(graph):
+                    data = run_iters_rotate(num_iters, func, rotate_args)
                 with tpf.profile(
                     activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
                     profile_memory=True,
@@ -81,14 +89,7 @@ def perftest(
                     run_iters(1, graph.replay)
                 avg = get_trace_perf(prof, num_iters)
                 logger.info(f"avg: {avg} us/iter with hipgraph")
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-            data = run_iters_rotate(num_iters, func, rotate_args)
-            end_event.record()
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            avg = start_event.elapsed_time(end_event) * 1000.0 / num_iters
+
             return data, avg
 
         return wrapper
