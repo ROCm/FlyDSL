@@ -317,9 +317,8 @@ def compile_moe_blockscale_gemm1(
                 # X: [tokens, k] bytes = tokens*k*elem_bytes
                 x_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
                 x_nbytes_idx = x_rows * k_in * arith.index(int(elem_bytes))
-                x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
                 x_rsrc = buffer_ops.create_buffer_resource(
-                    arg_x, max_size=False, num_records_bytes=x_nbytes_i32
+                    arg_x, max_size=False, num_records_bytes=arith.index_cast(i64, x_nbytes_idx)
                 )
 
                 w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
@@ -327,9 +326,8 @@ def compile_moe_blockscale_gemm1(
                 # OUT: [tokens, topk, inter] f16/bf16 -> bytes = tokens*topk*inter*out_elem_bytes
                 out_elem_bytes = 2  # f16/bf16
                 out_nbytes_idx = tokens_in * c_topk * inter_in * arith.index(out_elem_bytes)
-                out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
                 out_rsrc = buffer_ops.create_buffer_resource(
-                    arg_out, max_size=False, num_records_bytes=out_nbytes_i32
+                    arg_out, max_size=False, num_records_bytes=arith.index_cast(i64, out_nbytes_idx)
                 )
 
                 # fp16 path ignores scales completely (implicit scale=1.0).
@@ -340,9 +338,8 @@ def compile_moe_blockscale_gemm1(
                     # scale_x: [tokens] f32 -> bytes = tokens*4
                     sx_rows = tokens_in * (c_topk if x_is_token_slot else arith.index(1))
                     sx_nbytes_idx = sx_rows * arith.index(4)
-                    sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
                     sx_rsrc = buffer_ops.create_buffer_resource(
-                        arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
+                        arg_scale_x, max_size=False, num_records_bytes=arith.index_cast(i64, sx_nbytes_idx)
                     )
                     sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
 
@@ -350,9 +347,8 @@ def compile_moe_blockscale_gemm1(
                 sorted_w_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=False)
 
                 # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
-                eid_nbytes_i32 = arith.index_cast(i32, size_expert_ids_in * arith.index(4))
                 expert_rsrc = buffer_ops.create_buffer_resource(
-                    arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
+                    arg_expert_ids, max_size=False, num_records_bytes=arith.index_cast(i64, size_expert_ids_in * arith.index(4))
                 )
 
                 # Expert id for this M tile (keep address math in `index`)
@@ -1441,9 +1437,8 @@ def compile_moe_blockscale_gemm2(
 
             # X(A2): [tokens*topk, inter_dim] bytes = tokens*topk*k*elem_bytes
             x_nbytes_idx = (tokens_in * c_topk) * k_in * arith.index(int(elem_bytes))
-            x_nbytes_i32 = arith.index_cast(i32, x_nbytes_idx)
             x_rsrc = buffer_ops.create_buffer_resource(
-                arg_x, max_size=False, num_records_bytes=x_nbytes_i32
+                arg_x, max_size=False, num_records_bytes=arith.index_cast(i64, x_nbytes_idx)
             )
 
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False)
@@ -1458,9 +1453,8 @@ def compile_moe_blockscale_gemm2(
                     * n_in
                     * arith.index(out_elem_bytes)
                 )
-            out_nbytes_i32 = arith.index_cast(i32, out_nbytes_idx)
             out_rsrc = buffer_ops.create_buffer_resource(
-                arg_out, max_size=False, num_records_bytes=out_nbytes_i32
+                arg_out, max_size=False, num_records_bytes=arith.index_cast(i64, out_nbytes_idx)
             )
             # fp16 path ignores scales completely (implicit scale=1.0).
             if is_f16:
@@ -1469,9 +1463,8 @@ def compile_moe_blockscale_gemm2(
             else:
                 # scale_x (A2 scale): [tokens*topk] f32 -> bytes = tokens*topk*4
                 sx_nbytes_idx = (tokens_in * c_topk) * arith.index(4)
-                sx_nbytes_i32 = arith.index_cast(i32, sx_nbytes_idx)
                 sx_rsrc = buffer_ops.create_buffer_resource(
-                    arg_scale_x, max_size=False, num_records_bytes=sx_nbytes_i32
+                    arg_scale_x, max_size=False, num_records_bytes=arith.index_cast(i64, sx_nbytes_idx)
                 )
                 # scale_w: [experts*model_dim] f32 (static shape in practice)
                 sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False)
@@ -1482,19 +1475,18 @@ def compile_moe_blockscale_gemm2(
                 * arith.index(tile_m)
                 * arith.index(4)
             )
-            sorted_nbytes_i32 = arith.index_cast(i32, sorted_nbytes_idx)
+            sorted_nbytes_i64 = arith.index_cast(i64, sorted_nbytes_idx)
             sorted_rsrc = buffer_ops.create_buffer_resource(
-                arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_i32
+                arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes_i64
             )
             sorted_w_rsrc = buffer_ops.create_buffer_resource(
-                arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_i32
+                arg_sorted_weights, max_size=False, num_records_bytes=sorted_nbytes_i64
             )
 
             # expert ids: [blocks] i32 -> bytes = size_expert_ids_in*4
             eid_nbytes_idx = size_expert_ids_in * arith.index(4)
-            eid_nbytes_i32 = arith.index_cast(i32, eid_nbytes_idx)
             expert_rsrc = buffer_ops.create_buffer_resource(
-                arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
+                arg_expert_ids, max_size=False, num_records_bytes=arith.index_cast(i64, eid_nbytes_idx)
             )
             bx_m = bx * arith.index(tile_m)
 

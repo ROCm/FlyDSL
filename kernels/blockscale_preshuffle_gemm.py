@@ -391,9 +391,9 @@ def compile_blockscale_preshuffle_gemm(
 
             for i in range_constexpr(_num_a_async_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
-                col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4, k_blocks16)
+                col_a_local_sw = swizzle_xor16(row_a_local, col_a_local_i32 * c4_bytes, k_blocks16)
                 row_a_global = bx_m + row_a_local
-                global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4 + col_a_local_sw)
+                global_byte_idx = row_a_global * k_bytes_factor + (base_k_div4 * c4_bytes + col_a_local_sw)
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
 
                 if i == 0:
@@ -452,21 +452,19 @@ def compile_blockscale_preshuffle_gemm(
                 return mfma_step(acc_mid, a1, b1)
 
         # ── Blockscale compute tile ───────────────────────────────────────
+        from flydsl._mlir.dialects import math as math_dialect
+
         c_scale_block_k = arith.index(scale_block_k)
         c_scale_k = arith.index(scale_k)
         c_128 = arith.index(128)
         c_M = arith.index(M)
         row_off_base = lane_div_16 * 4
 
-        def compute_tile_blockscale(
-            global_accs, b_tile_in, lds_buffer, k_base, *, a0_prefetch=None
-        ):
-            """Blockscale compute_tile: per-K-block scale application with vector ArithValue ops."""
-            current_global = list(global_accs)
-
+        def load_scales_for_tile(k_base):
+            """Load and combine scales for all scale blocks in a K-tile. Returns list of combined_scales."""
+            all_combined = []
             for sb in range_constexpr(sb_per_tile):
                 kb = k_base / c_scale_block_k + arith.index(sb)
-
                 sa_base_offset = kb * c_M
                 s_a_vecs = []
                 for mi in range_constexpr(m_repeat):
@@ -500,7 +498,17 @@ def compile_blockscale_preshuffle_gemm(
                         combined = ArithValue(s_a_vecs[mi]) * ArithValue(s_b_vecs[ni])
                         mi_combined.append(combined)
                     combined_scales.append(mi_combined)
+                all_combined.append(combined_scales)
+            return all_combined
 
+        def compute_tile_blockscale(
+            global_accs, b_tile_in, lds_buffer, pre_scales, *, a0_prefetch=None
+        ):
+            """Blockscale compute_tile with pre-loaded scales and math.fma accumulation."""
+            current_global = list(global_accs)
+
+            for sb in range_constexpr(sb_per_tile):
+                combined_scales = pre_scales[sb]
                 block_accs = [acc_init] * (num_acc_n * m_repeat)
 
                 if _is_gfx950:
@@ -564,11 +572,12 @@ def compile_blockscale_preshuffle_gemm(
                 for mi in range_constexpr(m_repeat):
                     for ni in range_constexpr(num_acc_n):
                         acc_idx = mi * num_acc_n + ni
-                        block_w = ArithValue(block_accs[acc_idx])
-                        global_w = ArithValue(current_global[acc_idx])
-                        combined = combined_scales[mi][ni]
-                        new_global = global_w + block_w * combined
-                        current_global[acc_idx] = _raw(new_global)
+                        fma_result = math_dialect.fma(
+                            block_accs[acc_idx],
+                            _raw(combined_scales[mi][ni]),
+                            current_global[acc_idx],
+                        )
+                        current_global[acc_idx] = fma_result
 
             return current_global
 
@@ -710,6 +719,7 @@ def compile_blockscale_preshuffle_gemm(
         # ── Main pipeline: prologue ───────────────────────────────────────
         k0 = arith.index(0)
         b_tile_pong = prefetch_b_tile(k0)
+        scales_pong = load_scales_for_tile(k0)
         _load_a_to_lds(k0, lds_a_pong)
         gpu.barrier()
         global_accs = [acc_init] * (num_acc_n * m_repeat)
@@ -724,9 +734,10 @@ def compile_blockscale_preshuffle_gemm(
                 next_k1 = _k + tile_k
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
+                scales_ping = load_scales_for_tile(next_k1)
 
                 global_accs = compute_tile_blockscale(
-                    global_accs, b_tile_pong, lds_a_pong, _k,
+                    global_accs, b_tile_pong, lds_a_pong, scales_pong,
                     a0_prefetch=a0_prefetch_pong,
                 )
                 a0_prefetch_pong = None
@@ -740,9 +751,10 @@ def compile_blockscale_preshuffle_gemm(
                 next_k2 = _k + tile_k * 2
                 _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
+                scales_pong = load_scales_for_tile(next_k2)
 
                 global_accs = compute_tile_blockscale(
-                    global_accs, b_tile_ping, lds_a_ping, next_k1,
+                    global_accs, b_tile_ping, lds_a_ping, scales_ping,
                     a0_prefetch=a0_prefetch_ping,
                 )
                 a0_prefetch_ping = None
@@ -755,7 +767,7 @@ def compile_blockscale_preshuffle_gemm(
 
             last_k = arith.index(K - tile_k)
             final_accs = compute_tile_blockscale(
-                global_accs, b_tile_pong, lds_a_pong, last_k,
+                global_accs, b_tile_pong, lds_a_pong, scales_pong,
                 a0_prefetch=a0_prefetch_pong,
             )
         else:
@@ -764,8 +776,10 @@ def compile_blockscale_preshuffle_gemm(
                 next_k1 = _k + tile_k
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
+                scales_ping = load_scales_for_tile(next_k1)
+
                 global_accs = compute_tile_blockscale(
-                    global_accs, b_tile_pong, lds_a_pong, _k,
+                    global_accs, b_tile_pong, lds_a_pong, scales_pong,
                     a0_prefetch=a0_prefetch_pong,
                 )
                 a0_prefetch_pong = None
@@ -779,8 +793,10 @@ def compile_blockscale_preshuffle_gemm(
                 next_k2 = _k + tile_k * 2
                 _load_a_to_lds(next_k2, lds_a_pong)
                 b_tile_pong = prefetch_b_tile(next_k2)
+                scales_pong = load_scales_for_tile(next_k2)
+
                 global_accs = compute_tile_blockscale(
-                    global_accs, b_tile_ping, lds_a_ping, next_k1,
+                    global_accs, b_tile_ping, lds_a_ping, scales_ping,
                     a0_prefetch=a0_prefetch_ping,
                 )
                 a0_prefetch_ping = None
@@ -796,9 +812,10 @@ def compile_blockscale_preshuffle_gemm(
 
             _load_a_to_lds(last_k, lds_a_ping)
             b_tile_ping = prefetch_b_tile(last_k)
+            scales_ping = load_scales_for_tile(last_k)
 
             global_accs = compute_tile_blockscale(
-                global_accs, b_tile_pong, lds_a_pong, second_last_k,
+                global_accs, b_tile_pong, lds_a_pong, scales_pong,
                 a0_prefetch=a0_prefetch_pong,
             )
             a0_prefetch_pong = None
@@ -810,7 +827,7 @@ def compile_blockscale_preshuffle_gemm(
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
             final_accs = compute_tile_blockscale(
-                global_accs, b_tile_ping, lds_a_ping, last_k,
+                global_accs, b_tile_ping, lds_a_ping, scales_ping,
                 a0_prefetch=a0_prefetch_ping,
             )
 
@@ -863,7 +880,7 @@ def compile_blockscale_preshuffle_gemm(
 
 
 def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
-    """Auto-select tile config based on CK tuning heuristics."""
+    """Auto-select tile config aligned with CK tuned blockscale configs."""
     candidates = [
         (16, 64, 256), (16, 128, 256),
         (32, 64, 128), (32, 64, 256), (32, 128, 128), (32, 128, 256),
@@ -882,7 +899,7 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
 
     valid = [(tm, tn, tk) for tm, tn, tk in candidates if _valid(tm, tn, tk)]
     if not valid:
-        return (64, 128, 128)  # fallback
+        return (64, 128, 128)
 
     def _score(tm, tn, tk):
         s = 0
@@ -897,17 +914,22 @@ def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
             s += 5
         if M <= 48:
             s += 12 if tm == 16 else (8 if tm == 32 else 0)
-        elif M <= 256:
-            s += 12 if tm == 32 else (6 if tm == 64 else (3 if tm == 16 else 0))
+        elif M <= 128:
+            s += 10 if tm == 32 else (6 if tm == 16 else (4 if tm == 64 else 0))
         elif M <= 512:
             s += 12 if tm == 64 else (8 if tm == 32 else 0)
         else:
             s += 12 if tm == 64 else 0
-        s += 8 if tn == 128 else (4 if tn == 64 else (2 if tn == 256 else 0))
         if M <= 128:
-            s += 4 if tk == 256 else 2
+            s += 6 if tn == 64 else (4 if tn == 128 else (2 if tn == 256 else 0))
+        elif M <= 512:
+            s += 8 if tn == 128 else (6 if tn == 64 else (4 if tn == 256 else 0))
         else:
-            s += 4 if tk == 128 else 2
+            s += 6 if tn == 64 else (6 if tn == 256 else (5 if tn == 128 else 0))
+        if M <= 512:
+            s += 6 if tk == 256 else 3
+        else:
+            s += 6 if tk == 128 else 3
         return s
 
     return max(valid, key=lambda t: _score(*t))
