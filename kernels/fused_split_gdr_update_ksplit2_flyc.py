@@ -1,9 +1,10 @@
 """FlyDSL fused split-GDR update-forward kernel (ksplit2, HIP-aligned)."""
 
-from flydsl.dialects.ext import flir, arith
+from flydsl.dialects.ext import flir, arith, gpu
 from flydsl.dialects.ext.python_control_flow import range_constexpr
 from flydsl.dialects.ext import memref, rocdl
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils import SmemAllocator
 import _mlir.extras.types as T
 
 
@@ -56,12 +57,16 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
     BT = B * T_seq
     STATEHV = N_STATE * HV
 
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
+
     class _FusedSplitGdrUpdateKSplit2(flir.MlirModule):
         GPU_MODULE_NAME = f"fused_split_gdr_update_ksplit2_flyc_{dtype_str}"
         GPU_MODULE_TARGETS = [f'#rocdl.target<chip = "{gpu_arch}", abi = "500">']
 
         def init_gpu_module(self):
-            pass
+            _state["smem_kq"] = allocator.allocate_array(compute_type, K)
+            allocator.finalize()
 
         @flir.kernel
         def fused_split_gdr_update_ksplit2_flyc_kernel(
@@ -163,6 +168,12 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 arith.as_value(arith.index(0)),
                 arith.as_value(c_k_half),
             )
+            kg_start = arith.as_value(
+                flir.arith.DivUIOp(arith.as_value(k_base), arith.as_value(arith.index(4))).result
+            )
+
+            base_ptr = allocator.get_base()
+            smem_kq = _state["smem_kq"](base_ptr)
 
             state_idx_i32 = memref.load(initial_state_indices, [arith.as_value(i_n)])
             state_idx_nonneg = arith.CmpIOp(
@@ -183,39 +194,54 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 flir.arith.AddIOp(arith.as_value(state_mul), arith.as_value(i_hv)).result
             )
 
-            h_reg = []
-            for ik_local in range_constexpr(K // 2):
-                k_idx = arith.as_value(
-                    flir.arith.AddIOp(
-                        arith.as_value(k_base), arith.as_value(arith.index(ik_local))
-                    ).result
-                )
-                kg = arith.as_value(
-                    flir.arith.DivUIOp(arith.as_value(k_idx), arith.as_value(arith.index(4))).result
-                )
-                k4 = arith.as_value(
-                    flir.arith.RemUIOp(arith.as_value(k_idx), arith.as_value(arith.index(4))).result
-                )
-                h_init = memref.load(
-                    initial_state_source,
-                    [
-                        arith.as_value(row_state),
-                        arith.as_value(kg),
-                        arith.as_value(iv_safe),
-                        arith.as_value(k4),
-                    ],
-                )
-                h_init = arith.select(
-                    arith.as_value(state_idx_nonneg),
-                    arith.as_value(h_init),
-                    arith.as_value(c_zero_f32),
-                )
-                h_init = arith.select(
-                    arith.as_value(iv_valid),
-                    arith.as_value(h_init),
-                    arith.as_value(c_zero_f32),
-                )
-                h_reg.append(h_init)
+            h_vec_x = [c_zero_f32 for _ in range_constexpr(K // 8)]
+            h_vec_y = [c_zero_f32 for _ in range_constexpr(K // 8)]
+            h_vec_z = [c_zero_f32 for _ in range_constexpr(K // 8)]
+            h_vec_w = [c_zero_f32 for _ in range_constexpr(K // 8)]
+            if state_idx_nonneg:
+                if iv_valid:
+                    for kg_local in range_constexpr(K // 8):
+                        kg = arith.as_value(
+                            flir.arith.AddIOp(
+                                arith.as_value(kg_start), arith.as_value(arith.index(kg_local))
+                            ).result
+                        )
+                        h_vec_x[kg_local] = memref.load(
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(0)),
+                            ],
+                        )
+                        h_vec_y[kg_local] = memref.load(
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(1)),
+                            ],
+                        )
+                        h_vec_z[kg_local] = memref.load(
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(2)),
+                            ],
+                        )
+                        h_vec_w[kg_local] = memref.load(
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(3)),
+                            ],
+                        )
 
             a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
             dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
@@ -237,9 +263,9 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 fastmath=fm_fast,
             ).result
 
+            m5 = flir.arith.MulIOp(arith.as_value(i_n), c_T).result
             for t in range_constexpr(T_seq):
                 t_idx = arith.as_value(arith.index(t))
-                m5 = flir.arith.MulIOp(arith.as_value(i_n), c_T).result
                 row_ab = arith.as_value(
                     flir.arith.AddIOp(arith.as_value(m5), t_idx).result
                 )
@@ -326,37 +352,125 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 ).result
                 exp_g = flir.math.exp2(arith.as_value(g_log2e), fastmath=fm_fast)
 
-                acc_hk = arith.constant(0.0, type=comp)
-                k_sq_local = arith.constant(0.0, type=comp)
-                k_vals = []
-                for ik_local in range_constexpr(K // 2):
-                    k_idx = arith.as_value(
-                        flir.arith.AddIOp(
-                            arith.as_value(k_base), arith.as_value(arith.index(ik_local))
-                        ).result
+                # K tiles: cooperative load to LDS, then reuse in phase1/phase2.
+                k_pair_base = arith.as_value(
+                    flir.arith.MulIOp(arith.as_value(tid), arith.as_value(arith.index(2))).result
+                )
+                k_pair_valid0 = arith.CmpIOp(
+                    arith.CmpIPredicate.ult,
+                    arith.as_value(k_pair_base),
+                    arith.as_value(c_K_idx),
+                )
+                if k_pair_valid0:
+                    k_col0 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(c_k_dim_off), arith.as_value(k_pair_base)).result
                     )
-                    k_col = arith.as_value(
-                        flir.arith.AddIOp(arith.as_value(c_k_dim_off), arith.as_value(k_idx)).result
-                    )
-                    k_ik = memref.load(
+                    k0 = memref.load(
                         mixed_qkv,
-                        [arith.as_value(i_n), arith.as_value(k_col), arith.as_value(t_idx)],
+                        [arith.as_value(i_n), arith.as_value(k_col0), arith.as_value(t_idx)],
                     )
                     if dtype_str != "f32":
-                        k_ik = flir.arith.extf(comp, arith.as_value(k_ik))
-                    k_vals.append(k_ik)
-                    prod = flir.arith.MulFOp(
-                        arith.as_value(h_reg[ik_local]), arith.as_value(k_ik), fastmath=fm_fast
+                        k0 = flir.arith.extf(comp, arith.as_value(k0))
+                    smem_kq.store(k0, [arith.as_value(k_pair_base)])
+                k_pair_base1 = arith.as_value(
+                    flir.arith.AddIOp(arith.as_value(k_pair_base), arith.as_value(arith.index(1))).result
+                )
+                k_pair_valid1 = arith.CmpIOp(
+                    arith.CmpIPredicate.ult,
+                    arith.as_value(k_pair_base1),
+                    arith.as_value(c_K_idx),
+                )
+                if k_pair_valid1:
+                    k_col1 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(c_k_dim_off), arith.as_value(k_pair_base1)).result
+                    )
+                    k1 = memref.load(
+                        mixed_qkv,
+                        [arith.as_value(i_n), arith.as_value(k_col1), arith.as_value(t_idx)],
+                    )
+                    if dtype_str != "f32":
+                        k1 = flir.arith.extf(comp, arith.as_value(k1))
+                    smem_kq.store(k1, [arith.as_value(k_pair_base1)])
+                gpu.barrier()
+
+                acc_hk = arith.constant(0.0, type=comp)
+                k_sq_local = arith.constant(0.0, type=comp)
+                k_vec0 = []
+                k_vec1 = []
+                k_vec2 = []
+                k_vec3 = []
+                for kg_local in range_constexpr(K // 8):
+                    k_idx0 = arith.as_value(
+                        flir.arith.AddIOp(
+                            arith.as_value(k_base),
+                            arith.as_value(arith.index(kg_local * 4)),
+                        ).result
+                    )
+                    k_idx1 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(k_idx0), arith.as_value(arith.index(1))).result
+                    )
+                    k_idx2 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(k_idx0), arith.as_value(arith.index(2))).result
+                    )
+                    k_idx3 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(k_idx0), arith.as_value(arith.index(3))).result
+                    )
+                    k0 = smem_kq.load([arith.as_value(k_idx0)])
+                    k1 = smem_kq.load([arith.as_value(k_idx1)])
+                    k2 = smem_kq.load([arith.as_value(k_idx2)])
+                    k3 = smem_kq.load([arith.as_value(k_idx3)])
+                    k_vec0.append(k0)
+                    k_vec1.append(k1)
+                    k_vec2.append(k2)
+                    k_vec3.append(k3)
+                    prod0 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_x[kg_local]), arith.as_value(k0), fastmath=fm_fast
+                    ).result
+                    prod1 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_y[kg_local]), arith.as_value(k1), fastmath=fm_fast
+                    ).result
+                    prod2 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_z[kg_local]), arith.as_value(k2), fastmath=fm_fast
+                    ).result
+                    prod3 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_w[kg_local]), arith.as_value(k3), fastmath=fm_fast
+                    ).result
+                    sum01 = flir.arith.AddFOp(
+                        arith.as_value(prod0), arith.as_value(prod1), fastmath=fm_fast
+                    ).result
+                    sum23 = flir.arith.AddFOp(
+                        arith.as_value(prod2), arith.as_value(prod3), fastmath=fm_fast
+                    ).result
+                    sum0123 = flir.arith.AddFOp(
+                        arith.as_value(sum01), arith.as_value(sum23), fastmath=fm_fast
                     ).result
                     acc_hk = flir.arith.AddFOp(
-                        arith.as_value(acc_hk), arith.as_value(prod), fastmath=fm_fast
+                        arith.as_value(acc_hk), arith.as_value(sum0123), fastmath=fm_fast
                     ).result
                     if use_qk_l2norm_in_kernel:
-                        k_sq_i = flir.arith.MulFOp(
-                            arith.as_value(k_ik), arith.as_value(k_ik), fastmath=fm_fast
+                        k0_sq = flir.arith.MulFOp(
+                            arith.as_value(k0), arith.as_value(k0), fastmath=fm_fast
+                        ).result
+                        k1_sq = flir.arith.MulFOp(
+                            arith.as_value(k1), arith.as_value(k1), fastmath=fm_fast
+                        ).result
+                        k2_sq = flir.arith.MulFOp(
+                            arith.as_value(k2), arith.as_value(k2), fastmath=fm_fast
+                        ).result
+                        k3_sq = flir.arith.MulFOp(
+                            arith.as_value(k3), arith.as_value(k3), fastmath=fm_fast
+                        ).result
+                        sq01 = flir.arith.AddFOp(
+                            arith.as_value(k0_sq), arith.as_value(k1_sq), fastmath=fm_fast
+                        ).result
+                        sq23 = flir.arith.AddFOp(
+                            arith.as_value(k2_sq), arith.as_value(k3_sq), fastmath=fm_fast
+                        ).result
+                        sq0123 = flir.arith.AddFOp(
+                            arith.as_value(sq01), arith.as_value(sq23), fastmath=fm_fast
                         ).result
                         k_sq_local = flir.arith.AddFOp(
-                            arith.as_value(k_sq_local), arith.as_value(k_sq_i), fastmath=fm_fast
+                            arith.as_value(k_sq_local), arith.as_value(sq0123), fastmath=fm_fast
                         ).result
                 acc_hk_peer = rocdl.ds_bpermute(
                     T.i32(),
@@ -399,54 +513,168 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                     arith.as_value(v_val), arith.as_value(beta_val), fastmath=fm_fast
                 ).result
 
-                for ik_local in range_constexpr(K // 2):
-                    k_ik = k_vals[ik_local]
+                for kg_local in range_constexpr(K // 8):
+                    k0 = k_vec0[kg_local]
+                    k1 = k_vec1[kg_local]
+                    k2 = k_vec2[kg_local]
+                    k3 = k_vec3[kg_local]
                     if use_qk_l2norm_in_kernel:
-                        k_ik = flir.arith.MulFOp(
-                            arith.as_value(k_ik), arith.as_value(k_inv_norm), fastmath=fm_fast
+                        k0 = flir.arith.MulFOp(
+                            arith.as_value(k0), arith.as_value(k_inv_norm), fastmath=fm_fast
                         ).result
-                    prod = flir.arith.MulFOp(
-                        arith.as_value(k_ik), arith.as_value(v_val), fastmath=fm_fast
+                        k1 = flir.arith.MulFOp(
+                            arith.as_value(k1), arith.as_value(k_inv_norm), fastmath=fm_fast
+                        ).result
+                        k2 = flir.arith.MulFOp(
+                            arith.as_value(k2), arith.as_value(k_inv_norm), fastmath=fm_fast
+                        ).result
+                        k3 = flir.arith.MulFOp(
+                            arith.as_value(k3), arith.as_value(k_inv_norm), fastmath=fm_fast
+                        ).result
+                    kv0 = flir.arith.MulFOp(
+                        arith.as_value(k0), arith.as_value(v_val), fastmath=fm_fast
                     ).result
-                    h_decay = flir.arith.MulFOp(
-                        arith.as_value(h_reg[ik_local]), arith.as_value(exp_g), fastmath=fm_fast
+                    kv1 = flir.arith.MulFOp(
+                        arith.as_value(k1), arith.as_value(v_val), fastmath=fm_fast
                     ).result
-                    h_reg[ik_local] = flir.arith.AddFOp(
-                        arith.as_value(h_decay), arith.as_value(prod), fastmath=fm_fast
+                    kv2 = flir.arith.MulFOp(
+                        arith.as_value(k2), arith.as_value(v_val), fastmath=fm_fast
                     ).result
+                    kv3 = flir.arith.MulFOp(
+                        arith.as_value(k3), arith.as_value(v_val), fastmath=fm_fast
+                    ).result
+                    h_decay0 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_x[kg_local]), arith.as_value(exp_g), fastmath=fm_fast
+                    ).result
+                    h_decay1 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_y[kg_local]), arith.as_value(exp_g), fastmath=fm_fast
+                    ).result
+                    h_decay2 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_z[kg_local]), arith.as_value(exp_g), fastmath=fm_fast
+                    ).result
+                    h_decay3 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_w[kg_local]), arith.as_value(exp_g), fastmath=fm_fast
+                    ).result
+                    h_vec_x[kg_local] = flir.arith.AddFOp(
+                        arith.as_value(h_decay0), arith.as_value(kv0), fastmath=fm_fast
+                    ).result
+                    h_vec_y[kg_local] = flir.arith.AddFOp(
+                        arith.as_value(h_decay1), arith.as_value(kv1), fastmath=fm_fast
+                    ).result
+                    h_vec_z[kg_local] = flir.arith.AddFOp(
+                        arith.as_value(h_decay2), arith.as_value(kv2), fastmath=fm_fast
+                    ).result
+                    h_vec_w[kg_local] = flir.arith.AddFOp(
+                        arith.as_value(h_decay3), arith.as_value(kv3), fastmath=fm_fast
+                    ).result
+
+                # Q tiles: cooperative load to LDS, then reuse in phase3.
+                if k_pair_valid0:
+                    q_col0 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(c_q_dim_off), arith.as_value(k_pair_base)).result
+                    )
+                    q0 = memref.load(
+                        mixed_qkv,
+                        [arith.as_value(i_n), arith.as_value(q_col0), arith.as_value(t_idx)],
+                    )
+                    if dtype_str != "f32":
+                        q0 = flir.arith.extf(comp, arith.as_value(q0))
+                    smem_kq.store(q0, [arith.as_value(k_pair_base)])
+                if k_pair_valid1:
+                    q_col1 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(c_q_dim_off), arith.as_value(k_pair_base1)).result
+                    )
+                    q1 = memref.load(
+                        mixed_qkv,
+                        [arith.as_value(i_n), arith.as_value(q_col1), arith.as_value(t_idx)],
+                    )
+                    if dtype_str != "f32":
+                        q1 = flir.arith.extf(comp, arith.as_value(q1))
+                    smem_kq.store(q1, [arith.as_value(k_pair_base1)])
+                gpu.barrier()
 
                 o_acc = arith.constant(0.0, type=comp)
                 q_sq_local = arith.constant(0.0, type=comp)
-                for ik_local in range_constexpr(K // 2):
-                    k_idx = arith.as_value(
+                for kg_local in range_constexpr(K // 8):
+                    q_idx0 = arith.as_value(
                         flir.arith.AddIOp(
-                            arith.as_value(k_base), arith.as_value(arith.index(ik_local))
+                            arith.as_value(k_base),
+                            arith.as_value(arith.index(kg_local * 4)),
                         ).result
                     )
-                    q_col = arith.as_value(
-                        flir.arith.AddIOp(arith.as_value(c_q_dim_off), arith.as_value(k_idx)).result
+                    q_idx1 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(q_idx0), arith.as_value(arith.index(1))).result
                     )
-                    q_ik = memref.load(
-                        mixed_qkv,
-                        [arith.as_value(i_n), arith.as_value(q_col), arith.as_value(t_idx)],
+                    q_idx2 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(q_idx0), arith.as_value(arith.index(2))).result
                     )
-                    if dtype_str != "f32":
-                        q_ik = flir.arith.extf(comp, arith.as_value(q_ik))
-                    q_scaled = flir.arith.MulFOp(
-                        arith.as_value(q_ik), arith.as_value(c_scale), fastmath=fm_fast
+                    q_idx3 = arith.as_value(
+                        flir.arith.AddIOp(arith.as_value(q_idx0), arith.as_value(arith.index(3))).result
+                    )
+                    q0 = smem_kq.load([arith.as_value(q_idx0)])
+                    q1 = smem_kq.load([arith.as_value(q_idx1)])
+                    q2 = smem_kq.load([arith.as_value(q_idx2)])
+                    q3 = smem_kq.load([arith.as_value(q_idx3)])
+                    q0s = flir.arith.MulFOp(
+                        arith.as_value(q0), arith.as_value(c_scale), fastmath=fm_fast
                     ).result
-                    prod = flir.arith.MulFOp(
-                        arith.as_value(h_reg[ik_local]), arith.as_value(q_scaled), fastmath=fm_fast
+                    q1s = flir.arith.MulFOp(
+                        arith.as_value(q1), arith.as_value(c_scale), fastmath=fm_fast
+                    ).result
+                    q2s = flir.arith.MulFOp(
+                        arith.as_value(q2), arith.as_value(c_scale), fastmath=fm_fast
+                    ).result
+                    q3s = flir.arith.MulFOp(
+                        arith.as_value(q3), arith.as_value(c_scale), fastmath=fm_fast
+                    ).result
+                    prod0 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_x[kg_local]), arith.as_value(q0s), fastmath=fm_fast
+                    ).result
+                    prod1 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_y[kg_local]), arith.as_value(q1s), fastmath=fm_fast
+                    ).result
+                    prod2 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_z[kg_local]), arith.as_value(q2s), fastmath=fm_fast
+                    ).result
+                    prod3 = flir.arith.MulFOp(
+                        arith.as_value(h_vec_w[kg_local]), arith.as_value(q3s), fastmath=fm_fast
+                    ).result
+                    sum01 = flir.arith.AddFOp(
+                        arith.as_value(prod0), arith.as_value(prod1), fastmath=fm_fast
+                    ).result
+                    sum23 = flir.arith.AddFOp(
+                        arith.as_value(prod2), arith.as_value(prod3), fastmath=fm_fast
+                    ).result
+                    sum0123 = flir.arith.AddFOp(
+                        arith.as_value(sum01), arith.as_value(sum23), fastmath=fm_fast
                     ).result
                     o_acc = flir.arith.AddFOp(
-                        arith.as_value(o_acc), arith.as_value(prod), fastmath=fm_fast
+                        arith.as_value(o_acc), arith.as_value(sum0123), fastmath=fm_fast
                     ).result
                     if use_qk_l2norm_in_kernel:
-                        q_sq_i = flir.arith.MulFOp(
-                            arith.as_value(q_ik), arith.as_value(q_ik), fastmath=fm_fast
+                        q0_sq = flir.arith.MulFOp(
+                            arith.as_value(q0), arith.as_value(q0), fastmath=fm_fast
+                        ).result
+                        q1_sq = flir.arith.MulFOp(
+                            arith.as_value(q1), arith.as_value(q1), fastmath=fm_fast
+                        ).result
+                        q2_sq = flir.arith.MulFOp(
+                            arith.as_value(q2), arith.as_value(q2), fastmath=fm_fast
+                        ).result
+                        q3_sq = flir.arith.MulFOp(
+                            arith.as_value(q3), arith.as_value(q3), fastmath=fm_fast
+                        ).result
+                        sq01 = flir.arith.AddFOp(
+                            arith.as_value(q0_sq), arith.as_value(q1_sq), fastmath=fm_fast
+                        ).result
+                        sq23 = flir.arith.AddFOp(
+                            arith.as_value(q2_sq), arith.as_value(q3_sq), fastmath=fm_fast
+                        ).result
+                        sq0123 = flir.arith.AddFOp(
+                            arith.as_value(sq01), arith.as_value(sq23), fastmath=fm_fast
                         ).result
                         q_sq_local = flir.arith.AddFOp(
-                            arith.as_value(q_sq_local), arith.as_value(q_sq_i), fastmath=fm_fast
+                            arith.as_value(q_sq_local), arith.as_value(sq0123), fastmath=fm_fast
                         ).result
                 o_acc_peer = rocdl.ds_bpermute(
                     T.i32(),
@@ -497,48 +725,52 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                             ],
                         )
 
-            for ik_local in range_constexpr(K // 2):
-                k_idx = arith.as_value(
-                    flir.arith.AddIOp(
-                        arith.as_value(k_base), arith.as_value(arith.index(ik_local))
-                    ).result
-                )
-                kg = arith.as_value(
-                    flir.arith.DivUIOp(arith.as_value(k_idx), arith.as_value(arith.index(4))).result
-                )
-                k4 = arith.as_value(
-                    flir.arith.RemUIOp(arith.as_value(k_idx), arith.as_value(arith.index(4))).result
-                )
-                h_fin_elem = h_reg[ik_local]
-                old_h = memref.load(
-                    initial_state_source,
-                    [
-                        arith.as_value(row_state),
-                        arith.as_value(kg),
-                        arith.as_value(iv_safe),
-                        arith.as_value(k4),
-                    ],
-                )
-                new_h = arith.select(
-                    arith.as_value(iv_valid),
-                    arith.as_value(h_fin_elem),
-                    arith.as_value(old_h),
-                )
-                new_h = arith.select(
-                    arith.as_value(state_idx_nonneg),
-                    arith.as_value(new_h),
-                    arith.as_value(old_h),
-                )
-                if iv_valid:
-                    if state_idx_nonneg:
+            if iv_valid:
+                if state_idx_nonneg:
+                    for kg_local in range_constexpr(K // 8):
+                        kg = arith.as_value(
+                            flir.arith.AddIOp(
+                                arith.as_value(kg_start), arith.as_value(arith.index(kg_local))
+                            ).result
+                        )
                         memref.store(
-                            arith.as_value(new_h),
+                            arith.as_value(h_vec_x[kg_local]),
                             initial_state_source,
                             [
                                 arith.as_value(row_state),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
-                                arith.as_value(k4),
+                                arith.as_value(arith.index(0)),
+                            ],
+                        )
+                        memref.store(
+                            arith.as_value(h_vec_y[kg_local]),
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(1)),
+                            ],
+                        )
+                        memref.store(
+                            arith.as_value(h_vec_z[kg_local]),
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(2)),
+                            ],
+                        )
+                        memref.store(
+                            arith.as_value(h_vec_w[kg_local]),
+                            initial_state_source,
+                            [
+                                arith.as_value(row_state),
+                                arith.as_value(kg),
+                                arith.as_value(iv_safe),
+                                arith.as_value(arith.index(3)),
                             ],
                         )
 
