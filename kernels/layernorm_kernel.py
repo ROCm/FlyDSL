@@ -151,7 +151,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
         # ==================================================================
         # Fast path: N == BLOCK_THREADS * VEC_WIDTH * 4
         # Uses buffer_load / buffer_store for high-bandwidth vectorised
-        # memory access (same approach as preshuffle_gemm_flyc).
+        # memory access (same approach as preshuffle_gemm).
         # ==================================================================
         if N == (BLOCK_THREADS * VEC_WIDTH * 4) and elem_bits <= 16:
             from flydsl.expr.arith import ArithValue

@@ -124,7 +124,7 @@ softmax_kernel(self, A, C, m_in)
 
 ## 3. GEMM Kernel
 
-### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm_flyc.py`)
+### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm.py`)
 
 MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]^T`.
 
@@ -132,7 +132,7 @@ Uses the new `@flyc.kernel` / `@flyc.jit` API.
 
 **Builder:**
 ```python
-from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 
 launch_fn = compile_preshuffle_gemm_a8(
     M=16, N=5120, K=8192,
@@ -240,7 +240,7 @@ Pure-arith layout helpers for static-stride layouts:
 
 ### New API (GEMM)
 
-Used by `preshuffle_gemm_flyc.py`:
+Used by `preshuffle_gemm.py`:
 
 ```python
 import flydsl.compiler as flyc
@@ -277,7 +277,7 @@ What operation do you need?
 │   │   └── → compile_preshuffle_gemm_a8()
 │   │
 │   └── Uses new @flyc.kernel API
-│       └── See kernels/preshuffle_gemm_flyc.py
+│       └── See kernels/preshuffle_gemm.py
 │
 └── Building blocks
     ├── Warp/block reduction     → reduce.py
@@ -296,7 +296,7 @@ What operation do you need?
 | `kernels/layernorm_kernel.py` | LayerNorm builder (`_LayerNorm` MlirModule, legacy API) |
 | `kernels/rmsnorm_kernel.py` | RMSNorm builder (`_RMSNorm` MlirModule, legacy API) |
 | `kernels/softmax_kernel.py` | Softmax builder (`_Softmax` MlirModule, legacy API) |
-| `kernels/preshuffle_gemm_flyc.py` | Preshuffle GEMM builder (new `@flyc.kernel` API) |
+| `kernels/preshuffle_gemm.py` | Preshuffle GEMM builder (new `@flyc.kernel` API) |
 | `kernels/reduce.py` | Shared warp/block reduction helpers |
 | `kernels/mfma_epilogues.py` | MFMA epilogue strategies (default, CShuffle) |
 | `kernels/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |

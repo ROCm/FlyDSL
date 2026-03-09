@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MFMA FP8/INT8/BF16 GEMM Test with B preshuffle — @flyc.kernel API.
 
-Kernel implementation lives in `kernels/preshuffle_gemm_flyc.py`.
+Kernel implementation lives in `kernels/preshuffle_gemm.py`.
 This file is the correctness + perf harness.
 """
 
@@ -20,8 +20,8 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8 as compile_preshuffle_gemm_a8_flyc
-from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_w4
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_w4
 from tests.test_common import run_perftest, verify_output
 from tests.utils import pertoken_quant, shuffle_weight
 from tests.kernels.utils import fp4_utils
@@ -108,7 +108,7 @@ def test_mfma_a8_flyc_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_preshuffle_gemm_a8_flyc(
+    launch_fn = compile_preshuffle_gemm_a8(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,

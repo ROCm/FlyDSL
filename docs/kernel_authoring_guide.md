@@ -470,7 +470,7 @@ Shows the diff between original and rewritten AST for debugging control flow tra
 
 ## 11. Complete Example: Preshuffle GEMM
 
-From `kernels/preshuffle_gemm_flyc.py`:
+From `kernels/preshuffle_gemm.py`:
 
 ```python
 import flydsl.compiler as flyc
@@ -530,7 +530,7 @@ Writing a new kernel?
 ├── Matrix multiply (GEMM)?
 │   ├── Use @flyc.kernel + SmemAllocator + MFMA
 │   ├── B-preshuffle layout from mfma_preshuffle_pipeline.py
-│   └── See kernels/preshuffle_gemm_flyc.py
+│   └── See kernels/preshuffle_gemm.py
 │
 ├── Need shared memory?
 │   ├── Use SmemAllocator with target arch
@@ -562,7 +562,7 @@ Writing a new kernel?
 | `python/flydsl/expr/rocdl.py` | ROCm dialect intrinsics |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/utils/smem_allocator.py` | `SmemAllocator`, `SmemPtr`, LDS management |
-| `kernels/preshuffle_gemm_flyc.py` | Preshuffle GEMM kernel example |
+| `kernels/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
 | `kernels/reduce.py` | Warp/block reduction primitives |
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |
