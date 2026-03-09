@@ -437,7 +437,7 @@ def compile_mixed_moe_gemm1(
                     bx_m = bx * arith.constant(tile_m, index=True)
 
                     # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                    # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm_flyc.py.
+                    # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm.py.
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
@@ -1608,7 +1608,7 @@ def compile_mixed_moe_gemm2(
                 expert_off_idx = expert_idx * n_idx  # index
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm_flyc.py.
+                # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm.py.
                 if bytes_per_thread_x % 16 != 0:
                     raise ValueError(
                         f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
