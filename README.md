@@ -130,6 +130,8 @@ For the test folder organization, see `tests/` (`mlir/`, `pyir/`, `kernels/`).
 
 ## Documentation
 
+**Full documentation: [rocm.github.io/FlyDSL](https://rocm.github.io/FlyDSL)**
+
 | **Topic** | **Description** | **Guide** |
 |---|---|---|
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
