@@ -20,7 +20,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm, select_tile_config
+from kernels.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm
 from tests.test_common import run_perftest, verify_output
 from tests.utils import shuffle_weight
 from flydsl.runtime.device import get_rocm_arch
@@ -43,6 +43,40 @@ try:
     HAS_AITER = True
 except Exception:
     HAS_AITER = False
+
+def select_tile_config(M: int, N: int, K: int, scale_block_k: int = 128):
+    """Auto-select tile config for blockscale GEMM benchmarks."""
+    candidates = [
+        (16, 64, 256), (16, 128, 256),
+        (32, 64, 128), (32, 64, 256), (32, 128, 128), (32, 128, 256),
+        (64, 64, 128), (64, 64, 256), (64, 128, 128), (64, 128, 256), (64, 256, 128),
+    ]
+    def _valid(tm, tn, tk):
+        return (N % tn == 0 and K % tk == 0 and tk % scale_block_k == 0
+                and tm * tk // 256 >= 16)
+    valid = [(tm, tn, tk) for tm, tn, tk in candidates if _valid(tm, tn, tk)]
+    if not valid:
+        return (64, 128, 128)
+    def _score(tm, tn, tk):
+        s = 0
+        total_blocks = ((M + tm - 1) // tm) * (N // tn)
+        s += 15 if total_blocks >= 256 else (10 if total_blocks >= 128 else (5 if total_blocks >= 64 else 0))
+        if M <= 48:
+            s += 12 if tm == 16 else (8 if tm == 32 else 0)
+        elif M <= 128:
+            s += 10 if tm == 32 else (6 if tm == 16 else (4 if tm == 64 else 0))
+        elif M <= 512:
+            s += 12 if tm == 64 else (8 if tm == 32 else 0)
+        else:
+            s += 12 if tm == 64 else 0
+        if M <= 128:
+            s += 6 if tn == 64 else (4 if tn == 128 else (2 if tn == 256 else 0))
+        else:
+            s += 8 if tn == 128 else (4 if tn == 64 else (4 if tn == 256 else 0))
+        s += 6 if tk == 128 else 3
+        return s
+    return max(valid, key=lambda t: _score(*t))
+
 
 def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
                          dtype=torch.bfloat16):
@@ -85,27 +119,31 @@ def run_torch_blockscale(x, weight, x_scale, w_scale, block_shape=BLOCK_SHAPE,
         pytest.param(16, 7168, 2304, id="DS-7168x2304-M16"),
         pytest.param(33, 7168, 2304, id="DS-7168x2304-M33"),
         pytest.param(64, 7168, 2304, id="DS-7168x2304-M64"),
-        pytest.param(256, 7168, 2304, id="DS-7168x2304-M256"),
-        pytest.param(1024, 7168, 2304, id="DS-7168x2304-M1024"),
+        pytest.param(256, 7168, 2304, id="DS-7168x2304-M256", marks=pytest.mark.large_shape),
+        pytest.param(1024, 7168, 2304, id="DS-7168x2304-M1024", marks=pytest.mark.large_shape),
         pytest.param(1, 2112, 7168, id="DS-2112x7168-M1"),
         pytest.param(7, 2112, 7168, id="DS-2112x7168-M7"),
         pytest.param(16, 2112, 7168, id="DS-2112x7168-M16"),
         pytest.param(33, 2112, 7168, id="DS-2112x7168-M33"),
         pytest.param(64, 2112, 7168, id="DS-2112x7168-M64"),
-        pytest.param(256, 2112, 7168, id="DS-2112x7168-M256"),
-        pytest.param(1024, 2112, 7168, id="DS-2112x7168-M1024"),
+        pytest.param(256, 2112, 7168, id="DS-2112x7168-M256", marks=pytest.mark.large_shape),
+        pytest.param(1024, 2112, 7168, id="DS-2112x7168-M1024", marks=pytest.mark.large_shape),
         pytest.param(1, 3072, 1536, id="DS-3072x1536-M1"),
         pytest.param(7, 3072, 1536, id="DS-3072x1536-M7"),
         pytest.param(16, 3072, 1536, id="DS-3072x1536-M16"),
         pytest.param(33, 3072, 1536, id="DS-3072x1536-M33"),
         pytest.param(64, 3072, 1536, id="DS-3072x1536-M64"),
-        pytest.param(256, 3072, 1536, id="DS-3072x1536-M256"),
-        pytest.param(1024, 3072, 1536, id="DS-3072x1536-M1024"),
+        pytest.param(256, 3072, 1536, id="DS-3072x1536-M256", marks=pytest.mark.large_shape),
+        pytest.param(1024, 3072, 1536, id="DS-3072x1536-M1024", marks=pytest.mark.large_shape),
     ],
 )
 @pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize("test_graph", [
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph"),
+])
 def test_blockscale_preshuffle_gemm(
-    M, N, K, out_dtype,
+    M, N, K, out_dtype, test_graph,
     *,
     bench_iters=20,
     bench_warmup=3,
@@ -165,6 +203,7 @@ def test_blockscale_preshuffle_gemm(
         c_out, x, b_shuffled, x_scale_t, w_scale_flat,
         num_iters=bench_iters,
         num_warmup=bench_warmup,
+        testGraph=test_graph,
     )
     torch.cuda.synchronize()
     c_out_f32 = c_out.to(torch.float32)

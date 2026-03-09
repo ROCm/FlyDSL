@@ -4,6 +4,9 @@
 #
 # Prerequisites: bash scripts/build.sh && pip install -e .
 #   (or: export PYTHONPATH=build-fly/python_packages:$REPO_ROOT)
+#
+# By default, large_shape tests are skipped for fast local iteration.
+# Set RUN_TESTS_FULL=1 for CI (runs all parametrized cases).
 
 set -euo pipefail
 
@@ -13,24 +16,17 @@ cd "${REPO_ROOT}"
 BUILD_DIR="${FLY_BUILD_DIR:-${REPO_ROOT}/build-fly}"
 MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
 
-# Ensure REPO_ROOT and build packages are always on PYTHONPATH.
 export PYTHONPATH="${BUILD_DIR}/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
 
-# Ensure MLIR runtime shared libraries are discoverable.
 if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-# By default, skip large_shape-marked tests (slow).
-# Set RUN_TESTS_FULL=1 to run all parametrized cases (CI).
 pytest_extra_args=()
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
     pytest_extra_args+=(-m "not large_shape")
 fi
 
-# ---------------------------------------------------------------------------
-# Helper: run a pytest group with a banner
-# ---------------------------------------------------------------------------
 run_pytest() {
     local title="$1"; shift
     echo ""
@@ -42,79 +38,42 @@ run_pytest() {
 }
 
 # ---------------------------------------------------------------------------
-# Pytest-based tests
+# Pytest-based kernel tests (all use ${pytest_extra_args[@]} for large_shape)
 # ---------------------------------------------------------------------------
 run_pytest "GEMM Test Suite" \
     tests/kernels/test_preshuffle_gemm.py "${pytest_extra_args[@]}"
 
+run_pytest "Blockscale GEMM" \
+    tests/kernels/test_blockscale_preshuffle_gemm.py "${pytest_extra_args[@]}"
+
 run_pytest "MoE GEMM Kernels" \
     tests/kernels/test_moe_gemm.py "${pytest_extra_args[@]}"
 
+# test_moe_blockscale.py is a standalone benchmark (not pytest-compatible).
+# Run via: python tests/kernels/test_moe_blockscale.py -m 32 -dim 7168 -idim 256 -e 256 -k 8
+
 run_pytest "Norm & Softmax Kernels" \
-    tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py
+    tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py \
+    "${pytest_extra_args[@]}"
 
 run_pytest "Vector Addition" \
-    tests/kernels/test_vec_add.py
+    tests/kernels/test_vec_add.py "${pytest_extra_args[@]}"
 
 run_pytest "MoE Reduce Kernel" \
-    tests/kernels/test_moe_reduce.py
+    tests/kernels/test_moe_reduce.py "${pytest_extra_args[@]}"
 
 FLYDSL_RUN_QUANT=1 \
 run_pytest "Per-Token Quantization" \
-    tests/kernels/test_quant.py
+    tests/kernels/test_quant.py "${pytest_extra_args[@]}"
 
 run_pytest "Python Examples" \
-    tests/python/examples/*.py
+    tests/python/examples/*.py "${pytest_extra_args[@]}"
 
 run_pytest "Layout Algebra & PyIR Tests" \
     tests/pyir/test_layout_algebra.py tests/pyir/test_static_vs_dynamic.py tests/pyir/test_rocir_print.py
 
 # ---------------------------------------------------------------------------
-# Norm & Softmax Kernels (LayerNorm, RMSNorm, Softmax)
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Norm & Softmax Kernels"
-echo "========================================================================"
-echo ""
-
-python3 -m pytest tests/kernels/test_layernorm.py tests/kernels/test_rmsnorm.py tests/kernels/test_softmax.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Vector Addition Kernel
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Vector Addition"
-echo "========================================================================"
-echo ""
-
-python3 -m pytest tests/kernels/test_vec_add.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Per-Token Quantization Kernel
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Per-Token Quantization"
-echo "========================================================================"
-echo ""
-
-FLYDSL_RUN_QUANT=1 python3 -m pytest tests/kernels/test_quant.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Python Examples (tests/python/examples/) via pytest
-# ---------------------------------------------------------------------------
-echo ""
-echo "========================================================================"
-echo "Python Examples"
-echo "========================================================================"
-echo ""
-
-python3 -m pytest tests/python/examples/*.py -v --no-header --tb=short
-
-# ---------------------------------------------------------------------------
-# Examples (examples/*.py)
+# Examples (examples/*.py) — standalone scripts, not pytest
 # ---------------------------------------------------------------------------
 echo ""
 echo "========================================================================"
