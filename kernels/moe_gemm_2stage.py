@@ -1232,16 +1232,60 @@ def compile_moe_gemm1(
                 if is_a8w4smooth and int(tile_k) == 128:
                     c128 = arith.constant(128, index=True)
                     c256 = arith.constant(256, index=True)
+                    c512 = arith.constant(512, index=True)
+                    use_tilek128_x4 = (model_dim % 512) == 0
+
+                    def preload_chunk_qparams(base_k_256):
+                        gate_qparams = preload_qparams_tilek128(base_k_256, n_blk_gate, n_intra_gate)
+                        up_qparams = preload_qparams_tilek128(base_k_256, n_blk_up, n_intra_up)
+                        return gate_qparams, up_qparams
+
+                    def load_chunk_raw_half(pack_group, gate_qparams, up_qparams, base_k_256):
+                        qs_gate, qz_gate = gate_qparams
+                        qs_up, qz_up = up_qparams
+                        raw_gate = load_b_half_tilek128_raw(
+                            pack_group, qs_gate, qz_gate, base_k_256, n_blk_gate, n_intra_gate
+                        )
+                        raw_up = load_b_half_tilek128_raw(
+                            pack_group, qs_up, qz_up, base_k_256, n_blk_up, n_intra_up
+                        )
+                        return raw_gate, raw_up
+
+                    def compute_raw_half(
+                        acc_gate_in,
+                        acc_up_in,
+                        raw_gate,
+                        raw_up,
+                        pack_group,
+                        lds_base,
+                        *,
+                        prefetch_epilogue: bool = False,
+                        a0_prefetch=None,
+                    ):
+                        b_gate = dequant_b_half_tilek128(raw_gate, pack_group)
+                        b_up = dequant_b_half_tilek128(raw_up, pack_group)
+                        return compute_tile_a8w4smooth_tilek128(
+                            acc_gate_in,
+                            acc_up_in,
+                            b_gate,
+                            b_up,
+                            lds_base,
+                            prefetch_epilogue=prefetch_epilogue,
+                            a0_prefetch=a0_prefetch,
+                        )
+
+                    def advance_x_tile(x_regs, lds_base):
+                        store_x_tile_to_lds(x_regs, lds_base)
+                        hot_loop_scheduler()
+                        gpu.barrier()
+                        return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base)
 
                     # Prologue: preload qparams and load first half (K128) of chunk0.
                     k0 = arith.index(0)
                     x_regs0 = load_x_tile(k0)
-                    qs_gate, qz_gate = preload_qparams_tilek128(k0, n_blk_gate, n_intra_gate)
-                    qs_up, qz_up = preload_qparams_tilek128(k0, n_blk_up, n_intra_up)
-                    
-                    raw_gate_pong = load_b_half_tilek128_raw(0, qs_gate, qz_gate, k0, n_blk_gate, n_intra_gate)
-                    raw_up_pong = load_b_half_tilek128_raw(0, qs_up, qz_up, k0, n_blk_up, n_intra_up)
-                    
+                    qparams_gate_pong, qparams_up_pong = preload_chunk_qparams(k0)
+                    raw_gate_pong, raw_up_pong = load_chunk_raw_half(0, qparams_gate_pong, qparams_up_pong, k0)
+
                     store_x_tile_to_lds(x_regs0, lds_base_cur)
                     gpu.barrier()
 
@@ -1252,87 +1296,222 @@ def compile_moe_gemm1(
                     # Cross-tile A0 LDS prefetch for the tile we are about to compute.
                     a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
 
-                    # Main loop: 2 tiles (low128+high128) per K256 chunk, leaving the final chunk as a 2-tile tail.
-                    c_k_main2 = k_in - c256
-                    for k_iv in range(arith.index(0), c_k_main2, c256):
-                        # ---- stage 0: Load High(N), Compute Low(N) ----
-                        next_k1 = k_iv + c128
+                    if use_tilek128_x4:
+                        c_k_main4 = k_in - c512
+                        for k_iv in range(arith.index(0), c_k_main4, c512):
+                            next_k1 = k_iv + c128
+                            x_regs_ping = load_x_tile(next_k1)
+                            raw_gate_hi_pong, raw_up_hi_pong = load_chunk_raw_half(
+                                1, qparams_gate_pong, qparams_up_pong, k_iv
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_pong,
+                                raw_up_pong,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k2 = k_iv + c256
+                            x_regs_pong = load_x_tile(next_k2)
+                            qparams_gate_ping, qparams_up_ping = preload_chunk_qparams(next_k2)
+                            raw_gate_ping, raw_up_ping = load_chunk_raw_half(
+                                0, qparams_gate_ping, qparams_up_ping, next_k2
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_hi_pong,
+                                raw_up_hi_pong,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                            next_k3 = next_k2 + c128
+                            x_regs_ping = load_x_tile(next_k3)
+                            raw_gate_hi_ping, raw_up_hi_ping = load_chunk_raw_half(
+                                1, qparams_gate_ping, qparams_up_ping, next_k2
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_ping,
+                                raw_up_ping,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k4 = k_iv + c512
+                            x_regs_pong = load_x_tile(next_k4)
+                            qparams_gate_pong, qparams_up_pong = preload_chunk_qparams(next_k4)
+                            raw_gate_pong, raw_up_pong = load_chunk_raw_half(
+                                0, qparams_gate_pong, qparams_up_pong, next_k4
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_hi_ping,
+                                raw_up_hi_ping,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                        # Tail: final 2 K256 chunks (4 tiles).
+                        k_tail0 = k_in - c512
+                        k_tail1 = k_tail0 + c256
+
+                        next_k1 = k_tail0 + c128
                         x_regs_ping = load_x_tile(next_k1)
-                        
-                        # Load high half of current K256 chunk
-                        raw_gate_ping = load_b_half_tilek128_raw(1, qs_gate, qz_gate, k_iv, n_blk_gate, n_intra_gate)
-                        raw_up_ping = load_b_half_tilek128_raw(1, qs_up, qz_up, k_iv, n_blk_up, n_intra_up)
+                        raw_gate_hi_pong, raw_up_hi_pong = load_chunk_raw_half(
+                            1, qparams_gate_pong, qparams_up_pong, k_tail0
+                        )
 
-                        b_gate_pong = dequant_b_half_tilek128(raw_gate_pong, 0)
-                        b_up_pong = dequant_b_half_tilek128(raw_up_pong, 0)
-
-                        acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
-                            acc_gate, acc_up, b_gate_pong, b_up_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
+                        acc_gate, acc_up, _ = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_pong,
+                            raw_up_pong,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
                         )
                         a0_prefetch_pong = None
-                        store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                        hot_loop_scheduler()
-                        gpu.barrier()
-                        
-                        # Cross-tile prefetch for the ping tile we are about to compute.
-                        a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
 
-                        # ---- stage 1: Preload QParams(N+1), Load Low(N+1), Compute High(N) ----
-                        next_k2 = k_iv + c256
-                        x_regs_pong = load_x_tile(next_k2)
-                        
-                        # Preload qparams for NEXT K256 chunk
-                        qs_gate, qz_gate = preload_qparams_tilek128(next_k2, n_blk_gate, n_intra_gate)
-                        qs_up, qz_up = preload_qparams_tilek128(next_k2, n_blk_up, n_intra_up)
-                        
-                        # Load low half of NEXT K256 chunk
-                        raw_gate_pong = load_b_half_tilek128_raw(0, qs_gate, qz_gate, next_k2, n_blk_gate, n_intra_gate)
-                        raw_up_pong = load_b_half_tilek128_raw(0, qs_up, qz_up, next_k2, n_blk_up, n_intra_up)
+                        x_regs_pong = load_x_tile(k_tail1)
+                        qparams_gate_ping, qparams_up_ping = preload_chunk_qparams(k_tail1)
+                        raw_gate_ping, raw_up_ping = load_chunk_raw_half(
+                            0, qparams_gate_ping, qparams_up_ping, k_tail1
+                        )
 
-                        b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
-                        b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
-
-                        acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
-                            acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping,
+                        acc_gate, acc_up, _ = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_hi_pong,
+                            raw_up_hi_pong,
+                            1,
+                            lds_base_ping,
+                            a0_prefetch=a0_prefetch_ping,
                         )
                         a0_prefetch_ping = None
-                        store_x_tile_to_lds(x_regs_pong, lds_base_pong)
-                        hot_loop_scheduler()
-                        gpu.barrier()
-                        
-                        # Cross-tile prefetch for the next pong tile.
-                        a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
+                        a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
 
-                    # Tail: final K256 chunk (2 tiles: low128 then high128).
-                    k_tail0 = k_in - c256
-                    k_tail1 = k_in - c128
-                    x_regs_ping = load_x_tile(k_tail1)
-                    
-                    # Load high half of final chunk (N_final)
-                    raw_gate_ping = load_b_half_tilek128_raw(1, qs_gate, qz_gate, k_tail0, n_blk_gate, n_intra_gate)
-                    raw_up_ping = load_b_half_tilek128_raw(1, qs_up, qz_up, k_tail0, n_blk_up, n_intra_up)
+                        next_k3 = k_tail1 + c128
+                        x_regs_ping = load_x_tile(next_k3)
+                        raw_gate_hi_ping, raw_up_hi_ping = load_chunk_raw_half(
+                            1, qparams_gate_ping, qparams_up_ping, k_tail1
+                        )
 
-                    b_gate_pong = dequant_b_half_tilek128(raw_gate_pong, 0)
-                    b_up_pong = dequant_b_half_tilek128(raw_up_pong, 0)
+                        acc_gate, acc_up, _ = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_ping,
+                            raw_up_ping,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                        )
+                        a0_prefetch_pong = None
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
 
-                    acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
-                        acc_gate, acc_up, b_gate_pong, b_up_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
-                    )
-                    a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    
-                    # Cross-tile prefetch for the final ping tile.
-                    a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-                    
-                    # Epilogue: compute last tile (high128) with scale prefetch to overlap loads with MFMA.
-                    b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
-                    b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
-                    acc_gate, acc_up, epilogue_pf = compute_tile_a8w4smooth_tilek128(
-                        acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping,
-                        prefetch_epilogue=True, a0_prefetch=a0_prefetch_ping,
-                    )
+                        acc_gate, acc_up, epilogue_pf = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_hi_ping,
+                            raw_up_hi_ping,
+                            1,
+                            lds_base_ping,
+                            prefetch_epilogue=True,
+                            a0_prefetch=a0_prefetch_ping,
+                        )
+                    else:
+                        # Main loop: 2 tiles (low128+high128) per K256 chunk, leaving the final chunk as a 2-tile tail.
+                        c_k_main2 = k_in - c256
+                        for k_iv in range(arith.index(0), c_k_main2, c256):
+                            next_k1 = k_iv + c128
+                            x_regs_ping = load_x_tile(next_k1)
+                            raw_gate_ping, raw_up_ping = load_chunk_raw_half(
+                                1, qparams_gate_pong, qparams_up_pong, k_iv
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_pong,
+                                raw_up_pong,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k2 = k_iv + c256
+                            x_regs_pong = load_x_tile(next_k2)
+                            qparams_gate_pong, qparams_up_pong = preload_chunk_qparams(next_k2)
+                            raw_gate_pong, raw_up_pong = load_chunk_raw_half(
+                                0, qparams_gate_pong, qparams_up_pong, next_k2
+                            )
+
+                            acc_gate, acc_up, _ = compute_raw_half(
+                                acc_gate,
+                                acc_up,
+                                raw_gate_ping,
+                                raw_up_ping,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                        # Tail: final K256 chunk (2 tiles: low128 then high128).
+                        k_tail0 = k_in - c256
+                        k_tail1 = k_in - c128
+                        x_regs_ping = load_x_tile(k_tail1)
+                        raw_gate_ping, raw_up_ping = load_chunk_raw_half(
+                            1, qparams_gate_pong, qparams_up_pong, k_tail0
+                        )
+
+                        acc_gate, acc_up, _ = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_pong,
+                            raw_up_pong,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                        )
+                        a0_prefetch_pong = None
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                        acc_gate, acc_up, epilogue_pf = compute_raw_half(
+                            acc_gate,
+                            acc_up,
+                            raw_gate_ping,
+                            raw_up_ping,
+                            1,
+                            lds_base_ping,
+                            prefetch_epilogue=True,
+                            a0_prefetch=a0_prefetch_ping,
+                        )
                 else:
                     # Prologue: prefetch tile0, store to LDS(cur), sync.
                     k0 = arith.index(0)
@@ -2963,13 +3142,46 @@ def compile_moe_gemm2(
                 if is_a8w4smooth and int(tile_k) == 128:
                     c128 = arith.constant(128, index=True)
                     c256 = arith.constant(256, index=True)
+                    c512 = arith.constant(512, index=True)
+                    use_tilek128_x4 = (inter_dim % 512) == 0
+
+                    def preload_chunk_qparams(base_k_256):
+                        return preload_qparams_tilek128(base_k_256)
+
+                    def load_chunk_raw_half(pack_group, qparams, base_k_256):
+                        qs_word, qz_word = qparams
+                        return load_b_half_tilek128_raw(pack_group, qs_word, qz_word, base_k_256)
+
+                    def compute_raw_half(
+                        acc_in,
+                        raw_half,
+                        pack_group,
+                        lds_base,
+                        *,
+                        prefetch_epilogue: bool = False,
+                        a0_prefetch=None,
+                    ):
+                        b_half = dequant_b_half_tilek128(raw_half, pack_group)
+                        return compute_tile_a8w4smooth_tilek128(
+                            acc_in,
+                            b_half,
+                            lds_base,
+                            prefetch_epilogue=prefetch_epilogue,
+                            a0_prefetch=a0_prefetch,
+                        )
+
+                    def advance_x_tile(x_regs, lds_base):
+                        store_x_tile_to_lds(x_regs, lds_base)
+                        hot_loop_scheduler()
+                        gpu.barrier()
+                        return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base)
 
                     # Prologue (chunk0): preload qparams and load first half (K128) of chunk0.
                     k0 = arith.index(0)
                     x_regs0 = load_x_tile(k0)
-                    qs_word, qz_word = preload_qparams_tilek128(k0)
-                    raw_pong = load_b_half_tilek128_raw(0, qs_word, qz_word, k0)
-                    
+                    qparams_pong = preload_chunk_qparams(k0)
+                    raw_pong = load_chunk_raw_half(0, qparams_pong, k0)
+
                     store_x_tile_to_lds(x_regs0, lds_base_cur)
                     gpu.barrier()
 
@@ -2980,79 +3192,178 @@ def compile_moe_gemm2(
                     # Cross-tile A0 LDS prefetch for the tile we are about to compute.
                     a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
 
-                    # Main loop: 2 tiles (low128+high128) per K256 chunk, leaving the final chunk as a 2-tile tail.
-                    c_k_main2 = k_in - c256
-                    for k_iv in range(arith.index(0), c_k_main2, c256):
-                        # ---- stage 0: Load High(N), Compute Low(N) ----
-                        next_k1 = k_iv + c128
+                    if use_tilek128_x4:
+                        c_k_main4 = k_in - c512
+                        for k_iv in range(arith.index(0), c_k_main4, c512):
+                            next_k1 = k_iv + c128
+                            x_regs_ping = load_x_tile(next_k1)
+                            raw_hi_pong = load_chunk_raw_half(1, qparams_pong, k_iv)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_pong,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k2 = k_iv + c256
+                            x_regs_pong = load_x_tile(next_k2)
+                            qparams_ping = preload_chunk_qparams(next_k2)
+                            raw_ping = load_chunk_raw_half(0, qparams_ping, next_k2)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_hi_pong,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                            next_k3 = next_k2 + c128
+                            x_regs_ping = load_x_tile(next_k3)
+                            raw_hi_ping = load_chunk_raw_half(1, qparams_ping, next_k2)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_ping,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k4 = k_iv + c512
+                            x_regs_pong = load_x_tile(next_k4)
+                            qparams_pong = preload_chunk_qparams(next_k4)
+                            raw_pong = load_chunk_raw_half(0, qparams_pong, next_k4)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_hi_ping,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                        # Tail: final 2 K256 chunks (4 tiles).
+                        k_tail0 = k_in - c512
+                        k_tail1 = k_tail0 + c256
+
+                        next_k1 = k_tail0 + c128
                         x_regs_ping = load_x_tile(next_k1)
-                        
-                        # Load high half of current K256 chunk
-                        raw_ping = load_b_half_tilek128_raw(1, qs_word, qz_word, k_iv)
+                        raw_hi_pong = load_chunk_raw_half(1, qparams_pong, k_tail0)
 
-                        b_pong = dequant_b_half_tilek128(raw_pong, 0)
-
-                        acc, _ = compute_tile_a8w4smooth_tilek128(
-                            acc, b_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
+                        acc, _ = compute_raw_half(
+                            acc,
+                            raw_pong,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
                         )
                         a0_prefetch_pong = None
-                        store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                        hot_loop_scheduler()
-                        gpu.barrier()
-                        
-                        # Cross-tile prefetch for the ping tile we are about to compute.
-                        a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
 
-                        # ---- stage 1: Preload QParams(N+1), Load Low(N+1), Compute High(N) ----
-                        next_k2 = k_iv + c256
-                        x_regs_pong = load_x_tile(next_k2)
-                        
-                        # Preload qparams for NEXT K256 chunk
-                        qs_word, qz_word = preload_qparams_tilek128(next_k2)
-                        
-                        # Load low half of NEXT K256 chunk
-                        raw_pong = load_b_half_tilek128_raw(0, qs_word, qz_word, next_k2)
+                        x_regs_pong = load_x_tile(k_tail1)
+                        qparams_ping = preload_chunk_qparams(k_tail1)
+                        raw_ping = load_chunk_raw_half(0, qparams_ping, k_tail1)
 
-                        b_ping = dequant_b_half_tilek128(raw_ping, 1)
-
-                        acc, _ = compute_tile_a8w4smooth_tilek128(
-                            acc, b_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping,
+                        acc, _ = compute_raw_half(
+                            acc,
+                            raw_hi_pong,
+                            1,
+                            lds_base_ping,
+                            a0_prefetch=a0_prefetch_ping,
                         )
                         a0_prefetch_ping = None
-                        store_x_tile_to_lds(x_regs_pong, lds_base_pong)
-                        hot_loop_scheduler()
-                        gpu.barrier()
-                        
-                        # Cross-tile prefetch for the next pong tile.
-                        a0_prefetch_pong = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_pong)
+                        a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
 
-                    # Tail: final K256 chunk (2 tiles: low128 then high128).
-                    k_tail0 = k_in - c256
-                    k_tail1 = k_in - c128
-                    x_regs_ping = load_x_tile(k_tail1)
-                    
-                    # Load high half of final chunk (N_final)
-                    raw_ping = load_b_half_tilek128_raw(1, qs_word, qz_word, k_tail0)
+                        next_k3 = k_tail1 + c128
+                        x_regs_ping = load_x_tile(next_k3)
+                        raw_hi_ping = load_chunk_raw_half(1, qparams_ping, k_tail1)
 
-                    b_pong = dequant_b_half_tilek128(raw_pong, 0)
+                        acc, _ = compute_raw_half(
+                            acc,
+                            raw_ping,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                        )
+                        a0_prefetch_pong = None
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
 
-                    acc, _ = compute_tile_a8w4smooth_tilek128(
-                        acc, b_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
-                    )
-                    a0_prefetch_pong = None
-                    store_x_tile_to_lds(x_regs_ping, lds_base_ping)
-                    hot_loop_scheduler()
-                    gpu.barrier()
-                    
-                    # Cross-tile prefetch for the final ping tile.
-                    a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
-                    
-                    # Epilogue compute (high128).
-                    b_ping = dequant_b_half_tilek128(raw_ping, 1)
-                    acc, epilogue_pf = compute_tile_a8w4smooth_tilek128(
-                        acc, b_ping, lds_base_ping,
-                        prefetch_epilogue=True, a0_prefetch=a0_prefetch_ping,
-                    )
+                        acc, epilogue_pf = compute_raw_half(
+                            acc,
+                            raw_hi_ping,
+                            1,
+                            lds_base_ping,
+                            prefetch_epilogue=True,
+                            a0_prefetch=a0_prefetch_ping,
+                        )
+                    else:
+                        # Main loop: 2 tiles (low128+high128) per K256 chunk, leaving the final chunk as a 2-tile tail.
+                        c_k_main2 = k_in - c256
+                        for k_iv in range(arith.index(0), c_k_main2, c256):
+                            next_k1 = k_iv + c128
+                            x_regs_ping = load_x_tile(next_k1)
+                            raw_ping = load_chunk_raw_half(1, qparams_pong, k_iv)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_pong,
+                                0,
+                                lds_base_pong,
+                                a0_prefetch=a0_prefetch_pong,
+                            )
+                            a0_prefetch_pong = None
+                            a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                            next_k2 = k_iv + c256
+                            x_regs_pong = load_x_tile(next_k2)
+                            qparams_pong = preload_chunk_qparams(next_k2)
+                            raw_pong = load_chunk_raw_half(0, qparams_pong, next_k2)
+
+                            acc, _ = compute_raw_half(
+                                acc,
+                                raw_ping,
+                                1,
+                                lds_base_ping,
+                                a0_prefetch=a0_prefetch_ping,
+                            )
+                            a0_prefetch_ping = None
+                            a0_prefetch_pong = advance_x_tile(x_regs_pong, lds_base_pong)
+
+                        # Tail: final K256 chunk (2 tiles: low128 then high128).
+                        k_tail0 = k_in - c256
+                        k_tail1 = k_in - c128
+                        x_regs_ping = load_x_tile(k_tail1)
+                        raw_ping = load_chunk_raw_half(1, qparams_pong, k_tail0)
+
+                        acc, _ = compute_raw_half(
+                            acc,
+                            raw_pong,
+                            0,
+                            lds_base_pong,
+                            a0_prefetch=a0_prefetch_pong,
+                        )
+                        a0_prefetch_pong = None
+                        a0_prefetch_ping = advance_x_tile(x_regs_ping, lds_base_ping)
+
+                        acc, epilogue_pf = compute_raw_half(
+                            acc,
+                            raw_ping,
+                            1,
+                            lds_base_ping,
+                            prefetch_epilogue=True,
+                            a0_prefetch=a0_prefetch_ping,
+                        )
                 else:
                     # Prologue.
                     k0 = arith.index(0)
