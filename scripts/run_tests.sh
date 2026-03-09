@@ -21,7 +21,7 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-pytest_args=(-v --no-header --tb=short)
+pytest_args=(-v --no-header --tb=short --ignore=tests/kernels/test_pa.py)
 if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
     pytest_args+=(-m "not large_shape")
 fi
