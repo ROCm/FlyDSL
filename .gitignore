@@ -60,3 +60,6 @@ lib/python*/site-packages/
 # MACOS
 .DS_Store
 Thumbs.db
+
+# Sphinx documentation build
+docs/_build/
