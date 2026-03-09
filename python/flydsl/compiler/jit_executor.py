@@ -12,10 +12,7 @@ from .protocol import fly_pointers
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    rocm_rt = mlir_libs_dir / "libfly_jit_runtime.so"
-    if not rocm_rt.exists():
-        rocm_rt = mlir_libs_dir / "libmlir_rocm_runtime.so"
-    return [str(rocm_rt), str(mlir_libs_dir / "libmlir_c_runner_utils.so")]
+    return [str(mlir_libs_dir / "libfly_jit_runtime.so")]
 
 
 class _ArgPacker:

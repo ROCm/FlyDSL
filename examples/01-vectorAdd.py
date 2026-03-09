@@ -55,7 +55,6 @@ def vectorAdd(
     stream: fx.Stream = fx.Stream(None),
 ):
     print("> Compile: n={} const_n={}", n, const_n)
-    fx.printf("> Runtime: n={} const_n={}", n, const_n)
 
     block_dim = 64
     grid_x = (n + block_dim - 1) // block_dim

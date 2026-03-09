@@ -101,24 +101,6 @@ echo "Building with -j${PARALLEL_JOBS}..."
 cmake --build . -j"${PARALLEL_JOBS}"
 
 # ---------------------------------------------------------------------------
-# Symlink extra MLIR runtime libraries not handled by CMake
-# ---------------------------------------------------------------------------
-MLIR_LIBS_DIR="${BUILD_DIR}/python_packages/flydsl/_mlir/_mlir_libs"
-MLIR_LIB_SRC="${MLIR_PATH}/lib"
-
-for lib in libmlir_float16_utils.so; do
-  if [ -f "${MLIR_LIB_SRC}/${lib}" ] && [ ! -e "${MLIR_LIBS_DIR}/${lib}" ]; then
-    ln -sf "${MLIR_LIB_SRC}/${lib}" "${MLIR_LIBS_DIR}/${lib}"
-  fi
-done
-# Also symlink the versioned variant (e.g. .so.23.0git)
-for f in "${MLIR_LIB_SRC}"/libmlir_float16_utils.so.*; do
-  [ -f "$f" ] || continue
-  base="$(basename "$f")"
-  [ -e "${MLIR_LIBS_DIR}/${base}" ] || ln -sf "$f" "${MLIR_LIBS_DIR}/${base}"
-done
-
-# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 PYTHON_PKG_DIR="${BUILD_DIR}/python_packages"
@@ -129,7 +111,6 @@ echo "Build complete!"
 echo ""
 echo "Usage (no install):"
 echo "  export PYTHONPATH=${PYTHON_PKG_DIR}:\${PYTHONPATH}"
-echo "  export LD_LIBRARY_PATH=${MLIR_LIBS_DIR}:${MLIR_LIB_SRC}:\${LD_LIBRARY_PATH}"
 echo ""
 echo "Or install as editable package:"
 echo "  cd ${REPO_ROOT} && pip install -e ."
