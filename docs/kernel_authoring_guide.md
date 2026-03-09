@@ -2,7 +2,7 @@
 
 > Writing GPU kernels with FlyDSL: `@flyc.jit`, `@flyc.kernel`, expression API, launch configuration, shared memory, and synchronization.
 
-> **API**: This guide documents the current `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`). The legacy `flydsl_` package and `MlirModule`-based API have been removed.
+> **API**: This guide documents the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
 ## Quick Reference
 

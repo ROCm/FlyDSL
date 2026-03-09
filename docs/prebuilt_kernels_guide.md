@@ -11,7 +11,7 @@
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Legacy (pending migration) | f32, f16, bf16 | Online softmax, adaptive block size |
 | **GEMM** | `compile_preshuffle_gemm_a8(...)` | New (`@flyc.kernel`) | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
 
-> **Note on API styles**: The normalization and softmax kernels use a legacy API (importing from `flydsl.dialects.ext`). These kernels may require migration to the `@flyc.kernel` API. The GEMM kernel uses the new `@flyc.kernel`/`@flyc.jit` API from `python/flydsl/`.
+> **Note on API styles**: All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
 ---
 
@@ -45,7 +45,7 @@ executor = build_layernorm_module(M=32768, N=8192, dtype_str="bf16")
 - **bf16 handling**: Software round-to-nearest-even (RNE) pack on gfx942; hardware `cvt_pk_bf16_f32` on gfx950+
 - **Warp reduction**: XOR-shuffle-based intra-wave reduction (shifts: 32, 16, 8, 4, 2, 1), then LDS-based cross-wave synchronization
 
-**Kernel signature** (inside the `_LayerNorm` MlirModule):
+**Kernel signature** (using `@flyc.kernel` API):
 ```
 GPU_MODULE_NAME = "layernorm_module"
 
@@ -293,9 +293,9 @@ What operation do you need?
 | File | Description |
 |---|---|
 | `kernels/__init__.py` | Package marker |
-| `kernels/layernorm_kernel.py` | LayerNorm builder (`_LayerNorm` MlirModule, legacy API) |
-| `kernels/rmsnorm_kernel.py` | RMSNorm builder (`_RMSNorm` MlirModule, legacy API) |
-| `kernels/softmax_kernel.py` | Softmax builder (`_Softmax` MlirModule, legacy API) |
+| `kernels/layernorm_kernel.py` | LayerNorm builder (`@flyc.kernel` API) |
+| `kernels/rmsnorm_kernel.py` | RMSNorm builder (`@flyc.kernel` API) |
+| `kernels/softmax_kernel.py` | Softmax builder (`@flyc.kernel` API) |
 | `kernels/preshuffle_gemm_flyc.py` | Preshuffle GEMM builder (new `@flyc.kernel` API) |
 | `kernels/reduce.py` | Shared warp/block reduction helpers |
 | `kernels/mfma_epilogues.py` | MFMA epilogue strategies (default, CShuffle) |

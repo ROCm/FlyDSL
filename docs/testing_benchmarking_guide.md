@@ -6,10 +6,10 @@
 
 | Category | Location | Requires GPU | Description |
 |---|---|---|---|
-| **MLIR IR tests** | `tests/mlir/*.mlir` | No | Verify FLIR → standard lowering |
+| **MLIR lit tests** | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | No | Verify Fly dialect lowering |
 | **Python IR tests** | `tests/pyir/test_*.py` | No | Python-based MLIR generation + lowering |
 | **GPU kernel tests** | `tests/kernels/test_*.py` | Yes | Full compilation → GPU execution |
-| **Python DSL tests** | `tests/python/` | Varies | Tests for new `@flyc.kernel` API |
+| **AOT examples** | `tests/python/examples/` | Varies | AOT pre-compilation examples |
 
 **Run GEMM tests:**
 ```bash
@@ -25,31 +25,25 @@ bash scripts/run_benchmark.sh
 
 ## 1. Test Categories
 
-### 1.1 MLIR IR Tests (`tests/mlir/`)
+### 1.1 MLIR Lit Tests (`tests/mlir/`)
 
-Direct MLIR lowering verification using the `flir-opt` tool. Validates that FLIR operations lower correctly to standard MLIR dialects without needing a GPU.
+MLIR-based tests organized by category, verified using the `fly-opt` tool. Validates that Fly dialect operations lower correctly to standard MLIR dialects without needing a GPU.
 
-**Files:**
-| Test File | Description |
-|---|---|
-| `test_basic.mlir` | Basic FLIR operation lowering |
-| `test_crd2idx.mlir` | Coordinate-to-index mapping |
-| `test_idx2crd.mlir` | Index-to-coordinate mapping |
-| `test_size.mlir` | Size query operation |
-| `test_composition.mlir` | Layout composition |
-| `test_product_divide.mlir` | Product and divide operations |
-| `test_local_ops.mlir` | local_partition and local_tile |
-| `test_coord_lowering.mlir` | Static coordinate lowering |
-| `test_coord_lowering_dynamic.mlir` | Dynamic coordinate lowering |
-| `comprehensive_test.mlir` | Full integration test |
+**Directories:**
+
+| Directory | Tests | Description |
+|---|---|---|
+| `LayoutAlgebra/` | `coalesce.mlir`, `composition.mlir`, `construction.mlir`, `coordinate.mlir`, `divide.mlir`, `int_tuple.mlir`, `product.mlir`, `size_cosize.mlir` | Layout algebra operations |
+| `Conversion/` | `fly_gpu_to_llvm.mlir`, `gpu_ops.mlir`, `memref_alloca.mlir`, `memref_ops.mlir`, `mma_atom.mlir`, `pointer_ops.mlir`, `type_conversion.mlir` | Dialect conversion passes |
+| `Transforms/` | `canonicalize.mlir`, `layout_lowering.mlir` | Transformation passes |
 
 **Running individually:**
 ```bash
-# Build flir-opt first if needed
-cmake --build build-fly --target flir-opt -j$(nproc)
+# Build fly-opt first if needed
+cmake --build build-fly --target fly-opt -j$(nproc)
 
 # Run a single test
-build-fly/bin/flir-opt --flir-to-standard tests/mlir/test_basic.mlir
+build-fly/bin/fly-opt --fly-canonicalize tests/mlir/LayoutAlgebra/construction.mlir
 ```
 
 ### 1.2 Python IR Tests (`tests/pyir/`)
@@ -60,21 +54,8 @@ Python-based tests that generate MLIR IR using the FlyDSL Python API and verify 
 | Test File | Description |
 |---|---|
 | `test_layout_algebra.py` | Layout algebra: coalesce, composition, divide, product, complement |
-| `test_product_divide.py` | Pythonic product/divide operator tests |
-| `test_local_ops.py` | Thread-level partitioning and tiling |
-| `test_nested_layouts.py` | Nested/hierarchical layout construction |
-| `test_basic_ops.py` | Basic FLIR operation generation |
-| `test_arith_operators.py` | Arithmetic operator overloading |
-| `test_passes.py` | Pipeline pass execution |
+| `test_rocir_print.py` | IR printing for Fly dialect ops |
 | `test_static_vs_dynamic.py` | Static vs dynamic value handling |
-| `test_lang_module_descriptors.py` | MlirModule @kernel/@jit descriptors |
-| `test_rocdl_ops.py` | ROCm dialect operations |
-| `test_rocir_basic.py` | ROCm IR basic ops |
-| `test_rocir_coord_ops.py` | ROCm coordinate operations |
-| `test_rocir_product.py` | ROCm product operations |
-| `test_rocir_divide.py` | ROCm divide operations |
-| `test_rocir_local.py` | ROCm local operations |
-| `test_rocir_print.py` | ROCm IR printing |
 
 **Running individually:**
 ```bash
@@ -92,15 +73,13 @@ Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against 
 | `test_softmax.py` | Softmax | Row-wise softmax |
 | `test_layernorm.py` | LayerNorm | Layer normalization |
 | `test_rmsnorm.py` | RMSNorm | RMS normalization |
-| `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/int4/bf16/fp4) |
-| `test_eltwise_add.py` | EltAdd | Element-wise addition |
-| `test_matrix_trans.py` | Transpose | Matrix transpose |
+| `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/int4/bf16) |
+| `test_blockscale_preshuffle_gemm.py` | GEMM | Block-scale (MXFP4) preshuffle GEMM |
+| `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
+| `test_moe_blockscale.py` | MoE | MoE with block-scale quantization |
+| `test_moe_reduce.py` | MoE Reduce | MoE reduction kernel |
+| `test_pa.py` | Paged Attn | Paged attention decode |
 | `test_quant.py` | Quantization | Quantization ops |
-| `test_gpu_simple.py` | Simple GPU | Minimal GPU kernel test |
-| `test_gpu_layout.py` | Layout GPU | GPU layout operations |
-| `test_gpu_rocdsl.py` | ROCm DSL | ROCm DSL integration |
-| `test_gpu_with_rocir_coords.py` | Coords GPU | Coordinate operations on GPU |
-| `test_shared_working.py` | Shared Mem | Shared memory operations |
 | `test_ref.py` | Reference | Reference implementations |
 
 **Running individually:**
@@ -109,15 +88,13 @@ python tests/kernels/test_softmax.py
 python tests/kernels/test_preshuffle_gemm.py --in_dtype fp8 -M 16 -N 5120 -K 8192
 ```
 
-### 1.4 Python DSL Tests (`tests/python/`)
+### 1.4 AOT Examples (`tests/python/examples/`)
 
-Tests for the new `@flyc.kernel` / `@flyc.jit` API:
+AOT pre-compilation examples:
 
 ```
-tests/python/
-├── examples/     # Example-based tests
-├── gpu/          # GPU execution tests with new API
-└── ir/           # IR generation tests
+tests/python/examples/
+└── aot_example.py      # AOT pre-compilation for preshuffle GEMM
 ```
 
 ---
@@ -186,7 +163,7 @@ op             shape                              dtype       TB/s    TFLOPS
 gemm           16x40960x5120                      fp8         1.234     56.789
 ```
 
-**Logs:** Written to `${BENCH_LOG_DIR:-/tmp/flir_bench}/`
+**Logs:** Written to `${BENCH_LOG_DIR:-/tmp/flydsl_bench}/`
 
 ---
 
@@ -194,7 +171,7 @@ gemm           16x40960x5120                      fp8         1.234     56.789
 
 ### 3.1 `tests/conftest.py`
 
-Pytest configuration with MLIR context fixtures. Supports both the new Fly dialect and legacy FLIR dialect.
+Pytest configuration with MLIR context fixtures for the Fly dialect.
 
 **Fixtures:**
 
@@ -214,7 +191,7 @@ def insert_point(ctx):
 ```
 
 **Build discovery:** Supports multiple build layouts:
-- `build-fly/python_packages` (preferred, new Fly dialect)
+- `build-fly/python_packages` (preferred)
 - `build/python_packages/flydsl` (fallback)
 
 **Session hook:** Prevents pytest exit code 5 (no tests collected) from being treated as failure.
@@ -269,7 +246,7 @@ gpu_us = bench_gpu_us_torch(fn, warmup=20, iters=200)
 
 ### `compile_to_hsaco()`
 
-Standalone compilation path for legacy (FLIR-based) tests:
+Standalone compilation path for tests:
 
 ```python
 from tests.utils import compile_to_hsaco
@@ -278,8 +255,8 @@ hsaco = compile_to_hsaco(mlir_module, kernel_name="my_kernel")
 ```
 
 **Pipeline stages:**
-1. FLIR coordinate lowering
-2. `flir-to-standard` lowering
+1. Fly coordinate lowering
+2. `fly-to-standard` lowering
 3. `canonicalize` + `cse`
 4. Attach ROCDL target (auto-detect GPU arch)
 5. `convert-gpu-to-rocdl` (SCF→CF, bare pointer memref)
@@ -404,32 +381,21 @@ python tests/kernels/test_preshuffle_gemm.py \
 | `ROCDSL_LAYERNORM_SHAPES` | `test_layernorm.py` | Override layernorm test shapes |
 | `FLYDSL_DUMP_IR` | Compiler | Dump intermediate IR at each pipeline stage |
 | `FLYDSL_DUMP_DIR` | Compiler | IR dump directory (default: `~/.flydsl/debug`) |
-| `FLIR_DUMP_IR` | `tests/utils.py` | Dump IR in legacy compilation path |
-| `FLIR_DUMP_DIR` | `tests/utils.py` | Legacy IR dump directory |
-| `FLIR_ENABLE_IR_PRINTING` | `tests/utils.py` | Print IR to console |
-| `FLIR_TIME_COMPILE` | `tests/utils.py` | Print per-stage compilation timing |
+| `FLYDSL_RUNTIME_CACHE_DIR` | Compiler | Cache directory (default: `~/.flydsl/cache`) |
 | `RUN_TESTS_FULL` | `run_tests.sh` | Set to `1` to run all parametrized cases |
-| `BENCH_LOG_DIR` | `run_benchmark.sh` | Benchmark log directory (default: `/tmp/flir_bench`) |
+| `BENCH_LOG_DIR` | `run_benchmark.sh` | Benchmark log directory (default: `/tmp/flydsl_bench`) |
 
 ---
 
 ## 9. IR Dump Workflow
 
-### New API (via `MlirCompiler`)
+### Via `MlirCompiler`
 
 ```bash
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python my_test.py
 ```
 
 Produces numbered `.mlir` files per pipeline stage plus `final_isa.s`.
-
-### Legacy API (via `compile_to_hsaco`)
-
-For legacy test utilities using `tests/utils.py`:
-
-```bash
-FLIR_DUMP_IR=1 FLIR_DUMP_DIR=./dumps python tests/kernels/test_softmax.py
-```
 
 ### Dedicated IR Dump Script
 
@@ -450,7 +416,7 @@ bash scripts/dumpir.sh
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
 | `tests/utils.py` | `compile_to_hsaco()`, `pertoken_quant()`, `shuffle_weight()` |
 | `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
-| `tests/mlir/*.mlir` | MLIR IR lowering tests |
-| `tests/pyir/test_*.py` | Python IR generation tests (16 files) |
-| `tests/kernels/test_*.py` | GPU kernel tests (14 files) |
-| `tests/python/` | New Python DSL tests |
+| `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | MLIR lit tests (18 files) |
+| `tests/pyir/test_*.py` | Python IR generation tests (3 files) |
+| `tests/kernels/test_*.py` | GPU kernel tests (12 files) |
+| `tests/python/examples/` | AOT pre-compilation examples |
