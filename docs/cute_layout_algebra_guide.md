@@ -27,14 +27,14 @@ A pure-Python reference implementation also exists in PyTorch:
 
 ### 1.2 FlyDSL as an AMD Implementation
 
-FlyDSL implements the CuTe layout algebra for AMD GPUs through the FLIR MLIR dialect:
+FlyDSL implements the CuTe layout algebra for AMD GPUs through the Fly MLIR dialect:
 
 | Aspect | CuTe C++ (CUTLASS) | FlyDSL |
 |---|---|---|
 | **Language** | C++ templates | Python + MLIR emission |
 | **Hardware** | NVIDIA CUDA GPUs | AMD ROCm/HIP GPUs |
-| **IR backend** | C++ templates → CUDA/PTX | FLIR MLIR dialect → ROCDL → HSACO |
-| **Kernel model** | C++ kernel functions | `MlirModule` class + `@kernel`/`@jit` |
+| **IR backend** | C++ templates → CUDA/PTX | Fly MLIR dialect → ROCDL → HSACO |
+| **Kernel model** | C++ kernel functions | `@flyc.kernel` + `@flyc.jit` |
 | **Memory model** | GMEM → SMEM → RMEM | GMEM → LDS → VGPR |
 | **Compilation** | nvcc / CUTLASS build | Python → MLIR → ROCDL → HSACO binary |
 | **Wave/Warp size** | 32 threads (warp) | 64 threads (wavefront) |
@@ -49,31 +49,31 @@ A **Layout** is defined by a pair `(Shape, Stride)`:
 
 | Concept | Mathematical Definition | FlyDSL API |
 |---|---|---|
-| **Shape** | Tuple of positive integers describing dimensions | `flir.make_shape(M, N)` |
-| **Stride** | Tuple of integers describing step sizes per dimension | `flir.make_stride(s0, s1)` |
-| **Layout** | Pair `(Shape, Stride)` defining a coordinate → index mapping | `flir.make_layout(shape, stride)` |
-| **Coord** | Tuple of integers identifying a position in logical space | `flir.make_coord(i, j)` |
+| **Shape** | Tuple of positive integers describing dimensions | `fx.make_shape(M, N)` |
+| **Stride** | Tuple of integers describing step sizes per dimension | `fx.make_stride(s0, s1)` |
+| **Layout** | Pair `(Shape, Stride)` defining a coordinate → index mapping | `fx.make_layout(shape, stride)` |
+| **Coord** | Tuple of integers identifying a position in logical space | `fx.make_coord(i, j)` |
 
 > **Reference:** `include/cute/layout.hpp` — `Layout<Shape, Stride>` template class.
 
 **FlyDSL example:**
 ```python
-from flydsl.dialects.ext import flir
+import flydsl.expr as fx
 
-shape = flir.make_shape(128, 64)
-stride = flir.make_stride(1, 128)    # Column-major
-layout = flir.make_layout(shape, stride)
-coord = flir.make_coord(3, 5)
+shape = fx.make_shape(128, 64)
+stride = fx.make_stride(1, 128)    # Column-major
+layout = fx.make_layout(shape, stride)
+coord = fx.make_coord(3, 5)
 ```
 
 ### 2.2 Query Operations
 
 | Operation | Formula | FlyDSL API |
 |---|---|---|
-| **size** | `product(shape)` — total number of elements | `flir.size(layout)` |
-| **cosize** | `max(index) + 1` — size of the codomain | `flir.cosize(layout)` |
-| **rank** | Number of modes (top-level dimensions) | `flir.rank(layout)` |
-| **size of mode i** | `shape[i]` | `flir.get(flir.get_shape(layout), i)` |
+| **size** | `product(shape)` — total number of elements | `fx.size(layout)` |
+| **cosize** | `max(index) + 1` — size of the codomain | `fx.cosize(layout)` |
+| **rank** | Number of modes (top-level dimensions) | `fx.rank(layout)` |
+| **size of mode i** | `shape[i]` | `fx.get(fx.get_shape(layout), i)` |
 
 > **Reference:** `include/cute/layout.hpp` — `size()`, `cosize()`, `rank()` functions.
 
@@ -99,8 +99,8 @@ coord = idx2crd(index, shape, stride)
 
 | Operation | Definition | FlyDSL API |
 |---|---|---|
-| **crd2idx** | `coord → index = sum(c_i * d_i)` | `flir.crd2idx(coord, layout)` |
-| **idx2crd** | `index → coord` (successive div/mod by shape elements) | `flir.idx2crd(idx, layout)` |
+| **crd2idx** | `coord → index = sum(c_i * d_i)` | `fx.crd2idx(coord, layout)` |
+| **idx2crd** | `index → coord` (successive div/mod by shape elements) | `fx.idx2crd(idx, layout)` |
 
 > **Reference:** `include/cute/layout.hpp` — `crd2idx()`, `idx2crd()`.
 
@@ -116,7 +116,7 @@ Given layouts `A = (S_A, d_A)` and `B = (S_B, d_B)`, the composition `A ∘ B` c
 (A ∘ B)(c) = A(B(c))
 ```
 
-FlyDSL: `flir.composition(A, B)`
+FlyDSL: `fx.composition(A, B)`
 
 > **Reference:** `include/cute/layout.hpp` — `composition()`.
 
@@ -124,7 +124,7 @@ FlyDSL: `flir.composition(A, B)`
 
 The complement of layout `A` with respect to a codomain size `M` produces a layout `B` such that `(A, B)` together cover `[0, M)`:
 
-FlyDSL: `flir.complement(layout, cotarget)`
+FlyDSL: `fx.complement(layout, cotarget)`
 
 > **Reference:** `include/cute/layout.hpp` — `complement()`.
 
@@ -132,7 +132,7 @@ FlyDSL: `flir.complement(layout, cotarget)`
 
 Merges adjacent modes with compatible strides into a single mode, producing a simplified but functionally equivalent layout:
 
-FlyDSL: `flir.coalesce(layout)`
+FlyDSL: `fx.coalesce(layout)`
 
 > **Reference:** `include/cute/layout.hpp` — `coalesce()`.
 
@@ -142,12 +142,12 @@ Products combine two layouts to create higher-rank layouts. They differ in how t
 
 | Product | Description | FlyDSL API |
 |---|---|---|
-| **Logical Product** | Append B's modes as new outer modes of A | `flir.logical_product(A, B)` |
-| **Zipped Product** | Like logical, but zip inner modes together | `flir.zipped_product(A, B)` |
-| **Tiled Product** | Like logical, but group by tile | `flir.tiled_product(A, B)` |
-| **Flat Product** | Flatten all result modes | `flir.flat_product(A, B)` |
-| **Raked Product** | Interleave A and B elements (raked distribution) | `flir.raked_product(A, B)` |
-| **Blocked Product** | Block A elements together, then B (blocked distribution) | `flir.blocked_product(A, B)` |
+| **Logical Product** | Append B's modes as new outer modes of A | `fx.logical_product(A, B)` |
+| **Zipped Product** | Like logical, but zip inner modes together | `fx.zipped_product(A, B)` |
+| **Tiled Product** | Like logical, but group by tile | `fx.tiled_product(A, B)` |
+| **Flat Product** | Flatten all result modes | `fx.flat_product(A, B)` |
+| **Raked Product** | Interleave A and B elements (raked distribution) | `fx.raked_product(A, B)` |
+| **Blocked Product** | Block A elements together, then B (blocked distribution) | `fx.blocked_product(A, B)` |
 
 > **Reference:** `include/cute/layout.hpp` — `logical_product()`, `zipped_product()`, `tiled_product()`, `flat_product()`, `raked_product()`, `blocked_product()`.
 
@@ -157,10 +157,10 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 | Divide | Description | FlyDSL API |
 |---|---|---|
-| **Logical Divide** | Split A by tiler, keep full mode hierarchy | `flir.logical_divide(A, tiler)` |
-| **Zipped Divide** | Like logical, but zip tile modes | `flir.zipped_divide(A, tiler)` |
-| **Tiled Divide** | Like logical, but group by tile | `flir.tiled_divide(A, tiler)` |
-| **Flat Divide** | Flatten tile and remainder modes | `flir.flat_divide(A, tiler)` |
+| **Logical Divide** | Split A by tiler, keep full mode hierarchy | `fx.logical_divide(A, tiler)` |
+| **Zipped Divide** | Like logical, but zip tile modes | `fx.zipped_divide(A, tiler)` |
+| **Tiled Divide** | Like logical, but group by tile | `fx.tiled_divide(A, tiler)` |
+| **Flat Divide** | Flatten tile and remainder modes | `fx.flat_divide(A, tiler)` |
 
 > **Reference:** `include/cute/layout.hpp` — `logical_divide()`, `zipped_divide()`, `tiled_divide()`, `flat_divide()`.
 
@@ -168,8 +168,8 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 | Operation | Description | FlyDSL API |
 |---|---|---|
-| **local_partition** | Partition a layout among threads/tiles | `flir.local_partition(layout, ...)` |
-| **local_tile** | Extract a tile from a layout | `flir.local_tile(layout, ...)` |
+| **local_partition** | Partition a layout among threads/tiles | `fx.local_partition(layout, ...)` |
+| **local_tile** | Extract a tile from a layout | `fx.local_tile(layout, ...)` |
 
 > **Reference:** `include/cute/algorithm/` — `local_partition.hpp`, `local_tile.hpp`.
 
@@ -177,39 +177,42 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 ## 3. FlyDSL Kernel Development
 
-FlyDSL kernels are defined as Python classes extending `MlirModule`, using `@kernel` for GPU device functions and `@jit` for host-side launch wrappers:
+FlyDSL kernels are defined using `@flyc.kernel` for GPU device functions and `@flyc.jit` for host-side launch wrappers:
 
 ```python
-from flydsl.lang.ir.module import MlirModule, kernel, jit
-from flydsl.dialects.ext import flir, arith, gpu
-import _mlir.extras.types as T
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
-class MyKernel(MlirModule):
-    GPU_MODULE_NAME = "my_kernel"
-    GPU_MODULE_TARGETS = ['#rocdl.target<chip = "gfx942">']
+@flyc.kernel
+def my_kernel(
+    A: fx.Tensor,
+    B: fx.Tensor,
+    C: fx.Tensor,
+    block_dim: fx.Constexpr[int],
+):
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
+    # Kernel body — use layout algebra here
+    ...
 
-    @kernel
-    def my_kernel(self,
-                  A: T.memref(T.dynamic(), T.f16()),
-                  B: T.memref(T.dynamic(), T.f16()),
-                  C: T.memref(T.dynamic(), T.f16()),
-                  M: T.index()):
-        # Kernel body — use layout algebra here
-        ...
-
-    @jit
-    def __call__(self, A, B, C, M, stream_ptr: T.i64()):
-        # Host-side launch wrapper
-        ...
+@flyc.jit
+def launch(
+    A: fx.Tensor, B: fx.Tensor, C,
+    n: fx.Int32,
+    stream: fx.Stream = fx.Stream(None),
+):
+    my_kernel(A, B, C, block_dim).launch(
+        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream,
+    )
 ```
 
 **Key elements:**
-- `MlirModule` base class provides MLIR module construction
-- `@kernel` decorator marks GPU device functions
-- `@jit` decorator marks host-side launch wrappers
-- Parameters use MLIR types: `T.memref(...)` for tensors, `T.index()` for integer scalars
-- `GPU_MODULE_NAME` sets the kernel name in the compiled binary
-- `GPU_MODULE_TARGETS` specifies target architecture(s)
+- `@flyc.kernel` decorator compiles the function body into GPU IR via AST rewriting
+- `@flyc.jit` decorator wraps a host-side function that constructs and launches kernels
+- `fx.Tensor` denotes a GPU tensor argument
+- `fx.Constexpr[int]` denotes a compile-time constant (affects cache key)
+- `fx.Int32` denotes a dynamic int32 argument
+- `fx.Stream` denotes a GPU stream argument
 
 ---
 
@@ -219,11 +222,11 @@ GPU kernels organize threads into a hierarchy of blocks and grids. FlyDSL provid
 
 | Concept | FlyDSL API | Description |
 |---|---|---|
-| Thread index | `flir.thread_idx("x")` | Thread index within block |
-| Block index | `flir.block_idx("x")` | Block index within grid |
-| Block dimension | `flir.block_dim("x")` | Number of threads per block |
+| Thread index | `fx.thread_idx.x` | Thread index within block |
+| Block index | `fx.block_idx.x` | Block index within grid |
+| Block dimension | `fx.block_dim.x` | Number of threads per block |
 
-Supported dimensions: `"x"`, `"y"`, `"z"`.
+Supported dimensions: `.x`, `.y`, `.z`.
 
 **Hardware mapping (NVIDIA → AMD):**
 
@@ -241,20 +244,20 @@ Supported dimensions: `"x"`, `"y"`, `"z"`.
 
 ### 5.1 Tensor Construction
 
-FlyDSL uses `TensorView` as its tensor abstraction, wrapping an MLIR memref with layout information:
+FlyDSL provides tensor operations with layout-aware partitioning:
 
 ```python
-# Global memory tensor view
-gmem_A = flir.TensorView(
-    arg_a,                  # memref argument
-    (tile_m, tile_k),       # shape
-    strides=(1, M),         # strides
-    base_indices=(base_m,), # base offset
-    element_type=T.f16(),
-)
+import flydsl.expr as fx
+
+# Create a buffer tensor from a tensor argument (AMD buffer descriptor)
+A = fx.rocdl.make_buffer_tensor(A)
+
+# Partition using layout algebra
+tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
+tA = fx.slice(tA, (None, bid))
 
 # Register fragment
-rmem_frag = flir.make_fragment_like(template_tensor)
+frag = fx.make_fragment_like(partition_src)
 ```
 
 ### 5.2 Memory Hierarchy
@@ -268,15 +271,14 @@ rmem_frag = flir.make_fragment_like(template_tensor)
 
 **LDS allocation in FlyDSL:**
 ```python
-from flydsl.utils import SmemAllocator
+from flydsl.utils.smem_allocator import SmemAllocator
 
 allocator = SmemAllocator(ctx, arch="gfx942")
 lds_gen = allocator.allocate_array(T.f16(), num_elems=128*64)
-allocator.finalize()  # Inside gpu.module body
+allocator.finalize()
 
-# Inside kernel:
 base = allocator.get_base()
-lds_ptr = lds_gen(base)  # SmemPtr for typed access
+lds_ptr = lds_gen(base)
 ```
 
 ### 5.3 Swizzling (Bank Conflict Avoidance)
@@ -284,7 +286,7 @@ lds_ptr = lds_gen(base)  # SmemPtr for typed access
 Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL provides XOR-based swizzling at 16-byte granularity:
 
 ```python
-col_swizzled = flir.swizzle_xor16(row, col_bytes, k_blocks16)
+col_swizzled = fx.swizzle_xor16(row, col_bytes, k_blocks16)
 ```
 
 The swizzle function XORs the row index into the column address at 16-byte boundaries, distributing accesses across LDS banks.
@@ -298,13 +300,17 @@ The swizzle function XORs the row index into the column address at 16-byte bound
 FlyDSL uses the CuTe copy abstraction: a **copy atom** defines a single thread's copy capability, and a **tiled copy** distributes the atom across all threads:
 
 ```python
-# Create copy atom
-atom = flir.make_copy_atom(T.f16(), vector_size=8)
+import flydsl.expr as fx
 
-# Create tiled copy (distributed across threads)
-thr_layout = flir.make_ordered_layout(256, 8)  # 256 threads, 8 elements each
-val_layout = flir.make_layout(flir.make_shape(1, 8), flir.make_stride(0, 1))
-tiled_copy = flir.make_tiled_copy_tv(atom, thr_layout, val_layout)
+# Create copy atom (e.g., 128-bit buffer copy)
+copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+
+# Create tiled copy via raked product
+thr_layout = fx.make_layout((4, 1), (1, 1))
+val_layout = fx.make_layout((1, 8), (1, 1))
+layout_thr_val = fx.raked_product(thr_layout, val_layout)
+tile_mn = fx.make_tile(4, 8)
+tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
 
 # Get thread slice
 thr_copy = tiled_copy.get_slice(tid)
@@ -312,23 +318,21 @@ src_partition = thr_copy.partition_S(src_tensor)
 dst_partition = thr_copy.partition_D(dst_tensor)
 
 # Execute copy
-flir.copy(tiled_copy, src_tensor, dst_tensor)
+fx.copy(copy_atom, src_partition, dst_partition)
 ```
 
 ### 6.2 Buffer Loads (AMD-specific)
 
-AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these as intrinsics:
+AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these via the ``rocdl`` submodule:
 
 ```python
-from flydsl.dialects.ext import buffer_ops
+import flydsl.expr as fx
 
-# Buffer resource for global memory (AMD buffer load dwordx4)
-rsrc = buffer_ops.create_buffer_resource(arg_a, num_records)
+# Create a buffer tensor from a tensor argument (uses AMD buffer descriptor)
+A_buf = fx.rocdl.make_buffer_tensor(A)
 
-# Buffer load 16 bytes
-from kernels.mfma_preshuffle_pipeline import buffer_copy_gmem16_dwordx4
-vec = buffer_copy_gmem16_dwordx4(flir, arg=arg_a, elem_type=T.i8(),
-                                  idx_i32=offset, atom_g2r16=atom, rsrc=rsrc)
+# Use buffer copy atoms for efficient memory access
+copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 ```
 
 ---
@@ -338,19 +342,18 @@ vec = buffer_copy_gmem16_dwordx4(flir, arg=arg_a, elem_type=T.i8(),
 AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:
 
 ```python
-from flydsl.dialects.ext import rocdl
+import flydsl.expr as fx
 
-# FP16: mfma_f32_16x16x16f16 (K=16)
-c_acc = rocdl.mfma_f32_16x16x16f16(a_pack, b_pack, c_acc)
+# Create MFMA atom (16x16x4 FP32)
+mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
 
-# FP8: mfma_f32_16x16x32_fp8_fp8 (K=32)
-c_acc = rocdl.mfma_f32_16x16x32_fp8_fp8(a_pack, b_pack, c_acc)
-
-# INT8: mfma_i32_16x16x32_i8 (K=32)
-c_acc = rocdl.mfma_i32_16x16x32_i8(a_pack, b_pack, c_acc)
-
-# MXFP4 scaled MMA (GFX950 only)
-c_acc = rocdl.mfma_scale_x128(a_pack, b_pack, c_acc, scale_a, scale_b)
+# Partition and execute GEMM
+thr_mma = tiled_mma.thr_slice(tid)
+frag_A = thr_mma.make_fragment_A(partition_A)
+frag_B = thr_mma.make_fragment_B(partition_B)
+frag_C = thr_mma.make_fragment_C(partition_C)
+fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 ```
 
 **MFMA instruction reference (AMD CDNA):**
@@ -384,8 +387,8 @@ for ku in range(tile_k_bytes // 64):
 | `gpu.barrier()` | Workgroup-level barrier (equivalent to `__syncthreads`) |
 
 ```python
-from flydsl.dialects.ext import gpu
-gpu.barrier()
+import flydsl.expr as fx
+fx.gpu.barrier()
 ```
 
 ---
@@ -397,28 +400,35 @@ gpu.barrier()
 FlyDSL compiles Python → MLIR IR → ROCDL dialect → HSACO binary:
 
 ```python
-import flydsl
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
-# Option 1: Using compile() (preferred for production)
-mod = MyKernel()
-executor = flydsl.compile(mod)
-executor(A_torch, B_torch, C_torch, M)
+# Define kernel and launch wrapper
+@flyc.kernel
+def my_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor, ...):
+    ...
 
-# Option 2: Using compile_to_hsaco() (for tests)
-from tests.utils import compile_to_hsaco
-hsaco_bytes = compile_to_hsaco(mod)
+@flyc.jit
+def launch(A: fx.Tensor, B: fx.Tensor, C, ...,
+           stream: fx.Stream = fx.Stream(None)):
+    my_kernel(A, B, C, ...).launch(
+        grid=(...), block=(...), stream=stream,
+    )
+
+# Call the jit function — compilation happens automatically on first call
+launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 ```
 
 ### 9.2 Environment Variables
 
 | Variable | Description |
 |---|---|
-| `FLIR_CHIP` / `FLIR_GPU_ARCH` | Target architecture (e.g., `gfx942`, `gfx950`) |
-| `FLIR_DUMP_IR=1` | Dump intermediate MLIR IR |
-| `FLIR_DUMP_DIR=/path` | IR dump location |
-| `COMPILE_ONLY=1` | Skip execution, compile only |
-| `FLIR_NO_CACHE=1` | Disable compilation cache |
-| `FLIR_TIME_COMPILE=1` | Print compilation timing |
+| `ARCH` | Target architecture (e.g., `gfx942`, `gfx950`) |
+| `FLYDSL_DUMP_IR=1` | Dump intermediate MLIR IR |
+| `FLYDSL_DUMP_DIR=/path` | IR dump location |
+| `FLYDSL_COMPILE_ONLY=1` | Skip execution, compile only |
+| `FLYDSL_NO_CACHE=1` | Disable compilation cache |
+| `FLYDSL_RUNTIME_CACHE_DIR=/path` | Cache directory (default: `~/.flydsl/cache/`) |
 
 ---
 
@@ -427,58 +437,58 @@ hsaco_bytes = compile_to_hsaco(mod)
 This example shows how layout algebra concepts come together in a FlyDSL GEMM kernel. The layout algebra handles data distribution across threads and memory hierarchy; MFMA instructions handle the compute.
 
 ```python
-from flydsl.lang.ir.module import MlirModule, kernel, jit
-from flydsl.dialects.ext import flir, arith, gpu, rocdl
-from flydsl.utils import SmemAllocator
-import _mlir.extras.types as T
+import torch
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
-class GemmKernel(MlirModule):
-    GPU_MODULE_NAME = "gemm"
-    GPU_MODULE_TARGETS = ['#rocdl.target<chip = "gfx942">']
+block_m, block_n, block_k = 64, 64, 8
 
-    BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
+@flyc.kernel
+def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
 
-    @kernel
-    def gemm(self, A, B, C, M, N, K):
-        tid = flir.thread_idx("x")
-        bid = flir.block_idx("x")
+    tileA = fx.make_tile(block_m, block_k)
+    tileB = fx.make_tile(block_n, block_k)
+    tileC = fx.make_tile(block_m, block_n)
 
-        # 1. Layout algebra: define tile shapes
-        tile_shape = flir.make_shape(self.BLOCK_M, self.BLOCK_N)
+    A = fx.rocdl.make_buffer_tensor(A)
+    B = fx.rocdl.make_buffer_tensor(B)
+    C = fx.rocdl.make_buffer_tensor(C)
 
-        # 2. Layout algebra: partition work across blocks
-        block_coord = flir.idx2crd(bid, flir.make_shape(M // self.BLOCK_M,
-                                                         N // self.BLOCK_N))
+    bA = fx.slice(fx.zipped_divide(A, tileA), (None, bid))
+    bB = fx.slice(fx.zipped_divide(B, tileB), (None, bid))
+    bC = fx.slice(fx.zipped_divide(C, tileC), (None, bid))
 
-        # 3. Layout algebra: create tiled copies for GMEM → LDS
-        copy_atom = flir.make_copy_atom(T.f16(), vector_size=8)
-        thr_layout = flir.make_ordered_layout(256, 8)
-        tiled_copy = flir.make_tiled_copy_tv(copy_atom, thr_layout, ...)
+    # MFMA atom setup
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+    tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
+    thr_mma = tiled_mma.thr_slice(tid)
 
-        # 4. LDS allocation
-        base = self.allocator.get_base()
-        lds_a = self.lds_a_gen(base)
-        lds_b = self.lds_b_gen(base)
+    # Tiled copies for A, B, C
+    copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+    tiled_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma)
+    tiled_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma)
 
-        # 5. K-loop: load tiles, compute MFMA, accumulate
-        for k_tile in range(K // self.BLOCK_K):
-            # Load A, B tiles from GMEM to LDS
-            flir.copy(tiled_copy, gmem_a_tile, lds_a)
-            flir.copy(tiled_copy, gmem_b_tile, lds_b)
-            gpu.barrier()
+    # Partition and copy to register fragments
+    frag_A = thr_mma.make_fragment_A(thr_mma.partition_A(bA))
+    frag_B = thr_mma.make_fragment_B(thr_mma.partition_B(bB))
+    frag_C = thr_mma.make_fragment_C(thr_mma.partition_C(bC))
 
-            # MFMA compute
-            for ki in range(self.BLOCK_K // 16):
-                a_frag = ...  # Load from LDS
-                b_frag = ...  # Load from LDS
-                c_acc = rocdl.mfma_f32_16x16x16f16(a_frag, b_frag, c_acc)
-            gpu.barrier()
+    # ... copy data to fragments, then GEMM ...
+    fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
 
-        # 6. Store C tile back to GMEM
-        ...
+    # Store result back to C
+    # ...
+
+@flyc.jit
+def tiledMma(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
+             stream: fx.Stream = fx.Stream(None)):
+    gemm_kernel(A, B, C).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 ```
 
-See `kernels/preshuffle_gemm.py` for a complete, production-quality GEMM implementation.
+See `examples/03-tiledMma.py` for a complete working GEMM example, and
+`kernels/preshuffle_gemm.py` for a production-quality GEMM implementation.
 
 ---
 
@@ -493,10 +503,12 @@ See `kernels/preshuffle_gemm.py` for a complete, production-quality GEMM impleme
 - **PyCute reference:** `torch/distributed/_pycute/layout.py` — pure-Python layout algebra (open source, PyTorch)
 
 ### FlyDSL Source Files
-- `flydsl/src/flydsl/dialects/ext/flir.py` — Layout algebra Python API
-- `flydsl/src/flydsl/lang/ir/module.py` — MlirModule, @kernel, @jit
-- `flydsl/src/flydsl/compiler/compiler.py` — `flir.compile()` pipeline
-- `flydsl/src/flydsl/utils/smem_allocator.py` — SmemAllocator
-- `flydsl/src/flydsl/dialects/ext/rocm.py` — ROCm dialect helpers
-- `kernels/preshuffle_gemm.py` — GEMM implementation example
-- `tests/kernels/test_vec_add.py` — VecAdd example with full layout algebra
+- `python/flydsl/expr/` — Layout algebra and expression API (`primitive.py`, `derived.py`, etc.)
+- `python/flydsl/expr/rocdl/` — ROCDL-specific operations
+- `python/flydsl/compiler/` — JIT compilation pipeline (`kernel_function.py`, `jit_function.py`)
+- `python/flydsl/utils/smem_allocator.py` — SmemAllocator
+- `examples/01-vectorAdd.py` — VecAdd example with layout algebra
+- `examples/02-tiledCopy.py` — Tiled copy example
+- `examples/03-tiledMma.py` — Tiled MFMA GEMM example
+- `kernels/preshuffle_gemm.py` — Production GEMM implementation
+- `kernels/preshuffle_gemm_flyc.py` — GEMM using `@flyc.kernel` API

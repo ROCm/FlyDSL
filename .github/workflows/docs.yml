@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-      - docs-website
-      - docs/sphinx-website
   pull_request:
     branches:
       - main
@@ -38,7 +36,7 @@ jobs:
 
       - name: Install FlyDSL (best effort)
         run: |
-          FLIR_REBUILD=0 pip install -e . || true
+          pip install -e . 2>/dev/null || true
 
       - name: Build Sphinx documentation
         run: |
@@ -51,7 +49,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/docs-website' || github.ref == 'refs/heads/docs/sphinx-website')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:

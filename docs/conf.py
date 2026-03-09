@@ -4,16 +4,15 @@ import os
 import sys
 
 # -- Path setup --------------------------------------------------------------
-# Add project root and source directories to sys.path so autodoc can find modules.
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _project_root)
-sys.path.insert(0, os.path.join(_project_root, "flydsl", "src"))
+sys.path.insert(0, os.path.join(_project_root, "python"))
 
 # -- Project information -----------------------------------------------------
 project = "FlyDSL"
 copyright = "2024-2026, Advanced Micro Devices, Inc."
 author = "AMD"
-release = "0.0.1.dev"
+release = "0.1.0"
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -64,6 +63,8 @@ autodoc_mock_imports = [
     "hip",
     "torch",
     "numpy",
+    "nanobind",
+    "pybind11",
 ]
 
 # Intersphinx mapping

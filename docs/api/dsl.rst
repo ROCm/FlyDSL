@@ -12,55 +12,58 @@ Core Module
    :undoc-members:
    :show-inheritance:
 
-FLIR Dialect Extensions
------------------------
+Expression API (``flydsl.expr``)
+---------------------------------
 
-The ``flydsl.dialects.ext.flir`` module provides the high-level Python API for
-constructing FLIR IR, including layout construction, tiled copies, tensor
+The ``flydsl.expr`` module (imported as ``fx``) provides the high-level Python
+API for constructing Fly IR, including layout construction, tiled copies, tensor
 operations, and kernel definitions.
 
-Key classes and functions:
+.. code-block:: python
 
-- **MlirModule** -- base class for GPU kernel modules
-- **@kernel** / **@jit** -- decorators for GPU kernel and JIT function definitions
-- **make_shape**, **make_stride**, **make_layout** -- layout construction
-- **make_ordered_layout** -- ordered layout construction
-- **make_copy_atom**, **make_tiled_copy_tv** -- tiled copy setup
-- **make_tensor**, **zipped_divide** -- tensor partitioning
-- **make_fragment_like**, **copy** -- register fragment operations
-- **thread_idx**, **block_idx** -- GPU indexing
-- **size**, **rank**, **cosize** -- layout inspection
-- **crd2idx**, **idx2crd** -- coordinate-to-index mapping
+   import flydsl.expr as fx
 
-Arithmetic Extensions
----------------------
+Key functions and types:
 
-The ``flydsl.dialects.ext.arith`` module wraps MLIR arithmetic operations with
-Python operator overloading via ``ArithValue``.
+- **fx.make_layout**, **fx.make_shape**, **fx.make_stride** -- layout construction
+- **fx.make_tile** -- tile construction from layouts
+- **fx.make_copy_atom**, **fx.make_tiled_copy** -- tiled copy setup
+- **fx.make_mma_atom**, **fx.make_tiled_mma** -- MFMA instruction setup
+- **fx.logical_divide**, **fx.zipped_divide** -- tensor partitioning
+- **fx.logical_product**, **fx.raked_product** -- layout product operations
+- **fx.make_fragment_like**, **fx.copy** -- register fragment operations
+- **fx.slice** -- tensor slicing
+- **fx.memref_alloca**, **fx.memref_load_vec**, **fx.memref_store_vec** -- register operations
+- **fx.copy_atom_call** -- invoke copy atom
+- **fx.gemm** -- invoke MFMA GEMM
+- **fx.thread_idx**, **fx.block_idx** -- GPU indexing (via ``fx.gpu``)
+- **fx.size**, **fx.rank**, **fx.cosize** -- layout inspection
+- **fx.crd2idx**, **fx.idx2crd** -- coordinate-to-index mapping
 
-SCF Extensions
---------------
+Type annotations:
 
-The ``flydsl.dialects.ext.scf`` module provides structured control flow
-(``for_``, ``if_``, ``while_``) with Python context manager syntax.
+- **fx.Tensor** -- GPU tensor argument
+- **fx.Constexpr[int]** -- compile-time constant
+- **fx.Int32** -- dynamic int32 argument
+- **fx.Stream** -- GPU stream argument
 
-Buffer Operations
------------------
+Submodules:
 
-The ``flydsl.dialects.ext.buffer_ops`` module provides high-level wrappers for
-AMD buffer load/store instructions (CDNA3/CDNA4). These use scalar base pointers
-with per-thread offsets for efficient global memory access with hardware bounds
-checking. Key APIs: ``create_buffer_resource``, ``buffer_load``, ``buffer_store``,
-``buffer_load_2d``, ``buffer_store_2d``, ``BufferResourceDescriptor``.
+- **fx.arith** -- arithmetic operations (``addf``, ``mulf``, ``subf``, etc.)
+- **fx.gpu** -- GPU operations (``thread_idx``, ``block_idx``, ``barrier``)
+- **fx.vector** -- vector operations
+- **fx.buffer_ops** -- AMD buffer load/store instructions
+- **fx.rocdl** -- ROCDL-specific operations (buffer tensors, copy atoms)
 
-Block Reduce Operations
------------------------
+Compiler API (``flydsl.compiler``)
+-----------------------------------
 
-The ``flydsl.dialects.ext.block_reduce_ops`` module provides block-level and
-warp-level collective operations (reductions, broadcasts) that combine shuffle,
-shared memory, and barrier primitives into reusable patterns.
+.. code-block:: python
 
-Compiler Pipeline
------------------
+   import flydsl.compiler as flyc
 
-.. seealso:: :doc:`compiler` for the compilation and pipeline API.
+- **@flyc.kernel** -- decorator for GPU kernel functions
+- **@flyc.jit** -- decorator for host-side JIT launch functions
+- **flyc.from_dlpack** -- convert PyTorch tensors to FlyDSL tensors
+
+.. seealso:: :doc:`compiler` for the full compilation and pipeline API.

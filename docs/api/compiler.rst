@@ -1,97 +1,104 @@
 Compiler & Pipeline
 ===================
 
-FlyDSL includes a composable MLIR compiler pipeline for lowering kernel IR to
-GPU binaries.
+FlyDSL includes a JIT compiler that traces Python kernel functions into MLIR
+and lowers them through the Fly dialect pipeline to GPU binaries.
 
-Pipeline
---------
+``@flyc.kernel`` and ``@flyc.jit``
+------------------------------------
 
-The ``Pipeline`` class provides a fluent API for constructing MLIR pass pipelines:
+The primary API for defining and compiling kernels:
 
 .. code-block:: python
 
-   from flydsl.compiler.pipeline import Pipeline
+   import flydsl.compiler as flyc
+   import flydsl.expr as fx
 
-   pipeline = (
-       Pipeline()
-       .flir_to_standard()
-       .canonicalize()
-       .cse()
-       .rocdl_attach_target(chip="gfx942")
-       .Gpu(Pipeline().convert_gpu_to_rocdl(runtime="HIP"))
-       .gpu_to_llvm()
-       .lower_to_llvm()
-       .gpu_module_to_binary(format="bin")
+   @flyc.kernel
+   def my_kernel(A: fx.Tensor, B: fx.Tensor, n: fx.Constexpr[int]):
+       tid = fx.thread_idx.x
+       bid = fx.block_idx.x
+       # ... kernel body using layout ops ...
+
+   @flyc.jit
+   def launch(A: fx.Tensor, B: fx.Tensor, n: fx.Constexpr[int],
+              stream: fx.Stream = fx.Stream(None)):
+       my_kernel(A, B, n).launch(
+           grid=(grid_x, 1, 1),
+           block=(256, 1, 1),
+           stream=stream,
+       )
+
+- ``@flyc.kernel`` compiles the function body into a ``gpu.func`` inside a
+  ``gpu.module``. It uses AST rewriting to trace Python code into MLIR IR.
+- ``@flyc.jit`` wraps a host-side function that constructs and launches kernels.
+  On first call it triggers JIT compilation; subsequent calls with the same type
+  signature use a cached compiled artifact.
+
+Compilation Flow
+-----------------
+
+On first call, ``@flyc.jit`` runs the following pipeline:
+
+1. **AST Rewriting**: The Python source is parsed and rewritten to emit MLIR ops.
+2. **MLIR Module Construction**: Kernel body is traced into ``gpu``, ``arith``,
+   ``scf``, ``memref``, and ``fly`` dialect ops.
+3. **Fly Pass Pipeline**: The module is lowered through a series of MLIR passes:
+
+   - ``gpu-kernel-outlining``
+   - ``fly-canonicalize``
+   - ``fly-layout-lowering``
+   - ``convert-fly-to-rocdl``
+   - ``canonicalize`` + ``cse``
+   - ``gpu.module(convert-gpu-to-rocdl{...})``
+   - ``rocdl-attach-target{chip=gfxNNN}``
+   - ``gpu-to-llvm``, ``convert-arith/func-to-llvm``
+   - ``gpu-module-to-binary{format=fatbin}``
+
+4. **Cached Artifact**: The compiled binary is cached to disk
+   (``~/.flydsl/cache/``) keyed by the compiler toolchain hash and kernel
+   type signature.
+
+Tensor Arguments
+-----------------
+
+Use ``flyc.from_dlpack`` to convert PyTorch tensors into FlyDSL tensor
+descriptors with layout metadata:
+
+.. code-block:: python
+
+   import flydsl.compiler as flyc
+
+   tA = flyc.from_dlpack(torch_tensor).mark_layout_dynamic(
+       leading_dim=0, divisibility=4
    )
-
-Available pipeline passes include:
-
-- **flir_to_standard** -- lower FLIR dialect ops to standard MLIR
-- **canonicalize** -- standard canonicalization
-- **cse** -- common subexpression elimination
-- **rocdl_attach_target** -- attach ROCm device target (chip, features)
-- **convert_gpu_to_rocdl** -- lower GPU dialect to ROCDL
-- **gpu_to_llvm** -- lower GPU host-side ops to LLVM
-- **lower_to_llvm** -- lower remaining ops to LLVM dialect
-- **gpu_module_to_binary** -- compile GPU module to device binary
-
-Compiler
---------
-
-The ``compile`` function JIT-compiles an MLIR module into an executable:
-
-.. code-block:: python
-
-   import flydsl
-
-   exe = flydsl.compile(module)
-   exe(arg1, arg2, ...)
-
-Executor
---------
-
-The ``Executor`` class provides lower-level control over kernel execution,
-including launch configuration and argument marshalling.
-
-RAII Context
-------------
-
-``RAIIMLIRContextModule`` manages the MLIR context lifetime, ensuring proper
-initialization and cleanup of dialects and passes.
+   launch(tA, B, n, stream=torch.cuda.Stream())
 
 Buffer Operations
 -----------------
 
-The ``flydsl.dialects.ext.buffer_ops`` module provides high-level Python wrappers
-for AMD CDNA3/CDNA4 buffer load/store operations. Buffer operations use a scalar
+The ``flydsl.expr.buffer_ops`` module provides high-level Python wrappers for
+AMD CDNA3/CDNA4 buffer load/store operations. Buffer operations use a scalar
 base pointer (SGPRs) and per-thread offsets for efficient global memory access
 with hardware bounds checking.
 
-Key functions:
+ROCDL Operations
+-----------------
 
-- **create_buffer_resource** -- create an AMD buffer resource descriptor from a memref
-- **buffer_load** / **buffer_store** -- vectorized buffer load/store with optional masking
-- **buffer_load_2d** / **buffer_store_2d** -- 2D buffer access with automatic row/col offset calculation
-- **BufferResourceDescriptor** -- class wrapping the ROCDL buffer resource descriptor
+The ``flydsl.expr.rocdl`` module provides AMD-specific operations:
 
-.. code-block:: python
+- **fx.rocdl.make_buffer_tensor** -- create buffer resource descriptor from tensor
+- **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy atoms
+- **fx.rocdl.MFMA** -- MFMA instruction atoms (e.g., ``MFMA(16, 16, 4, fx.Float32)``)
 
-   from flydsl.dialects.ext import buffer_ops
-
-   rsrc = buffer_ops.create_buffer_resource(A)
-   data = buffer_ops.buffer_load(rsrc, offset, vec_width=4)
-   buffer_ops.buffer_store(result, rsrc, offset)
-
-Helper utilities: ``index_cast_to_i32``, ``i32_mul``, ``i32_add``, ``i32_select``.
-
-flir-opt CLI
+fly-opt CLI
 ------------
 
-The ``flir-opt`` tool is a command-line interface for running MLIR passes on
+The ``fly-opt`` tool is a command-line interface for running MLIR passes on
 ``.mlir`` files:
 
 .. code-block:: bash
 
-   flir-opt --flir-to-standard input.mlir
-   flir-opt --help
+   fly-opt --fly-canonicalize input.mlir
+   fly-opt --fly-layout-lowering input.mlir
+   fly-opt --help
