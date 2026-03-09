@@ -46,6 +46,7 @@ __all__ = [
     "tensor_wait",
     "compute_padding_encoding",
     "compute_warp_distribution",
+    "l2_prefetch_tile",
 ]
 
 
@@ -392,3 +393,84 @@ def tensor_wait(count: int = 0) -> None:
         count: Number of outstanding operations to allow (0 = wait for all).
     """
     rocdl.s_wait_tensorcnt(count)
+
+
+# ---------------------------------------------------------------------------
+# L2 prefetch
+# ---------------------------------------------------------------------------
+
+# Scope constants for global_prefetch
+PREFETCH_SCOPE_SE = 8       # SE scope = L2 cache
+PREFETCH_SCOPE_DEVICE = 16  # Device scope
+
+def l2_prefetch_tile(
+    global_ptr,
+    global_offset: Tuple,
+    tile_shape: Tuple[int, int],
+    strides: Tuple[int, int],
+    elem_bytes: int = 2,
+    num_warps: int = 1,
+    wave_id=None,
+    thread_id=None,
+    block_threads: int = 256,
+    scope: int = PREFETCH_SCOPE_SE,
+) -> None:
+    """Issue per-lane L2 cache prefetch hints for a 2D tile.
+
+    Each lane in the workgroup prefetches 1 byte at a distinct global address
+    within the tile, distributing prefetch coverage across the tile.
+
+    For a tile of outer×inner elements, each lane covers a unique row offset.
+    Multiple calls (from successive iterations) accumulate coverage.
+
+    Args:
+        global_ptr:    The global tensor (fx.Tensor).
+        global_offset: (outer_idx, inner_idx) as MLIR index values.
+        tile_shape:    (outer_size, inner_size) in elements.
+        strides:       (outer_stride, inner_stride) in elements.
+        elem_bytes:    Element size in bytes.
+        num_warps:     Total warps in the workgroup.
+        wave_id:       Current wave ID (MLIR index). Unused; thread_id used instead.
+        thread_id:     Workgroup-local thread ID (MLIR index value).
+        block_threads: Total threads in the workgroup.
+        scope:         Prefetch scope (default: SE = L2).
+    """
+    from .._mlir.dialects import (
+        fly as _fly_d,
+        llvm as llvm_dialect,
+    )
+
+    outer_size, inner_size = tile_shape
+    outer_stride, inner_stride = strides
+    outer_off, inner_off = global_offset
+
+    # Get global base address as i64
+    glb_ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    i64 = ir.IntegerType.get_signless(64)
+    a_raw = global_ptr.__fly_values__()[0]
+    glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
+    glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
+
+    # Each thread prefetches one row of the tile.
+    # thread_id maps to an outer-dim offset within the tile.
+    # Total rows = outer_size; if block_threads > outer_size, some threads
+    # wrap and prefetch additional cachelines.
+    # For simplicity, each thread prefetches row[tid % outer_size], col=0.
+    tile_row = thread_id % arith.index(outer_size)
+
+    elem_off = (
+        (outer_off + tile_row) * arith.index(outer_stride)
+        + inner_off * arith.index(inner_stride)
+    )
+    byte_off = elem_off * arith.index(elem_bytes)
+    byte_off_i64 = arith.index_cast(T.i64, byte_off)
+    addr_i64 = glb_base_i64 + byte_off_i64
+
+    # Convert i64 address to pointer
+    ptr_val = llvm_dialect.inttoptr(glb_ptr_type, _raw(addr_i64))
+
+    # Issue prefetch hint via ROCDL dialect op.
+    # NOTE: rocdl.global_prefetch lowers to llvm.amdgcn.global.prefetch, which
+    # requires LLVM ISel support for gfx1250 global_prefetch_b8. If the LLVM
+    # build lacks this pattern, the instruction will be silently dropped.
+    rocdl.global_prefetch(ptr_val, scope)

@@ -178,4 +178,7 @@ __all__ = [
     'tensor_store_from_lds',    # 4-group store
     'tensor_store_from_lds_d2', # 2-group store
     's_wait_tensorcnt',
+
+    # gfx1250 L2 prefetch
+    'global_prefetch',          # per-lane 1-byte prefetch hint
 ]
