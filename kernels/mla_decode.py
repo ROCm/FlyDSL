@@ -303,6 +303,12 @@ def compile_mla_decode(
     D_CHUNKS = HEAD_DIM_V // 16
     PV_K_STEPS = N_KV_SUBTILES     # 1
 
+    RESHAPE_CPB = 4
+    RESHAPE_BATCHES = D_CHUNKS // RESHAPE_CPB
+    RESHAPE_ROW = RESHAPE_CPB * 16 + 4
+    RESHAPE_WAVE = 16 * RESHAPE_ROW
+    RESHAPE_TOTAL = NUM_WAVES * RESHAPE_WAVE
+
     STRIDE_TOKEN_Q = NUM_Q_HEADS * HEAD_DIM_QK
     STRIDE_TOKEN_KV = NUM_KV_HEADS * HEAD_DIM_QK
     STRIDE_PAGE = PAGE_BLOCK_SIZE * STRIDE_TOKEN_KV
@@ -323,8 +329,9 @@ def compile_mla_decode(
     K_SEQS_PER_WAVE = K_PAIRS_PER_WAVE * 2
     COOP_K_VMEM_OPS = CKV_NUM_CHUNKS * K_PAIRS_PER_WAVE
 
-    K_LO_CHUNKS = 5
-    K_HI0_CHUNKS = 2
+    _GEMM1_HALF = K_STEPS - K_PREFETCH
+    K_LO_CHUNKS = min(5, _GEMM1_HALF // K_PAIRS_PER_WAVE)
+    K_HI0_CHUNKS = min(2, CKV_NUM_CHUNKS - K_LO_CHUNKS)
     K_HI1_CHUNKS = CKV_NUM_CHUNKS - K_LO_CHUNKS - K_HI0_CHUNKS
     K_LO_OPS = K_LO_CHUNKS * K_PAIRS_PER_WAVE
     K_HI0_OPS = K_HI0_CHUNKS * K_PAIRS_PER_WAVE
@@ -338,7 +345,9 @@ def compile_mla_decode(
     VT_STRIDE = (BLOCK_N // 4) * 8
 
     K_BUF_ELEMS = CKV_WAVE_BYTES * NUM_WAVES // 2
-    VT_BUF_ELEMS = (HEAD_DIM_V // 2) * VT_STRIDE
+    _VT_DATA_ELEMS = (HEAD_DIM_V // 2) * VT_STRIDE
+    _VT_WRITE_SPAN = 128 * 2 * VT_STRIDE
+    VT_BUF_ELEMS = max(_VT_DATA_ELEMS, _VT_WRITE_SPAN)
     VT_BUF_OFFSET = 2 * K_BUF_ELEMS
     KV_LDS_SIZE = 2 * K_BUF_ELEMS + VT_BUF_ELEMS
 
@@ -355,7 +364,7 @@ def compile_mla_decode(
 
     LDS_SIZE = max(KV_LDS_SIZE, Q_TILE_ELEMS)
 
-    assert HEAD_DIM_V // 2 == BLOCK_SIZE
+    assert HEAD_DIM_V % 16 == 0 and HEAD_DIM_V <= BLOCK_SIZE * 2
 
     _KLOAD_ASM = None
     _KLOAD_CONSTRAINTS = None
@@ -440,6 +449,9 @@ def compile_mla_decode(
         lds_red = SmemPtr(
             base_ptr_red, lds_red_offset, T.f32, shape=(256,)
         ).get()
+        lds_reshape = SmemPtr(
+            base_ptr, lds_k_cur_offset, T.f32, shape=(RESHAPE_TOTAL,)
+        ).get()
 
         # ---- Thread / block indices ----
         batch_idx = gpu.block_id("x")
@@ -468,6 +480,8 @@ def compile_mla_decode(
 
         lane_mod_16 = lane % arith.index(16)
         lane_div_16 = lane / arith.index(16)
+        lane_div_8 = lane / arith.index(8)
+        lane_mod_8 = lane % arith.index(8)
 
         k_seq_wave = lane_mod_16 % arith.index(NUM_WAVES)
         k_seq_group = lane_mod_16 / arith.index(NUM_WAVES)
@@ -2196,42 +2210,88 @@ def compile_mla_decode(
             ).result
             inv_l_vec = vector.broadcast(v4f32_type, l_rcp)
 
-            for dc_pair in range_constexpr(D_CHUNKS // 2):
-                dc_even = dc_pair * 2
-                dc_odd = dc_pair * 2 + 1
-                o_even = _std_arith.MulFOp(
-                    _raw(o_finals[dc_even]), _raw(inv_l_vec),
-                    fastmath=fm_fast,
-                ).result
-                o_odd = _std_arith.MulFOp(
-                    _raw(o_finals[dc_odd]), _raw(inv_l_vec),
-                    fastmath=fm_fast,
-                ).result
-                v4_lo = vector.shuffle(
-                    o_even, o_odd, [0, 4, 1, 5])
-                v4_hi = vector.shuffle(
-                    o_even, o_odd, [2, 6, 3, 7])
-                d_col = (
-                    arith.index(dc_pair * 32)
-                    + lane_div_16 * arith.index(8)
-                )
-                o_g_idx = mid_o_global_idx(q_row, d_col)
-                o_off_i32 = _index_cast_to_i32(o_g_idx)
-                buffer_ops.buffer_store(
-                    v4_lo, mid_o_rsrc, o_off_i32)
-                buffer_ops.buffer_store(
-                    v4_hi, mid_o_rsrc, o_off_i32,
-                    soffset_bytes=16)
-
             m_final_scaled = _std_arith.MulFOp(
                 _raw(m_final), _raw(c_sm_scale), fastmath=fm_fast
             ).result
             log_l = _math_log(l_final, fastmath=fm_fast)
+            lse_idx = mid_lse_global_idx(q_row)
+            lse_off_i32 = _index_cast_to_i32(lse_idx)
+
+            o_scaled = []
+            for dc in range_constexpr(D_CHUNKS):
+                o_scaled.append(_std_arith.MulFOp(
+                    _raw(o_finals[dc]), _raw(inv_l_vec),
+                    fastmath=fm_fast,
+                ).result)
+
+            _barrier(vmcnt=0, lgkmcnt=0)
+
+            reshape_wb = wave_id * arith.index(RESHAPE_WAVE)
+            total_q_epi = batch_idx * seqlen_q_v + q_row
+
+            for rbatch in range_constexpr(RESHAPE_BATCHES):
+                for pair_l in range_constexpr(RESHAPE_CPB // 2):
+                    dp = rbatch * (RESHAPE_CPB // 2) + pair_l
+                    dc_even = dp * 2
+                    dc_odd = dp * 2 + 1
+                    v4_lo = vector.shuffle(
+                        o_scaled[dc_even], o_scaled[dc_odd],
+                        [0, 4, 1, 5])
+                    v4_hi = vector.shuffle(
+                        o_scaled[dc_even], o_scaled[dc_odd],
+                        [2, 6, 3, 7])
+                    wr_base = (
+                        reshape_wb
+                        + lane_mod_16 * arith.index(RESHAPE_ROW)
+                        + arith.index(pair_l * 32)
+                        + lane_div_16 * arith.index(8)
+                    )
+                    vector.store(
+                        v4_lo, lds_reshape, [_raw(wr_base)])
+                    vector.store(
+                        v4_hi, lds_reshape,
+                        [_raw(wr_base + arith.index(4))])
+
+                rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+
+                for rp in range_constexpr(2):
+                    for si in range_constexpr(2):
+                        rd_idx = (
+                            reshape_wb
+                            + (arith.index(rp * 8) + lane_div_8)
+                                * arith.index(RESHAPE_ROW)
+                            + arith.index(si * 32)
+                            + lane_mod_8 * arith.index(4)
+                        )
+                        rd_val = vector.load_op(
+                            v4f32_type, lds_reshape,
+                            [_raw(rd_idx)])
+                        new_head = (
+                            head_group_idx
+                                * arith.index(HEADS_PER_WAVE)
+                            + arith.index(rp * 8)
+                            + lane_div_8
+                        )
+                        d_col = (
+                            arith.index(
+                                rbatch * RESHAPE_CPB * 16
+                                + si * 32)
+                            + lane_mod_8 * arith.index(4)
+                        )
+                        g_idx = (
+                            total_q_epi * stride_mid_o_token
+                            + split_id * arith.index(
+                                NUM_Q_HEADS * HEAD_DIM_V)
+                            + new_head * arith.index(HEAD_DIM_V)
+                            + d_col
+                        )
+                        o_off_i32 = _index_cast_to_i32(g_idx)
+                        buffer_ops.buffer_store(
+                            rd_val, mid_o_rsrc, o_off_i32)
+
             lse_val = _std_arith.AddFOp(
                 _raw(m_final_scaled), _raw(log_l), fastmath=fm_fast
             ).result
-            lse_idx = mid_lse_global_idx(q_row)
-            lse_off_i32 = _index_cast_to_i32(lse_idx)
             buffer_ops.buffer_store(lse_val, mid_lse_rsrc, lse_off_i32)
 
     # ── Host launcher ──
