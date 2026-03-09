@@ -350,6 +350,18 @@ def make_tensor_descriptor_2d(
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
 
 
+def _zero_dgroup_v4i32():
+    """Create a zero vector<4xi32> for unused descriptor groups."""
+    z = arith.constant(0, type=T.i32)
+    return vector.from_elements(T.vec(4, T.i32), [z, z, z, z])
+
+
+def _zero_dgroup_v8i32():
+    """Create a zero vector<8xi32> for unused descriptor groups."""
+    z = arith.constant(0, type=T.i32)
+    return vector.from_elements(T.vec(8, T.i32), [z, z, z, z, z, z, z, z])
+
+
 def tensor_load_2d(
     desc: TDMDescriptor2D,
     cache_policy: int = 0,
@@ -360,12 +372,18 @@ def tensor_load_2d(
     (as built by make_tensor_descriptor_2d). All waves together
     cover the full tile.
 
+    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
+    zero-initialized for 2D tensors.
+
     Args:
         desc:         TDMDescriptor2D from make_tensor_descriptor_2d.
         cache_policy: Cache policy (0 = default).
     """
-    rocdl.tensor_load_to_lds_d2(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), cache_policy
+    dg2 = _raw(_zero_dgroup_v4i32())
+    dg3 = _raw(_zero_dgroup_v4i32())
+    dg4 = _raw(_zero_dgroup_v8i32())
+    rocdl.tensor_load_to_lds(
+        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
     )
 
 
@@ -375,12 +393,18 @@ def tensor_store_2d(
 ) -> None:
     """Issue a TDM 2D async store (LDS -> Global).
 
+    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
+    zero-initialized for 2D tensors.
+
     Args:
         desc:         TDMDescriptor2D (with LDS source and global destination).
         cache_policy: Cache policy (0 = default).
     """
-    rocdl.tensor_store_from_lds_d2(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), cache_policy
+    dg2 = _raw(_zero_dgroup_v4i32())
+    dg3 = _raw(_zero_dgroup_v4i32())
+    dg4 = _raw(_zero_dgroup_v8i32())
+    rocdl.tensor_store_from_lds(
+        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
     )
 
 

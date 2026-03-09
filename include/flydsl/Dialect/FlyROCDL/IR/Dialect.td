@@ -16,7 +16,6 @@ def FlyROCDL_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
-  let usePropertiesForAttributes = 1;
 }
 
 class FlyxROCL_MmaAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 
