@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - hotfix_ci_0309
   pull_request:
     branches:
       - main
