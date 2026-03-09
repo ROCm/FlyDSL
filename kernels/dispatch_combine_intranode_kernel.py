@@ -213,6 +213,8 @@ declare i32 @llvm.amdgcn.workgroup.id.x()
 declare i64 @llvm.amdgcn.ballot.i64(i1)
 declare i32 @llvm.amdgcn.readlane(i32, i32)
 declare void @llvm.amdgcn.s.barrier()
+declare ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc(ptr addrspace(1), i16, i32, i32)
+declare void @llvm.amdgcn.raw.ptr.buffer.store.v4i32(<4 x i32>, ptr addrspace(8), i32, i32, i32)
 
 ; ===== Dispatch IntraNode Kernel =====
 define amdgpu_kernel void @ep_dispatch_intranode(
@@ -235,6 +237,35 @@ entry:
   %gw_id    = add i32 %tmp_gw, %warp
   %gw_num   = mul i32 %block_num, %warp_num_per_block
   %limit    = mul i32 %cur_tok, %experts_per_token
+  ; ---- Precompute all 24 P2P base addresses (once per kernel) ----
+  ; Eliminates ~65K ptr_p2p calls in Phase 1 loop → just 24 calls at startup
+  %stok_base = ptrtoint ptr %shmem_out_tok to i64
+  %swts_base = ptrtoint ptr %shmem_out_wts to i64
+  %sidx_base = ptrtoint ptr %shmem_out_idx to i64
+  %rem_tok0 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 0)
+  %rem_tok1 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 1)
+  %rem_tok2 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 2)
+  %rem_tok3 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 3)
+  %rem_tok4 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 4)
+  %rem_tok5 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 5)
+  %rem_tok6 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 6)
+  %rem_tok7 = call i64 @mori_shmem_ptr_p2p(i64 %stok_base, i32 %rank, i32 7)
+  %rem_wts0 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 0)
+  %rem_wts1 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 1)
+  %rem_wts2 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 2)
+  %rem_wts3 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 3)
+  %rem_wts4 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 4)
+  %rem_wts5 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 5)
+  %rem_wts6 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 6)
+  %rem_wts7 = call i64 @mori_shmem_ptr_p2p(i64 %swts_base, i32 %rank, i32 7)
+  %rem_idx0 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 0)
+  %rem_idx1 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 1)
+  %rem_idx2 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 2)
+  %rem_idx3 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 3)
+  %rem_idx4 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 4)
+  %rem_idx5 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 5)
+  %rem_idx6 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 6)
+  %rem_idx7 = call i64 @mori_shmem_ptr_p2p(i64 %sidx_base, i32 %rank, i32 7)
   br label %ph1_hdr
 
 ; ----------------------------------------------------------------
@@ -309,7 +340,11 @@ ph1_l0_alloc:
   %tis_sym   = add i64 %tis_i64, %tis_boff
   %src_enc_p = mul i32 %rank, %max_tok_per_rank
   %src_enc   = add i32 %src_enc_p, %src_tok
-  %_tis_p    = call i32 @mori_shmem_int32_p(i64 %tis_sym, i32 %src_enc, i32 %dest_pe, i32 0)
+  ; Use ptr_p2p + addrspace(1) store for tok_id_to_src
+  %tis_rem   = call i64 @mori_shmem_ptr_p2p(i64 %tis_i64, i32 %rank, i32 %dest_pe)
+  %tis_raddr = add i64 %tis_rem, %tis_boff
+  %tis_rptr  = inttoptr i64 %tis_raddr to ptr addrspace(1)
+  store i32 %src_enc, ptr addrspace(1) %tis_rptr, align 4
   br label %ph1_join
 
 ph1_join:
@@ -318,50 +353,116 @@ ph1_join:
   %dtok_all  = call i32 @llvm.amdgcn.readlane(i32 %dtok_phi, i32 0)
   br label %ph1_put_tok
 
+; ---- Use ptr_p2p + direct XGMI stores (bypasses NIC, uses XGMI hardware path) ----
 ph1_put_tok:
-  ; Warp-level bulk puts for weights, indices, and token data
-  ; All 64 lanes participate in each putmem_nbi_warp call
-  ; 1. Weights: k floats
-  %swts_i64  = ptrtoint ptr %shmem_out_wts to i64
+  ; 1. Weights/Indices: select from precomputed P2P bases, add slot offset
   %wdst_bi   = mul i32 %dtok_all, %experts_per_token
   %wdst_bi64 = zext i32 %wdst_bi to i64
   %wdst_byt  = mul i64 %wdst_bi64, 4
-  %wdst_sym2 = add i64 %swts_i64, %wdst_byt
-  %wsrc_bi   = mul i32 %src_tok, %experts_per_token
-  %wsrc_bi64 = zext i32 %wsrc_bi to i64
-  %wsrc_byt  = mul i64 %wsrc_bi64, 4
-  %wbuf_i64  = ptrtoint ptr %weights_buf to i64
-  %wsrc2     = add i64 %wbuf_i64, %wsrc_byt
-  %k64       = zext i32 %experts_per_token to i64
-  %wt_bytes  = mul i64 %k64, 4
-  %_put_wts  = call i32 @mori_shmem_putmem_nbi_warp(
-                   i64 %wdst_sym2, i64 %wsrc2, i64 %wt_bytes, i32 %dest_pe, i32 0)
-  ; 2. Indices: k ints
-  %sidx_i64  = ptrtoint ptr %shmem_out_idx to i64
-  %idst_sym2 = add i64 %sidx_i64, %wdst_byt
-  %ixbuf_i64 = ptrtoint ptr %token_indices to i64
-  %isrc2     = add i64 %ixbuf_i64, %wsrc_byt
-  %_put_idx  = call i32 @mori_shmem_putmem_nbi_warp(
-                   i64 %idst_sym2, i64 %isrc2, i64 %wt_bytes, i32 %dest_pe, i32 0)
-  ; 3. Token embeddings: hidden_dim elements
-  %stok_i64  = ptrtoint ptr %shmem_out_tok to i64
+  %is_pe0w = icmp eq i32 %dest_pe, 0
+  %is_pe2w = icmp eq i32 %dest_pe, 2
+  %is_pe4w = icmp eq i32 %dest_pe, 4
+  %is_pe6w = icmp eq i32 %dest_pe, 6
+  %rw01    = select i1 %is_pe0w, i64 %rem_wts0, i64 %rem_wts1
+  %rw23    = select i1 %is_pe2w, i64 %rem_wts2, i64 %rem_wts3
+  %rw45    = select i1 %is_pe4w, i64 %rem_wts4, i64 %rem_wts5
+  %rw67    = select i1 %is_pe6w, i64 %rem_wts6, i64 %rem_wts7
+  %rwlt2   = icmp ult i32 %dest_pe, 2
+  %rwlt4   = icmp ult i32 %dest_pe, 4
+  %rwlt6   = icmp ult i32 %dest_pe, 6
+  %rw03    = select i1 %rwlt2, i64 %rw01, i64 %rw23
+  %rw47    = select i1 %rwlt6, i64 %rw45, i64 %rw67
+  %wts_base2 = select i1 %rwlt4, i64 %rw03, i64 %rw47
+  %wts_rem   = add i64 %wts_base2, %wdst_byt
+  %is_pe0i = icmp eq i32 %dest_pe, 0
+  %is_pe2i = icmp eq i32 %dest_pe, 2
+  %is_pe4i = icmp eq i32 %dest_pe, 4
+  %is_pe6i = icmp eq i32 %dest_pe, 6
+  %ri01    = select i1 %is_pe0i, i64 %rem_idx0, i64 %rem_idx1
+  %ri23    = select i1 %is_pe2i, i64 %rem_idx2, i64 %rem_idx3
+  %ri45    = select i1 %is_pe4i, i64 %rem_idx4, i64 %rem_idx5
+  %ri67    = select i1 %is_pe6i, i64 %rem_idx6, i64 %rem_idx7
+  %rilt2   = icmp ult i32 %dest_pe, 2
+  %rilt4   = icmp ult i32 %dest_pe, 4
+  %rilt6   = icmp ult i32 %dest_pe, 6
+  %ri03    = select i1 %rilt2, i64 %ri01, i64 %ri23
+  %ri47    = select i1 %rilt6, i64 %ri45, i64 %ri67
+  %idx_base2 = select i1 %rilt4, i64 %ri03, i64 %ri47
+  %idx_rem   = add i64 %idx_base2, %wdst_byt
+  %l_lt_kx = icmp ult i32 %lane, %experts_per_token
+  br i1 %l_lt_kx, label %ph1_wts_store, label %ph1_tok_prep
+
+ph1_wts_store:
+  ; Direct XGMI store using global addrspace(1) for optimal AMD GPU write path
+  %wsrc_idx  = add i32 %lb, %lane
+  %wsrc_gp   = getelementptr float, ptr %weights_buf, i32 %wsrc_idx
+  %wt_valx   = load float, ptr %wsrc_gp, align 4
+  %wlanex64  = zext i32 %lane to i64
+  %wlanex_b  = mul i64 %wlanex64, 4
+  %wdst_ax   = add i64 %wts_rem, %wlanex_b
+  %wdst_gp   = inttoptr i64 %wdst_ax to ptr addrspace(1)
+  store float %wt_valx, ptr addrspace(1) %wdst_gp, align 4
+  ; index store via addrspace(1)
+  %ixsrc_gp  = getelementptr i32, ptr %token_indices, i32 %wsrc_idx
+  %ix_valx   = load i32, ptr %ixsrc_gp, align 4
+  %idst_ax   = add i64 %idx_rem, %wlanex_b
+  %idst_gp   = inttoptr i64 %idst_ax to ptr addrspace(1)
+  store i32 %ix_valx, ptr addrspace(1) %idst_gp, align 4
+  br label %ph1_tok_prep
+
+ph1_tok_prep:
+  ; 2. Token: use precomputed P2P base (from entry), add token offset
+  ; Vectorized 128-bit store: <4 x i32> = 16 bytes per lane per iteration
   %tok_ei    = mul i32 %dtok_all, %hidden_dim
   %tok_e64   = zext i32 %tok_ei to i64
   %esz_64    = zext i32 %hidden_elem_size to i64
   %tok_boff  = mul i64 %tok_e64, %esz_64
-  %stok_sym  = add i64 %stok_i64, %tok_boff
+  ; Select precomputed rem_tok base for dest_pe (avoids runtime ptr_p2p per token)
+  %is_pe0t = icmp eq i32 %dest_pe, 0
+  %is_pe2t = icmp eq i32 %dest_pe, 2
+  %is_pe4t = icmp eq i32 %dest_pe, 4
+  %is_pe6t = icmp eq i32 %dest_pe, 6
+  %rt01  = select i1 %is_pe0t, i64 %rem_tok0, i64 %rem_tok1
+  %rt23  = select i1 %is_pe2t, i64 %rem_tok2, i64 %rem_tok3
+  %rt45  = select i1 %is_pe4t, i64 %rem_tok4, i64 %rem_tok5
+  %rt67  = select i1 %is_pe6t, i64 %rem_tok6, i64 %rem_tok7
+  %lt2t  = icmp ult i32 %dest_pe, 2
+  %lt4t  = icmp ult i32 %dest_pe, 4
+  %lt6t  = icmp ult i32 %dest_pe, 6
+  %rt03  = select i1 %lt2t, i64 %rt01, i64 %rt23
+  %rt47  = select i1 %lt6t, i64 %rt45, i64 %rt67
+  %tok_rem_base = select i1 %lt4t, i64 %rt03, i64 %rt47
+  %tok_rem  = add i64 %tok_rem_base, %tok_boff
   %inp_i64   = ptrtoint ptr %inp_tok to i64
   %inp_ei    = mul i32 %src_tok, %hidden_dim
   %inp_e64   = zext i32 %inp_ei to i64
   %inp_boff  = mul i64 %inp_e64, %esz_64
-  %inp_src   = add i64 %inp_i64, %inp_boff
-  %hdim_64   = zext i32 %hidden_dim to i64
-  %nbytes    = mul i64 %hdim_64, %esz_64
-  %_put1     = call i32 @mori_shmem_putmem_nbi_warp(
-                   i64 %stok_sym, i64 %inp_src, i64 %nbytes, i32 %dest_pe, i32 0)
-  ; NO quiet here: all puts are NBI (non-blocking immediate).
-  ; System fence in Phase 2 (before signal send) ensures all puts are ordered.
-  br label %ph1_latch
+  %inp_base  = add i64 %inp_i64, %inp_boff
+  %hdim_i32  = lshr i32 %hidden_dim, 1
+  %lane4     = mul i32 %lane, 4
+  br label %tch_hdr
+
+tch_hdr:
+  ; Vector stride loop: each lane handles positions lane*4, lane*4+256, ...
+  %ec4      = phi i32 [ %lane4, %ph1_tok_prep ], [ %ec4_next, %tch_latch ]
+  %tc_cond  = icmp ult i32 %ec4, %hdim_i32
+  br i1 %tc_cond, label %tch_body, label %ph1_latch
+
+tch_body:
+  ; 128-bit vector load + addrspace(1) store to precomputed P2P remote address
+  %ec4_64   = zext i32 %ec4 to i64
+  %ec4_b64  = mul i64 %ec4_64, 4
+  %src_v4a  = add i64 %inp_base, %ec4_b64
+  %src_v4p  = inttoptr i64 %src_v4a to ptr
+  %vec4     = load <4 x i32>, ptr %src_v4p, align 4
+  %dst_v4a  = add i64 %tok_rem, %ec4_b64
+  %dst_v4gp = inttoptr i64 %dst_v4a to ptr addrspace(1)
+  store <4 x i32> %vec4, ptr addrspace(1) %dst_v4gp, align 4
+  br label %tch_latch
+
+tch_latch:
+  %ec4_next = add i32 %ec4, 256             ; 64 lanes × 4 i32 = 256 stride
+  br label %tch_hdr
 
 ph1_latch:
   %i_next_ph1 = add i32 %i, %gw_num
