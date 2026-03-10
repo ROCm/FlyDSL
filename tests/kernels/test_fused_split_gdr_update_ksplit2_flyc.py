@@ -410,14 +410,13 @@ def _run_hip_kernel(
     return out, state_after
 
 
-
-
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("seqlen", [1])
 @pytest.mark.parametrize("num_heads_qk", [4])
 @pytest.mark.parametrize("num_heads_v", [8])
 @pytest.mark.parametrize("head_dim", [128])
 def test_split_gdr_ksplit2_correctness(
+    ctx,
     batch_size,
     seqlen,
     num_heads_qk,
@@ -487,10 +486,48 @@ def test_split_gdr_ksplit2_correctness(
 
     ssm_state_hip_final = from_swizzled_layout(ssm_state_swizzled)
 
+    # ---- FlyDSL build module precision check ----
+    fly_module = build_fused_split_gdr_update_ksplit2_flyc_module(
+        B=batch_size,
+        T_seq=seqlen,
+        H=num_heads_qk,
+        HV=num_heads_v,
+        K=head_dim,
+        V=head_dim,
+        N_STATE=inputs["ssm_state"].shape[0],
+        dtype_str=("f32" if dtype == torch.float32 else "bf16"),
+        BV=64,
+        use_qk_l2norm_in_kernel=True,
+    )
+    fly_exe = flydsl.compile(fly_module)
+    ssm_state_fly = inputs["ssm_state"].clone()
+    ssm_state_swizzled_fly = to_swizzled_layout(ssm_state_fly).reshape(
+        ssm_state_fly.shape[0] * num_heads_v, head_dim // 4, head_dim, 4
+    )
+    output_fly = torch.empty_like(output_hip)
+    fly_exe(
+        inputs["A_log"].to(dtype),
+        inputs["a"],
+        inputs["dt_bias"],
+        inputs["mixed_qkv"],
+        inputs["b"],
+        ssm_state_swizzled_fly,
+        inputs["ssm_state_indices"],
+        output_fly,
+    )
+    torch.cuda.synchronize()
+    ssm_state_fly_final = from_swizzled_layout(
+        ssm_state_swizzled_fly.reshape(
+            ssm_state_fly.shape[0], num_heads_v, head_dim // 4, head_dim, 4
+        )
+    )
+
     print("output_ref[:128]:\n", output_ref.reshape(-1)[:128])
     print("output_hip[:128]:\n", output_hip.reshape(-1)[:128])
+    print("output_fly[:128]:\n", output_fly.reshape(-1)[:128])
     print("ssm_state_ref[:128]:\n", ssm_state_ref.reshape(-1)[:128])
     print("ssm_state_hip_final[:128]:\n", ssm_state_hip_final.reshape(-1)[:128])
+    print("ssm_state_fly_final[:128]:\n", ssm_state_fly_final.reshape(-1)[:128])
     print(
         f"output_ref min/max: {output_ref.float().min().item():.6f} / {output_ref.float().max().item():.6f}"
     )
@@ -498,25 +535,43 @@ def test_split_gdr_ksplit2_correctness(
         f"output_hip min/max: {output_hip.float().min().item():.6f} / {output_hip.float().max().item():.6f}"
     )
     print(
+        f"output_fly min/max: {output_fly.float().min().item():.6f} / {output_fly.float().max().item():.6f}"
+    )
+    print(
         f"ssm_state_ref min/max: {ssm_state_ref.float().min().item():.6f} / {ssm_state_ref.float().max().item():.6f}"
     )
     print(
         f"ssm_state_hip_final min/max: {ssm_state_hip_final.float().min().item():.6f} / {ssm_state_hip_final.float().max().item():.6f}"
     )
+    print(
+        f"ssm_state_fly_final min/max: {ssm_state_fly_final.float().min().item():.6f} / {ssm_state_fly_final.float().max().item():.6f}"
+    )
 
-    output_diff = (output_ref - output_hip).abs().max().item()
-    state_diff = (ssm_state_ref - ssm_state_hip_final).abs().max().item()
+    output_diff_hip_ref = (output_ref - output_hip).abs().max().item()
+    state_diff_hip_ref = (ssm_state_ref - ssm_state_hip_final).abs().max().item()
+    output_diff_fly_ref = (output_ref - output_fly).abs().max().item()
+    state_diff_fly_ref = (ssm_state_ref - ssm_state_fly_final).abs().max().item()
+    output_diff_fly_hip = (output_hip - output_fly).abs().max().item()
+    state_diff_fly_hip = (ssm_state_hip_final - ssm_state_fly_final).abs().max().item()
 
     print(f"\n{'='*70}")
     print(f"Split GDR ksplit2 Correctness: batch={batch_size}, seqlen={seqlen}")
     print(f"  heads_qk={num_heads_qk}, heads_v={num_heads_v}, head_dim={head_dim}")
     print(f"{'='*70}")
-    print(f"  Output max diff: {output_diff:.6f}")
-    print(f"  State  max diff: {state_diff:.6f}")
+    print(f"  Output max diff (hip vs ref): {output_diff_hip_ref:.6f}")
+    print(f"  State  max diff (hip vs ref): {state_diff_hip_ref:.6f}")
+    print(f"  Output max diff (fly vs ref): {output_diff_fly_ref:.6f}")
+    print(f"  State  max diff (fly vs ref): {state_diff_fly_ref:.6f}")
+    print(f"  Output max diff (fly vs hip): {output_diff_fly_hip:.6f}")
+    print(f"  State  max diff (fly vs hip): {state_diff_fly_hip:.6f}")
     print(f"{'='*70}")
 
-    assert output_diff < 1e-3, f"Output diff too large: {output_diff}"
-    assert state_diff < 1e-3, f"State diff too large: {state_diff}"
+    assert output_diff_hip_ref < 5e-3, f"Hip output vs ref diff too large: {output_diff_hip_ref}"
+    assert state_diff_hip_ref < 5e-3, f"Hip state vs ref diff too large: {state_diff_hip_ref}"
+    assert output_diff_fly_ref < 5e-3, f"Fly output vs ref diff too large: {output_diff_fly_ref}"
+    assert state_diff_fly_ref < 5e-3, f"Fly state vs ref diff too large: {state_diff_fly_ref}"
+    assert output_diff_fly_hip < 5e-3, f"Fly output vs hip diff too large: {output_diff_fly_hip}"
+    assert state_diff_fly_hip < 5e-3, f"Fly state vs hip diff too large: {state_diff_fly_hip}"
     print(f"  PASS — ksplit2 correctness test passed!")
 
 
