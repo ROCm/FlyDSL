@@ -569,7 +569,7 @@ Writing a new kernel?
 ├── Matrix multiply (GEMM)?
 │   ├── Use @flyc.kernel + SmemAllocator + MFMA
 │   ├── B-preshuffle layout from mfma_preshuffle_pipeline.py
-│   └── See kernels/preshuffle_gemm_flyc.py
+│   └── See kernels/preshuffle_gemm.py
 │
 ├── Need shared memory?
 │   ├── Use SmemAllocator with target arch
