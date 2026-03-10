@@ -14,6 +14,7 @@ This module provides access to ROCm-specific GPU operations including:
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -99,6 +100,17 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
         result_type, a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB,
         loc=loc, ip=ip,
     ).result
+
+
+def wave_id():
+    """Get wave-id-in-workgroup as SGPR (via TTMP8[29:25]).
+
+    Returns:
+        i32 value (SGPR) with the wave ID within the workgroup.
+    """
+    from ..._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_wave_id(i32)
 
 
 # ── New high-level helpers from universal.py ──────────────────────────

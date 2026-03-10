@@ -84,6 +84,7 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
     return _prim.make_view(bd_ptr, layout, loc=loc, ip=ip)
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -300,6 +301,7 @@ __all__ = [
     'workgroup_dim_x', 'workgroup_dim_y', 'workgroup_dim_z',
     'grid_dim_x', 'grid_dim_y', 'grid_dim_z',
     'wavefrontsize',
+    'wave_id',
     
     # Synchronization
     'barrier', 's_barrier', 's_barrier_signal', 's_barrier_wait',
