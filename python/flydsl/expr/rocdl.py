@@ -83,6 +83,7 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
     return _prim.make_view(bd_ptr, layout, loc=loc, ip=ip)
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -174,6 +175,21 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     ).result
 
 
+def wave_id():
+    """Get wave-id-in-workgroup as SGPR (via TTMP8[29:25]).
+
+    On gfx1250 this reads an architected SGPR, so the result stays in
+    the SGPR pipeline and all derived computations are automatically
+    scalarized by LLVM uniformity analysis.
+
+    Returns:
+        i32 value (SGPR) with the wave ID within the workgroup.
+    """
+    from .._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_wave_id(i32)
+
+
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
     'workitem_id_x', 'workitem_id_y', 'workitem_id_z',
@@ -181,6 +197,7 @@ __all__ = [
     'workgroup_dim_x', 'workgroup_dim_y', 'workgroup_dim_z',
     'grid_dim_x', 'grid_dim_y', 'grid_dim_z',
     'wavefrontsize',
+    'wave_id',
     
     # Synchronization
     'barrier', 's_barrier', 's_barrier_signal', 's_barrier_wait',

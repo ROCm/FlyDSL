@@ -14,7 +14,7 @@ behind a clean API:
         tile_shape=(tile_m, tile_k),
         elem_bytes=2,
         pad_interval=64, pad_amount=8,
-        num_warps=8, wave_id=wave_id,
+        num_warps=8,
     )
     tdm_ops.tensor_load_2d(desc)
     tdm_ops.tensor_wait(0)
@@ -174,7 +174,6 @@ def make_tensor_descriptor_2d(
     pad_interval: int = 0,
     pad_amount: int = 0,
     num_warps: int = 1,
-    wave_id=None,
     cache_policy: int = 0,
     pred: int = 1,
 ) -> TDMDescriptor2D:
@@ -205,8 +204,6 @@ def make_tensor_descriptor_2d(
         pad_interval:  Padding interval in elements (0 to disable).
         pad_amount:    Padding amount in elements (0 to disable).
         num_warps:     Total warps in the workgroup.
-        wave_id:       Current wave's ID (MLIR index Value). Required when
-                       num_warps > 1.
         cache_policy:  Cache policy (0 = default).
         pred:          Predicate (1 = enabled).
 
@@ -227,7 +224,12 @@ def make_tensor_descriptor_2d(
     bpw_outer, bpw_inner = block_per_warp
     warps_dim0 = warps_per_dim[0]
 
-    if num_warps > 1 and wave_id is not None:
+    if num_warps > 1:
+        # Auto-acquire SGPR wave_id via hardware register (TTMP8[29:25]).
+        # This keeps the entire descriptor address chain in SALU,
+        from . import rocdl as _rocdl_ext
+        _wid_i32 = _rocdl_ext.wave_id()
+        wave_id = arith.index_cast(T.index, _wid_i32)
         warp_coord_outer = wave_id % arith.index(warps_dim0)
         warp_coord_inner = wave_id / arith.index(warps_dim0)
         warp_off_outer = warp_coord_outer * arith.index(bpw_outer)

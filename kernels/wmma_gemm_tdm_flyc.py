@@ -18,7 +18,7 @@ from flydsl.expr.gpu import lds_space
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 from flydsl._mlir.extras import types as mlir_T
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+from kernels.layout_utils import crd2idx, idx2crd
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
@@ -171,22 +171,14 @@ def compile_wmma_gemm_tdm(
 
         # --- Thread/wave decomposition ---
         layout_thr = fx.make_layout(
-            (m_warp * n_warp, WAVE_SIZE), (WAVE_SIZE, 1))
-        layout_lane = fx.make_layout((2, 16), (16, 1))
+            (m_warp, n_warp, 2, 16),
+            (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
+        thr_coord = idx2crd(tx, layout_thr)
+        wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
+            thr_coord[0], thr_coord[1], thr_coord[2], thr_coord[3])
 
-        thr = idx2crd(tx, layout_thr)
-        wave_id = layout_get(thr, 0)
-        lane = layout_get(thr, 1)
-
-        wave_m = wave_id / arith.index(n_warp)
-        wave_n = wave_id % arith.index(n_warp)
-
-        lc = idx2crd(lane, layout_lane)
-        lane_kgrp = layout_get(lc, 0)
-        lane16 = layout_get(lc, 1)
-
-        warp_m_off = wave_m * arith.index(warp_tile_m)
-        warp_n_off = wave_n * arith.index(warp_tile_n)
+        warp_m_base = wave_m_idx * arith.index(warp_tile_m)
+        warp_n_base = wave_n_idx * arith.index(warp_tile_n)
 
         elem_ty = _elem_type()
 
@@ -207,7 +199,7 @@ def compile_wmma_gemm_tdm(
                 tensor_shape=(tile_m, tile_k), strides=(K, 1),
                 tile_shape=(tile_m, tile_k), elem_bytes=elem_bytes,
                 pad_interval=tile_k, pad_amount=LDS_PAD_A,
-                num_warps=num_warps, wave_id=wave_id)
+                num_warps=num_warps)
             tdm_ops.tensor_load_2d(desc)
 
         def copy_b_to_lds(k_base, lds_b_mem_ref):
@@ -217,31 +209,52 @@ def compile_wmma_gemm_tdm(
                 tensor_shape=(tile_n, tile_k), strides=(K, 1),
                 tile_shape=(tile_n, tile_k), elem_bytes=elem_bytes,
                 pad_interval=tile_k, pad_amount=LDS_PAD_B,
-                num_warps=num_warps, wave_id=wave_id)
+                num_warps=num_warps)
             tdm_ops.tensor_load_2d(desc)
 
-        # --- LDS load helper ---
-        def _lds_load(ptr_or_memref, indices):
-            """Load a single element from LDS (SmemPtr or raw memref)."""
-            if isinstance(ptr_or_memref, SmemPtr):
-                return ptr_or_memref.load(indices)
-            idx_vals = [get_op_result_or_value(i) for i in indices]
-            return memref_d.load(get_op_result_or_value(ptr_or_memref), idx_vals)
+        layout_smem_a = fx.make_layout((tile_m, lds_a_stride), (lds_a_stride, 1))
+        layout_smem_b = fx.make_layout((tile_n, lds_b_stride), (lds_b_stride, 1))
 
-        # --- WMMA fragment loader ---
-        def load_wmma_frag(lds_ptr, row_offset, k_offset, lds_stride):
-            """Load one 16x32 WMMA fragment from LDS.
+        # --- LDS load helpers ---
+        from flydsl._mlir.dialects import vector as vec_d
 
-            Each lane loads 16 elements in 2 groups of 8 consecutive elements.
-            Row = row_offset + lane16, Col = k_offset + (k0*2 + lane_kgrp)*8 + k1
+        FRAG_K_ELEMS = 8
+
+        def _get_lds_memref(lds_ptr):
+            """Get the raw memref value from SmemPtr or raw memref."""
+            if isinstance(lds_ptr, SmemPtr):
+                return get_op_result_or_value(lds_ptr.get())
+            return get_op_result_or_value(lds_ptr)
+
+        def load_wmma_frag(lds_ptr, row_base, k_base, lds_layout):
+            """Load one 16x32 WMMA fragment from LDS using vectorized 128-bit loads.
+
+            Uses vector.load to read 8 contiguous fp16 elements at once,
+            avoiding scalar load + v_perm/v_alignbit overhead.
+            Two 128-bit loads per fragment (2 × 8 fp16 = 16 fp16 values).
             """
-            vals = []
-            for k0 in range_constexpr(2):
-                for k1 in range_constexpr(8):
-                    kk = k_offset + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                    off = (row_offset + lane16) * arith.index(lds_stride) + kk
-                    vals.append(_lds_load(lds_ptr, [off]))
-            return vector.from_elements(T.vec(16, elem_ty), vals)
+            raw_memref = _get_lds_memref(lds_ptr)
+            row = row_base + lane16
+            vec8_ty = ir.VectorType.get([8], elem_ty)
+
+            # Two K-groups per fragment:
+            # Group 0 (values 0-7):  k = k_base + lane_kgrp * 8
+            # Group 1 (values 8-15): k = k_base + (2 + lane_kgrp) * 8
+            k0 = k_base + lane_kgrp * arith.index(8)
+            k1 = k_base + (arith.index(2) + lane_kgrp) * arith.index(8)
+
+            off0 = crd2idx((row, k0), lds_layout)
+            off1 = crd2idx((row, k1), lds_layout)
+
+            idx0 = [get_op_result_or_value(off0)]
+            idx1 = [get_op_result_or_value(off1)]
+
+            v0 = vec_d.load(vec8_ty, raw_memref, idx0)
+            v1 = vec_d.load(vec8_ty, raw_memref, idx1)
+
+            # Concatenate two vec<8> into vec<16> via vector.shuffle
+            mask = ir.DenseI64ArrayAttr.get(list(range(16)))
+            return vec_d.shuffle(v0, v1, mask)
 
         # --- Compute on one LDS buffer ---
         def compute_tile(accs_in, lds_a_ptr, lds_b_ptr):
@@ -250,25 +263,22 @@ def compile_wmma_gemm_tdm(
             for ks in range_constexpr(k_wmma_steps):
                 k_off = arith.index(ks * WMMA_K)
 
-                b_frags = []
-                for wn in range_constexpr(wmma_n_rep):
-                    b_frags.append(load_wmma_frag(
-                        lds_b_ptr,
-                        warp_n_off + arith.index(wn * WMMA_N),
-                        k_off, lds_b_stride))
+                b_frags = [load_wmma_frag(
+                    lds_b_ptr, warp_n_base + arith.index(wn * WMMA_N),
+                    k_off, layout_smem_b)
+                    for wn in range_constexpr(wmma_n_rep)]
 
                 for wm in range_constexpr(wmma_m_rep):
                     a_frag = load_wmma_frag(
-                        lds_a_ptr,
-                        warp_m_off + arith.index(wm * WMMA_M),
-                        k_off, lds_a_stride)
+                        lds_a_ptr, warp_m_base + arith.index(wm * WMMA_M),
+                        k_off, layout_smem_a)
 
                     for wn in range_constexpr(wmma_n_rep):
-                        acc_idx = wm * wmma_n_rep + wn
-                        current_accs[acc_idx] = wmma_op(
+                        idx = wm * wmma_n_rep + wn
+                        current_accs[idx] = wmma_op(
                             T.vec(8, T.f32),
                             b_frags[wn], a_frag,
-                            current_accs[acc_idx],
+                            current_accs[idx],
                             signA=False, signB=False, modC=0,
                             reuseA=False, reuseB=False,
                         ).result
@@ -312,20 +322,18 @@ def compile_wmma_gemm_tdm(
         def epilogue(final_accs):
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
-                    acc_idx = wm * wmma_n_rep + wn
-                    row = blk_m + warp_m_off + arith.index(wm * WMMA_M) + lane16
-                    col_base = (blk_n + warp_n_off + arith.index(wn * WMMA_N)
+                    idx = wm * wmma_n_rep + wn
+                    row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
+                    col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
                                 + lane_kgrp * arith.index(8))
                     for half in range_constexpr(2):
                         col = col_base + arith.index(half * 4)
                         c_off = row * n_stride + col
-                        vals = []
-                        for vi in range_constexpr(4):
-                            vals.append(vector.extract(
-                                final_accs[acc_idx],
-                                static_position=[half * 4 + vi],
-                                dynamic_position=[],
-                            ))
+                        vals = [vector.extract(
+                            final_accs[idx],
+                            static_position=[half * 4 + vi],
+                            dynamic_position=[])
+                            for vi in range_constexpr(4)]
                         vec4 = vector.from_elements(T.vec(4, T.f32), vals)
                         buffer_ops.buffer_store(vec4, c_rsrc, c_off)
 
