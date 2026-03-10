@@ -433,9 +433,13 @@ def compile_shmem_kernel(
                             kernel_fn._kernel_name,
                             launcher_vals,
                         )
+                        # Use block=(1024,1,1) so LLVM sets
+                        # amdgpu-flat-work-group-size="1,1024", allowing
+                        # the kernel to be launched with up to 1024 threads
+                        # (= 16 warps × 64) without hipErrorLaunchOutOfResources.
                         kl.launch(
                             grid=(1, 1, 1),
-                            block=(64, 1, 1),
+                            block=(1024, 1, 1),
                             stream=stream_arg,
                         )
                         func.ReturnOp([])
@@ -474,6 +478,13 @@ def compile_shmem_kernel(
         # ---------------------------------------------------------------
         gpu_mlir = _extract_gpu_module_mlir(mlir_asm, ctx)
         llvm_ir  = _mlir_to_llvm_ir(gpu_mlir)
+        # AMD GPU pass sets amdgpu-flat-work-group-size="1,256" by default.
+        # Override to 1024 so the kernel can be launched with up to
+        # 1024 threads (= 16 warps × 64) without hipErrorLaunchOutOfResources.
+        llvm_ir = llvm_ir.replace(
+            '"amdgpu-flat-work-group-size"="1,256"',
+            '"amdgpu-flat-work-group-size"="1,1024"'
+        )
 
     _link_and_compile_hsaco(llvm_ir, chip, out_path, shmem_bc)
 

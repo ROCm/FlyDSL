@@ -150,6 +150,48 @@ def inttoptr(addr: Any) -> ir.Value:
 # ---------------------------------------------------------------------------
 # Atomic operations (LLVM)
 # ---------------------------------------------------------------------------
+def _to_i32_value(v: Any) -> ir.Value:
+    """Convert a value to an i32 ir.Value (for divui/remui)."""
+    if isinstance(v, int):
+        from .._mlir.dialects import arith as _arith
+        from .._mlir.ir import IntegerAttr as _IA
+        i32 = _i32()
+        return _arith.ConstantOp(i32, _IA.get(i32, v)).result
+    return _unwrap(v)
+
+
+def divui(a: Any, b: Any) -> ir.Value:
+    """Unsigned integer divide ``a // b``.
+
+    Generates ``arith.divui`` which compiles to efficient ``udiv`` on AMD GPU
+    (vs the default ``arith.floordivsi`` → ``sdiv`` from Python's ``//``).
+    For non-negative values, ``udiv`` is significantly faster than ``sdiv``.
+
+    Args:
+        a: i32 dividend (ArithValue or int).
+        b: i32 divisor (ArithValue or compile-time int constant).
+    """
+    from .._mlir.dialects import arith as _arith
+    a_ = _unwrap(a)
+    b_ = _to_i32_value(b) if isinstance(b, int) else _unwrap(b)
+    return _arith.DivUIOp(a_, b_).result
+
+
+def remui(a: Any, b: Any) -> ir.Value:
+    """Unsigned integer remainder ``a % b``.
+
+    Generates ``arith.remui`` which compiles to efficient ``urem`` on AMD GPU.
+
+    Args:
+        a: i32 dividend (ArithValue or int).
+        b: i32 divisor (ArithValue or compile-time int constant).
+    """
+    from .._mlir.dialects import arith as _arith
+    a_ = _unwrap(a)
+    b_ = _to_i32_value(b) if isinstance(b, int) else _unwrap(b)
+    return _arith.RemUIOp(a_, b_).result
+
+
 def load_i32_global(addr_i64: Any) -> ir.Value:
     """Load i32 from a global (addrspace 1) address.
 

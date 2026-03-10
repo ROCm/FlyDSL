@@ -12,11 +12,9 @@ import ctypes
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.distributed as dist
-
 import mori.shmem as ms
 from mori.shmem import mori_shmem_create_tensor
 
@@ -92,18 +90,26 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         chip = config.chip
         r    = config.rank
 
+        # HSACO 文件名包含关键编译参数，避免不同配置间的缓存污染
+        mt  = config.max_num_inp_token_per_rank
+        epr = config.num_experts_per_rank
+        ept = config.num_experts_per_token
+        hdim = config.hidden_dim
+
         print(f"[v2] Rank {r}: compiling v2 dispatch kernel...")
         self._disp_kernel = build_and_compile_dispatch(
             rank=r, npes=config.world_size,
-            experts_per_rank=config.num_experts_per_rank,
-            experts_per_token=config.num_experts_per_token,
-            hidden_dim=config.hidden_dim,
-            max_tok_per_rank=config.max_num_inp_token_per_rank,
+            experts_per_rank=epr,
+            experts_per_token=ept,
+            hidden_dim=hdim,
+            max_tok_per_rank=mt,
             block_num=config.block_num,
             warp_num_per_block=config.warp_num_per_block,
             data_type=config.data_type,
             chip=chip,
-            out_path=os.path.join(tmp, f"v2_dispatch_{chip}_r{r}.hsaco"),
+            out_path=os.path.join(
+                tmp, f"v2_disp_{chip}_ep{config.world_size}"
+                     f"_mt{mt}_h{hdim}_k{ept}_r{r}.hsaco"),
             shmem_bc=self._mori_bc,
         )
 
@@ -117,7 +123,9 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             warp_num_per_block=config.warp_num_per_block,
             data_type=config.data_type,
             chip=chip,
-            out_path=os.path.join(tmp, f"v2_combine_{chip}_r{r}.hsaco"),
+            out_path=os.path.join(
+                tmp, f"v2_comb_{chip}_ep{config.world_size}"
+                     f"_mt{mt}_h{hdim}_k{ept}_r{r}.hsaco"),
             shmem_bc=self._mori_bc,
         )
 
@@ -167,7 +175,13 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             (mt * k,), sentinel, dtype=torch.int32, device=self._dev)
 
     def reset(self):
-        """清零所有计数器和信号 buffer（供下一轮使用）。"""
+        """清零所有计数器和信号 buffer（供下一轮使用）。
+
+        shmem_barrier_all 确保 NIC 操作（prev round Phase 2/3 的远端写）
+        在下一轮 Phase 1 开始前完全完成。
+        调用方需确保 BOTH ranks 在同一时间点调用 reset()，
+        否则 barrier 可能与其他操作配对，导致竞争。
+        """
         self.shmem_tok_off.fill_(0)
         self.shmem_recv_tok_num.fill_(0)
         self.shmem_xdev_bar_mem.fill_(0)
@@ -180,6 +194,10 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         sentinel = self.cfg.world_size * max_recv
         self.dest_tok_map.fill_(sentinel)
         torch.cuda.synchronize()
+        # dist.barrier ensures both ranks reach this point before shmem_barrier_all
+        # This prevents wrong pairing of shmem barriers when ranks have different timing
+        if dist.is_initialized():
+            dist.barrier()
         ms.shmem_barrier_all()
 
     def dispatch(self, input, weights, scales, indices,
