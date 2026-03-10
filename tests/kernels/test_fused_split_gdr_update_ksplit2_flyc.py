@@ -415,7 +415,7 @@ def _run_hip_kernel(
 @pytest.mark.parametrize("num_heads_qk", [4])
 @pytest.mark.parametrize("num_heads_v", [8])
 @pytest.mark.parametrize("head_dim", [128])
-def test_split_gdr_ksplit2_correctness(
+def test_split_gdr_ksplit2_correctness_and_perf(
     ctx,
     batch_size,
     seqlen,
@@ -522,12 +522,12 @@ def test_split_gdr_ksplit2_correctness(
         )
     )
 
-    print("output_ref[:128]:\n", output_ref.reshape(-1)[:128])
-    print("output_hip[:128]:\n", output_hip.reshape(-1)[:128])
-    print("output_fly[:128]:\n", output_fly.reshape(-1)[:128])
-    print("ssm_state_ref[:128]:\n", ssm_state_ref.reshape(-1)[:128])
-    print("ssm_state_hip_final[:128]:\n", ssm_state_hip_final.reshape(-1)[:128])
-    print("ssm_state_fly_final[:128]:\n", ssm_state_fly_final.reshape(-1)[:128])
+    # print("output_ref[:128]:\n", output_ref.reshape(-1)[:128])
+    # print("output_hip[:128]:\n", output_hip.reshape(-1)[:128])
+    # print("output_fly[:128]:\n", output_fly.reshape(-1)[:128])
+    # print("ssm_state_ref[:128]:\n", ssm_state_ref.reshape(-1)[:128])
+    # print("ssm_state_hip_final[:128]:\n", ssm_state_hip_final.reshape(-1)[:128])
+    # print("ssm_state_fly_final[:128]:\n", ssm_state_fly_final.reshape(-1)[:128])
     print(
         f"output_ref min/max: {output_ref.float().min().item():.6f} / {output_ref.float().max().item():.6f}"
     )
@@ -566,12 +566,76 @@ def test_split_gdr_ksplit2_correctness(
     print(f"  State  max diff (fly vs hip): {state_diff_fly_hip:.6f}")
     print(f"{'='*70}")
 
-    assert output_diff_hip_ref < 5e-3, f"Hip output vs ref diff too large: {output_diff_hip_ref}"
-    assert state_diff_hip_ref < 5e-3, f"Hip state vs ref diff too large: {state_diff_hip_ref}"
-    assert output_diff_fly_ref < 5e-3, f"Fly output vs ref diff too large: {output_diff_fly_ref}"
-    assert state_diff_fly_ref < 5e-3, f"Fly state vs ref diff too large: {state_diff_fly_ref}"
-    assert output_diff_fly_hip < 5e-3, f"Fly output vs hip diff too large: {output_diff_fly_hip}"
-    assert state_diff_fly_hip < 5e-3, f"Fly state vs hip diff too large: {state_diff_fly_hip}"
+    assert output_diff_hip_ref < 1e-3, f"Hip output vs ref diff too large: {output_diff_hip_ref}"
+    assert state_diff_hip_ref < 1e-3, f"Hip state vs ref diff too large: {state_diff_hip_ref}"
+    assert output_diff_fly_ref < 1e-3, f"Fly output vs ref diff too large: {output_diff_fly_ref}"
+    assert state_diff_fly_ref < 1e-3, f"Fly state vs ref diff too large: {state_diff_fly_ref}"
+    assert output_diff_fly_hip < 1e-3, f"Fly output vs hip diff too large: {output_diff_fly_hip}"
+    assert state_diff_fly_hip < 1e-3, f"Fly state vs hip diff too large: {state_diff_fly_hip}"
+
+    # ---- Performance check: HIP vs FlyDSL ----
+    warmup = 10
+    num_iters = 1000
+    state_swz_template = to_swizzled_layout(inputs["ssm_state"]).reshape(
+        inputs["ssm_state"].shape[0] * num_heads_v, head_dim // 4, head_dim, 4
+    )
+    out_template = torch.empty_like(output_hip)
+
+    def _benchmark_us(run_fn):
+        for _ in range(warmup):
+            run_fn()
+        torch.cuda.synchronize()
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record()
+        for _ in range(num_iters):
+            run_fn()
+        end_evt.record()
+        torch.cuda.synchronize()
+        return (start_evt.elapsed_time(end_evt) * 1000.0) / num_iters
+
+    def _run_fly_once():
+        state_swz = state_swz_template.clone()
+        out_fly_perf = out_template.clone()
+        fly_exe(
+            inputs["A_log"].float(),
+            inputs["a"],
+            inputs["dt_bias"],
+            inputs["mixed_qkv"],
+            inputs["b"],
+            state_swz,
+            inputs["ssm_state_indices"],
+            out_fly_perf,
+        )
+
+    def _run_hip_once():
+        state_swz = state_swz_template.clone()
+        _ = hip_mod.fused_split_gdr_update_ksplit2(
+            mixed_qkv=inputs["mixed_qkv"],
+            A_log=inputs["A_log"],
+            a=inputs["a"],
+            dt_bias=inputs["dt_bias"],
+            b_gate=inputs["b"],
+            initial_state_source=state_swz,
+            initial_state_indices=inputs["ssm_state_indices"],
+            key_dim=key_dim,
+            value_dim=value_dim,
+            num_heads_qk=num_heads_qk,
+            num_heads_v=num_heads_v,
+            head_dim=head_dim,
+            softplus_beta=softplus_beta,
+            softplus_threshold=softplus_threshold,
+            scale=scale,
+            use_qk_l2norm_in_kernel=True,
+        )
+
+    fly_us = _benchmark_us(_run_fly_once)
+    hip_us = _benchmark_us(_run_hip_once)
+    speed_ratio = hip_us / fly_us if fly_us > 0 else float("inf")
+    print(f"  Perf warmup/loop: {warmup}/{num_iters}")
+    print(f"  FlyDSL time: {fly_us:.2f} us")
+    print(f"  HIP time:    {hip_us:.2f} us")
+    print(f"  HIP/FlyDSL:  {speed_ratio:.3f}x")
     print(f"  PASS — ksplit2 correctness test passed!")
 
 
