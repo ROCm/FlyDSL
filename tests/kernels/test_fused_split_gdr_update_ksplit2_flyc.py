@@ -263,7 +263,7 @@ def split_gdr_reference(
 
 def _build_inputs(bsz, t_seq, h, hv, k_dim, v_dim, n_state, dtype, seed=0):
     torch.manual_seed(seed)
-    A_log = torch.randn(hv, device="cuda", dtype=dtype) * 0.1
+    A_log = torch.randn(hv, device="cuda", dtype=torch.float32) * 0.1
     dt_bias = torch.randn(hv, device="cuda", dtype=dtype) * 0.1
     a = torch.randn(bsz, t_seq, hv, device="cuda", dtype=dtype) * 0.1
     b = torch.randn(bsz, t_seq, hv, device="cuda", dtype=dtype) * 0.1
@@ -506,7 +506,7 @@ def test_split_gdr_ksplit2_correctness(
     )
     output_fly = torch.empty_like(output_hip)
     fly_exe(
-        inputs["A_log"].to(dtype),
+        inputs["A_log"].float(),
         inputs["a"],
         inputs["dt_bias"],
         inputs["mixed_qkv"],

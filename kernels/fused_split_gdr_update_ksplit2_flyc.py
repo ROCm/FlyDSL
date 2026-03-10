@@ -71,7 +71,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
         @flir.kernel
         def fused_split_gdr_update_ksplit2_flyc_kernel(
             self: flir.T.i64,
-            A_log: lambda: T.memref(HV, elem_type),
+            A_log: lambda: T.memref(HV, T.f32()),
             a: lambda: T.memref(BT, HV, elem_type),
             dt_bias: lambda: T.memref(HV, elem_type),
             mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
@@ -246,7 +246,6 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
             a_log_val = memref.load(A_log, [arith.as_value(i_hv)])
             dt_bias_val = memref.load(dt_bias, [arith.as_value(i_hv)])
             if dtype_str != "f32":
-                a_log_val = flir.arith.extf(comp, arith.as_value(a_log_val))
                 dt_bias_val = flir.arith.extf(comp, arith.as_value(dt_bias_val))
             neg_exp_a = flir.arith.MulFOp(
                 arith.as_value(c_neg_one),
@@ -777,7 +776,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
         @flir.jit
         def __call__(
             self: flir.T.i64,
-            A_log: lambda: T.memref(HV, elem_type),
+            A_log: lambda: T.memref(HV, T.f32()),
             a: lambda: T.memref(BT, HV, elem_type),
             dt_bias: lambda: T.memref(HV, elem_type),
             mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
