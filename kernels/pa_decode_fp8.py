@@ -124,10 +124,10 @@ def build_pa_decode_module(
         block_tables_ptr: fx.Tensor,
         context_length_i32: Int32,
     ):
-        tid  = arith.index_cast(T.i32, gpu.thread_idx.x)
-        seq  = arith.index_cast(T.i32, gpu.block_idx.x)
-        kv_h = arith.index_cast(T.i32, gpu.block_idx.y)
-        part = arith.index_cast(T.i32, gpu.block_idx.z)
+        tid  = gpu.thread_idx.x
+        seq  = gpu.block_idx.x
+        kv_h = gpu.block_idx.y
+        part = gpu.block_idx.z
 
         mfma_row    = tid & _i32_const(15)
         lane_hi4    = (tid & _i32_const(0xF0)) >> _i32_const(4)
@@ -165,7 +165,7 @@ def build_pa_decode_module(
         _k_head_off  = kv_h * c_kh
         _v_head_off  = kv_h * c_vh
 
-        part_z = arith.index_cast(T.i32, gpu.block_idx.z)
+        part_z = gpu.block_idx.z
 
         # ── STEP 1: Q → LDS ────────────────────────────────────
         q_off_g = _q_cta_base + mfma_row * c_qh + lane_hi4 * c8

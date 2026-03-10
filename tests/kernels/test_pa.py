@@ -10,6 +10,8 @@ import kernels.pa_decode_fp8 as _pa
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir import ir as _ir
 import flydsl.compiler as flyc, flydsl.expr as fx
+from flydsl.expr import arith
+from flydsl.expr.typing import T
 from aiter.ops.triton.gluon.pa_decode_gluon import (
     pa_decode_gluon, get_recommended_splits,
     _paged_attention_decode_v2_reduce_kernel_wrapper,
@@ -102,7 +104,7 @@ def gluon_reduce(fd_out, fd_es, fd_ml, context_lengths, num_parts, ps_mode=False
 
 def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
                block_size=16, trans_v=False, ps=True, quant_q=True,
-               num_iters=100):
+               num_iters=100, test_graph=False):
     setup_seed(SEED)
     head_size = HEAD_SIZE
     softmax_scale = 1.0 / math.sqrt(head_size)
@@ -182,19 +184,29 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
         fd_ml  = torch.full((batch_size, num_kv_heads, num_parts, qg), float('-inf'),
                             dtype=torch.float32, device=dev)
 
+    _cache_tag = (batch_size, num_kv_heads, grid_z)
+
     @flyc.jit
     def fd_launch(out, es, ml, q, kc, vc, bt, cl: fx.Int32,
-                  stream: fx.Stream = fx.Stream(None)):
+                  gx: fx.Int32, gy: fx.Int32, gz: fx.Int32,
+                  stream: fx.Stream):
+        _ = _cache_tag
         fd_al.finalized = False
         ctx = CompilationContext.get_current()
         with _ir.InsertionPoint(ctx.gpu_module_body):
             fd_al.finalize()
+        grid_x = arith.index_cast(T.index, gx.ir_value())
+        grid_y = arith.index_cast(T.index, gy.ir_value())
+        grid_z_val = arith.index_cast(T.index, gz.ir_value())
         fd_kfn(out, es, ml, q, kc, vc, bt, cl).launch(
-            grid=(batch_size, num_kv_heads, grid_z),
+            grid=(grid_x, grid_y, grid_z_val),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
+    # Warmup (compilation happens here)
     fd_launch(fd_out, fd_es, fd_ml, fd_query, q_keys, q_vals,
-              block_tables, context_length)
+              block_tables, context_length,
+              batch_size, num_kv_heads, grid_z,
+              torch.cuda.current_stream())
     torch.cuda.synchronize()
 
     if _one_shot:
@@ -219,68 +231,83 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
 
     mode_str = "one_shot" if _one_shot else (f"ps({fd_num_splits})" if fd_num_splits > 0 else "partitioned")
 
-    # ── Perf (PA kernel + reduce = fair comparison) ─────────────
+    # ── Perf (GEMM-style: wrapper + run_perftest with tensor args) ──
     if _one_shot:
-        def _fd():
-            fd_launch(fd_out, fd_es, fd_ml, fd_query, q_keys, q_vals,
-                      block_tables, context_length)
+        def launch_fd(out, es, ml, q, kc, vc, bt):
+            fd_launch(out, es, ml, q, kc, vc, bt,
+                      context_length, batch_size, num_kv_heads, grid_z,
+                      torch.cuda.current_stream())
     else:
         fd_reduce_out = torch.empty(batch_size, 1, num_kv_heads, qg, head_size,
                                     dtype=bf16, device=dev)
         _reduce_grid = (batch_size, num_kv_heads, 1)
         _is_ps = fd_num_splits > 0
 
-        def _fd():
-            fd_launch(fd_out, fd_es, fd_ml, fd_query, q_keys, q_vals,
-                      block_tables, context_length)
+        def launch_fd(out, es, ml, q, kc, vc, bt):
+            fd_launch(out, es, ml, q, kc, vc, bt,
+                      context_length, batch_size, num_kv_heads, grid_z,
+                      torch.cuda.current_stream())
             _paged_attention_decode_v2_reduce_kernel_wrapper(
                 _reduce_grid, fd_reduce_out,
-                fd_es, fd_ml, fd_out, context_lengths, None,
+                es, ml, out, context_lengths, None,
                 fd_reduce_out.stride(0), fd_reduce_out.stride(1),
                 fd_reduce_out.stride(2), fd_reduce_out.stride(3),
-                fd_es.stride(0), fd_es.stride(1), fd_es.stride(2),
-                fd_out.stride(0), fd_out.stride(1), fd_out.stride(2), fd_out.stride(3),
+                es.stride(0), es.stride(1), es.stride(2),
+                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
                 query_seq_len=1, query_group_size=qg,
                 HEAD_SIZE=head_size, CONTEXT_PARTITION_SIZE=CPSZ,
                 PS=_is_ps, context_partition_num=num_parts,
             )
 
-    def _gl():
-        pa_decode_gluon(gl_out, quantized_query, q_keys, q_vals, context_lengths,
-                        block_tables, softmax_scale, 1, gl_mp, CPSZ, fp8,
+    def launch_gl(out, q, kc, vc, bt):
+        pa_decode_gluon(out, q, kc, vc, context_lengths,
+                        bt, softmax_scale, 1, gl_mp, CPSZ, fp8,
                         q_scale, key_scale, val_scale,
                         gl_es, gl_ml, gl_tmp, None, ps=ps)
 
-    _, fd_us = run_perftest(_fd, num_iters=num_iters, num_warmup=5, num_rotate_args=1)
-    _, gl_us = run_perftest(_gl, num_iters=num_iters, num_warmup=5, num_rotate_args=1)
+    _, fd_us = run_perftest(launch_fd, fd_out, fd_es, fd_ml, fd_query,
+                            q_keys, q_vals, block_tables,
+                            num_iters=num_iters, num_warmup=5,
+                            testGraph=test_graph)
+    _, gl_us = run_perftest(launch_gl, gl_out, quantized_query, q_keys,
+                            q_vals, block_tables,
+                            num_iters=num_iters, num_warmup=5,
+                            testGraph=test_graph)
 
     torch.cuda.empty_cache(); gc.collect()
     return fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd
 
 
 # ── Test configs ─────────────────────────────────────────────────
-NH, NKV, BS = 16, 1, 1024
-tv, qq = True, False
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="PA Decode FP8 benchmark")
+    parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
+    parser.add_argument("--num_iters", type=int, default=100)
+    args = parser.parse_args()
 
-print(f"{'mode':>14} |  NH  NKV |   BS | batch |   CTX | tv qq |   FlyDSL   |   Gluon    | ratio | status")
-print("-" * 100)
+    NH, NKV, BS = 16, 1, 1024
+    tv, qq = True, False
 
-configs = [
-    (128, 8192, False),   # partitioned: target config
-    (128, 8192, True),    # PS mode
-    (128, 4096, False),   # partitioned: shorter CTX
-]
+    print(f"{'mode':>14} |  NH  NKV |   BS | batch |   CTX | tv qq |   FlyDSL   |   Gluon    | ratio | status")
+    print("-" * 100)
 
-for batch, CTX, use_ps in configs:
-    try:
-        fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd = run_single(
-            NH, NKV, batch, CTX, block_size=BS, trans_v=tv, quant_q=qq, ps=use_ps)
-        sp = gl_us / fd_us
-        fd_s = "PASS" if fd_ok else "FAIL"
-        gl_s = "PASS" if gl_ok else "FAIL"
-        ps_s = "T" if use_ps else "F"
-        print(f"{mode_str:>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} |  T  F | {fd_us:>8.1f}us | {gl_us:>8.1f}us | {sp:>5.2f}x | {fd_s:>4} {gl_s:>4} (err={err_fd:.4f})")
-    except Exception as ex:
-        import traceback; traceback.print_exc()
-        print(f"{'ERROR':>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} | ps={'T' if use_ps else 'F'} | EXCEPTION")
-print("-" * 100)
+    configs = [
+        (128, 8192, False),
+        (128, 8192, True),
+        (128, 4096, False),
+    ]
+
+    for batch, CTX, use_ps in configs:
+        try:
+            fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd = run_single(
+                NH, NKV, batch, CTX, block_size=BS, trans_v=tv, quant_q=qq,
+                ps=use_ps, num_iters=args.num_iters, test_graph=args.test_graph)
+            sp = gl_us / fd_us
+            fd_s = "PASS" if fd_ok else "FAIL"
+            gl_s = "PASS" if gl_ok else "FAIL"
+            print(f"{mode_str:>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} |  T  F | {fd_us:>8.1f}us | {gl_us:>8.1f}us | {sp:>5.2f}x | {fd_s:>4} {gl_s:>4} (err={err_fd:.4f})")
+        except Exception as ex:
+            import traceback; traceback.print_exc()
+            print(f"{'ERROR':>14} | {NH:>3} {NKV:>4} | {BS:>4} | {batch:>5} | {CTX:>5} | ps={'T' if use_ps else 'F'} | EXCEPTION")
+    print("-" * 100)
