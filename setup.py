@@ -4,6 +4,7 @@ import os
 import subprocess
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from setuptools import Distribution, find_namespace_packages, find_packages, setup
@@ -83,6 +84,20 @@ EMBEDDED_MLIR_ROOT = REPO_ROOT / EMBEDDED_MLIR_ROOT_REL
 EMBEDDED__MLIR = REPO_ROOT / EMBEDDED__MLIR_REL
 
 
+def _git_short_hash() -> str:
+    """Return the short commit hash from `git rev-parse --short HEAD`, or "" on failure."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=str(REPO_ROOT),
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _git_rev_count() -> str:
     """Return the commit count from `git rev-list --count HEAD`, or "" on failure."""
     try:
@@ -98,6 +113,14 @@ def _git_rev_count() -> str:
 
 
 def _read_version() -> str:
+    """Build the package version based on FLYDSL_RELEASE_TYPE.
+
+    Release types (set via env var FLYDSL_RELEASE_TYPE):
+      nightlies   -> {base}+{YYYYMMDD}.{git_hash}     (e.g. 0.1.0+20260309.a1b2c3d)
+      devreleases -> {base}.dev{YYYYMMDD}+{git_hash}   (e.g. 0.1.0.dev20260309+a1b2c3d)
+      release     -> {base}                             (e.g. 0.1.0)
+      <unset>     -> {base}.dev{commit_count}           (legacy local dev builds)
+    """
     init_py = (PY_SRC / "flydsl" / "__init__.py").read_text(encoding="utf-8")
     base_version = "0.0.0"
     for line in init_py.splitlines():
@@ -108,11 +131,25 @@ def _read_version() -> str:
     if "+" in base_version:
         return base_version
 
+    release_type = os.environ.get("FLYDSL_RELEASE_TYPE", "").strip().lower()
+    git_hash = _git_short_hash()
+    date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    if release_type == "nightlies":
+        local = ".".join(filter(None, [date_tag, git_hash]))
+        return f"{base_version}+{local}"
+    elif release_type == "devreleases":
+        version = f"{base_version}.dev{date_tag}"
+        if git_hash:
+            version += f"+{git_hash}"
+        return version
+    elif release_type == "release":
+        return base_version
+
+    # Legacy: local dev builds without FLYDSL_RELEASE_TYPE
     commit_count = _git_rev_count()
     if not commit_count:
         return base_version
-
-    # <base>.dev<N>  (e.g. 0.1.0.dev335)
     return f"{base_version}.dev{commit_count}"
 
 
