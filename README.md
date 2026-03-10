@@ -133,10 +133,20 @@ bash scripts/build.sh -j64
   - Run `pip install -e .` or set `PYTHONPATH` as shown above.
 
 - **MLIR `.so` load errors**
-  - Set `LD_LIBRARY_PATH` to include the MLIR libs directory:
-    ```bash
-    export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
-    ```
+  - Add MLIR build lib dir to the loader path:
+    -  export LD_LIBRARY_PATH=$(pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH
+
+## Documentation
+
+**Full documentation: [rocm.github.io/FlyDSL](https://rocm.github.io/FlyDSL)**
+
+| **Topic** | **Description** | **Guide** |
+|---|---|---|
+| Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
+| Layout System | FLIR layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
+| Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
 - **Kernel cache issues** (stale results after code changes)
   - Clear: `rm -rf ~/.flydsl/cache`

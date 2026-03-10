@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ inputs.llvm_commit }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/flir/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
+          key: mlir-install-${{ inputs.llvm_commit }}-${{ hashFiles('flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -75,7 +75,7 @@ jobs:
         run: |
           docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.39 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
-          docker cp flydsl_build:/flydsl/build-fly/build_py312/bin/flir-opt ./dist/flir-opt
+          docker cp flydsl_build:/flydsl/build-fly/build_py312/bin/fly-opt ./dist/fly-opt
 
       - name: Collect wheel names
         id: collect-wheels
@@ -90,7 +90,7 @@ jobs:
           name: flydsl-wheels
           path: |
             dist/*.whl
-            dist/flir-opt
+            dist/fly-opt
           retention-days: 3
 
       - name: Build summary
