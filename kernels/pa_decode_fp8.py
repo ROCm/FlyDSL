@@ -207,8 +207,6 @@ def build_pa_decode_module(
         PROB_SCALE_C = arith.constant(_prob_scale, type=T.f32)
         warp_head_base = warp_id * arith.constant(32, type=T.i32)
 
-        from flydsl.expr.utils.arith import int_to_int as _int_cast
-        from flydsl.expr.numeric import Int32 as _Int32, Int64 as _Int64
 
         def _wave_max(x):
             w = x
@@ -290,30 +288,52 @@ def build_pa_decode_module(
             b = vector.extract(kv_4xi32, static_position=[pair_idx * 2 + 1])
             return _pack_i32_pair_to_i64(a, b)
 
-        # -- Online softmax state (persists across partition iterations) --
-        running_max = NEG_INF
-        running_sum = ZERO_F
-        acc_pv_running = [arith.constant_vector(0.0, T.f32x4) for _ in [0, 1]]
+        # -- State layout constants for scf.for loop-carried values --
+        _N_KV = 8       # 4 tiles × 2 loads
+        _N_BT = 2       # phys_0/phys_1 or phys_block/page_off
+        _N_SOFTMAX = 2  # running_max, running_sum
+        _N_PV = 2       # acc_pv_running[0], acc_pv_running[1]
+        # Total: _N_KV + 1 (partition_start) + _N_BT + _N_SOFTMAX + _N_PV = 15
 
-        # -- Partition loop --
-        for _pi in range(int(_max_pps)):
-            # Compute partition index for this iteration
-            if _ps_mode:
-                _pi_i32 = arith.index_cast(T.i32, _pi)
-                part = part_z * arith.constant(int(_max_pps), type=T.i32) + _pi_i32
-            else:
-                part = part_z
+        def _unwrap_val(v):
+            """Convert FlyDSL wrapper (Int32, Float32, etc.) to raw MLIR ir.Value."""
+            if hasattr(v, 'ir_value'):
+                return v.ir_value()
+            return v
 
-            # Issue BT + K loads for this iteration
-            pf = _issue_bt_k_loads(part)
-            kv = pf['kv']
-            partition_start = pf['partition_start']
+        def _pack_loop_state(kv_flat, partition_start_v, bt_vals, rmax, rsum, acc_pv):
+            """Pack all loop-carried values into a flat list for scf.for init.
+            All values are unwrapped to raw MLIR ir.Value for scf.ForOp."""
+            raw = kv_flat + [partition_start_v] + bt_vals + [rmax, rsum] + acc_pv
+            return [_unwrap_val(v) for v in raw]
+
+        def _unpack_loop_state(state):
+            """Unpack flat state list back into structured values."""
+            idx = 0
+            kv_flat = list(state[idx:idx+_N_KV]); idx += _N_KV
+            partition_start_v = state[idx]; idx += 1
+            bt_vals = list(state[idx:idx+_N_BT]); idx += _N_BT
+            rmax = state[idx]; idx += 1
+            rsum = state[idx]; idx += 1
+            acc_pv = [state[idx], state[idx+1]]
+            # Reshape kv_flat -> kv[4][2]
+            kv = [[kv_flat[t*2], kv_flat[t*2+1]] for t in range(4)]
+            return kv, partition_start_v, bt_vals, rmax, rsum, acc_pv
+
+        def _flatten_kv(kv):
+            """Flatten kv[4][2] -> flat list of 8 values."""
+            return [kv[t][l] for t in range(4) for l in range(2)]
+
+        # ================================================================
+        # Helper: compute one partition iteration (QK, softmax, PV)
+        # Takes prefetched K data + softmax state, returns updated state.
+        # Does NOT write output — caller handles that.
+        # ================================================================
+        def _compute_partition_body(kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running):
             if _use_large_block:
-                phys_block = pf['phys_block']
-                page_off = pf['page_off']
+                phys_block_v, page_off_v = bt_vals[0], bt_vals[1]
             else:
-                phys_0 = pf['phys_0']
-                phys_1 = pf['phys_1']
+                phys_0, phys_1 = bt_vals[0], bt_vals[1]
 
             # -- STEP 6: QK MFMAs (4 tiles x 4 K-chunks) --
             q_vecs = [q_a0, q_a1, q_a2, q_a3]
@@ -345,31 +365,31 @@ def build_pa_decode_module(
 
             # -- STEP 7: BT LDS staging (for V loads) --
             if _use_large_block:
-                token_page_base = page_off // arith.constant(16, type=T.i32)
+                token_page_base = page_off_v // arith.constant(16, type=T.i32)
                 tp0 = token_page_base + warp_id
                 tp1 = token_page_base + warp_id + arith.constant(4, type=T.i32)
-                tp0_i64 = _int_cast(tp0, _Int64, signed=True)
-                tp1_i64 = _int_cast(tp1, _Int64, signed=True)
+                tp0_i64 = arith.extsi(T.i64, arith.unwrap(tp0))
+                tp1_i64 = arith.extsi(T.i64, arith.unwrap(tp1))
                 bt_si = arith.index_cast(T.index, warp_id * arith.constant(2, type=T.i32))
                 bt_vec = vector.from_elements(T.vec(2, T.i64), [tp0_i64, tp1_i64])
                 vector.store(bt_vec, bt_lds_i64, [bt_si])
                 gpu.barrier()
                 bt_li = arith.index_cast(T.index, kv_col_bits // arith.constant(8, type=T.i32))
                 bt_load = vector.load_op(T.vec(2, T.i64), bt_lds_i64, [bt_li])
-                phys_pv_0 = _int_cast(vector.extract(bt_load, static_position=[0], dynamic_position=[]), _Int32)
-                phys_pv_1 = _int_cast(vector.extract(bt_load, static_position=[1], dynamic_position=[]), _Int32)
+                phys_pv_0 = arith.trunci(T.i32, arith.unwrap(vector.extract(bt_load, static_position=[0], dynamic_position=[])))
+                phys_pv_1 = arith.trunci(T.i32, arith.unwrap(vector.extract(bt_load, static_position=[1], dynamic_position=[])))
             else:
                 gpu.barrier()
-                p0_i64 = _int_cast(phys_0, _Int64, signed=True)
-                p1_i64 = _int_cast(phys_1, _Int64, signed=True)
+                p0_i64 = arith.extsi(T.i64, arith.unwrap(phys_0))
+                p1_i64 = arith.extsi(T.i64, arith.unwrap(phys_1))
                 bt_si = arith.index_cast(T.index, warp_id * arith.constant(2, type=T.i32))
                 bt_vec = vector.from_elements(T.vec(2, T.i64), [p0_i64, p1_i64])
                 vector.store(bt_vec, bt_lds_i64, [bt_si])
                 gpu.barrier()
                 bt_li = arith.index_cast(T.index, kv_col_bits // arith.constant(8, type=T.i32))
                 bt_load = vector.load_op(T.vec(2, T.i64), bt_lds_i64, [bt_li])
-                phys_pv_0 = _int_cast(vector.extract(bt_load, static_position=[0], dynamic_position=[]), _Int32)
-                phys_pv_1 = _int_cast(vector.extract(bt_load, static_position=[1], dynamic_position=[]), _Int32)
+                phys_pv_0 = arith.trunci(T.i32, arith.unwrap(vector.extract(bt_load, static_position=[0], dynamic_position=[])))
+                phys_pv_1 = arith.trunci(T.i32, arith.unwrap(vector.extract(bt_load, static_position=[1], dynamic_position=[])))
 
             # -- STEP 8: V batch loads (via buffer_load) --
             vv = []
@@ -378,13 +398,13 @@ def build_pa_decode_module(
                 pv_pb = phys_pv_0 if n_tile == 0 else phys_pv_1
                 if _use_large_block and trans_v:
                     _v_blk_base = (
-                        arith.unwrap(phys_block) * c_vb
+                        arith.unwrap(phys_block_v) * c_vb
                         + _v_head_off
                         + pv_pb * arith.constant(HEAD_SIZE * 16, type=T.i32)
                         + arith.constant(h_py * 16, type=T.i32)
                     )
                 elif _use_large_block:
-                    _v_blk_base = pv_pb * c_vb + _v_head_off + arith.constant(h_py * _bs, type=T.i32) + page_off
+                    _v_blk_base = pv_pb * c_vb + _v_head_off + arith.constant(h_py * _bs, type=T.i32) + page_off_v
                 else:
                     _v_blk_base = pv_pb * c_vb + _v_head_off + arith.constant(h_py * KV_BLOCK_SIZE, type=T.i32)
                 nt_loads = []
@@ -468,72 +488,174 @@ def build_pa_decode_module(
             p_ops = [_pack(_pa, _pb, k) for k in [0, 1, 2, 3]] + [_pack(_pc, _pd, k) for k in [0, 1, 2, 3]]
 
             # -- STEP 12+13: PV MFMAs (2 tiles x 8 V-chunks) --
-            # V data is 4xi32 from buffer_load; extract i64 pairs for MFMA
             for t in [0, 1]:
-                # vv[t] has 4 loads of 4xi32 each → 8 i64 operands
                 v_t = []
                 for load_idx in [0, 1, 2, 3]:
-                    v_t.append(_extract_k_i64(vv[t][load_idx], 0))  # elements [0,1]
-                    v_t.append(_extract_k_i64(vv[t][load_idx], 1))  # elements [2,3]
+                    v_t.append(_extract_k_i64(vv[t][load_idx], 0))
+                    v_t.append(_extract_k_i64(vv[t][load_idx], 1))
                 acc = acc_pv_running[t]
                 for j in [0, 1, 2, 3, 4, 5, 6, 7]:
                     acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v_t[j], p_ops[j], acc, 0, 0, 0])
                 acc_pv_running[t] = acc
 
-            # -- STEP 14: Output --
-            _is_last_iter = (_pi == int(_max_pps) - 1)
-            if not _ps_mode or _is_last_iter:
-                if one_shot or _ps_mode:
-                    rcp = arith.constant(1.0, type=T.f32) / running_sum
-                    pv_out = [
-                        _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
-                        _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
-                    ]
+            return running_max, running_sum, acc_pv_running
 
-                    c_os = arith.constant(_stride_out_seq, type=T.i32)
-                    c_oh = arith.constant(_stride_out_head, type=T.i32)
-                    for n_tile in [0, 1]:
-                        h_py = n_tile * MFMA_N
-                        out_off = (
-                            seq * c_os
-                            + kv_h * c_oh
-                            + mfma_row * arith.constant(HEAD_SIZE, type=T.i32)
-                            + warp_head_base
-                            + arith.constant(h_py, type=T.i32)
-                        )
-                        out_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_out[n_tile])
-                        out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
-                        buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+        # ================================================================
+        # Helper: write output (direct or partitioned)
+        # ================================================================
+        def _write_output(running_max, running_sum, acc_pv_running, part_idx):
+            if one_shot or _ps_mode:
+                rcp = arith.constant(1.0, type=T.f32) / running_sum
+                pv_out = [
+                    _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
+                    _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
+                ]
+
+                c_os = arith.constant(_stride_out_seq, type=T.i32)
+                c_oh = arith.constant(_stride_out_head, type=T.i32)
+                for n_tile in [0, 1]:
+                    h_py = n_tile * MFMA_N
+                    out_off = (
+                        seq * c_os
+                        + kv_h * c_oh
+                        + mfma_row * arith.constant(HEAD_SIZE, type=T.i32)
+                        + warp_head_base
+                        + arith.constant(h_py, type=T.i32)
+                    )
+                    out_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_out[n_tile])
+                    out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
+                    buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+            else:
+                rcp = arith.constant(1.0, type=T.f32) / running_sum
+                pv_out = [
+                    _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
+                    _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
+                ]
+
+                c_np_qg = arith.constant(num_partitions * QUERY_GROUP_SIZE, type=T.i32)
+                c_qg = arith.constant(QUERY_GROUP_SIZE, type=T.i32)
+                ml_off = seq * arith.constant(_stride_ml_seq, type=T.i32) + kv_h * c_np_qg + part_idx * c_qg + mfma_row
+                es_off = seq * arith.constant(_stride_es_seq, type=T.i32) + kv_h * c_np_qg + part_idx * c_qg + mfma_row
+                buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
+                buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
+
+                c_os = arith.constant(_stride_out_seq, type=T.i32)
+                c_oh = arith.constant(_stride_out_head, type=T.i32)
+                c_op = arith.constant(_stride_out_part, type=T.i32)
+                for n_tile in [0, 1]:
+                    h_py = n_tile * MFMA_N
+                    out_off = (
+                        seq * c_os
+                        + kv_h * c_oh
+                        + part_idx * c_op
+                        + mfma_row * arith.constant(HEAD_SIZE, type=T.i32)
+                        + warp_head_base
+                        + arith.constant(h_py, type=T.i32)
+                    )
+                    out_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_out[n_tile])
+                    out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
+                    buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+
+        # ================================================================
+        # Helper: compute partition index from loop iteration
+        # ================================================================
+        def _compute_part_idx(pi_val):
+            """Compute the global partition index from a loop iteration value (i32)."""
+            if _ps_mode:
+                return part_z * arith.constant(int(_max_pps), type=T.i32) + pi_val
+            else:
+                return part_z
+
+        # ================================================================
+        # Partition loop: scf.for with loop-carried prefetch (PS mode)
+        #   or single-iteration (non-PS / one_shot)
+        # ================================================================
+        if _max_pps == 1:
+            # -- Single partition: no loop, no prefetch needed --
+            running_max = NEG_INF
+            running_sum = ZERO_F
+            acc_pv_running = [arith.constant_vector(0.0, T.f32x4) for _ in [0, 1]]
+
+            part = _compute_part_idx(arith.constant(0, type=T.i32))
+            pf = _issue_bt_k_loads(part)
+            kv = pf['kv']
+            partition_start = pf['partition_start']
+            if _use_large_block:
+                bt_vals = [pf['phys_block'], pf['page_off']]
+            else:
+                bt_vals = [pf['phys_0'], pf['phys_1']]
+
+            running_max, running_sum, acc_pv_running = _compute_partition_body(
+                kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running
+            )
+            _write_output(running_max, running_sum, acc_pv_running, part)
+
+        else:
+            # -- Multi-partition (PS mode): scf.for with loop-carried K prefetch --
+
+            # ── Prologue: load first partition's K data ──
+            part_0 = _compute_part_idx(arith.constant(0, type=T.i32))
+            pf_0 = _issue_bt_k_loads(part_0)
+            kv_flat_0 = _flatten_kv(pf_0['kv'])
+            if _use_large_block:
+                bt_vals_0 = [pf_0['phys_block'], pf_0['page_off']]
+            else:
+                bt_vals_0 = [pf_0['phys_0'], pf_0['phys_1']]
+
+            init_state = _pack_loop_state(
+                kv_flat_0, pf_0['partition_start'],
+                bt_vals_0,
+                NEG_INF, ZERO_F,
+                [arith.constant_vector(0.0, T.f32x4), arith.constant_vector(0.0, T.f32x4)]
+            )
+
+            # ── scf.for: iterations 0.._max_pps-2 ──
+            # Each iteration: compute current K data, prefetch next K data
+            # Use arith.index constants so AST rewriter emits scf.for (not Python range)
+            _loop_start = arith.index(0)
+            _loop_stop = arith.index(int(_max_pps) - 1)
+            _loop_step = arith.index(1)
+            for iv, state in range(_loop_start, _loop_stop, _loop_step, init=init_state):
+                kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running = _unpack_loop_state(state)
+
+                # Compute current partition (QK + softmax + PV)
+                running_max, running_sum, acc_pv_running = _compute_partition_body(
+                    kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running
+                )
+
+                # Prefetch NEXT partition's K data (overlaps with PV MFMA pipeline drain)
+                iv_i32 = arith.index_cast(T.i32, iv)
+                next_pi = iv_i32 + arith.constant(1, type=T.i32)
+                next_part = _compute_part_idx(next_pi)
+                pf_next = _issue_bt_k_loads(next_part)
+                kv_next_flat = _flatten_kv(pf_next['kv'])
+                if _use_large_block:
+                    bt_next = [pf_next['phys_block'], pf_next['page_off']]
                 else:
-                    rcp = arith.constant(1.0, type=T.f32) / running_sum
-                    pv_out = [
-                        _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
-                        _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
-                    ]
+                    bt_next = [pf_next['phys_0'], pf_next['phys_1']]
 
-                    c_np_qg = arith.constant(num_partitions * QUERY_GROUP_SIZE, type=T.i32)
-                    c_qg = arith.constant(QUERY_GROUP_SIZE, type=T.i32)
-                    ml_off = seq * arith.constant(_stride_ml_seq, type=T.i32) + kv_h * c_np_qg + part * c_qg + mfma_row
-                    es_off = seq * arith.constant(_stride_es_seq, type=T.i32) + kv_h * c_np_qg + part * c_qg + mfma_row
-                    buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
-                    buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
+                # Yield: updated softmax/PV state + next K data
+                results = yield _pack_loop_state(
+                    kv_next_flat, pf_next['partition_start'],
+                    bt_next,
+                    running_max, running_sum, acc_pv_running
+                )
 
-                    c_os = arith.constant(_stride_out_seq, type=T.i32)
-                    c_oh = arith.constant(_stride_out_head, type=T.i32)
-                    c_op = arith.constant(_stride_out_part, type=T.i32)
-                    for n_tile in [0, 1]:
-                        h_py = n_tile * MFMA_N
-                        out_off = (
-                            seq * c_os
-                            + kv_h * c_oh
-                            + part * c_op
-                            + mfma_row * arith.constant(HEAD_SIZE, type=T.i32)
-                            + warp_head_base
-                            + arith.constant(h_py, type=T.i32)
-                        )
-                        out_bf16 = arith.trunc_f(T.vec(4, T.bf16), pv_out[n_tile])
-                        out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
-                        buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
+            # ── Epilogue: compute last partition from loop results ──
+            # Clear SmemPtr view caches to avoid dominance errors
+            # (views were created inside the scf.for body; epilogue needs fresh views)
+            s_max_p._view_cache = None
+            s_sum_p._view_cache = None
+
+            kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running = _unpack_loop_state(results)
+
+            running_max, running_sum, acc_pv_running = _compute_partition_body(
+                kv, partition_start, bt_vals, running_max, running_sum, acc_pv_running
+            )
+
+            # Compute the last partition's index for output
+            last_part = _compute_part_idx(arith.constant(int(_max_pps) - 1, type=T.i32))
+            _write_output(running_max, running_sum, acc_pv_running, last_part)
 
     return pa_decode_dot_kernel
 
