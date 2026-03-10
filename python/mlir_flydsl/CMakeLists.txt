@@ -114,6 +114,14 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
   DECLARED_SOURCES ${MLIRFlyDSLSources}
 )
 
+# Hide internal LLVM C++ symbols to prevent conflicts with ROCm's LLVM.
+# Only mlir* C API, mlir:: C++ symbols, and PyInit_* are exported.
+set(FLYDSL_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/flydsl_exports.ld")
+set_target_properties(FlyPythonCAPI PROPERTIES
+  LINK_FLAGS "-Wl,--version-script=${FLYDSL_VERSION_SCRIPT}"
+)
+set_property(TARGET FlyPythonCAPI APPEND PROPERTY LINK_DEPENDS "${FLYDSL_VERSION_SCRIPT}")
+
 
 set(FlyPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
