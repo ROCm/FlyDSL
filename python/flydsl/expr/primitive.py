@@ -201,6 +201,27 @@ def make_int_tuple(elems, loc=None, ip=None):
 
 @traced_op
 def make_layout(shape, stride, loc=None, ip=None):
+    def _to_int_tuple_value(name, value, tuple_maker):
+        if not isinstance(value, ir.Value):
+            return value
+        try:
+            IntTupleType(value.type)
+            return value
+        except Exception as e:
+            # Auto-wrap scalar IR values as 1-element IntTuple values.
+            # This keeps dynamic scalar inputs usable in make_layout(...).
+            try:
+                tuple_ty, dyn_elems = fly.infer_int_tuple_type(value)
+                return tuple_maker(tuple_ty, dyn_elems, loc=loc, ip=ip)
+            except Exception:
+                raise TypeError(
+                    f"make_layout cannot convert `{name}` to IntTuple value. "
+                    f"Got IR value type `{value.type}`."
+                ) from e
+
+    shape = _to_int_tuple_value("shape", shape, fly.make_shape)
+    stride = _to_int_tuple_value("stride", stride, fly.make_stride)
+
     if not isinstance(shape, ir.Value):
         shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
         shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
