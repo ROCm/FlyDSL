@@ -28,7 +28,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.preshuffle_gemm_flyc import compile_preshuffle_gemm_a8
+from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 
 
 def _run_kernel(

@@ -66,8 +66,16 @@ echo "MLIR FileCheck Tests"
 echo "========================================================================"
 
 FLY_OPT="${BUILD_DIR}/bin/fly-opt"
-FILECHECK="${MLIR_PATH:+${MLIR_PATH}/bin/FileCheck}"
-[ -z "${FILECHECK:-}" ] || [ ! -x "${FILECHECK}" ] && FILECHECK="$(which FileCheck 2>/dev/null || true)"
+FILECHECK=""
+if [ -f "${BUILD_DIR}/CMakeCache.txt" ]; then
+    _mlir_dir=$(grep '^MLIR_DIR:' "${BUILD_DIR}/CMakeCache.txt" | sed 's|^MLIR_DIR:[A-Z]*=||')
+    [ -n "${_mlir_dir}" ] && FILECHECK="${_mlir_dir}/../../../bin/FileCheck"
+fi
+[ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ] && FILECHECK="$(which FileCheck 2>/dev/null || true)"
+
+if [ -z "${FILECHECK}" ] || [ ! -x "${FILECHECK}" ]; then
+    echo "  SKIP  FileCheck not found; skipping MLIR lit tests."
+else
 
 for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | sort); do
     run_line=$(grep '^// RUN:' "$f" | head -1 | sed 's|^// RUN: *||')
@@ -81,6 +89,8 @@ for f in $(find "${REPO_ROOT}/tests/mlir" -name "*.mlir" -type f 2>/dev/null | s
         exit 1
     fi
 done
+
+fi
 
 echo ""
 echo "========================================================================"

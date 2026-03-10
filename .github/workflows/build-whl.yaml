@@ -73,9 +73,9 @@ jobs:
 
       - name: Build wheels
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.39 && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.39 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
-          docker cp flydsl_build:/flydsl/.flir/build_py312/bin/flir-opt ./dist/flir-opt
+          docker cp flydsl_build:/flydsl/build-fly/build_py312/bin/flir-opt ./dist/flir-opt
 
       - name: Collect wheel names
         id: collect-wheels

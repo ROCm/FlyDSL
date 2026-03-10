@@ -78,7 +78,7 @@ FlyDSL/
 │   └── 02-tiledCopy.py               # Tiled copy with partitioned tensors
 │
 ├── kernels/                          # Pre-built GPU kernels
-│   ├── preshuffle_gemm_flyc.py       # GEMM with B-preshuffle (@flyc.kernel API)
+│   ├── preshuffle_gemm.py       # GEMM with B-preshuffle (@flyc.kernel API)
 │   ├── layernorm_kernel.py           # LayerNorm
 │   ├── rmsnorm_kernel.py             # RMSNorm
 │   ├── softmax_kernel.py             # Softmax
