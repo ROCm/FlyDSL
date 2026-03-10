@@ -425,13 +425,11 @@ def run_v2_compilation_test(chip: str = "gfx942") -> None:
         max_tok_per_rank=max_tok,
         block_num=2, warp_num_per_block=1,
     )
-    disp_dummy = (
-        [torch.zeros(1, hdim, dtype=torch.bfloat16, device=dev),   # inp_tok
-         torch.zeros(1, k, dtype=torch.int32, device=dev),         # token_indices
-         torch.zeros(1, k, dtype=torch.float32, device=dev)]       # weights_buf
-        + [_fx.Int64(0)] * 10                                      # shmem base addrs
-        + [_fx.Int32(1)]                                            # cur_tok
-    )
+    # v2 kernel uses ALL fx.Int64 for addresses (no fx.Tensor params)
+    # 13 i64 addrs: addr_inp_tok, addr_idx, addr_wts, addr_out_tok,
+    #               addr_out_wts, addr_out_idx, addr_tok_off, addr_recv_num,
+    #               addr_dest_ctr, addr_disp_bar, addr_tok_map, addr_tis, addr_total_rv
+    disp_dummy = [_fx.Int64(0)] * 13 + [_fx.Int32(1)]
     disp_kernel = compile_shmem_kernel(disp_fn, disp_dummy, chip=chip)
     assert os.path.exists(disp_kernel.hsaco_path), \
         f"Dispatch HSACO not found: {disp_kernel.hsaco_path}"
