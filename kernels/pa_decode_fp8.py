@@ -268,47 +268,17 @@ def build_pa_decode_module(
                 kv.append([_raw_global_load_2xi64(key_cache_ptr, kb0),
                            _raw_global_load_2xi64(key_cache_ptr, kb1)])
 
-            k00 = _ex(kv[0][0], 0); k01 = _ex(kv[0][0], 1)
-            k02 = _ex(kv[0][1], 0); k03 = _ex(kv[0][1], 1)
-            k10 = _ex(kv[1][0], 0); k11 = _ex(kv[1][0], 1)
-            k12 = _ex(kv[1][1], 0); k13 = _ex(kv[1][1], 1)
-            k20 = _ex(kv[2][0], 0); k21 = _ex(kv[2][0], 1)
-            k22 = _ex(kv[2][1], 0); k23 = _ex(kv[2][1], 1)
-            k30 = _ex(kv[3][0], 0); k31 = _ex(kv[3][0], 1)
-            k32 = _ex(kv[3][1], 0); k33 = _ex(kv[3][1], 1)
-
-            # ── STEP 6: QK MFMAs ──────────────────────────────
-            rocdl.sched_barrier(0)
-            rocdl.sched_dsrd(2)
-            rocdl.sched_mfma(16)
-            rocdl.sched_barrier(0)
-
+            # ── STEP 6: QK MFMAs (4 tiles × 4 K-chunks) ──────────
+            q_vecs = [q_a0, q_a1, q_a2, q_a3]
             zero = arith.constant_vector(0.0, T.f32x4)
-            rocdl.s_waitcnt(0x0F77)
-            acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k00, q_a0, zero, 0, 0, 0])
-            acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k01, q_a1, acc0, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F76)
-            acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k02, q_a2, acc0, 0, 0, 0])
-            acc0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k03, q_a3, acc0, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F75)
-            acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k10, q_a0, zero, 0, 0, 0])
-            acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k11, q_a1, acc1, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F74)
-            acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k12, q_a2, acc1, 0, 0, 0])
-            acc1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k13, q_a3, acc1, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F73)
-            acc2 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k20, q_a0, zero, 0, 0, 0])
-            acc2 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k21, q_a1, acc2, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F72)
-            acc2 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k22, q_a2, acc2, 0, 0, 0])
-            acc2 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k23, q_a3, acc2, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F71)
-            acc3 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k30, q_a0, zero, 0, 0, 0])
-            acc3 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k31, q_a1, acc3, 0, 0, 0])
-            rocdl.s_waitcnt(0x0F70)
-            acc3 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k32, q_a2, acc3, 0, 0, 0])
-            acc3 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k33, q_a3, acc3, 0, 0, 0])
-            acc_qk = [acc0, acc1, acc2, acc3]
+            acc_qk = []
+            for t in [0, 1, 2, 3]:
+                k_t = [_ex(kv[t][j // 2], j % 2) for j in [0, 1, 2, 3]]
+                acc = zero
+                for j in [0, 1, 2, 3]:
+                    acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        T.f32x4, [k_t[j], q_vecs[j], acc, 0, 0, 0])
+                acc_qk.append(acc)
 
             ctx_len = context_length_i32
             for n_tile in [0, 1, 2, 3]:
@@ -442,45 +412,16 @@ def build_pa_decode_module(
             p_ops = [_pack(_pa, _pb, k) for k in [0,1,2,3]] + [_pack(_pc, _pd, k) for k in [0,1,2,3]]
 
             # ── STEP 12: V extracts ────────────────────────────
-            v00=_ex(vv[0][0],0); v01=_ex(vv[0][0],1)
-            v02=_ex(vv[0][1],0); v03=_ex(vv[0][1],1)
-            v04=_ex(vv[0][2],0); v05=_ex(vv[0][2],1)
-            v06=_ex(vv[0][3],0); v07=_ex(vv[0][3],1)
-            v10=_ex(vv[1][0],0); v11=_ex(vv[1][0],1)
-            v12=_ex(vv[1][1],0); v13=_ex(vv[1][1],1)
-            v14=_ex(vv[1][2],0); v15=_ex(vv[1][2],1)
-            v16=_ex(vv[1][3],0); v17=_ex(vv[1][3],1)
-
-            # ── STEP 13: PV MFMAs ─────────────────────────────
-            rocdl.sched_barrier(0)
-            rocdl.sched_dsrd(4)
-            rocdl.sched_mfma(16)
-            rocdl.sched_barrier(0)
-
-            rocdl.s_waitcnt(0x0F77)
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v00, p_ops[0], acc_pv[0], 0, 0, 0])
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v01, p_ops[1], pv0,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F76)
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v02, p_ops[2], pv0,        0, 0, 0])
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v03, p_ops[3], pv0,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F75)
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v04, p_ops[4], pv0,        0, 0, 0])
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v05, p_ops[5], pv0,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F74)
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v06, p_ops[6], pv0,        0, 0, 0])
-            pv0 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v07, p_ops[7], pv0,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F73)
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v10, p_ops[0], acc_pv[1], 0, 0, 0])
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v11, p_ops[1], pv1,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F72)
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v12, p_ops[2], pv1,        0, 0, 0])
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v13, p_ops[3], pv1,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F71)
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v14, p_ops[4], pv1,        0, 0, 0])
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v15, p_ops[5], pv1,        0, 0, 0])
-            rocdl.s_waitcnt(0x0F70)
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v16, p_ops[6], pv1,        0, 0, 0])
-            pv1 = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [v17, p_ops[7], pv1,        0, 0, 0])
+            # ── STEP 12+13: PV MFMAs (2 tiles × 8 V-chunks) ─────
+            pv_results = []
+            for t in [0, 1]:
+                v_t = [_ex(vv[t][j // 2], j % 2) for j in [0, 1, 2, 3, 4, 5, 6, 7]]
+                acc = acc_pv[t]
+                for j in [0, 1, 2, 3, 4, 5, 6, 7]:
+                    acc = rocdl.mfma_f32_16x16x32_fp8_fp8(
+                        T.f32x4, [v_t[j], p_ops[j], acc, 0, 0, 0])
+                pv_results.append(acc)
+            pv0, pv1 = pv_results
 
             # ── STEP 14: Output ────────────────────────────────
             rcp = arith.constant(1.0, type=T.f32) / global_sum
