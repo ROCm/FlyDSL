@@ -200,6 +200,27 @@ def make_int_tuple(elems, loc=None, ip=None):
 
 @traced_op
 def make_layout(shape, stride, loc=None, ip=None):
+    def _to_int_tuple_value(name, value, tuple_maker):
+        if not isinstance(value, ir.Value):
+            return value
+        try:
+            IntTupleType(value.type)
+            return value
+        except Exception as e:
+            # Auto-wrap scalar IR values as 1-element IntTuple values.
+            # This keeps dynamic scalar inputs usable in make_layout(...).
+            try:
+                tuple_ty, dyn_elems = fly.infer_int_tuple_type(value)
+                return tuple_maker(tuple_ty, dyn_elems, loc=loc, ip=ip)
+            except Exception:
+                raise TypeError(
+                    f"make_layout cannot convert `{name}` to IntTuple value. "
+                    f"Got IR value type `{value.type}`."
+                ) from e
+
+    shape = _to_int_tuple_value("shape", shape, fly.make_shape)
+    stride = _to_int_tuple_value("stride", stride, fly.make_stride)
+
     if not isinstance(shape, ir.Value):
         shapeTy, dyncElems = fly.infer_int_tuple_type(shape)
         shape = fly.make_shape(shapeTy, dyncElems, loc=loc, ip=ip)
@@ -229,6 +250,20 @@ def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
 def size(int_tuple, loc=None, ip=None):
     result = fly.size(int_tuple, loc=loc, ip=ip)
     # If the int_tuple is static, return the static value
+    result_ty = IntTupleType(result.type)
+    if result_ty.is_leaf and result_ty.is_static:
+        return Int32(result_ty.static_value)
+    return result
+
+
+@traced_op
+def cosize(layout, loc=None, ip=None):
+    # first extracting the layout before building fly.cosize.
+    if isinstance(layout, ir.Value) and not str(layout.type).startswith("!fly.layout"):
+        layout = fly.get_layout(layout, loc=loc, ip=ip)
+
+    result = fly.cosize(layout, loc=loc, ip=ip)
+    # If the cosize result is static, return the static scalar value.
     result_ty = IntTupleType(result.type)
     if result_ty.is_leaf and result_ty.is_static:
         return Int32(result_ty.static_value)

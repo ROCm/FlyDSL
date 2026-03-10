@@ -472,13 +472,20 @@ typename LayoutBuilder<Layout>::IntTuple layoutCosize(LayoutBuilder<Layout> &bui
   intTupleFlattenToVector(builder, stride, flatStrideLeaves);
 
   ArithValue one = builder.materializeConstantArith(1);
-  ArithValue s = builder.getArithValue(flatShapeLeaves[0]);
-  ArithValue d = builder.getArithValue(flatStrideLeaves[0]);
-  ArithValue cosize = builder.add(one, builder.mul(builder.sub(s, one), d));
+  ArithValue zero = builder.materializeConstantArith(0);
+  auto absArith = [&](ArithValue v) -> ArithValue {
+    // Match cute::cosize semantics: sum((shape_i - 1) * abs(stride_i)) + 1.
+    ArithValue negV = builder.sub(zero, v);
+    return builder.max(v, negV);
+  };
 
-  for (size_t i = 1; i < flatShapeLeaves.size(); ++i) {
+  if (flatShapeLeaves.empty())
+    return builder.makeInt(one);
+
+  ArithValue cosize = one;
+  for (size_t i = 0; i < flatShapeLeaves.size(); ++i) {
     ArithValue s = builder.getArithValue(flatShapeLeaves[i]);
-    ArithValue d = builder.getArithValue(flatStrideLeaves[i]);
+    ArithValue d = absArith(builder.getArithValue(flatStrideLeaves[i]));
     cosize = builder.add(cosize, builder.mul(builder.sub(s, one), d));
   }
   return builder.makeInt(cosize);
