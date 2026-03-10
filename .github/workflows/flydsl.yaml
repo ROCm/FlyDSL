@@ -132,6 +132,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
         
+      - name: Install aiter
+        run: |
+          docker exec flydsl_test bash -c "git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
+
       - name: Run tests
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
