@@ -40,7 +40,7 @@ def compile_wmma_gemm_tdm(
     in_dtype: str = "fp16",
     num_buffers: int = 2,
     waves_per_eu: int = None,
-    l2_prefetch_distance: int = 0,
+    l2_prefetch_distance: int = 2,
 ):
     """Compile a WMMA GEMM kernel with TDM async copy and multi-stage buffering.
 
@@ -148,11 +148,6 @@ def compile_wmma_gemm_tdm(
         lds_a_off_b1 = _dbuf1_off
         lds_b_off_b1 = _dbuf1_off + lds_a_elems * elem_bytes
 
-    # --- Scheduling hints ---
-    DS_COALESCE = 8
-    total_wmma_insts = k_wmma_steps * wmma_m_rep * wmma_n_rep
-    total_lds_reads = k_wmma_steps * (wmma_m_rep + wmma_n_rep) * 16
-
     @flyc.kernel
     def kernel_wmma_gemm_tdm(
         arg_c: fx.Tensor,
@@ -256,66 +251,70 @@ def compile_wmma_gemm_tdm(
             mask = ir.DenseI64ArrayAttr.get(list(range(16)))
             return vec_d.shuffle(v0, v1, mask)
 
-        # --- Compute on one LDS buffer ---
+        # --- K-subtile load/compute helpers ---
+        # Number of ds_load_b128 per K-subtile:
+        # B frags: wmma_n_rep * 2, A frags: wmma_m_rep * 2
+        LOADS_PER_SUBTILE = (wmma_m_rep + wmma_n_rep) * 2
+
+        def load_k_subtile_frags(lds_a_ptr, lds_b_ptr, ks):
+            """Batch-load all A and B fragments for one K-subtile (no wait)."""
+            k_off = arith.index(ks * WMMA_K)
+
+            b_frags = [load_wmma_frag(
+                lds_b_ptr, warp_n_base + arith.index(wn * WMMA_N),
+                k_off, layout_smem_b)
+                for wn in range_constexpr(wmma_n_rep)]
+
+            a_frags = [load_wmma_frag(
+                lds_a_ptr, warp_m_base + arith.index(wm * WMMA_M),
+                k_off, layout_smem_a)
+                for wm in range_constexpr(wmma_m_rep)]
+
+            return a_frags, b_frags
+
+        def do_k_subtile_wmma(a_frags, b_frags, accs):
+            """Execute all WMMAs for one K-subtile using pre-loaded fragments."""
+            for wm in range_constexpr(wmma_m_rep):
+                for wn in range_constexpr(wmma_n_rep):
+                    idx = wm * wmma_n_rep + wn
+                    accs[idx] = wmma_op(
+                        T.vec(8, T.f32),
+                        b_frags[wn], a_frags[wm],
+                        accs[idx],
+                        signA=False, signB=False, modC=0,
+                        reuseA=False, reuseB=False,
+                    ).result
+            return accs
+
+        # --- Compute on one LDS buffer (K-subtile pipelined) ---
         def compute_tile(accs_in, lds_a_ptr, lds_b_ptr):
             rocdl.sched_barrier(0)
             current_accs = list(accs_in)
-            for ks in range_constexpr(k_wmma_steps):
-                k_off = arith.index(ks * WMMA_K)
 
-                b_frags = [load_wmma_frag(
-                    lds_b_ptr, warp_n_base + arith.index(wn * WMMA_N),
-                    k_off, layout_smem_b)
-                    for wn in range_constexpr(wmma_n_rep)]
+            if k_wmma_steps == 1:
+                a_frags, b_frags = load_k_subtile_frags(lds_a_ptr, lds_b_ptr, 0)
+                rocdl.s_wait_dscnt(0)
+                current_accs = do_k_subtile_wmma(a_frags, b_frags, current_accs)
+            else:
+                # Prologue: batch-load K-subtile 0
+                prev_a, prev_b = load_k_subtile_frags(lds_a_ptr, lds_b_ptr, 0)
 
-                for wm in range_constexpr(wmma_m_rep):
-                    a_frag = load_wmma_frag(
-                        lds_a_ptr, warp_m_base + arith.index(wm * WMMA_M),
-                        k_off, layout_smem_a)
+                # Main K-loop: overlap load[ks+1] with compute[ks]
+                for ks in range_constexpr(k_wmma_steps - 1):
+                    next_a, next_b = load_k_subtile_frags(
+                        lds_a_ptr, lds_b_ptr, ks + 1)
+                    rocdl.s_wait_dscnt(LOADS_PER_SUBTILE)
+                    current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
+                    prev_a, prev_b = next_a, next_b
 
-                    for wn in range_constexpr(wmma_n_rep):
-                        idx = wm * wmma_n_rep + wn
-                        current_accs[idx] = wmma_op(
-                            T.vec(8, T.f32),
-                            b_frags[wn], a_frag,
-                            current_accs[idx],
-                            signA=False, signB=False, modC=0,
-                            reuseA=False, reuseB=False,
-                        ).result
+                # Epilogue: wait for last subtile, then compute
+                rocdl.s_wait_dscnt(0)
+                current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
+
             return current_accs
 
         # --- Scheduling ---
-        _n_dsrd_machine = total_lds_reads // DS_COALESCE
-        _n_dsrd_eff = max(0, _n_dsrd_machine - (16 // DS_COALESCE))
-        _n_wmma = total_wmma_insts
-
-        def _build_schedule(numer, denom):
-            if denom <= 0:
-                return []
-            if numer <= 0:
-                return [0] * denom
-            out, prev = [], 0
-            for i in range_constexpr(denom):
-                cur = ((i + 1) * numer + (denom - 1)) // denom
-                out.append(cur - prev)
-                prev = cur
-            return out
-
-        _dsrd_preload = min(2, _n_dsrd_eff)
-        _dsrd_remaining = _n_dsrd_eff - _dsrd_preload
-        _dsrd_sched = _build_schedule(_dsrd_remaining, _n_wmma) if _n_wmma > 0 else []
-
         def hot_loop_scheduler():
-            if _n_wmma <= 0:
-                rocdl.sched_barrier(0)
-                return
-            if _dsrd_preload > 0:
-                rocdl.sched_group_barrier(0x100, _dsrd_preload, 0)
-            for i in range_constexpr(_n_wmma):
-                rocdl.sched_group_barrier(0x08, 1, 0)
-                n_d = _dsrd_sched[i]
-                if n_d > 0:
-                    rocdl.sched_group_barrier(0x100, n_d, 0)
             rocdl.sched_barrier(0)
 
         # --- Epilogue: vectorized buffer_store_b128 ---

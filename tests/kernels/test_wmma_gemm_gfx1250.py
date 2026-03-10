@@ -47,7 +47,7 @@ if not torch.cuda.is_available():
 @pytest.mark.parametrize("num_buffers", [2, 3])
 def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         num_buffers,
-                        m_warp=2, n_warp=4, l2_prefetch_distance=0):
+                        m_warp=2, n_warp=4, l2_prefetch_distance=2):
     arch = str(get_rocm_arch(timeout_s=300))
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
