@@ -19,11 +19,8 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in [
-    os.path.join(_HERE, "../python"),
-    "/home/yashao/FlyDSL/python",
-    "/home/yashao/mori/python",
-]:
+for _p in [os.path.join(_HERE, "../python"), "/home/yashao/FlyDSL/python",
+           "/home/yashao/mori/python"]:
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -56,6 +53,8 @@ from flydsl.expr.lowlevel import (
     as_index,
     idx_to_i32,
     atomic_add_i32_at,  # GPU local atomic add (not shmem)
+    divui,              # unsigned integer divide (faster than Python //)
+    remui,              # unsigned integer remainder (faster than Python %)
 )
 
 
@@ -142,15 +141,17 @@ def make_dispatch_kernel(
         # 每个 warp 处理一组 (srcTok, expertSlot) 对（步长 gw_num）
         for i in range(as_index(gw_id), as_index(limit), as_index(gw_num)):
             i = idx_to_i32(i)
-            src_tok  = i // experts_per_token
-            j        = i % experts_per_token
+            # 使用 divui/remui（unsigned）替代 Python 的 ///%（→ sdiv/srem）
+            # 这些值在运行时始终为非负，udiv 比 sdiv 在 AMD GPU 上快约 3×
+            src_tok  = divui(i, experts_per_token)
+            j        = remui(i, experts_per_token)
             dest_exp = load_i32_at(addr_idx, i)
-            dest_pe  = dest_exp // experts_per_rank
+            dest_pe  = divui(dest_exp, experts_per_rank)
 
             # 去重检测：ballot 判断当前 (srcTok, destPe) 是否被更早的 slot 发过
             safe_lane    = select_i32(icmp_ult_i32(lane, j), lane, const_i32(0))
             lane_exp     = load_i32_at(addr_idx, src_tok * experts_per_token + safe_lane)
-            lane_pe      = lane_exp // experts_per_rank
+            lane_pe      = divui(lane_exp, experts_per_rank)
             dup_per_lane = select_i32(
                 icmp_eq_i32(lane_pe, dest_pe),
                 select_i32(icmp_ult_i32(lane, j), lane, const_i32(64)),
@@ -341,17 +342,22 @@ def make_combine_kernel(
         # Stage 3: P2P 读 + 累计
         rem_sci = [mori_shmem.ptr_p2p(addr_comb_inp, rank, pe) for pe in range(npes)]
 
+        # ceil(gw_num / cur_tok): 每个 token 分配的 warp 数
         wpt    = (gw_num + cur_tok - 1) // cur_tok
         hpw    = (n_i32 + wpt - 1) // wpt
         s3_lim = cur_tok * wpt
 
         for si in range(as_index(gw_id), as_index(s3_lim), as_index(gw_num)):
             si      = idx_to_i32(si)
-            tok_id  = si // wpt
-            part_id = si % wpt
+            # 使用 divui/remui（unsigned，比 sdiv/srem 快）
+            tok_id  = divui(si, wpt)
+            part_id = remui(si, wpt)
             h_i32   = part_id * hpw
 
-            for ec4 in range(as_index(lane * 4), as_index(hpw), 256):
+            # 每个 lane 处理 1 个 i32 (= 2 bf16) 元素，步长 = warp_size = 64
+            # dispatch 写入用 lane*4 + stride=256 (每次写 <4xi32>)
+            # combine 读取用 lane + stride=64 (每次处理 1 i32 累加)
+            for ec4 in range(as_index(lane), as_index(hpw), 64):
                 ec4        = idx_to_i32(ec4)
                 global_ec4 = h_i32 + ec4
                 in_bounds  = icmp_ult_i32(global_ec4, const_i32(n_i32))
@@ -377,8 +383,9 @@ def make_combine_kernel(
                 for j_py in range_constexpr(experts_per_token):
                     enc_j     = load_i32_at(addr_tok_map,
                                     tok_id * experts_per_token + j_py)
-                    dest_pe_j = enc_j // max_recv
-                    local_tok = enc_j % max_recv
+                    # 使用 unsigned 除法（enc_j 值域 [0, npes*max_recv]，均为非负）
+                    dest_pe_j = divui(enc_j, max_recv)
+                    local_tok = remui(enc_j, max_recv)
                     valid_pe  = icmp_ult_i32(dest_pe_j, const_i32(npes))
 
                     elem_off  = zext_i32_to_i64(local_tok * n_i32 + global_ec4) * 4
@@ -422,15 +429,6 @@ def make_combine_kernel(
 def _find_mori_shmem_bc() -> str:
     from mori.ir.bitcode import find_bitcode
     return find_bitcode()
-
-
-def _disp_dummy_args(npes, k, max_tok, hdim, dev="cuda:0"):
-    max_recv = npes * max_tok
-    return [fx.Int64(0)] * 13 + [fx.Int32(1)]   # 13 i64 addrs + cur_tok
-
-
-def _comb_dummy_args():
-    return [fx.Int64(0)] * 8 + [fx.Int32(1), fx.Int32(1)]
 
 
 def build_and_compile_dispatch(

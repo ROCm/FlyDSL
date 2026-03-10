@@ -1,5 +1,8 @@
 """
-FlyDSL DispatchCombine IntraNode Python Wrapper.
+FlyDSL DispatchCombine IntraNode Python Wrapper — v1（Legacy）。
+
+注意：v1 使用手写 LLVM IR 字符串作为 kernel body；新项目请使用 v2：
+  dispatch_combine_intranode_op_v2.py   # Python FlyDSL 语法，ExternFunction shmem
 
 关键 buffer 尺寸说明：
   max_recv = npes * max_tok_per_rank
