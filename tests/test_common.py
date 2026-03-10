@@ -11,6 +11,7 @@ import pandas as pd
 import logging
 
 logger = logging.getLogger("flir")
+
 pd.set_option("display.max_rows", 200)
 ## debug ##
 # pd.set_option("display.max_rows", None)
@@ -64,6 +65,17 @@ def perftest(
                     latencies.append(start_event.elapsed_time(end_event))
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
+            with tpf.profile(
+                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                profile_memory=False,
+                with_stack=False,
+                with_modules=True,
+            ) as prof:
+                data = run_iters_rotate(num_iters, func, rotate_args)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            avg = get_trace_perf(prof, num_iters)
+
             if testGraph:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
@@ -77,23 +89,7 @@ def perftest(
                     run_iters(1, graph.replay)
                 avg = get_trace_perf(prof, num_iters)
                 logger.info(f"avg: {avg} us/iter with hipgraph")
-            with tpf.profile(
-                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
-                profile_memory=False,
-                with_stack=False,
-                with_modules=True,
-                # record_shapes=True,
-                on_trace_ready=(
-                    tpf.tensorboard_trace_handler(f"./flir_logs/gpu_id_{gpu_id}")
-                    if needTrace
-                    else None
-                ),
-            ) as prof:
-                data = run_iters_rotate(num_iters, func, rotate_args)
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
 
-            avg = get_trace_perf(prof, num_iters)
             return data, avg
 
         return wrapper

@@ -1,22 +1,32 @@
 #!/bin/bash
 set -e
 
-# Default to downloading llvm-project in the parent directory of flir
+# Default to downloading llvm-project in the parent directory of flydsl
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
+LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
-LLVM_COMMIT="${LLVM_COMMIT:-04f968b02917}"
+
+# Read LLVM commit hash from thirdparty/llvm-hash.txt
+LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
+if [[ -f "${LLVM_HASH_FILE}" ]]; then
+    LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
+else
+    echo "Warning: ${LLVM_HASH_FILE} not found, using hardcoded default."
+    LLVM_COMMIT_DEFAULT="ac5dc54d509169d387fcfd495d71853d81c46484"
+fi
+LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
+echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
 if [ ! -d "$LLVM_SRC_DIR" ]; then
@@ -72,6 +82,8 @@ cmake -G "$GENERATOR" \
     -DLLVM_ENABLE_ASSERTIONS=ON \
     -DLLVM_INSTALL_UTILS=ON \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+    -DMLIR_ENABLE_ROCM_RUNNER=ON \
+    -DMLIR_BINDINGS_PYTHON_NB_DOMAIN=mlir \
     -DPython3_EXECUTABLE=$(which python3) \
     -Dnanobind_DIR="$NANOBIND_DIR" \
     -DBUILD_SHARED_LIBS=OFF \
@@ -79,8 +91,16 @@ cmake -G "$GENERATOR" \
     -DLLVM_LINK_LLVM_DYLIB=OFF 
 
 # 4. Build
-echo "Starting build with $(nproc) parallel jobs..."
-cmake --build . -j$(nproc)
+PARALLEL_JOBS=$(( $(nproc) / 2 ))
+for arg in "$@"; do
+    if [[ "$arg" =~ ^-j([0-9]+)$ ]]; then
+        PARALLEL_JOBS="${BASH_REMATCH[1]}"
+    elif [[ "$arg" == "--no-install" ]]; then
+        LLVM_PACKAGE_INSTALL=0
+    fi
+done
+echo "Starting build with ${PARALLEL_JOBS} parallel jobs..."
+cmake --build . -j${PARALLEL_JOBS}
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo "=============================================="
@@ -95,13 +115,18 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   fi
 
   echo "Creating tarball..."
-  tar -C "$(dirname "${LLVM_INSTALL_DIR}")" -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
+  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
+  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
+  # non-fatal for packaging.
+  tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
+      -C "$(dirname "${LLVM_INSTALL_DIR}")" \
+      -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
 fi
 
 echo "=============================================="
 echo "LLVM/MLIR build completed successfully!"
 echo ""
-echo "To configure flir, use:"
+echo "To configure flydsl, use:"
 echo "cmake .. -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir"
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo ""

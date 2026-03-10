@@ -20,7 +20,7 @@ on:
       llvm_commit:
         description: 'LLVM commit hash for MLIR build'
         type: string
-        default: "04f968b02917"
+        default: "ac5dc54d5091"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
@@ -32,7 +32,7 @@ jobs:
     with:
       release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
       docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1' }}
-      llvm_commit: ${{ inputs.llvm_commit || '04f968b02917' }}
+      llvm_commit: ${{ inputs.llvm_commit || 'ac5dc54d5091' }}
     permissions:
       id-token: write
       contents: read

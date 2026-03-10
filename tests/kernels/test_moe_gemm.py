@@ -16,8 +16,13 @@ import torch
 # on `sys.path`, which can miss newer ROCDL wrappers (notably atomic fadd / MFMA).
 # -----------------------------------------------------------------------------
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+_PYTHON_CANDIDATES = [
+    os.path.join(_REPO_ROOT, "build", "python_packages"),
+    _REPO_ROOT,
+]
+for _p in reversed(_PYTHON_CANDIDATES):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
 from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
@@ -62,7 +67,7 @@ except Exception:
     HAS_AITER = False
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
-from flydsl.kernels.moe_gemm_2stage import (
+from kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
@@ -499,7 +504,7 @@ def run_moe_stage1(
     # Output: [tokens, topk, inter_dim] fp16
     out = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-    from flydsl.kernels.moe_gemm_2stage import compile_moe_gemm1
+    from kernels.moe_gemm_2stage import compile_moe_gemm1
     exe = compile_moe_gemm1(
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -515,7 +520,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        stream = torch.cuda.current_stream()
         exe(
             o,
             x,
@@ -530,7 +535,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
-            stream_ptr,
+            stream,
         )
 
     _, us = run_perftest(
@@ -981,7 +986,7 @@ def run_moe_stage2(
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        stream = torch.cuda.current_stream()
         valid_mask = None
         if is_reduce_exe and bool(use_valid_mask):
             # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
@@ -1002,7 +1007,7 @@ def run_moe_stage2(
                 inter_dim,
                 int(blocks),
                 valid_mask,
-                stream_ptr,
+                stream,
             )
         else:
             # Atomic mode does not take valid_mask.
@@ -1020,7 +1025,7 @@ def run_moe_stage2(
                 model_dim,
                 inter_dim,
                 int(blocks),
-                stream_ptr,
+                stream,
             )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -1199,8 +1204,8 @@ def run_moe_stage2(
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
-    pytest.param(False, id="graph"),
-    pytest.param(True, id="eager", marks=pytest.mark.large_shape),
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph"),
 ])
 @pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
@@ -1395,7 +1400,6 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
-            # Use unified implementation with FlyDSL reduce kernel
             return compile_moe_gemm2_ex(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1408,14 +1412,11 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 in_dtype=in_dtype,
                 group_size=group_size,
                 out_dtype=out_dtype,
-                # `compile_moe_gemm2_ex` uses `valid_mask is not None` as a compile-time sentinel
-                # to enable masked reduction (different reduce kernel signature).
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
                 zero_intermediate=False, # test non-zeroed performance
             )
         else:
-            # Use torch.sum for reduction (baseline comparison)
             gemm2_exe = compile_moe_gemm2(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1463,7 +1464,7 @@ class _TorchReduceWrapper:
         k_in,
         size_expert_ids_in,
         valid_mask,
-        stream_ptr,
+        stream,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1479,7 +1480,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
-            stream_ptr,
+            stream,
         )
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         if valid_mask is not None:

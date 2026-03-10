@@ -1,13 +1,26 @@
 """Shared utilities for GPU testing, compilation, and benchmarking."""
 
-from flydsl.compiler.pipeline import Pipeline, run_pipeline
 from flydsl.runtime.device import get_rocm_arch
-from _mlir import ir
 import os
 import torch
 import functools
 import time
 from typing import Optional
+
+
+def _resolve_pipeline_api():
+    """Resolve Pipeline/run_pipeline from available FlyDSL APIs.
+
+    Newer trees may not expose `flydsl.compiler.pipeline`; older test helpers still
+    rely on the FLIR pass pipeline builder. Resolve lazily so modules that only use
+    quant helpers (e.g. moe tests) don't fail at import time.
+    """
+    try:
+        from flydsl.compiler.pipeline import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
+    except Exception:
+        from flydsl.passes import Pipeline, run_pipeline
+        return Pipeline, run_pipeline
 
 def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """
@@ -48,6 +61,9 @@ def compile_to_hsaco(mlir_module, kernel_name="kernel", waves_per_eu: Optional[i
 
 def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Optional[int] = None):
     """Implementation of compile_to_hsaco; assumes an MLIR context is already active."""
+    from flydsl._mlir import ir
+
+    Pipeline, run_pipeline = _resolve_pipeline_api()
     # Check environment variables for IR dumping
     dump_ir = os.environ.get('FLIR_DUMP_IR', '0') == '1'
     dump_dir = os.environ.get('FLIR_DUMP_DIR', '/tmp/flir_dump')
@@ -203,7 +219,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
                 ir.Module.parse(str(llvm_lowered), context=llvm_lowered.context),
                 Pipeline().gpu_module_to_binary(format="isa")
             )
-            from flydsl.dialects.ext.gpu import get_compile_object_bytes
+            from flydsl.expr.gpu import get_compile_object_bytes
             asm_bytes = get_compile_object_bytes(asm_module)
             asm_filename = os.path.join(dump_dir, f"{kernel_name}_09_assembly.s")
             with open(asm_filename, 'wb') as f:
@@ -219,7 +235,7 @@ def _compile_to_hsaco_impl(mlir_module, kernel_name="kernel", waves_per_eu: Opti
     )
     dump_stage(lowered, "10_binary_module")
     
-    from flydsl.dialects.ext.gpu import get_compile_object_bytes
+    from flydsl.expr.gpu import get_compile_object_bytes
     hsaco_bytes = _timeit("11_get_compile_object_bytes", lambda: get_compile_object_bytes(lowered))
     
     # Save HSACO binary if dumping
@@ -348,5 +364,4 @@ def shuffle_scale_for_int4(scale: torch.Tensor, group_size: int = 32, layout=(16
             f"This is due to int4 preshuffle layout constraints."
         )
 
-    # No shuffle needed - return original scale (ensure contiguous)
     return scale.contiguous()
