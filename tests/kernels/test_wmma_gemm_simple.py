@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WMMA GEMM tests for gfx1250 — @flyc.kernel API.
 
-Kernel implementation lives in `kernels/wmma_gemm_flyc.py`.
+Kernel implementation lives in `kernels/wmma_gemm_simple.py`.
 This file is the correctness + perf harness.
 """
 
@@ -19,7 +19,7 @@ if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.wmma_gemm_flyc import compile_wmma_gemm
+from kernels.wmma_gemm_simple import compile_wmma_gemm
 from tests.test_common import verify_output
 
 

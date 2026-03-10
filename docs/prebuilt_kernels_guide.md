@@ -124,7 +124,7 @@ softmax_kernel(self, A, C, m_in)
 
 ## 3. GEMM Kernel
 
-### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm_flyc.py`)
+### 3.1 Preshuffle GEMM (`kernels/preshuffle_gemm.py`)
 
 MFMA 16x16-based GEMM with B-matrix preshuffle layout: `C[M,N] = A[M,K] @ B[N,K]^T`.
 
