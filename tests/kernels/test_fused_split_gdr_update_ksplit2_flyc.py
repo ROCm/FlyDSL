@@ -5,12 +5,9 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import torch
-import triton
-import triton.language as tl
 from torch.utils.cpp_extension import load
 
 _repo = Path(__file__).resolve().parents[2]
@@ -28,6 +25,7 @@ import flydsl
 from kernels.fused_split_gdr_update_ksplit2_flyc import (
     build_fused_split_gdr_update_ksplit2_flyc_module,
 )
+from kernels.split_gdr_triton import fused_sigmoid_gating_delta_rule_update
 
 
 if not torch.cuda.is_available():
@@ -96,29 +94,6 @@ def from_swizzled_layout(state: torch.Tensor) -> torch.Tensor:
     state = state.reshape(N, HV, K, V)
     # Make contiguous
     return state.contiguous()
-
-
-def to_vsplit_layout(state: torch.Tensor) -> torch.Tensor:
-    """
-    Convert state from standard (N, HV, K, V) to vsplit (N, HV, V/4, K, 4) layout.
-    
-    Vsplit layout groups 4 contiguous V values together:
-    - Each float4 = 4 V values for one K position
-    - Optimized for the vsplit kernel's [8,8] thread layout
-    """
-    N, HV, K, V = state.shape
-    assert V % 4 == 0, f"V ({V}) must be divisible by 4 for vsplit layout"
-    return state.reshape(N, HV, K, V // 4, 4).permute(0, 1, 3, 2, 4).contiguous()
-
-
-def from_vsplit_layout(state: torch.Tensor) -> torch.Tensor:
-    """
-    Convert state from vsplit (N, HV, V/4, K, 4) to standard (N, HV, K, V) layout.
-    """
-    N, HV, V4, K, four = state.shape
-    assert four == 4, f"Last dimension must be 4, got {four}"
-    V = V4 * 4
-    return state.permute(0, 1, 3, 2, 4).reshape(N, HV, K, V).contiguous()
 
 
 # ---------------------------------------------------------------------------
@@ -264,19 +239,6 @@ def split_gdr_reference(
     return output.to(mixed_qkv.dtype).to(mixed_qkv.device)
 
 
-def _build_inputs(bsz, t_seq, h, hv, k_dim, v_dim, n_state, dtype, seed=0):
-    torch.manual_seed(seed)
-    A_log = torch.randn(hv, device="cuda", dtype=torch.float32) * 0.1
-    dt_bias = torch.randn(hv, device="cuda", dtype=dtype) * 0.1
-    a = torch.randn(bsz, t_seq, hv, device="cuda", dtype=dtype) * 0.1
-    b = torch.randn(bsz, t_seq, hv, device="cuda", dtype=dtype) * 0.1
-    q = torch.randn(bsz, t_seq, h, k_dim, device="cuda", dtype=dtype) * 0.1
-    k = torch.randn(bsz, t_seq, h, k_dim, device="cuda", dtype=dtype) * 0.1
-    v = torch.randn(bsz, t_seq, hv, v_dim, device="cuda", dtype=dtype) * 0.1
-    state_pool = torch.randn(n_state, hv, k_dim, v_dim, device="cuda", dtype=dtype) * 0.1
-    state_indices = torch.arange(bsz, device="cuda", dtype=torch.int32) % n_state
-    return A_log, a, dt_bias, q, k, v, b, state_pool, state_indices
-
 def create_inputs(
     batch_size: int,
     seqlen: int,
@@ -321,344 +283,6 @@ def create_inputs(
         "key_dim": key_dim,
         "value_dim": value_dim,
     }
-
-@triton.jit(do_not_specialize=["T"])
-def fused_sigmoid_gating_delta_rule_update_kernel(
-    A_log,
-    a,
-    dt_bias,
-    softplus_beta,
-    softplus_threshold,
-    q,
-    k,
-    v,
-    b,
-    o,
-    h0_source,
-    h0_indices,
-    cu_seqlens,
-    scale,
-    T,
-    B: tl.constexpr,
-    H: tl.constexpr,
-    HV: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    USE_INITIAL_STATE: tl.constexpr,
-    USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
-    IS_VARLEN: tl.constexpr,
-    IS_KDA: tl.constexpr,
-):
-    """
-    Fused kernel that combines sigmoid gating computation with recurrent delta rule update.
-    """
-    i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    i_n, i_hv = i_nh // HV, i_nh % HV
-    i_h = i_hv // (HV // H)
-
-    if IS_VARLEN:
-        bos, eos = (
-            tl.load(cu_seqlens + i_n).to(tl.int64),
-            tl.load(cu_seqlens + i_n + 1).to(tl.int64),
-        )
-        all = T
-        T = eos - bos
-    else:
-        bos, eos = i_n * T, i_n * T + T
-        all = B * T
-
-    o_k = i_k * BK + tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
-
-    p_q = q + (bos * H + i_h) * K + o_k
-    p_k = k + (bos * H + i_h) * K + o_k
-    p_v = v + (bos * HV + i_hv) * V + o_v
-    p_b = b + bos * HV + i_hv
-    p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
-
-    # Gating computation pointers
-    p_A_log = A_log + i_hv
-    if IS_KDA:
-        p_a = a + (bos * HV + i_hv) * K + o_k
-        p_dt_bias = dt_bias + i_hv * K + o_k
-    else:
-        p_a = a + bos * HV + i_hv
-        p_dt_bias = dt_bias + i_hv
-
-    mask_k = o_k < K
-    mask_v = o_v < V
-    mask_h = mask_k[:, None] & mask_v[None, :]
-
-    b_h = tl.zeros([BK, BV], dtype=tl.float32)
-    if USE_INITIAL_STATE:
-        idx = tl.load(h0_indices + i_n)
-        if idx >= 0:
-            p_h0 = (
-                h0_source
-                + idx * HV * K * V
-                + i_hv * K * V
-                + o_k[:, None] * V
-                + o_v[None, :]
-            )
-            b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
-
-    for _ in range(0, T):
-        # Load inputs
-        b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32)
-        b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
-        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
-        b_b = tl.load(p_b).to(tl.float32)
-
-        # Compute sigmoid gating
-        # Load gating parameters
-        b_A_log = tl.load(p_A_log).to(tl.float32)
-        b_a = tl.load(p_a).to(tl.float32)
-        b_dt_bias = tl.load(p_dt_bias).to(tl.float32)
-
-        # Compute g = -exp(A_log) * softplus(a + dt_bias)
-        x = b_a + b_dt_bias
-        beta_x = softplus_beta * x
-        # Apply softplus with numerical stability
-        softplus_x = tl.where(
-            beta_x <= softplus_threshold,
-            (1.0 / softplus_beta) * tl.log(1.0 + tl.exp(beta_x)),
-            x,
-        )
-        b_g = -tl.exp(b_A_log) * softplus_x
-
-        # Compute beta = sigmoid(b)
-        b_beta = 1.0 / (1.0 + tl.exp(-b_b))
-
-        # Apply L2 normalization if enabled
-        if USE_QK_L2NORM_IN_KERNEL:
-            b_q = b_q / (tl.sqrt(tl.sum(b_q * b_q) + 1e-6))
-            b_k = b_k / (tl.sqrt(tl.sum(b_k * b_k) + 1e-6))
-
-        b_q = b_q * scale
-
-        # Apply gating to hidden state: h *= exp(g)
-        if IS_KDA:
-            b_h *= tl.exp(b_g[:, None])
-        else:
-            b_h *= tl.exp(b_g)
-
-        # Delta rule: v -= sum(h * k, dim=0)
-        b_v -= tl.sum(b_h * b_k[:, None], 0)
-
-        # Apply beta gating: v *= beta
-        b_v *= b_beta
-
-        # Update hidden state: h += k[:, None] * v[None, :]
-        b_h += b_k[:, None] * b_v[None, :]
-
-        # Compute output: o = sum(h * q, dim=0)
-        b_o = tl.sum(b_h * b_q[:, None], 0)
-        tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
-
-        # Update pointers for next timestep
-        p_q += H * K
-        p_k += H * K
-        p_o += HV * V
-        p_v += HV * V
-        p_b += HV
-        p_a += HV
-
-    # Store final state back to h0_source with bounds checking
-    if USE_INITIAL_STATE:
-        idx = tl.load(h0_indices + i_n)
-        if idx >= 0:
-            p_h0 = (
-                h0_source
-                + idx * HV * K * V
-                + i_hv * K * V
-                + o_k[:, None] * V
-                + o_v[None, :]
-            )
-            tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
-
-
-def fused_sigmoid_gating_delta_rule_update(
-    o: torch.Tensor,
-    A_log: torch.Tensor,
-    a: torch.Tensor,
-    dt_bias: torch.Tensor,
-    softplus_beta: float,
-    softplus_threshold: float,
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    b: torch.Tensor,
-    initial_state_source: torch.Tensor,
-    initial_state_indices: torch.Tensor,
-    scale: Optional[float] = None,
-    use_qk_l2norm_in_kernel: bool = True,
-    cu_seqlens: Optional[torch.Tensor] = None,
-    is_kda: bool = False,
-):
-    """
-    Fused triton implementation of sigmoid gating delta rule update.
-    This function uses a single fused kernel that combines both sigmoid gating computation
-    and the recurrent delta rule update for better performance.
-    """
-    B, T, H, K, V = *k.shape, v.shape[-1]
-    HV = v.shape[2]
-    N = B if cu_seqlens is None else len(cu_seqlens) - 1
-    BK, BV = triton.next_power_of_2(K), min(triton.next_power_of_2(V), 32)
-    NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
-    assert NK == 1, "NK > 1 is not supported yet"
-    num_stages = 3
-    num_warps = 1
-
-    if scale is None:
-        scale = k.shape[-1] ** -0.5
-    else:
-        assert scale > 0, "scale must be positive"
-
-    grid = (NK, NV, N * HV)
-
-    fused_sigmoid_gating_delta_rule_update_kernel[grid](
-        A_log=A_log,
-        a=a,
-        dt_bias=dt_bias,
-        softplus_beta=softplus_beta,
-        softplus_threshold=softplus_threshold,
-        q=q,
-        k=k,
-        v=v,
-        b=b,
-        o=o,
-        h0_source=initial_state_source,
-        h0_indices=initial_state_indices,
-        cu_seqlens=cu_seqlens,
-        scale=scale,
-        T=T,
-        B=B,
-        H=H,
-        HV=HV,
-        K=K,
-        V=V,
-        BK=BK,
-        BV=BV,
-        USE_INITIAL_STATE=initial_state_source is not None,
-        USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
-        IS_VARLEN=cu_seqlens is not None,
-        IS_KDA=is_kda,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-
-
-def run_triton_kernel(out, A_log, dt_bias, q, k, v, a, b, initial_state, indices, scale, use_qk_l2norm_in_kernel):
-    fused_sigmoid_gating_delta_rule_update(
-        out,
-        A_log=A_log,
-        a=a,
-        dt_bias=dt_bias,
-        softplus_beta=1.0,
-        softplus_threshold=20.0,
-        q=q,
-        k=k,
-        v=v,
-        b=b,
-        initial_state_source=initial_state,
-        initial_state_indices=indices,
-        scale=scale,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-        cu_seqlens=None,
-    )
-
-def _run_kernel(
-    bsz,
-    t_seq,
-    h,
-    hv,
-    k_dim,
-    v_dim,
-    n_state,
-    A_log,
-    a,
-    dt_bias,
-    q,
-    k,
-    v,
-    b,
-    state_pool,
-    state_indices,
-    use_qk_l2norm_in_kernel,
-    dtype_str,
-):
-    module = build_fused_split_gdr_update_ksplit2_flyc_module(
-        B=bsz,
-        T_seq=t_seq,
-        H=h,
-        HV=hv,
-        K=k_dim,
-        V=v_dim,
-        N_STATE=n_state,
-        dtype_str=dtype_str,
-        BV=64,
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-    )
-    exe = flydsl.compile(module)
-    a_flat = a.reshape(bsz * t_seq, hv).contiguous()
-    b_flat = b.reshape(bsz * t_seq, hv).contiguous()
-    mixed_qkv = _pack_mixed_qkv(q, k, v)
-    state_swz = to_swizzled_layout(state_pool)
-    o = torch.empty(bsz, t_seq, hv, v_dim, device="cuda", dtype=state_pool.dtype)
-    exe(mixed_qkv, A_log, a_flat, dt_bias, b_flat, state_swz, state_indices, o)
-    torch.cuda.synchronize()
-    state_after = from_swizzled_layout(state_swz)
-    return o, state_after
-
-
-def _run_hip_kernel(
-    bsz,
-    t_seq,
-    h,
-    hv,
-    k_dim,
-    v_dim,
-    A_log,
-    a,
-    dt_bias,
-    q,
-    k,
-    v,
-    b,
-    state_pool,
-    state_indices,
-    use_qk_l2norm_in_kernel,
-):
-    hip_mod = _get_hip_module()
-    a_flat = a.reshape(bsz * t_seq, hv).contiguous()
-    b_flat = b.reshape(bsz * t_seq, hv).contiguous()
-    mixed_qkv = _pack_mixed_qkv(q, k, v)
-    state_swz = to_swizzled_layout(state_pool)
-
-    out = hip_mod.fused_split_gdr_update_ksplit2(
-        mixed_qkv=mixed_qkv,
-        A_log=A_log.float(),
-        a=a_flat,
-        dt_bias=dt_bias,
-        b_gate=b_flat,
-        initial_state_source=state_swz,
-        initial_state_indices=state_indices,
-        key_dim=h * k_dim,
-        value_dim=hv * v_dim,
-        num_heads_qk=h,
-        num_heads_v=hv,
-        head_dim=k_dim,
-        softplus_beta=1.0,
-        softplus_threshold=20.0,
-        scale=1.0 / math.sqrt(k_dim),
-        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-    )
-    torch.cuda.synchronize()
-    state_after = from_swizzled_layout(state_swz)
-    return out, state_after
-
 
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("seqlen", [1])
@@ -816,62 +440,46 @@ def test_split_gdr_ksplit2_correctness_and_perf(
     )
     torch.cuda.synchronize()
 
-    print(
-        f"output_ref min/max: {output_ref.float().min().item():.6f} / {output_ref.float().max().item():.6f}"
-    )
-    print(
-        f"output_hip min/max: {output_hip.float().min().item():.6f} / {output_hip.float().max().item():.6f}"
-    )
-    print(
-        f"output_fly min/max: {output_fly.float().min().item():.6f} / {output_fly.float().max().item():.6f}"
-    )
-    print(
-        f"output_triton min/max: {output_triton.float().min().item():.6f} / {output_triton.float().max().item():.6f}"
-    )
-    print(
-        f"ssm_state_ref min/max: {ssm_state_ref.float().min().item():.6f} / {ssm_state_ref.float().max().item():.6f}"
-    )
-    print(
-        f"ssm_state_hip_final min/max: {ssm_state_hip_final.float().min().item():.6f} / {ssm_state_hip_final.float().max().item():.6f}"
-    )
-    print(
-        f"ssm_state_fly_final min/max: {ssm_state_fly_final.float().min().item():.6f} / {ssm_state_fly_final.float().max().item():.6f}"
-    )
-    print(
-        f"ssm_state_triton min/max: {ssm_state_triton.float().min().item():.6f} / {ssm_state_triton.float().max().item():.6f}"
-    )
+    stats_tensors = {
+        "output_ref": output_ref,
+        "output_hip": output_hip,
+        "output_fly": output_fly,
+        "output_triton": output_triton,
+        "ssm_state_ref": ssm_state_ref,
+        "ssm_state_hip_final": ssm_state_hip_final,
+        "ssm_state_fly_final": ssm_state_fly_final,
+        "ssm_state_triton": ssm_state_triton,
+    }
+    for name, tensor in stats_tensors.items():
+        tensor_f32 = tensor.float()
+        print(f"{name} min/max: {tensor_f32.min().item():.6f} / {tensor_f32.max().item():.6f}")
 
-    output_diff_hip_ref = (output_ref - output_hip).abs().max().item()
-    state_diff_hip_ref = (ssm_state_ref - ssm_state_hip_final).abs().max().item()
-    output_diff_fly_ref = (output_ref - output_fly).abs().max().item()
-    state_diff_fly_ref = (ssm_state_ref - ssm_state_fly_final).abs().max().item()
-    output_diff_fly_hip = (output_hip - output_fly).abs().max().item()
-    state_diff_fly_hip = (ssm_state_hip_final - ssm_state_fly_final).abs().max().item()
-    output_diff_triton_ref = (output_ref - output_triton).abs().max().item()
-    state_diff_triton_ref = (ssm_state_ref - ssm_state_triton).abs().max().item()
+    diff_checks = [
+        ("Output max diff (hip vs ref)", output_ref, output_hip, "Hip output vs ref"),
+        ("State  max diff (hip vs ref)", ssm_state_ref, ssm_state_hip_final, "Hip state vs ref"),
+        ("Output max diff (fly vs ref)", output_ref, output_fly, "Fly output vs ref"),
+        ("State  max diff (fly vs ref)", ssm_state_ref, ssm_state_fly_final, "Fly state vs ref"),
+        ("Output max diff (fly vs hip)", output_hip, output_fly, "Fly output vs hip"),
+        ("State  max diff (fly vs hip)", ssm_state_hip_final, ssm_state_fly_final, "Fly state vs hip"),
+        ("Output max diff (triton vs ref)", output_ref, output_triton, "Triton output vs ref"),
+        ("State  max diff (triton vs ref)", ssm_state_ref, ssm_state_triton, "Triton state vs ref"),
+    ]
+    diff_results = {}
+    for display_name, lhs, rhs, err_name in diff_checks:
+        diff = (lhs - rhs).abs().max().item()
+        diff_results[display_name] = (diff, err_name)
 
     print(f"\n{'='*70}")
     print(f"Split GDR ksplit2 Correctness: batch={batch_size}, seqlen={seqlen}")
     print(f"  heads_qk={num_heads_qk}, heads_v={num_heads_v}, head_dim={head_dim}")
     print(f"{'='*70}")
-    print(f"  Output max diff (hip vs ref): {output_diff_hip_ref:.6f}")
-    print(f"  State  max diff (hip vs ref): {state_diff_hip_ref:.6f}")
-    print(f"  Output max diff (fly vs ref): {output_diff_fly_ref:.6f}")
-    print(f"  State  max diff (fly vs ref): {state_diff_fly_ref:.6f}")
-    print(f"  Output max diff (fly vs hip): {output_diff_fly_hip:.6f}")
-    print(f"  State  max diff (fly vs hip): {state_diff_fly_hip:.6f}")
-    print(f"  Output max diff (triton vs ref): {output_diff_triton_ref:.6f}")
-    print(f"  State  max diff (triton vs ref): {state_diff_triton_ref:.6f}")
+    for display_name, _lhs, _rhs, _err_name in diff_checks:
+        print(f"  {display_name}: {diff_results[display_name][0]:.6f}")
     print(f"{'='*70}")
 
-    assert output_diff_hip_ref < 1e-3, f"Hip output vs ref diff too large: {output_diff_hip_ref}"
-    assert state_diff_hip_ref < 1e-3, f"Hip state vs ref diff too large: {state_diff_hip_ref}"
-    assert output_diff_fly_ref < 1e-3, f"Fly output vs ref diff too large: {output_diff_fly_ref}"
-    assert state_diff_fly_ref < 1e-3, f"Fly state vs ref diff too large: {state_diff_fly_ref}"
-    assert output_diff_fly_hip < 1e-3, f"Fly output vs hip diff too large: {output_diff_fly_hip}"
-    assert state_diff_fly_hip < 1e-3, f"Fly state vs hip diff too large: {state_diff_fly_hip}"
-    assert output_diff_triton_ref < 1e-3, f"Triton output vs ref diff too large: {output_diff_triton_ref}"
-    assert state_diff_triton_ref < 1e-3, f"Triton state vs ref diff too large: {state_diff_triton_ref}"
+    for display_name, _lhs, _rhs, _err_name in diff_checks:
+        diff, err_name = diff_results[display_name]
+        assert diff < 1e-3, f"{err_name} diff too large: {diff}"
 
     # ---- Performance check: HIP vs FlyDSL vs Triton ----
     warmup = 10
@@ -892,54 +500,59 @@ def test_split_gdr_ksplit2_correctness_and_perf(
         torch.cuda.synchronize()
         return (start_evt.elapsed_time(end_evt) * 1000.0) / num_iters
 
-    def _run_fly_once():
-        state_swz = state_swz_template.clone()
-        out_fly_perf = out_template.clone()
-        fly_exe(
-            common_tensor_args["mixed_qkv"],
-            common_tensor_args["A_log"],
-            common_tensor_args["a"],
-            common_tensor_args["dt_bias"],
-            common_tensor_args["b_gate"],
-            state_swz,
-            common_tensor_args["initial_state_indices"],
-            out_fly_perf,
-        )
+    def _run_once(backend: str):
+        if backend == "fly":
+            state_swz = state_swz_template.clone()
+            out = out_template.clone()
+            fly_exe(
+                common_tensor_args["mixed_qkv"],
+                common_tensor_args["A_log"],
+                common_tensor_args["a"],
+                common_tensor_args["dt_bias"],
+                common_tensor_args["b_gate"],
+                state_swz,
+                common_tensor_args["initial_state_indices"],
+                out,
+            )
+            return
 
-    def _run_hip_once():
-        state_swz = state_swz_template.clone()
-        _ = hip_mod.fused_split_gdr_update_ksplit2(
-            **common_tensor_args,
-            initial_state_source=state_swz,
-            **common_scalar_args,
-        )
+        if backend == "hip":
+            state_swz = state_swz_template.clone()
+            _ = hip_mod.fused_split_gdr_update_ksplit2(
+                **common_tensor_args,
+                initial_state_source=state_swz,
+                **common_scalar_args,
+            )
+            return
 
-    def _run_triton_once():
-        state_triton = inputs["ssm_state"].clone()
-        out_triton_perf = out_template.clone()
-        fused_sigmoid_gating_delta_rule_update(
-            out_triton_perf,
-            A_log=inputs["A_log"],
-            a=a_triton,
-            dt_bias=inputs["dt_bias"],
-            softplus_beta=softplus_beta,
-            softplus_threshold=softplus_threshold,
-            q=q_triton,
-            k=k_triton,
-            v=v_triton,
-            b=b_triton,
-            initial_state_source=state_triton,
-            initial_state_indices=common_tensor_args["initial_state_indices"],
-            scale=scale,
-            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
-            cu_seqlens=None,
-        )
+        if backend == "triton":
+            state_triton = inputs["ssm_state"].clone()
+            out = out_template.clone()
+            fused_sigmoid_gating_delta_rule_update(
+                out,
+                A_log=inputs["A_log"],
+                a=a_triton,
+                dt_bias=inputs["dt_bias"],
+                softplus_beta=softplus_beta,
+                softplus_threshold=softplus_threshold,
+                q=q_triton,
+                k=k_triton,
+                v=v_triton,
+                b=b_triton,
+                initial_state_source=state_triton,
+                initial_state_indices=common_tensor_args["initial_state_indices"],
+                scale=scale,
+                use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                cu_seqlens=None,
+            )
+            return
 
-    fly_us = _benchmark_us(_run_fly_once)
-    hip_us = _benchmark_us(_run_hip_once)
-    triton_us = _benchmark_us(_run_triton_once)
+        raise ValueError(f"Unknown backend: {backend}")
+
+    fly_us = _benchmark_us(lambda: _run_once("fly"))
+    hip_us = _benchmark_us(lambda: _run_once("hip"))
+    triton_us = _benchmark_us(lambda: _run_once("triton"))
     speed_ratio = hip_us / fly_us if fly_us > 0 else float("inf")
-    triton_vs_fly = triton_us / fly_us if fly_us > 0 else float("inf")
     hip_vs_triton = hip_us / triton_us if triton_us > 0 else float("inf")
     print(f"  Perf warmup/loop: {warmup}/{num_iters}")
     print(f"  FlyDSL time: {fly_us:.2f} us")
