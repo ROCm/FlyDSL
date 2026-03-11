@@ -18,6 +18,7 @@ from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferLDSTType
 
 from .._mlir._mlir_libs._fly_rocdl import MmaAtomCDNA3_MFMAType
+from .._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
 
 BufferLDST = lambda bit_size: CopyOpCDNA3BufferLDSTType.get(bit_size)  # noqa: E731
 BufferLDST32b = lambda: CopyOpCDNA3BufferLDSTType.get(32)  # noqa: E731
@@ -47,6 +48,29 @@ def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
     ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
     ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
     return MmaAtomCDNA3_MFMAType.get(m, n, k, ty, ty_b, ty_acc)
+
+
+def WMMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
+    """Create a WMMA MMA atom type for GFX1250 (wave32).
+
+    Args:
+        m, n, k: WMMA tile dimensions.
+        elem_type: Element type for A operand.
+        elem_type_b: Element type for B operand (defaults to elem_type).
+        elem_type_acc: Element type for accumulator (defaults to elem_type).
+    """
+    from .._mlir import ir
+
+    if isinstance(elem_type, type) and hasattr(elem_type, 'ir_type'):
+        ty = elem_type.ir_type
+    elif isinstance(elem_type, ir.Type):
+        ty = elem_type
+    else:
+        raise TypeError(f"WMMA: unsupported elem_type {elem_type}")
+
+    ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
+    ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
+    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty, ty_b, ty_acc)
 
 
 def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
@@ -261,6 +285,7 @@ __all__ = [
 
     # MMA atom types
     'MmaAtomCDNA3_MFMAType', 'MFMA',
+    'MmaAtomGFX1250_WMMAType', 'WMMA',
 
     # Convenience wrappers
     'make_buffer_tensor',
