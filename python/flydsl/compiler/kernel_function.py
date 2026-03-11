@@ -1,4 +1,5 @@
 import inspect
+import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
 
@@ -170,6 +171,24 @@ class CompilationContext:
     """
 
     _current: Optional["CompilationContext"] = None
+
+    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    _compile_hints = threading.local()
+
+    @classmethod
+    def set_compile_hints(cls, hints: dict):
+        """Set compiler hints for the current thread (used by autotune)."""
+        cls._compile_hints.data = hints
+
+    @classmethod
+    def clear_compile_hints(cls):
+        """Clear compiler hints for the current thread."""
+        cls._compile_hints.data = None
+
+    @classmethod
+    def get_compile_hints(cls):
+        """Get compiler hints for the current thread, or empty dict."""
+        return getattr(cls._compile_hints, 'data', None) or {}
 
     def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
         self.gpu_module_op = None

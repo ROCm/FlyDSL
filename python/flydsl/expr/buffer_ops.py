@@ -25,6 +25,7 @@ from .._mlir import ir
 from .._mlir.dialects import llvm, rocdl, arith as std_arith
 from .._mlir.extras import types as T
 from typing import Optional, Union
+from .meta import traced_op
 
 __all__ = [
     'create_buffer_resource',
@@ -202,6 +203,7 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
+@traced_op
 def create_buffer_resource(memref_val: ir.Value, 
                            stride: int = 0,
                            max_size: bool = True,
@@ -230,6 +232,7 @@ def create_buffer_resource(memref_val: ir.Value,
     return desc.rsrc
 
 
+@traced_op
 def buffer_load(rsrc: ir.Value,
                 offset: ir.Value,
                 vec_width: int = 4,
@@ -320,6 +323,7 @@ def buffer_load(rsrc: ir.Value,
     return load_op.result
 
 
+@traced_op
 def buffer_store(data: ir.Value,
                  rsrc: ir.Value,
                  offset: ir.Value,
