@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
-#define FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -22,12 +22,10 @@ Layout layoutTiledCopyThrValView(LayoutBuilder<Layout> &builder, CopyAtomType co
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 
   auto atomLayoutRef = cast<LayoutAttr>(copyAtom.getThrValLayoutRef());
-  auto atomNumThr = intTupleProductImpl(attrBuilder, atomLayoutRef.getShape().at(0));
-  auto atomNumVal = intTupleProductImpl(attrBuilder, atomLayoutRef.getShape().at(1));
+  auto atomNumThr = intTupleProduct(attrBuilder, atomLayoutRef.getShape().at(0)).getLeafAsInt();
+  auto atomNumVal = intTupleProduct(attrBuilder, atomLayoutRef.getShape().at(1)).getLeafAsInt();
 
-  TileAttr atomTile = TileAttr::get(
-      ArrayAttr::get(ctx, {IntAttr::getStatic(ctx, attrBuilder.getStaticValue(atomNumThr)),
-                           IntAttr::getStatic(ctx, attrBuilder.getStaticValue(atomNumVal))}));
+  TileAttr atomTile = TileAttr::get(ArrayAttr::get(ctx, {atomNumThr, atomNumVal}));
   LayoutAttr atomLayoutTV = layoutZippedDivide(attrBuilder, tiledLayoutThrVal, atomTile);
 
   LayoutAttr firstMode = atomLayoutTV.at(0);
@@ -80,8 +78,8 @@ Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomTypeInter
 
   SmallVector<Attribute> atomTileElems;
   for (int i = 0; i < atomShape2D.rank(); ++i) {
-    auto size = intTupleProductImpl(attrBuilder, atomShape2D.at(i));
-    atomTileElems.push_back(IntAttr::getStatic(ctx, attrBuilder.getStaticValue(size)));
+    auto size = intTupleProduct(attrBuilder, atomShape2D.at(i));
+    atomTileElems.push_back(size.getLeafAsInt());
   }
   TileAttr atomTile = TileAttr::get(ArrayAttr::get(ctx, atomTileElems));
   Layout atomDiv = layoutZippedDivide(builder, permuted, atomTile);
@@ -98,8 +96,8 @@ Layout layoutTiledMmaThrValView(LayoutBuilder<Layout> &builder, MmaAtomTypeInter
 
   SmallVector<Attribute> thrTileElems;
   for (int i = 0; i < tiledShape2D.getShape().rank(); ++i) {
-    auto size = intTupleProductImpl(attrBuilder, tiledShape2D.getShape().at(i));
-    thrTileElems.push_back(IntAttr::getStatic(ctx, attrBuilder.getStaticValue(size)));
+    auto size = intTupleProduct(attrBuilder, tiledShape2D.getShape().at(i));
+    thrTileElems.push_back(size.getLeafAsInt());
   }
   TileAttr thrTile = TileAttr::get(ArrayAttr::get(ctx, thrTileElems));
   Layout thrDiv = layoutZippedDivide(builder, restLayout, thrTile);
@@ -180,18 +178,16 @@ Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder, CopyAtomType copyAt
   LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 
   auto atomLayoutRef = cast<LayoutAttr>(copyAtom.getThrValLayoutRef());
-  auto atomNumVal = intTupleProductImpl(attrBuilder, atomLayoutRef.getShape().at(1));
-  auto tiledNumThr = intTupleProductImpl(attrBuilder, tiledLayoutThrVal.getShape().at(0));
+  auto atomNumVal = intTupleProduct(attrBuilder, atomLayoutRef.getShape().at(1)).getLeafAsInt();
+  auto tiledNumThr =
+      intTupleProduct(attrBuilder, tiledLayoutThrVal.getShape().at(0)).getLeafAsInt();
 
   IntTuple inputShape = builder.getShape(inputLayout);
   IntTuple V = builder.at(inputShape, 0);
 
-  auto vVal = intTupleProductImpl(builder, V);
-  int32_t tiledNumThrStatic = attrBuilder.getStaticValue(tiledNumThr);
-  int32_t atomNumValStatic = attrBuilder.getStaticValue(atomNumVal);
-  int32_t vStatic = builder.getStaticValue(vVal);
-
-  int32_t upcastFactor = tiledNumThrStatic * vStatic;
+  auto vAttr = builder.getAttr(V);
+  auto vVal = intTupleProduct(attrBuilder, vAttr).getLeafAsInt();
+  int32_t upcastFactor = (tiledNumThr * vVal).getValue();
 
   LayoutAttr tiledLayoutTVInv = layoutRightInverse(attrBuilder, tiledLayoutThrVal);
 
@@ -199,8 +195,8 @@ Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder, CopyAtomType copyAt
   for (int i = 0; i < tilerMN.rank(); ++i) {
     auto elem = tilerMN.at(i);
     if (auto layoutElem = dyn_cast<LayoutAttr>(elem)) {
-      auto sz = intTupleProductImpl(attrBuilder, layoutElem.getShape());
-      tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, attrBuilder.getStaticValue(sz)));
+      auto sz = intTupleProduct(attrBuilder, layoutElem.getShape());
+      tilerShapeElems.push_back(sz);
     } else if (auto intElem = dyn_cast<IntAttr>(elem)) {
       tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, intElem.getValue()));
     }
@@ -213,27 +209,26 @@ Layout layoutTiledCopyRetile(LayoutBuilder<Layout> &builder, CopyAtomType copyAt
       layoutComposition(attrBuilder, tiledLayoutTVInv, tilerShapeLayout);
   LayoutAttr frgLayoutMN = layoutUpcast(attrBuilder, tiledLayoutTVInvWithShape, upcastFactor);
 
-  LayoutAttr vLayout = LayoutAttr::get(IntTupleAttr::getLeafStatic(ctx, vStatic),
-                                       IntTupleAttr::getLeafStatic(ctx, 1));
+  LayoutAttr vLayout =
+      LayoutAttr::get(IntTupleAttr::get(vVal), IntTupleAttr::getLeafStatic(ctx, 1));
 
   LayoutAttr frgLayoutMNInv = layoutRightInverse(attrBuilder, frgLayoutMN);
   LayoutAttr vProduct = layoutLogicalProduct(attrBuilder, vLayout, frgLayoutMNInv);
 
-  LayoutAttr atomNumValLayout = LayoutAttr::get(IntTupleAttr::getLeafStatic(ctx, atomNumValStatic),
-                                                IntTupleAttr::getLeafStatic(ctx, 1));
+  LayoutAttr atomNumValLayout =
+      LayoutAttr::get(IntTupleAttr::get(atomNumVal), IntTupleAttr::getLeafStatic(ctx, 1));
   LayoutAttr frgLayoutV = layoutZippedDivide(attrBuilder, vProduct, atomNumValLayout);
 
   IntTupleAttr frgMNShapeProductEach = intTupleProductEach(attrBuilder, frgLayoutMN.getShape());
-  IntTupleAttr divisorShapeForTensor = intTuplePrepend(attrBuilder, frgMNShapeProductEach,
-                                                       IntTupleAttr::getLeafStatic(ctx, vStatic));
+  IntTupleAttr divisorShapeForTensor =
+      intTuplePrepend(attrBuilder, frgMNShapeProductEach, IntTupleAttr::get(vVal));
   SmallVector<Attribute> divisorTileElems;
   if (divisorShapeForTensor.isLeaf()) {
-    divisorTileElems.push_back(IntAttr::getStatic(
-        ctx, attrBuilder.getStaticValue(attrBuilder.getArithValue(divisorShapeForTensor))));
+    divisorTileElems.push_back(intTupleProduct(attrBuilder, divisorShapeForTensor).getLeafAsInt());
   } else {
     for (int i = 0; i < divisorShapeForTensor.rank(); ++i) {
-      auto elemVal = intTupleProductImpl(attrBuilder, attrBuilder.at(divisorShapeForTensor, i));
-      divisorTileElems.push_back(IntAttr::getStatic(ctx, attrBuilder.getStaticValue(elemVal)));
+      auto elemVal = intTupleProduct(attrBuilder, attrBuilder.at(divisorShapeForTensor, i));
+      divisorTileElems.push_back(elemVal.getLeafAsInt());
     }
   }
   TileAttr divisorTile = TileAttr::get(ArrayAttr::get(ctx, divisorTileElems));
@@ -306,11 +301,9 @@ Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomTy
   SmallVector<Attribute> permElems;
   for (int i : {idx0, idx1}) {
     if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
-      auto atomShapeI =
-          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
-      auto thrSizeI = attrBuilder.getStaticValue(
-          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
-      permElems.push_back(IntAttr::getStatic(ctx, atomShapeI * thrSizeI));
+      auto atomShapeI = intTupleProduct(attrBuilder, shapeMNK.at(i)).getLeafAsInt();
+      auto thrSizeI = intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt();
+      permElems.push_back(atomShapeI * thrSizeI);
     } else {
       permElems.push_back(permutationMNK.at(i));
     }
@@ -323,4 +316,4 @@ Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomTy
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H

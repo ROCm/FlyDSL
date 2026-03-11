@@ -22,16 +22,20 @@ def Fly_MayStaticInterface {
 }
 
 def Fly_NestedAttrInterface : AttrInterface<"NestedAttrInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
 }
 def Fly_NestedTypeInterface : TypeInterface<"NestedTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
 }
 
 def Fly_MayStaticAttrInterface : AttrInterface<"MayStaticAttrInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = Fly_MayStaticInterface.methods;
 }
 def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
+  let cppNamespace = "::mlir::fly";
   let methods = Fly_MayStaticInterface.methods;
 }
 
