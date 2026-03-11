@@ -31,6 +31,26 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyB(MlirType
 MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type);
 
 //===----------------------------------------------------------------------===//
+// MmaAtomGFX1250_WMMAType
+//===----------------------------------------------------------------------===//
+
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyROCDLMmaAtomGFX1250_WMMAType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetTypeID(void);
+
+// Constructor
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGet(int32_t m, int32_t n, int32_t k,
+                                                                   MlirType elemTyA, MlirType elemTyB,
+                                                                   MlirType elemTyAcc);
+
+// Accessors
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetM(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetN(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetK(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyA(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyB(MlirType type);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyAcc(MlirType type);
+
+//===----------------------------------------------------------------------===//
 // CopyOpCDNA3BufferLDSTType
 //===----------------------------------------------------------------------===//
 

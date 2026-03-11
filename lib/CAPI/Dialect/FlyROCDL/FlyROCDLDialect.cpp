@@ -62,6 +62,50 @@ MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
+// MmaAtomGFX1250_WMMAType
+//===----------------------------------------------------------------------===//
+
+bool mlirTypeIsAFlyROCDLMmaAtomGFX1250_WMMAType(MlirType type) {
+  return isa<MmaAtomGFX1250_WMMAType>(unwrap(type));
+}
+
+MlirTypeID mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetTypeID(void) {
+  return wrap(MmaAtomGFX1250_WMMAType::getTypeID());
+}
+
+MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGet(int32_t m, int32_t n, int32_t k,
+                                                 MlirType elemTyA,
+                                                 MlirType elemTyB,
+                                                 MlirType elemTyAcc) {
+  return wrap(MmaAtomGFX1250_WMMAType::get(m, n, k, unwrap(elemTyA),
+                                           unwrap(elemTyB), unwrap(elemTyAcc)));
+}
+
+int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetM(MlirType type) {
+  return cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getM();
+}
+
+int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetN(MlirType type) {
+  return cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getN();
+}
+
+int32_t mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetK(MlirType type) {
+  return cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getK();
+}
+
+MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyA(MlirType type) {
+  return wrap(cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getElemTyA());
+}
+
+MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyB(MlirType type) {
+  return wrap(cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getElemTyB());
+}
+
+MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyAcc(MlirType type) {
+  return wrap(cast<MmaAtomGFX1250_WMMAType>(unwrap(type)).getElemTyAcc());
+}
+
+//===----------------------------------------------------------------------===//
 // CopyOpCDNA3BufferLDSTType
 //===----------------------------------------------------------------------===//
 
