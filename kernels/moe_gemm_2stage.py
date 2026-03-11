@@ -467,7 +467,7 @@ def compile_moe_gemm1(
                     # NOTE: rows beyond `num_valid_ids` can contain garbage (within the allocated
                     # buffer). That's OK as long as we never use an out-of-range token id to index X.
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
-                    t_raw = arith.andi(fused_i, mask24)
+                    t_raw = fused_i & mask24
                     # NOTE: aiter moe_sorting uses sentinel token_id == tokens for padding.
                     # Do NOT rely on buffer OOB semantics for X loads; explicitly mask to a safe row.
                     t_valid_i32 = arith.cmpi(arith.CmpIPredicate.ult, t_raw, tokens_i32)
@@ -1232,6 +1232,7 @@ def compile_moe_gemm1(
         doweight_stage1,
         x_is_token_slot,
         use_cshuffle_epilog,
+        group_size,
     )
 
     @flyc.jit
@@ -1729,13 +1730,13 @@ def compile_moe_gemm2(
     
                     sorted_row_i = bx_m + row_local
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
-                    t_i32 = arith.andi(fused_i, mask24)
+                    t_i32 = fused_i & mask24
                     s_i32 = arith.shrui(fused_i, arith.constant(24, type=T.i32))
                     # aiter moe_sorting uses sentinel token_id == tokens for padding.
                     # Do NOT rely on buffer OOB semantics for A2/scale loads; explicitly mask.
                     t_valid = arith.cmpi(arith.CmpIPredicate.ult, t_i32, tokens_i32)
                     s_valid = arith.cmpi(arith.CmpIPredicate.ult, s_i32, topk_i32)
-                    ts_valid = arith.andi(t_valid, s_valid)
+                    ts_valid = t_valid & s_valid
                     t_safe = arith.select(ts_valid, t_i32, arith.constant(0, type=T.i32))
                     s_safe = arith.select(ts_valid, s_i32, arith.constant(0, type=T.i32))
                     row_ts_i32 = t_safe * topk_i32 + s_safe
@@ -2264,7 +2265,7 @@ def compile_moe_gemm2(
                         # For invalid rows, force sx=0 so they contribute exactly 0 to output.
                         t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32)
                         s_ok = arith.cmpi(arith.CmpIPredicate.ult, s2, topk_i32_v)
-                        ts_ok = arith.andi(t_ok, s_ok)
+                        ts_ok = t_ok & s_ok
                         t2_safe = arith.select(ts_ok, t2, arith.constant(0, type=T.i32))
                         s2_safe = arith.select(ts_ok, s2, arith.constant(0, type=T.i32))
                         ts2 = t2_safe * topk_i32_v + s2_safe
@@ -2344,7 +2345,7 @@ def compile_moe_gemm2(
                         # Explicitly mask sentinel token/slot to avoid OOB scale_x loads.
                         t_ok = arith.cmpi(arith.CmpIPredicate.ult, t2, tokens_i32)
                         s_ok = arith.cmpi(arith.CmpIPredicate.ult, s2, topk_i32_v)
-                        ts_ok = arith.andi(t_ok, s_ok)
+                        ts_ok = t_ok & s_ok
                         t2_safe = arith.select(ts_ok, t2, arith.constant(0, type=T.i32))
                         s2_safe = arith.select(ts_ok, s2, arith.constant(0, type=T.i32))
                         ts2 = t2_safe * topk_i32_v + s2_safe
@@ -2395,7 +2396,7 @@ def compile_moe_gemm2(
                         s = fused2 >> 24
                         t_ok = arith.cmpi(arith.CmpIPredicate.ult, t, tokens_i32)
                         s_ok = arith.cmpi(arith.CmpIPredicate.ult, s, topk_i32_v)
-                        row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
+                        row_valid = row_valid0 & t_ok & s_ok
                         return (fused2, row_valid)
 
                     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
@@ -2476,6 +2477,7 @@ def compile_moe_gemm2(
         doweight_stage2,
         accumulate,
         use_cshuffle_epilog,
+        group_size,
     )
 
     @flyc.jit

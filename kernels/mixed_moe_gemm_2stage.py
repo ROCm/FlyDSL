@@ -480,7 +480,7 @@ def compile_mixed_moe_gemm1(
 
                         sorted_row_i = bx_m + row_local
                         fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
-                        t_i32 = arith.andi(fused_i, mask24)
+                        t_i32 = fused_i & mask24
                         t_idx = arith.index_cast(ir.IndexType.get(), t_i32)
                         x_row_base_div4.append(t_idx * c_k_div4)
 
@@ -1666,13 +1666,13 @@ def compile_mixed_moe_gemm2(
     
                     sorted_row_i = bx_m + row_local
                     fused_i = buffer_ops.buffer_load(sorted_rsrc, sorted_row_i, vec_width=1, dtype=i32)
-                    t_i32 = arith.andi(fused_i, mask24)
+                    t_i32 = fused_i & mask24
                     s_i32 = arith.shrui(fused_i, arith.i32(24))
                     # Keep `blk_valid` only; remove per-row token validity checks.
 
                     t_valid = arith.cmpu(t_i32, tokens_i32, "ult")
                     s_valid = arith.cmpu(s_i32, topk_i32, "ult")
-                    ts_valid = arith.andi(t_valid, s_valid)
+                    ts_valid = t_valid & s_valid
                     t_safe = arith.select(ts_valid, t_i32, arith.i32(0))
                     s_safe = arith.select(ts_valid, s_i32, arith.i32(0))
                     row_ts_i32 = t_safe * topk_i32 + s_safe
@@ -2170,7 +2170,7 @@ def compile_mixed_moe_gemm2(
 
                     t_ok = arith.cmpu(t2, tokens_i32, "ult")
                     s_ok = arith.cmpu(s2, topk_i32_v, "ult")
-                    ts_ok = arith.andi(t_ok, s_ok)
+                    ts_ok = t_ok & s_ok
                     t2_safe = arith.select(ts_ok, t2, arith.i32(0))
                     s2_safe = arith.select(ts_ok, s2, arith.i32(0))
                     ts2 = t2_safe * topk_i32_v + s2_safe
@@ -2215,7 +2215,7 @@ def compile_mixed_moe_gemm2(
                     s = fused2 >> 24
                     t_ok = arith.cmpu(t, tokens_i32, "ult")
                     s_ok = arith.cmpu(s, topk_i32_v, "ult")
-                    row_valid = arith.andi(row_valid0, arith.andi(t_ok, s_ok))
+                    row_valid = row_valid0 & t_ok & s_ok
 
                     return (fused2, row_valid)
 

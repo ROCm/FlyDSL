@@ -127,8 +127,8 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     bits1 = arith.bitcast(T.i32, f32_vals[1])
     bits2 = arith.bitcast(T.i32, f32_vals[2])
     bits3 = arith.bitcast(T.i32, f32_vals[3])
-    i32_lo = arith.ori(arith.shrui(bits0, c16), arith.andi(bits1, c_ffff0000))
-    i32_hi = arith.ori(arith.shrui(bits2, c16), arith.andi(bits3, c_ffff0000))
+    i32_lo = arith.shrui(bits0, c16) | (bits1 & c_ffff0000)
+    i32_hi = arith.shrui(bits2, c16) | (bits3 & c_ffff0000)
 
     v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
     v64 = vector.bitcast(vec1_i64, v2)

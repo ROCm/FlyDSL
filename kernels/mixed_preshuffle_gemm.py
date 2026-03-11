@@ -702,10 +702,10 @@ def compile_mxfp4_preshuffle_gemm(
                         c2_i32 = arith.constant(2, type=T.i32)
 
                         lane_id_i32 = arith.index_cast(T.i32, lane_id)
-                        lane_lsb = arith.andi(lane_id_i32, c1_i32)
+                        lane_lsb = lane_id_i32 & c1_i32
                         is_odd = lane_lsb != c0_i32
-                        nbr_lane = arith.xori(lane_id_i32, c1_i32)
-                        nbr_lane_bytes = arith.shli(nbr_lane, c2_i32)  # lane_id * 4 (bytes)
+                        nbr_lane = lane_id_i32 ^ c1_i32
+                        nbr_lane_bytes = nbr_lane << c2_i32  # lane_id * 4 (bytes)
 
                         for ni in range_constexpr(num_acc_n):
                             col_local = col_base_local + (ni * 16)
@@ -754,7 +754,7 @@ def compile_mxfp4_preshuffle_gemm(
 
                             # Store [even, odd] as a single 32-bit LDS write (2xf16).
                             col_local_i32 = arith.index_cast(T.i32, col_local)
-                            col_even_i32 = arith.andi(col_local_i32, cFE_i32)
+                            col_even_i32 = col_local_i32 & cFE_i32
                             col_even = arith.index_cast(T.index, col_even_i32)
 
                             lds_idx = row_base_lds + col_even
