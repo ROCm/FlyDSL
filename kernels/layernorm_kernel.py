@@ -180,7 +180,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec_buf(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> 2
                 raw = buffer_ops.buffer_load(
                     rsrc, dw, vec_width=vec_dwords, dtype=T.i32,
                     soffset_bytes=soff,
@@ -190,7 +190,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec_buf(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> 2
                 buffer_ops.buffer_store(
                     data, rsrc, dw,
                     soffset_bytes=soff,

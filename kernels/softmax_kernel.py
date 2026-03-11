@@ -142,14 +142,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> 2
                 raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
                 if vec_dwords == VEC_WIDTH:
                     return raw.bitcast(vec_type_e)
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> 2
                 buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
 
             # 1. Load + compute local max

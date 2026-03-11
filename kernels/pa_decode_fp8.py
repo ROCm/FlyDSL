@@ -142,7 +142,7 @@ def build_pa_decode_module(
         lane_hi4 = (tid & 0xF0) >> 4
         warp_id = tid >> 6
         kv_col_bits = tid & 48
-        lane_iw = tid % arith.constant(WARP_SIZE, type=T.i32)
+        lane_iw = tid % WARP_SIZE
         c8 = arith.constant(8, type=T.i32)
         c112 = arith.constant(112, type=T.i32)
         c_w = arith.constant(WARP_SIZE, type=T.i32)
@@ -199,12 +199,12 @@ def build_pa_decode_module(
         q_a2 = vector.extract(q_v1, static_position=[0], dynamic_position=[])
         q_a3 = vector.extract(q_v1, static_position=[1], dynamic_position=[])
 
-        NEG_INF = arith.constant(float("-inf"), type=T.f32)
-        ZERO_F = arith.constant(0.0, type=T.f32)
-        LOG2E_C = arith.constant(LOG2E, type=T.f32)
-        QK_SCALE = arith.constant(_qk_scale, type=T.f32)
-        F240 = arith.constant(FP8_MAX, type=T.f32)
-        PROB_SCALE_C = arith.constant(_prob_scale, type=T.f32)
+        NEG_INF = fx.Float32(float("-inf"))
+        ZERO_F = fx.Float32(0.0)
+        LOG2E_C = fx.Float32(LOG2E)
+        QK_SCALE = fx.Float32(_qk_scale)
+        F240 = fx.Float32(FP8_MAX)
+        PROB_SCALE_C = fx.Float32(_prob_scale)
         warp_head_base = warp_id * arith.constant(32, type=T.i32)
 
         from flydsl.expr.utils.arith import int_to_int as _int_cast
@@ -484,7 +484,7 @@ def build_pa_decode_module(
             _is_last_iter = (_pi == int(_max_pps) - 1)
             if not _ps_mode or _is_last_iter:
                 if one_shot or _ps_mode:
-                    rcp = arith.constant(1.0, type=T.f32) / running_sum
+                    rcp = fx.Float32(1.0) / running_sum
                     pv_out = [
                         _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
                         _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
@@ -505,7 +505,7 @@ def build_pa_decode_module(
                         out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
                         buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
                 else:
-                    rcp = arith.constant(1.0, type=T.f32) / running_sum
+                    rcp = fx.Float32(1.0) / running_sum
                     pv_out = [
                         _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
                         _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
@@ -588,36 +588,36 @@ def build_ps_reduce_kernel(
         po_rsrc = buffer_ops.create_buffer_resource(partial_output_ptr, max_size=True)
         out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
 
-        LOG2E_C = arith.constant(LOG2E, type=T.f32())
-        NEG_INF = arith.constant(NEG_INF_VAL, type=T.f32())
-        ZERO_F = arith.constant(0.0, type=T.f32())
+        LOG2E_C = fx.Float32(LOG2E)
+        NEG_INF = fx.Float32(NEG_INF_VAL)
+        ZERO_F = fx.Float32(0.0)
 
         tid = gpu.thread_idx.x
 
         for qg in range(qg_total):
-            qg_i32 = arith.constant(qg, type=T.i32())
-            ql_idx = arith.constant(qg // query_group_size, type=T.i32())
-            gr_idx = arith.constant(qg % query_group_size, type=T.i32())
+            qg_i32 = arith.constant(qg, type=T.i32)
+            ql_idx = arith.constant(qg // query_group_size, type=T.i32)
+            gr_idx = arith.constant(qg % query_group_size, type=T.i32)
 
             global_max = NEG_INF
             for p in range(max_context_partition_num):
-                p_i32 = arith.constant(p, type=T.i32())
+                p_i32 = arith.constant(p, type=T.i32)
                 p_valid = p_i32 < context_partition_num
 
                 es_off = seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
-                ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                 ml_val = arith.select(p_valid, ml_val, NEG_INF)
                 global_max = global_max.maximumf(ml_val)
 
             total_exp_sum = ZERO_F
             for p in range(max_context_partition_num):
-                p_i32 = arith.constant(p, type=T.i32())
+                p_i32 = arith.constant(p, type=T.i32)
                 p_valid = p_i32 < context_partition_num
 
                 es_off = seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
-                ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                 ml_val = arith.select(p_valid, ml_val, NEG_INF)
-                es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32())
+                es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
                 es_val = arith.select(p_valid, es_val, ZERO_F)
 
                 rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
@@ -625,23 +625,23 @@ def build_ps_reduce_kernel(
 
             if use_sinks:
                 sink_rsrc = buffer_ops.create_buffer_resource(sink_token_ptr, max_size=True)
-                sink_off = kv_head_idx * arith.constant(query_group_size, type=T.i32()) + gr_idx
-                sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32())
+                sink_off = kv_head_idx * arith.constant(query_group_size, type=T.i32) + gr_idx
+                sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32)
                 sink_contrib = _exp_f32(sink_val - global_max, LOG2E_C)
                 total_exp_sum = total_exp_sum + sink_contrib
 
             for h in range(head_size):
-                h_i32 = arith.constant(h, type=T.i32())
+                h_i32 = arith.constant(h, type=T.i32)
                 acc = ZERO_F
 
                 for p in range(max_context_partition_num):
-                    p_i32 = arith.constant(p, type=T.i32())
+                    p_i32 = arith.constant(p, type=T.i32)
                     p_valid = p_i32 < context_partition_num
 
                     es_off = seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
-                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                     ml_val = arith.select(p_valid, ml_val, NEG_INF)
-                    es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32())
+                    es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
                     es_val = arith.select(p_valid, es_val, ZERO_F)
 
                     rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
@@ -654,7 +654,7 @@ def build_ps_reduce_kernel(
                         + qg_i32 * stride_po_group
                         + h_i32
                     )
-                    po_val = buffer_ops.buffer_load(po_rsrc, po_off, vec_width=1, dtype=T.f32())
+                    po_val = buffer_ops.buffer_load(po_rsrc, po_off, vec_width=1, dtype=T.f32)
                     po_val = arith.select(p_valid, po_val, ZERO_F)
 
                     acc = acc + po_val * attn_prob
@@ -753,41 +753,41 @@ def build_v2_reduce_kernel(
         kv_head_idx = gpu.block_idx.y
 
         cl_rsrc = buffer_ops.create_buffer_resource(context_lengths_ptr, max_size=True)
-        ctx_len = buffer_ops.buffer_load(cl_rsrc, seq_idx, vec_width=1, dtype=T.i32())
-        cps_const = arith.constant(context_partition_size, type=T.i32())
-        context_partition_num = (ctx_len + cps_const - arith.constant(1, type=T.i32())) / cps_const
+        ctx_len = buffer_ops.buffer_load(cl_rsrc, seq_idx, vec_width=1, dtype=T.i32)
+        cps_const = arith.constant(context_partition_size, type=T.i32)
+        context_partition_num = (ctx_len + cps_const - arith.constant(1, type=T.i32)) / cps_const
 
         es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
         ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
         po_rsrc = buffer_ops.create_buffer_resource(partial_output_ptr, max_size=True)
         out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
 
-        LOG2E_C = arith.constant(LOG2E, type=T.f32())
-        NEG_INF = arith.constant(NEG_INF_VAL, type=T.f32())
-        ZERO_F = arith.constant(0.0, type=T.f32())
-        ONE_F = arith.constant(1.0, type=T.f32())
-        CHUNK = arith.constant(max_chunk_size, type=T.i32())
+        LOG2E_C = fx.Float32(LOG2E)
+        NEG_INF = fx.Float32(NEG_INF_VAL)
+        ZERO_F = fx.Float32(0.0)
+        ONE_F = fx.Float32(1.0)
+        CHUNK = arith.constant(max_chunk_size, type=T.i32)
 
         for qg in range(qg_total):
-            qg_i32 = arith.constant(qg, type=T.i32())
-            ql_idx = arith.constant(qg // query_group_size, type=T.i32())
-            gr_idx = arith.constant(qg % query_group_size, type=T.i32())
+            qg_i32 = arith.constant(qg, type=T.i32)
+            ql_idx = arith.constant(qg // query_group_size, type=T.i32)
+            gr_idx = arith.constant(qg % query_group_size, type=T.i32)
 
             global_max = NEG_INF
             global_exp_sum = ZERO_F
 
             for chunk_base in range(0, max_chunk_size * 64, max_chunk_size):
-                chunk_base_i32 = arith.constant(chunk_base, type=T.i32())
+                chunk_base_i32 = arith.constant(chunk_base, type=T.i32)
                 chunk_active = chunk_base_i32 < context_partition_num
 
                 prev_global_max = global_max
 
                 for p_in_chunk in range(max_chunk_size):
-                    p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32())
+                    p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32)
                     p_valid = p_i32 < context_partition_num
 
                     es_off = seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
-                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                     ml_val = arith.select(p_valid, ml_val, NEG_INF)
                     global_max = global_max.maximumf(ml_val)
 
@@ -795,13 +795,13 @@ def build_v2_reduce_kernel(
                 global_exp_sum = global_exp_sum * update_scale
 
                 for p_in_chunk in range(max_chunk_size):
-                    p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32())
+                    p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32)
                     p_valid = p_i32 < context_partition_num
 
                     es_off = seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
-                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                    ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                     ml_val = arith.select(p_valid, ml_val, NEG_INF)
-                    es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32())
+                    es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
                     es_val = arith.select(p_valid, es_val, ZERO_F)
 
                     rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
@@ -809,28 +809,28 @@ def build_v2_reduce_kernel(
 
             if use_sinks:
                 sink_rsrc = buffer_ops.create_buffer_resource(sink_token_ptr, max_size=True)
-                sink_off = kv_head_idx * arith.constant(query_seq_len * query_group_size, type=T.i32()) + qg_i32
-                sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32())
+                sink_off = kv_head_idx * arith.constant(query_seq_len * query_group_size, type=T.i32) + qg_i32
+                sink_val = buffer_ops.buffer_load(sink_rsrc, sink_off, vec_width=1, dtype=T.f32)
                 sink_contrib = _exp_f32(sink_val - global_max, LOG2E_C)
                 global_exp_sum = global_exp_sum + sink_contrib
 
             for h in range(head_size):
-                h_i32 = arith.constant(h, type=T.i32())
+                h_i32 = arith.constant(h, type=T.i32)
                 acc = ZERO_F
 
                 for chunk_base in range(0, max_chunk_size * 64, max_chunk_size):
-                    chunk_base_i32 = arith.constant(chunk_base, type=T.i32())
+                    chunk_base_i32 = arith.constant(chunk_base, type=T.i32)
 
                     for p_in_chunk in range(max_chunk_size):
-                        p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32())
+                        p_i32 = chunk_base_i32 + arith.constant(p_in_chunk, type=T.i32)
                         p_valid = p_i32 < context_partition_num
 
                         es_off = (
                             seq_idx * stride_es_seq + kv_head_idx * stride_es_head + p_i32 * stride_es_part + qg_i32
                         )
-                        ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32())
+                        ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1, dtype=T.f32)
                         ml_val = arith.select(p_valid, ml_val, NEG_INF)
-                        es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32())
+                        es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1, dtype=T.f32)
                         es_val = arith.select(p_valid, es_val, ZERO_F)
 
                         rescaled = es_val * _exp_f32(ml_val - global_max, LOG2E_C)
@@ -843,7 +843,7 @@ def build_v2_reduce_kernel(
                             + qg_i32 * stride_po_group
                             + h_i32
                         )
-                        po_val = buffer_ops.buffer_load(po_rsrc, po_off, vec_width=1, dtype=T.f32())
+                        po_val = buffer_ops.buffer_load(po_rsrc, po_off, vec_width=1, dtype=T.f32)
                         po_val = arith.select(p_valid, po_val, ZERO_F)
 
                         acc = acc + po_val * attn_prob
