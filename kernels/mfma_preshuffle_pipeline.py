@@ -31,9 +31,9 @@ def _buffer_load_vec(buffer_ops, vector, rsrc, idx, *, elem_type, vec_elems, ele
     vec_width = load_bytes // 4
 
     if offset_in_bytes:
-        idx_i32 = idx / 4
+        idx_i32 = idx // 4
     elif elem_bytes == 2:
-        idx_i32 = (idx * 2) / 4
+        idx_i32 = (idx * 2) // 4
     else:
         idx_i32 = idx
 
@@ -73,10 +73,10 @@ def make_preshuffle_b_layout(
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     c_k_bytes = c_k * arith.constant(int(elem_bytes), index=True)
-    c_k0 = c_k_bytes / c64
-    n0 = c_n / c16
+    c_k0 = c_k_bytes // c64
+    n0 = c_n // c16
 
-    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack / arith.constant(int(elem_bytes), index=True))
+    c_kpack_elems = c_kpack if elem_bytes == 1 else (c_kpack // arith.constant(int(elem_bytes), index=True))
 
     stride_nlane = c_kpack_elems
     stride_klane = c16 * stride_nlane
@@ -164,11 +164,11 @@ def load_b_raw_w4a16(
     c2_idx = arith.constant(2, index=True)
     c4_idx = arith.constant(4, index=True)
 
-    k0_base = base_k / c64
+    k0_base = base_k // c64
     k1_layout_offset = ku * 2
-    lane_div_32 = lane_div_16 / c2_idx
+    lane_div_32 = lane_div_16 // c2_idx
     total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
-    k0 = k0_base + (total_k1 / c4_idx)
+    k0 = k0_base + (total_k1 // c4_idx)
     k1_local = total_k1 % c4_idx
     lane_odd = lane_div_16 % c2_idx
     k2_base = lane_odd * arith.constant(half_bytes, index=True)
@@ -243,7 +243,7 @@ def load_b_pack_k32(
 
     c64 = arith.constant(64, index=True)
     base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
-    k0_base = base_k_bytes / c64
+    k0_base = base_k_bytes // c64
     k0 = k0_base + arith.constant(ki_step // 2, index=True)
     k1 = lane_div_16
     half_bytes = kpack_bytes // 2
@@ -362,7 +362,7 @@ def lds_store_16b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v16 = vector.bitcast(vec16_ty, vec_part_i32x4)
@@ -389,7 +389,7 @@ def lds_store_8b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v8 = vector.bitcast(vec8_ty, vec_part_i32x2)
@@ -416,7 +416,7 @@ def lds_store_4b_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_local_bytes = col_local_i32 * tx_c4
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
+    col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
     idx0 = crd2idx(coord_store, layout_lds) + lds_base
     v4 = vector.bitcast(vec4_ty, vec_part_i32x1)

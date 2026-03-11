@@ -89,7 +89,7 @@ def compile_moe_reduction(
             elif dtype_str == "f16":
                 elem_type = T.f16()
             elif dtype_str == "bf16":
-                elem_type = ir.BF16Type.get()
+                elem_type = T.bf16()
             else:
                 raise ValueError(f"Unsupported dtype: {dtype_str}")
 
@@ -143,8 +143,8 @@ def compile_moe_reduction(
 
             thread_offset_base = arith.ArithValue(tid) * VEC_WIDTH
 
-            vec_type_e = ir.VectorType.get([VEC_WIDTH], elem_type)
-            vec_type_f32 = ir.VectorType.get([VEC_WIDTH], compute_type)
+            vec_type_e = T.vector(VEC_WIDTH, element_type=elem_type)
+            vec_type_f32 = T.vector(VEC_WIDTH, element_type=compute_type)
 
             c_model_dim = arith.index(model_dim).value
 

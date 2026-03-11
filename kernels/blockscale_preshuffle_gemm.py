@@ -245,7 +245,7 @@ def compile_blockscale_preshuffle_gemm(
         n_blk_list = []
         for i in range_constexpr(num_acc_n):
             global_n = by_n + n_tile_base + (i * 16) + lane_mod_16
-            n_blk_list.append(global_n / 16)
+            n_blk_list.append(global_n // 16)
             n_intra_list.append(global_n % 16)
 
         # ── B load helpers ────────────────────────────────────────────────
@@ -264,7 +264,7 @@ def compile_blockscale_preshuffle_gemm(
 
         def load_b_packs_k64(base_k, ku: int, ni: int):
             base_k_bytes = base_k
-            k0_base = base_k_bytes / c64_b
+            k0_base = base_k_bytes // c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
             coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], arith.index(0))
@@ -420,11 +420,11 @@ def compile_blockscale_preshuffle_gemm(
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
-            base_k_div4 = base_k / 4
+            base_k_div4 = base_k // 4
             dma_a_tile_to_lds(base_k_div4, lds_buffer)
 
         def prefetch_a_tile(base_k):
-            base_k_div4 = base_k / 4
+            base_k_div4 = base_k // 4
             return load_a_tile(base_k_div4)
 
         def prefetch_b_tile(base_k):
@@ -464,7 +464,7 @@ def compile_blockscale_preshuffle_gemm(
             """Load and combine scales for all scale blocks in a K-tile. Returns list of combined_scales."""
             all_combined = []
             for sb in range_constexpr(sb_per_tile):
-                kb = k_base / c_scale_block_k + arith.index(sb)
+                kb = k_base // c_scale_block_k + arith.index(sb)
                 sa_base_offset = kb * c_M
                 s_a_vecs = []
                 for mi in range_constexpr(m_repeat):
@@ -479,7 +479,7 @@ def compile_blockscale_preshuffle_gemm(
                 s_b_vals = []
                 for ni in range_constexpr(num_acc_n):
                     col_base_ni = by_n + n_tile_base + arith.index(ni * 16)
-                    n_block = col_base_ni / c_128
+                    n_block = col_base_ni // c_128
                     sb_idx = n_block * c_scale_k + kb
                     s_b_val = buffer_ops.buffer_load(
                         scale_b_rsrc, sb_idx, vec_width=1, dtype=T.f32
@@ -856,10 +856,8 @@ def compile_blockscale_preshuffle_gemm(
             allocator_pong.finalize()
             allocator_ping.finalize()
 
-        idx_m = ArithValue(arith.index_cast(T.index, i32_m.ir_value()))
-        idx_n = ArithValue(arith.index_cast(T.index, i32_n.ir_value()))
-        gx = (idx_m + (tile_m - 1)) / tile_m
-        gy = idx_n / tile_n
+        gx = (i32_m + (tile_m - 1)) // tile_m
+        gy = i32_n // tile_n
 
         launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
                                i32_m, i32_n)

@@ -2,6 +2,8 @@
 
 > Core types, construction, coordinate mapping, algebra operations, and layout utilities in FlyDSL.
 
+> **Important:** All `fx.*` layout operations generate MLIR IR and **must** be called inside a `@flyc.kernel` or `@flyc.jit` function body. Code snippets below show API usage patterns within that context, not standalone scripts.
+
 ## Quick Reference
 
 | Operation | Python API | Fly Dialect Op | Description |
@@ -11,9 +13,11 @@
 | | `fx.make_layout(shape, stride)` | `fly.make_layout` | Create layout from (shape, stride) |
 | | `fx.make_coord(i, j)` | `fly.make_coord` | Create coordinate |
 | | `fx.make_int_tuple(elems)` | `fly.make_int_tuple` | Create generic IntTuple |
+| | `fx.make_ordered_layout(shape, order)` | `fly.make_ordered_layout` | Create layout with mode ordering |
 | **Mapping** | `fx.crd2idx(coord, layout)` | `fly.crd2idx` | Coordinate → linear index |
 | | `fx.idx2crd(idx, layout)` | `fly.idx2crd` | Linear index → coordinate |
 | **Query** | `fx.size(layout)` | `fly.size` | Total element count |
+| | `fx.cosize(layout)` | `fly.cosize` | Codomain size (max index + 1) |
 | | `fx.get_shape(layout)` | `fly.get_shape` | Extract shape from layout |
 | | `fx.get_stride(layout)` | `fly.get_stride` | Extract stride from layout |
 | | `fx.get(int_tuple, idx)` | `fly.select` + `fly.get_scalar` | Extract element at index |
@@ -92,6 +96,10 @@ it = fx.make_int_tuple((4, 8, 2))
 # Nested shapes
 shape_nested = fx.make_shape(9, (4, 8))   # (9, (4, 8))
 
+# Ordered layout — specify stride order (e.g., column-major vs row-major)
+col_major = fx.make_ordered_layout((M, N), order=(0, 1))  # stride order: M-first
+row_major = fx.make_ordered_layout((M, N), order=(1, 0))  # stride order: N-first
+
 # Identity layout / tensor
 identity = fx.make_identity_layout((M, N))
 id_tensor = fx.make_identity_tensor((M, N))
@@ -108,7 +116,6 @@ The fundamental operation: mapping between logical coordinates and physical memo
 ### `crd2idx` — Coordinate to Index
 
 ```python
-# Via fly dialect ops
 idx = fx.crd2idx(coord, layout)
 ```
 
@@ -144,6 +151,7 @@ For layout `((8, 16), (1, 8))` (8x16, column-major):
 | Operation | Description | Example |
 |---|---|---|
 | `size(x)` | Product of all dimensions | `size((8, 16)) = 128` |
+| `cosize(layout)` | Max index + 1 (codomain size) | `cosize(((8,16),(1,8))) = 128` |
 | `get_shape(layout)` | Extract shape from layout | Returns `!fly.int_tuple` |
 | `get_stride(layout)` | Extract stride from layout | Returns `!fly.int_tuple` |
 | `get(x, i)` | Extract i-th element | `get((8, 16), 0) = 8` |
@@ -153,6 +161,7 @@ For layout `((8, 16), (1, 8))` (8x16, column-major):
 
 ```python
 s = fx.size(layout)           # total elements (returns Int32 for static)
+cs = fx.cosize(layout)        # codomain size (max index + 1)
 shape = fx.get_shape(layout)
 stride = fx.get_stride(layout)
 v = fx.get(shape, 0)          # first dimension
@@ -333,26 +342,94 @@ view = fx.make_view(iterator, layout)
 ptr = fx.add_offset(ptr, offset)
 ```
 
-### Copy and GEMM Atoms
+### Copy Atoms and Tiled Copies
+
+#### Copy Atom Types
+
+| Type Factory | Description |
+|---|---|
+| `fx.UniversalCopy128b()` | Generic 128-bit copy |
+| `fx.UniversalCopy64b()` | Generic 64-bit copy |
+| `fx.UniversalCopy32b()` | Generic 32-bit copy |
+| `fx.UniversalCopy(bits)` | Generic copy with custom bit width |
+| `fx.rocdl.BufferCopy128b()` | AMD buffer-descriptor 128-bit copy |
+| `fx.rocdl.BufferCopy64b()` | AMD buffer-descriptor 64-bit copy |
+| `fx.rocdl.BufferCopy32b()` | AMD buffer-descriptor 32-bit copy |
+
+#### Construction
 
 ```python
-# Create copy atom
-copy_atom = fx.make_copy_atom(CopyAtomUniversalCopyType.get(...))
+# Create copy atom (copy_op_type, elem_type)
+copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
 # Create MMA atom
-mma_atom = fx.make_mma_atom(MmaAtomUniversalFMAType.get(...))
+mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 
-# Make tiled copy
-tiled_copy = fx.make_tiled_copy(copy_atom, layout_thr_val, tile_mn)
+# Build thread-value layout from thread and value layouts
+tiler_mn, layout_tv = fx.make_layout_tv(thr_layout, val_layout)
 
-# Partition for a thread
-src_part = fx.tiled_copy_partition_src(tiled_copy, src, thr_coord)
-dst_part = fx.tiled_copy_partition_dst(tiled_copy, dst, thr_coord)
+# Make tiled copy from copy atom + layout + tile
+tiled_copy = fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
-# Execute copy / gemm
-fx.copy(copy_atom, src, dst)
+# Make tiled copy matched to a TiledMma's A/B/C partitioning
+tiled_copy_a = fx.make_tiled_copy_A(copy_atom, tiled_mma)
+tiled_copy_b = fx.make_tiled_copy_B(copy_atom, tiled_mma)
+tiled_copy_c = fx.make_tiled_copy_C(copy_atom, tiled_mma)
+
+# Make tiled MMA from MMA atom + atom layout + optional permutation
+tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout)
+tiled_mma = fx.make_tiled_mma(mma_atom, atom_layout, permutation)
+```
+
+#### Thread Slicing and Partitioning
+
+```python
+# Get a per-thread view of a tiled copy
+thr_copy = tiled_copy.get_slice(tid)   # returns ThrCopy
+src_part = thr_copy.partition_S(src)   # partition source tensor
+dst_part = thr_copy.partition_D(dst)   # partition destination tensor
+retiled  = thr_copy.retile(tensor)     # retile tensor to match copy atom
+
+# Get a per-thread view of a tiled MMA
+thr_mma = tiled_mma.get_slice(tid)     # returns ThrMma
+part_a = thr_mma.partition_A(tensor_a)
+part_b = thr_mma.partition_B(tensor_b)
+part_c = thr_mma.partition_C(tensor_c)
+
+# Create register fragments
+frag_a = tiled_mma.make_fragment_A(part_a)
+frag_b = tiled_mma.make_fragment_B(part_b)
+frag_c = tiled_mma.make_fragment_C(part_c)
+```
+
+#### Execution
+
+```python
+# Execute tiled copy
+fx.copy(copy_atom, src_part, dst_part)
+
+# Execute tiled copy with predicate mask (for boundary handling)
+fx.copy(copy_atom, src_part, dst_part, pred=pred_tensor)
+
+# Execute GEMM: D = A * B + C
 fx.gemm(mma_atom, d, a, b, c)
 ```
+
+#### Introspection
+
+| Property | Class | Description |
+|---|---|---|
+| `copy_atom.thr_layout` | `CopyAtom` | Thread layout of copy atom |
+| `copy_atom.tv_layout_src` | `CopyAtom` | Thread-value layout for source |
+| `copy_atom.tv_layout_dst` | `CopyAtom` | Thread-value layout for destination |
+| `mma_atom.thr_layout` | `MmaAtom` | Thread layout |
+| `mma_atom.shape_mnk` | `MmaAtom` | M×N×K tile dimensions |
+| `mma_atom.tv_layout_A/B/C` | `MmaAtom` | Thread-value layouts per operand |
+| `tiled_copy.tiled_tv_layout_S` | `TiledCopy` | Full tiled source layout |
+| `tiled_copy.tiled_tv_layout_D` | `TiledCopy` | Full tiled destination layout |
+| `tiled_mma.tile_size_mnk` | `TiledMma` | Tiled MMA dimensions |
+| `tiled_mma.thr_layout_vmnk` | `TiledMma` | Thread layout across V,M,N,K |
+| `tiled_mma.tiled_tv_layout_A/B/C` | `TiledMma` | Full tiled layouts per operand |
 
 ---
 

@@ -178,7 +178,7 @@ def c_shuffle_epilog(
     n_reps_shuffle = int(tile_n) // (CShuffleNLane * EVec)
 
     c_nlane = arith.constant(CShuffleNLane, index=True)
-    m_lane = tx / c_nlane
+    m_lane = tx // c_nlane
     n_lane = tx % c_nlane
     c_evec = arith.constant(EVec, index=True)
 
