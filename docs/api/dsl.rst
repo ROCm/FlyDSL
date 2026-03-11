@@ -26,18 +26,20 @@ operations, and kernel definitions.
 Key functions and types:
 
 - **fx.make_layout**, **fx.make_shape**, **fx.make_stride** -- layout construction
+- **fx.make_ordered_layout** -- layout with explicit mode ordering
 - **fx.make_tile** -- tile construction from layouts
 - **fx.make_copy_atom**, **fx.make_tiled_copy** -- tiled copy setup
+- **fx.make_tiled_copy_A**, **fx.make_tiled_copy_B**, **fx.make_tiled_copy_C** -- tiled copy matched to MMA
+- **fx.make_layout_tv** -- build thread-value layout from thread and value layouts
 - **fx.make_mma_atom**, **fx.make_tiled_mma** -- MFMA instruction setup
 - **fx.logical_divide**, **fx.zipped_divide** -- tensor partitioning
-- **fx.logical_product**, **fx.raked_product** -- layout product operations
-- **fx.make_fragment_like**, **fx.copy** -- register fragment operations
+- **fx.logical_product**, **fx.raked_product**, **fx.block_product** -- layout product operations
+- **fx.make_fragment_like**, **fx.copy** -- register fragment operations (``copy`` supports ``pred=`` for masking)
 - **fx.slice** -- tensor slicing
-- **fx.memref_alloca**, **fx.memref_load_vec**, **fx.memref_store_vec** -- register operations
-- **fx.copy_atom_call** -- invoke copy atom
+- **fx.memref_alloca**, **fx.memref_load_vec**, **fx.memref_store_vec** -- memory operations
 - **fx.gemm** -- invoke MFMA GEMM
 - **fx.thread_idx**, **fx.block_idx** -- GPU indexing (via ``fx.gpu``)
-- **fx.size**, **fx.rank**, **fx.cosize** -- layout inspection
+- **fx.size**, **fx.cosize**, **fx.rank** -- layout inspection
 - **fx.crd2idx**, **fx.idx2crd** -- coordinate-to-index mapping
 
 Type annotations:
@@ -53,7 +55,7 @@ Submodules:
 - **fx.gpu** -- GPU operations (``thread_idx``, ``block_idx``, ``barrier``)
 - **fx.vector** -- vector operations
 - **fx.buffer_ops** -- AMD buffer load/store instructions
-- **fx.rocdl** -- ROCDL-specific operations (buffer tensors, copy atoms)
+- **fx.rocdl** -- ROCDL-specific operations (``make_buffer_tensor``, ``MFMA``, ``BufferCopy128b``, ``sched_mfma``, etc.)
 
 Compiler API (``flydsl.compiler``)
 -----------------------------------

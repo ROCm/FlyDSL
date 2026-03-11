@@ -16,7 +16,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith
-from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr import gpu, buffer_ops, vector, rocdl
 from flydsl.expr import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -203,7 +202,7 @@ def compile_moe_blockscale_gemm1(
             i32_size_expert_ids_in: fx.Int32,
         ):
             tokens_in = arith.index_cast(T.index, i32_tokens_in.ir_value())
-            inter_in = arith.index_cast(T.index, i32_inter_in.ir_value())
+            inter_in = arith.ArithValue(arith.index_cast(T.index, i32_inter_in.ir_value()))
             k_in = arith.index_cast(T.index, i32_k_in.ir_value())
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
@@ -261,7 +260,7 @@ def compile_moe_blockscale_gemm1(
                 arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
             layout_b = b_layout.layout_b
-            c_k0 = (k_in * arith.index(int(elem_bytes))) / arith.index(64)
+            c_k0 = (k_in * arith.index(int(elem_bytes))) // arith.index(64)
 
             shape_lds = fx.make_shape(tile_m, tile_k)
             stride_lds = fx.make_stride(lds_stride, 1)
@@ -380,7 +379,7 @@ def compile_moe_blockscale_gemm1(
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
     
-                c_k_div4 = (k_in * arith.index(int(elem_bytes))) / arith.index(4)
+                c_k_div4 = (k_in * arith.index(int(elem_bytes))) // arith.index(4)
                 c_k_div4_i32 = arith.index_cast(i32, c_k_div4)
                 layout_x_div4 = fx.make_layout((tokens_i32_v, c_k_div4_i32), stride=(c_k_div4_i32, 1))
                 tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
@@ -461,7 +460,7 @@ def compile_moe_blockscale_gemm1(
     
                 def load_x_tile(base_k):
                     """Prefetch the per-thread X tile portion (gmem -> regs) for a given K base (in elements)."""
-                    base_k_div4 = (base_k * arith.index(int(elem_bytes))) / arith.index(4)
+                    base_k_div4 = (base_k * arith.index(int(elem_bytes))) // arith.index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
@@ -509,7 +508,7 @@ def compile_moe_blockscale_gemm1(
                 col_g_list = []
                 inter_idx = arith.index(inter_dim)
                 # layout for (row -> (blk,intra)) where intra is 0..15
-                c_n0 = c_n_total / arith.index(16)
+                c_n0 = c_n_total // arith.index(16)
                 c_n0_i32 = arith.index_cast(i32, c_n0)
                 layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
@@ -632,10 +631,10 @@ def compile_moe_blockscale_gemm1(
                     col_base_swz = (
                         col_base_swz_bytes
                         if elem_bytes == 1
-                        else (col_base_swz_bytes / arith.index(int(elem_bytes)))
+                        else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                     )
                     idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
-                    idx_a16 = arith.addi(_raw(idx_a16), _raw(lds_base))
+                    idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
                     a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
@@ -1141,11 +1140,11 @@ def compile_moe_blockscale_gemm1(
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        inter_in = arith.index_cast(T.index, i32_inter_in.ir_value())
+        inter_in = arith.ArithValue(arith.index_cast(T.index, i32_inter_in.ir_value()))
         size_expert_ids_in = arith.index_cast(
             T.index, i32_size_expert_ids_in.ir_value()
         )
-        gx = inter_in / arith.index(tile_n)
+        gx = inter_in // arith.index(tile_n)
         gy = size_expert_ids_in
 
         moe_blockscale_gemm1(
@@ -1342,7 +1341,7 @@ def compile_moe_blockscale_gemm2(
             i32_size_expert_ids_in: fx.Int32,
         ):
             tokens_in = arith.index_cast(T.index, i32_tokens_in.ir_value())
-            n_in = arith.index_cast(T.index, i32_n_in.ir_value())
+            n_in = arith.ArithValue(arith.index_cast(T.index, i32_n_in.ir_value()))
             k_in = arith.index_cast(T.index, i32_k_in.ir_value())
             size_expert_ids_in = arith.index_cast(
                 T.index, i32_size_expert_ids_in.ir_value()
@@ -1391,7 +1390,7 @@ def compile_moe_blockscale_gemm2(
                 arith, c_n=c_n_total, c_k=k_in, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes
             )
             layout_b = b_layout.layout_b
-            c_k0 = (k_in * arith.index(int(elem_bytes))) / arith.index(64)
+            c_k0 = (k_in * arith.index(int(elem_bytes))) // arith.index(64)
 
             shape_lds = fx.make_shape(tile_m, tile_k)
             stride_lds = fx.make_stride(lds_stride, 1)
@@ -1532,7 +1531,7 @@ def compile_moe_blockscale_gemm2(
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
                 vec4_i32 = T.vec(4, i32)
     
-                c_k_div4 = (k_in * arith.index(int(elem_bytes))) / arith.index(4)
+                c_k_div4 = (k_in * arith.index(int(elem_bytes))) // arith.index(4)
                 c_k_div4_i32 = arith.index_cast(i32, c_k_div4)
                 layout_x_div4 = fx.make_layout((m_i32_v, c_k_div4_i32), stride=(c_k_div4_i32, 1))
                 tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
@@ -1601,7 +1600,7 @@ def compile_moe_blockscale_gemm2(
                     x_row_base_div4.append(row_ts_idx * c_k_div4)
     
                 def load_x_tile(base_k):
-                    base_k_div4 = (base_k * arith.index(int(elem_bytes))) / arith.index(4)
+                    base_k_div4 = (base_k * arith.index(int(elem_bytes))) // arith.index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
@@ -1644,7 +1643,7 @@ def compile_moe_blockscale_gemm2(
                 n_intra_list = []
                 n_blk_list = []
                 col_g_list = []
-                c_n0 = c_n_total / arith.index(16)
+                c_n0 = c_n_total // arith.index(16)
                 c_n0_i32 = arith.index_cast(i32, c_n0)
                 layout_n_blk_intra = fx.make_layout((c_n0_i32, 16), stride=(16, 1))
                 for ni in range_constexpr(num_acc_n):
@@ -1755,10 +1754,10 @@ def compile_moe_blockscale_gemm2(
                     col_base_swz = (
                         col_base_swz_bytes
                         if elem_bytes == 1
-                        else (col_base_swz_bytes / arith.index(int(elem_bytes)))
+                        else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                     )
                     idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
-                    idx_a16 = arith.addi(_raw(idx_a16), _raw(lds_base))
+                    idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
                     a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
@@ -2251,7 +2250,7 @@ def compile_moe_blockscale_gemm2(
                         by_n=by_n,
                         n_tile_base=n_tile_base,
                         lds_out=lds_out,
-                        frag_elem_type=(ir.BF16Type.get() if out_is_bf16 else ir.F16Type.get()),
+                        frag_elem_type=(T.bf16 if out_is_bf16 else T.f16),
                         write_row_to_lds=write_row_to_lds,
                         precompute_row=precompute_row,
                         store_pair=store_pair,
@@ -2283,11 +2282,11 @@ def compile_moe_blockscale_gemm2(
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        n_in = arith.index_cast(T.index, i32_n_in.ir_value())
+        n_in = arith.ArithValue(arith.index_cast(T.index, i32_n_in.ir_value()))
         size_expert_ids_in = arith.index_cast(
             T.index, i32_size_expert_ids_in.ir_value()
         )
-        gx = n_in / arith.index(tile_n)
+        gx = n_in // arith.index(tile_n)
         gy = size_expert_ids_in
 
         moe_blockscale_gemm2(
