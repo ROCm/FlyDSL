@@ -236,6 +236,15 @@ def size(int_tuple, loc=None, ip=None):
 
 
 @traced_op
+def cosize(layout, loc=None, ip=None):
+    result = fly.cosize(layout, loc=loc, ip=ip)
+    result_ty = IntTupleType(result.type)
+    if result_ty.is_leaf and result_ty.is_static:
+        return Int32(result_ty.static_value)
+    return result
+
+
+@traced_op
 def get_scalar(int_tuple, loc=None, ip=None):
     return fly.get_scalar(int_tuple, loc=loc, ip=ip)
 
@@ -591,7 +600,7 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, _arith.constant(T.i1(), int(val)))
+            return (False, _arith.constant(ir.IntegerType.get_signless(1), int(val)))
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):

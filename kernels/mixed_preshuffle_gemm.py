@@ -26,7 +26,7 @@ from flydsl._mlir import ir
 
 from flydsl.expr import arith, gpu
 from flydsl.expr import buffer_ops, rocdl, vector
-from flydsl.expr.arith import _to_raw as _raw
+
 from flydsl.expr.typing import T
 
 from kernels.mfma_preshuffle_pipeline import (
@@ -57,10 +57,10 @@ def make_preshuffle_scale_layout(
     c4 = arith_mod.constant(4, index=True)
     c_mn_pack = arith_mod.constant(mn_pack, index=True)
     c_k_pack = arith_mod.constant(k_pack, index=True)
-    c_k_scale = c_k / scale_block_size
+    c_k_scale = c_k // scale_block_size
 
-    c_mn1 = c_mn / c16 / c_mn_pack
-    c_k1 = c_k_scale / c4 / c_k_pack
+    c_mn1 = c_mn // c16 // c_mn_pack
+    c_k1 = c_k_scale // c4 // c_k_pack
     if elem_bytes != mn_pack * k_pack:
         raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
 
@@ -272,9 +272,9 @@ def compile_mxfp4_preshuffle_gemm(
             # A uses dword indexing (buffer-load dwordx4). Convert element index -> dword index:
             #   dword_index = (elem_index * elem_bytes) / 4
             if (int(elem_bytes) == 2):
-                c_k_div4bytes = (c_k * 2) / 4
+                c_k_div4bytes = (c_k * 2) // 4
             else:
-                c_k_div4bytes = c_k / 4 / a_elem_vec_pack
+                c_k_div4bytes = c_k // 4 // a_elem_vec_pack
             layout_a_div4 = fx.make_layout((c_m, c_k_div4bytes), stride=(c_k_div4bytes, 1))
 
             c_k_b = c_k // b_elem_vec_pack
@@ -376,7 +376,7 @@ def compile_mxfp4_preshuffle_gemm(
             num_acc_n_packed = num_acc_n // pack_N
 
             # Decompose global_n -> (n_blk, n_intra) once per ni.
-            c_n0 = c_n / 16
+            c_n0 = c_n // 16
             layout_n_blk_intra = fx.make_layout((c_n0, 16), stride=(16, 1))
             n_intra_list = []
             n_blk_list = []
@@ -395,7 +395,7 @@ def compile_mxfp4_preshuffle_gemm(
 
             def load_b_packs_k64(base_k, ku: int, ni: int):
                 base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
-                k0_base = base_k_bytes / c64_b
+                k0_base = base_k_bytes // c64_b
                 k0 = k0_base + ku
                 k1 = lane_div_16
                 coord_pack = fx.make_coord(n_blk_list[ni], k0, k1, n_intra_list[ni], c0_idx)
@@ -471,7 +471,7 @@ def compile_mxfp4_preshuffle_gemm(
             def lds_load_16b(curr_row_a_lds, col_base, lds_base):
                 # Swizzle in bytes, then convert to element offset for memref indexing.
                 col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-                col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
+                col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes // 2)
                 coord_a16 = fx.make_coord(curr_row_a_lds, col_base_swz)
                 idx_a16 = crd2idx(coord_a16, layout_lds)
                 idx_a16 = idx_a16 + lds_base
@@ -557,7 +557,7 @@ def compile_mxfp4_preshuffle_gemm(
 
             def prefetch_ab_tile(base_k):
                 base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
-                base_k_div4 = base_k_bytes / 4
+                base_k_div4 = base_k_bytes // 4
                 a_regs = load_a_tile(base_k_div4 // a_elem_vec_pack)
                 b_regs = load_b_tile(base_k // 2)
                 return a_regs, b_regs
@@ -662,12 +662,12 @@ def compile_mxfp4_preshuffle_gemm(
                                         )
                 return current_accs_list, None
 
-            vec1_f16 = ir.VectorType.get([1], ir.F16Type.get())
-            vec2_f16 = ir.VectorType.get([2], ir.F16Type.get())
-            vec1_i16 = ir.VectorType.get([1], ir.IntegerType.get_signless(16))
-            vec2_i16 = ir.VectorType.get([2], ir.IntegerType.get_signless(16))
-            vec1_i32 = ir.VectorType.get([1], ir.IntegerType.get_signless(32))
-            vec4_i32 = ir.VectorType.get([4], ir.IntegerType.get_signless(32))
+            vec1_f16 = T.vec(1, T.f16)
+            vec2_f16 = T.f16x2
+            vec1_i16 = T.vec(1, T.i16)
+            vec2_i16 = T.i16x2
+            vec1_i32 = T.vec(1, T.i32)
+            vec4_i32 = T.i32x4
 
             def store_output(final_accs):
                 if use_cshuffle_epilog:
@@ -1108,10 +1108,8 @@ def compile_mxfp4_preshuffle_gemm(
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
-        idx_m = arith.index_cast(T.index, i32_m.ir_value())
-        idx_n = arith.index_cast(T.index, i32_n.ir_value())
-        gx = _raw((idx_m + (tile_m - 1)) / tile_m)
-        gy = _raw(idx_n / tile_n)
+        gx = (i32_m + (tile_m - 1)) // tile_m
+        gy = i32_n // tile_n
 
         kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n).launch(
             grid=(gx, gy, 1),
