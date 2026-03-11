@@ -109,15 +109,15 @@ func.func @pyir_composition_static() -> !fly.layout<(3, 5) : (19, 51)> {
 }
 
 // CHECK-LABEL: @pyir_composition_with_tuple
-func.func @pyir_composition_with_tuple() -> !fly.layout<(2) : (1)> {
+func.func @pyir_composition_with_tuple() -> !fly.layout<2 : 1> {
   %as = fly.static : !fly.int_tuple<(4)>
   %ad = fly.static : !fly.int_tuple<(1)>
   %a = fly.make_layout(%as, %ad) : (!fly.int_tuple<(4)>, !fly.int_tuple<(1)>) -> !fly.layout<(4) : (1)>
   %bs = fly.static : !fly.int_tuple<(2)>
   %bd = fly.static : !fly.int_tuple<(1)>
   %b = fly.make_layout(%bs, %bd) : (!fly.int_tuple<(2)>, !fly.int_tuple<(1)>) -> !fly.layout<(2) : (1)>
-  %result = fly.composition(%a, %b) : (!fly.layout<(4) : (1)>, !fly.layout<(2) : (1)>) -> !fly.layout<(2) : (1)>
-  return %result : !fly.layout<(2) : (1)>
+  %result = fly.composition(%a, %b) : (!fly.layout<(4) : (1)>, !fly.layout<(2) : (1)>) -> !fly.layout<2 : 1>
+  return %result : !fly.layout<2 : 1>
 }
 
 // CHECK-LABEL: @pyir_complement_rank1

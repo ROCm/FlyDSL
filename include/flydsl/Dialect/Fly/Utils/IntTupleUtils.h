@@ -868,12 +868,17 @@ std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple>
 
 template <class IntTuple>
 IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, IntTupleAttr guide) {
-  using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
-  auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
-  Collector collector;
-  collector.push_back(first);
-  collector.push_back(second);
-  return builder.makeTuple(collector);
+  if (guide.isLeaf()) {
+    assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
+    return t;
+  } else {
+    using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
+    auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
+    Collector collector;
+    collector.push_back(first);
+    collector.push_back(second);
+    return builder.makeTuple(collector);
+  }
 }
 
 namespace detail {

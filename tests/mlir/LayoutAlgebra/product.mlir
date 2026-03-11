@@ -21,8 +21,7 @@ func.func @test_logical_product() -> !fly.layout<((4, 8), (2, 2)) : ((1, 4), (32
 }
 
 // CHECK-LABEL: @test_zipped_product
-func.func @test_zipped_product() -> !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4, 64))> {
-  // zipped_product zips base and tile modes together
+func.func @test_zipped_product() -> !fly.layout<((4, 8), (2, 2)) : ((1, 4), (32, 64))> {
   %s1 = fly.static : !fly.int_tuple<(4, 8)>
   %d1 = fly.static : !fly.int_tuple<(1, 4)>
   %base = fly.make_layout(%s1, %d1) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
@@ -30,15 +29,15 @@ func.func @test_zipped_product() -> !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4,
   %d2 = fly.static : !fly.int_tuple<(1, 2)>
   %tile = fly.make_layout(%s2, %d2) : (!fly.int_tuple<(2, 2)>, !fly.int_tuple<(1, 2)>) -> !fly.layout<(2, 2) : (1, 2)>
   // CHECK: fly.zipped_product
-  %result = fly.zipped_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4, 64))>
-  return %result : !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4, 64))>
+  %result = fly.zipped_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<((4, 8), (2, 2)) : ((1, 4), (32, 64))>
+  return %result : !fly.layout<((4, 8), (2, 2)) : ((1, 4), (32, 64))>
 }
 
 // CHECK-LABEL: @test_tiled_product
 func.func @test_tiled_product(%base: !fly.layout<(4, 8) : (1, 4)>,
                                %tile: !fly.layout<(2, 2) : (1, 2)>) {
   // CHECK: fly.tiled_product
-  %result = fly.tiled_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4, 64))>
+  %result = fly.tiled_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<((4, 8), 2, 2) : ((1, 4), 32, 64)>
   return
 }
 
@@ -46,7 +45,7 @@ func.func @test_tiled_product(%base: !fly.layout<(4, 8) : (1, 4)>,
 func.func @test_flat_product(%base: !fly.layout<(4, 8) : (1, 4)>,
                               %tile: !fly.layout<(2, 2) : (1, 2)>) {
   // CHECK: fly.flat_product
-  %result = fly.flat_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<((4, 2), (8, 2)) : ((1, 32), (4, 64))>
+  %result = fly.flat_product(%base, %tile) : (!fly.layout<(4, 8) : (1, 4)>, !fly.layout<(2, 2) : (1, 2)>) -> !fly.layout<(4, 8, 2, 2) : (1, 4, 32, 64)>
   return
 }
 
@@ -181,7 +180,7 @@ func.func @pyir_blocked_product() -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1
 }
 
 // CHECK-LABEL: @pyir_flat_product
-func.func @pyir_flat_product() -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))> {
+func.func @pyir_flat_product() -> !fly.layout<(3, 6, 4, 5) : (6, 1, 18, 72)> {
   %s = fly.static : !fly.int_tuple<(3, 6)>
   %d = fly.static : !fly.int_tuple<(6, 1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(3, 6)>, !fly.int_tuple<(6, 1)>) -> !fly.layout<(3, 6) : (6, 1)>
@@ -189,6 +188,6 @@ func.func @pyir_flat_product() -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 7
   %td = fly.static : !fly.int_tuple<(1, 4)>
   %tiler = fly.make_layout(%ts, %td) : (!fly.int_tuple<(4, 5)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 5) : (1, 4)>
   // CHECK: fly.flat_product
-  %result = fly.flat_product(%layout, %tiler) : (!fly.layout<(3, 6) : (6, 1)>, !fly.layout<(4, 5) : (1, 4)>) -> !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
-  return %result : !fly.layout<((3, 4), (6, 5)) : ((6, 18), (1, 72))>
+  %result = fly.flat_product(%layout, %tiler) : (!fly.layout<(3, 6) : (6, 1)>, !fly.layout<(4, 5) : (1, 4)>) -> !fly.layout<(3, 6, 4, 5) : (6, 1, 18, 72)>
+  return %result : !fly.layout<(3, 6, 4, 5) : (6, 1, 18, 72)>
 }

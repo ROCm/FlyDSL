@@ -105,10 +105,10 @@ func.func @test_get_stride(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(
   return %stride : !fly.int_tuple<(1, 4)>
 }
 
-// TODO
-// // CHECK-LABEL: @test_get_leaves
+// TODO: test_get_leaves (disabled until op is implemented)
+// COM: CHECK-LABEL: @test_get_leaves
 // func.func @test_get_leaves(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)> {
-//   // CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
+//   COM: CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
 //   %leaves = fly.get_leaves(%l) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)>
 //   return %leaves : !fly.int_tuple<(4, 8)>
 // }

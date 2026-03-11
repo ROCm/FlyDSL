@@ -880,8 +880,8 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
       retStride.push_back(builder.at(lhsStride, i));
     }
   }
-  auto [canonicalShape, canonicalStride] =
-      detail::canonicalizeStridePair(builder, builder.makeTuple(retShape), builder.makeTuple(retStride));
+  auto [canonicalShape, canonicalStride] = detail::canonicalizeStridePair(
+      builder, builder.makeTuple(retShape), builder.makeTuple(retStride));
   return builder.makeLayout(canonicalShape, canonicalStride);
 }
 
