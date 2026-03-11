@@ -55,8 +55,6 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
     state_elem_type = T.f32()
     scale = K ** (-0.5)
     BT = B * T_seq
-    STATEHV = N_STATE * HV
-
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -71,12 +69,12 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
         @flir.kernel
         def fused_split_gdr_update_ksplit2_flyc_kernel(
             self: flir.T.i64,
+            mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
             A_log: lambda: T.memref(HV, T.f32()),
             a: lambda: T.memref(BT, HV, elem_type),
             dt_bias: lambda: T.memref(HV, elem_type),
-            mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
-            b: lambda: T.memref(BT, HV, elem_type),
-            initial_state_source: lambda: T.memref(STATEHV, K // 4, V, 4, state_elem_type),
+            b_gate: lambda: T.memref(BT, HV, elem_type),
+            initial_state_source: lambda: T.memref(N_STATE, HV, K // 4, V, 4, state_elem_type),
             initial_state_indices: lambda: T.memref(B, T.i32()),
             o: lambda: T.memref(B, T_seq, HV, V, elem_type),
         ):
@@ -189,10 +187,6 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
             state_idx = arith.as_value(
                 flir.arith.IndexCastOp(T.index(), arith.as_value(state_idx_i32_safe)).result
             )
-            state_mul = flir.arith.MulIOp(arith.as_value(state_idx), c_hv).result
-            row_state = arith.as_value(
-                flir.arith.AddIOp(arith.as_value(state_mul), arith.as_value(i_hv)).result
-            )
 
             h_vec_x = [c_zero_f32 for _ in range_constexpr(K // 8)]
             h_vec_y = [c_zero_f32 for _ in range_constexpr(K // 8)]
@@ -209,7 +203,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                         h_vec_x[kg_local] = memref.load(
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(0)),
@@ -218,7 +213,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                         h_vec_y[kg_local] = memref.load(
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(1)),
@@ -227,7 +223,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                         h_vec_z[kg_local] = memref.load(
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(2)),
@@ -236,7 +233,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                         h_vec_w[kg_local] = memref.load(
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(3)),
@@ -327,7 +325,7 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 ).result
                 g_val = exp_a_log_softplus
 
-                b_val = memref.load(b, [arith.as_value(row_ab), arith.as_value(i_hv)])
+                b_val = memref.load(b_gate, [arith.as_value(row_ab), arith.as_value(i_hv)])
                 if dtype_str != "f32":
                     b_val = flir.arith.extf(comp, arith.as_value(b_val))
                 neg_b = flir.arith.MulFOp(
@@ -736,7 +734,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                             arith.as_value(h_vec_x[kg_local]),
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(0)),
@@ -746,7 +745,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                             arith.as_value(h_vec_y[kg_local]),
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(1)),
@@ -756,7 +756,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                             arith.as_value(h_vec_z[kg_local]),
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(2)),
@@ -766,7 +767,8 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                             arith.as_value(h_vec_w[kg_local]),
                             initial_state_source,
                             [
-                                arith.as_value(row_state),
+                                arith.as_value(state_idx),
+                                arith.as_value(i_hv),
                                 arith.as_value(kg),
                                 arith.as_value(iv_safe),
                                 arith.as_value(arith.index(3)),
@@ -776,12 +778,12 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
         @flir.jit
         def __call__(
             self: flir.T.i64,
+            mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
             A_log: lambda: T.memref(HV, T.f32()),
             a: lambda: T.memref(BT, HV, elem_type),
             dt_bias: lambda: T.memref(HV, elem_type),
-            mixed_qkv: lambda: T.memref(B, mixed_dim, T_seq, elem_type),
-            b: lambda: T.memref(BT, HV, elem_type),
-            initial_state_source: lambda: T.memref(STATEHV, K // 4, V, 4, state_elem_type),
+            b_gate: lambda: T.memref(BT, HV, elem_type),
+            initial_state_source: lambda: T.memref(N_STATE, HV, K // 4, V, 4, state_elem_type),
             initial_state_indices: lambda: T.memref(B, T.i32()),
             o: lambda: T.memref(B, T_seq, HV, V, elem_type),
         ):
@@ -795,11 +797,11 @@ def build_fused_split_gdr_update_ksplit2_flyc_module(
                 grid_size=(gx, gy, gz),
                 block_size=(bx, c1, c1),
                 kernel_operands=[
+                    mixed_qkv,
                     A_log,
                     a,
                     dt_bias,
-                    mixed_qkv,
-                    b,
+                    b_gate,
                     initial_state_source,
                     initial_state_indices,
                     o,

@@ -605,11 +605,11 @@ def _run_kernel(
     a_flat = a.reshape(bsz * t_seq, hv).contiguous()
     b_flat = b.reshape(bsz * t_seq, hv).contiguous()
     mixed_qkv = _pack_mixed_qkv(q, k, v)
-    state_swz = _swizzle_state(state_pool)
+    state_swz = to_swizzled_layout(state_pool)
     o = torch.empty(bsz, t_seq, hv, v_dim, device="cuda", dtype=state_pool.dtype)
-    exe(A_log, a_flat, dt_bias, mixed_qkv, b_flat, state_swz, state_indices, o)
+    exe(mixed_qkv, A_log, a_flat, dt_bias, b_flat, state_swz, state_indices, o)
     torch.cuda.synchronize()
-    state_after = _unswizzle_state(state_swz, n_state, hv, k_dim, v_dim)
+    state_after = from_swizzled_layout(state_swz)
     return o, state_after
 
 
@@ -635,7 +635,7 @@ def _run_hip_kernel(
     a_flat = a.reshape(bsz * t_seq, hv).contiguous()
     b_flat = b.reshape(bsz * t_seq, hv).contiguous()
     mixed_qkv = _pack_mixed_qkv(q, k, v)
-    state_swz = _swizzle_state(state_pool)
+    state_swz = to_swizzled_layout(state_pool)
 
     out = hip_mod.fused_split_gdr_update_ksplit2(
         mixed_qkv=mixed_qkv,
@@ -656,7 +656,7 @@ def _run_hip_kernel(
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
     torch.cuda.synchronize()
-    state_after = _unswizzle_state(state_swz, state_pool.shape[0], hv, k_dim, v_dim)
+    state_after = from_swizzled_layout(state_swz)
     return out, state_after
 
 
@@ -688,6 +688,27 @@ def test_split_gdr_ksplit2_correctness_and_perf(
     softplus_beta = 1.0
     softplus_threshold = 20.0
     scale = head_dim ** -0.5
+    use_qk_l2norm_in_kernel = True
+
+    common_scalar_args = {
+        "key_dim": key_dim,
+        "value_dim": value_dim,
+        "num_heads_qk": num_heads_qk,
+        "num_heads_v": num_heads_v,
+        "head_dim": head_dim,
+        "softplus_beta": softplus_beta,
+        "softplus_threshold": softplus_threshold,
+        "scale": scale,
+        "use_qk_l2norm_in_kernel": use_qk_l2norm_in_kernel,
+    }
+    common_tensor_args = {
+        "mixed_qkv": inputs["mixed_qkv"],
+        "A_log": inputs["A_log"],
+        "a": inputs["a"],
+        "dt_bias": inputs["dt_bias"],
+        "b_gate": inputs["b"],
+        "initial_state_indices": inputs["ssm_state_indices"],
+    }
 
     # ---- Reference: pure PyTorch CPU ----
     ssm_state_ref = inputs["ssm_state"].clone()
@@ -707,7 +728,7 @@ def test_split_gdr_ksplit2_correctness_and_perf(
         softplus_beta=softplus_beta,
         softplus_threshold=softplus_threshold,
         scale=scale,
-        use_qk_l2norm_in_kernel=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
 
     # ---- ksplit2 kernel under test ----
@@ -716,22 +737,9 @@ def test_split_gdr_ksplit2_correctness_and_perf(
     ssm_state_swizzled = to_swizzled_layout(ssm_state_hip)
 
     output_hip = hip_mod.fused_split_gdr_update_ksplit2(
-        mixed_qkv=inputs["mixed_qkv"],
-        A_log=inputs["A_log"],
-        a=inputs["a"],
-        dt_bias=inputs["dt_bias"],
-        b_gate=inputs["b"],
+        **common_tensor_args,
         initial_state_source=ssm_state_swizzled,
-        initial_state_indices=inputs["ssm_state_indices"],
-        key_dim=key_dim,
-        value_dim=value_dim,
-        num_heads_qk=num_heads_qk,
-        num_heads_v=num_heads_v,
-        head_dim=head_dim,
-        softplus_beta=softplus_beta,
-        softplus_threshold=softplus_threshold,
-        scale=scale,
-        use_qk_l2norm_in_kernel=True,
+        **common_scalar_args,
     )
 
     ssm_state_hip_final = from_swizzled_layout(ssm_state_swizzled)
@@ -747,30 +755,24 @@ def test_split_gdr_ksplit2_correctness_and_perf(
         N_STATE=inputs["ssm_state"].shape[0],
         dtype_str=("f32" if dtype == torch.float32 else "bf16"),
         BV=64,
-        use_qk_l2norm_in_kernel=True,
+        use_qk_l2norm_in_kernel=common_scalar_args["use_qk_l2norm_in_kernel"],
     )
     fly_exe = flydsl.compile(fly_module)
     ssm_state_fly = inputs["ssm_state"].clone()
-    ssm_state_swizzled_fly = to_swizzled_layout(ssm_state_fly).reshape(
-        ssm_state_fly.shape[0] * num_heads_v, head_dim // 4, head_dim, 4
-    )
+    ssm_state_swizzled_fly = to_swizzled_layout(ssm_state_fly)
     output_fly = torch.empty_like(output_hip)
     fly_exe(
-        inputs["A_log"].float(),
-        inputs["a"],
-        inputs["dt_bias"],
-        inputs["mixed_qkv"],
-        inputs["b"],
+        common_tensor_args["mixed_qkv"],
+        common_tensor_args["A_log"],
+        common_tensor_args["a"],
+        common_tensor_args["dt_bias"],
+        common_tensor_args["b_gate"],
         ssm_state_swizzled_fly,
-        inputs["ssm_state_indices"],
+        common_tensor_args["initial_state_indices"],
         output_fly,
     )
     torch.cuda.synchronize()
-    ssm_state_fly_final = from_swizzled_layout(
-        ssm_state_swizzled_fly.reshape(
-            ssm_state_fly.shape[0], num_heads_v, head_dim // 4, head_dim, 4
-        )
-    )
+    ssm_state_fly_final = from_swizzled_layout(ssm_state_swizzled_fly)
 
     # ---- Triton fused_sigmoid_gating_delta_rule_update precision check ----
     q_triton = (
@@ -807,19 +809,13 @@ def test_split_gdr_ksplit2_correctness_and_perf(
         v=v_triton,
         b=b_triton,
         initial_state_source=ssm_state_triton,
-        initial_state_indices=inputs["ssm_state_indices"],
+        initial_state_indices=common_tensor_args["initial_state_indices"],
         scale=scale,
-        use_qk_l2norm_in_kernel=True,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         cu_seqlens=None,
     )
     torch.cuda.synchronize()
 
-    # print("output_ref[:128]:\n", output_ref.reshape(-1)[:128])
-    # print("output_hip[:128]:\n", output_hip.reshape(-1)[:128])
-    # print("output_fly[:128]:\n", output_fly.reshape(-1)[:128])
-    # print("ssm_state_ref[:128]:\n", ssm_state_ref.reshape(-1)[:128])
-    # print("ssm_state_hip_final[:128]:\n", ssm_state_hip_final.reshape(-1)[:128])
-    # print("ssm_state_fly_final[:128]:\n", ssm_state_fly_final.reshape(-1)[:128])
     print(
         f"output_ref min/max: {output_ref.float().min().item():.6f} / {output_ref.float().max().item():.6f}"
     )
@@ -880,9 +876,7 @@ def test_split_gdr_ksplit2_correctness_and_perf(
     # ---- Performance check: HIP vs FlyDSL vs Triton ----
     warmup = 10
     num_iters = 1000
-    state_swz_template = to_swizzled_layout(inputs["ssm_state"]).reshape(
-        inputs["ssm_state"].shape[0] * num_heads_v, head_dim // 4, head_dim, 4
-    )
+    state_swz_template = to_swizzled_layout(inputs["ssm_state"])
     out_template = torch.empty_like(output_hip)
 
     def _benchmark_us(run_fn):
@@ -902,35 +896,22 @@ def test_split_gdr_ksplit2_correctness_and_perf(
         state_swz = state_swz_template.clone()
         out_fly_perf = out_template.clone()
         fly_exe(
-            inputs["A_log"].float(),
-            inputs["a"],
-            inputs["dt_bias"],
-            inputs["mixed_qkv"],
-            inputs["b"],
+            common_tensor_args["mixed_qkv"],
+            common_tensor_args["A_log"],
+            common_tensor_args["a"],
+            common_tensor_args["dt_bias"],
+            common_tensor_args["b_gate"],
             state_swz,
-            inputs["ssm_state_indices"],
+            common_tensor_args["initial_state_indices"],
             out_fly_perf,
         )
 
     def _run_hip_once():
         state_swz = state_swz_template.clone()
         _ = hip_mod.fused_split_gdr_update_ksplit2(
-            mixed_qkv=inputs["mixed_qkv"],
-            A_log=inputs["A_log"],
-            a=inputs["a"],
-            dt_bias=inputs["dt_bias"],
-            b_gate=inputs["b"],
+            **common_tensor_args,
             initial_state_source=state_swz,
-            initial_state_indices=inputs["ssm_state_indices"],
-            key_dim=key_dim,
-            value_dim=value_dim,
-            num_heads_qk=num_heads_qk,
-            num_heads_v=num_heads_v,
-            head_dim=head_dim,
-            softplus_beta=softplus_beta,
-            softplus_threshold=softplus_threshold,
-            scale=scale,
-            use_qk_l2norm_in_kernel=True,
+            **common_scalar_args,
         )
 
     def _run_triton_once():
@@ -948,9 +929,9 @@ def test_split_gdr_ksplit2_correctness_and_perf(
             v=v_triton,
             b=b_triton,
             initial_state_source=state_triton,
-            initial_state_indices=inputs["ssm_state_indices"],
+            initial_state_indices=common_tensor_args["initial_state_indices"],
             scale=scale,
-            use_qk_l2norm_in_kernel=True,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=None,
         )
 
