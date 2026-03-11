@@ -111,11 +111,8 @@ def convert_to_jit_arguments(
                     f"No DslType registered for JitArgument type {type(value).__name__} (parameter '{param_name}')"
                 )
         else:
-            # Handle raw cuda_stream int passed where Stream is expected
             if isinstance(value, int) and annotation is Stream:
-                import ctypes as _ct
-                jit_arg = Stream(None)
-                jit_arg._stream_storage = _ct.c_void_p(value)
+                jit_arg = Stream(value)
                 dsl_type = Stream
             else:
                 jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))

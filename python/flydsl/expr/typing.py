@@ -303,7 +303,9 @@ class Stream:
         return [gpu.AsyncTokenType.get()]
 
     def __fly_ptrs__(self):
-        if self.value is None:
+        if isinstance(self.value, int):
+            self._stream_storage = ctypes.c_void_p(self.value)
+        elif self.value is None:
             self._stream_storage = ctypes.c_void_p(0)
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)

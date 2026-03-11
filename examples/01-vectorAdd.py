@@ -62,8 +62,6 @@ def vectorAdd(
     vectorAddKernel(A, B, C, block_dim).launch(grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream)
 
 
-
-
 def run_eager():
     """Normal execution (no graph capture) - should always work."""
     n = 128
