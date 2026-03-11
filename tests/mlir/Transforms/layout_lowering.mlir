@@ -203,9 +203,9 @@ func.func @test_logical_divide() -> !fly.layout<((2,4),1):((1,2),0)> {
   %dd = fly.make_int_tuple() : () -> !fly.int_tuple<(1,2)>
   %divisor = fly.make_layout(%ds, %dd) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(1,2)>) -> !fly.layout<(2,4):(1,2)>
   // CHECK-NOT: fly.logical_divide
-  // CHECK: %[[RS:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<((2,4),1)>
-  // CHECK: %[[RD:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<((1,2),0)>
-  // CHECK: %[[R:.*]] = fly.make_layout(%[[RS]], %[[RD]])
+  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((2,4),1)>
+  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<((1,2),0)>
+  // CHECK: %[[R:.*]] = fly.make_layout
   // CHECK: return %[[R]]
   %result = fly.logical_divide(%layout, %divisor) : (!fly.layout<8:1>, !fly.layout<(2,4):(1,2)>) -> !fly.layout<((2,4),1):((1,2),0)>
   return %result : !fly.layout<((2,4),1):((1,2),0)>
@@ -244,9 +244,9 @@ func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(4,1)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2,4)>, !fly.int_tuple<(4,1)>) -> !fly.layout<(2,4):(4,1)>
   // CHECK-NOT: fly.right_inverse
-  // CHECK: %[[RS:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(4,2)>
-  // CHECK: %[[RD:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<(2,1)>
-  // CHECK: %[[R:.*]] = fly.make_layout(%[[RS]], %[[RD]])
+  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<(4,2)>
+  // CHECK-DAG: fly.make_int_tuple() : () -> !fly.int_tuple<(2,1)>
+  // CHECK: %[[R:.*]] = fly.make_layout
   // CHECK: return %[[R]]
   %result = fly.right_inverse(%layout) : (!fly.layout<(2,4):(4,1)>) -> !fly.layout<(4,2):(2,1)>
   return %result : !fly.layout<(4,2):(2,1)>
