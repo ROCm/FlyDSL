@@ -251,8 +251,9 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
+        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts={'-g' if env.debug.enable_debug_info else ''} section= toolkit=}})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -296,6 +297,17 @@ def _sanitize_path_component(s: str) -> str:
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
+        from .kernel_function import CompilationContext
+        hints = CompilationContext.get_compile_hints()
+        waves_per_eu = hints.get('waves_per_eu')
+        maxnreg = hints.get('maxnreg')
+
+        # Build compiler option flags for gpu-module-to-binary
+        debug_opt = "-g" if env.debug.enable_debug_info else ""
+        wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
+        maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
+        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
+
         wave64 = "false" if is_rdna_arch(chip) else "true"
         return [
             "gpu-kernel-outlining{data-layout-str=}",
@@ -313,7 +325,8 @@ class MlirCompiler:
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
+            *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
+            f"gpu-module-to-binary{{format=fatbin opts={all_opts}}}",
         ]
 
     @classmethod

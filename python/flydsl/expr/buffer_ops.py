@@ -63,6 +63,7 @@ def _get_buffer_flags(arch=None):
         flags |= (1 << 24)   # reserved bit, must be 1 on RDNA
         flags |= (2 << 28)   # OOB_SELECT = 2 (no bounds checking)
     return flags
+from .meta import traced_op
 
 __all__ = [
     'create_buffer_resource',
@@ -243,6 +244,7 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
+@traced_op
 def create_buffer_resource(memref_val: ir.Value, 
                            stride: int = 0,
                            max_size: bool = True,
@@ -271,6 +273,7 @@ def create_buffer_resource(memref_val: ir.Value,
     return desc.rsrc
 
 
+@traced_op
 def buffer_load(rsrc: ir.Value,
                 offset: ir.Value,
                 vec_width: int = 4,
@@ -366,6 +369,7 @@ def buffer_load(rsrc: ir.Value,
     return load_op.result
 
 
+@traced_op
 def buffer_store(data: ir.Value,
                  rsrc: ir.Value,
                  offset: ir.Value,
