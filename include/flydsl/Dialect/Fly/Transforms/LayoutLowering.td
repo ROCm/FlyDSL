@@ -21,8 +21,10 @@ def : Pat<(Fly_GetStrideOp Fly_CoordTensor:$tensor),
           (Fly_GetStrideOp (Fly_GetLayoutOp $tensor))>;
 
 // SizeOp patterns
+def : Pat<(Fly_SizeOp Fly_IntTuple:$int_tuple),
+          (Fly_IntTupleProductOp $int_tuple)>;
 def : Pat<(Fly_SizeOp Fly_Layout:$layout), 
-          (Fly_SizeOp (Fly_GetShapeOp $layout))>;
+          (Fly_IntTupleProductOp (Fly_GetShapeOp $layout))>;
 def : Pat<(Fly_SizeOp Fly_ComposedLayout:$layout), 
           (Fly_SizeOp (Fly_ComposedGetOuterOp $layout))>;
 def : Pat<(Fly_SizeOp Fly_MemRef:$memref), 

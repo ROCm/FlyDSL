@@ -200,7 +200,7 @@ add_dependencies(CopyFlyPythonSources FlyPythonModules)
 find_package(hip QUIET CONFIG PATHS /opt/rocm)
 if(hip_FOUND)
   add_library(FlyJitRuntime SHARED
-    "${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp"
+    ${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp
   )
   target_include_directories(FlyJitRuntime PRIVATE
     ${LLVM_INCLUDE_DIRS}

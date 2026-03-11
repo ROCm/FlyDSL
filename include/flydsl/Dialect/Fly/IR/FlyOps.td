@@ -219,7 +219,7 @@ def Fly_DiceOp : Fly_Op<"dice", [Pure, DeclareOpInterfaceMethods<InferTypeOpInte
 //===----------------------------------------------------------------------===//
 
 def Fly_SizeOp : Fly_Op<"size", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_LayoutLikeType:$int_tuple);
+  let arguments = (ins Fly_IntTupleLikeType:$int_tuple);
   let results = (outs Fly_IntTuple:$result);
 }
 def Fly_CoprofileOp : Fly_Op<"coprofile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -247,7 +247,7 @@ def Fly_GetFlatCoordOp : Fly_Op<"get_flat_coord", [Pure, DeclareOpInterfaceMetho
   let arguments = (ins Fly_IntTuple:$index, Fly_Layout:$layout);
   let results = (outs Fly_IntTuple:$result);
 }
-def Fly_Get1DCoordOp : Fly_Op<"get_hier_coord", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+def Fly_Get1DCoordOp : Fly_Op<"get_1d_coord", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_IntTuple:$index, Fly_Layout:$layout);
   let results = (outs Fly_IntTuple:$result);
 }

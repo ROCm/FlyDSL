@@ -365,18 +365,17 @@ void IntAttr::print(::mlir::AsmPrinter &odsPrinter) const { prettyPrintIntAttr(o
     valueAttr = IntAttr::getStatic(ctx, value);
   }
 
-  if (odsParser.parseOptionalKeyword("E"))
-    return valueAttr;
-
   StringRef strRefModes;
-  if (failed(odsParser.parseKeyword(&strRefModes)))
-    return {};
+  if (failed(odsParser.parseOptionalKeyword(&strRefModes)) || !strRefModes.starts_with("E"))
+    return valueAttr;
 
   SmallVector<int32_t> modes;
   SmallVector<StringRef, 8> strRefModeList;
 
   strRefModes.split(strRefModeList, "E");
   for (StringRef strRefMode : strRefModeList) {
+    if (strRefMode.empty())
+      continue;
     int32_t mode;
     if (strRefMode.getAsInteger(10, mode))
       return {};

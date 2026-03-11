@@ -12,6 +12,7 @@ find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
 
+set(LLVM_BUILD_TOOLS ON)
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
 set(LLVM_BUILD_TOOLS ON)
@@ -48,4 +49,5 @@ add_subdirectory(include/flydsl)
 add_subdirectory(lib)
 add_subdirectory(tools)
 
+add_subdirectory(tools)
 add_subdirectory(python/mlir_flydsl)

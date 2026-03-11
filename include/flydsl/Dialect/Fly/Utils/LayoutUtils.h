@@ -26,8 +26,6 @@ std::pair<IntTuple, IntTuple> canonicalizeStridePair(const IntTupleBuilder<IntTu
     }
     return {shape, stride};
   }
-  // Canonicalize singleton tuple wrappers so rank-1 trees print as leaf modes.
-  // Example: ((4), 4):((1), 4) -> (4, 4):(1, 4).
   if (shape.rank() == 1) {
     return canonicalizeStridePair(builder, builder.at(shape, 0), builder.at(stride, 0));
   }

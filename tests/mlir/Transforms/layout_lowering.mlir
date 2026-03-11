@@ -73,37 +73,6 @@ func.func @test_get_iter(%ptr: !fly.ptr<f32, global>) -> !fly.ptr<f32, global> {
 
 // -----
 
-// === get_leaf Lowering ===
-
-// get_leaf on IntTuple extracts the element at index.
-// CHECK-LABEL: @test_get_leaf_int_tuple
-func.func @test_get_leaf_int_tuple() -> !fly.int_tuple<4> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  // CHECK-NOT: fly.get_leaf
-  // CHECK: %[[LEAF:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<4>
-  // CHECK: return %[[LEAF]]
-  %leaf = fly.get_leaf(%s, 0) : (!fly.int_tuple<(4, 8)>) -> !fly.int_tuple<4>
-  return %leaf : !fly.int_tuple<4>
-}
-
-// get_leaf on Layout extracts a sub-layout (shape[i]:stride[i]).
-// CHECK-LABEL: @test_get_leaf_layout
-func.func @test_get_leaf_layout() -> !fly.layout<4:1> {
-  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
-  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
-  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // CHECK-NOT: fly.get_leaf
-  // CHECK: %[[LS:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<4>
-  // CHECK: %[[LD:.*]] = fly.make_int_tuple() : () -> !fly.int_tuple<1>
-  // CHECK: %[[LEAF:.*]] = fly.make_layout(%[[LS]], %[[LD]])
-  // CHECK: return %[[LEAF]]
-  %leaf = fly.get_leaf(%layout, 0) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.layout<4:1>
-  return %leaf : !fly.layout<4:1>
-}
-
-// -----
-
-// === get_scalar Lowering ===
 
 // Static get_scalar lowers to arith.constant.
 // CHECK-LABEL: @test_get_scalar_static

@@ -2,6 +2,7 @@
 #ifndef FLYDSL_CONVERSION_PASSES_H
 #define FLYDSL_CONVERSION_PASSES_H
 
+#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 
