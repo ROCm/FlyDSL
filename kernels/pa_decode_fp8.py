@@ -9,6 +9,7 @@ Contains:
 
 from __future__ import annotations
 import math as _math
+import torch as _torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -17,7 +18,8 @@ from flydsl.expr.typing import T, Int32
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
-
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.autotune import autotune, Config
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 QUERY_GROUP_SIZE = 16
@@ -53,6 +55,8 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
 
 
 allocator = None
+grid_z_multiplier = 1
+effective_splits = 1
 
 
 def build_pa_decode_module(
@@ -69,7 +73,7 @@ def build_pa_decode_module(
     one_shot=False,
     ps_num_splits=0,
 ):
-    global allocator
+    global allocator, grid_z_multiplier, effective_splits
     arch = get_hip_arch()
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE**0.5)
@@ -91,24 +95,33 @@ def build_pa_decode_module(
         _stride_v_block = num_kv_heads * HEAD_SIZE * _bs
         _stride_v_head = HEAD_SIZE * _bs
 
-    _direct_output = one_shot or (ps_num_splits > 0)
+    _use_large_block = _bs > KV_BLOCK_SIZE
+    _partitions_per_block = _bs // KV_COMPUTE_BLOCK if _use_large_block else 1
+    _blocks_per_partition = KV_COMPUTE_BLOCK // _bs if not _use_large_block else 1
+
+    _ps_mode = ps_num_splits > 0
+    # For large blocks in PS mode, expand grid-Z by _partitions_per_block
+    # to increase parallelism: each CTA handles 1/ppb of each 1024-token block
+    _grid_z_multiplier = _partitions_per_block if (_ps_mode and _use_large_block) else 1
+    _effective_splits = ps_num_splits * _grid_z_multiplier if _ps_mode else 1
+    _max_pps = _math.ceil(num_partitions / _effective_splits) if _ps_mode else 1
+    grid_z_multiplier = _grid_z_multiplier
+    effective_splits = _effective_splits
+
+    # Large-block PS mode: each CTA writes partial results, reduce kernel merges
+    _direct_output = one_shot or (ps_num_splits > 0 and not _use_large_block)
+    # Output partition dimension: _effective_splits for large-block PS, num_partitions otherwise
+    _out_num_parts = _effective_splits if (_ps_mode and _use_large_block) else num_partitions
     if _direct_output:
         _stride_out_part = 0
         _stride_out_head = QUERY_GROUP_SIZE * HEAD_SIZE
         _stride_out_seq = num_kv_heads * QUERY_GROUP_SIZE * HEAD_SIZE
     else:
         _stride_out_part = QUERY_GROUP_SIZE * HEAD_SIZE
-        _stride_out_head = num_partitions * QUERY_GROUP_SIZE * HEAD_SIZE
-        _stride_out_seq = num_kv_heads * num_partitions * QUERY_GROUP_SIZE * HEAD_SIZE
-    _stride_es_seq = num_kv_heads * num_partitions * QUERY_GROUP_SIZE
-    _stride_ml_seq = num_kv_heads * num_partitions * QUERY_GROUP_SIZE
-
-    _use_large_block = _bs > KV_BLOCK_SIZE
-    _partitions_per_block = _bs // KV_COMPUTE_BLOCK if _use_large_block else 1
-    _blocks_per_partition = KV_COMPUTE_BLOCK // _bs if not _use_large_block else 1
-
-    _ps_mode = ps_num_splits > 0
-    _max_pps = _math.ceil(num_partitions / ps_num_splits) if _ps_mode else 1
+        _stride_out_head = _out_num_parts * QUERY_GROUP_SIZE * HEAD_SIZE
+        _stride_out_seq = num_kv_heads * _out_num_parts * QUERY_GROUP_SIZE * HEAD_SIZE
+    _stride_es_seq = num_kv_heads * _out_num_parts * QUERY_GROUP_SIZE
+    _stride_ml_seq = num_kv_heads * _out_num_parts * QUERY_GROUP_SIZE
 
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_smem")
     q_off = 0
@@ -504,7 +517,7 @@ def build_pa_decode_module(
         # Helper: write output (direct or partitioned)
         # ================================================================
         def _write_output(running_max, running_sum, acc_pv_running, part_idx):
-            if one_shot or _ps_mode:
+            if _direct_output:
                 rcp = arith.constant(1.0, type=T.f32) / running_sum
                 pv_out = [
                     _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
@@ -526,16 +539,20 @@ def build_pa_decode_module(
                     out_i32 = vector.bitcast(T.vec(2, T.i32), out_bf16)
                     buffer_ops.buffer_store(out_i32, out_rsrc, out_off * arith.constant(2, type=T.i32), offset_is_bytes=True)
             else:
+                # For large-block PS mode: write at part_z slot (each CTA's grid-Z index)
+                # For non-PS partitioned mode: write at part_idx (partition index)
+                _write_slot = part_z if (_ps_mode and _use_large_block) else part_idx
+
                 rcp = arith.constant(1.0, type=T.f32) / running_sum
                 pv_out = [
                     _vsplat_mul(_vsplat_mul(acc_pv_running[0], PROB_SCALE_C), rcp),
                     _vsplat_mul(_vsplat_mul(acc_pv_running[1], PROB_SCALE_C), rcp),
                 ]
 
-                c_np_qg = arith.constant(num_partitions * QUERY_GROUP_SIZE, type=T.i32)
+                c_np_qg = arith.constant(_out_num_parts * QUERY_GROUP_SIZE, type=T.i32)
                 c_qg = arith.constant(QUERY_GROUP_SIZE, type=T.i32)
-                ml_off = seq * arith.constant(_stride_ml_seq, type=T.i32) + kv_h * c_np_qg + part_idx * c_qg + mfma_row
-                es_off = seq * arith.constant(_stride_es_seq, type=T.i32) + kv_h * c_np_qg + part_idx * c_qg + mfma_row
+                ml_off = seq * arith.constant(_stride_ml_seq, type=T.i32) + kv_h * c_np_qg + _write_slot * c_qg + mfma_row
+                es_off = seq * arith.constant(_stride_es_seq, type=T.i32) + kv_h * c_np_qg + _write_slot * c_qg + mfma_row
                 buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
                 buffer_ops.buffer_store(running_sum, es_rsrc, es_off)
 
@@ -547,7 +564,7 @@ def build_pa_decode_module(
                     out_off = (
                         seq * c_os
                         + kv_h * c_oh
-                        + part_idx * c_op
+                        + _write_slot * c_op
                         + mfma_row * arith.constant(HEAD_SIZE, type=T.i32)
                         + warp_head_base
                         + arith.constant(h_py, type=T.i32)
@@ -561,7 +578,16 @@ def build_pa_decode_module(
         # ================================================================
         def _compute_part_idx(pi_val):
             """Compute the global partition index from a loop iteration value (i32)."""
-            if _ps_mode:
+            if _ps_mode and _use_large_block:
+                # Decode part_z into sequence split and block split
+                # part_z encodes: seq_split * ppb + blk_split
+                c_ppb = arith.constant(_partitions_per_block, type=T.i32)
+                seq_split = part_z // c_ppb
+                blk_split = part_z % c_ppb
+                # Global partition: seq_split * (max_pps * ppb) + pi_val * ppb + blk_split
+                return (seq_split * arith.constant(int(_max_pps * _partitions_per_block), type=T.i32)
+                        + pi_val * c_ppb + blk_split)
+            elif _ps_mode:
                 return part_z * arith.constant(int(_max_pps), type=T.i32) + pi_val
             else:
                 return part_z
@@ -1027,3 +1053,186 @@ def build_v2_reduce_kernel(
         )
 
     return v2_reduce_kernel, launch_v2_reduce
+
+
+# ── Launch API ───────────────────────────────────────────────────
+
+_compiled_cache = {}  # (batch, nkv, num_parts, bps, kv_bs, tv, ps_splits) -> launcher dict
+
+
+def _make_launcher(batch_size, num_kv_heads, num_parts, blocks_per_seq,
+                   kv_block_size, trans_v, softmax_scale,
+                   query_scale, key_scale, value_scale,
+                   ps_num_splits):
+    """Build kernel + @flyc.jit launch wrapper + output buffers for a given ps_num_splits.
+    Returns dict with keys: launch, grid_z, direct, fd_out, fd_es, fd_ml,
+                            reduce_ps, reduce_np, mode, eff_splits
+    """
+    one_shot = (num_parts <= 1)
+    qg = QUERY_GROUP_SIZE
+    head_size = HEAD_SIZE
+
+    fd_kfn = build_pa_decode_module(
+        batch_size, num_kv_heads, num_parts, blocks_per_seq,
+        kv_block_size=kv_block_size, trans_v=trans_v,
+        softmax_scale=softmax_scale, query_scale=query_scale,
+        key_scale=key_scale, value_scale=value_scale,
+        one_shot=one_shot, ps_num_splits=ps_num_splits,
+    )
+    fd_al = allocator
+    _gzm = grid_z_multiplier
+    _eff = effective_splits
+
+    _grid_z = (ps_num_splits * _gzm) if ps_num_splits > 0 else (1 if one_shot else num_parts)
+    _use_lb = kv_block_size > KV_BLOCK_SIZE
+    _direct = one_shot or (ps_num_splits > 0 and not _use_lb)
+
+    dev = 'cuda'
+    bf16 = _torch.bfloat16
+    if _direct:
+        fd_out = _torch.zeros(batch_size, num_kv_heads, 1, qg, head_size, dtype=bf16, device=dev)
+        fd_es  = _torch.zeros(1, dtype=_torch.float32, device=dev)
+        fd_ml  = _torch.zeros(1, dtype=_torch.float32, device=dev)
+    elif _use_lb and ps_num_splits > 0:
+        fd_out = _torch.zeros(batch_size, num_kv_heads, _eff, qg, head_size, dtype=bf16, device=dev)
+        fd_es  = _torch.zeros(batch_size, num_kv_heads, _eff, qg, dtype=_torch.float32, device=dev)
+        fd_ml  = _torch.full((batch_size, num_kv_heads, _eff, qg), float('-inf'),
+                              dtype=_torch.float32, device=dev)
+    else:
+        fd_out = _torch.zeros(batch_size, num_kv_heads, num_parts, qg, head_size, dtype=bf16, device=dev)
+        fd_es  = _torch.zeros(batch_size, num_kv_heads, num_parts, qg, dtype=_torch.float32, device=dev)
+        fd_ml  = _torch.full((batch_size, num_kv_heads, num_parts, qg), float('-inf'),
+                              dtype=_torch.float32, device=dev)
+
+    _cache_tag = (batch_size, num_kv_heads, _grid_z)
+    @autotune(
+        configs=[
+            Config(waves_per_eu=1),
+            Config(waves_per_eu=2),
+            Config(waves_per_eu=3),
+        ],
+        key=['gy', 'gz'],
+        warmup=3,
+        rep=10,
+    )
+    @flyc.jit
+    def _launch(out, es, ml, q, kc, vc, bt, cl: Int32,
+                gx: Int32, gy: Int32, gz: Int32, stream: fx.Stream):
+        _ = _cache_tag
+        fd_al.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            fd_al.finalize()
+        gx_v = arith.index_cast(T.index, gx.ir_value())
+        gy_v = arith.index_cast(T.index, gy.ir_value())
+        gz_v = arith.index_cast(T.index, gz.ir_value())
+        fd_kfn(out, es, ml, q, kc, vc, bt, cl).launch(
+            grid=(gx_v, gy_v, gz_v),
+            block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    _reduce_ps = _use_lb and ps_num_splits > 0
+    _reduce_np = _eff if _reduce_ps else num_parts
+
+    # Mode string for display
+    if one_shot:
+        mode = "one_shot"
+    elif ps_num_splits > 0 and _gzm > 1:
+        mode = f"ps({ps_num_splits}x{_gzm})"
+    elif ps_num_splits > 0:
+        mode = f"ps({ps_num_splits})"
+    else:
+        mode = "partitioned"
+
+    return {
+        'launch': _launch, 'grid_z': _grid_z,
+        'direct': _direct, 'fd_out': fd_out, 'fd_es': fd_es, 'fd_ml': fd_ml,
+        'reduce_ps': _reduce_ps, 'reduce_np': _reduce_np,
+        'mode': mode, 'eff_splits': _eff,
+    }
+
+
+def _run_with_launcher(L, query, key_cache, value_cache, block_tables,
+                       context_lengths, ctx_len, batch, nkv, stream):
+    """Execute kernel (+ reduce if needed) using launcher L. Returns result tensor."""
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        _paged_attention_decode_v2_reduce_kernel_wrapper as _reduce_wrapper,
+    )
+    qg = QUERY_GROUP_SIZE
+    hs = HEAD_SIZE
+
+    if not L['direct']:
+        L['fd_out'].zero_(); L['fd_es'].zero_(); L['fd_ml'].fill_(float('-inf'))
+
+    L['launch'](L['fd_out'], L['fd_es'], L['fd_ml'],
+                query, key_cache, value_cache, block_tables,
+                ctx_len, batch, nkv, L['grid_z'], stream)
+
+    if L['direct']:
+        return L['fd_out'].squeeze(2)
+    else:
+        reduce_out = _torch.empty(batch, 1, nkv, qg, hs, dtype=_torch.bfloat16, device='cuda')
+        _reduce_wrapper(
+            (batch, nkv, 1), reduce_out,
+            L['fd_es'], L['fd_ml'], L['fd_out'], context_lengths, None,
+            *[reduce_out.stride(i) for i in range(4)],
+            *[L['fd_es'].stride(i) for i in range(3)],
+            *[L['fd_out'].stride(i) for i in range(4)],
+            query_seq_len=1, query_group_size=qg,
+            head_size=hs, CONTEXT_PARTITION_SIZE=KV_COMPUTE_BLOCK,
+            PS=L['reduce_ps'], context_partition_num=L['reduce_np'],
+        )
+        return reduce_out.reshape(batch, nkv, qg, hs)
+
+
+def pa_decode_launch(output, query, key_cache, value_cache,
+                     context_lengths, block_tables,
+                     softmax_scale, query_scale, key_scale, value_scale,
+                     kv_block_size=1024, trans_v=True, stream=None):
+    """Run PA decode using get_recommended_splits to determine ps_num_splits."""
+    from aiter.ops.triton.gluon.pa_decode_gluon import (
+        get_recommended_splits as _grs,
+    )
+    batch = query.shape[0]
+    nqh = query.shape[1]
+    nkv = nqh // QUERY_GROUP_SIZE
+    ctx_len = context_lengths[0].item()
+    num_parts = (ctx_len + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
+    bps = block_tables.shape[1]
+    s = stream or _torch.cuda.current_stream()
+
+    one_shot = (num_parts <= 1)
+    ps_num_splits = 0 if one_shot else _grs(batch, nkv)
+
+    lk = (batch, nkv, num_parts, bps, kv_block_size, trans_v, ps_num_splits)
+    if lk not in _compiled_cache:
+        L = _make_launcher(batch, nkv, num_parts, bps,
+                           kv_block_size, trans_v, softmax_scale,
+                           query_scale, key_scale, value_scale, ps_num_splits)
+        # Warmup / compile
+        L['launch'](L['fd_out'], L['fd_es'], L['fd_ml'],
+                    query, key_cache, value_cache, block_tables,
+                    ctx_len, batch, nkv, L['grid_z'], s)
+        _torch.cuda.synchronize()
+        _compiled_cache[lk] = L
+
+    L = _compiled_cache[lk]
+    result = _run_with_launcher(L, query, key_cache, value_cache, block_tables,
+                                context_lengths, ctx_len, batch, nkv, s)
+
+    output.copy_(result.reshape_as(output))
+    return L['mode']
+
+
+def get_launcher(batch_size, num_kv_heads, context_length, blocks_per_seq,
+                 kv_block_size, trans_v, softmax_scale,
+                 query_scale, key_scale, value_scale, ps_num_splits):
+    """Return a cached launcher dict for a specific ps_num_splits (no autotune)."""
+    num_parts = (context_length + KV_COMPUTE_BLOCK - 1) // KV_COMPUTE_BLOCK
+    lk = (batch_size, num_kv_heads, num_parts, blocks_per_seq,
+          kv_block_size, trans_v, ps_num_splits)
+    if lk not in _compiled_cache:
+        L = _make_launcher(batch_size, num_kv_heads, num_parts, blocks_per_seq,
+                           kv_block_size, trans_v, softmax_scale,
+                           query_scale, key_scale, value_scale, ps_num_splits)
+        _compiled_cache[lk] = L
+    return _compiled_cache[lk]
