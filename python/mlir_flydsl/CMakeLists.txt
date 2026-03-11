@@ -180,6 +180,10 @@ add_custom_target(CopyFlyPythonSources ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_rocdl_enum_gen.py"
     "${MLIR_BINARY_DIR}/python_packages/flydsl/_mlir/dialects/_fly_rocdl_enum_gen.py"
+  # MLIR C runner utils (printI64, printString, … for vector.print / fx.printf)
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "$<TARGET_FILE:mlir_c_runner_utils>"
+    "${_MLIR_LIBS_DIR}/libmlir_c_runner_utils.so"
   COMMENT "Copying python/flydsl sources to build/python_packages/flydsl"
   DEPENDS FlyPythonModules
 )
@@ -213,5 +217,3 @@ else()
     "GPU execution will fall back to libmlir_rocm_runtime.so."
   )
 endif()
-
-

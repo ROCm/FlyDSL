@@ -12,7 +12,17 @@ from .protocol import fly_pointers
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    return [str(mlir_libs_dir / "libfly_jit_runtime.so")]
+    libs = [
+        mlir_libs_dir / "libfly_jit_runtime.so",
+        mlir_libs_dir / "libmlir_c_runner_utils.so",
+    ]
+    for lib in libs:
+        if not lib.exists():
+            raise FileNotFoundError(
+                f"Required JIT runtime library not found: {lib}\n"
+                f"Please rebuild the project."
+            )
+    return [str(p) for p in libs]
 
 
 class _ArgPacker:

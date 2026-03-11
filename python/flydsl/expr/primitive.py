@@ -591,7 +591,7 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, _arith.constant(T.i1(), int(val)))
+            return (False, _arith.constant(ir.IntegerType.get_signless(1), int(val)))
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):
