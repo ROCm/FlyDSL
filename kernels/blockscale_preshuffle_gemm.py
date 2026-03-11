@@ -15,7 +15,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl._mlir import ir
 
 from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
-from flydsl.expr.arith import ArithValue, _to_raw as _raw
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
@@ -270,7 +270,7 @@ def compile_blockscale_preshuffle_gemm(
             coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], arith.index(0))
             idx_pack = crd2idx(coord_pack, layout_b)
             b16 = _buffer_load_vec(
-                buffer_ops, vector, b_rsrc, _raw(idx_pack),
+                buffer_ops, vector, b_rsrc, idx_pack,
                 elem_type=T.f8, vec_elems=16, elem_bytes=elem_bytes,
                 offset_in_bytes=True,
             )
@@ -294,7 +294,7 @@ def compile_blockscale_preshuffle_gemm(
         # ── A LDS load helpers ────────────────────────────────────────────
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-            idx_a16 = _raw(curr_row_a_lds * _lds_k_dim_c + col_base_swz)
+            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz
             return vector.load_op(T.f8x16, lds_buffer, [idx_a16])
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
@@ -412,11 +412,11 @@ def compile_blockscale_preshuffle_gemm(
                 rocdl.raw_ptr_buffer_load_lds(
                     a_rsrc,
                     lds_ptr,
-                    _raw(size_i32),
-                    _raw(global_offset),
-                    _raw(soffset),
-                    _raw(offset_imm),
-                    _raw(aux),
+                    size_i32,
+                    global_offset,
+                    soffset,
+                    offset_imm,
+                    aux,
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
@@ -486,7 +486,7 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_b_vals.append(s_b_val)
 
-                vec4_f32 = ir.VectorType.get([4], ir.F32Type.get())
+                vec4_f32 = T.f32x4
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
                     s_b_vecs.append(vector.broadcast(vec4_f32, s_b_vals[ni]))
@@ -574,7 +574,7 @@ def compile_blockscale_preshuffle_gemm(
                         acc_idx = mi * num_acc_n + ni
                         fma_result = math_dialect.fma(
                             block_accs[acc_idx],
-                            _raw(combined_scales[mi][ni]),
+                            combined_scales[mi][ni],
                             current_global[acc_idx],
                         )
                         current_global[acc_idx] = fma_result
@@ -627,7 +627,7 @@ def compile_blockscale_preshuffle_gemm(
                         )
 
                 e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
-                frag_elem_type = ir.BF16Type.get() if is_bf16_out else ir.F16Type.get()
+                frag_elem_type = T.bf16 if is_bf16_out else T.f16
                 mfma_epilog(
                     use_cshuffle=True,
                     arith=arith, vector=vector, gpu=gpu,
@@ -856,10 +856,10 @@ def compile_blockscale_preshuffle_gemm(
             allocator_pong.finalize()
             allocator_ping.finalize()
 
-        idx_m = arith.index_cast(T.index, i32_m.ir_value())
-        idx_n = arith.index_cast(T.index, i32_n.ir_value())
-        gx = _raw((idx_m + (tile_m - 1)) / tile_m)
-        gy = _raw(idx_n / tile_n)
+        idx_m = ArithValue(arith.index_cast(T.index, i32_m.ir_value()))
+        idx_n = ArithValue(arith.index_cast(T.index, i32_n.ir_value()))
+        gx = (idx_m + (tile_m - 1)) / tile_m
+        gy = idx_n / tile_n
 
         launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
                                i32_m, i32_n)
@@ -869,7 +869,7 @@ def compile_blockscale_preshuffle_gemm(
                 for op in ctx.gpu_module_body.operations:
                     if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            ir.IntegerType.get_signless(32), _wpe)
+                            T.i32, _wpe)
         launcher.launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),

@@ -18,18 +18,26 @@ Understanding Layouts
 ---------------------
 
 Layouts are the core abstraction in FlyDSL. A layout maps logical coordinates
-to physical memory indices using a ``(Shape, Stride)`` pair:
+to physical memory indices using a ``(Shape, Stride)`` pair.
+
+.. note::
+
+   All ``fx.*`` operations (``make_layout``, ``make_shape``, etc.) generate
+   MLIR IR under the hood and **must** be called inside a ``@flyc.kernel`` or
+   ``@flyc.jit`` function. They cannot be used in bare Python scripts.
 
 .. code-block:: python
 
+   import flydsl.compiler as flyc
    import flydsl.expr as fx
 
-   # Create a 2D layout: 8 rows x 16 columns, column-major
-   layout = fx.make_layout((8, 16), (1, 8))
+   @flyc.kernel
+   def my_kernel(data: fx.Tensor):
+       # Create a 2D layout: 8 rows x 16 columns, column-major
+       layout = fx.make_layout((8, 16), (1, 8))
+       # Index = dot(Coord, Stride) = i*1 + j*8
 
-   # Index = dot(Coord, Stride) = i*1 + j*8
-
-Layout operations include:
+Layout operations (all used inside kernel/jit functions):
 
 - **fx.size(layout)** -- total number of elements
 - **fx.rank(layout)** -- number of dimensions

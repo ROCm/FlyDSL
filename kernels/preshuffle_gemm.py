@@ -15,8 +15,8 @@ from flydsl.expr import gpu
 from flydsl.expr import buffer_ops, rocdl
 
 
-from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
+from flydsl.compiler.protocol import fly_values
 
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
@@ -382,7 +382,7 @@ def compile_preshuffle_gemm_a8(
 
             base_k_bytes = base_k * elem_bytes
             k0 = base_k_bytes / c64_b + ku
-            idx_pack = _raw(n_blk_list[ni] * _b_stride_n0_c + k0 * _b_stride_k0_c + lane_div_16 * _b_stride_klane_c + n_intra_list[ni] * _b_stride_nlane_c)
+            idx_pack = n_blk_list[ni] * _b_stride_n0_c + k0 * _b_stride_k0_c + lane_div_16 * _b_stride_klane_c + n_intra_list[ni] * _b_stride_nlane_c
             vec_elems = 16 if elem_bytes == 1 else 8
             b16 = _buffer_load_vec(
                 buffer_ops, vector, b_rsrc, idx_pack,
@@ -427,7 +427,7 @@ def compile_preshuffle_gemm_a8(
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             col_base_swz = col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes / 2)
-            idx_a16 = _raw(curr_row_a_lds * _lds_k_dim_c + col_base_swz)
+            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz
             return vector.load_op(_vec16_type(), lds_buffer, [idx_a16])
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
@@ -484,7 +484,7 @@ def compile_preshuffle_gemm_a8(
                 col_local_bytes = col_a_local_i32 * c4
                 col_swz_bytes = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
                 col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes / 2
-                idx0 = _raw(row_a_local * _lds_k_dim_c + col_swz + lds_base_zero)
+                idx0 = row_a_local * _lds_k_dim_c + col_swz + lds_base_zero
                 v16 = vector.bitcast(_vec16_type(), vec_a_parts[i])
                 vector.store(v16, lds_buffer, [idx0])
 
@@ -529,11 +529,11 @@ def compile_preshuffle_gemm_a8(
                 rocdl.raw_ptr_buffer_load_lds(
                     a_rsrc,
                     lds_ptr,
-                    _raw(size_i32),
-                    _raw(global_offset),
-                    _raw(soffset),
-                    _raw(offset_imm),
-                    _raw(aux),
+                    size_i32,
+                    global_offset,
+                    soffset,
+                    offset_imm,
+                    aux,
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
@@ -569,30 +569,30 @@ def compile_preshuffle_gemm_a8(
             _fp4_use_scheduler = (tile_m >= 64)
 
             _ptr_type = ir.Type.parse('!llvm.ptr<1>')
-            _i32_type = ir.IntegerType.get_signless(32)
-            _i64_type = ir.IntegerType.get_signless(64)
-            _scale_a_raw = arg_scale_a.__fly_values__()[0]
-            _scale_b_raw = arg_scale_b.__fly_values__()[0]
+            _i32_type = T.i32
+            _i64_type = T.i64
+            _scale_a_raw = fly_values(arg_scale_a)[0]
+            _scale_b_raw = fly_values(arg_scale_b)[0]
             _scale_a_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_a_raw)
             _scale_b_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_b_raw)
             _scale_a_ptr_int = _llvm_d.ptrtoint(_i64_type, _scale_a_ptr)
             _scale_b_ptr_int = _llvm_d.ptrtoint(_i64_type, _scale_b_ptr)
 
-            _scale_lane_byte_off = _raw(lane_div_16 * arith.index(16) + lane_mod_16) * 4
-            _scale_lane_byte_i64 = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, _scale_lane_byte_off)).result
+            _scale_lane_byte_off = arith.index_cast(T.i32, (lane_div_16 * arith.index(16) + lane_mod_16) * arith.index(4))
+            _scale_lane_byte_i64 = _llvm_d.ZExtOp(_i64_type, _scale_lane_byte_off).result
 
             _scale_a_base_ptrs = []
             for mi in range_constexpr(_m_repeat_packed_outer):
-                mni_a = _raw(arith.index(mi) + bx_m / arith.index(_fp4_pack_M_outer * 16))
-                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, _raw(mni_a * arith.index(_K1_outer * 64) * 4))).result
+                mni_a = arith.index(mi) + bx_m / arith.index(_fp4_pack_M_outer * 16)
+                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, mni_a * arith.index(_K1_outer * 64 * 4))).result
                 base = _llvm_d.AddOp(_scale_a_ptr_int, mni_byte_off, _llvm_d.IntegerOverflowFlags(0)).result
                 base = _llvm_d.AddOp(base, _scale_lane_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
                 _scale_a_base_ptrs.append(_llvm_d.inttoptr(_ptr_type, base))
 
             _scale_b_base_ptrs = []
             for ni in range_constexpr(_num_acc_n_packed_outer):
-                mni_b = _raw(arith.index(ni) + (by_n + n_tile_base) / arith.index(_fp4_pack_N_outer * 16))
-                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, _raw(mni_b * arith.index(_K1_outer * 64) * 4))).result
+                mni_b = arith.index(ni) + (by_n + n_tile_base) / arith.index(_fp4_pack_N_outer * 16)
+                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, mni_b * arith.index(_K1_outer * 64 * 4))).result
                 base = _llvm_d.AddOp(_scale_b_ptr_int, mni_byte_off, _llvm_d.IntegerOverflowFlags(0)).result
                 base = _llvm_d.AddOp(base, _scale_lane_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
                 _scale_b_base_ptrs.append(_llvm_d.inttoptr(_ptr_type, base))
@@ -602,7 +602,7 @@ def compile_preshuffle_gemm_a8(
             def load_fp4_scales(base_k_scale_idx):
                 a_scales, b_scales = [], []
                 for ku in range_constexpr(_k_unroll_packed_outer):
-                    ku_byte_offset = arith.index_cast(T.i32, _raw((base_k_scale_idx + arith.index(ku)) * arith.index(_stride_k0_bytes)))
+                    ku_byte_offset = arith.index_cast(T.i32, (base_k_scale_idx + arith.index(ku)) * arith.index(_stride_k0_bytes))
                     ku_byte_i64 = _llvm_d.ZExtOp(_i64_type, ku_byte_offset).result
                     for mi in range_constexpr(_m_repeat_packed_outer):
                         addr_i64 = _llvm_d.AddOp(_llvm_d.ptrtoint(_i64_type, _scale_a_base_ptrs[mi]), ku_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
@@ -1158,10 +1158,10 @@ def compile_preshuffle_gemm_a8(
             allocator_pong.finalize()
             allocator_ping.finalize()
 
-        idx_m = arith.index_cast(T.index, i32_m.ir_value())
-        idx_n = arith.index_cast(T.index, i32_n.ir_value())
-        gx = _raw((idx_m + (tile_m - 1)) / tile_m)
-        gy = _raw(idx_n / tile_n)
+        idx_m = arith.ArithValue(arith.index_cast(T.index, i32_m.ir_value()))
+        idx_n = arith.ArithValue(arith.index_cast(T.index, i32_n.ir_value()))
+        gx = (idx_m + (tile_m - 1)) / tile_m
+        gy = idx_n / tile_n
 
         launcher = kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, i32_m, i32_n)
         if waves_per_eu is not None:
@@ -1170,7 +1170,7 @@ def compile_preshuffle_gemm_a8(
                 for op in ctx.gpu_module_body.operations:
                     if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                            ir.IntegerType.get_signless(32), _wpe)
+                            T.i32, _wpe)
         launcher.launch(
             grid=(gx, gy, 1),
             block=(256, 1, 1),

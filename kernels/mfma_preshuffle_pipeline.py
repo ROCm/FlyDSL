@@ -105,13 +105,10 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     which on gfx942 expands to ~5 VALU per element. The shift is exact for
     unscaled int8 values and introduces <0.5 ULP error for scaled values.
     """
-    i8 = ir.IntegerType.get_signless(8)
-    i32 = ir.IntegerType.get_signless(32)
-    f32 = ir.F32Type.get()
-    vec1_i32_t = ir.VectorType.get([1], i32)
-    vec2_i32 = ir.VectorType.get([2], i32)
-    vec4_i8 = ir.VectorType.get([4], i8)
-    vec1_i64 = ir.VectorType.get([1], ir.IntegerType.get_signless(64))
+    vec1_i32_t = T.vec(1, T.i32)
+    vec2_i32 = T.i32x2
+    vec4_i8 = T.i8x4
+    vec1_i64 = T.vec(1, T.i64)
 
     v1 = vector.from_elements(vec1_i32_t, [val_i32])
     i8x4 = vector.bitcast(vec4_i8, v1)
@@ -119,17 +116,17 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
     f32_vals = []
     for i in range(4):
         val_i8 = vector.extract(i8x4, static_position=[i], dynamic_position=[])
-        v = arith.sitofp(f32, val_i8)
+        v = arith.sitofp(T.f32, val_i8)
         if scale_val is not None:
             v = v * scale_val
         f32_vals.append(v)
 
-    c16 = arith.constant(16, type=i32)
-    c_ffff0000 = arith.constant(0xFFFF0000, type=i32)
-    bits0 = arith.bitcast(i32, f32_vals[0])
-    bits1 = arith.bitcast(i32, f32_vals[1])
-    bits2 = arith.bitcast(i32, f32_vals[2])
-    bits3 = arith.bitcast(i32, f32_vals[3])
+    c16 = arith.constant(16, type=T.i32)
+    c_ffff0000 = arith.constant(0xFFFF0000, type=T.i32)
+    bits0 = arith.bitcast(T.i32, f32_vals[0])
+    bits1 = arith.bitcast(T.i32, f32_vals[1])
+    bits2 = arith.bitcast(T.i32, f32_vals[2])
+    bits3 = arith.bitcast(T.i32, f32_vals[3])
     i32_lo = arith.ori(arith.shrui(bits0, c16), arith.andi(bits1, c_ffff0000))
     i32_hi = arith.ori(arith.shrui(bits2, c16), arith.andi(bits3, c_ffff0000))
 
