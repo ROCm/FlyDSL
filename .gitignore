@@ -15,6 +15,7 @@ my_ir_dumps*/
 *.diff
 
 # Python
+python/flydsl/_mlir/
 __pycache__/
 python/flydsl/_version.py
 .ruff_cache/
