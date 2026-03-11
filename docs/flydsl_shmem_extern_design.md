@@ -35,7 +35,7 @@ def ep_dispatch(addr_buf: fx.Int64, ...):
 | `FlyDSL/python/flydsl/expr/extern.py` | `ExternFunction` 类：在 `@flyc.kernel` 编译期发射 `llvm.LLVMFuncOp` 声明 + `llvm.CallOp` |
 | `FlyDSL/python/flydsl/expr/lowlevel.py` | 低层 GPU op 包装：`ballot_i64`, `readlane`, `store_v4i32_global`, `idx_to_i32`, `as_index`, `atomic_add_i32_at`, `load_i32_global` 等 |
 | `FlyDSL/python/flydsl/compiler/shmem_compile.py` | `compile_shmem_kernel()` + `ShmemKernel` 可调用对象 |
-| `FlyDSL/kernels/dispatch_combine_intranode_v2.py` | 用 `@flyc.kernel` 重写的 dispatch/combine kernel（工厂函数模式） |
+| `FlyDSL/kernels/dispatch_combine_intranode_kernel_v2.py` | 用 `@flyc.kernel` 重写的 dispatch/combine kernel（工厂函数模式） |
 | `FlyDSL/kernels/dispatch_combine_intranode_op_v2.py` | v2 算子包装器（Python API 与 v1 兼容） |
 | `FlyDSL/tests/kernels/test_v2_accuracy_perf.py` | 精度 + 性能测试（支持 EP=2/8, spawn/torchrun 两种模式） |
 
@@ -80,7 +80,7 @@ ShmemKernel.launch() via ctypes
 `ExternFunction` 是 `mori_shmem.*` 函数在 `@flyc.kernel` 中的 Python 代理对象。在内核编译（tracing）阶段调用时，它向当前 GPU module 发射 MLIR 声明和调用指令。
 
 ```python
-# 用户侧（dispatch_combine_intranode_v2.py）
+# 用户侧（dispatch_combine_intranode_kernel_v2.py）
 import mori.ir.flydsl as mori_shmem
 
 @flyc.kernel
@@ -369,7 +369,7 @@ python tests/kernels/test_v2_accuracy_perf.py \
     --block-num 80 --warp-per-block 16
 
 # 4. 查看 FlyDSL 中间 IR（调试）
-./scripts/dumpir.sh python kernels/dispatch_combine_intranode_v2.py
+./scripts/dumpir.sh python kernels/dispatch_combine_intranode_kernel_v2.py
 # IR 输出到 /tmp/flydsl_dump_ir/
 ```
 
@@ -404,7 +404,7 @@ def divui(a, b) -> ir.Value:   # arith.DivUIOp → udiv（比 sdiv 快 ~3×）
 def remui(a, b) -> ir.Value:   # arith.RemUIOp → urem
 ```
 
-在 `dispatch_combine_intranode_v2.py` 中，将所有已知非负值的 `//` 和 `%` 替换：
+在 `dispatch_combine_intranode_kernel_v2.py` 中，将所有已知非负值的 `//` 和 `%` 替换：
 
 ```python
 # Before（生成 sdiv）                  After（生成 udiv）
@@ -434,7 +434,7 @@ FlyDSL/
 │   └── compiler/
 │       └── shmem_compile.py   # compile_shmem_kernel() + ShmemKernel
 ├── kernels/
-│   ├── dispatch_combine_intranode_v2.py      # @flyc.kernel 实现（工厂函数）
+│   ├── dispatch_combine_intranode_kernel_v2.py      # @flyc.kernel 实现（工厂函数）
 │   └── dispatch_combine_intranode_op_v2.py   # 算子包装器（兼容 v1 API）
 └── tests/kernels/
     └── test_v2_accuracy_perf.py              # 精度 + 性能测试

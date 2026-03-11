@@ -81,7 +81,7 @@ class FlyDSLDispatchCombineConfig:
     hidden_dim: int
     max_num_inp_token_per_rank: int
     num_experts_per_rank: int
-    num_experts_per_token: int
+    top_k: int
     data_type: torch.dtype = torch.bfloat16
     warp_num_per_block: int = 16
     block_num: int = 80
@@ -139,7 +139,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
     def _alloc_buffers(self):
         cfg = self.cfg
         npes = cfg.world_size
-        k    = cfg.num_experts_per_token
+        k    = cfg.top_k
         mt   = cfg.max_num_inp_token_per_rank   # max_tok_per_rank
         mr   = cfg.max_recv                      # npes * mt
         hdim = cfg.hidden_dim
@@ -228,7 +228,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             _i32(cfg.world_size),
             _i32(cur_tok),
             _i32(cfg.num_experts_per_rank),
-            _i32(cfg.num_experts_per_token),
+            _i32(cfg.top_k),
             _i32(cfg.hidden_dim),
             _i32(cfg.elem_size),
             _i32(cfg.max_num_inp_token_per_rank),
@@ -241,7 +241,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         n     = int(self.total_recv[0].item())
         mr    = cfg.max_recv
         hdim  = cfg.hidden_dim
-        k     = cfg.num_experts_per_token
+        k     = cfg.top_k
 
         out_tok = (self.shmem_disp_out_tok
                    .view(torch.bfloat16).view(mr, hdim)[:n]
@@ -288,7 +288,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             _i32(cfg.world_size),
             _i32(cur_tok),
             _i32(total_recv_val),
-            _i32(cfg.num_experts_per_token),
+            _i32(cfg.top_k),
             _i32(cfg.hidden_dim),
             _i32(cfg.elem_size),
             _i32(cfg.max_num_inp_token_per_rank),
@@ -300,7 +300,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         mt   = cfg.max_num_inp_token_per_rank
         hdim = cfg.hidden_dim
-        k    = cfg.num_experts_per_token
+        k    = cfg.top_k
 
         out_tok = (self.shmem_comb_out_tok
                    .view(torch.bfloat16).view(mt, hdim)[:cur_tok]

@@ -20,11 +20,14 @@ Pipeline
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import inspect
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Post-compile hook (set by mori.ir.flydsl.runtime.install_hook)
@@ -171,6 +174,62 @@ def _link_and_compile_hsaco(llvm_ir: str, chip: str, out_path: str, shmem_bc: st
 
 
 # ---------------------------------------------------------------------------
+# Content-hash-based cache
+# ---------------------------------------------------------------------------
+_SHMEM_CACHE_DIR = Path.home() / ".flydsl" / "cache" / "shmem"
+
+
+def _shmem_cache_key(kernel_fn, chip: str, shmem_bc: str) -> str:
+    """Compute a stable SHA-256 key for a shmem kernel compilation.
+
+    Covers:
+      1. Kernel function source code (``inspect.getsource``)
+      2. Closure variable values (compile-time constants: rank, npes, hidden_dim…)
+      3. Target chip name
+      4. mori shmem bitcode content hash
+    """
+    parts: list[str] = []
+
+    # 1. Kernel source
+    try:
+        parts.append(inspect.getsource(kernel_fn._func))
+    except (OSError, TypeError):
+        parts.append(kernel_fn._func.__code__.co_code.hex())
+
+    # 2. Closure values (compile-time constants embedded in the kernel factory)
+    func = kernel_fn._func
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+                if isinstance(val, (int, float, bool, str, type(None), tuple)):
+                    parts.append(f"{name}={val!r}")
+            except ValueError:
+                pass
+
+    # 3. Chip
+    parts.append(f"chip={chip}")
+
+    # 4. Shmem bitcode content hash (first 64 KB is enough for a fingerprint)
+    try:
+        h = hashlib.sha256()
+        with open(shmem_bc, "rb") as f:
+            h.update(f.read(65536))
+        parts.append(f"bc={h.hexdigest()[:16]}")
+    except OSError:
+        parts.append(f"bc_path={shmem_bc}")
+
+    digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()
+    return digest
+
+
+def _shmem_cache_path(kernel_fn, chip: str, shmem_bc: str) -> Path:
+    key = _shmem_cache_key(kernel_fn, chip, shmem_bc)
+    name = getattr(getattr(kernel_fn, "_func", None), "__name__", "shmem_kernel")
+    return _SHMEM_CACHE_DIR / f"{name}_{key[:16]}.hsaco"
+
+
+# ---------------------------------------------------------------------------
 # ShmemKernel callable
 # ---------------------------------------------------------------------------
 class ShmemKernel:
@@ -239,9 +298,13 @@ def compile_shmem_kernel(
     const_args: Optional[Dict[str, Any]] = None,
     chip: Optional[str] = None,
     shmem_bc: Optional[str] = None,
-    out_path: Optional[str] = None,
 ) -> ShmemKernel:
     """Compile a ``@flyc.kernel`` function with mori shmem bitcode.
+
+    The compiled HSACO is cached in ``~/.flydsl/cache/shmem/`` keyed by a
+    SHA-256 hash of the kernel source, closure constants, chip, and bitcode
+    fingerprint.  Subsequent calls with identical inputs skip compilation and
+    load the cached binary directly.
 
     Parameters
     ----------
@@ -257,8 +320,6 @@ def compile_shmem_kernel(
         AMD GPU target.  Auto-detected from ``rocm_agent_enumerator``.
     shmem_bc:
         Path to ``libmori_shmem_device.bc``.  Auto-detected via mori.
-    out_path:
-        Destination ``.hsaco``.  A temp file is used if not given.
 
     Returns
     -------
@@ -290,11 +351,12 @@ def compile_shmem_kernel(
     if const_args is None:
         const_args = {}
 
-    if out_path is None:
-        fn_name = getattr(
-            getattr(kernel_fn, "_func", None), "__name__", "shmem_kernel")
-        out_path = os.path.join(
-            tempfile.gettempdir(), f"{fn_name}_{chip}.hsaco")
+    # Compute content-hash-based cache path (~/.flydsl/cache/shmem/<name>_<hash>.hsaco)
+    cache_path = _shmem_cache_path(kernel_fn, chip, shmem_bc)
+    if cache_path.exists():
+        return ShmemKernel(str(cache_path), kernel_fn._kernel_name)
+
+    out_path = str(cache_path)
 
     # -----------------------------------------------------------------------
     # Convert dummy_args to (JitArgument, DslType) pairs for the MLIR pipeline
@@ -486,6 +548,7 @@ def compile_shmem_kernel(
             '"amdgpu-flat-work-group-size"="1,1024"'
         )
 
+    _SHMEM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _link_and_compile_hsaco(llvm_ir, chip, out_path, shmem_bc)
 
     # -----------------------------------------------------------------------

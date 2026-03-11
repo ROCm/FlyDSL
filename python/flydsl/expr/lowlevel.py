@@ -489,3 +489,34 @@ def sync_threads() -> None:
     """
     from .._mlir.dialects import gpu
     gpu.barrier()
+
+
+def atomic_fetch_add_i32_global(addr_i64, val):
+    """Atomic fetch-add on XGMI global (addrspace 1) address, returns old value.
+
+    Generates a single global_atomic_add_ret AMD GPU instruction on the
+    XGMI-mapped remote address returned by ptr_p2p() or _sel_pe().
+    This is vastly faster than mori_shmem_uint32_atomic_fetch_add_thread
+    which uses a software CAS-retry loop (~10+ instructions per lane).
+
+    Performance note:
+        For intranode dispatch, call this from lane0 exec-masked block and
+        broadcast via readlane(result, 0) to avoid 64x unnecessary XGMI ops.
+
+    Args:
+        addr_i64: XGMI address from ptr_p2p() / _sel_pe(), addrspace(1).
+        val:      i32 value to add (0 = fetch only, 1 = increment).
+
+    Returns:
+        Old i32 value before the add.
+    """
+    addr = _unwrap(addr_i64)
+    val_ = _unwrap(val)
+    ptr_g = llvm.PointerType.get(address_space=1)
+    gptr  = llvm.IntToPtrOp(ptr_g, addr).result
+    return llvm.AtomicRMWOp(
+        llvm.AtomicBinOp.add,
+        gptr,
+        val_,
+        llvm.AtomicOrdering.monotonic,
+    ).res

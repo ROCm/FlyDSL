@@ -52,10 +52,12 @@ from flydsl.expr.lowlevel import (
     icmp_ult_i32,
     as_index,
     idx_to_i32,
-    atomic_add_i32_at,  # GPU local atomic add (not shmem)
+    atomic_add_i32_at,             # GPU local atomic add (not shmem)
+    atomic_fetch_add_i32_global,   # XGMI native fetch-add, single instruction
     divui,              # unsigned integer divide (faster than Python //)
     remui,              # unsigned integer remainder (faster than Python %)
 )
+from flydsl.expr.lowlevel import _unwrap as _lv_unwrap
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -137,6 +139,9 @@ def make_dispatch_kernel(
         rem_idx = [mori_shmem.ptr_p2p(addr_out_idx, rank, pe) for pe in range(npes)]
         rem_tis = [mori_shmem.ptr_p2p(addr_tis,     rank, pe) for pe in range(npes)]
 
+        # 预计算 tok_off 的 XGMI 远端地址（每 PE 一个，避免循环内重复调用）
+        rem_tok_off = [mori_shmem.ptr_p2p(addr_tok_off, rank, pe) for pe in range(npes)]
+
         # ── Phase 1: 发送 token ───────────────────────────────────────────────
         # 每个 warp 处理一组 (srcTok, expertSlot) 对（步长 gw_num）
         for i in range(as_index(gw_id), as_index(limit), as_index(gw_num)):
@@ -159,13 +164,32 @@ def make_dispatch_kernel(
             dup_ballot   = ballot_i64(icmp_ult_i32(dup_per_lane, const_i32(64)))
             is_dup       = _icmp_ne_i64(dup_ballot, const_i64(0))
 
-            # 原子分配 destTokId（lane0 无重复时 +1，其余 +0）
-            lane0    = icmp_eq_i32(lane, const_i32(0))
-            add_one  = select_i32(lane0,
-                           select_i32(is_dup, const_i32(0), const_i32(1)),
-                           const_i32(0))
-            dest_tok     = mori_shmem.uint32_atomic_fetch_add_thread(
-                               addr_tok_off, add_one, dest_pe, 0)
+            # ── 原子分配 destTokId（仅 lane0 非重复路径执行 XGMI 原子） ───────
+            # Fix 1（前次）：scf.IfOp 将 exec 收缩到 lane0 → 消除 63 个无效 CAS 调用。
+            # Fix 2（本次）：lane0 block 内再嵌套 IfOp 区分 dup/non-dup：
+            #   - non-dup：发 atomic_fetch_add_i32_global(+1)（单条 XGMI 硬件原子）
+            #   - dup：直接返回 0，完全不发 AMO 指令（mori 用 continue 实现同等效果）
+            from flydsl._mlir.dialects import scf as _scf_d
+            from flydsl._mlir.ir import InsertionPoint as _IP, IntegerType as _IT_mlir
+            _i32_ty = _IT_mlir.get_signless(32)
+            _lane0_cond = _lv_unwrap(icmp_eq_i32(lane, const_i32(0)))
+            _if_lane0 = _scf_d.IfOp(_lane0_cond, [_i32_ty], has_else=True)
+            with _IP(_if_lane0.then_block):
+                # lane 0：non-dup → fetch+add 1；dup → return 0（跳过 XGMI AMO）
+                _nodup_cond = _lv_unwrap(_icmp_eq_i64(dup_ballot, const_i64(0)))
+                _if_nodup = _scf_d.IfOp(_nodup_cond, [_i32_ty], has_else=True)
+                with _IP(_if_nodup.then_block):
+                    _tok_off_xgmi = _sel_pe(rem_tok_off, dest_pe)
+                    _old_tok = atomic_fetch_add_i32_global(_tok_off_xgmi, const_i32(1))
+                    _scf_d.YieldOp([_lv_unwrap(_old_tok)])
+                with _IP(_if_nodup.else_block):
+                    # dup：返回 0；dest_tok_all 在 dup 路径的所有使用均受 is_dup/dup_ballot 保护
+                    _scf_d.YieldOp([_lv_unwrap(const_i32(0))])
+                _scf_d.YieldOp([_if_nodup.result])
+            with _IP(_if_lane0.else_block):
+                # lanes 1-63：不执行原子，返回 0（readlane 只用 lane0 的值）
+                _scf_d.YieldOp([_lv_unwrap(const_i32(0))])
+            dest_tok     = _if_lane0.result  # single result → scalar ArithValue
             dest_tok_all = readlane(dest_tok, 0)  # 广播 lane0 的结果给整个 warp
 
             # 写入 dest_tok_map[i]（lane0）
@@ -236,8 +260,11 @@ def make_dispatch_kernel(
                 # Spin-wait on remote addr (XGMI read, ptr_p2p addr OK for wait_until)
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
                 fence_one_as_seq_cst()
-                # Write signal: uint32_atomic_add_thread uses LOCAL symmetric addr
-                mori_shmem.uint32_atomic_add_thread(rtn_local, nsig, dest_pe, 0)
+                # Fix B: uint32_p → P2P AtomicStoreRelaxedSystem（单条 XGMI store 指令）
+                # 替代原来的 uint32_atomic_add_thread（软件 CAS 循环）。
+                # 语义正确：等到 rtn_remote==0 后值已知为 0，直接 store nsig 即可，无需 RMW。
+                # 对应 mori: core::AtomicStoreRelaxedSystem(signal, numTokenSignal)
+                mori_shmem.uint32_p(rtn_local, nsig, dest_pe, 0)
 
         # ── Phase 3: 接收信号，累计 total_recv ───────────────────────────────
         for src_pe in range(as_index(lane), as_index(npes), 64):
@@ -248,9 +275,11 @@ def make_dispatch_kernel(
                 rtn_src  = addr_recv_num + zext_i32_to_i64(src_pe) * 4
                 sig_val  = mori_shmem.int32_wait_until_greater_than(rtn_src, 0)
                 recv_cnt = sig_val - 1
-                # Reset signal: atomic add -(sig_val) to bring it back to 0
-                mori_shmem.uint32_atomic_add_thread(
-                    rtn_src, const_i32(0) - sig_val, rank, 0)
+                # Fix C: 直接写 0 重置信号，替代原子减法（CAS 循环）。
+                # 语义正确：sig_val 刚读出，此时信号值已知为 sig_val，无并发写入者，
+                # 直接 store 0 安全。对应 mori: core::AtomicStoreRelaxedSystem(signal, 0)。
+                # 使用 uint32_p(pe=rank) 保证 system-scope ordering（同 mori AtomicStore）。
+                mori_shmem.uint32_p(rtn_src, const_i32(0), rank, 0)
                 # total_recv 累加（原子，多 lane 可能并发）
                 atomic_add_i32_at(addr_total_rv, recv_cnt)
                 store_i32_at(addr_dest_ctr, src_pe, const_i32(0))
@@ -443,10 +472,12 @@ def build_and_compile_dispatch(
     warp_num_per_block: int,
     data_type,
     chip: str = "gfx942",
-    out_path: str = None,
     shmem_bc: str = None,
 ) -> ShmemKernel:
-    """编译 v2 dispatch kernel，返回 ShmemKernel callable。"""
+    """编译 v2 dispatch kernel，返回 ShmemKernel callable。
+
+    编译产物缓存在 ~/.flydsl/cache/shmem/，基于内容 hash 自动管理。
+    """
     import torch
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     if shmem_bc is None:
@@ -462,7 +493,7 @@ def build_and_compile_dispatch(
     dummy = [fx.Int64(0)] * 13 + [fx.Int32(1)]
     return compile_shmem_kernel(
         kernel_fn, dummy_args=dummy,
-        chip=chip, shmem_bc=shmem_bc, out_path=out_path,
+        chip=chip, shmem_bc=shmem_bc,
     )
 
 
@@ -477,10 +508,12 @@ def build_and_compile_combine(
     warp_num_per_block: int,
     data_type,
     chip: str = "gfx942",
-    out_path: str = None,
     shmem_bc: str = None,
 ) -> ShmemKernel:
-    """编译 v2 combine kernel，返回 ShmemKernel callable。"""
+    """编译 v2 combine kernel，返回 ShmemKernel callable。
+
+    编译产物缓存在 ~/.flydsl/cache/shmem/，基于内容 hash 自动管理。
+    """
     import torch
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
     if shmem_bc is None:
@@ -496,5 +529,5 @@ def build_and_compile_combine(
     dummy = [fx.Int64(0)] * 8 + [fx.Int32(1), fx.Int32(1)]
     return compile_shmem_kernel(
         kernel_fn, dummy_args=dummy,
-        chip=chip, shmem_bc=shmem_bc, out_path=out_path,
+        chip=chip, shmem_bc=shmem_bc,
     )
