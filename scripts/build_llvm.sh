@@ -39,13 +39,13 @@ pushd "$LLVM_SRC_DIR"
 
 # Check if we need to switch remote to ROCm fork
 CURRENT_REMOTE=$(git remote get-url origin)
-if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
-    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
-    git remote set-url origin https://github.com/ROCm/llvm-project.git
-fi
+# if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
+#     echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
+#     git remote set-url origin https://github.com/ROCm/llvm-project.git
+# fi
 
-git fetch origin amd-staging
-git checkout "${LLVM_COMMIT}"
+# git fetch origin amd-staging
+# git checkout "${LLVM_COMMIT}"
 popd
 
 # 2. Create Build Directory
