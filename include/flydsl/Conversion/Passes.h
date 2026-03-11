@@ -4,7 +4,6 @@
 
 #include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
-#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
 
 namespace mlir {
 

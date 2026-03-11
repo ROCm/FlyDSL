@@ -94,6 +94,8 @@ IntAttr IntTupleAttr::extractIntFromLeaf() const {
     return intAttr;
   } else if (auto basisAttr = dyn_cast<BasisAttr>(this->getValue())) {
     return basisAttr.getValue();
+  } else {
+    llvm_unreachable("Non-leaf attribute cannot be converted to IntAttr");
   }
 }
 

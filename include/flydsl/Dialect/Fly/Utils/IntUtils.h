@@ -5,6 +5,8 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 
+#include <numeric>
+
 namespace mlir::fly {
 namespace utils {
 
