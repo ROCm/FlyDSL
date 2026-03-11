@@ -307,6 +307,86 @@ class MlirCompiler:
             "gpu-module-to-binary{format=fatbin}",
         ]
 
+    @staticmethod
+    def _compile_gpu_binary_external(module: ir.Module) -> ir.Module:
+        """Use external mlir-opt to run gpu-module-to-binary, avoiding
+        in-process LLVM symbol conflicts with PyTorch/ROCm.
+        Also extracts and caches .hsaco files for HIP-based launching."""
+        import subprocess, tempfile, re
+        mlir_opt = os.environ.get("MLIR_OPT_PATH", "")
+        if not mlir_opt:
+            mlir_path = os.environ.get("MLIR_PATH", "")
+            if mlir_path:
+                candidate = os.path.join(mlir_path, "bin", "mlir-opt")
+                if os.path.isfile(candidate):
+                    mlir_opt = candidate
+        if not mlir_opt:
+            return None
+        asm = module.operation.get_asm(enable_debug_info=True)
+        # Save pre-binary MLIR for reuse
+        cache_dir = Path.home() / ".flydsl" / "precompiled"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mlir', delete=False) as f:
+            f.write(asm)
+            in_path = f.name
+        out_path = in_path + ".out.mlir"
+        try:
+            result = subprocess.run(
+                [mlir_opt, "--gpu-module-to-binary", in_path, "-o", out_path],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                print(f"[flydsl.compile] external mlir-opt failed: {result.stderr[-200:]}")
+                return None
+            with open(out_path, 'r') as f:
+                out_asm = f.read()
+
+            # Extract and cache .hsaco ELF binary
+            bin_match = re.search(r'bin\s*=\s*"((?:[^"\\]|\\.)*)"', out_asm, re.DOTALL)
+            kern_match = re.search(r'@(\w+)\s*\(', asm)
+            if bin_match:
+                escaped = bin_match.group(1)
+                raw = bytearray()
+                i = 0
+                while i < len(escaped):
+                    if escaped[i] == '\\' and i + 1 < len(escaped):
+                        i += 1; c = escaped[i]
+                        if c == '\\': raw.append(0x5C)
+                        elif c == '"': raw.append(0x22)
+                        elif c == 'n': raw.append(0x0A)
+                        elif c == 't': raw.append(0x09)
+                        else:
+                            try: raw.append(int(escaped[i:i+2], 16)); i += 1
+                            except ValueError: raw.append(ord(c))
+                    else:
+                        raw.append(ord(escaped[i]))
+                    i += 1
+                # Infer kernel name from MLIR
+                kname_match = re.search(r'gpu\.func\s+@(\w+)', asm)
+                kname = kname_match.group(1) if kname_match else "kernel"
+                # Save with a content-based hash name
+                import hashlib
+                content_hash = hashlib.sha256(bytes(raw)).hexdigest()[:12]
+                hsaco_path = cache_dir / f"{kname}_{content_hash}.hsaco"
+                hsaco_path.write_bytes(bytes(raw))
+                # Save metadata
+                import json
+                meta = {"kernel_name": kname, "hsaco": str(hsaco_path)}
+                (cache_dir / f"{kname}_{content_hash}.json").write_text(
+                    json.dumps(meta, indent=2))
+                print(f"[flydsl.compile] Cached .hsaco: {hsaco_path} ({len(raw)} bytes)")
+
+            return ir.Module.parse(out_asm, context=module.context)
+        except Exception as e:
+            print(f"[flydsl.compile] external compile error: {e}")
+            return None
+        finally:
+            for p in (in_path, out_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -361,13 +441,72 @@ class MlirCompiler:
                 if isa_out is not None:
                     print(f"[flydsl.compile] dump {isa_stage} -> {isa_out}")
         else:
-            pipeline = f"builtin.module({','.join(fragments)})"
-            pm = PassManager.parse(pipeline)
-            pm.enable_verifier(env.debug.enable_verifier)
-            pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
-            pm.run(module.operation)
+            binary_frag = "gpu-module-to-binary{format=fatbin}"
+            use_subprocess = (
+                binary_frag in fragments
+                and os.environ.get("FLYDSL_SUBPROCESS_GPU_COMPILE", "1") == "1"
+            )
+
+            if use_subprocess:
+                pre_binary = [f for f in fragments if f != binary_frag]
+                pipeline = f"builtin.module({','.join(pre_binary)})"
+                pm = PassManager.parse(pipeline)
+                pm.enable_verifier(env.debug.enable_verifier)
+                pm.run(module.operation)
+                result = cls._subprocess_gpu_compile(module)
+                if result is not None:
+                    module = result
+                else:
+                    pm2 = PassManager.parse(f"builtin.module({binary_frag})")
+                    pm2.run(module.operation)
+            else:
+                pipeline = f"builtin.module({','.join(fragments)})"
+                pm = PassManager.parse(pipeline)
+                pm.enable_verifier(env.debug.enable_verifier)
+                pm.enable_ir_printing(print_after_all=env.debug.print_after_all)
+                pm.run(module.operation)
 
         return module
+
+    @staticmethod
+    def _subprocess_gpu_compile(module: ir.Module) -> "ir.Module | None":
+        """Run gpu-module-to-binary in a subprocess without PyTorch/ROCm loaded."""
+        import subprocess
+        import tempfile
+        mlir_opt = ""
+        for candidate in [
+            os.path.join(os.environ.get("MLIR_PATH", ""), "bin", "mlir-opt"),
+            "mlir-opt",
+        ]:
+            if os.path.isfile(candidate):
+                mlir_opt = candidate
+                break
+        if not mlir_opt:
+            return None
+        asm = module.operation.get_asm(enable_debug_info=True)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.mlir', delete=False) as f:
+            f.write(asm)
+            in_path = f.name
+        out_path = in_path + ".out.mlir"
+        try:
+            result = subprocess.run(
+                [mlir_opt, "--gpu-module-to-binary", in_path, "-o", out_path],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                log().warning(f"[flydsl] subprocess gpu compile failed: {result.stderr[-200:]}")
+                return None
+            with open(out_path) as f:
+                return ir.Module.parse(f.read(), context=module.context)
+        except Exception as e:
+            log().warning(f"[flydsl] subprocess gpu compile error: {e}")
+            return None
+        finally:
+            for p in (in_path, out_path):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 
 class JitCacheManager:

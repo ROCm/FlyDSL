@@ -54,7 +54,14 @@ class JitArgumentRegistry:
 
     @classmethod
     def get(cls, py_type: type) -> Optional[Tuple[Callable, Type[DslType]]]:
-        return cls.registry.get(py_type, (None, None))
+        result = cls.registry.get(py_type, None)
+        if result is not None:
+            return result
+        # Fallback: check base classes (e.g., torch.nn.Parameter -> torch.Tensor)
+        for registered_type, entry in cls.registry.items():
+            if isinstance(registered_type, type) and issubclass(py_type, registered_type):
+                return entry
+        return (None, None)
 
     @classmethod
     def get_dsl_type(cls, jit_arg_type: type) -> Type[DslType]:
