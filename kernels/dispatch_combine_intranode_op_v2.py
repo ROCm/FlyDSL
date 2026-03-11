@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import tempfile
 from dataclasses import dataclass
 
 import torch
@@ -18,7 +17,7 @@ import torch.distributed as dist
 import mori.shmem as ms
 from mori.shmem import mori_shmem_create_tensor
 
-from .dispatch_combine_intranode_v2 import (
+from .dispatch_combine_intranode_kernel_v2 import (
     _find_mori_shmem_bc,
     build_and_compile_dispatch,
     build_and_compile_combine,
@@ -56,7 +55,7 @@ class FlyDSLDispatchCombineConfigV2:
     hidden_dim: int
     max_num_inp_token_per_rank: int
     num_experts_per_rank: int
-    num_experts_per_token: int
+    top_k: int
     data_type: torch.dtype = torch.bfloat16
     warp_num_per_block: int = 16
     block_num: int = 80
@@ -86,46 +85,33 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self.cfg    = config
         self._dev   = torch.device("cuda", config.rank)
         self._mori_bc = _find_mori_shmem_bc()
-        tmp  = tempfile.gettempdir()
         chip = config.chip
         r    = config.rank
-
-        # HSACO 文件名包含关键编译参数，避免不同配置间的缓存污染
-        mt  = config.max_num_inp_token_per_rank
-        epr = config.num_experts_per_rank
-        ept = config.num_experts_per_token
-        hdim = config.hidden_dim
 
         print(f"[v2] Rank {r}: compiling v2 dispatch kernel...")
         self._disp_kernel = build_and_compile_dispatch(
             rank=r, npes=config.world_size,
-            experts_per_rank=epr,
-            experts_per_token=ept,
-            hidden_dim=hdim,
-            max_tok_per_rank=mt,
-            block_num=config.block_num,
-            warp_num_per_block=config.warp_num_per_block,
-            data_type=config.data_type,
-            chip=chip,
-            out_path=os.path.join(
-                tmp, f"v2_disp_{chip}_ep{config.world_size}"
-                     f"_mt{mt}_h{hdim}_k{ept}_r{r}.hsaco"),
-            shmem_bc=self._mori_bc,
-        )
-
-        print(f"[v2] Rank {r}: compiling v2 combine kernel...")
-        self._comb_kernel = build_and_compile_combine(
-            rank=r, npes=config.world_size,
-            experts_per_token=config.num_experts_per_token,
+            experts_per_rank=config.num_experts_per_rank,
+            experts_per_token=config.top_k,
             hidden_dim=config.hidden_dim,
             max_tok_per_rank=config.max_num_inp_token_per_rank,
             block_num=config.block_num,
             warp_num_per_block=config.warp_num_per_block,
             data_type=config.data_type,
             chip=chip,
-            out_path=os.path.join(
-                tmp, f"v2_comb_{chip}_ep{config.world_size}"
-                     f"_mt{mt}_h{hdim}_k{ept}_r{r}.hsaco"),
+            shmem_bc=self._mori_bc,
+        )
+
+        print(f"[v2] Rank {r}: compiling v2 combine kernel...")
+        self._comb_kernel = build_and_compile_combine(
+            rank=r, npes=config.world_size,
+            experts_per_token=config.top_k,
+            hidden_dim=config.hidden_dim,
+            max_tok_per_rank=config.max_num_inp_token_per_rank,
+            block_num=config.block_num,
+            warp_num_per_block=config.warp_num_per_block,
+            data_type=config.data_type,
+            chip=chip,
             shmem_bc=self._mori_bc,
         )
 
@@ -147,7 +133,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
     def _alloc_buffers(self):
         cfg  = self.cfg
         npes = cfg.world_size
-        k    = cfg.num_experts_per_token
+        k    = cfg.top_k
         mt   = cfg.max_num_inp_token_per_rank
         mr   = cfg.max_recv   # npes * mt
         hdim = cfg.hidden_dim
@@ -156,9 +142,9 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self.shmem_disp_out_tok  = mori_shmem_create_tensor((mr * hdim,), torch.int16)
         self.shmem_disp_out_wts  = mori_shmem_create_tensor((mr * k,),    torch.float32)
         self.shmem_disp_out_idx  = mori_shmem_create_tensor((mr * k,),    torch.int32)
-        self.shmem_tok_off       = mori_shmem_create_tensor((1,),          torch.int32)
+        self.shmem_tok_off       = mori_shmem_create_tensor((1,),          torch.int32)  # slot cnt
         self.shmem_recv_tok_num  = mori_shmem_create_tensor((npes,),       torch.int32)
-        self.shmem_tok_id_to_src = mori_shmem_create_tensor((mr,),         torch.int32)
+        self.shmem_tok_id_to_src = mori_shmem_create_tensor((mr,),         torch.int32)  # src token id
         self.shmem_comb_inp_tok  = mori_shmem_create_tensor((mr * hdim,), torch.int16)
         self.shmem_comb_out_tok  = mori_shmem_create_tensor((mt * hdim,), torch.int16)
         self.shmem_xdev_bar_mem  = mori_shmem_create_tensor((npes,),       torch.int64)
@@ -244,7 +230,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         n    = int(self.total_recv[0].item())
         mr   = cfg.max_recv
         hdim = cfg.hidden_dim
-        k    = cfg.num_experts_per_token
+        k    = cfg.top_k
 
         out_tok = (self.shmem_disp_out_tok.view(torch.bfloat16)
                    .view(mr, hdim)[:n].to(cfg.data_type))

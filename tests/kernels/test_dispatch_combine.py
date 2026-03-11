@@ -88,12 +88,12 @@ def build_mori_ref(rank, world_size, cfg):
         rank=rank,
         world_size=world_size,
         hidden_dim=cfg.hidden_dim,
-        scale_dim=cfg.num_experts_per_token,
+        scale_dim=cfg.top_k,
         scale_type_size=4,
         max_token_type_size=elem,
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
-        num_experts_per_token=cfg.num_experts_per_token,
+        num_experts_per_token=cfg.top_k,
         warp_num_per_block=cfg.warp_num_per_block,
         block_num=cfg.block_num,
         gpu_per_node=world_size,
@@ -108,7 +108,7 @@ def run_accuracy_test(cfg, args, op_v2, op_ref, has_ref):
     rank   = cfg.rank
     ws     = cfg.world_size
     device = torch.device("cuda", rank)
-    k      = cfg.num_experts_per_token
+    k      = cfg.top_k
     n_exp  = ws * cfg.num_experts_per_rank
 
     if rank == 0:
@@ -269,7 +269,7 @@ def run_benchmark(cfg, args, op_v2, op_ref, has_ref):
     rank   = cfg.rank
     ws     = cfg.world_size
     device = torch.device("cuda", rank)
-    k      = cfg.num_experts_per_token
+    k      = cfg.top_k
 
     cur_tok = cfg.max_num_inp_token_per_rank
     n_exp   = ws * cfg.num_experts_per_rank
@@ -373,7 +373,7 @@ def _worker(rank, world_size, args, master_port):
         hidden_dim=args.hidden_dim,
         max_num_inp_token_per_rank=args.max_tokens,
         num_experts_per_rank=experts,
-        num_experts_per_token=args.k,
+        top_k=args.k,
         data_type=torch.bfloat16,
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
@@ -430,11 +430,11 @@ def _parse_args():
     p = argparse.ArgumentParser(
         description="FlyDSL v2 dispatch/combine IntraNode 精度 & 性能测试")
     p.add_argument("--mode", choices=["test", "bench", "both"], default="both")
-    p.add_argument("--world-size", type=int, default=2)
+    p.add_argument("--world-size", type=int, default=8)
     p.add_argument("--max-tokens", type=int, default=512)
-    p.add_argument("--hidden-dim", type=int, default=512)
+    p.add_argument("--hidden-dim", type=int, default=7168)
     p.add_argument("--num-experts", type=int, default=None)
-    p.add_argument("--k", type=int, default=4)
+    p.add_argument("--k", type=int, default=8)
     p.add_argument("--block-num", type=int, default=16)
     p.add_argument("--warp-per-block", type=int, default=4)
     p.add_argument("--chip", type=str, default="gfx942")
