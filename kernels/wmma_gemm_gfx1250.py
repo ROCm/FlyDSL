@@ -13,10 +13,7 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops,
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl._mlir.dialects import memref as memref_d
-from flydsl.expr.gpu import lds_space
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
-from flydsl._mlir.extras import types as mlir_T
 
 from kernels.layout_utils import crd2idx, idx2crd
 
@@ -25,6 +22,47 @@ WAVE_SIZE = 32
 
 LDS_PAD_A = 8
 LDS_PAD_B = 8
+
+_STAGE_NAMES = ("ping", "pong", "pang")
+
+
+def _make_tail_plan(num_buffers, pre_loaded, extra):
+    """Compute a compile-time tail execution plan for the N-stage pipeline.
+
+    Returns a list of (load_stage, compute_stage, outstanding) tuples, one per
+    tail step.  outstanding=-1 means "last step, use compute_tile (no barrier)".
+
+    Args:
+        num_buffers: total number of pipeline stages.
+        pre_loaded:  stages already loaded and ready to compute (= num_buffers - 1).
+        extra:       additional tiles that must be loaded in the tail.
+    """
+    steps = pre_loaded + extra
+    plan = []
+    for i in range(steps):
+        compute_stage = (
+            i if i < pre_loaded
+            else (i - pre_loaded + num_buffers - 1) % num_buffers
+        )
+        load_stage = (
+            (i + num_buffers - 1) % num_buffers if i < extra
+            else None
+        )
+        is_last = (i == steps - 1)
+        if is_last:
+            outstanding = -1
+        else:
+            j = i + 1
+            next_compute = (
+                j if j < pre_loaded
+                else (j - pre_loaded + num_buffers - 1) % num_buffers
+            )
+            outstanding = (
+                2 if (load_stage is not None and load_stage != next_compute)
+                else 0
+            )
+        plan.append((load_stage, compute_stage, outstanding))
+    return plan
 
 
 def compile_wmma_gemm_tdm(
@@ -55,7 +93,6 @@ def compile_wmma_gemm_tdm(
     _ = (M, N)
     if num_buffers not in (2, 3):
         raise ValueError(f"num_buffers must be 2 or 3, got {num_buffers}")
-    use_triple_buffer = num_buffers == 3
     if in_dtype not in ("fp16", "bf16"):
         raise ValueError(f"in_dtype must be 'fp16' or 'bf16', got {in_dtype!r}")
     is_f16 = in_dtype == "fp16"
@@ -110,43 +147,24 @@ def compile_wmma_gemm_tdm(
     # --- LDS allocation ---
     num_warps = m_warp * n_warp
 
-    if use_triple_buffer:
-        # Triple-buffer: 3 separate allocators (ping/pong/pang)
-        allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_ping")
-        allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_pong")
-        allocator_pang = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_pang")
+    stage_allocators = []
+    stage_a_offsets = []
+    stage_b_offsets = []
+    for i in range(num_buffers):
+        name = _STAGE_NAMES[i]
+        alloc = SmemAllocator(None, arch=gpu_arch, global_sym_name=f"wmma_tdm_{name}")
+        off = alloc._align(alloc.ptr, 16)
+        alloc.ptr = off + buf_size_elems * elem_bytes
+        stage_allocators.append(alloc)
+        stage_a_offsets.append(off)
+        stage_b_offsets.append(off + lds_a_elems * elem_bytes)
 
-        ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
-        allocator_ping.ptr = ping_offset + buf_size_elems * elem_bytes
-        pong_offset = allocator_pong._align(allocator_pong.ptr, 16)
-        allocator_pong.ptr = pong_offset + buf_size_elems * elem_bytes
-        pang_offset = allocator_pang._align(allocator_pang.ptr, 16)
-        allocator_pang.ptr = pang_offset + buf_size_elems * elem_bytes
-
-        lds_a_offset_ping = ping_offset
-        lds_b_offset_ping = ping_offset + lds_a_elems * elem_bytes
-        lds_a_offset_pong = pong_offset
-        lds_b_offset_pong = pong_offset + lds_a_elems * elem_bytes
-        lds_a_offset_pang = pang_offset
-        lds_b_offset_pang = pang_offset + lds_a_elems * elem_bytes
-
-        allocator_dbuf = None
-    else:
-        # Double-buffer: unified allocator with dynamic buffer selection
-        allocator_ping = None
-        allocator_pong = None
-        allocator_pang = None
-
-        allocator_dbuf = SmemAllocator(None, arch=gpu_arch, global_sym_name="wmma_tdm_dbuf")
-        _dbuf0_off = allocator_dbuf._align(allocator_dbuf.ptr, 16)
-        allocator_dbuf.ptr = _dbuf0_off + buf_size_elems * elem_bytes
-        _dbuf1_off = allocator_dbuf._align(allocator_dbuf.ptr, 16)
-        allocator_dbuf.ptr = _dbuf1_off + buf_size_elems * elem_bytes
-
-        lds_a_off_b0 = _dbuf0_off
-        lds_b_off_b0 = _dbuf0_off + lds_a_elems * elem_bytes
-        lds_a_off_b1 = _dbuf1_off
-        lds_b_off_b1 = _dbuf1_off + lds_a_elems * elem_bytes
+    # Compile-time pipeline parameters
+    pre_loaded = num_buffers - 1        # stages pre-loaded in prologue
+    loop_iters = (num_k_tiles - pre_loaded) // num_buffers
+    _tail_start = loop_iters * num_buffers  # index of first un-computed tile in tail
+    extra = num_k_tiles - _tail_start - pre_loaded
+    tail_plan = _make_tail_plan(num_buffers, pre_loaded, extra)
 
     @flyc.kernel
     def kernel_wmma_gemm_tdm(
@@ -160,7 +178,6 @@ def compile_wmma_gemm_tdm(
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
 
-        n_stride = arith.index_cast(T.index, i32_n.ir_value())
         blk_m = bx * arith.index(tile_m)
         blk_n = by * arith.index(tile_n)
 
@@ -177,13 +194,10 @@ def compile_wmma_gemm_tdm(
 
         elem_ty = _elem_type()
 
-        # --- Buffer resources ---
+        # --- Epilogue setup ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
-        a_nrec = m_idx * arith.index(K * elem_bytes)
-        b_nrec = n_stride * arith.index(K * elem_bytes)
-        c_nrec = m_idx * n_stride * arith.index(4)  # f32 output
-        a_rsrc = buffer_ops.create_buffer_resource(arg_a, num_records_bytes=a_nrec)
-        b_rsrc = buffer_ops.create_buffer_resource(arg_b, num_records_bytes=b_nrec)
+        n_stride = arith.index(N)
+        c_nrec = m_idx * n_stride * arith.index(4)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
         # --- TDM async copy helpers ---
@@ -361,147 +375,64 @@ def compile_wmma_gemm_tdm(
         acc_zero = arith.constant_vector(0.0, T.vec(8, T.f32))
         accs = [acc_zero] * n_accs
 
-        if use_triple_buffer:
-            # ====== Triple-buffer 3-stage pipeline ======
-            base_ptr_ping = allocator_ping.get_base()
-            base_ptr_pong = allocator_pong.get_base()
-            base_ptr_pang = allocator_pang.get_base()
+        # Build per-stage SmemPtrs (one per pipeline stage)
+        base_ptrs = [sa.get_base() for sa in stage_allocators]
+        stages_a = [
+            SmemPtr(base_ptrs[i], stage_a_offsets[i], elem_ty, shape=(lds_a_elems,))
+            for i in range_constexpr(num_buffers)
+        ]
+        stages_b = [
+            SmemPtr(base_ptrs[i], stage_b_offsets[i], elem_ty, shape=(lds_b_elems,))
+            for i in range_constexpr(num_buffers)
+        ]
+        stages_a_mem = [stages_a[i].get() for i in range_constexpr(num_buffers)]
+        stages_b_mem = [stages_b[i].get() for i in range_constexpr(num_buffers)]
 
-            lds_a_ping = SmemPtr(base_ptr_ping, lds_a_offset_ping, elem_ty, shape=(lds_a_elems,))
-            lds_a_pong = SmemPtr(base_ptr_pong, lds_a_offset_pong, elem_ty, shape=(lds_a_elems,))
-            lds_a_pang = SmemPtr(base_ptr_pang, lds_a_offset_pang, elem_ty, shape=(lds_a_elems,))
-            lds_b_ping = SmemPtr(base_ptr_ping, lds_b_offset_ping, elem_ty, shape=(lds_b_elems,))
-            lds_b_pong = SmemPtr(base_ptr_pong, lds_b_offset_pong, elem_ty, shape=(lds_b_elems,))
-            lds_b_pang = SmemPtr(base_ptr_pang, lds_b_offset_pang, elem_ty, shape=(lds_b_elems,))
+        # Prologue: load first (num_buffers - 1) tiles into stages 0..(num_buffers-2)
+        for i in range_constexpr(pre_loaded):
+            copy_a_to_lds(arith.index(i * tile_k), stages_a_mem[i])
+            copy_b_to_lds(arith.index(i * tile_k), stages_b_mem[i])
+        # Wait until stage[0] is ready; allow later-stage loads to still be in flight
+        # outstanding = 2 * (num_buffers - 2): 0 for double-buffer, 2 for triple-buffer
+        wait_and_barrier(outstanding=2 * (num_buffers - 2))
 
-            lds_a_ping_mem = lds_a_ping.get()
-            lds_a_pong_mem = lds_a_pong.get()
-            lds_a_pang_mem = lds_a_pang.get()
-            lds_b_ping_mem = lds_b_ping.get()
-            lds_b_pong_mem = lds_b_pong.get()
-            lds_b_pang_mem = lds_b_pang.get()
+        # Main loop: each iteration covers (num_buffers) K-tiles
+        # Sub-phase s: load the "next" tile, compute the "current" tile, then barrier
+        #   load_stage  = (s + num_buffers - 1) % num_buffers
+        #   load_offset = iv + (s + num_buffers - 1) * tile_k
+        #   compute stage[s]
+        main_end = loop_iters * num_buffers * tile_k
 
-            # Prologue: load first 2 tiles
-            copy_b_to_lds(arith.index(0), lds_b_pong_mem)
-            copy_a_to_lds(arith.index(0), lds_a_pong_mem)
-            copy_b_to_lds(arith.index(tile_k), lds_b_ping_mem)
-            copy_a_to_lds(arith.index(tile_k), lds_a_ping_mem)
-            wait_and_barrier(outstanding=2)
-
-            _safe_iters = max(0, num_k_tiles - 2) // 3
-            _tiles_in_loop = _safe_iters * 3
-            _tail_start = _tiles_in_loop
-            _n_tail = num_k_tiles - _tail_start
-            safe_loop_bound = _safe_iters * 3 * tile_k
-
-            if _safe_iters > 0:
-                for iv, state in range(0, safe_loop_bound, tile_k * 3, init=list(accs)):
-                    accs_in = list(state)
-
-                    copy_a_to_lds(iv + arith.index(tile_k * 2), lds_a_pang_mem)
-                    copy_b_to_lds(iv + arith.index(tile_k * 2), lds_b_pang_mem)
-                    _l2_prefetch(iv)
-                    accs_in = _compute_and_schedule(accs_in, lds_a_pong, lds_b_pong)
+        if loop_iters > 0:
+            for iv, state in range(0, main_end, num_buffers * tile_k, init=list(accs)):
+                accs_in = list(state)
+                for s in range_constexpr(num_buffers):
+                    _load_stage = (s + num_buffers - 1) % num_buffers
+                    _load_k_off = (s + num_buffers - 1) * tile_k
+                    copy_a_to_lds(iv + arith.index(_load_k_off), stages_a_mem[_load_stage])
+                    copy_b_to_lds(iv + arith.index(_load_k_off), stages_b_mem[_load_stage])
+                    _l2_prefetch(iv + arith.index(s * tile_k))
+                    accs_in = _compute_and_schedule(accs_in, stages_a[s], stages_b[s])
                     wait_and_barrier(outstanding=2)
+                results = yield list(accs_in)
+            accs = list(results)
 
-                    copy_a_to_lds(iv + arith.index(tile_k * 3), lds_a_pong_mem)
-                    copy_b_to_lds(iv + arith.index(tile_k * 3), lds_b_pong_mem)
-                    _l2_prefetch(iv + arith.index(tile_k))
-                    accs_in = _compute_and_schedule(accs_in, lds_a_ping, lds_b_ping)
-                    wait_and_barrier(outstanding=2)
-
-                    copy_a_to_lds(iv + arith.index(tile_k * 4), lds_a_ping_mem)
-                    copy_b_to_lds(iv + arith.index(tile_k * 4), lds_b_ping_mem)
-                    _l2_prefetch(iv + arith.index(tile_k * 2))
-                    accs_in = _compute_and_schedule(accs_in, lds_a_pang, lds_b_pang)
-                    wait_and_barrier(outstanding=2)
-
-                    results = yield list(accs_in)
-                accs = list(results)
-
-            t0 = _tail_start
-            if _n_tail == 2:
-                accs = _compute_and_schedule(accs, lds_a_pong, lds_b_pong)
-                wait_and_barrier(outstanding=0)
-                accs = compute_tile(accs, lds_a_ping, lds_b_ping)
-            elif _n_tail == 3:
-                copy_a_to_lds(arith.index((t0 + 2) * tile_k), lds_a_pang_mem)
-                copy_b_to_lds(arith.index((t0 + 2) * tile_k), lds_b_pang_mem)
-                accs = _compute_and_schedule(accs, lds_a_pong, lds_b_pong)
-                wait_and_barrier(outstanding=2)
-                accs = _compute_and_schedule(accs, lds_a_ping, lds_b_ping)
-                wait_and_barrier(outstanding=0)
-                accs = compute_tile(accs, lds_a_pang, lds_b_pang)
-            elif _n_tail == 4:
-                copy_a_to_lds(arith.index((t0 + 2) * tile_k), lds_a_pang_mem)
-                copy_b_to_lds(arith.index((t0 + 2) * tile_k), lds_b_pang_mem)
-                accs = _compute_and_schedule(accs, lds_a_pong, lds_b_pong)
-                wait_and_barrier(outstanding=2)
-                copy_a_to_lds(arith.index((t0 + 3) * tile_k), lds_a_pong_mem)
-                copy_b_to_lds(arith.index((t0 + 3) * tile_k), lds_b_pong_mem)
-                accs = _compute_and_schedule(accs, lds_a_ping, lds_b_ping)
-                wait_and_barrier(outstanding=2)
-                accs = _compute_and_schedule(accs, lds_a_pang, lds_b_pang)
-                wait_and_barrier(outstanding=0)
-                accs = compute_tile(accs, lds_a_pong, lds_b_pong)
+        # Tail: handle remaining tiles using the compile-time plan
+        # Each plan step: optionally load one tile, compute one stage, then wait.
+        # outstanding=-1 → last step: use compute_tile (no barrier).
+        _extra_j = 0
+        for _load_stage, _compute_stage, _outstanding in tail_plan:
+            if _load_stage is not None:
+                _k_off = (_tail_start + pre_loaded + _extra_j) * tile_k
+                copy_a_to_lds(arith.index(_k_off), stages_a_mem[_load_stage])
+                copy_b_to_lds(arith.index(_k_off), stages_b_mem[_load_stage])
+                _extra_j += 1
+            if _outstanding == -1:
+                accs = compute_tile(accs, stages_a[_compute_stage], stages_b[_compute_stage])
             else:
-                raise RuntimeError(f"Unexpected _n_tail={_n_tail}")
-
-        else:
-            # ====== Double-buffer 2-stage SCF pipeline ======
-            base_uni = allocator_dbuf.get_base()
-            _a_vtype = mlir_T.memref(lds_a_elems, elem_ty, memory_space=lds_space())
-            _b_vtype = mlir_T.memref(lds_b_elems, elem_ty, memory_space=lds_space())
-
-            def _mk_a_view(off_val):
-                return memref_d.view(_a_vtype, base_uni, off_val, sizes=[])
-            def _mk_b_view(off_val):
-                return memref_d.view(_b_vtype, base_uni, off_val, sizes=[])
-
-            c_a0 = arith.index(lds_a_off_b0)
-            c_b0 = arith.index(lds_b_off_b0)
-            c_a1 = arith.index(lds_a_off_b1)
-            c_b1 = arith.index(lds_b_off_b1)
-
-            # Prologue: load k=0 → buf0
-            copy_a_to_lds(arith.index(0), _mk_a_view(c_a0))
-            copy_b_to_lds(arith.index(0), _mk_b_view(c_b0))
-            wait_and_barrier()
-
-            # Main loop: each iteration loads NEXT tile, computes CURRENT
-            main_end = (num_k_tiles - 1) * tile_k
-            init_st = list(accs) + [arith.index(0)]
-
-            for iv, state in range(0, main_end, tile_k, init=init_st):
-                accs_in = list(state[:n_accs])
-                buf_flag = state[n_accs]
-                is_buf0 = arith.cmpi(arith.CmpIPredicate.eq, buf_flag, arith.index(0))
-
-                comp_a = arith.select(is_buf0, c_a0, c_a1)
-                comp_b = arith.select(is_buf0, c_b0, c_b1)
-                load_a = arith.select(is_buf0, c_a1, c_a0)
-                load_b = arith.select(is_buf0, c_b1, c_b0)
-
-                next_k = iv + arith.index(tile_k)
-                copy_a_to_lds(next_k, _mk_a_view(load_a))
-                copy_b_to_lds(next_k, _mk_b_view(load_b))
-                _l2_prefetch(iv)
-
-                accs_in = compute_tile(accs_in, _mk_a_view(comp_a), _mk_b_view(comp_b))
-                hot_loop_scheduler()
-                wait_and_barrier(outstanding=2)
-
-                next_flag = arith.select(is_buf0, arith.index(1), arith.index(0))
-                results = yield list(accs_in) + [next_flag]
-
-            accs = list(results[:n_accs])
-            last_flag = results[n_accs]
-
-            # Tail: compute the last loaded tile
-            is_last_b0 = arith.cmpi(arith.CmpIPredicate.eq, last_flag, arith.index(0))
-            tail_a = arith.select(is_last_b0, c_a0, c_a1)
-            tail_b = arith.select(is_last_b0, c_b0, c_b1)
-            accs = compute_tile(accs, _mk_a_view(tail_a), _mk_b_view(tail_b))
+                accs = _compute_and_schedule(
+                    accs, stages_a[_compute_stage], stages_b[_compute_stage])
+                wait_and_barrier(outstanding=_outstanding)
 
         epilogue(accs)
 
@@ -520,16 +451,10 @@ def compile_wmma_gemm_tdm(
         _ = cache_tag
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
-            if use_triple_buffer:
-                allocator_ping.finalized = False
-                allocator_pong.finalized = False
-                allocator_pang.finalized = False
-                allocator_ping.finalize()
-                allocator_pong.finalize()
-                allocator_pang.finalize()
-            else:
-                allocator_dbuf.finalized = False
-                allocator_dbuf.finalize()
+            for alloc in stage_allocators:
+                alloc.finalized = False
+            for alloc in stage_allocators:
+                alloc.finalize()
 
         idx_m = arith.index_cast(T.index, i32_m.ir_value())
         idx_n = arith.index_cast(T.index, i32_n.ir_value())
