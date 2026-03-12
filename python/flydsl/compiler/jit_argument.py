@@ -111,13 +111,17 @@ def convert_to_jit_arguments(
                     f"No DslType registered for JitArgument type {type(value).__name__} (parameter '{param_name}')"
                 )
         else:
-            jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
-            if jit_arg_constructor is None:
-                raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
-            try:
-                jit_arg = jit_arg_constructor(value)
-            except Exception as e:
-                raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
+            if isinstance(value, int) and annotation is Stream:
+                jit_arg = Stream(value)
+                dsl_type = Stream
+            else:
+                jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
+                if jit_arg_constructor is None:
+                    raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
+                try:
+                    jit_arg = jit_arg_constructor(value)
+                except Exception as e:
+                    raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
 
         param_names.append(param_name)
         jit_args.append(jit_arg)
