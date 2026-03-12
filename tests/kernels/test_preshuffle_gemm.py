@@ -104,7 +104,7 @@ def test_mfma_a8_flyc_preshuffle(
     lds_stage = int(lds_stage)
     if lds_stage not in (1, 2):
         raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage!r}")
-    torch_out_dtype = torch.float16
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
@@ -112,6 +112,7 @@ def test_mfma_a8_flyc_preshuffle(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         use_async_copy=bool(use_async_copy),
