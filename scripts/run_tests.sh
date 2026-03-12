@@ -34,6 +34,7 @@ echo "========================================================================"
 python3 -m pytest \
     tests/kernels/ \
     tests/pyir/ \
+    tests/unit/ \
     tests/python/examples/ \
     "${pytest_args[@]}"
 
