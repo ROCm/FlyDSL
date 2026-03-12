@@ -34,6 +34,7 @@ from kernels.mfma_preshuffle_pipeline import (
     lds_load_pack_k32,
     lds_store_16b_xor16,
     make_preshuffle_b_layout,
+    make_preshuffle_scale_layout,
     load_b_pack_k32,
     tile_chunk_coord_i32,
     swizzle_xor16,
@@ -41,35 +42,6 @@ from kernels.mfma_preshuffle_pipeline import (
 )
 from kernels.mfma_epilogues import mfma_epilog
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
-
-def make_preshuffle_scale_layout(
-    arith_mod,
-    *,
-    c_mn: ir.Value,
-    c_k: ir.Value,
-    mn_pack: int = 2,
-    k_pack: int = 2,
-    elem_bytes: int = 4,
-    scale_block_size: int = 32,
-):
-    """Compatibility helper: scale preshuffle layout used by mixed FP4 kernels."""
-    c16 = arith_mod.constant(16, index=True)
-    c4 = arith_mod.constant(4, index=True)
-    c_mn_pack = arith_mod.constant(mn_pack, index=True)
-    c_k_pack = arith_mod.constant(k_pack, index=True)
-    c_k_scale = c_k // scale_block_size
-
-    c_mn1 = c_mn // c16 // c_mn_pack
-    c_k1 = c_k_scale // c4 // c_k_pack
-    if elem_bytes != mn_pack * k_pack:
-        raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
-
-    stride_nlane = arith_mod.constant(1, index=True)
-    stride_klane = c16
-    stride_k0 = c4 * stride_klane
-    stride_n0 = c_k1 * stride_k0
-    stride_b_scale = (stride_n0, stride_k0, stride_klane, stride_nlane)
-    return fx.make_layout((c_mn1, c_k1, c4, c16), stride=stride_b_scale)
 
 
 @functools.lru_cache(maxsize=None)
@@ -429,9 +401,10 @@ def compile_mxfp4_preshuffle_gemm(
                     b_tile.append((packs0, packs1))
                 return b_tile
 
-            def load_scale(arg_scale, rsrc, layout, ku, mni):
+            def load_scale(arg_scale, rsrc, scale_layout, ku, mni):
                 k_lane = lane_div_16
                 n_lane = lane_mod_16
+                layout = scale_layout.layout_scale if hasattr(scale_layout, 'layout_scale') else scale_layout
                 coord_pack = fx.make_coord(mni, ku, k_lane, n_lane)
                 idx_pack = crd2idx(coord_pack, layout)
                 scale_i32 = buffer_ops.buffer_load(rsrc, idx_pack, vec_width=1, dtype=T.i32)

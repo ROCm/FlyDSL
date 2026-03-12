@@ -18,82 +18,34 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
-# Compatibility: FlyDSL2 doesn't have these functions
-def supports_bf16_global_atomics(arch):
-    return True  # Assume supported for now
-
-def bf16_global_atomics_arch_description():
-    return "bf16 atomics enabled"
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl._mlir import ir
 from flydsl.expr.typing import T
 
-# FlyDSL2 imports
 from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
 from flydsl._mlir.dialects import llvm, scf, memref
 from flydsl._mlir.dialects.arith import CmpIPredicate
 
 from kernels.mfma_preshuffle_pipeline import (
+    _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
-    lds_load_pack_k32,
-    lds_store_4b_xor16,
-    lds_store_8b_xor16,
     lds_store_16b_xor16,
+    lds_store_8b_xor16,
+    lds_store_4b_xor16,
     make_preshuffle_b_layout,
+    make_preshuffle_scale_layout,
+    PreshuffleScaleLayout,
     load_b_pack_k32,
     tile_chunk_coord_i32,
     swizzle_xor16,
 )
-from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
+from kernels.mfma_epilogues import c_shuffle_epilog, mfma_epilog
 from kernels.kernels_common import stream_ptr_to_async_token
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 import functools
-
-class ScaleLayoutInfo:
-    """Preshuffle scale layout with stride values for direct arith crd2idx.
-
-    The layout is (c_mn1, c_k1, 4, 16) : (stride_n0, stride_k0, stride_klane, 1).
-    Instead of going through fly.crd2idx (which returns i32 IntTuple and causes
-    type/domination issues), callers can compute flat index directly:
-        idx = mni * stride_n0 + ku * stride_k0 + k_lane * stride_klane + n_lane
-    """
-    __slots__ = ("stride_n0", "stride_k0", "stride_klane")
-
-    def __init__(self, stride_n0, stride_k0, stride_klane):
-        self.stride_n0 = stride_n0          # index-typed MLIR value (dynamic)
-        self.stride_k0 = stride_k0          # index-typed MLIR value (= 64)
-        self.stride_klane = stride_klane     # index-typed MLIR value (= 16)
-
-
-def make_preshuffle_scale_layout(
-    arith_mod,
-    *,
-    c_mn: ir.Value,
-    c_k: ir.Value,
-    mn_pack: int = 2,
-    k_pack: int = 2,
-    elem_bytes: int = 4,
-    scale_block_size: int = 32,
-):
-    c16 = arith_mod.constant(16, index=True)
-    c4 = arith_mod.constant(4, index=True)
-    c_mn_pack = arith_mod.constant(mn_pack, index=True)
-    c_k_pack = arith_mod.constant(k_pack, index=True)
-    c_k_scale = c_k / scale_block_size
-
-    c_mn1 = c_mn / c16 / c_mn_pack
-    c_k1 = c_k_scale / c4 / c_k_pack
-    if elem_bytes != mn_pack * k_pack:
-        raise ValueError(f"elem_bytes of scale must be {mn_pack} * {k_pack}, got {elem_bytes!r}")
-
-    stride_nlane = arith_mod.constant(1, index=True)
-    stride_klane = c16
-    stride_k0 = c4 * stride_klane
-    stride_n0 = c_k1 * stride_k0
-    return ScaleLayoutInfo(stride_n0=stride_n0, stride_k0=stride_k0, stride_klane=stride_klane)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1360,11 +1312,6 @@ def compile_mixed_moe_gemm2(
     _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
-    if out_is_bf16:
-        if not supports_bf16_global_atomics(gpu_arch):
-            raise ValueError(
-                f"out_dtype='bf16' requires bf16 global atomics ({bf16_global_atomics_arch_description()}), got arch={gpu_arch!r}"
-            )
 
     if out_is_f32:
         # Match origin/dev_a16w4: f32 output uses scalar atomics and does NOT use the CShuffle epilogue.
@@ -1681,16 +1628,29 @@ def compile_mixed_moe_gemm2(
                 expert_off_idx = expert_idx * n_idx  # index
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                # Keep a fixed 16B gmem->reg schedule (dwordx4) to match preshuffle_gemm_flyc.py.
-                if bytes_per_thread_x % 16 != 0:
-                    raise ValueError(
-                        f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
-                    )
-                x_load_bytes = 16
+                # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
+                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                if is_f16_a:
+                    if bytes_per_thread_x % 16 != 0:
+                        raise ValueError(
+                            f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
+                        )
+                    x_load_bytes = 16
+                else:
+                    if bytes_per_thread_x % 16 == 0:
+                        x_load_bytes = 16
+                    elif bytes_per_thread_x % 8 == 0:
+                        x_load_bytes = 8
+                    elif bytes_per_thread_x % 4 == 0:
+                        x_load_bytes = 4
+                    else:
+                        raise ValueError(
+                            f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
+                        )
                 num_x_loads = bytes_per_thread_x // x_load_bytes
                 chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
                 vec4_i32 = T.vec(4, i32)
-    
+
                 c_k_div4 = ((k_in / c_a_pack) * arith.constant(int(a_elem_bytes), index=True)) / arith.index(4)
                 c_k_div4_i32 = arith.index_cast(T.i32, c_k_div4)
                 layout_x_div4 = fx.make_layout((m_i32_v, c_k_div4_i32), stride=(c_k_div4_i32, 1))
@@ -1717,16 +1677,29 @@ def compile_mixed_moe_gemm2(
                 vec1_i32 = T.vec(1, i32)
                 vec2_i32 = T.vec(2, i32)
                 vec4_x = T.vec(4, x_elem)
-    
+                x_load_vec_elems = x_load_bytes if a_elem_bytes == 1 else x_load_bytes // a_elem_bytes
+
                 def load_x(idx_i32):
-                    idx_elem = idx_i32 if a_elem_bytes == 1 else (idx_i32 * arith.index(2))
-                    return buffer_copy_gmem16_dwordx4(
-                        buffer_ops,
-                        vector,
-                        elem_type=x_elem,
-                        idx_i32=idx_elem,
-                        rsrc=x_rsrc,
-                        vec_elems=vec16_elems,
+                    """Load `x_load_bytes` bytes from X (gmem) into regs.
+
+                    For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
+                    """
+                    if x_load_bytes == 16:
+                        idx_elem = idx_i32 if a_elem_bytes == 1 else (idx_i32 * arith.index(2))
+                        return buffer_copy_gmem16_dwordx4(
+                            buffer_ops,
+                            vector,
+                            elem_type=x_elem,
+                            idx_i32=idx_elem,
+                            rsrc=x_rsrc,
+                            vec_elems=vec16_elems,
+                        )
+                    # 8B/4B: convert dword index to byte offset and use offset_in_bytes path.
+                    idx_bytes = idx_i32 * arith.index(4)
+                    return _buffer_load_vec(
+                        buffer_ops, vector, x_rsrc, idx_bytes,
+                        elem_type=x_elem, vec_elems=x_load_vec_elems,
+                        elem_bytes=a_elem_bytes, offset_in_bytes=True,
                     )
     
                 # decode routed token once (per thread's M-slice) and build a base offset.
@@ -1824,40 +1797,25 @@ def compile_mixed_moe_gemm2(
     
                 # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
                 def load_b_packs_k64(base_k, ku: int, ni: int):
-                    b0 = load_b_pack_k32(
-                        buffer_ops,
-                        arith,
-                        vector,
-                        arg_b=arg_w,
-                        b_rsrc=w_rsrc,
-                        layout_b=layout_b,
-                        base_k=base_k,
-                        ki_step=ku * 2,
-                        n_blk=n_blk_list[ni],
-                        n_intra=n_intra_list[ni],
-                        lane_div_16=lane_div_16,
-                        elem_type=_w_elem_type(),
-                        kpack_bytes=kpack_bytes,
+                    """Load one K64-byte B micro-step: single 16B load, split into 2x i64."""
+                    c64 = arith.constant(64, index=True)
+                    base_k_bytes = base_k * arith.constant(int(b_elem_bytes), index=True)
+                    k0_base = base_k_bytes // c64
+                    k0 = k0_base + arith.constant(ku, index=True)
+                    k1 = lane_div_16
+                    coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], arith.constant(0, index=True))
+                    idx_pack = crd2idx(coord_pack, layout_b)
+
+                    vec_elems = kpack_bytes // int(b_elem_bytes)
+                    b16 = _buffer_load_vec(
+                        buffer_ops, vector, w_rsrc, idx_pack,
+                        elem_type=_w_elem_type(), vec_elems=vec_elems,
                         elem_bytes=b_elem_bytes,
-                        unpack_int4=bool(is_int4),
+                        offset_in_bytes=(b_elem_bytes == 1),
                     )
-                    b1 = load_b_pack_k32(
-                        buffer_ops,
-                        arith,
-                        vector,
-                        arg_b=arg_w,
-                        b_rsrc=w_rsrc,
-                        layout_b=layout_b,
-                        base_k=base_k,
-                        ki_step=ku * 2 + 1,
-                        n_blk=n_blk_list[ni],
-                        n_intra=n_intra_list[ni],
-                        lane_div_16=lane_div_16,
-                        elem_type=_w_elem_type(),
-                        kpack_bytes=kpack_bytes,
-                        elem_bytes=b_elem_bytes,
-                        unpack_int4=bool(is_int4),
-                    )
+                    b_i64x2 = vector.bitcast(vec2_i64, b16)
+                    b0 = vector.extract(b_i64x2, static_position=[0], dynamic_position=[])
+                    b1 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
                     return b0, b1
 
                 def load_b_tile(base_k):
@@ -1911,6 +1869,9 @@ def compile_mixed_moe_gemm2(
                 def prefetch_ab_scale_tile(base_k):
                     return [load_a_scale_tile(base_k), load_b_scale_tile(base_k)]
     
+                vec8_x = T.vec(vec8_elems, x_elem)
+                vec4_x_lds = T.vec(vec4_elems, x_elem)
+
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
@@ -1929,6 +1890,36 @@ def compile_mixed_moe_gemm2(
                                 k_blocks16=k_blocks16,
                                 lds_base=lds_base,
                                 vec_part_i32x4=vec_x_in_parts[i],
+                                elem_bytes=elem_bytes,
+                            )
+                        elif x_load_bytes == 8:
+                            lds_store_8b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec8_ty=vec8_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=arith.index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x2=vec_x_in_parts[i],
+                                elem_bytes=elem_bytes,
+                            )
+                        else:  # x_load_bytes == 4
+                            lds_store_4b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec4_ty=vec4_x_lds,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=arith.index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x1=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
 
@@ -1989,8 +1980,6 @@ def compile_mixed_moe_gemm2(
                         return vector.bitcast(vec8_i32, v4)
 
                     # fp4 path
-                    force_tilek256_schedule = (not is_f8_a) and (tile_k == 256) and (pack_M == 2) and (pack_K == 2)
-
                     for ku128 in range_constexpr(k_unroll_packed):
                         for mi in range_constexpr(m_repeat_packed):
                             a_scale_i32 = a_scale[ku128 * m_repeat_packed + mi]
@@ -2005,119 +1994,47 @@ def compile_mixed_moe_gemm2(
 
                                     col_base = col_offset_base + (k_idx * 128) // a_elem_vec_pack
 
-                                    if force_tilek256_schedule:
-                                        # Software pipelining: load BOTH M rows from LDS
-                                        # before issuing any MFMA, so MFMA execution (~64 cycles)
-                                        # covers the LDS read latency (~30 cycles).
-                                        mi_idx0 = mi * pack_M
-                                        mi_idx1 = mi_idx0 + 1
+                                    for imxdl in range_constexpr(pack_M):
+                                        col_base0 = col_base
+                                        mi_idx = mi * pack_M + imxdl
+                                        mi_val = arith.constant(mi_idx * 16, index=True)
+                                        curr_row_a_lds = row_a_lds + mi_val
 
-                                        mi0_val = arith.constant(mi_idx0 * 16, index=True)
-                                        mi1_val = arith.constant(mi_idx1 * 16, index=True)
-                                        curr_row0_a_lds = row_a_lds + mi0_val
-                                        curr_row1_a_lds = row_a_lds + mi1_val
-
-                                        # Load both rows from LDS before any MFMA
-                                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx0 == 0):
-                                            a0_0, a0_1 = a0_prefetch
+                                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
+                                            a0, a1 = a0_prefetch
                                         else:
-                                            a0_0, a0_1 = lds_load_packs_k64(curr_row0_a_lds, col_base, lds_base)
-                                        a1_0, a1_1 = lds_load_packs_k64(curr_row1_a_lds, col_base, lds_base)
+                                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
 
-                                        a128_0 = pack_i64x4_to_i32x8(a0_0, a0_1, c0_i64, c0_i64)
-                                        a128_1 = pack_i64x4_to_i32x8(a1_0, a1_1, c0_i64, c0_i64)
+                                        if is_f8_a:
+                                            col_base1 = col_base + 64
+                                            a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
+                                            a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
+                                        else:
+                                            a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
 
-                                        # Keep the two LDS reads before MFMA issue
-                                        rocdl.sched_barrier(0)
-
-                                        # Issue all MFMAs for row 0
                                         for inxdl in range_constexpr(pack_N):
                                             ni_idx = ni * pack_N + inxdl
+
                                             b0 = b_packs0[ni_idx]
                                             b1 = b_packs1[ni_idx]
                                             b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
 
-                                            acc_idx0 = mi_idx0 * num_acc_n + ni_idx
-                                            acc_list[acc_idx0] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                            acc_idx = mi_idx * num_acc_n + ni_idx
+                                            rocdl.sched_barrier(0)
+                                            acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                                                 mfma_res_ty,
                                                 [
-                                                    a128_0,
+                                                    a128,
                                                     b128,
-                                                    acc_list[acc_idx0],
+                                                    acc_list[acc_idx],
                                                     cbsz,
                                                     blgp,
-                                                    ikxdl * pack_M + 0,
+                                                    ikxdl * pack_M + imxdl,
                                                     a_scale_val,
                                                     ikxdl * pack_N + inxdl,
                                                     b_scale_val,
                                                 ],
                                             )
-
-                                        # Issue all MFMAs for row 1
-                                        for inxdl in range_constexpr(pack_N):
-                                            ni_idx = ni * pack_N + inxdl
-                                            b0 = b_packs0[ni_idx]
-                                            b1 = b_packs1[ni_idx]
-                                            b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-
-                                            acc_idx1 = mi_idx1 * num_acc_n + ni_idx
-                                            acc_list[acc_idx1] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                                mfma_res_ty,
-                                                [
-                                                    a128_1,
-                                                    b128,
-                                                    acc_list[acc_idx1],
-                                                    cbsz,
-                                                    blgp,
-                                                    ikxdl * pack_M + 1,
-                                                    a_scale_val,
-                                                    ikxdl * pack_N + inxdl,
-                                                    b_scale_val,
-                                                ],
-                                            )
-
-                                    else:
-                                        for imxdl in range_constexpr(pack_M):
-                                            col_base0 = col_base
-                                            mi_idx = mi * pack_M + imxdl
-                                            mi_val = arith.constant(mi_idx * 16, index=True)
-                                            curr_row_a_lds = row_a_lds + mi_val
-
-                                            if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
-                                                a0, a1 = a0_prefetch
-                                            else:
-                                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base0, lds_base)
-
-                                            if is_f8_a:
-                                                col_base1 = col_base + 64
-                                                a2, a3 = lds_load_packs_k64(curr_row_a_lds, col_base1, lds_base)
-                                                a128 = pack_i64x4_to_i32x8(a0, a1, a2, a3)
-                                            else:
-                                                a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
-
-                                            for inxdl in range_constexpr(pack_N):
-                                                ni_idx = ni * pack_N + inxdl
-
-                                                b0 = b_packs0[ni_idx]
-                                                b1 = b_packs1[ni_idx]
-                                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-
-                                                acc_idx = mi_idx * num_acc_n + ni_idx
-                                                rocdl.sched_barrier(0)
-                                                acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                                    mfma_res_ty,
-                                                    [
-                                                        a128,
-                                                        b128,
-                                                        acc_list[acc_idx],
-                                                        cbsz,
-                                                        blgp,
-                                                        ikxdl * pack_M + imxdl,
-                                                        a_scale_val,
-                                                        ikxdl * pack_N + inxdl,
-                                                        b_scale_val,
-                                                    ],
-                                                )
 
                     return acc_list, epilogue_pf
 
@@ -2287,14 +2204,10 @@ def compile_mixed_moe_gemm2(
                 if epilogue_pf is not None:
                     sw_pf, tw_pf, bias_pf = epilogue_pf
 
-                expert_off = expert_off_idx
                 mask24_i32 = arith.constant(0xFFFFFF)
-                model_i32 = arith.constant(model_dim)
                 topk_i32_v = topk_i32
     
                 zero_i32 = arith.constant(0)
-                c2_i32 = arith.constant(2)  # 2B element size for f16/bf16
-                mask_even_i32 = arith.constant(0xFFFFFFFE)  # align element index to even for half2 atomics
     
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
                     rocdl.raw_ptr_buffer_atomic_fadd(
