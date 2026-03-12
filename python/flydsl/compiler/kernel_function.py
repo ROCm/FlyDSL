@@ -301,9 +301,47 @@ class KernelFunction:
 
     def __init__(self, func: Callable, some_args=None):
         self._func = ASTRewriter.transform(func)
+        self._transform_referenced_helpers(self._func)
         self._some_args = some_args
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
+
+    def _transform_referenced_helpers(self, func: Callable) -> None:
+        """Recursively transform Python helpers referenced by kernel code.
+
+        Kernel bodies can call plain Python helper functions. Those helpers need
+        the same AST rewrite (e.g. range -> scf_range) to support dynamic DSL
+        values.
+        """
+        visited = set()
+        owner_module = getattr(func, "__module__", None)
+
+        def _walk(f: Callable):
+            fid = id(f)
+            if fid in visited:
+                return
+            visited.add(fid)
+
+            for name in f.__code__.co_names:
+                target = f.__globals__.get(name, None)
+                if not inspect.isfunction(target):
+                    continue
+                if target is f:
+                    continue
+                # Only rewrite user helper functions defined in the same module
+                # as the kernel function. This avoids transforming runtime
+                # rewrite helpers injected by ASTRewriter itself.
+                if getattr(target, "__module__", None) != owner_module:
+                    continue
+                try:
+                    ASTRewriter.transform(target)
+                except Exception:
+                    # Best effort: if a helper cannot be transformed (e.g.
+                    # source unavailable), keep existing behavior.
+                    continue
+                _walk(target)
+
+        _walk(func)
 
     @staticmethod
     def _is_constexpr_annotation(annotation) -> bool:
