@@ -301,13 +301,14 @@ def compile_wmma_gemm_tdm(
             return accs
 
         # --- Compute on one LDS buffer (K-subtile pipelined) ---
-        def compute_tile(accs_in, lds_a_ptr, lds_b_ptr):
-            rocdl.sched_barrier(0)
+        def compute_tile(accs_in, lds_a_ptr, lds_b_ptr, emit_filler=None):
             current_accs = list(accs_in)
 
             if k_wmma_steps == 1:
                 a_frags, b_frags = load_k_subtile_frags(lds_a_ptr, lds_b_ptr, 0)
                 rocdl.s_wait_dscnt(0)
+                if emit_filler is not None:
+                    emit_filler()
                 current_accs = do_k_subtile_wmma(a_frags, b_frags, current_accs)
             else:
                 # Prologue: batch-load K-subtile 0
@@ -321,8 +322,10 @@ def compile_wmma_gemm_tdm(
                     current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
                     prev_a, prev_b = next_a, next_b
 
-                # Epilogue: wait for last subtile, then compute
                 rocdl.s_wait_dscnt(0)
+                if emit_filler is not None:
+                    rocdl.sched_barrier(0)
+                    emit_filler()
                 current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
 
             return current_accs
@@ -332,23 +335,35 @@ def compile_wmma_gemm_tdm(
             rocdl.sched_barrier(0)
 
         # --- Epilogue: vectorized buffer_store_b128 ---
-        def epilogue(final_accs):
+        def epilogue_prepare_addrs():
+            """Precompute all epilogue store addresses (VALU only, no stores). """
+            addrs = []
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
-                    idx = wm * wmma_n_rep + wn
                     row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
                     col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
                                 + lane_kgrp * arith.index(8))
                     for half in range_constexpr(2):
                         col = col_base + arith.index(half * 4)
                         c_off = row * n_stride + col
+                        addrs.append(c_off)
+            return addrs
+
+        def epilogue_stores(final_accs, addrs):
+            """Execute buffer_store using precomputed addresses."""
+            addr_idx = 0
+            for wm in range_constexpr(wmma_m_rep):
+                for wn in range_constexpr(wmma_n_rep):
+                    idx = wm * wmma_n_rep + wn
+                    for half in range_constexpr(2):
                         vals = [vector.extract(
                             final_accs[idx],
                             static_position=[half * 4 + vi],
                             dynamic_position=[])
                             for vi in range_constexpr(4)]
                         vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                        buffer_ops.buffer_store(vec4, c_rsrc, c_off)
+                        buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
+                        addr_idx += 1
 
         # --- Pipeline helpers ---
         def wait_and_barrier(outstanding=0):
@@ -356,6 +371,7 @@ def compile_wmma_gemm_tdm(
             gpu.barrier()
 
         def _compute_and_schedule(accs_in, lds_a, lds_b):
+            rocdl.sched_barrier(0)
             accs_out = compute_tile(accs_in, lds_a, lds_b)
             hot_loop_scheduler()
             return accs_out
@@ -428,13 +444,20 @@ def compile_wmma_gemm_tdm(
                 copy_b_to_lds(arith.index(_k_off), stages_b_mem[_load_stage])
                 _extra_j += 1
             if _outstanding == -1:
-                accs = compute_tile(accs, stages_a[_compute_stage], stages_b[_compute_stage])
+                epi_addrs_box = [None]
+
+                def _emit_epi_addrs():
+                    epi_addrs_box[0] = epilogue_prepare_addrs()
+
+                accs = compute_tile(
+                    accs, stages_a[_compute_stage], stages_b[_compute_stage],
+                    emit_filler=_emit_epi_addrs)
             else:
                 accs = _compute_and_schedule(
                     accs, stages_a[_compute_stage], stages_b[_compute_stage])
                 wait_and_barrier(outstanding=_outstanding)
 
-        epilogue(accs)
+        epilogue_stores(accs, epi_addrs_box[0])
 
     cache_tag = (in_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                  num_buffers, waves_per_eu, l2_prefetch_distance)
