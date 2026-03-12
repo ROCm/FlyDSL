@@ -1611,6 +1611,10 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
   case MmaOperand::D:
     elemTy = mmaAtom.getValTypeD();
     break;
+  default:
+    return emitOptionalError(location,
+                             "MmaMakeFragmentOp: invalid operand_id value: ",
+                             operandId);
   }
 
   auto inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
