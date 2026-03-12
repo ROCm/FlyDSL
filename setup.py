@@ -300,7 +300,10 @@ def _auditwheel_repair_in_place(wheel_path: Path, dist_dir: Path) -> None:
     # MLIR install prefix, if available) to LD_LIBRARY_PATH so that the
     # dynamic linker can resolve them during the repair step.
     env = dict(os.environ)
-    extra_lib_dirs = [str(EMBEDDED__MLIR / "_mlir_libs")]
+    extra_lib_dirs = [
+        str(EMBEDDED__MLIR / "_mlir_libs"),
+        str(EMBEDDED__MLIR / "lib"),
+    ]
     mlir_path = os.environ.get("MLIR_PATH")
     if mlir_path:
         extra_lib_dirs.append(os.path.join(mlir_path, "lib"))
@@ -420,6 +423,8 @@ setup(
             "_mlir_libs/libMLIRPythonSupport-*.so",
             "_mlir_libs/lib*.so",
             "_mlir_libs/lib*.so.*",
+            "lib/lib*.so",
+            "lib/lib*.so.*",
             "*.pyi",
         ],
     },

@@ -12,16 +12,27 @@ from .protocol import fly_pointers
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    libs = [
-        mlir_libs_dir / "libfly_jit_runtime.so",
-        mlir_libs_dir / "libmlir_c_runner_utils.so",
-    ]
-    for lib in libs:
-        if not lib.exists():
-            raise FileNotFoundError(
-                f"Required JIT runtime library not found: {lib}\n"
-                f"Please rebuild the project."
-            )
+    c_runner_utils = mlir_libs_dir / "libmlir_c_runner_utils.so"
+    fly_jit_runtime = mlir_libs_dir / "libfly_jit_runtime.so"
+    rocm_runtime = mlir_libs_dir / "libmlir_rocm_runtime.so"
+
+    if not c_runner_utils.exists():
+        raise FileNotFoundError(
+            f"Required JIT runtime library not found: {c_runner_utils}\n"
+            f"Please rebuild the project."
+        )
+
+    if fly_jit_runtime.exists():
+        libs = [fly_jit_runtime, c_runner_utils]
+    elif rocm_runtime.exists():
+        libs = [rocm_runtime, c_runner_utils]
+    else:
+        raise FileNotFoundError(
+            "Neither GPU runtime library was found:\n"
+            f"  - {fly_jit_runtime}\n"
+            f"  - {rocm_runtime}\n"
+            "Please rebuild the project with ROCm runtime libraries available."
+        )
     return [str(p) for p in libs]
 
 
