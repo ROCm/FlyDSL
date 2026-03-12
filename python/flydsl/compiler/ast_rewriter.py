@@ -524,7 +524,7 @@ class CanonicalizeWhile(Transformer):
         if isinstance(node.test, ast.NamedExpr):
             node.test.value = next_
         else:
-            new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}"), value=next_)
+            new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}", ctx=ast.Store()), value=next_)
             new_test = ast.copy_location(new_test, node)
             node.test = new_test
 
