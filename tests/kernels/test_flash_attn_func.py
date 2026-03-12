@@ -29,7 +29,6 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-import flydsl
 from kernels.flash_attn_func import (
     KERNEL_NAME,
     build_flash_attn_func_module,
@@ -40,7 +39,7 @@ from tests.test_common import run_perftest
 # Tensor initialization range (uniform distribution)
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
-FLASH_ATTN_FUNC_COMPILE_KWARGS = {
+FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "unsafe_fp_math": True,
     "fast_fp_math": True,
     "waves_per_eu": 3,
@@ -179,12 +178,18 @@ def run_config(
         return results
 
     try:
-        m = build_flash_attn_func_module(
-            num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str="f16"
+        exe = build_flash_attn_func_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            causal=causal,
+            dtype_str="f16",
+            fast_fp_math=FLASH_ATTN_FUNC_KERNEL_CONFIG["fast_fp_math"],
+            unsafe_fp_math=FLASH_ATTN_FUNC_KERNEL_CONFIG["unsafe_fp_math"],
+            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+            flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG["flat_work_group_size"],
         )
-        exe = flydsl.compile(m, **FLASH_ATTN_FUNC_COMPILE_KWARGS)
     except Exception as e:
-        results["err"] = f"compile: {e}"
+        results["err"] = f"build: {e}"
         import traceback
 
         traceback.print_exc()
@@ -281,7 +286,7 @@ def main():
     print("  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)")
     print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"  Compile opts: {FLASH_ATTN_FUNC_COMPILE_KWARGS}")
+    print(f"  Kernel opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
     print("=" * 130)
 
     if args.seq_len or args.head_dim or args.batch:
