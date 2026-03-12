@@ -248,3 +248,35 @@ __all__ = [
     # Convenience wrappers
     'make_buffer_tensor',
 ]
+
+
+# ── Wrappers that accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ───────
+# The ODS-generated ops require raw ir.Value. These wrappers call ir_value()
+# on any DSL Numeric argument before forwarding to the underlying MLIR op.
+
+def _to_ir(v):
+    """Coerce DSL Numeric to ir.Value if needed."""
+    if not isinstance(v, __import__('flydsl._mlir.ir', fromlist=['Value']).Value) and hasattr(v, 'ir_value'):
+        return v.ir_value()
+    return v
+
+
+def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
+    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+
+
+def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
+    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+
+
+def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
+    from .._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
+
+
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
+    return _op(_to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset),
+               _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw)

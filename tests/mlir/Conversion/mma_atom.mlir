@@ -12,7 +12,7 @@ func.func @test_mma_atom_call(
     %a: !fly.memref<f32, register, 1:1>,
     %b: !fly.memref<f32, register, 1:1>,
     %c: !fly.memref<f32, register, 4:1>) {
-  %atom = fly.make_mma_atom : () -> !fly_rocdl.atom.cdna3.mfma<16x16x4, (f32, f32) -> f32>
+  %atom = fly.make_mma_atom : !fly_rocdl.atom.cdna3.mfma<16x16x4, (f32, f32) -> f32>
   // CHECK: %[[A_VAL:.*]] = llvm.load %[[A]] : !llvm.ptr<5> -> f32
   // CHECK: %[[B_VAL:.*]] = llvm.load %[[B]] : !llvm.ptr<5> -> f32
   // CHECK: %[[C_VAL:.*]] = llvm.load %[[C]] : !llvm.ptr<5> -> vector<4xf32>

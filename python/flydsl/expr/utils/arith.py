@@ -64,6 +64,8 @@ def arith_const(value, ty=None, *, loc=None, ip=None):
 
 
 def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     src_elem_type = element_type(src.type)
     if res_elem_type == src_elem_type:
         return src
@@ -74,6 +76,8 @@ def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
 
 
 def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed:
         return arith.fptosi(res_type, src, loc=loc, ip=ip)
@@ -81,6 +85,8 @@ def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed and element_type(src.type).width > 1:
         return arith.sitofp(res_type, src, loc=loc, ip=ip)
@@ -88,6 +94,8 @@ def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_int(src, dst_type, *, signed=None, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     src_width = element_type(src.type).width
     dst_width = dst_type.width
     dst_ir_type = recast_type(src.type, dst_type.ir_type)
@@ -106,6 +114,9 @@ def _coerce_other(self, other, *, loc=None, ip=None):
     if isinstance(other, (int, float, bool)):
         return arith_const(other, self.type, loc=loc, ip=ip).with_signedness(self.signed)
     if not isinstance(other, ArithValue):
+        # Accept DSL Numeric types (Int32, Float32, etc.) by unwrapping via ir_value()
+        if hasattr(other, "ir_value"):
+            return ArithValue(other.ir_value())
         return NotImplemented
     return other
 
@@ -233,7 +244,7 @@ def _shift_op(self, other, op, reverse=False, *, loc=None, ip=None):
     if op == "shl":
         return arith.shli(lhs, rhs, loc=loc, ip=ip)
     signed = getattr(lhs, "signed", None)
-    if signed is not False:
+    if signed is True:
         return arith.shrsi(lhs, rhs, loc=loc, ip=ip)
     return arith.shrui(lhs, rhs, loc=loc, ip=ip)
 

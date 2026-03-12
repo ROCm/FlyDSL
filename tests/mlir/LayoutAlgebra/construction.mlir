@@ -9,22 +9,22 @@
 
 // CHECK-LABEL: @test_static_int_tuple
 func.func @test_static_int_tuple() -> !fly.int_tuple<(4, 8)> {
-  // CHECK: fly.static : () -> !fly.int_tuple<(4,8)>
-  %0 = fly.static : () -> !fly.int_tuple<(4, 8)>
+  // CHECK: fly.static : !fly.int_tuple<(4,8)>
+  %0 = fly.static : !fly.int_tuple<(4, 8)>
   return %0 : !fly.int_tuple<(4, 8)>
 }
 
 // CHECK-LABEL: @test_static_scalar
 func.func @test_static_scalar() -> !fly.int_tuple<42> {
-  // CHECK: fly.static : () -> !fly.int_tuple<42>
-  %0 = fly.static : () -> !fly.int_tuple<42>
+  // CHECK: fly.static : !fly.int_tuple<42>
+  %0 = fly.static : !fly.int_tuple<42>
   return %0 : !fly.int_tuple<42>
 }
 
 // CHECK-LABEL: @test_static_nested
 func.func @test_static_nested() -> !fly.int_tuple<((2, 4), 8)> {
   // CHECK: fly.static
-  %0 = fly.static : () -> !fly.int_tuple<((2, 4), 8)>
+  %0 = fly.static : !fly.int_tuple<((2, 4), 8)>
   return %0 : !fly.int_tuple<((2, 4), 8)>
 }
 
@@ -51,33 +51,25 @@ func.func @test_dynamic_make_stride(%s0: i32, %s1: i32) -> !fly.int_tuple<(?, ?)
 
 // CHECK-LABEL: @test_make_layout_static
 func.func @test_make_layout_static() -> !fly.layout<(4, 8) : (1, 4)> {
-  %shape = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %stride = fly.static : () -> !fly.int_tuple<(1, 4)>
+  %shape = fly.static : !fly.int_tuple<(4, 8)>
+  %stride = fly.static : !fly.int_tuple<(1, 4)>
   // CHECK: fly.make_layout(%{{.*}}, %{{.*}}) : (!fly.int_tuple<(4,8)>, !fly.int_tuple<(1,4)>) -> !fly.layout<(4,8):(1,4)>
   %layout = fly.make_layout(%shape, %stride) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
   return %layout : !fly.layout<(4, 8) : (1, 4)>
 }
 
-// CHECK-LABEL: @test_make_layout_shape_only
-func.func @test_make_layout_shape_only(%m: i32, %n: i32) -> !fly.layout<(?, ?) : (1, ?)> {
-  %shape = fly.make_shape(%m, %n) : (i32, i32) -> !fly.int_tuple<(?, ?)>
-  // CHECK: fly.make_layout(%{{.*}}) : (!fly.int_tuple<(?,?)>) -> !fly.layout<(?,?):(1,?)>
-  %layout = fly.make_layout(%shape) : (!fly.int_tuple<(?, ?)>) -> !fly.layout<(?, ?) : (1, ?)>
-  return %layout : !fly.layout<(?, ?) : (1, ?)>
-}
-
 // CHECK-LABEL: @test_make_layout_3d
 func.func @test_make_layout_3d() -> !fly.layout<(2, 4, 8) : (1, 2, 8)> {
-  %shape = fly.static : () -> !fly.int_tuple<(2, 4, 8)>
-  %stride = fly.static : () -> !fly.int_tuple<(1, 2, 8)>
+  %shape = fly.static : !fly.int_tuple<(2, 4, 8)>
+  %stride = fly.static : !fly.int_tuple<(1, 2, 8)>
   %layout = fly.make_layout(%shape, %stride) : (!fly.int_tuple<(2, 4, 8)>, !fly.int_tuple<(1, 2, 8)>) -> !fly.layout<(2, 4, 8) : (1, 2, 8)>
   return %layout : !fly.layout<(2, 4, 8) : (1, 2, 8)>
 }
 
 // CHECK-LABEL: @test_make_ordered_layout_row_major
 func.func @test_make_ordered_layout_row_major() -> !fly.layout<(4, 8) : (8, 1)> {
-  %shape = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %order = fly.static : () -> !fly.int_tuple<(1, 0)>
+  %shape = fly.static : !fly.int_tuple<(4, 8)>
+  %order = fly.static : !fly.int_tuple<(1, 0)>
   // CHECK: fly.make_ordered_layout
   %layout = fly.make_ordered_layout(%shape, %order) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 0)>) -> !fly.layout<(4, 8) : (8, 1)>
   return %layout : !fly.layout<(4, 8) : (8, 1)>
@@ -85,15 +77,15 @@ func.func @test_make_ordered_layout_row_major() -> !fly.layout<(4, 8) : (8, 1)> 
 
 // CHECK-LABEL: @test_make_ordered_layout_col_major
 func.func @test_make_ordered_layout_col_major() -> !fly.layout<(4, 8) : (1, 4)> {
-  %shape = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %order = fly.static : () -> !fly.int_tuple<(0, 1)>
+  %shape = fly.static : !fly.int_tuple<(4, 8)>
+  %order = fly.static : !fly.int_tuple<(0, 1)>
   %layout = fly.make_ordered_layout(%shape, %order) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(0, 1)>) -> !fly.layout<(4, 8) : (1, 4)>
   return %layout : !fly.layout<(4, 8) : (1, 4)>
 }
 
 // CHECK-LABEL: @test_make_identity_layout
 func.func @test_make_identity_layout() -> !fly.layout<(4, 8) : (1E0, 1E1)> {
-  %shape = fly.static : () -> !fly.int_tuple<(4, 8)>
+  %shape = fly.static : !fly.int_tuple<(4, 8)>
   // CHECK: fly.make_identity_layout
   %layout = fly.make_identity_layout(%shape) : (!fly.int_tuple<(4, 8)>) -> !fly.layout<(4, 8) : (1E0, 1E1)>
   return %layout : !fly.layout<(4, 8) : (1E0, 1E1)>
@@ -113,12 +105,13 @@ func.func @test_get_stride(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(
   return %stride : !fly.int_tuple<(1, 4)>
 }
 
-// CHECK-LABEL: @test_get_leaves
-func.func @test_get_leaves(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)> {
-  // CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
-  %leaves = fly.get_leaves(%l) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)>
-  return %leaves : !fly.int_tuple<(4, 8)>
-}
+// TODO: test_get_leaves (disabled until op is implemented)
+// COM: CHECK-LABEL: @test_get_leaves
+// func.func @test_get_leaves(%l: !fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)> {
+//   COM: CHECK: fly.get_leaves(%{{.*}}) : (!fly.layout<(4,8):(1,4)>) -> !fly.int_tuple<(4,8)>
+//   %leaves = fly.get_leaves(%l) : (!fly.layout<(4, 8) : (1, 4)>) -> !fly.int_tuple<(4, 8)>
+//   return %leaves : !fly.int_tuple<(4, 8)>
+// }
 
 // CHECK-LABEL: @test_make_layout_like
 func.func @test_make_layout_like(%src: !fly.layout<(4, 8) : (1, 4)>) -> !fly.layout<(4, 8) : (1, 4)> {

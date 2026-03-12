@@ -78,16 +78,16 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         s_red2.get()
 
         def wave_reduce_add(x):
-            width_i32 = arith.constant(WARP_SIZE, type=T.i32)
+            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for sh in [32, 16, 8, 4, 2, 1]:
-                off = arith.constant(sh, type=T.i32)
+                off = fx.Int32(sh)
                 peer = w.shuffle_xor(off, width_i32)
                 w = w.addf(peer, fastmath=fm_fast)
             return w
 
         def block_reduce_add(val):
-            dummy = arith.constant(0.0, type=T.f32)
+            dummy = fx.Float32(0.0)
             r0, _ = block_reduce_add2(val, dummy)
             return r0
 
@@ -101,31 +101,31 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             w0 = wave_reduce_add(val0)
             w1 = wave_reduce_add(val1)
 
-            if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+            if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
                 s_red.store(w0, [wave_idx])
                 s_red2.store(w1, [wave_idx])
             gpu.barrier()
 
-            if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
+            if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
-                lane_safe = arith.select(in_range, lane, Int32(0))
+                lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
                 v0 = s_red.load([lane_safe_idx])
                 v1 = s_red2.load([lane_safe_idx])
-                z = arith.constant(0.0, type=T.f32)
-                ww0 = arith.select(in_range, v0, z)
-                ww1 = arith.select(in_range, v1, z)
+                z = fx.Float32(0.0)
+                ww0 = in_range.select(v0, z)
+                ww1 = in_range.select(v1, z)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
-                if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.constant(0, index=True)
+                if lane == fx.Int32(0):
+                    c0_idx = fx.Index(0)
                     s_red.store(ww0, [c0_idx])
                     s_red2.store(ww1, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.constant(0, index=True)
+            c0_idx = fx.Index(0)
             return s_red.load([c0_idx]), s_red2.load([c0_idx])
 
         # ==================================================================
@@ -149,14 +149,14 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
                 if vec_dwords == VEC_WIDTH:
                     return raw.bitcast(vec_type_e)
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
 
             c_zero_f = arith.constant(0.0, type=compute_type)

@@ -173,7 +173,7 @@ public:
     if (!flyMemRefTy)
       return failure();
 
-    LayoutAttr layoutAttr = flyMemRefTy.getLayout();
+    LayoutAttr layoutAttr = cast<LayoutAttr>(flyMemRefTy.getLayout());
     auto elemTy = flyMemRefTy.getElemTy();
 
     LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
@@ -494,7 +494,8 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
-    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    IntAttr numValSrcAttr =
+        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
@@ -535,7 +536,8 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null");
-    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    IntAttr numValSrcAttr =
+        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
@@ -847,7 +849,6 @@ public:
   }
 };
 
-
 class ExtractAlignedPointerAsIndexLowering
     : public OpConversionPattern<ExtractAlignedPointerAsIndexOp> {
 public:
@@ -884,7 +885,8 @@ public:
                            ROCDL::ROCDLDialect, fly_rocdl::FlyROCDLDialect>();
     target.addIllegalDialect<fly::FlyDialect>();
 
-    target.addLegalOp<MakeIntTupleOp, MakeLayoutOp, MakeTileOp>();
+    // Constructors
+    target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeTileOp, MakeComposedLayoutOp>();
     target.addLegalOp<MakeMmaAtomOp, MakeCopyAtomOp>();
 
     FlyTypeConverter typeConverter;

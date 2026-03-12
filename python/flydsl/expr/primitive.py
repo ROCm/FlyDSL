@@ -1,5 +1,6 @@
 from .._mlir import ir
-from .._mlir.dialects import arith as _arith, fly
+from .._mlir.dialects import arith as _arith
+from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,

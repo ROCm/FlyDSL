@@ -79,10 +79,10 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
         # ── wave / block reduction (supports max and sum) ─────────────────
         def wave_reduce(x, mode):
-            width_i32 = arith.constant(WARP_SIZE, type=T.i32)
+            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for sh in [32, 16, 8, 4, 2, 1]:
-                off = arith.constant(sh, type=T.i32)
+                off = fx.Int32(sh)
                 peer = w.shuffle_xor(off, width_i32)
                 if mode == "max":
                     w = w.maximumf(peer)
@@ -100,26 +100,26 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             w = wave_reduce(val, mode)
 
-            if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+            if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
                 s_red.store(w, [wave_idx])
             gpu.barrier()
 
-            if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
+            if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
-                lane_safe = arith.select(in_range, lane, Int32(0))
+                lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
                 v = s_red.load([lane_safe_idx])
                 z = neutral
-                ww = arith.select(in_range, v, z)
+                ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
-                if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.constant(0, index=True)
+                if lane == fx.Int32(0):
+                    c0_idx = fx.Index(0)
                     s_red.store(ww, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.constant(0, index=True)
+            c0_idx = fx.Index(0)
             return s_red.load([c0_idx])
 
         # ==================================================================
@@ -142,14 +142,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
                 if vec_dwords == VEC_WIDTH:
                     return raw.bitcast(vec_type_e)
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
 
             # 1. Load + compute local max
