@@ -178,7 +178,7 @@ def c_shuffle_epilog(
     n_reps_shuffle = int(tile_n) // (CShuffleNLane * EVec)
 
     c_nlane = arith.constant(CShuffleNLane, index=True)
-    m_lane = tx // c_nlane
+    m_lane = tx / c_nlane
     n_lane = tx % c_nlane
     c_evec = arith.constant(EVec, index=True)
 
@@ -188,6 +188,10 @@ def c_shuffle_epilog(
     bx_m_v = bx_m
     by_n_v = by_n
 
+    # Batch-precompute all row contexts (sorted_idx loads) before the store loop.
+    # This issues all buffer_load instructions upfront so the compiler can pipeline
+    # them instead of serializing each load with s_waitcnt vmcnt(0).
+    _precomputed_rows = []
     for mr in range_constexpr(m_reps_shuffle):
         row_base_m = arith.constant(mr * CShuffleMLane, index=True)
         row_local = row_base_m + m_lane
@@ -208,6 +212,12 @@ def c_shuffle_epilog(
             and len(row_ctx_raw) == 2
         ):
             row_ctx, row_pred = row_ctx_raw
+
+        _precomputed_rows.append((row_local, row, row_ctx, row_pred))
+
+    # Now perform LDS reads and stores using the pre-fetched row contexts.
+    for mr in range_constexpr(m_reps_shuffle):
+        row_local, row, row_ctx, row_pred = _precomputed_rows[mr]
 
         def _do_store_row():
             row_base_lds = row_local * tile_n_idx
