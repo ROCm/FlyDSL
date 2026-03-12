@@ -296,7 +296,7 @@ FLY_INFER_RETURN_TYPES(GetScalarOp) {
 FLY_INFER_RETURN_TYPES(GetLeavesOp) {
   auto intTupleType = dyn_cast<IntTupleType>(operands[0].getType());
   if (!intTupleType)
-    return emitOptionalError(location, "GetScalarOp: expected IntTupleType, got ",
+    return emitOptionalError(location, "GetLeavesOp: expected IntTupleType, got ",
                              operands[0].getType());
   // transform_leaf on intTupleAttr,
   return failure();
@@ -1295,9 +1295,11 @@ FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
     assert(isa<ComposedLayoutAttr>(result));
     inferredReturnTypes.assign({ComposedLayoutType::get(cast<ComposedLayoutAttr>(result))});
     return success();
+  } else {
+    return emitOptionalError(
+        location, "RecastLayoutOp: expected LayoutType or ComposedLayoutType for operand #0, got ",
+        operands[0].getType());
   }
-
-  return success();
 }
 
 FLY_INFER_RETURN_TYPES(TileToShapeOp) {
