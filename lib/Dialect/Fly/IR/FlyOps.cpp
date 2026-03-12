@@ -23,7 +23,7 @@ using namespace mlir::fly;
 
 namespace {
 
-std::optional<LayoutAttr> GetLayoutAttrFromLayoutLikeType(Type type) {
+LayoutAttr GetLayoutAttrFromLayoutLikeType(Type type) {
   Attribute layoutAttr;
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
     layoutAttr = memrefTy.getLayout();
@@ -70,16 +70,14 @@ Type RebuildLayoutLikeType(Type type, LayoutAttr newLayoutAttr) {
   }
 }
 
-Type applyIntTupleTransform(const IntTupleBuilder<IntTupleAttr> &builder, Type inputTy,
-                            function_ref<IntTupleAttr(IntTupleAttr)> fn) {
+Type applyIntTupleTransform(Type inputTy, function_ref<IntTupleAttr(IntTupleAttr)> fn) {
   if (auto tupleTy = dyn_cast<IntTupleType>(inputTy))
     return IntTupleType::get(fn(tupleTy.getAttr()));
 
-  auto outerLayout = GetLayoutAttrFromLayoutLikeType(inputTy);
+  LayoutAttr outerLayout = GetLayoutAttrFromLayoutLikeType(inputTy);
   if (!outerLayout)
     return {};
-  LayoutAttr transformed =
-      LayoutAttr::get(fn(outerLayout->getShape()), fn(outerLayout->getStride()));
+  LayoutAttr transformed = LayoutAttr::get(fn(outerLayout.getShape()), fn(outerLayout.getStride()));
   return RebuildLayoutLikeType(inputTy, transformed);
 }
 
@@ -244,12 +242,12 @@ FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
     elemTy = dtypeAttr.getValue();
   }
 
-  if (!srcLayout->getShape().isStatic())
+  if (!srcLayout.getShape().isStatic())
     return emitOptionalError(location, "MakeFragmentLikeOp: expected static shape layout, got ",
-                             *srcLayout);
+                             srcLayout);
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, *srcLayout);
+  LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, srcLayout);
   inferredReturnTypes.assign({MemRefType::get(
       elemTy, AddressSpaceAttr::get(context, AddressSpace::Register), fragmentLayout)});
   return success();
@@ -285,7 +283,7 @@ FLY_INFER_RETURN_TYPES(GetShapeOp) {
   if (!layout)
     return emitOptionalError(location, "GetShapeOp: expected LayoutLikeType, got ",
                              operands[0].getType());
-  inferredReturnTypes.assign({IntTupleType::get(layout->getShape())});
+  inferredReturnTypes.assign({IntTupleType::get(layout.getShape())});
   return success();
 }
 
@@ -306,7 +304,7 @@ FLY_INFER_RETURN_TYPES(GetStrideOp) {
   if (!layout)
     return emitOptionalError(location, "GetStrideOp: expected LayoutLikeType, got ", inputTy);
 
-  inferredReturnTypes.assign({IntTupleType::get(layout->getStride())});
+  inferredReturnTypes.assign({IntTupleType::get(layout.getStride())});
   return success();
 }
 
@@ -600,7 +598,7 @@ FLY_INFER_RETURN_TYPES(TakeOp) {
   int32_t end = properties.as<Properties *>()->end.getInt();
 
   IntTupleBuilder<IntTupleAttr> builder(context);
-  Type resultTy = applyIntTupleTransform(builder, operands[0].getType(), [&](IntTupleAttr attr) {
+  Type resultTy = applyIntTupleTransform(operands[0].getType(), [&](IntTupleAttr attr) {
     return intTupleTake(builder, attr, begin, end);
   });
   if (!resultTy)
@@ -615,7 +613,7 @@ FLY_INFER_RETURN_TYPES(SelectOp) {
   SmallVector<int32_t> indices(idxArr.begin(), idxArr.end());
 
   IntTupleBuilder<IntTupleAttr> builder(context);
-  Type resultTy = applyIntTupleTransform(builder, operands[0].getType(), [&](IntTupleAttr attr) {
+  Type resultTy = applyIntTupleTransform(operands[0].getType(), [&](IntTupleAttr attr) {
     return intTupleSelect(builder, attr, indices);
   });
   if (!resultTy)
@@ -629,7 +627,7 @@ FLY_INFER_RETURN_TYPES(GroupOp) {
   int32_t end = properties.as<Properties *>()->end.getInt();
 
   IntTupleBuilder<IntTupleAttr> builder(context);
-  Type resultTy = applyIntTupleTransform(builder, operands[0].getType(), [&](IntTupleAttr attr) {
+  Type resultTy = applyIntTupleTransform(operands[0].getType(), [&](IntTupleAttr attr) {
     return intTupleGroup(builder, attr, begin, end);
   });
   if (!resultTy)
@@ -849,7 +847,7 @@ FLY_INFER_RETURN_TYPES(SizeOp) {
     return emitOptionalError(location, "SizeOp: expected LayoutLikeType, got ",
                              operands[0].getType());
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  inferredReturnTypes.assign({IntTupleType::get(layoutSize(layoutBuilder, *layout))});
+  inferredReturnTypes.assign({IntTupleType::get(layoutSize(layoutBuilder, layout))});
   return success();
 }
 
@@ -859,7 +857,7 @@ FLY_INFER_RETURN_TYPES(CoprofileOp) {
     return emitOptionalError(location, "CoprofileOp: expected LayoutLikeType, got ",
                              operands[0].getType());
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  inferredReturnTypes.assign({IntTupleType::get(layoutCoprofile(layoutBuilder, *layout))});
+  inferredReturnTypes.assign({IntTupleType::get(layoutCoprofile(layoutBuilder, layout))});
   return success();
 }
 
@@ -869,7 +867,7 @@ FLY_INFER_RETURN_TYPES(CoshapeOp) {
     return emitOptionalError(location, "CoshapeOp: expected LayoutLikeType, got ",
                              operands[0].getType());
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  inferredReturnTypes.assign({IntTupleType::get(layoutCoshape(layoutBuilder, *layout))});
+  inferredReturnTypes.assign({IntTupleType::get(layoutCoshape(layoutBuilder, layout))});
   return success();
 }
 
@@ -879,7 +877,7 @@ FLY_INFER_RETURN_TYPES(CosizeOp) {
     return emitOptionalError(location, "CosizeOp: expected LayoutLikeType, got ",
                              operands[0].getType());
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  inferredReturnTypes.assign({IntTupleType::get(layoutCosize(layoutBuilder, *layout))});
+  inferredReturnTypes.assign({IntTupleType::get(layoutCosize(layoutBuilder, layout))});
   return success();
 }
 
@@ -985,7 +983,7 @@ FLY_INFER_RETURN_TYPES(CoalesceOp) {
   }
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutCoalesce(layoutBuilder, *layoutAttr, profileAttr);
+  LayoutAttr inferred = layoutCoalesce(layoutBuilder, layoutAttr, profileAttr);
   inferredReturnTypes.assign({RebuildLayoutLikeType(inputTy, inferred)});
   return success();
 }
@@ -1001,9 +999,9 @@ FLY_INFER_RETURN_TYPES(CompositionOp) {
   Type innerTy = operands[1].getType();
   LayoutAttr inferred;
   if (auto tileTy = dyn_cast<TileType>(innerTy))
-    inferred = layoutComposition(layoutBuilder, *outerLayoutAttr, tileTy.getAttr());
+    inferred = layoutComposition(layoutBuilder, outerLayoutAttr, tileTy.getAttr());
   else if (auto innerLayoutTy = dyn_cast<LayoutType>(innerTy))
-    inferred = layoutComposition(layoutBuilder, *outerLayoutAttr, innerLayoutTy.getAttr());
+    inferred = layoutComposition(layoutBuilder, outerLayoutAttr, innerLayoutTy.getAttr());
   else
     return emitOptionalError(
         location, "CompositionOp: expected TileType or LayoutType for inner, got ", innerTy);
@@ -1029,7 +1027,7 @@ FLY_INFER_RETURN_TYPES(ComplementOp) {
   }
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutComplement(layoutBuilder, *layoutAttr, codomainSizeAttr);
+  LayoutAttr inferred = layoutComplement(layoutBuilder, layoutAttr, codomainSizeAttr);
   inferredReturnTypes.assign({RebuildLayoutLikeType(inputTy, inferred)});
   return success();
 }
@@ -1040,7 +1038,7 @@ FLY_INFER_RETURN_TYPES(RightInverseOp) {
   if (!layoutAttr)
     return emitOptionalError(location, "RightInverseOp: expected NarrowLayoutType, got ", inputTy);
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutRightInverse(layoutBuilder, *layoutAttr);
+  LayoutAttr inferred = layoutRightInverse(layoutBuilder, layoutAttr);
   inferredReturnTypes.assign({RebuildLayoutLikeType(inputTy, inferred)});
   return success();
 }
@@ -1051,7 +1049,7 @@ FLY_INFER_RETURN_TYPES(LeftInverseOp) {
   if (!layoutAttr)
     return emitOptionalError(location, "LeftInverseOp: expected NarrowLayoutType, got ", inputTy);
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutLeftInverse(layoutBuilder, *layoutAttr);
+  LayoutAttr inferred = layoutLeftInverse(layoutBuilder, layoutAttr);
   inferredReturnTypes.assign({RebuildLayoutLikeType(inputTy, inferred)});
   return success();
 }
@@ -1067,9 +1065,9 @@ FLY_INFER_RETURN_TYPES(LogicalDivideOp) {
   LayoutAttr inferred;
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
-    inferred = layoutLogicalDivide(layoutBuilder, *layoutAttr, divisorLayoutTy.getAttr());
+    inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
-    inferred = layoutLogicalDivide(layoutBuilder, *layoutAttr, divisorTileTy.getAttr());
+    inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
         location, "LogicalDivideOp: expected LayoutType or TileType for divisor, got ", divisorTy);
@@ -1090,9 +1088,9 @@ FLY_INFER_RETURN_TYPES(ZippedDivideOp) {
   LayoutAttr inferred;
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
-    inferred = layoutZippedDivide(layoutBuilder, *layoutAttr, divisorLayoutTy.getAttr());
+    inferred = layoutZippedDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
-    inferred = layoutZippedDivide(layoutBuilder, *layoutAttr, divisorTileTy.getAttr());
+    inferred = layoutZippedDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
         location, "ZippedDivideOp: expected LayoutType or TileType for divisor, got ", divisorTy);
@@ -1113,9 +1111,9 @@ FLY_INFER_RETURN_TYPES(TiledDivideOp) {
   LayoutAttr inferred;
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
-    inferred = layoutTiledDivide(layoutBuilder, *layoutAttr, divisorLayoutTy.getAttr());
+    inferred = layoutTiledDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
-    inferred = layoutTiledDivide(layoutBuilder, *layoutAttr, divisorTileTy.getAttr());
+    inferred = layoutTiledDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
         location, "TiledDivideOp: expected LayoutType or TileType for divisor, got ", divisorTy);
@@ -1136,9 +1134,9 @@ FLY_INFER_RETURN_TYPES(FlatDivideOp) {
   LayoutAttr inferred;
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
-    inferred = layoutFlatDivide(layoutBuilder, *layoutAttr, divisorLayoutTy.getAttr());
+    inferred = layoutFlatDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
-    inferred = layoutFlatDivide(layoutBuilder, *layoutAttr, divisorTileTy.getAttr());
+    inferred = layoutFlatDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
         location, "FlatDivideOp: expected LayoutType or TileType for divisor, got ", divisorTy);
@@ -1161,7 +1159,7 @@ FLY_INFER_RETURN_TYPES(LogicalProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutLogicalProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutLogicalProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1179,7 +1177,7 @@ FLY_INFER_RETURN_TYPES(ZippedProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutZippedProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutZippedProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1197,7 +1195,7 @@ FLY_INFER_RETURN_TYPES(TiledProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutTiledProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutTiledProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1215,7 +1213,7 @@ FLY_INFER_RETURN_TYPES(FlatProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutFlatProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutFlatProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1233,7 +1231,7 @@ FLY_INFER_RETURN_TYPES(BlockedProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutBlockedProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutBlockedProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1251,7 +1249,7 @@ FLY_INFER_RETURN_TYPES(RakedProductOp) {
                              operands[1].getType());
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
-  LayoutAttr inferred = layoutRakedProduct(layoutBuilder, *layoutAttr, tilerTy.getAttr());
+  LayoutAttr inferred = layoutRakedProduct(layoutBuilder, layoutAttr, tilerTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(lhsTy, inferred)});
   return success();
 }
@@ -1299,7 +1297,7 @@ FLY_INFER_RETURN_TYPES(TileToShapeOp) {
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   LayoutAttr inferred =
-      layoutTileToShape(layoutBuilder, *layoutAttr, trgShapeTy.getAttr(), ordShapeTy.getAttr());
+      layoutTileToShape(layoutBuilder, layoutAttr, trgShapeTy.getAttr(), ordShapeTy.getAttr());
   inferredReturnTypes.assign({RebuildLayoutLikeType(blockTy, inferred)});
   return success();
 }
@@ -1378,11 +1376,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
 
-  auto srcLayoutOpt = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
-  if (!srcLayoutOpt)
+  LayoutAttr srcLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
+  if (!srcLayout)
     return emitOptionalError(location,
                              "TiledCopyPartitionSrcOp: unsupported layout type for operand #1");
-  LayoutAttr srcLayout = *srcLayoutOpt;
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView =
@@ -1431,11 +1428,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
 
-  auto dstLayoutOpt = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
-  if (!dstLayoutOpt)
+  LayoutAttr dstLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
+  if (!dstLayout)
     return emitOptionalError(location,
                              "TiledCopyPartitionDstOp: unsupported layout type for operand #1");
-  LayoutAttr dstLayout = *dstLayoutOpt;
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView =
@@ -1519,11 +1515,14 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
-  auto inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
+  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
+  if (!inputLayout)
+    return emitOptionalError(location,
+                             "TiledMmaPartitionOp: unsupported layout type for operand #1");
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
-                                                          permutationMNK, operandId, *inputLayout);
+                                                          permutationMNK, operandId, inputLayout);
 
   SmallVector<Attribute> coordElems;
   coordElems.push_back(IntTupleAttr::getLeafStatic(context, 0));
@@ -1617,7 +1616,7 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
                              operandId);
   }
 
-  auto inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
+  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
   if (!inputLayout)
     return emitOptionalError(location, "MmaMakeFragmentOp: unsupported layout type for operand #1");
 
@@ -1626,7 +1625,7 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
-                                                          permutationMNK, operandId, *inputLayout);
+                                                          permutationMNK, operandId, inputLayout);
 
   SmallVector<Attribute> coordElems;
   coordElems.push_back(IntTupleAttr::getLeafStatic(context, 0));
