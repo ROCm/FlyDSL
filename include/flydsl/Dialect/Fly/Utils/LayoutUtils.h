@@ -242,13 +242,15 @@ auto layoutCrd2Idx(LayoutBuilder<Layout> &builder, typename LayoutBuilder<Layout
 
 class LayoutValueAdaptor {
 private:
-  Value value;
-  Attribute attr;
+  Value value = nullptr;
+  Attribute attr = nullptr;
 
 public:
+  LayoutValueAdaptor() = default;
   LayoutValueAdaptor(Value value, Attribute attr) : value(value), attr(attr) {}
 
   Value getValue() const { return value; }
+  Attribute getAttr() const { return attr; }
 
   friend class LayoutBuilder<LayoutValueAdaptor>;
 };

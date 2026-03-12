@@ -312,6 +312,7 @@ def Fly_TileToShapeOp : Fly_Op<"tile_to_shape", [Pure, DeclareOpInterfaceMethods
 //===----------------------------------------------------------------------===//
 // Atom and Tiled Mma/Copy ops
 //===----------------------------------------------------------------------===//
+
 def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
   let arguments = (ins);
   let results = (outs AnyType:$result);
@@ -321,20 +322,18 @@ def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
 def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
   let arguments = (ins I32Attr:$valBits);
   let results = (outs Fly_CopyAtom:$result);
-  let assemblyFormat = "attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "attr-dict `:` type($result)";
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
-  let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst);
-  let results = (outs);
+  let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
 }
 def Fly_MmaAtomCall : Fly_Op<"mma_atom_call"> {
   let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
-  let results = (outs);
 }
 
 def Fly_MakeTiledCopyOp : Fly_Op<"make_tiled_copy", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyType:$copyAtom, Fly_Layout:$layoutThrVal, Fly_Tile:$tileMN);
+  let arguments = (ins Fly_CopyAtom:$copyAtom, Fly_Layout:$layoutThrVal, Fly_Tile:$tileMN);
   let results = (outs Fly_TiledCopy:$result);
 }
 def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
@@ -342,7 +341,6 @@ def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure, DeclareOpInterfaceMetho
   let results = (outs Fly_TiledMma:$result);
   let assemblyFormat = "`(` $mmaAtom `,` $atomLayout (`,` $permutation^)? `)` attr-dict `:` functional-type(operands, results)";
 }
-
 
 def Fly_TiledCopyPartitionSrcOp : Fly_Op<"tiled_copy.partition_src", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$src, Fly_IntTuple:$coord);
@@ -357,37 +355,27 @@ def Fly_TiledCopyRetileOp : Fly_Op<"tiled_copy.retile", [Pure, DeclareOpInterfac
   let results = (outs Fly_MemRef:$result);
 }
 
-
-def Fly_CopyOp : Fly_Op<"copy"> {
-  let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, OptionalAttr<I1Attr>:$pred);
-  let results = (outs);
-  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
-}
-
-def Fly_GemmOp : Fly_Op<"gemm"> {
-  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a,
-                       Fly_MemRef:$b, Fly_MemRef:$c);
-  let results = (outs);
-}
-
-def Fly_MmaMakeFragmentOp : Fly_Op<"mma_make_fragment", [Pure]> {
-  let arguments = (ins AnyTypeOf<[I32, I64]>:$operand_id, AnyType:$atom, AnyType:$input);
-  let results = (outs AnyType:$result);
-}
-
 def Fly_TiledMmaPartitionOp : Fly_Op<"tiled_mma.partition", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MmaOperandAttr:$operand_id, AnyType:$tiled_mma,
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma,
                        Fly_MemRef:$input, Fly_IntTuple:$coord);
   let results = (outs Fly_MemRef:$result);
-  let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input `,` $coord `)` attr-dict `:` functional-type(operands, results)";
 }
-
-def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma_partition_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MmaOperandAttr:$operand_id, AnyType:$tiled_mma, Fly_MemRef:$input);
+def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma.partition_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_IntTuple:$shape);
   let results = (outs Fly_IntTuple:$result);
-  let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input `)` attr-dict `:` functional-type(operands, results)";
+}
+def Fly_MmaMakeFragmentOp : Fly_Op<"mma_atom.make_fragment", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_MemRef:$input);
+  let results = (outs Fly_MemRef:$result);
 }
 
+def Fly_CopyOp : Fly_Op<"copy"> {
+  let arguments = (ins AnyType:$copyAtom, Fly_MemRef:$src, Fly_MemRef:$dst, Optional<Fly_MemRef>:$pred);
+  let assemblyFormat = "`(` $copyAtom `,` $src `,` $dst (`,` $pred^)? `)` attr-dict `:` functional-type(operands, results)";
+}
+def Fly_GemmOp : Fly_Op<"gemm"> {
+  let arguments = (ins AnyType:$mmaAtom, Fly_MemRef:$d, Fly_MemRef:$a, Fly_MemRef:$b, Fly_MemRef:$c);
+}
 
 //===----------------------------------------------------------------------===//
 // MemRef and Ptr operations
@@ -428,7 +416,7 @@ def Fly_PtrStoreOp : Fly_Op<"ptr.store"> {
   let arguments = (ins AnyType:$value, Fly_Pointer:$ptr);
 }
 def Fly_ApplySwizzleOp : Fly_Op<"apply_swizzle", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_Pointer:$ptr);
+  let arguments = (ins Fly_Pointer:$ptr, Fly_Swizzle:$swizzle);
   let results = (outs Fly_Pointer:$result);
 }
 def Fly_RecastIterOp : Fly_Op<"recast_iter", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
