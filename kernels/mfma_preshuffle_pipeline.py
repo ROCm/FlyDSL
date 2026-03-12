@@ -121,14 +121,14 @@ def _i8x4_in_i32_to_bf16x4_i64(val_i32, arith, vector, scale_val=None):
             v = v * scale_val
         f32_vals.append(v)
 
-    c16 = arith.constant(16, type=T.i32)
-    c_ffff0000 = arith.constant(0xFFFF0000, type=T.i32)
+    c16 = fx.Int32(16)
+    c_ffff0000 = fx.Int32(0xFFFF0000)
     bits0 = arith.bitcast(T.i32, f32_vals[0])
     bits1 = arith.bitcast(T.i32, f32_vals[1])
     bits2 = arith.bitcast(T.i32, f32_vals[2])
     bits3 = arith.bitcast(T.i32, f32_vals[3])
-    i32_lo = arith.shrui(bits0, c16) | (bits1 & c_ffff0000)
-    i32_hi = arith.shrui(bits2, c16) | (bits3 & c_ffff0000)
+    i32_lo = (bits0 >> c16) | (bits1 & c_ffff0000)
+    i32_hi = (bits2 >> c16) | (bits3 & c_ffff0000)
 
     v2 = vector.from_elements(vec2_i32, [i32_lo, i32_hi])
     v64 = vector.bitcast(vec1_i64, v2)
@@ -195,10 +195,10 @@ def unpack_b_w4a16(packed32, arith, vector, scale_val=None):
     Takes raw packed32 from load_b_raw_w4a16 and produces (b0, b1) --
     two i64 values each containing 4 bf16 for one MFMA.
     """
-    c_08080808 = arith.constant(0x08080808, type=T.i32)
-    c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=T.i32)
-    c_1e = arith.constant(0x1E, type=T.i32)
-    c_4_i32 = arith.constant(4, type=T.i32)
+    c_08080808 = fx.Int32(0x08080808)
+    c_0f0f0f0f = fx.Int32(0x0F0F0F0F)
+    c_1e = fx.Int32(0x1E)
+    c_4_i32 = fx.Int32(4)
 
     s0 = (packed32 & c_08080808) * c_1e
     even = (packed32 & c_0f0f0f0f) | s0
@@ -264,10 +264,10 @@ def load_b_pack_k32(
             dynamic_position=[],
         )
 
-        c_08080808 = arith.constant(0x08080808, type=T.i32)
-        c_0f0f0f0f = arith.constant(0x0F0F0F0F, type=T.i32)
-        c_1e = arith.constant(0x1E, type=T.i32)
-        c_4_i32 = arith.constant(4, type=T.i32)
+        c_08080808 = fx.Int32(0x08080808)
+        c_0f0f0f0f = fx.Int32(0x0F0F0F0F)
+        c_1e = fx.Int32(0x1E)
+        c_4_i32 = fx.Int32(4)
 
         s0 = (packed32 & c_08080808) * c_1e
         even = (packed32 & c_0f0f0f0f) | s0

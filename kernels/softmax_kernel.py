@@ -79,10 +79,10 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
         # ── wave / block reduction (supports max and sum) ─────────────────
         def wave_reduce(x, mode):
-            width_i32 = arith.constant(WARP_SIZE, type=T.i32)
+            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for sh in [32, 16, 8, 4, 2, 1]:
-                off = arith.constant(sh, type=T.i32)
+                off = fx.Int32(sh)
                 peer = w.shuffle_xor(off, width_i32)
                 if mode == "max":
                     w = w.maximumf(peer)
@@ -115,11 +115,11 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
                 ww = wave_reduce(ww, mode)
 
                 if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.constant(0, index=True)
+                    c0_idx = arith.index(0)
                     s_red.store(ww, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.constant(0, index=True)
+            c0_idx = arith.index(0)
             return s_red.load([c0_idx])
 
         # ==================================================================
@@ -142,14 +142,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
                 if vec_dwords == VEC_WIDTH:
                     return raw.bitcast(vec_type_e)
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
 
             # 1. Load + compute local max

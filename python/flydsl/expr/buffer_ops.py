@@ -36,13 +36,17 @@ __all__ = [
 
 def _unwrap_value(value):
     """Recursively unwrap ArithValue or similar wrappers to get the actual MLIR value.
-    
-    flir's ArithValue can be nested (double-wrapped), so we need to unwrap recursively
-    until we get to a real ir.Value (OpResult or BlockArgument).
+
+    Handles:
+    - flir ArithValue (has ._value)
+    - flyc DSL Numeric like fx.Int32 (has .ir_value() method)
+    - flyc ArithValue (is already ir.Value subclass)
     """
+    # DSL Numeric (Int32, Float32, etc.) — use ir_value() to materialize
+    if hasattr(value, 'ir_value') and not isinstance(value, ir.Value):
+        return value.ir_value()
     max_depth = 10  # Safety limit
     depth = 0
-    
     while depth < max_depth and not isinstance(value, ir.Value):
         if hasattr(value, '_value'):
             value = value._value
@@ -51,7 +55,6 @@ def _unwrap_value(value):
         else:
             break
         depth += 1
-    
     return value
 
 
@@ -266,8 +269,13 @@ def buffer_load(rsrc: ir.Value,
     # Default dtype to f32
     if dtype is None:
         dtype = ir.F32Type.get()
-    
-    # Unwrap offset first
+    # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
+    elif hasattr(dtype, "ir_type"):
+        dtype = dtype.ir_type
+
+    # Unwrap offset first (accept DSL Numeric values via ir_value())
+    if hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
     offset = _unwrap_value(offset)
     
     # Convert offset to i32 if needed
@@ -345,7 +353,11 @@ def buffer_store(data: ir.Value,
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
-    # Unwrap all inputs
+    # Unwrap all inputs (accept DSL Numeric values via ir_value())
+    if hasattr(data, "ir_value"):
+        data = data.ir_value()
+    if hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)
     offset = _unwrap_value(offset)

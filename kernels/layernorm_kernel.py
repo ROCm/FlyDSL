@@ -86,10 +86,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
         # ── helpers: wave / block reduction ───────────────────────────────
         def wave_reduce_add(x):
-            width_i32 = arith.constant(WARP_SIZE, type=T.i32)
+            width_i32 = fx.Int32(WARP_SIZE)
             w = x
             for sh in [32, 16, 8, 4, 2, 1]:
-                off = arith.constant(sh, type=T.i32)
+                off = fx.Int32(sh)
                 peer = w.shuffle_xor(off, width_i32)
                 w = w.addf(peer, fastmath=fm_fast)
             return w
@@ -116,19 +116,19 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
                 v0 = s_sum.load([lane_safe_idx])
                 v1 = s_sumsq.load([lane_safe_idx])
-                z = arith.constant(0.0, type=T.f32)
+                z = fx.Float32(0.0)
                 ww0 = arith.select(in_range, v0, z)
                 ww1 = arith.select(in_range, v1, z)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
                 if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.constant(0, index=True)
+                    c0_idx = arith.index(0)
                     s_sum.store(ww0, [c0_idx])
                     s_sumsq.store(ww1, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.constant(0, index=True)
+            c0_idx = arith.index(0)
             return s_sum.load([c0_idx]), s_sumsq.load([c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):
@@ -180,7 +180,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             thr_col_bytes = ArithValue(tid) * (VEC_WIDTH * elem_bytes)
 
             def _load_vec_buf(rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 raw = buffer_ops.buffer_load(
                     rsrc, dw, vec_width=vec_dwords, dtype=T.i32,
                     soffset_bytes=soff,
@@ -190,7 +190,7 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec_buf(data, rsrc, col_byte_off, soff=None):
-                dw = col_byte_off.shrui(arith.constant(2, type=T.i32))
+                dw = col_byte_off >> fx.Int32(2)
                 buffer_ops.buffer_store(
                     data, rsrc, dw,
                     soffset_bytes=soff,

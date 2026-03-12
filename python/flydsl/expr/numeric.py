@@ -15,6 +15,7 @@ from .utils.arith import (
     int_to_fp,
     int_to_int,
     is_float_type,
+    _to_raw,
 )
 
 
@@ -181,9 +182,12 @@ def _try_coerce_rhs(rhs):
     if isinstance(rhs, Numeric):
         return rhs
     if isinstance(rhs, ArithValue):
-        if isinstance(rhs.type, ir.VectorType):
+        if isinstance(rhs.type, (ir.VectorType, ir.IndexType)):
+            return None  # no Numeric representation for vector/index
+        try:
+            return Numeric.from_ir_type(rhs.type)(rhs)
+        except (ValueError, KeyError):
             return None
-        return as_numeric(rhs)
     if isinstance(rhs, (int, float, bool)):
         return as_numeric(rhs)
     return None
@@ -404,6 +408,31 @@ class Numeric(metaclass=NumericMeta):
 
     def __ne__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
+
+    # ── Proxy methods: delegate ArithValue-specific ops via ir_value() ──
+    def maximumf(self, other, *, loc=None):
+        """Float maximum — delegates to ArithValue.maximumf."""
+        return type(self)(self.ir_value().maximumf(_to_raw(other), loc=loc))
+
+    def minimumf(self, other, *, loc=None):
+        """Float minimum — delegates to ArithValue.minimumf."""
+        return type(self)(self.ir_value().minimumf(_to_raw(other), loc=loc))
+
+    def exp2(self, *, fastmath=None, loc=None):
+        """Base-2 exponential — delegates to ArithValue.exp2."""
+        return type(self)(self.ir_value().exp2(fastmath=fastmath, loc=loc))
+
+    def shuffle_xor(self, offset, width, *, loc=None):
+        """GPU warp shuffle XOR — delegates to ArithValue.shuffle_xor."""
+        return type(self)(self.ir_value().shuffle_xor(offset, width, loc=loc))
+
+    def shrui(self, amount, *, loc=None):
+        """Unsigned right shift — delegates to ArithValue.shrui."""
+        return type(self)(self.ir_value().shrui(amount, loc=loc))
+
+    def addf(self, other, *, fastmath=None, loc=None):
+        """Float add with fastmath — delegates to ArithValue.addf."""
+        return type(self)(self.ir_value().addf(_to_raw(other), fastmath=fastmath, loc=loc))
 
     def __lt__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.lt)(self, other, loc=loc, ip=ip)
