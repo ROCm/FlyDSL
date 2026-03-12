@@ -3734,8 +3734,9 @@ class _MoeGemm2ReduceWrapper:
         n_in,
         k_in,
         size_expert_ids_in,
+        intermediate = None,
         valid_mask = None,
-        stream_ptr = None,
+        stream_ptr = None
     ):
         """Execute GEMM2 + reduce.
 
@@ -3743,11 +3744,12 @@ class _MoeGemm2ReduceWrapper:
         """
         # Allocate/reuse intermediate buffer
         import torch
-        intermediate = torch.empty(
-                tokens_in * self._topk, self._model_dim,
-                device=arg_out.device,
-                dtype=self._get_torch_dtype()
-            )
+        if intermediate is None:
+            intermediate = torch.empty(
+                    tokens_in * self._topk, self._model_dim,
+                    device=arg_out.device,
+                    dtype=self._get_torch_dtype()
+                )
         if self._zero_intermediate and not self._use_mask:
             intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
