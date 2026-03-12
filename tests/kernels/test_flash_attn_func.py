@@ -40,8 +40,6 @@ from tests.test_common import run_perftest
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
-    "unsafe_fp_math": True,
-    "fast_fp_math": True,
     "waves_per_eu": 3,
     "flat_work_group_size": 256,
 }
@@ -183,8 +181,6 @@ def run_config(
             head_dim=head_dim,
             causal=causal,
             dtype_str="f16",
-            fast_fp_math=FLASH_ATTN_FUNC_KERNEL_CONFIG["fast_fp_math"],
-            unsafe_fp_math=FLASH_ATTN_FUNC_KERNEL_CONFIG["unsafe_fp_math"],
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG["flat_work_group_size"],
         )

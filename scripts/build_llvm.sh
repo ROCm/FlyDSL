@@ -43,10 +43,24 @@ else
     pushd "$LLVM_SRC_DIR"
 fi
 
+<<<<<<< HEAD
 if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
     echo "Fetching commit ${LLVM_COMMIT} ..."
     git fetch --depth 1 origin "${LLVM_COMMIT}"
 fi
+=======
+echo "Checking out llvm-project commit ${LLVM_COMMIT} (amd-staging)..."
+pushd "$LLVM_SRC_DIR"
+
+# Check if we need to switch remote to ROCm fork
+CURRENT_REMOTE=$(git remote get-url origin)
+if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
+    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
+    git remote set-url origin https://github.com/ROCm/llvm-project.git
+fi
+
+git fetch origin amd-staging
+>>>>>>> 56e7961 (flash_attn: add mfma_f32_32x32x8f16 wrapper and remove fp_math params)
 git checkout "${LLVM_COMMIT}"
 popd
 
