@@ -104,31 +104,31 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             w0 = wave_reduce_add(val0)
             w1 = wave_reduce_add(val1)
 
-            if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+            if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
                 s_sum.store(w0, [wave_idx])
                 s_sumsq.store(w1, [wave_idx])
             gpu.barrier()
 
-            if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
+            if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
-                lane_safe = arith.select(in_range, lane, Int32(0))
+                lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
                 v0 = s_sum.load([lane_safe_idx])
                 v1 = s_sumsq.load([lane_safe_idx])
                 z = fx.Float32(0.0)
-                ww0 = arith.select(in_range, v0, z)
-                ww1 = arith.select(in_range, v1, z)
+                ww0 = in_range.select(v0, z)
+                ww1 = in_range.select(v1, z)
                 ww0 = wave_reduce_add(ww0)
                 ww1 = wave_reduce_add(ww1)
 
-                if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.index(0)
+                if lane == fx.Int32(0):
+                    c0_idx = fx.Index(0)
                     s_sum.store(ww0, [c0_idx])
                     s_sumsq.store(ww1, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.index(0)
+            c0_idx = fx.Index(0)
             return s_sum.load([c0_idx]), s_sumsq.load([c0_idx])
 
         def compute_mean_rstd(sum_val, sumsq_val):

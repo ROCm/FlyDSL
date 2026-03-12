@@ -43,6 +43,9 @@ def get_mlir_type_align(mlir_type: ir.Type) -> int:
     return min(size, 16) 
 
 def get_op_result_or_value(op_or_val):
+    # DSL Numeric (fx.Int32, fx.Index, etc.) — materialize via ir_value()
+    if not isinstance(op_or_val, ir.Value) and hasattr(op_or_val, 'ir_value'):
+        return op_or_val.ir_value()
     if hasattr(op_or_val, 'value'): # ArithValue or similar wrapper
         return op_or_val.value
     if isinstance(op_or_val, ir.Value):

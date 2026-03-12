@@ -65,10 +65,10 @@ def make_preshuffle_b_layout(
     if kpack_bytes not in (8, 16):
         raise ValueError(f"kpack_bytes must be 8 or 16, got {kpack_bytes!r}")
 
-    c16 = arith.constant(16, index=True)
-    c64 = arith.constant(64, index=True)
-    c4 = arith.constant(4, index=True)
-    c_kpack = arith.constant(kpack_bytes, index=True)
+    c16 = fx.Index(16)
+    c64 = fx.Index(64)
+    c4 = fx.Index(4)
+    c_kpack = fx.Index(kpack_bytes)
 
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
@@ -159,21 +159,21 @@ def load_b_raw_w4a16(
     if kpack_bytes != 8:
         raise ValueError(f"W4A16 requires kpack_bytes=8, got {kpack_bytes!r}")
 
-    c64 = arith.constant(64, index=True)
+    c64 = fx.Index(64)
     half_bytes = kpack_bytes // 2
-    c2_idx = arith.constant(2, index=True)
-    c4_idx = arith.constant(4, index=True)
+    c2_idx = fx.Index(2)
+    c4_idx = fx.Index(4)
 
     k0_base = base_k // c64
     k1_layout_offset = ku * 2
     lane_div_32 = lane_div_16 // c2_idx
-    total_k1 = arith.constant(k1_layout_offset, index=True) + lane_div_32
+    total_k1 = fx.Index(k1_layout_offset) + lane_div_32
     k0 = k0_base + (total_k1 // c4_idx)
     k1_local = total_k1 % c4_idx
     lane_odd = lane_div_16 % c2_idx
-    k2_base = lane_odd * arith.constant(half_bytes, index=True)
+    k2_base = lane_odd * fx.Index(half_bytes)
 
-    coord_pack = (n_blk, k0, k1_local, n_intra, arith.constant(0, index=True))
+    coord_pack = (n_blk, k0, k1_local, n_intra, fx.Index(0))
     idx_pack = crd2idx(coord_pack, layout_b)
     idx_bytes = idx_pack + k2_base
 
@@ -241,7 +241,7 @@ def load_b_pack_k32(
     if elem_bytes not in (1, 2):
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
 
-    c64 = arith.constant(64, index=True)
+    c64 = fx.Index(64)
     base_k_bytes = base_k * arith.constant(int(elem_bytes), index=True)
     k0_base = base_k_bytes // c64
     k0 = k0_base + arith.constant(ki_step // 2, index=True)
@@ -249,7 +249,7 @@ def load_b_pack_k32(
     half_bytes = kpack_bytes // 2
     k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
-    coord_pack = (n_blk, k0, k1, n_intra, arith.constant(0, index=True))
+    coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
     idx_pack = crd2idx(coord_pack, layout_b)
 
     if unpack_int4:

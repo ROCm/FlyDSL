@@ -100,26 +100,26 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             w = wave_reduce(val, mode)
 
-            if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
+            if lane == fx.Int32(0):
                 wave_idx = arith.index_cast(T.index, wave)
                 s_red.store(w, [wave_idx])
             gpu.barrier()
 
-            if arith.cmpi(arith.CmpIPredicate.eq, wave, Int32(0)):
+            if wave == fx.Int32(0):
                 in_range = lane < RED_SLOTS
-                lane_safe = arith.select(in_range, lane, Int32(0))
+                lane_safe = in_range.select(lane, fx.Int32(0))
                 lane_safe_idx = arith.index_cast(T.index, lane_safe)
                 v = s_red.load([lane_safe_idx])
                 z = neutral
-                ww = arith.select(in_range, v, z)
+                ww = in_range.select(v, z)
                 ww = wave_reduce(ww, mode)
 
-                if arith.cmpi(arith.CmpIPredicate.eq, lane, Int32(0)):
-                    c0_idx = arith.index(0)
+                if lane == fx.Int32(0):
+                    c0_idx = fx.Index(0)
                     s_red.store(ww, [c0_idx])
             gpu.barrier()
 
-            c0_idx = arith.index(0)
+            c0_idx = fx.Index(0)
             return s_red.load([c0_idx])
 
         # ==================================================================
