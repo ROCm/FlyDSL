@@ -61,8 +61,6 @@ def build_flash_attn_func_module_primary(
     sm_scale=None,
     waves_per_eu=3,
     flat_work_group_size=256,
-    fast_fp_math=True,
-    unsafe_fp_math=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
     gpu_arch = get_hip_arch()
@@ -163,8 +161,6 @@ def build_flash_attn_func_module_primary(
         NUM_PREFETCH_V,
         waves_per_eu,
         flat_work_group_size,
-        fast_fp_math,
-        unsafe_fp_math,
     )
 
     @flyc.kernel
@@ -607,8 +603,6 @@ def build_flash_attn_func_module_primary(
         _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
-        ctx.compile_options["fast_fp_math"] = bool(fast_fp_math)
-        ctx.compile_options["unsafe_fp_math"] = bool(unsafe_fp_math)
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
 
