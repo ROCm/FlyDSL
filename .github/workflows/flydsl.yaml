@@ -99,7 +99,7 @@ jobs:
           docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
           ls -lh ./mlir_install.tgz || true
 
-      - name: Build FLIR (uses MLIR install prefix)
+      - name: Build FlyDSL (uses MLIR install prefix)
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
 
@@ -159,8 +159,8 @@ jobs:
       - name: Show benchmarks logs
         if: failure()
         run: |
-          docker exec flydsl_test bash -c 'cd /tmp/flir_bench && tar czf /tmp/flir_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flir_bench/logs.tgz . || true
+          docker exec flydsl_test bash -c 'cd /tmp/flydsl_bench && tar czf /tmp/flydsl_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/flydsl_bench/logs.tgz . || true
           if [ -f logs.tgz ]; then
             tar -xzf logs.tgz || true
             cat *.log || true

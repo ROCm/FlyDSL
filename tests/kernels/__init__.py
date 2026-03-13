@@ -1,2 +1,2 @@
-# GPU-focused FLIR/ROCIR tests.
+# GPU-focused FlyDSL/ROCIR tests.
 #

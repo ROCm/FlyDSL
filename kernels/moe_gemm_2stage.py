@@ -1,4 +1,4 @@
-"""MoE GEMM stage1/stage2 kernel implementations (FLIR MFMA FP8).
+"""MoE GEMM stage1/stage2 kernel implementations (FlyDSL MFMA FP8).
 
 This module intentionally contains the **kernel builder code** for:
 - `moe_gemm1` (stage1)
@@ -198,11 +198,11 @@ def compile_moe_gemm1(
     # LDS128 mode (same idea as test_preshuffle_gemm.py):
     # - LDS stride == tile_k (no extra padding) + XOR16 swizzle
     # - Use ds_{read,write}_b128 (16B) and extract 8B halves for MFMA steps
-    _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
+    _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
     if use_cshuffle_epilog is None:
-        use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
+        use_cshuffle_epilog = os.environ.get("FLYDSL_MOE_STAGE1_CSHUFFLE", "1") in ("1", "true", "True", "YES", "yes")
     use_cshuffle_epilog = bool(use_cshuffle_epilog)
     if out_dtype != "f16" and use_cshuffle_epilog:
         raise ValueError("stage1 cshuffle epilog currently supports only f16 output (out_dtype='f16')")
@@ -1393,7 +1393,7 @@ def compile_moe_gemm2(
         )
     bytes_per_thread_x = bytes_x_per_tile // total_threads
 
-    _ck_lds128 = os.environ.get("FLIR_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
+    _ck_lds128 = os.environ.get("FLYDSL_CK_LDS128", "1") in ("1", "true", "True", "YES", "yes")
     pad_k = 0 if _ck_lds128 else 8
     lds_stride = tile_k + pad_k
     if out_is_bf16:
@@ -1409,7 +1409,7 @@ def compile_moe_gemm2(
             raise ValueError("out_dtype='f32' does not support CShuffle epilogue (set use_cshuffle_epilog=False).")
     else:
         if use_cshuffle_epilog is None:
-            _use_cshuffle_epilog = os.environ.get("FLIR_MOE_STAGE2_CSHUFFLE", "1") in (
+            _use_cshuffle_epilog = os.environ.get("FLYDSL_MOE_STAGE2_CSHUFFLE", "1") in (
                 "1",
                 "true",
                 "True",
@@ -1420,7 +1420,7 @@ def compile_moe_gemm2(
             _use_cshuffle_epilog = bool(use_cshuffle_epilog)
         if not _use_cshuffle_epilog:
             raise ValueError(
-                "stage2 f16 output currently requires CShuffle epilogue (FLIR_MOE_STAGE2_CSHUFFLE=1)."
+                "stage2 f16 output currently requires CShuffle epilogue (FLYDSL_MOE_STAGE2_CSHUFFLE=1)."
             )
 
     # NOTE: Keep this as a callable so we don't require an MLIR Context at Python-time.
@@ -2318,7 +2318,7 @@ def compile_moe_gemm2(
                 else:
                     if lds_out is None:
                         raise RuntimeError(
-                            "FLIR_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
+                            "FLYDSL_MOE_STAGE2_CSHUFFLE=1 but lds_out is not allocated/aliased."
                         )
 
                     # For bf16 global atomics, precompute the output base address once.

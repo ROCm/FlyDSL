@@ -30,9 +30,29 @@ from .._mlir.dialects import arith as _mlir_arith  # noqa: E402
 
 
 def cmpi(predicate, lhs, rhs, **kwargs):
+    """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
+
+    Args:
+        predicate: ``arith.CmpIPredicate`` (e.g., ``eq``, ``slt``, ``uge``).
+        lhs: Left-hand operand.
+        rhs: Right-hand operand.
+
+    Returns:
+        An ``i1`` comparison result.
+    """
     return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 
 
 def cmpf(predicate, lhs, rhs, **kwargs):
+    """Floating-point comparison accepting DSL numeric types.
+
+    Args:
+        predicate: ``arith.CmpFPredicate`` (e.g., ``olt``, ``oeq``, ``une``).
+        lhs: Left-hand operand.
+        rhs: Right-hand operand.
+
+    Returns:
+        An ``i1`` comparison result.
+    """
     return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 

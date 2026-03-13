@@ -38,7 +38,7 @@ def _unwrap_value(value):
     """Recursively unwrap ArithValue or similar wrappers to get the actual MLIR value.
 
     Handles:
-    - flir ArithValue (has ._value)
+    - FlyDSL ArithValue (has ._value)
     - flyc DSL Numeric like fx.Int32 (has .ir_value() method)
     - flyc ArithValue (is already ir.Value subclass)
     """
@@ -185,7 +185,7 @@ class BufferResourceDescriptor:
                 num_records = v
         elif max_size:
             # Use max for flexibility (hardware will check actual bounds)
-            # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
+            # Note: FlyDSL's rocdl.make.buffer.rsrc requires i32, not i64
             num_records = _create_i64_constant(0xFFFFFFFF)  # FALLBACK_MAX_SIZE
         else:
             # Use the logical memref size (in bytes) for hardware OOB checking.

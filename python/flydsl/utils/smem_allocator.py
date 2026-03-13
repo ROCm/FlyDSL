@@ -43,7 +43,7 @@ def get_mlir_type_align(mlir_type: ir.Type) -> int:
     return min(size, 16) 
 
 def get_op_result_or_value(op_or_val):
-    # DSL Numeric (fx.Int32, fx.Index, etc.) — materialize via ir_value()
+    """Unwrap an MLIR op, ArithValue, or DSL numeric to a raw ``ir.Value``."""
     if not isinstance(op_or_val, ir.Value) and hasattr(op_or_val, 'ir_value'):
         return op_or_val.ir_value()
     if hasattr(op_or_val, 'value'): # ArithValue or similar wrapper
@@ -134,6 +134,26 @@ class SmemPtr:
 # ==============================================================================
 
 class SmemAllocator:
+    """GPU shared memory (LDS) allocator for kernel construction.
+
+    Tracks byte offsets and alignment requirements for multiple shared
+    memory buffers within a single kernel. Call ``finalize()`` inside the
+    ``gpu.module`` body to emit the underlying ``memref.global`` op.
+
+    Usage::
+
+        allocator = SmemAllocator(None, arch="gfx942")
+        offset_a = allocator._align(allocator.ptr, 16)
+        allocator.ptr = offset_a + num_bytes_a
+        # ... repeat for more buffers ...
+        allocator.finalize()  # emit gpu.module global
+
+    Args:
+        ctx: Compilation context (may be None for deferred finalization).
+        arch: GPU architecture string for capacity checking.
+        global_sym_name: Symbol name for the shared memory global.
+    """
+
     def __init__(self, ctx, arch: Optional[str] = None, global_sym_name: str = "smem_storage"):
         self.ctx = ctx
         self.ptr = 0
@@ -199,7 +219,7 @@ def check_smem_capacity(allocated_bytes: int, arch: str = None):
     Checks if the allocated shared memory fits within the device capacity.
     """
     if arch is None:
-        # Try to detect arch from environment or flir context if possible
+        # Try to detect arch from environment or FlyDSL context if possible
         # For now, default to a safe limit or skip check if unknown
         return
         

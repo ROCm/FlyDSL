@@ -4,13 +4,13 @@
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
 tiling, partitioning, data movement, and kernel structure at a high level.
 
-**FlyDSL**: FlyDSL is powered by FLIR (**F**lexible **L**ayout **I**ntermediate **R**epresentation):
+**FlyDSL**: FlyDSL is powered by the Fly dialect:
 an end‑to‑end, MLIR‑native compiler stack for GPU kernels. Its core is the `fly` dialect—a first‑class
 layout IR with explicit algebra and coordinate mapping, plus a composable lowering pipeline to GPU/ROCDL.
 
 ## Overview
 
-- **FlyDSL (Python DSL)**: author kernels in Python and compile them through FLIR
+- **FlyDSL (Python DSL)**: author kernels in Python and compile them through the Fly dialect
   - Primary package: `python/flydsl/`
   - Kernel examples: `kernels/` (importable as `kernels.*`)
 - **Fly dialect**: the layout IR and compiler foundation
@@ -143,7 +143,7 @@ bash scripts/build.sh -j64
 | **Topic** | **Description** | **Guide** |
 |---|---|---|
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
-| Layout System | FLIR layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
+| Layout System | FlyDSL layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
 | Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
 | Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
