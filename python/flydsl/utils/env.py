@@ -225,6 +225,8 @@ class CompileEnvManager(EnvManager):
     compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
+    unsafe_fp_math = OptBool(False, description="Enable unsafe floating-point math optimizations in LLVM backend")
+    fast_fp_math = OptBool(False, description="Enable fast floating-point math optimizations in LLVM backend")
 
 
 class DebugEnvManager(EnvManager):
