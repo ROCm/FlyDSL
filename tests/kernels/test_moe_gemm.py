@@ -904,7 +904,7 @@ def run_moe_stage2(
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
     # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
-    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16", "int4_fp8")):
+    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
     else:

@@ -181,10 +181,8 @@ def compile_moe_gemm1(
     num_groups = model_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage1 = experts * (2 * inter_dim) * num_groups
     # For groupwise scale, weight scale is applied per-group in the K loop,
-    # so epilogue can skip weight scale multiplication.
-    # For W4A16 groupwise: skip entirely (bf16 activations have no scale_x).
+    # so epilogue can skip weight scale multiplication (uses 1.0 for sw).
     # For W4A8/W4A_FP8 groupwise: still need scale_x in epilogue.
-    skip_epilogue_scale = use_groupwise_scale and (not needs_scale_x)
 
     mfma_i32_k32 = None
     if is_int8:
@@ -1600,7 +1598,6 @@ def compile_moe_gemm2(
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     scale_w_size_stage2 = experts * model_dim * num_groups
-    skip_epilogue_scale = use_groupwise_scale and (not needs_scale_x)
 
     mfma_i32_k32 = None
     if is_int8:
@@ -2676,7 +2673,6 @@ def compile_moe_gemm2(
                 # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
                 if use_groupwise_scale:
                     # Groupwise: weight scale already applied per-group in K-loop.
-                    # Epilogue uses 1.0 for weight scale (skip_epilogue_scale path).
                     sw_vals = [arith.constant(1.0, type=T.f32)] * num_acc_n
                 elif sw_pf is not None:
                     sw_vals = sw_pf
