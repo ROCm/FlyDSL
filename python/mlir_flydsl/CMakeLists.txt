@@ -167,7 +167,7 @@ add_mlir_python_modules(FlyPythonModules
 
 set(_FLYDSL_PYTHON_PACKAGES_DIR "${MLIR_BINARY_DIR}/python_packages")
 set(_MLIR_LIBS_DIR "${FlyPythonModules_ROOT_PREFIX}/_mlir_libs")
-set(_MLIR_RUNTIME_LIB_DIR "${FlyPythonModules_ROOT_PREFIX}/lib")
+set(_MLIR_RUNTIME_LIB_DIR "${FlyPythonModules_ROOT_PREFIX}/../lib")
 set(_STUB_MARKER_FILE "${_MLIR_LIBS_DIR}/.stubs_generated")
 
 add_custom_command(
@@ -234,10 +234,7 @@ add_dependencies(CopyFlyPythonSources FlyPythonModules)
 # FlyJitRuntime — thin ROCm runtime with GPU module caching
 ################################################################################
 
-set(_FLYDSL_HIP_HINT_PATHS /opt/rocm)
-file(GLOB _FLYDSL_HIP_VERSIONED_PATHS LIST_DIRECTORIES TRUE "/opt/rocm-*")
-list(APPEND _FLYDSL_HIP_HINT_PATHS ${_FLYDSL_HIP_VERSIONED_PATHS})
-find_package(hip QUIET CONFIG PATHS ${_FLYDSL_HIP_HINT_PATHS})
+find_package(hip QUIET CONFIG PATHS /opt/rocm)
 if(hip_FOUND)
   add_library(FlyJitRuntime SHARED
     "${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp"
