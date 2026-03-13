@@ -33,8 +33,7 @@ function run_flydsl_op {
     export FLIR_LOG_MORE=1
     export FLYDSL_DUMP_IR=1
     export FLYDSL_RUNTIME_ENABLE_CACHE=1
-    # export FLYDSL_DUMP_DIR=./flydsl_dump
-    export FLYDSL_DUMP_DIR=./flydsl_dump_old_llvm
+    export FLYDSL_DUMP_DIR=./flydsl_dump
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 

@@ -28,7 +28,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.utils import env
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import memref as _memref, scf
+from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _llvm
 
 
 KERNEL_NAME = "flash_attn_func_kernel"
@@ -64,6 +64,7 @@ def build_flash_attn_func_module_primary(
     flat_work_group_size=256,
     unsafe_fp_math=True,
     fast_fp_math=True,
+    daz=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
     env.compile.unsafe_fp_math = unsafe_fp_math
@@ -168,6 +169,7 @@ def build_flash_attn_func_module_primary(
         flat_work_group_size,
         unsafe_fp_math,
         fast_fp_math,
+        daz,
     )
 
     @flyc.kernel
@@ -180,14 +182,11 @@ def build_flash_attn_func_module_primary(
     ):
         elem_type = T.f16
         compute_type = T.f32
-        Q = Q.value
-        K = K.value
-        V = V.value
-        O = O.value
-        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
-        k_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
-        v_rsrc = buffer_ops.create_buffer_resource(V, max_size=True)
-        o_rsrc = buffer_ops.create_buffer_resource(O, max_size=True)
+        llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
+        q_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, Q.value)
+        k_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, K.value)
+        v_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, V.value)
+        o_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, O.value)
 
         fm_fast = arith.FastMathFlags.fast
         v4f16_type = T.vec(4, elem_type)
@@ -237,21 +236,29 @@ def build_flash_attn_func_module_primary(
             token = batch_idx * seq_len_v + token_idx
             return token * STRIDE_TOKEN + head_idx * HEAD_DIM + col
 
-        def load_global_f16x4(rsrc, base_idx):
-            dword_idx = arith.index_cast(T.i32, base_idx // 2)
-            raw = buffer_ops.buffer_load(rsrc, dword_idx, vec_width=2, dtype=T.i32)
-            return vector.bitcast(v4f16_type, raw)
+        _GEP_DYNAMIC = -2147483648  # LLVM's kDynamicIndex sentinel (0x80000000 as signed i32)
 
-        def load_global_f16xN(rsrc, base_idx):
-            dword_idx = arith.index_cast(T.i32, base_idx // 2)
-            if VEC_WIDTH == 8:
-                raw = buffer_ops.buffer_load(rsrc, dword_idx, vec_width=4, dtype=T.i32)
-                return vector.bitcast(vxf16_type, raw)
-            raw_lo = buffer_ops.buffer_load(rsrc, dword_idx, vec_width=4, dtype=T.i32)
-            raw_hi = buffer_ops.buffer_load(rsrc, dword_idx + 4, vec_width=4, dtype=T.i32)
-            vec_lo = vector.bitcast(v8f16_type, raw_lo)
-            vec_hi = vector.bitcast(v8f16_type, raw_hi)
-            return vector.shuffle(vec_lo, vec_hi, list(range(16)))
+        def _gep_load(base_ptr, elem_idx, vec_type):
+            idx_i64 = arith.index_cast(T.i64, elem_idx)
+            gep = _llvm.GEPOp(llvm_ptr_ty, base_ptr, [idx_i64],
+                              rawConstantIndices=[_GEP_DYNAMIC],
+                              elem_type=elem_type,
+                              noWrapFlags=0)
+            return _llvm.LoadOp(vec_type, gep.result).result
+
+        def _gep_store(val, base_ptr, elem_idx):
+            idx_i64 = arith.index_cast(T.i64, elem_idx)
+            gep = _llvm.GEPOp(llvm_ptr_ty, base_ptr, [idx_i64],
+                              rawConstantIndices=[_GEP_DYNAMIC],
+                              elem_type=elem_type,
+                              noWrapFlags=0)
+            _llvm.StoreOp(val, gep.result)
+
+        def load_global_f16x4(base_ptr, base_idx):
+            return _gep_load(base_ptr, base_idx, v4f16_type)
+
+        def load_global_f16xN(base_ptr, base_idx):
+            return _gep_load(base_ptr, base_idx, vxf16_type)
 
         def k_buf_base(buf_id):
             return arith.index(buf_id * LDS_K_TILE_SIZE)
@@ -275,13 +282,13 @@ def build_flash_attn_func_module_primary(
                         g_idx = global_idx(row_idx, load_col_base)
                         lds_row = load_row_in_batch + row_offset
                         lds_idx = k_base + lds_row * K_STRIDE + load_col_base
-                        vec = load_global_f16xN(k_rsrc, g_idx)
+                        vec = load_global_f16xN(k_ptr, g_idx)
                         vector.store(vec, lds_kv, [lds_idx])
                 else:
                     g_idx = global_idx(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     lds_idx = k_base + lds_row * K_STRIDE + load_col_base
-                    vec = load_global_f16xN(k_rsrc, g_idx)
+                    vec = load_global_f16xN(k_ptr, g_idx)
                     vector.store(vec, lds_kv, [lds_idx])
 
         # ---- Cooperative V load (transposed, padded stride) ----
@@ -299,7 +306,7 @@ def build_flash_attn_func_module_primary(
                     if row_valid:
                         g_idx = global_idx(row_idx, load_col_base)
                         load_row = load_row_in_batch + row_offset
-                        vec = load_global_f16xN(v_rsrc, g_idx)
+                        vec = load_global_f16xN(v_ptr, g_idx)
                         for e in range_constexpr(VEC_WIDTH):
                             elem = vector.extract(
                                 vec,
@@ -312,7 +319,7 @@ def build_flash_attn_func_module_primary(
                 else:
                     g_idx = global_idx(row_idx, load_col_base)
                     load_row = load_row_in_batch + row_offset
-                    vec = load_global_f16xN(v_rsrc, g_idx)
+                    vec = load_global_f16xN(v_ptr, g_idx)
                     for e in range_constexpr(VEC_WIDTH):
                         elem = vector.extract(
                             vec,
@@ -326,12 +333,12 @@ def build_flash_attn_func_module_primary(
         # ---- Preload Q^T B-operand packs once (register-resident) ----
         # B operand uses j = lane_mod_32, k-subblock = lane_div_32*4.
         q_row = q_start + wave_q_offset + lane_mod_32
-        q_row_i32 = arith.index_cast(T.i32, q_row)
+        q_row_i64 = arith.index_cast(T.i64, q_row)
         q_b_packs = []
         for ks in range_constexpr(K_STEPS_QK):
             q_col = arith.index(ks * K_STEP_QK) + lane_div_32 * 4
             g_idx = global_idx(q_row, q_col)
-            q_b_packs.append(load_global_f16x4(q_rsrc, g_idx))
+            q_b_packs.append(load_global_f16x4(q_ptr, g_idx))
 
         # ---- Constants ----
         c_neg_inf = arith.constant(float("-inf"), type=compute_type)
@@ -428,21 +435,21 @@ def build_flash_attn_func_module_primary(
                     if CAUSAL:
                         kv_row_rel = lane_div_32 * 4 + (r // 4) * 8 + (r % 4)
                         kv_col = kv_start + kv_row_rel
-                        kv_col_i32 = arith.index_cast(T.i32, kv_col)
+                        kv_col_i64 = arith.index_cast(T.i64, kv_col)
                         is_masked = arith.cmpi(
                             arith.CmpIPredicate.ugt,
-                            kv_col_i32,
-                            q_row_i32,
+                            kv_col_i64,
+                            q_row_i64,
                         )
                         s_val = arith.select(is_masked, c_neg_inf, s_val)
                     s_vals.append(s_val)
 
                 local_max = s_vals[0]
                 for r in range_constexpr(15):
-                    local_max = arith.MaximumFOp(local_max, s_vals[r + 1]).result
+                    local_max = arith.MaxNumFOp(local_max, s_vals[r + 1]).result
                 peer_max = reduction_peer(local_max)
-                row_max = arith.MaximumFOp(local_max, peer_max).result
-                m_new = arith.MaximumFOp(m_running, row_max).result
+                row_max = arith.MaxNumFOp(local_max, peer_max).result
+                m_new = arith.MaxNumFOp(m_running, row_max).result
 
                 diff_m = arith.SubFOp(
                     m_running,
@@ -591,11 +598,7 @@ def build_flash_attn_func_module_primary(
                 d_row_rel = lane_div_32 * 4 + (r // 4) * 8 + (r % 4)
                 d_col = arith.index(dc * D_CHUNK) + d_row_rel
                 o_global = global_idx(q_row, d_col)
-                buffer_ops.buffer_store(
-                    o_f16,
-                    o_rsrc,
-                    arith.index_cast(T.i32, o_global),
-                )
+                _gep_store(o_f16, o_ptr, o_global)
 
     @flyc.jit
     def launch_flash_attn_func(
@@ -636,6 +639,24 @@ def build_flash_attn_func_module_primary(
                 for op in ctx.gpu_module_body.operations:
                     if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                         op.attributes["rocdl.flat_work_group_size"] = flat_wg_attr
+
+        if daz:
+            for op in ctx.gpu_module_body.operations:
+                if getattr(op, "OPERATION_NAME", None) == "gpu.func":
+                    op.attributes["passthrough"] = ir.ArrayAttr.get([
+                        ir.ArrayAttr.get([
+                            ir.StringAttr.get("denormal-fp-math-f32"),
+                            ir.StringAttr.get("preserve-sign,preserve-sign"),
+                        ]),
+                        # ir.ArrayAttr.get([
+                        #     ir.StringAttr.get("no-nans-fp-math"),
+                        #     ir.StringAttr.get("true"),
+                        # ]),
+                        # ir.ArrayAttr.get([
+                        #     ir.StringAttr.get("unsafe-fp-math"),
+                        #     ir.StringAttr.get("true"),
+                        # ]),
+                    ])
 
         launcher.launch(
             grid=(grid_x, 1, 1),
