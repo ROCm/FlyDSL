@@ -42,6 +42,7 @@ DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": 3,
     "flat_work_group_size": 256,
+    "daz": True,
 }
 
 
@@ -183,6 +184,7 @@ def run_config(
             dtype_str="f16",
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG["flat_work_group_size"],
+            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
         )
     except Exception as e:
         results["err"] = f"build: {e}"
