@@ -26,6 +26,7 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.utils import env
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as _memref, scf
 
@@ -61,8 +62,12 @@ def build_flash_attn_func_module_primary(
     sm_scale=None,
     waves_per_eu=3,
     flat_work_group_size=256,
+    unsafe_fp_math=True,
+    fast_fp_math=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API."""
+    env.compile.unsafe_fp_math = unsafe_fp_math
+    env.compile.fast_fp_math = fast_fp_math
     gpu_arch = get_hip_arch()
 
     # Aggressive MFMA32 configuration for target B=1, H=64, S=8192, D=128.
@@ -161,6 +166,8 @@ def build_flash_attn_func_module_primary(
         NUM_PREFETCH_V,
         waves_per_eu,
         flat_work_group_size,
+        unsafe_fp_math,
+        fast_fp_math,
     )
 
     @flyc.kernel
