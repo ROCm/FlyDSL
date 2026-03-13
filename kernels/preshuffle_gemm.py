@@ -1213,6 +1213,7 @@ def compile_preshuffle_gemm_w4(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype="fp4",
+        out_dtype=out_dtype,
         lds_stage=1,
         use_cshuffle_epilog=use_cshuffle_epilog,
     )
