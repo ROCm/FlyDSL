@@ -12,17 +12,26 @@ from .protocol import fly_pointers
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    libs = [
-        mlir_libs_dir / "libfly_jit_runtime.so",
-        mlir_libs_dir / "libmlir_c_runner_utils.so",
-    ]
-    for lib in libs:
-        if not lib.exists():
-            raise FileNotFoundError(
-                f"Required JIT runtime library not found: {lib}\n"
-                f"Please rebuild the project."
-            )
-    return [str(p) for p in libs]
+    fly_rt = mlir_libs_dir / "libfly_jit_runtime.so"
+    if not fly_rt.exists():
+        raise FileNotFoundError(
+            f"Required JIT runtime library not found: {fly_rt}\n"
+            f"Please rebuild the project."
+        )
+    # libfly_jit_runtime.so is self-contained (provides all mgpu* HIP wrappers).
+    # libmlir_c_runner_utils.so has versioned .so dependencies that may not be
+    # available in all environments (e.g. libmlir_float16_utils.so.*). Only add
+    # it if it can actually be loaded.
+    libs = [str(fly_rt)]
+    runner_utils = mlir_libs_dir / "libmlir_c_runner_utils.so"
+    if runner_utils.exists():
+        try:
+            import ctypes as _ctypes
+            _ctypes.CDLL(str(runner_utils))
+            libs.append(str(runner_utils))
+        except OSError:
+            pass  # Missing transitive dependency; skip (not needed for GPU kernels)
+    return libs
 
 
 class _ArgPacker:
