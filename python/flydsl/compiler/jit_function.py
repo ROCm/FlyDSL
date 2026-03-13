@@ -26,6 +26,8 @@ from .kernel_function import (
 )
 from .protocol import fly_types, fly_construct
 
+_FLYDSL_ABI = 600
+_FLYDSL_COV = _FLYDSL_ABI // 100
 
 
 @lru_cache(maxsize=1)
@@ -287,7 +289,10 @@ def _sanitize_path_component(s: str) -> str:
 
 class MlirCompiler:
     @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
+    def _pipeline_fragments(*, chip: str, link_libs: list | None = None) -> list:
+        link_opt = ""
+        if link_libs:
+            link_opt = " " + " ".join(f"l={lib}" for lib in link_libs)
         return [
             "gpu-kernel-outlining{data-layout-str=}",
             "fly-canonicalize",
@@ -296,8 +301,8 @@ class MlirCompiler:
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+            f"rocdl-attach-target{{O=2 abi={_FLYDSL_ABI} chip={chip} correct-sqrt=true daz=false fast=false features= "
+            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true{link_opt}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
             "fly-gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
@@ -308,14 +313,14 @@ class MlirCompiler:
         ]
 
     @classmethod
-    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "", link_libs: list | None = None) -> ir.Module:
         module.operation.verify()
 
         if chip is None:
             chip = env.compile.arch or get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
+        fragments = cls._pipeline_fragments(chip=chip, link_libs=link_libs)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -517,7 +522,7 @@ class JitFunction:
 
             with ir.InsertionPoint(module.body), loc:
                 chip = env.compile.arch or get_rocm_arch()
-                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
+                gpu_module = create_gpu_module("kernels")
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -541,7 +546,17 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+            # Auto-detect mori shmem extern calls and link bitcode.
+            link_libs = None
+            needs_shmem = False
+            if any(s.startswith("mori_shmem_") for s in comp_ctx.extern_symbols):
+                from mori.ir.bitcode import find_bitcode
+                link_libs = [find_bitcode(cov=_FLYDSL_COV)]
+                needs_shmem = True
+
+            compiled_module = MlirCompiler.compile(
+                module, chip=chip, func_name=self.func.__name__, link_libs=link_libs,
+            )
 
             if env.compile.compile_only:
                 print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
@@ -551,6 +566,7 @@ class JitFunction:
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                needs_shmem=needs_shmem,
             )
 
             if use_cache:

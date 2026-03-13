@@ -34,16 +34,52 @@ class _ArgPacker:
         return buf
 
 
+_shmem_hook_installed = False
+_shmem_hook_lock = threading.Lock()
+
+
+def _ensure_shmem_hook():
+    """Register mori shmem module-load hook in libfly_jit_runtime.so.
+
+    After registration, every hipModuleLoadData performed by the MLIR
+    ExecutionEngine will trigger ``mori.shmem.shmem_module_init`` so that
+    ``globalGpuStates`` is injected into the loaded GPU module.
+    """
+    global _shmem_hook_installed
+    if _shmem_hook_installed:
+        return
+
+    with _shmem_hook_lock:
+        if _shmem_hook_installed:
+            return
+
+        import mori.shmem as ms
+
+        runtime_lib = ctypes.CDLL(str(_resolve_runtime_libs()[0]))
+
+        HOOK_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+
+        def _on_module_load(hip_module_ptr):
+            ms.shmem_module_init(hip_module_ptr)
+
+        # Must keep a reference to prevent GC of the callback.
+        _ensure_shmem_hook._callback = HOOK_TYPE(_on_module_load)
+        runtime_lib.mgpuSetModuleLoadHook(_ensure_shmem_hook._callback)
+        _shmem_hook_installed = True
+
+
 class CompiledArtifact:
     def __init__(
         self,
         compiled_module: ir.Module,
         func_name: str,
         source_ir: str = None,
+        needs_shmem: bool = False,
     ):
         self._ir_text = str(compiled_module)
         self._entry = func_name
         self._source_ir = source_ir
+        self._needs_shmem = needs_shmem
         self._module = None
         self._engine = None
         self._lock = threading.Lock()
@@ -54,12 +90,14 @@ class CompiledArtifact:
             "ir_text": self._ir_text,
             "entry": self._entry,
             "source_ir": self._source_ir,
+            "needs_shmem": self._needs_shmem,
         }
 
     def __setstate__(self, state):
         self._ir_text = state["ir_text"]
         self._entry = state["entry"]
         self._source_ir = state["source_ir"]
+        self._needs_shmem = state.get("needs_shmem", False)
         self._module = None
         self._engine = None
         self._lock = threading.Lock()
@@ -69,6 +107,9 @@ class CompiledArtifact:
         with self._lock:
             if self._engine is not None:
                 return
+
+            if self._needs_shmem:
+                _ensure_shmem_hook()
 
             with ir.Context() as ctx:
                 ctx.load_all_available_dialects()

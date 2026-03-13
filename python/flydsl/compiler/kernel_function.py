@@ -177,6 +177,7 @@ class CompilationContext:
         self.func_tracker = func_tracker
         self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
+        self.extern_symbols: set = set()
 
     @classmethod
     def get_current(cls) -> Optional["CompilationContext"]:
