@@ -29,12 +29,12 @@ rocprofv3 --version
 
 
 function run_flydsl_op {
-    export MLIR_ASM_VERBOSE=1
+    # export MLIR_ASM_VERBOSE=1
     export FLIR_LOG_MORE=1
-    export FLIR_DUMP_IR=1
-    export FLIR_NO_CACHE=1
-    export FLIR_REBUILD=1
-    export FLIR_DUMP_DIR=./flydsl_dump
+    export FLYDSL_DUMP_IR=1
+    export FLYDSL_RUNTIME_ENABLE_CACHE=1
+    # export FLYDSL_DUMP_DIR=./flydsl_dump
+    export FLYDSL_DUMP_DIR=./flydsl_dump_old_llvm
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
