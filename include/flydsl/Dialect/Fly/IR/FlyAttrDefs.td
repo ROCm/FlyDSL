@@ -52,52 +52,55 @@ def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
   let extraClassDeclaration = [{
     static AlignAttr getTrivialAlignment(MLIRContext *context);
   }];
-
-  let extraClassDefinition = [{
-    AlignAttr $cppClass::getTrivialAlignment(MLIRContext *context) {
-      return get(context, 1);
-    }
-  }];
 }
 
 /// Unified integer attribute that represents both static and dynamic integers.
 /// - None : value == 0 and width == 0. it could be used as a Static 0 in the arithmetic operations.
-/// - Static integer: value is the actual integer value (value != INT32_MIN)
-/// - Dynamic integer: value == INT32_MIN (sentinel), width and divisibility describe the dynamic value
+/// - Static integer: staticFlag == true, value is the actual integer value
+/// - Dynamic integer: staticFlag == false, width and divisibility describe the dynamic value
 def Fly_IntAttr : Fly_Attr<"Int", "int", [
     DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
 ]> {
   let parameters = (ins 
-    "int32_t":$value, // needs to be int64_t to support large integers in the future
-    DefaultValuedParameter<"int32_t", "32">:$width, 
-    DefaultValuedParameter<"int32_t", "1">:$divisibility);
+    "int32_t":$value, // may need update to int64_t in the future
+    "int32_t":$width, 
+    "int32_t":$divisibility,
+    "bool":$staticFlag);
   let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     bool isNone() const;
-    // value can't be INT32_MIN here
     bool isStaticValue(int32_t value) const;
     static IntAttr getNone(MLIRContext *ctx);
     static IntAttr getStatic(MLIRContext *ctx, int32_t value);
     static IntAttr getDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
   }];
+}
 
-  let extraClassDefinition = [{
-    bool $cppClass::isNone() const {
-      return getValue() == 0 && getWidth() == 0;
-    }
-    bool $cppClass::isStaticValue(int32_t value) const {
-      return getValue() == value;
-    }
-    IntAttr $cppClass::getNone(MLIRContext *ctx) {
-      return get(ctx, 0, 0, 0);
-    }
-    IntAttr $cppClass::getStatic(MLIRContext *ctx, int32_t value) {
-      return get(ctx, value, 32, value == 0 ? 1 : value);
-    }
-    IntAttr $cppClass::getDynamic(MLIRContext *ctx, int32_t width, int32_t divisibility) {
-      return get(ctx, std::numeric_limits<int32_t>::min(), width, divisibility);
-    }
+
+def Fly_BasisAttr : Fly_Attr<"Basis", "basis", [
+    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
+]> {
+  let parameters = (ins
+    Fly_IntAttr:$value,
+    ArrayRefParameter<"int32_t">:$modes
+  );
+  let hasCustomAssemblyFormat = 1;
+
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "int32_t":$mode), [{
+      ::llvm::SmallVector<int32_t, 1> modes;
+      modes.push_back(mode);
+      return $_get(value.getContext(), value, modes);
+    }]>,
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
+      return $_get(value.getContext(), value, modes);
+    }]>
+  ];
+  
+  let extraClassDeclaration = [{
+    int32_t depth();
+    static BasisAttr getStatic(MLIRContext *ctx, int32_t value, ArrayRef<int32_t> modes);
   }];
 }
 
@@ -108,37 +111,6 @@ def Fly_SwizzleAttr : Fly_Attr<"Swizzle", "swizzle", []> {
   let extraClassDeclaration = [{
     bool isTrivialSwizzle() const;
     static SwizzleAttr getTrivialSwizzle(MLIRContext *context);
-  }];
-
-  let extraClassDefinition = [{
-    bool $cppClass::isTrivialSwizzle() const {
-      return getMask() == 0;
-    }
-    SwizzleAttr $cppClass::getTrivialSwizzle(MLIRContext *context) {
-      return get(context, 0, 0, 0);
-    }
-  }];
-}
-
-def Fly_BasisAttr : Fly_Attr<"Basis", "basis", [
-    DeclareAttrInterfaceMethods<Fly_MayStaticAttrInterface>
-]> {
-  let parameters = (ins
-    "Attribute":$value,
-    ArrayRefParameter<"int32_t">:$modes
-  );
-  let hasCustomAssemblyFormat = 1;
-
-  let builders = [
-    AttrBuilderWithInferredContext<(ins "Attribute":$value, "int32_t":$mode), [{
-      ::llvm::SmallVector<int32_t, 1> modes;
-      modes.push_back(mode);
-      return $_get(value.getContext(), value, modes);
-    }]>
-  ];
-  
-  let extraClassDeclaration = [{
-    int32_t depth();
   }];
 }
 
@@ -152,8 +124,8 @@ def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
   let hasCustomAssemblyFormat = 1;
 
   let builders = [
-    AttrBuilder<(ins "int32_t":$value), [{
-      return $_get($_ctxt, IntAttr::getStatic($_ctxt, value));
+    AttrBuilderWithInferredContext<(ins "IntAttr":$value, "ArrayRef<int32_t>":$modes), [{
+      return $_get(value.getContext(), BasisAttr::get(value, modes));
     }]>,
     AttrBuilderWithInferredContext<(ins "Attribute":$value), [{
       return $_get(value.getContext(), value);
@@ -166,8 +138,11 @@ def Fly_IntTupleAttr : Fly_Attr<"IntTuple", "int_tuple", [
     static IntTupleAttr getLeafDynamic(MLIRContext *ctx, int32_t width = 32, int32_t divisibility = 1);
 
     bool isLeafNone() const;
+    bool isLeafInt() const;
+    bool isLeafBasis() const;
     bool isLeafStaticValue(int32_t value) const;
     IntAttr getLeafAsInt() const;
+    IntAttr extractIntFromLeaf() const;
     BasisAttr getLeafAsBasis() const;
 
     IntTupleAttr at(int32_t idx) const;
@@ -211,7 +186,7 @@ def Fly_ComposedLayoutAttr : Fly_Attr<"ComposedLayout", "composed_layout", [
     Fly_IntTupleAttr:$offset,
     Fly_LayoutAttr:$outer
   );
-  let assemblyFormat = "`<` $inner `o` $offset `o` $outer `>`";
+  let hasCustomAssemblyFormat = 1;
     
   let builders = [
     AttrBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
@@ -252,11 +227,5 @@ def Fly_TileAttr : Fly_Attr<"Tile", "tile", []> {
   }];
 }
 
-def Fly_LeafAttr : AnyAttrOf<[Fly_IntAttr, Fly_BasisAttr]> {
-  let cppFunctionName = "isValidLeafAttr";
-}
-def Fly_AnyLayoutAttr : AnyAttrOf<[Fly_LayoutAttr, Fly_ComposedLayoutAttr]> {
-  let cppFunctionName = "isAnyValidLayoutAttr";
-}
 
 #endif // FLY_ATTRDEFS

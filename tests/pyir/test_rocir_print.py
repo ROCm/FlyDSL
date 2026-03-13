@@ -1,113 +1,110 @@
 #!/usr/bin/env python3
-"""
-Test fly.print_ (printf) functionality via the Fly dialect API.
-
-Covers:
-  - {} auto-format placeholders
-  - bare-value printf (no format string)
-  - Python literal auto-materialization (int, float, bool)
-  - format arg-count mismatch detection
-"""
-
-import re
-import pytest
+"""Test fx.printf: IR generation, GPU lowering, CPU lowering."""
 
 from flydsl._mlir.ir import (
     Context, Location, Module, InsertionPoint,
-    FunctionType, IntegerType, IndexType,
+    FunctionType, IntegerType, F32Type,
 )
-from flydsl._mlir.dialects.fly import IntTupleType
-from flydsl._mlir.dialects import fly, arith, func
+from flydsl._mlir.dialects import arith, func, gpu
+from flydsl._mlir.passmanager import PassManager
+from flydsl.compiler.kernel_function import create_gpu_module, get_gpu_module_body, create_gpu_func
 import flydsl.expr as fx
 
 
-def _build_module(name, build_fn):
-    """Build a module with a single function, return its IR string."""
+def _build_cpu_module(build_fn):
     with Context() as ctx:
         ctx.allow_unregistered_dialects = True
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
             with InsertionPoint(module.body):
-                f = func.FuncOp(name, FunctionType.get([], []))
+                f = func.FuncOp("test", FunctionType.get([], []))
                 with InsertionPoint(f.add_entry_block()):
                     build_fn(i32)
                     func.ReturnOp([])
             return str(module)
 
 
-def _count(pattern, text):
-    return len(re.findall(pattern, text))
+def _build_gpu_module(build_fn):
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            with InsertionPoint(module.body):
+                gpu_mod = create_gpu_module("mod")
+                with InsertionPoint(get_gpu_module_body(gpu_mod)):
+                    kern = create_gpu_func("kern", FunctionType.get([], []))
+                    with InsertionPoint(kern.add_entry_block()):
+                        build_fn()
+                        gpu.ReturnOp([])
+            return str(module)
 
 
-# ===========================================================================
-# 1. {} placeholder resolution
-# ===========================================================================
+def _lower(ir_text):
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.parse(ir_text)
+            PassManager.parse("builtin.module(fly-layout-lowering)").run(module.operation)
+            return str(module)
 
-def test_placeholder_single():
-    """{} placeholder with an i32 value generates fly.print with the value as operand."""
+
+# -- IR generation --
+
+def test_printf_generates_fly_print():
     def build(i32):
         x = arith.ConstantOp(i32, 42).result
-        fx.printf("x={}", x)
-    ir = _build_module("single_placeholder", build)
+        fx.printf("val={}", x)
+    ir = _build_cpu_module(build)
     assert "fly.print" in ir
-    assert "42" in ir
 
 
-def test_placeholder_multi():
-    """Multiple {} placeholders produce a fly.print with multiple operands."""
+def test_printf_multi_placeholder():
     def build(i32):
         a = arith.ConstantOp(i32, 10).result
         b = arith.ConstantOp(i32, 20).result
         fx.printf("a={}, b={}", a, b)
-    ir = _build_module("multi_placeholder", build)
+    ir = _build_cpu_module(build)
     assert "fly.print" in ir
-    assert "10" in ir
-    assert "20" in ir
+    assert "10" in ir and "20" in ir
 
 
-# ===========================================================================
-# 2. Python literal auto-materialization
-# ===========================================================================
-
-def test_python_int_literal():
-    """Python int is auto-materialized as i32 constant."""
+def test_printf_python_literals():
     def build(i32):
-        fx.printf("int={}", 42)
-    ir = _build_module("int_literal", build)
+        fx.printf("int={}, float={}, str={}", 42, 3.14, "hello")
+    ir = _build_cpu_module(build)
     assert "fly.print" in ir
     assert "42" in ir
-
-
-def test_python_float_literal():
-    """Python float is auto-materialized as f64 constant."""
-    def build(i32):
-        fx.printf("float={}", 3.14)
-    ir = _build_module("float_literal", build)
-    assert "fly.print" in ir
-    assert "3.14" in ir or "3.140000" in ir
-
-
-# ===========================================================================
-# 3. Static string embedding
-# ===========================================================================
-
-def test_static_string_in_placeholder():
-    """Static string values are embedded directly in the format string."""
-    def build(i32):
-        fx.printf("type={}", "hello")
-    ir = _build_module("static_string", build)
     assert "hello" in ir
 
 
-# ===========================================================================
-# 4. IR structure check
-# ===========================================================================
-
-def test_print_generates_fly_print():
-    """fx.printf generates fly.print op."""
+def test_printf_bare_value():
     def build(i32):
-        x = arith.ConstantOp(i32, 1).result
-        fx.printf("v={}", x)
-    ir = _build_module("ir_check", build)
-    assert 'fly.print "v' in ir or "fly.print" in ir
+        x = arith.ConstantOp(i32, 99).result
+        fx.printf(x)
+    ir = _build_cpu_module(build)
+    assert "fly.print" in ir
+
+
+# -- GPU lowering: fly.print → gpu.printf --
+
+def test_gpu_printf_lowering():
+    def build():
+        a = arith.ConstantOp(IntegerType.get_signless(32), 1).result
+        b = arith.ConstantOp(F32Type.get(), 2.0).result
+        fx.printf("a={}, b={}", a, b)
+    ir = _lower(_build_gpu_module(build))
+    assert "gpu.printf" in ir
+    assert "fly.print" not in ir
+    assert "%d" in ir and "%f" in ir
+
+
+# -- CPU lowering: fly.print → vector.print --
+
+def test_cpu_printf_lowering():
+    def build(i32):
+        x = arith.ConstantOp(i32, 42).result
+        fx.printf("val={}", x)
+    ir = _lower(_build_cpu_module(build))
+    assert "vector.print" in ir
+    assert "fly.print" not in ir

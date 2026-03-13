@@ -21,6 +21,7 @@ from .numeric import (
     Float16,
     Float32,
     Float64,
+    Index,
     Int4,
     Int8,
     Int16,
@@ -235,6 +236,7 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Index",
     "Uint8",
     "Uint16",
     "Uint32",
@@ -303,7 +305,9 @@ class Stream:
         return [gpu.AsyncTokenType.get()]
 
     def __fly_ptrs__(self):
-        if self.value is None:
+        if isinstance(self.value, int):
+            self._stream_storage = ctypes.c_void_p(self.value)
+        elif self.value is None:
             self._stream_storage = ctypes.c_void_p(0)
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)

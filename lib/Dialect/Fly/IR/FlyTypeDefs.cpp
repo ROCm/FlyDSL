@@ -9,7 +9,9 @@ bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
-bool CoordTensorType::isStatic() const { return getBase().isStatic() && getLayout().isStatic(); }
+bool CoordTensorType::isStatic() const {
+  return getBase().isStatic() && cast<MayStaticAttrInterface>(getLayout()).isStatic();
+}
 
 int32_t BasisType::depth() { return getAttr().depth(); }
 
@@ -44,13 +46,21 @@ bool ComposedLayoutType::isStaticOffset() const { return getAttr().isStaticOffse
 
 int32_t TileType::rank() const { return getAttr().rank(); }
 
-bool CoordTensorType::isLeaf() const { return getLayout().isLeaf(); }
-int32_t CoordTensorType::rank() const { return getLayout().rank(); }
-int32_t CoordTensorType::rank(int32_t idx) const { return getLayout().rank(idx); }
-int32_t CoordTensorType::rank(ArrayRef<int32_t> idxs) const { return getLayout().rank(idxs); }
-int32_t CoordTensorType::depth() const { return getLayout().depth(); }
-int32_t CoordTensorType::depth(int32_t idx) const { return getLayout().depth(idx); }
-int32_t CoordTensorType::depth(ArrayRef<int32_t> idxs) const { return getLayout().depth(idxs); }
+bool CoordTensorType::isLeaf() const { return cast<NestedAttrInterface>(getLayout()).isLeaf(); }
+int32_t CoordTensorType::rank() const { return cast<NestedAttrInterface>(getLayout()).rank(); }
+int32_t CoordTensorType::rank(int32_t idx) const {
+  return cast<NestedAttrInterface>(getLayout()).rank(idx);
+}
+int32_t CoordTensorType::rank(ArrayRef<int32_t> idxs) const {
+  return cast<NestedAttrInterface>(getLayout()).rank(idxs);
+}
+int32_t CoordTensorType::depth() const { return cast<NestedAttrInterface>(getLayout()).depth(); }
+int32_t CoordTensorType::depth(int32_t idx) const {
+  return cast<NestedAttrInterface>(getLayout()).depth(idx);
+}
+int32_t CoordTensorType::depth(ArrayRef<int32_t> idxs) const {
+  return cast<NestedAttrInterface>(getLayout()).depth(idxs);
+}
 
 IntTupleType IntTupleType::at(int32_t idx) const {
   return IntTupleType::get(getContext(), getAttr().at(idx));
@@ -71,11 +81,128 @@ ComposedLayoutType ComposedLayoutType::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutType::get(getContext(), getAttr().at(idxs));
 }
 
+MemRefType MemRefType::at(int32_t idx) const {
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return MemRefType::get(getElemTy(), getAddressSpace(), layout.at(idx), getAlignment(),
+                           getSwizzle());
+  auto composed = cast<ComposedLayoutAttr>(layoutAttr);
+  return MemRefType::get(getElemTy(), getAddressSpace(), composed.at(idx), getAlignment(),
+                         getSwizzle());
+}
+MemRefType MemRefType::at(ArrayRef<int32_t> idxs) const {
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return MemRefType::get(getElemTy(), getAddressSpace(), layout.at(idxs), getAlignment(),
+                           getSwizzle());
+  auto composed = cast<ComposedLayoutAttr>(layoutAttr);
+  return MemRefType::get(getElemTy(), getAddressSpace(), composed.at(idxs), getAlignment(),
+                         getSwizzle());
+}
+
 CoordTensorType CoordTensorType::at(int32_t idx) const {
-  return CoordTensorType::get(getContext(), getBase().at(idx), getLayout().at(idx));
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return CoordTensorType::get(getContext(), getBase().at(idx), layout.at(idx));
+  auto composed = cast<ComposedLayoutAttr>(layoutAttr);
+  return CoordTensorType::get(getContext(), getBase().at(idx), composed.at(idx));
 }
 CoordTensorType CoordTensorType::at(ArrayRef<int32_t> idxs) const {
-  return CoordTensorType::get(getContext(), getBase().at(idxs), getLayout().at(idxs));
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    return CoordTensorType::get(getContext(), getBase().at(idxs), layout.at(idxs));
+  auto composed = cast<ComposedLayoutAttr>(layoutAttr);
+  return CoordTensorType::get(getContext(), getBase().at(idxs), composed.at(idxs));
+}
+
+Type CoordTensorType::parse(AsmParser &parser) {
+  if (parser.parseLess())
+    return {};
+  auto base = FieldParser<IntTupleAttr>::parse(parser);
+  if (failed(base))
+    return {};
+  if (parser.parseComma())
+    return {};
+  Attribute layout = ComposedLayoutAttr::parse(parser, {});
+  if (!layout)
+    return {};
+  if (parser.parseGreater())
+    return {};
+  return get((*base).getContext(), *base, layout);
+}
+
+void CoordTensorType::print(AsmPrinter &printer) const {
+  printer << "<";
+  printer.printStrippedAttrOrType(getBase());
+  printer << ",";
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    printer.printStrippedAttrOrType(layout);
+  else
+    printer.printStrippedAttrOrType(cast<ComposedLayoutAttr>(layoutAttr));
+  printer << ">";
+}
+
+Type MemRefType::parse(AsmParser &parser) {
+  parser.getContext()->getOrLoadDialect<FlyDialect>();
+  Type elemTy;
+  FailureOr<AddressSpaceAttr> addressSpace;
+  if (parser.parseLess() || parser.parseType(elemTy) || parser.parseComma())
+    return {};
+  addressSpace = FieldParser<AddressSpaceAttr>::parse(parser);
+  if (failed(addressSpace))
+    return {};
+  if (parser.parseComma())
+    return {};
+  Attribute layout = ComposedLayoutAttr::parse(parser, {});
+  if (!layout)
+    return {};
+
+  AlignAttr alignment = AlignAttr::getTrivialAlignment(elemTy.getContext());
+  SwizzleAttr swizzle = SwizzleAttr::getTrivialSwizzle(elemTy.getContext());
+  if (succeeded(parser.parseOptionalComma())) {
+    if (succeeded(parser.parseOptionalKeyword("align"))) {
+      int32_t val;
+      if (parser.parseLess() || parser.parseInteger(val) || parser.parseGreater())
+        return {};
+      alignment = AlignAttr::get(elemTy.getContext(), val);
+      if (succeeded(parser.parseOptionalComma())) {
+        auto sw = FieldParser<SwizzleAttr>::parse(parser);
+        if (failed(sw))
+          return {};
+        swizzle = *sw;
+      }
+    } else {
+      auto sw = FieldParser<SwizzleAttr>::parse(parser);
+      if (failed(sw))
+        return {};
+      swizzle = *sw;
+    }
+  }
+  if (parser.parseGreater())
+    return {};
+  return get(elemTy.getContext(), elemTy, *addressSpace, layout, alignment, swizzle);
+}
+
+void MemRefType::print(AsmPrinter &printer) const {
+  printer << "<" << getElemTy() << ",";
+  printer.printStrippedAttrOrType(getAddressSpace());
+  printer << ", ";
+  Attribute layoutAttr = getLayout();
+  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
+    printer.printStrippedAttrOrType(layout);
+  else
+    printer.printStrippedAttrOrType(cast<ComposedLayoutAttr>(layoutAttr));
+
+  if (getAlignment() != AlignAttr::getTrivialAlignment(getContext())) {
+    printer << ",";
+    printer.printStrippedAttrOrType(getAlignment());
+  }
+  if (getSwizzle() != SwizzleAttr::getTrivialSwizzle(getContext())) {
+    printer << ",";
+    printer.printStrippedAttrOrType(getSwizzle());
+  }
+  printer << ">";
 }
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"

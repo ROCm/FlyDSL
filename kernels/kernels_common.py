@@ -5,6 +5,7 @@ but this module is intentionally small and MLIR-dialect facing.
 """
 
 from flydsl._mlir import ir
+from flydsl.expr.typing import T
 from flydsl._mlir.dialects import arith as _std_arith, builtin, gpu as _gpu, llvm as _llvm
 from flydsl.expr import buffer_ops
 
@@ -12,7 +13,7 @@ from flydsl.expr import buffer_ops
 def _create_llvm_ptr(value, address_space: int = 1):
     value = buffer_ops._unwrap_value(value)
     if isinstance(value.type, ir.IndexType):
-        i64_type = ir.IntegerType.get_signless(64)
+        i64_type = T.i64
         value = buffer_ops._unwrap_value(_std_arith.IndexCastOp(i64_type, value).result)
     ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
     return _llvm.IntToPtrOp(ptr_type, value).result

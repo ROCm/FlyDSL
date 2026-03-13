@@ -1,5 +1,6 @@
 from .._mlir import ir
-from .._mlir.dialects import arith as _arith, fly
+from .._mlir.dialects import arith as _arith
+from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
@@ -229,6 +230,15 @@ def make_fragment_like(tensor, dtype=None, loc=None, ip=None):
 def size(int_tuple, loc=None, ip=None):
     result = fly.size(int_tuple, loc=loc, ip=ip)
     # If the int_tuple is static, return the static value
+    result_ty = IntTupleType(result.type)
+    if result_ty.is_leaf and result_ty.is_static:
+        return Int32(result_ty.static_value)
+    return result
+
+
+@traced_op
+def cosize(layout, loc=None, ip=None):
+    result = fly.cosize(layout, loc=loc, ip=ip)
     result_ty = IntTupleType(result.type)
     if result_ty.is_leaf and result_ty.is_static:
         return Int32(result_ty.static_value)
@@ -591,7 +601,7 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, _arith.constant(T.i1(), int(val)))
+            return (False, _arith.constant(ir.IntegerType.get_signless(1), int(val)))
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):

@@ -58,8 +58,6 @@ A **Layout** is defined by a pair `(Shape, Stride)`:
 
 **FlyDSL example:**
 ```python
-import flydsl.expr as fx
-
 shape = fx.make_shape(128, 64)
 stride = fx.make_stride(1, 128)    # Column-major
 layout = fx.make_layout(shape, stride)
@@ -147,7 +145,7 @@ Products combine two layouts to create higher-rank layouts. They differ in how t
 | **Tiled Product** | Like logical, but group by tile | `fx.tiled_product(A, B)` |
 | **Flat Product** | Flatten all result modes | `fx.flat_product(A, B)` |
 | **Raked Product** | Interleave A and B elements (raked distribution) | `fx.raked_product(A, B)` |
-| **Blocked Product** | Block A elements together, then B (blocked distribution) | `fx.blocked_product(A, B)` |
+| **Blocked Product** | Block A elements together, then B (blocked distribution) | `fx.block_product(A, B)` |
 
 > **Reference:** `include/cute/layout.hpp` — `logical_product()`, `zipped_product()`, `tiled_product()`, `flat_product()`, `raked_product()`, `blocked_product()`.
 
@@ -168,10 +166,10 @@ Divides decompose a layout by a tiler, creating a hierarchical layout with "tile
 
 | Operation | Description | FlyDSL API |
 |---|---|---|
-| **local_partition** | Partition a layout among threads/tiles | `fx.local_partition(layout, ...)` |
-| **local_tile** | Extract a tile from a layout | `fx.local_tile(layout, ...)` |
+| **local_partition** | Partition a layout among threads/tiles | *Not yet implemented* — use `zipped_divide` + `slice` |
+| **local_tile** | Extract a tile from a layout | *Not yet implemented* — use `zipped_divide` + `slice` |
 
-> **Reference:** `include/cute/algorithm/` — `local_partition.hpp`, `local_tile.hpp`.
+> **Reference:** `include/cute/algorithm/` — `local_partition.hpp`, `local_tile.hpp`. FlyDSL does not expose these as single functions; use `fx.zipped_divide()` + `fx.slice()` to achieve equivalent results.
 
 ---
 
@@ -247,8 +245,6 @@ Supported dimensions: `.x`, `.y`, `.z`.
 FlyDSL provides tensor operations with layout-aware partitioning:
 
 ```python
-import flydsl.expr as fx
-
 # Create a buffer tensor from a tensor argument (AMD buffer descriptor)
 A = fx.rocdl.make_buffer_tensor(A)
 
@@ -283,13 +279,14 @@ lds_ptr = lds_gen(base)
 
 ### 5.3 Swizzling (Bank Conflict Avoidance)
 
-Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL provides XOR-based swizzling at 16-byte granularity:
+Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL does not provide a built-in swizzle function; kernels implement XOR-based swizzling manually using arithmetic ops:
 
 ```python
-col_swizzled = fx.swizzle_xor16(row, col_bytes, k_blocks16)
+# XOR-based swizzle at 16-byte granularity (manual implementation)
+col_swizzled = col_bytes ^ ((row % k_blocks16) << 4)
 ```
 
-The swizzle function XORs the row index into the column address at 16-byte boundaries, distributing accesses across LDS banks.
+The pattern XORs the row index into the column address at 16-byte boundaries, distributing accesses across LDS banks.
 
 ---
 
@@ -300,9 +297,6 @@ The swizzle function XORs the row index into the column address at 16-byte bound
 FlyDSL uses the CuTe copy abstraction: a **copy atom** defines a single thread's copy capability, and a **tiled copy** distributes the atom across all threads:
 
 ```python
-import flydsl.expr as fx
-
-# Create copy atom (e.g., 128-bit buffer copy)
 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
 # Create tiled copy via raked product
@@ -326,9 +320,6 @@ fx.copy(copy_atom, src_partition, dst_partition)
 AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these via the ``rocdl`` submodule:
 
 ```python
-import flydsl.expr as fx
-
-# Create a buffer tensor from a tensor argument (uses AMD buffer descriptor)
 A_buf = fx.rocdl.make_buffer_tensor(A)
 
 # Use buffer copy atoms for efficient memory access
@@ -342,9 +333,6 @@ copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:
 
 ```python
-import flydsl.expr as fx
-
-# Create MFMA atom (16x16x4 FP32)
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
 
@@ -387,7 +375,6 @@ for ku in range(tile_k_bytes // 64):
 | `gpu.barrier()` | Workgroup-level barrier (equivalent to `__syncthreads`) |
 
 ```python
-import flydsl.expr as fx
 fx.gpu.barrier()
 ```
 

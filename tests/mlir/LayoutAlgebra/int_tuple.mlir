@@ -11,8 +11,8 @@
 // CHECK-LABEL: @test_int_tuple_add
 func.func @test_int_tuple_add() -> !fly.int_tuple<(6, 10)> {
   // (4,8) + (2,2) = (6,10)
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 2)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 2)>
   // CHECK: fly.int_tuple_add(%{{.*}}, %{{.*}})
   %result = fly.int_tuple_add(%a, %b) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(2, 2)>) -> !fly.int_tuple<(6, 10)>
   return %result : !fly.int_tuple<(6, 10)>
@@ -21,8 +21,8 @@ func.func @test_int_tuple_add() -> !fly.int_tuple<(6, 10)> {
 // CHECK-LABEL: @test_int_tuple_sub
 func.func @test_int_tuple_sub() -> !fly.int_tuple<(2, 6)> {
   // (4,8) - (2,2) = (2,6)
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 2)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 2)>
   // CHECK: fly.int_tuple_sub(%{{.*}}, %{{.*}})
   %result = fly.int_tuple_sub(%a, %b) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(2, 2)>) -> !fly.int_tuple<(2, 6)>
   return %result : !fly.int_tuple<(2, 6)>
@@ -31,8 +31,8 @@ func.func @test_int_tuple_sub() -> !fly.int_tuple<(2, 6)> {
 // CHECK-LABEL: @test_int_tuple_mul
 func.func @test_int_tuple_mul() -> !fly.int_tuple<(8, 16)> {
   // (4,8) * (2,2) = (8,16)
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 2)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 2)>
   // CHECK: fly.int_tuple_mul(%{{.*}}, %{{.*}})
   %result = fly.int_tuple_mul(%a, %b) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(2, 2)>) -> !fly.int_tuple<(8, 16)>
   return %result : !fly.int_tuple<(8, 16)>
@@ -41,27 +41,26 @@ func.func @test_int_tuple_mul() -> !fly.int_tuple<(8, 16)> {
 // CHECK-LABEL: @test_int_tuple_div
 func.func @test_int_tuple_div() -> !fly.int_tuple<(2, 4)> {
   // (4,8) / (2,2) = (2,4)
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 2)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 2)>
   // CHECK: fly.int_tuple_div(%{{.*}}, %{{.*}})
   %result = fly.int_tuple_div(%a, %b) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(2, 2)>) -> !fly.int_tuple<(2, 4)>
   return %result : !fly.int_tuple<(2, 4)>
 }
 
 // CHECK-LABEL: @test_int_tuple_mod
-func.func @test_int_tuple_mod() -> !fly.int_tuple<(?, ?)> {
-  // mod result type is dynamic (inferred as (?,?))
-  %a = fly.static : () -> !fly.int_tuple<(5, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 4)>
+func.func @test_int_tuple_mod() -> !fly.int_tuple<(1, 0)> {
+  %a = fly.static : !fly.int_tuple<(5, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 4)>
   // CHECK: fly.int_tuple_mod(%{{.*}}, %{{.*}})
-  %result = fly.int_tuple_mod(%a, %b) : (!fly.int_tuple<(5, 8)>, !fly.int_tuple<(2, 4)>) -> !fly.int_tuple<(?, ?)>
-  return %result : !fly.int_tuple<(?, ?)>
+  %result = fly.int_tuple_mod(%a, %b) : (!fly.int_tuple<(5, 8)>, !fly.int_tuple<(2, 4)>) -> !fly.int_tuple<(1, 0)>
+  return %result : !fly.int_tuple<(1, 0)>
 }
 
 // CHECK-LABEL: @test_int_tuple_product
 func.func @test_int_tuple_product() -> !fly.int_tuple<32> {
   // product((4,8)) = 4 * 8 = 32
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
   // CHECK: fly.int_tuple_product(%{{.*}})
   %result = fly.int_tuple_product(%a) : (!fly.int_tuple<(4, 8)>) -> !fly.int_tuple<32>
   return %result : !fly.int_tuple<32>
@@ -78,8 +77,8 @@ func.func @test_int_tuple_product_each(%input: !fly.int_tuple<((2, 3), (4, 5))>)
 // CHECK-LABEL: @test_shape_div
 func.func @test_shape_div() -> !fly.int_tuple<(2, 4)> {
   // shape_div: (4,8) / (2,2) = (2,4)
-  %a = fly.static : () -> !fly.int_tuple<(4, 8)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 2)>
+  %a = fly.static : !fly.int_tuple<(4, 8)>
+  %b = fly.static : !fly.int_tuple<(2, 2)>
   // CHECK: fly.shape_div(%{{.*}}, %{{.*}})
   %result = fly.shape_div(%a, %b) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(2, 2)>) -> !fly.int_tuple<(2, 4)>
   return %result : !fly.int_tuple<(2, 4)>
@@ -88,8 +87,8 @@ func.func @test_shape_div() -> !fly.int_tuple<(2, 4)> {
 // CHECK-LABEL: @test_ceil_div
 func.func @test_ceil_div() -> !fly.int_tuple<(3, 3)> {
   // ceil_div: (5,7) / (2,3) = (3,3)
-  %a = fly.static : () -> !fly.int_tuple<(5, 7)>
-  %b = fly.static : () -> !fly.int_tuple<(2, 3)>
+  %a = fly.static : !fly.int_tuple<(5, 7)>
+  %b = fly.static : !fly.int_tuple<(2, 3)>
   // CHECK: fly.ceil_div(%{{.*}}, %{{.*}})
   %result = fly.ceil_div(%a, %b) : (!fly.int_tuple<(5, 7)>, !fly.int_tuple<(2, 3)>) -> !fly.int_tuple<(3, 3)>
   return %result : !fly.int_tuple<(3, 3)>

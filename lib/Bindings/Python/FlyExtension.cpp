@@ -68,9 +68,9 @@ int32_t rank(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::ComposedLayoutType>(ty))
     return t.getAttr().rank();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::CoordTensorType>(ty))
-    return t.getLayout().rank();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).rank();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::MemRefType>(ty))
-    return t.getLayout().rank();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).rank();
   throw std::invalid_argument("Unsupported type for rank()");
 }
 
@@ -84,9 +84,9 @@ int32_t depth(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::ComposedLayoutType>(ty))
     return t.getAttr().depth();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::CoordTensorType>(ty))
-    return t.getLayout().depth();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).depth();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::MemRefType>(ty))
-    return t.getLayout().depth();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).depth();
   throw std::invalid_argument("Unsupported type for depth()");
 }
 

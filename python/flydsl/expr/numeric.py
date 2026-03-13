@@ -15,6 +15,7 @@ from .utils.arith import (
     int_to_fp,
     int_to_int,
     is_float_type,
+    _to_raw,
 )
 
 
@@ -181,9 +182,12 @@ def _try_coerce_rhs(rhs):
     if isinstance(rhs, Numeric):
         return rhs
     if isinstance(rhs, ArithValue):
-        if isinstance(rhs.type, ir.VectorType):
+        if isinstance(rhs.type, (ir.VectorType, ir.IndexType)):
+            return None  # no Numeric representation for vector/index
+        try:
+            return Numeric.from_ir_type(rhs.type)(rhs)
+        except (ValueError, KeyError):
             return None
-        return as_numeric(rhs)
     if isinstance(rhs, (int, float, bool)):
         return as_numeric(rhs)
     return None
@@ -356,6 +360,9 @@ class Numeric(metaclass=NumericMeta):
             T.f6E3M2FN(): Float6E3M2FN,
             T.f4E2M1FN(): Float4E2M1FN,
         }
+        # Handle IndexType specially since it maps to Index
+        if isinstance(ir_type, ir.IndexType):
+            return Index
         if ir_type not in ir2dsl_map:
             raise ValueError(f"unsupported mlir type: {ir_type}")
         return ir2dsl_map[ir_type]
@@ -404,6 +411,31 @@ class Numeric(metaclass=NumericMeta):
 
     def __ne__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
+
+    # ── Proxy methods: delegate ArithValue-specific ops via ir_value() ──
+    def maximumf(self, other, *, loc=None):
+        """Float maximum — delegates to ArithValue.maximumf."""
+        return type(self)(self.ir_value().maximumf(_to_raw(other), loc=loc))
+
+    def minimumf(self, other, *, loc=None):
+        """Float minimum — delegates to ArithValue.minimumf."""
+        return type(self)(self.ir_value().minimumf(_to_raw(other), loc=loc))
+
+    def exp2(self, *, fastmath=None, loc=None):
+        """Base-2 exponential — delegates to ArithValue.exp2."""
+        return type(self)(self.ir_value().exp2(fastmath=fastmath, loc=loc))
+
+    def shuffle_xor(self, offset, width, *, loc=None):
+        """GPU warp shuffle XOR — delegates to ArithValue.shuffle_xor."""
+        return type(self)(self.ir_value().shuffle_xor(offset, width, loc=loc))
+
+    def shrui(self, amount, *, loc=None):
+        """Unsigned right shift — delegates to ArithValue.shrui."""
+        return type(self)(self.ir_value().shrui(amount, loc=loc))
+
+    def addf(self, other, *, fastmath=None, loc=None):
+        """Float add with fastmath — delegates to ArithValue.addf."""
+        return type(self)(self.ir_value().addf(_to_raw(other), fastmath=fastmath, loc=loc))
 
     def __lt__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.lt)(self, other, loc=loc, ip=ip)
@@ -654,3 +686,26 @@ class Float8E8M0FNU(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E8M0FNU):
 
 
 class Float4E2M1FN(Float, metaclass=NumericMeta, width=4, ir_type=T.f4E2M1FN): ...
+
+
+
+class Index(Integer, metaclass=NumericMeta, width=64, signed=False,
+            ir_type=lambda: ir.IndexType.get()):
+    """DSL Numeric for MLIR index type. Replaces arith.index(N).
+
+    Usage:
+        fx.Index(64)       # compile-time constant → arith.index(64)
+        fx.Index(i32_val)  # cast i32/i64 ir.Value or Numeric to index
+    """
+    def __init__(self, x, *, loc=None, ip=None):
+        from .utils.arith import index_cast
+        # Unwrap DSL Numeric to ir.Value first
+        if isinstance(x, Numeric) and not isinstance(x, Index):
+            x = x.ir_value(loc=loc, ip=ip)
+        # Cast integer ir.Value to index (skip if already index type)
+        if isinstance(x, ir.Value) and not isinstance(x.type, ir.IndexType):
+            x = index_cast(ir.IndexType.get(), x, loc=loc)
+        # x is now either: Python int, or index-typed ir.Value
+        # Pass directly to Numeric.__init__ (bypass Integer conversion logic)
+        Numeric.__init__(self, x)
+

@@ -1,16 +1,15 @@
-#ifndef FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
-#define FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/PatternMatch.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 //===----------------------------------------------------------------------===//
-// IntTupleAttr constexpr utilities
+// IntTupleAttr utilities
 //===----------------------------------------------------------------------===//
 
 namespace mlir::fly {
@@ -31,6 +30,15 @@ namespace mlir::fly {
 
 template <class IntTuple> class IntTupleBuilder;
 
+/// Adapts a normal-form IntTuple SSA value while preserving the structural
+/// information from `attr`.
+///
+/// Invariants:
+/// - If `attr` is a leaf (`IntAttr` or `BasisAttr`), `value` is the scalar SSA
+///   value for that leaf instead of a `MakeIntTupleOp` result.
+/// - If `attr` is not a leaf, `value` is the `MakeIntTupleOp` result for the
+///   current subtree, and `[dyncIdxStart, dyncIdxEnd)` identifies which dynamic
+///   leaf operands belong to this subtree.
 class IntTupleValueAdaptor {
 private:
   int32_t prefixSumDyncElems(int32_t idx) const {
@@ -54,12 +62,17 @@ public:
 
   template <class Builder>
   static IntTupleValueAdaptor create(Builder &builder, Value value, IntTupleAttr attr) {
+    // Rebuild the adaptor from a normal-form IntTuple value while re-establishing
+    // the leaf/non-leaf invariant above.
     auto defOp = value.getDefiningOp<MakeIntTupleOp>();
     assert(defOp && "Value must be a MakeIntTupleOp");
     if (attr.isLeaf()) {
       if (attr.isStatic()) {
-        return IntTupleValueAdaptor(
-            builder.materializeConstantArith(attr.getLeafAsInt().getValue()).value, attr);
+        if (attr.isLeafInt()) {
+          return builder.materializeConstantLeaf(attr.getLeafAsInt());
+        } else {
+          return builder.materializeConstantLeaf(attr.getLeafAsBasis());
+        }
       } else {
         return IntTupleValueAdaptor(value.getDefiningOp()->getOperand(0), attr);
       }
@@ -69,11 +82,26 @@ public:
   }
 
   bool isLeaf() const { return attr.isLeaf(); }
+  bool isLeafNone() const { return attr.isLeafNone(); }
+  bool isLeafInt() const { return attr.isLeafInt(); }
+  bool isLeafBasis() const { return attr.isLeafBasis(); }
+  bool isLeafStaticValue(int32_t value) const { return attr.isLeafStaticValue(value); }
+  bool isStatic() const { return attr.isStatic(); }
   int32_t rank() const { return attr.rank(); }
-  int32_t depth() const { return attr.depth(); }
+
+  Value getValue() const { return value; }
+  IntTupleAttr getAttr() const { return attr; }
 
   friend class IntTupleBuilder<IntTupleValueAdaptor>;
 };
+
+template <class IntTuple>
+IntTuple intTupleAdd(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs);
+
+IntTupleAttr intTupleBasis2Tuple(const IntTupleBuilder<IntTupleAttr> &builder, IntTupleAttr basis);
+
+IntTupleValueAdaptor intTupleBasis2Tuple(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
+                                         IntTupleValueAdaptor basis);
 
 template <> class IntTupleBuilder<IntTupleAttr> {
 protected:
@@ -82,7 +110,6 @@ protected:
 public:
   IntTupleBuilder(MLIRContext *ctx) : ctx(ctx) {}
 
-  using ArithValue = IntAttr;
   struct ElemCollector {
     SmallVector<Attribute> attrCollector;
 
@@ -92,60 +119,66 @@ public:
     void reverse() { std::reverse(attrCollector.begin(), attrCollector.end()); }
   };
 
-  ArithValue add(ArithValue lhs, ArithValue rhs) const { return lhs + rhs; }
-  ArithValue sub(ArithValue lhs, ArithValue rhs) const { return lhs - rhs; }
-  ArithValue mul(ArithValue lhs, ArithValue rhs) const { return lhs * rhs; }
-  ArithValue div(ArithValue lhs, ArithValue rhs) const { return lhs / rhs; }
-  ArithValue mod(ArithValue lhs, ArithValue rhs) const { return lhs % rhs; }
+  IntTupleAttr add(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr sub(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr mul(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr div(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr mod(IntTupleAttr lhs, IntTupleAttr rhs) const;
 
-  ArithValue logicalAnd(ArithValue lhs, ArithValue rhs) const { return lhs && rhs; }
-  ArithValue logicalOr(ArithValue lhs, ArithValue rhs) const { return lhs || rhs; }
-  ArithValue logicalNot(ArithValue val) const { return !val; }
-  ArithValue lt(ArithValue lhs, ArithValue rhs) const { return lhs < rhs; }
-  ArithValue le(ArithValue lhs, ArithValue rhs) const { return lhs <= rhs; }
-  ArithValue gt(ArithValue lhs, ArithValue rhs) const { return lhs > rhs; }
-  ArithValue ge(ArithValue lhs, ArithValue rhs) const { return lhs >= rhs; }
-  ArithValue eq(ArithValue lhs, ArithValue rhs) const { return lhs == rhs; }
-  ArithValue ne(ArithValue lhs, ArithValue rhs) const { return lhs != rhs; }
+  IntTupleAttr logicalAnd(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr logicalOr(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr logicalNot(IntTupleAttr val) const;
+  IntTupleAttr lt(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr le(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr gt(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr ge(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr eq(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr ne(IntTupleAttr lhs, IntTupleAttr rhs) const;
 
-  ArithValue min(ArithValue lhs, ArithValue rhs) const { return intMin(lhs, rhs); }
-  ArithValue max(ArithValue lhs, ArithValue rhs) const { return intMax(lhs, rhs); }
-  ArithValue safeDiv(ArithValue lhs, ArithValue rhs) const { return intSafeDiv(lhs, rhs); }
-  ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const { return intCeilDiv(lhs, rhs); }
-  ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const { return intShapeDiv(lhs, rhs); }
-
-  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const { return lhs ^ rhs; }
-  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const { return lhs & rhs; }
-  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const { return lhs >> rhs; }
+  IntTupleAttr min(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr max(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr safeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr ceilDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr shapeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  IntTupleAttr applySwizzle(IntTupleAttr v, SwizzleAttr swizzle) const;
 
   IntTupleAttr getAttr(IntTupleAttr attr) const { return attr; }
-  ArithValue getArithValue(IntTupleAttr attr) const { return attr.getLeafAsInt(); }
 
-  ArithValue materializeConstantArith(int32_t value) const {
-    return IntAttr::getStatic(ctx, value);
+  int32_t getStaticValue(IntTupleAttr attr) const {
+    assert(attr.isLeaf() && attr.isStatic() && "getStaticValue requires a static leaf");
+    auto intAttr = attr.extractIntFromLeaf();
+    return intAttr.getValue();
   }
-  ArithValue materializeConstantArith(int64_t value) const;
 
-  ArithValue materializeConstantArith(IntAttr value) const {
+  IntTupleAttr materializeConstantLeaf(int32_t value, ArrayRef<int32_t> modes = {}) const {
+    if (modes.empty()) {
+      return IntTupleAttr::get(IntAttr::getStatic(ctx, value));
+    } else {
+      return IntTupleAttr::get(BasisAttr::get(IntAttr::getStatic(ctx, value), modes));
+    }
+  }
+  IntTupleAttr materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
     assert(value.isStatic() && "Value must be static");
-    return value;
+    if (modes.empty()) {
+      return IntTupleAttr::get(value);
+    } else {
+      return IntTupleAttr::get(BasisAttr::get(value, modes));
+    }
   }
-
+  IntTupleAttr materializeConstantLeaf(BasisAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    return IntTupleAttr::get(value);
+  }
   IntTupleAttr materializeConstantTuple(IntTupleAttr attr) const {
     assert(attr.isStatic() && "Tuple must be static");
     return attr;
   }
 
-  bool isNone(ArithValue val) const { return val.isNone(); }
-  bool isStatic(ArithValue val) const { return val.isStatic(); }
-  bool isStaticValue(ArithValue val, int32_t v) const { return val.isStaticValue(v); }
-  int32_t getStaticValue(ArithValue val) const { return val.getValue(); }
-
   IntTupleAttr at(IntTupleAttr attr, int32_t idx) const { return attr.at(idx); }
-  IntTupleAttr makeInt(ArithValue value) const { return IntTupleAttr::get(value); }
   IntTupleAttr makeTuple(const ElemCollector &collector) const {
     return IntTupleAttr::get(ArrayAttr::get(ctx, collector.attrCollector));
   }
+
   const IntTupleBuilder<IntTupleAttr> &getAttrBuilder() const { return *this; }
 };
 
@@ -159,15 +192,13 @@ public:
   IntTupleBuilder(PatternRewriter &builder, Location loc)
       : builder(builder), loc(loc), attrBuilder(builder.getContext()) {}
 
-  struct ArithValue {
-    Value value;
-    IntAttr attr;
-  };
   struct ElemCollector {
     typename IntTupleBuilder<IntTupleAttr>::ElemCollector attrCollector;
     SmallVector<Value> dyncElems;
 
     void push_back(const IntTupleValueAdaptor &element) {
+      // A leaf contributes at most one scalar dynamic value. A non-leaf forwards
+      // the contiguous operand slice that represents its subtree.
       auto elemAttr = element.attr;
       attrCollector.push_back(elemAttr);
       if (elemAttr.isLeaf()) {
@@ -192,76 +223,68 @@ public:
     }
   };
 
-  Type getIntType(IntAttr attr) const {
-    assert((attr.getWidth() == 64 || attr.getWidth() == 32) && "Invalid width");
-    return attr.getWidth() == 64 ? builder.getI64Type() : builder.getI32Type();
-  }
-  Type getCommonIntType(IntAttr lhs, IntAttr rhs) const {
-    assert((lhs.getWidth() == 64 || lhs.getWidth() == 32) && "Invalid width");
-    assert((rhs.getWidth() == 64 || rhs.getWidth() == 32) && "Invalid width");
-    return lhs.getWidth() == 64 || rhs.getWidth() == 64 ? builder.getI64Type()
-                                                        : builder.getI32Type();
-  }
-  Value extendToIntType(Value input, Type intType) const {
-    if (input.getType() != intType) {
-      input = arith::ExtSIOp::create(builder, loc, intType, input);
-    }
-    return input;
-  }
+  Type getIntType(IntTupleAttr t) const;
+  Type getCommonIntType(IntTupleAttr lhs, IntTupleAttr rhs) const;
+  Value extendToIntType(Value input, Type intType) const;
 
-  ArithValue add(ArithValue lhs, ArithValue rhs) const;
-  ArithValue sub(ArithValue lhs, ArithValue rhs) const;
-  ArithValue mul(ArithValue lhs, ArithValue rhs) const;
-  ArithValue div(ArithValue lhs, ArithValue rhs) const;
-  ArithValue mod(ArithValue lhs, ArithValue rhs) const;
+  IntTupleValueAdaptor add(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor sub(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor mul(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor div(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor mod(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
 
-  ArithValue logicalAnd(ArithValue lhs, ArithValue rhs) const;
-  ArithValue logicalOr(ArithValue lhs, ArithValue rhs) const;
-  ArithValue logicalNot(ArithValue val) const;
-  ArithValue lt(ArithValue lhs, ArithValue rhs) const;
-  ArithValue le(ArithValue lhs, ArithValue rhs) const;
-  ArithValue gt(ArithValue lhs, ArithValue rhs) const;
-  ArithValue ge(ArithValue lhs, ArithValue rhs) const;
-  ArithValue eq(ArithValue lhs, ArithValue rhs) const;
-  ArithValue ne(ArithValue lhs, ArithValue rhs) const;
+  IntTupleValueAdaptor logicalAnd(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor logicalOr(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor logicalNot(IntTupleValueAdaptor val) const;
+  IntTupleValueAdaptor lt(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor le(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor gt(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor ge(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor eq(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor ne(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
 
-  ArithValue min(ArithValue lhs, ArithValue rhs) const;
-  ArithValue max(ArithValue lhs, ArithValue rhs) const;
-  ArithValue safeDiv(ArithValue lhs, ArithValue rhs) const { return div(lhs, rhs); }
-  ArithValue ceilDiv(ArithValue lhs, ArithValue rhs) const;
-  ArithValue shapeDiv(ArithValue lhs, ArithValue rhs) const;
-
-  ArithValue bitwiseXor(ArithValue lhs, ArithValue rhs) const;
-  ArithValue bitwiseAnd(ArithValue lhs, ArithValue rhs) const;
-  ArithValue shiftRight(ArithValue lhs, ArithValue rhs) const;
+  IntTupleValueAdaptor min(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor max(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor safeDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor ceilDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor shapeDiv(IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const;
+  IntTupleValueAdaptor applySwizzle(IntTupleValueAdaptor v, SwizzleAttr swizzle) const;
 
   IntTupleAttr getAttr(IntTupleValueAdaptor adaptor) const { return adaptor.attr; }
 
-  ArithValue getArithValue(IntTupleValueAdaptor adaptor) const {
-    assert(adaptor.attr.isLeaf() && "Adaptor must be a leaf");
-    return ArithValue{adaptor.value, attrBuilder.getArithValue(adaptor.attr)};
+  int32_t getStaticValue(IntTupleValueAdaptor adaptor) const {
+    return attrBuilder.getStaticValue(adaptor.attr);
   }
 
-  ArithValue materializeConstantArith(int32_t value) const {
-    return ArithValue{arith::ConstantIntOp::create(builder, loc, value, 32).getResult(),
-                      attrBuilder.materializeConstantArith(value)};
+  IntTupleValueAdaptor materializeConstantLeaf(int32_t value, ArrayRef<int32_t> modes = {}) const {
+    auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    return IntTupleValueAdaptor(arith::ConstantIntOp::create(builder, loc, value, 32).getResult(),
+                                attr);
   }
-  ArithValue materializeConstantArith(int64_t value) const;
-
-  ArithValue materializeConstantArith(IntAttr value) const {
+  IntTupleValueAdaptor materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
     assert(value.isStatic() && "Value must be static");
-    return ArithValue{
+    auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    return IntTupleValueAdaptor(
         arith::ConstantIntOp::create(builder, loc, value.getValue(), value.getWidth()).getResult(),
-        value};
+        attr);
   }
-
+  IntTupleValueAdaptor materializeConstantLeaf(BasisAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    auto attr = attrBuilder.materializeConstantLeaf(value);
+    return IntTupleValueAdaptor(arith::ConstantIntOp::create(builder, loc,
+                                                             value.getValue().getValue(),
+                                                             value.getValue().getWidth())
+                                    .getResult(),
+                                attr);
+  }
   IntTupleValueAdaptor materializeConstantTuple(IntTupleAttr attr) const {
     assert(attr.isStatic() && "Tuple must be static");
     if (attr.isLeaf()) {
-      return IntTupleValueAdaptor{
-          arith::ConstantIntOp::create(builder, loc, attr.getLeafAsInt().getValue(), 32)
-              .getResult(),
-          attrBuilder.materializeConstantTuple(attr)};
+      if (attr.isLeafInt()) {
+        return materializeConstantLeaf(attr.getLeafAsInt());
+      } else {
+        return materializeConstantLeaf(attr.getLeafAsBasis());
+      }
     } else {
       return IntTupleValueAdaptor{
           MakeIntTupleOp::create(builder, loc, IntTupleType::get(attr), {}).getResult(),
@@ -269,31 +292,24 @@ public:
     }
   }
 
-  bool isNone(ArithValue val) const { return attrBuilder.isNone(val.attr); }
-  bool isStatic(ArithValue val) const { return attrBuilder.isStatic(val.attr); }
-  bool isStaticValue(ArithValue val, int32_t v) const {
-    return attrBuilder.isStaticValue(val.attr, v);
-  }
-  int32_t getStaticValue(ArithValue val) const { return attrBuilder.getStaticValue(val.attr); }
-
   IntTupleValueAdaptor at(IntTupleValueAdaptor adaptor, int32_t idx) const {
     auto childAttr = adaptor.attr.at(idx);
+    // Leaf children become scalar SSA values
     if (childAttr.isLeaf()) {
       if (childAttr.isStatic()) {
-        return makeInt(this->materializeConstantArith(childAttr.getLeafAsInt().getValue()));
+        return this->materializeConstantTuple(childAttr);
       } else {
         return IntTupleValueAdaptor(adaptor.value.getDefiningOp()->getOperand(
                                         adaptor.dyncIdxStart + adaptor.prefixSumDyncElems(idx)),
                                     childAttr);
       }
     } else {
+      // Tuple children keep sharing the parent tuple value with a narrowed
+      // dynamic-leaf slice.
       int32_t dyncOffset = adaptor.prefixSumDyncElems(idx);
       return IntTupleValueAdaptor(adaptor.value, childAttr, adaptor.dyncIdxStart + dyncOffset,
                                   adaptor.dyncIdxStart + dyncOffset + childAttr.dyncLeafCount());
     }
-  }
-  IntTupleValueAdaptor makeInt(ArithValue value) const {
-    return IntTupleValueAdaptor(value.value, IntTupleAttr::get(value.attr));
   }
   IntTupleValueAdaptor makeTuple(const ElemCollector &collector) const {
     auto TupleAttr = attrBuilder.makeTuple(collector.attrCollector);
@@ -302,46 +318,43 @@ public:
             .getResult(),
         TupleAttr);
   }
+
   const IntTupleBuilder<IntTupleAttr> &getAttrBuilder() const { return attrBuilder; }
 
-  //===----------------------------------------------------------------------===//
-  // IntTupleValueAdaptor only interface
-  //===----------------------------------------------------------------------===//
+  TypedValue<IntTupleType> finalize(IntTupleValueAdaptor adaptor,
+                                    std::optional<IntTupleAttr> destAttr = std::nullopt) const {
+    // Convert the adaptor back to the normal IntTuple representation.
+    // Result is always a MakeIntTupleOp, including leaf tuples.
+    auto finalAttr = destAttr.value_or(adaptor.attr);
+    auto Ty = IntTupleType::get(finalAttr);
 
-  TypedValue<IntTupleType> finalize(IntTupleValueAdaptor adaptor) const {
-    auto Ty = IntTupleType::get(adaptor.attr);
+    assert(adaptor.attr.dyncLeafCount() == finalAttr.dyncLeafCount() &&
+           "Adaptor and finalAttr must have the same dyncLeafCount");
+    if (adaptor.attr.isStatic()) {
+      return MakeIntTupleOp::create(builder, loc, Ty, {}).getResult();
+    }
     if (adaptor.isLeaf()) {
-      if (adaptor.attr.isStatic()) {
-        return MakeIntTupleOp::create(builder, loc, Ty, {}).getResult();
-      } else {
-        return MakeIntTupleOp::create(builder, loc, Ty, adaptor.value).getResult();
-      }
-    } else if (adaptor.dyncIdxStart == 0 && adaptor.dyncIdxEnd == -1) {
-      return cast<TypedValue<IntTupleType>>(adaptor.value);
+      return MakeIntTupleOp::create(builder, loc, Ty, {adaptor.value}).getResult();
     } else {
       int32_t dyncIdxEnd = adaptor.dyncIdxEnd == -1
                                ? adaptor.value.getDefiningOp()->getOperands().size()
                                : adaptor.dyncIdxEnd;
+      int32_t dyncCount = dyncIdxEnd - adaptor.dyncIdxStart;
+      assert(dyncCount == finalAttr.dyncLeafCount());
       return MakeIntTupleOp::create(builder, loc, Ty,
                                     adaptor.value.getDefiningOp()->getOperands().slice(
-                                        adaptor.dyncIdxStart, dyncIdxEnd - adaptor.dyncIdxStart))
+                                        adaptor.dyncIdxStart, dyncCount))
           .getResult();
     }
-  }
-  TypedValue<IntTupleType> reprofile(TypedValue<IntTupleType> value,
-                                     IntTupleAttr newProfile) const {
-    return MakeIntTupleOp::create(builder, value.getLoc(), IntTupleType::get(newProfile),
-                                  value.getDefiningOp()->getOperands())
-        .getResult();
   }
 };
 
 template <class BinaryOp, class IntTuple>
-IntTuple intTupleBinaryOp(IntTupleBuilder<IntTuple> &builder, BinaryOp &&binaryOp, IntTuple lhs,
-                          IntTuple rhs) {
+IntTuple intTupleBinaryOp(const IntTupleBuilder<IntTuple> &builder, BinaryOp &&binaryOp,
+                          IntTuple lhs, IntTuple rhs) {
   if (lhs.isLeaf()) {
-    assert(rhs.isLeaf() && "Mismatched structure");
-    return builder.makeInt(binaryOp(builder.getArithValue(lhs), builder.getArithValue(rhs)));
+    assert(rhs.isLeaf());
+    return binaryOp(lhs, rhs);
   }
   typename IntTupleBuilder<IntTuple>::ElemCollector collector;
   const int minRank = std::min(lhs.rank(), rhs.rank());
@@ -359,124 +372,53 @@ IntTuple intTupleBinaryOp(IntTupleBuilder<IntTuple> &builder, BinaryOp &&binaryO
 }
 
 template <class IntTuple>
-IntTuple intTupleAdd(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+IntTuple intTupleAdd(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.add(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.add(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
-IntTuple intTupleSub(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+IntTuple intTupleSub(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.sub(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.sub(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
 IntTuple intTupleMul(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.mul(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.mul(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
 IntTuple intTupleDiv(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.div(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.div(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
 IntTuple intTupleMod(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.mod(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.mod(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
 IntTuple intTupleMin(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.min(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.min(a, b); }, lhs, rhs);
 }
-
 template <class IntTuple>
 IntTuple intTupleMax(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
   return intTupleBinaryOp(
-      builder, [&](ArithValue a, ArithValue b) { return builder.max(a, b); }, lhs, rhs);
+      builder, [&](IntTuple a, IntTuple b) { return builder.max(a, b); }, lhs, rhs);
 }
+
+namespace detail {
 
 template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue intTupleSumImpl(IntTupleBuilder<IntTuple> &builder,
-                                                               IntTuple t) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
-  if (t.isLeaf()) {
-    return builder.getArithValue(t);
-  }
-  ArithValue result = intTupleSumImpl(builder, builder.at(t, 0));
-  for (int i = 1; i < t.rank(); ++i) {
-    result = builder.add(result, intTupleSumImpl(builder, builder.at(t, i)));
-  }
-  return result;
-}
-
-template <class IntTuple> IntTuple intTupleSum(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
-  return builder.makeInt(intTupleSumImpl(builder, t));
-}
-
-template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue
-intTupleProductImpl(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
-  if (t.isLeaf()) {
-    return builder.getArithValue(t);
-  }
-  ArithValue result = intTupleProductImpl(builder, builder.at(t, 0));
-  for (int i = 1; i < t.rank(); ++i) {
-    result = builder.mul(result, intTupleProductImpl(builder, builder.at(t, i)));
-  }
-  return result;
-}
-
-template <class IntTuple> IntTuple intTupleProduct(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
-  return builder.makeInt(intTupleProductImpl(builder, t));
-}
-
-template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue
-intTupleInnerProductImpl(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
-  if (lhs.isLeaf() && rhs.isLeaf()) {
-    return builder.mul(builder.getArithValue(lhs), builder.getArithValue(rhs));
-  }
-  assert(lhs.rank() == rhs.rank() && "Mismatched ranks");
-  ArithValue result = intTupleInnerProductImpl(builder, builder.at(lhs, 0), builder.at(rhs, 0));
-  for (int i = 1; i < lhs.rank(); ++i) {
-    result = builder.add(result,
-                         intTupleInnerProductImpl(builder, builder.at(lhs, i), builder.at(rhs, i)));
-  }
-  return result;
-}
-
-template <class IntTuple>
-IntTuple intTupleInnerProduct(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  return builder.makeInt(intTupleInnerProductImpl(builder, lhs, rhs));
-}
-
-template <class IntTuple>
-std::pair<IntTuple, typename IntTupleBuilder<IntTuple>::ArithValue>
-intTupleCeilDivFoldImpl(IntTupleBuilder<IntTuple> &builder, IntTuple a,
-                        typename IntTupleBuilder<IntTuple>::ArithValue b) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+std::pair<IntTuple, IntTuple> intTupleCeilDivFoldImpl(IntTupleBuilder<IntTuple> &builder,
+                                                      IntTuple a, IntTuple b) {
   if (a.isLeaf()) {
-    auto aVal = builder.getArithValue(a);
-    auto result = builder.ceilDiv(aVal, b);
-    auto remainder = builder.ceilDiv(b, aVal);
-    return {builder.makeInt(result), remainder};
+    auto result = builder.ceilDiv(a, b);
+    auto remainder = builder.ceilDiv(b, a);
+    return {result, remainder};
   }
   typename IntTupleBuilder<IntTuple>::ElemCollector collector;
-  ArithValue remaining = b;
+  IntTuple remaining = b;
   for (int i = 0; i < a.rank(); ++i) {
     auto [res, rem] = intTupleCeilDivFoldImpl(builder, builder.at(a, i), remaining);
     collector.push_back(res);
@@ -486,17 +428,72 @@ intTupleCeilDivFoldImpl(IntTupleBuilder<IntTuple> &builder, IntTuple a,
 }
 
 template <class IntTuple>
+std::pair<IntTuple, IntTuple> intTupleShapeDivFoldImpl(IntTupleBuilder<IntTuple> &builder,
+                                                       IntTuple a, IntTuple b) {
+  if (a.isLeaf()) {
+    auto result = builder.shapeDiv(a, b);
+    auto remainder = builder.shapeDiv(b, a);
+    return {result, remainder};
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  IntTuple remaining = b;
+  for (int i = 0; i < a.rank(); ++i) {
+    auto [res, rem] = intTupleShapeDivFoldImpl(builder, builder.at(a, i), remaining);
+    collector.push_back(res);
+    remaining = rem;
+  }
+  return {builder.makeTuple(collector), remaining};
+}
+
+} // namespace detail
+
+template <class IntTuple> IntTuple intTupleSum(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
+  if (t.isLeaf()) {
+    return t;
+  }
+  IntTuple result = intTupleSum(builder, builder.at(t, 0));
+  for (int i = 1; i < t.rank(); ++i) {
+    result = builder.add(result, intTupleSum(builder, builder.at(t, i)));
+  }
+  return result;
+}
+
+template <class IntTuple> IntTuple intTupleProduct(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
+  if (t.isLeaf()) {
+    return t;
+  }
+  IntTuple result = intTupleProduct(builder, builder.at(t, 0));
+  for (int i = 1; i < t.rank(); ++i) {
+    result = builder.mul(result, intTupleProduct(builder, builder.at(t, i)));
+  }
+  return result;
+}
+
+template <class IntTuple>
+IntTuple intTupleInnerProduct(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
+  if (lhs.isLeaf() && rhs.isLeaf()) {
+    return builder.mul(lhs, rhs);
+  }
+  assert(lhs.rank() == rhs.rank() && "Mismatched ranks");
+  IntTuple result = intTupleInnerProduct(builder, builder.at(lhs, 0), builder.at(rhs, 0));
+  for (int i = 1; i < lhs.rank(); ++i) {
+    result =
+        builder.add(result, intTupleInnerProduct(builder, builder.at(lhs, i), builder.at(rhs, i)));
+  }
+  return result;
+}
+
+template <class IntTuple>
 IntTuple intTupleCeilDiv(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
   if (lhs.isLeaf()) {
     if (rhs.isLeaf()) {
-      return builder.makeInt(
-          builder.ceilDiv(builder.getArithValue(lhs), builder.getArithValue(rhs)));
+      return builder.ceilDiv(lhs, rhs);
     }
-    auto rhsProduct = intTupleProductImpl(builder, rhs);
-    return builder.makeInt(builder.ceilDiv(builder.getArithValue(lhs), rhsProduct));
+    auto rhsProduct = intTupleProduct(builder, rhs);
+    return builder.ceilDiv(lhs, rhsProduct);
   }
   if (rhs.isLeaf()) {
-    auto [result, rest] = intTupleCeilDivFoldImpl(builder, lhs, builder.getArithValue(rhs));
+    auto [result, rest] = detail::intTupleCeilDivFoldImpl(builder, lhs, rhs);
     return result;
   }
   const int divRank = std::min(lhs.rank(), rhs.rank());
@@ -511,38 +508,16 @@ IntTuple intTupleCeilDiv(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTu
 }
 
 template <class IntTuple>
-std::pair<IntTuple, typename IntTupleBuilder<IntTuple>::ArithValue>
-intTupleShapeDivFoldImpl(IntTupleBuilder<IntTuple> &builder, IntTuple a,
-                         typename IntTupleBuilder<IntTuple>::ArithValue b) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
-  if (a.isLeaf()) {
-    auto aVal = builder.getArithValue(a);
-    auto result = builder.shapeDiv(aVal, b);
-    auto remainder = builder.shapeDiv(b, aVal);
-    return {builder.makeInt(result), remainder};
-  }
-  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
-  ArithValue remaining = b;
-  for (int i = 0; i < a.rank(); ++i) {
-    auto [res, rem] = intTupleShapeDivFoldImpl(builder, builder.at(a, i), remaining);
-    collector.push_back(res);
-    remaining = rem;
-  }
-  return {builder.makeTuple(collector), remaining};
-}
-
-template <class IntTuple>
 IntTuple intTupleShapeDiv(IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
   if (lhs.isLeaf()) {
     if (rhs.isLeaf()) {
-      return builder.makeInt(
-          builder.shapeDiv(builder.getArithValue(lhs), builder.getArithValue(rhs)));
+      return builder.shapeDiv(lhs, rhs);
     }
-    auto rhsProduct = intTupleProductImpl(builder, rhs);
-    return builder.makeInt(builder.shapeDiv(builder.getArithValue(lhs), rhsProduct));
+    auto rhsProduct = intTupleProduct(builder, rhs);
+    return builder.shapeDiv(lhs, rhsProduct);
   }
   if (rhs.isLeaf()) {
-    auto [result, rest] = intTupleShapeDivFoldImpl(builder, lhs, builder.getArithValue(rhs));
+    auto [result, rest] = detail::intTupleShapeDivFoldImpl(builder, lhs, rhs);
     return result;
   }
   const int divRank = std::min(lhs.rank(), rhs.rank());
@@ -568,6 +543,18 @@ IntTuple intTupleProductEach(IntTupleBuilder<IntTuple> &builder, IntTuple val) {
   return builder.makeTuple(collector);
 }
 
+template <class IntTuple>
+IntTuple intTupleProductLike(IntTupleBuilder<IntTuple> &builder, IntTuple tuple, IntTuple guide) {
+  if (guide.isLeaf()) {
+    return intTupleProduct(builder, tuple);
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  for (int i = 0; i < guide.rank(); ++i) {
+    collector.push_back(intTupleProductLike(builder, builder.at(tuple, i), builder.at(guide, i)));
+  }
+  return builder.makeTuple(collector);
+}
+
 //===----------------------------------------------------------------------===//
 // Attribute manipulation
 //===----------------------------------------------------------------------===//
@@ -586,38 +573,33 @@ IntTupleAttr intTupleGroup(const IntTupleBuilder<IntTupleAttr> &builder, IntTupl
 inline IntTupleValueAdaptor intTupleWrap(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                          IntTupleValueAdaptor adaptor) {
   IntTupleAttr newAttr = intTupleWrap(builder.getAttrBuilder(), builder.getAttr(adaptor));
-  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor), newAttr);
+  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor, newAttr), newAttr);
 }
 inline IntTupleValueAdaptor intTupleUnwrap(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                            IntTupleValueAdaptor adaptor) {
   IntTupleAttr newAttr = intTupleUnwrap(builder.getAttrBuilder(), builder.getAttr(adaptor));
-  return IntTupleValueAdaptor::create(
-      builder, builder.reprofile(builder.finalize(adaptor), newAttr), newAttr);
+  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor, newAttr), newAttr);
 }
 inline IntTupleValueAdaptor intTupleUnflatten(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                               IntTupleValueAdaptor adaptor, IntTupleAttr profile) {
   IntTupleAttr newAttr =
       intTupleUnflatten(builder.getAttrBuilder(), builder.getAttr(adaptor), profile);
-  return IntTupleValueAdaptor::create(
-      builder, builder.reprofile(builder.finalize(adaptor), newAttr), newAttr);
+  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor, newAttr), newAttr);
 }
 inline IntTupleValueAdaptor intTupleExpand(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                            IntTupleValueAdaptor adaptor,
                                            ArrayRef<int32_t> indices) {
   IntTupleAttr newAttr =
       intTupleExpand(builder.getAttrBuilder(), builder.getAttr(adaptor), indices);
-  return IntTupleValueAdaptor::create(
-      builder, builder.reprofile(builder.finalize(adaptor), newAttr), newAttr);
+  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor, newAttr), newAttr);
 }
 inline IntTupleValueAdaptor intTupleGroup(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
                                           IntTupleValueAdaptor adaptor, int32_t begin,
                                           int32_t end) {
   IntTupleAttr newAttr =
       intTupleGroup(builder.getAttrBuilder(), builder.getAttr(adaptor), begin, end);
-  return IntTupleValueAdaptor::create(
-      builder, builder.reprofile(builder.finalize(adaptor), newAttr), newAttr);
+  return IntTupleValueAdaptor::create(builder, builder.finalize(adaptor, newAttr), newAttr);
 }
-
 template <class IntTuple, class Collector>
 void intTupleFlattenToVector(const IntTupleBuilder<IntTuple> &builder, IntTuple t,
                              Collector &result) {
@@ -713,6 +695,21 @@ IntTuple intTupleTransformLeaf(const IntTupleBuilder<IntTuple> &builder, F &&fn,
     collector.push_back(intTupleTransformLeaf(builder, fn, builder.at(t0, i), builder.at(t1, i),
                                               builder.at(t2, i)));
   }
+  return builder.makeTuple(collector);
+}
+
+template <class IntTuple>
+IntTuple intTupleTake(const IntTupleBuilder<IntTuple> &builder, IntTuple val, int32_t begin,
+                      int32_t end) {
+  assert(!val.isLeaf() && "intTupleTake expects a non-leaf tuple");
+  if (end == -1)
+    end = val.rank();
+  assert(begin >= 0 && end <= val.rank() && begin <= end);
+  if (end - begin == 1)
+    return builder.at(val, begin);
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  for (int32_t i = begin; i < end; ++i)
+    collector.push_back(builder.at(val, i));
   return builder.makeTuple(collector);
 }
 
@@ -871,12 +868,17 @@ std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple>
 
 template <class IntTuple>
 IntTuple intTupleZip2By(const IntTupleBuilder<IntTuple> &builder, IntTuple t, IntTupleAttr guide) {
-  using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
-  auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
-  Collector collector;
-  collector.push_back(first);
-  collector.push_back(second);
-  return builder.makeTuple(collector);
+  if (guide.isLeaf()) {
+    assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
+    return t;
+  } else {
+    using Collector = typename IntTupleBuilder<IntTuple>::ElemCollector;
+    auto [first, second] = detail::intTupleZip2ByImpl(builder, t, guide);
+    Collector collector;
+    collector.push_back(first);
+    collector.push_back(second);
+    return builder.makeTuple(collector);
+  }
 }
 
 namespace detail {
@@ -888,11 +890,11 @@ void intTupleSliceImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple tuple,
     if (coord.isLeafNone()) {
       result.push_back(tuple);
     }
-    return;
-  }
-  assert(coord.rank() == tuple.rank() && "Mismatched ranks in slice");
-  for (int i = 0; i < coord.rank(); ++i) {
-    intTupleSliceImpl(builder, builder.at(tuple, i), coord.at(i), result);
+  } else {
+    assert(coord.rank() == tuple.rank() && "Mismatched ranks in slice");
+    for (int i = 0; i < coord.rank(); ++i) {
+      intTupleSliceImpl(builder, builder.at(tuple, i), coord.at(i), result);
+    }
   }
 }
 template <class IntTuple>
@@ -902,11 +904,11 @@ void intTupleDiceImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple tuple, 
     if (!coord.isLeafNone()) {
       result.push_back(tuple);
     }
-    return;
-  }
-  assert(coord.rank() == tuple.rank() && "Mismatched ranks in dice");
-  for (int i = 0; i < coord.rank(); ++i) {
-    intTupleDiceImpl(builder, builder.at(tuple, i), coord.at(i), result);
+  } else {
+    assert(coord.rank() == tuple.rank() && "Mismatched ranks in dice");
+    for (int i = 0; i < coord.rank(); ++i) {
+      intTupleDiceImpl(builder, builder.at(tuple, i), coord.at(i), result);
+    }
   }
 }
 
@@ -955,7 +957,7 @@ IntTuple intTupleFilterZero(IntTupleBuilder<IntTuple> &builder, IntTupleAttr gui
   if (guide.isLeaf()) {
     if (guide.isLeafStaticValue(0)) {
       return intTupleTransformLeaf(
-          builder, [&](auto) { return builder.makeInt(builder.materializeConstantArith(1)); }, val);
+          builder, [&](auto) { return builder.materializeConstantLeaf(1); }, val);
     }
     return val;
   }
@@ -978,18 +980,17 @@ IntTuple intTupleFilterZero(IntTupleBuilder<IntTuple> &builder, IntTuple val) {
 namespace detail {
 
 template <class IntTuple>
-typename IntTupleBuilder<IntTuple>::ArithValue
-intTupleElemLessImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+IntTuple intTupleElemLessImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs,
+                              IntTuple rhs) {
   if (lhs.isLeaf() && rhs.isLeaf()) {
-    return builder.lt(builder.getArithValue(lhs), builder.getArithValue(rhs));
+    return builder.lt(lhs, rhs);
   }
   if (lhs.rank() > rhs.rank()) {
-    return builder.materializeConstantArith(0);
+    return builder.materializeConstantLeaf(0);
   }
-  ArithValue result = intTupleElemLessImpl(builder, builder.at(lhs, 0), builder.at(rhs, 0));
+  IntTuple result = intTupleElemLessImpl(builder, builder.at(lhs, 0), builder.at(rhs, 0));
   for (int i = 1; i < lhs.rank(); ++i) {
-    ArithValue ri = intTupleElemLessImpl(builder, builder.at(lhs, i), builder.at(rhs, i));
+    IntTuple ri = intTupleElemLessImpl(builder, builder.at(lhs, i), builder.at(rhs, i));
     result = builder.logicalAnd(result, ri);
   }
   return result;
@@ -999,21 +1000,37 @@ intTupleElemLessImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, Int
 
 template <class IntTuple>
 IntTuple intTupleElemLess(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  return builder.makeInt(detail::intTupleElemLessImpl(builder, lhs, rhs));
+  return detail::intTupleElemLessImpl(builder, lhs, rhs);
 }
 template <class IntTuple>
 IntTuple intTupleElemLessEqual(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs,
                                IntTuple rhs) {
-  return builder.makeInt(builder.logicalNot(detail::intTupleElemLessImpl(builder, rhs, lhs)));
+  return builder.logicalNot(detail::intTupleElemLessImpl(builder, rhs, lhs));
 }
 template <class IntTuple>
 IntTuple intTupleElemGreater(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
-  return builder.makeInt(detail::intTupleElemLessImpl(builder, rhs, lhs));
+  return detail::intTupleElemLessImpl(builder, rhs, lhs);
 }
 template <class IntTuple>
 IntTuple intTupleElemGreaterEqual(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs,
                                   IntTuple rhs) {
-  return builder.makeInt(builder.logicalNot(detail::intTupleElemLessImpl(builder, lhs, rhs)));
+  return builder.logicalNot(detail::intTupleElemLessImpl(builder, lhs, rhs));
+}
+
+template <class IntTuple>
+IntTuple intTupleEqual(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
+  if (lhs.isLeaf() && rhs.isLeaf()) {
+    return builder.eq(lhs, rhs);
+  }
+  if (lhs.isLeaf() != rhs.isLeaf() || lhs.rank() != rhs.rank()) {
+    return builder.materializeConstantLeaf(0);
+  }
+  IntTuple result = intTupleEqual(builder, builder.at(lhs, 0), builder.at(rhs, 0));
+  for (int i = 1; i < lhs.rank(); ++i) {
+    result =
+        builder.logicalAnd(result, intTupleEqual(builder, builder.at(lhs, i), builder.at(rhs, i)));
+  }
+  return result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1023,16 +1040,14 @@ IntTuple intTupleElemGreaterEqual(const IntTupleBuilder<IntTuple> &builder, IntT
 namespace detail {
 
 template <class IntTuple>
-std::pair<IntTuple, typename IntTupleBuilder<IntTuple>::ArithValue>
-intTupleCompactColMajorImpl(IntTupleBuilder<IntTuple> &builder, IntTuple shape,
-                            typename IntTupleBuilder<IntTuple>::ArithValue current) {
-  using ArithValue = typename IntTupleBuilder<IntTuple>::ArithValue;
+std::pair<IntTuple, IntTuple> intTupleCompactColMajorImpl(IntTupleBuilder<IntTuple> &builder,
+                                                          IntTuple shape, IntTuple current) {
   if (shape.isLeaf()) {
-    ArithValue nextCurrent = builder.mul(current, builder.getArithValue(shape));
-    return {builder.makeInt(current), nextCurrent};
+    IntTuple nextCurrent = builder.mul(current, shape);
+    return {current, nextCurrent};
   }
   typename IntTupleBuilder<IntTuple>::ElemCollector collector;
-  ArithValue running = current;
+  IntTuple running = current;
   for (int i = 0; i < shape.rank(); ++i) {
     auto [childStride, nextRunning] =
         intTupleCompactColMajorImpl(builder, builder.at(shape, i), running);
@@ -1046,33 +1061,18 @@ intTupleCompactColMajorImpl(IntTupleBuilder<IntTuple> &builder, IntTuple shape,
 
 template <class IntTuple>
 IntTuple intTupleCompactColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple shape,
-                                 typename IntTupleBuilder<IntTuple>::ArithValue current) {
+                                 IntTuple current) {
   auto [stride, finalProduct] = detail::intTupleCompactColMajorImpl(builder, shape, current);
   return stride;
 }
 
 template <class IntTuple>
 IntTuple intTupleCompactColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple shape) {
-  return intTupleCompactColMajor(builder, shape, builder.materializeConstantArith(1));
+  return intTupleCompactColMajor(builder, shape, builder.materializeConstantLeaf(1));
 }
 
-//===----------------------------------------------------------------------===//
-// Basis arithmetic operations
-//===----------------------------------------------------------------------===//
-
-IntTupleAttr intTupleExpandBasis(BasisAttr attr);
-IntTupleAttr intTupleMakeBasisLike(IntTupleAttr profile);
-
-IntTupleAttr operator+(BasisAttr lhs, BasisAttr rhs);
-IntTupleAttr operator+(BasisAttr lhs, IntTupleAttr rhs);
-IntTupleAttr operator+(IntTupleAttr lhs, BasisAttr rhs);
-BasisAttr operator*(BasisAttr lhs, IntAttr rhs);
-BasisAttr operator*(IntAttr lhs, BasisAttr rhs);
-BasisAttr operator/(BasisAttr lhs, IntAttr rhs);
-
-BasisAttr basisSafeDiv(BasisAttr lhs, IntAttr rhs);
-BasisAttr basisCeilDiv(BasisAttr lhs, IntAttr rhs);
+IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile);
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H

@@ -13,6 +13,7 @@ def vectorAddKernel(
 ):
     bid = fx.block_idx.x
     tid = fx.thread_idx.x
+    fx.printf("[kernel] bid={}, tid={}", bid, tid)
 
     A = fx.rocdl.make_buffer_tensor(A)
 
@@ -54,14 +55,11 @@ def vectorAdd(
     const_n: fx.Constexpr[int],  # static int32, it has an effect on function cache-key
     stream: fx.Stream = fx.Stream(None),
 ):
-    print("> Compile: n={} const_n={}", n, const_n)
-
     block_dim = 64
     grid_x = (n + block_dim - 1) // block_dim
+    fx.printf("> vectorAdd: n={}, grid_x={}", n, grid_x)
 
     vectorAddKernel(A, B, C, block_dim).launch(grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream)
-
-
 
 
 def run_eager():

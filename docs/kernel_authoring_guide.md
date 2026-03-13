@@ -251,20 +251,59 @@ buffer_ops.buffer_store(data, rsrc, byte_offset)
 
 ### 4.4 ROCm Intrinsics (`fx.rocdl`)
 
+#### High-Level Helpers
+
 ```python
 from flydsl.expr import rocdl
 
-# MFMA instructions
-result = rocdl.mfma_f32_16x16x16_f16(a, b, acc)
-result = rocdl.mfma_f32_16x16x32_fp8(a, b, acc)
-result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
+# Buffer tensor — wraps a Tensor with AMD buffer resource descriptor
+A_buf = rocdl.make_buffer_tensor(A)
 
+# MFMA MMA atom constructor — returns MmaAtomCDNA3_MFMAType
+atom_type = rocdl.MFMA(m=16, n=16, k=32, elem_ty_ab=fx.Float8E4M3FNUZ)
+
+# Buffer copy atom types
+copy_op = rocdl.BufferCopy128b()   # 128-bit buffer copy
+copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
+copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
+```
+
+#### MFMA Instructions
+
+Signature: `(result_type, [a, b, c, cbsz, abid, blgp])` — trailing ints default to 0.
+
+```python
+result = rocdl.mfma_f32_16x16x16f16(result_type, [a, b, acc])
+result = rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, [a, b, acc])
+result = rocdl.mfma_i32_16x16x32_i8(result_type, [a, b, acc])
+result = rocdl.mfma_f32_16x16x16bf16_1k(result_type, [a, b, acc])   # BF16 1K variant
+
+# GFX950 scaled MFMA (MXFP4/FP6/FP8)
+result = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+    result_type, [a, b, acc, cbsz, blgp, opselA, scaleA, opselB, scaleB]
+)
+```
+
+#### Instruction Scheduling Barriers
+
+Control instruction scheduling for performance tuning:
+
+```python
+rocdl.sched_mfma(cnt)    # wait for cnt MFMA instructions to complete
+rocdl.sched_vmem(cnt)    # wait for cnt VMEM reads to complete
+rocdl.sched_dsrd(cnt)    # wait for cnt DS (LDS) reads to complete
+rocdl.sched_dswr(cnt)    # wait for cnt DS (LDS) writes to complete
+```
+
+#### Low-Level Ops
+
+```python
 # Warp shuffle
 val = rocdl.ds_bpermute(idx, src)
 
-# LDS operations
-rocdl.ds_write_b128(lds_ptr, offset, data)
-data = rocdl.ds_read_b128(lds_ptr, offset)
+# Buffer load/store (raw)
+data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
+rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
 
 ### 4.5 GPU Operations (`fx.gpu`)

@@ -54,7 +54,14 @@ class JitArgumentRegistry:
 
     @classmethod
     def get(cls, py_type: type) -> Optional[Tuple[Callable, Type[DslType]]]:
-        return cls.registry.get(py_type, (None, None))
+        result = cls.registry.get(py_type, None)
+        if result is not None:
+            return result
+        # Fallback: check base classes (e.g., torch.nn.Parameter -> torch.Tensor)
+        for registered_type, entry in cls.registry.items():
+            if isinstance(registered_type, type) and issubclass(py_type, registered_type):
+                return entry
+        return (None, None)
 
     @classmethod
     def get_dsl_type(cls, jit_arg_type: type) -> Type[DslType]:
@@ -104,13 +111,17 @@ def convert_to_jit_arguments(
                     f"No DslType registered for JitArgument type {type(value).__name__} (parameter '{param_name}')"
                 )
         else:
-            jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
-            if jit_arg_constructor is None:
-                raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
-            try:
-                jit_arg = jit_arg_constructor(value)
-            except Exception as e:
-                raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
+            if isinstance(value, int) and annotation is Stream:
+                jit_arg = Stream(value)
+                dsl_type = Stream
+            else:
+                jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
+                if jit_arg_constructor is None:
+                    raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
+                try:
+                    jit_arg = jit_arg_constructor(value)
+                except Exception as e:
+                    raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
 
         param_names.append(param_name)
         jit_args.append(jit_arg)

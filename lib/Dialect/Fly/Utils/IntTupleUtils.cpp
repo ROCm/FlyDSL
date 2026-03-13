@@ -62,94 +62,229 @@ bool intTupleIsWeaklyCongruent(IntTupleAttr lhs, IntTupleAttr rhs) {
   return true;
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::add(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.add(lhs.attr, rhs.attr);
-  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::AddIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                          extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+//===----------------------------------------------------------------------===//
+// IntTupleBuilder<IntTupleAttr>
+//===----------------------------------------------------------------------===//
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::add(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() + rhs.getLeafAsInt());
+  } else {
+    assert(lhs.isLeafBasis() || lhs.isLeafStaticValue(0) || !lhs.isLeaf());
+    assert(rhs.isLeafBasis() || rhs.isLeafStaticValue(0) || !rhs.isLeaf());
+    if (lhs.isLeafStaticValue(0)) {
+      return rhs;
+    }
+    if (rhs.isLeafStaticValue(0)) {
+      return lhs;
+    }
+    auto lhsTuple = lhs.isLeafBasis() ? intTupleBasis2Tuple(*this, lhs) : lhs;
+    auto rhsTuple = rhs.isLeafBasis() ? intTupleBasis2Tuple(*this, rhs) : rhs;
+    return intTupleAdd(*this, lhsTuple, rhsTuple);
+  }
 }
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::sub(ArithValue lhs, ArithValue rhs) const {
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::sub(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() - rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::mul(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  assert(lhs.isLeafInt() || rhs.isLeafInt());
+
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() * rhs.getLeafAsInt());
+  } else if (lhs.isLeafInt()) {
+    auto rhsBasis = rhs.getLeafAsBasis();
+    return IntTupleAttr::get(lhs.getLeafAsInt() * rhsBasis.getValue(), rhsBasis.getModes());
+  } else {
+    auto lhsBasis = lhs.getLeafAsBasis();
+    return IntTupleAttr::get(lhsBasis.getValue() * rhs.getLeafAsInt(), lhsBasis.getModes());
+  }
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::div(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() / rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::mod(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() % rhs.getLeafAsInt());
+}
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalAnd(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() && rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalOr(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() || rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalNot(IntTupleAttr val) const {
+  assert(val.isLeafInt());
+  return IntTupleAttr::get(!val.getLeafAsInt());
+}
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::lt(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() < rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::le(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() <= rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::gt(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() > rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::ge(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() >= rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::eq(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() == rhs.getLeafAsInt());
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::ne(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(lhs.getLeafAsInt() != rhs.getLeafAsInt());
+}
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::min(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(intMin(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::max(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(intMax(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::safeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeaf() && rhs.isLeafInt());
+  if (lhs.isLeafInt()) {
+    return IntTupleAttr::get(intSafeDiv(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
+  } else {
+    return IntTupleAttr::get(intSafeDiv(lhs.getLeafAsBasis(), rhs.getLeafAsInt()));
+  }
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::ceilDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeaf() && rhs.isLeafInt());
+  if (lhs.isLeafInt()) {
+    return IntTupleAttr::get(intCeilDiv(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
+  } else {
+    return IntTupleAttr::get(intCeilDiv(lhs.getLeafAsBasis(), rhs.getLeafAsInt()));
+  }
+}
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::shapeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
+  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  return IntTupleAttr::get(intShapeDiv(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
+}
+
+IntTupleAttr IntTupleBuilder<IntTupleAttr>::applySwizzle(IntTupleAttr v,
+                                                         SwizzleAttr swizzle) const {
+  assert(v.isLeafInt() && "applySwizzle only supports leafInt IntTupleAttr");
+  return IntTupleAttr::get(intApplySwizzle(v.getLeafAsInt(), swizzle));
+}
+
+//===----------------------------------------------------------------------===//
+// IntTupleBuilder<IntTupleValueAdaptor>
+//===----------------------------------------------------------------------===//
+
+Type IntTupleBuilder<IntTupleValueAdaptor>::getIntType(IntTupleAttr t) const {
+  assert(t.isLeaf());
+  auto attr = t.extractIntFromLeaf();
+  assert((attr.getWidth() == 64 || attr.getWidth() == 32 || attr.getWidth() == 0) &&
+         "Invalid width");
+  return attr.getWidth() == 64 ? builder.getI64Type() : builder.getI32Type();
+}
+Type IntTupleBuilder<IntTupleValueAdaptor>::getCommonIntType(IntTupleAttr lhs,
+                                                             IntTupleAttr rhs) const {
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  auto lhsAttr = lhs.extractIntFromLeaf();
+  auto rhsAttr = rhs.extractIntFromLeaf();
+  assert((lhsAttr.getWidth() == 64 || lhsAttr.getWidth() == 32 || lhsAttr.getWidth() == 0) &&
+         "Invalid width");
+  assert((rhsAttr.getWidth() == 64 || rhsAttr.getWidth() == 32 || rhsAttr.getWidth() == 0) &&
+         "Invalid width");
+  return lhsAttr.getWidth() == 64 || rhsAttr.getWidth() == 64 ? builder.getI64Type()
+                                                              : builder.getI32Type();
+}
+Value IntTupleBuilder<IntTupleValueAdaptor>::extendToIntType(Value input, Type intType) const {
+  if (input.getType() != intType) {
+    input = arith::ExtSIOp::create(builder, loc, intType, input);
+  }
+  return input;
+}
+
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::add(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    auto retAttr = attrBuilder.add(lhs.attr, rhs.attr);
+    auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+    return IntTupleValueAdaptor{arith::AddIOp::create(builder, loc,
+                                                      extendToIntType(lhs.value, cmpType),
+                                                      extendToIntType(rhs.value, cmpType))
+                                    .getResult(),
+                                retAttr};
+  } else {
+    assert(lhs.isLeafBasis() || lhs.isLeafStaticValue(0) || !lhs.isLeaf());
+    assert(rhs.isLeafBasis() || rhs.isLeafStaticValue(0) || !rhs.isLeaf());
+    if (lhs.isLeafStaticValue(0)) {
+      return rhs;
+    }
+    if (rhs.isLeafStaticValue(0)) {
+      return lhs;
+    }
+    auto lhsTuple = lhs.isLeafBasis() ? intTupleBasis2Tuple(*this, lhs) : lhs;
+    auto rhsTuple = rhs.isLeafBasis() ? intTupleBasis2Tuple(*this, rhs) : rhs;
+    return intTupleAdd(*this, lhsTuple, rhsTuple);
+  }
+}
+
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::sub(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.sub(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::SubIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                          extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::SubIOp::create(builder, loc,
+                                                    extendToIntType(lhs.value, cmpType),
+                                                    extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::mul(ArithValue lhs, ArithValue rhs) const {
+
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mul(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.mul(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::MulIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                          extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::MulIOp::create(builder, loc,
+                                                    extendToIntType(lhs.value, cmpType),
+                                                    extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::div(ArithValue lhs, ArithValue rhs) const {
+
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::div(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.div(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::DivSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                           extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
+                                                     extendToIntType(lhs.value, cmpType),
+                                                     extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::mod(ArithValue lhs, ArithValue rhs) const {
+
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::mod(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.mod(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::RemSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                           extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::RemSIOp::create(builder, loc,
+                                                     extendToIntType(lhs.value, cmpType),
+                                                     extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::min(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.min(lhs.attr, rhs.attr);
-  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::MinSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                           extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
-}
-
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::max(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.max(lhs.attr, rhs.attr);
-  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::MaxSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                           extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
-}
-
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::ceilDiv(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.ceilDiv(lhs.attr, rhs.attr);
-  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::CeilDivSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                               extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
-}
-
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::shapeDiv(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.shapeDiv(lhs.attr, rhs.attr);
-  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::CeilDivSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                               extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
-}
-
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::logicalAnd(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::logicalAnd(IntTupleValueAdaptor lhs,
+                                                  IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.logicalAnd(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   // (lhs != 0) && (rhs != 0)
@@ -160,11 +295,13 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalAnd(ArithValue lhs, ArithValue rhs
       builder, loc, arith::CmpIPredicate::ne, rhs.value,
       arith::ConstantIntOp::create(builder, loc, getIntType(rhs.attr), 0).getResult());
   auto result = arith::AndIOp::create(builder, loc, lhsBool, rhsBool);
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, result).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(IntTupleValueAdaptor lhs,
+                                                 IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.logicalOr(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   // (lhs != 0) || (rhs != 0)
@@ -175,113 +312,178 @@ IntTupleBuilder<IntTupleValueAdaptor>::logicalOr(ArithValue lhs, ArithValue rhs)
       builder, loc, arith::CmpIPredicate::ne, rhs.value,
       arith::ConstantIntOp::create(builder, loc, getIntType(rhs.attr), 0).getResult());
   auto result = arith::OrIOp::create(builder, loc, lhsBool, rhsBool);
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, result).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::logicalNot(ArithValue val) const {
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::logicalNot(IntTupleValueAdaptor val) const {
   auto retAttr = attrBuilder.logicalNot(val.attr);
   auto retType = getIntType(retAttr);
   auto zero = arith::ConstantIntOp::create(builder, loc, getIntType(val.attr), 0).getResult();
   // !(val) == (val == 0)
   auto result = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, val.value, zero);
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, result).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, result).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::lt(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::lt(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.lt(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::le(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::le(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.le(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sle,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::gt(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::gt(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.gt(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sgt,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::ge(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ge(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.ge(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::sge,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::eq(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::eq(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.eq(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::ne(ArithValue lhs, ArithValue rhs) const {
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::ne(IntTupleValueAdaptor lhs,
+                                                               IntTupleValueAdaptor rhs) const {
   auto retAttr = attrBuilder.ne(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
   auto retType = getIntType(retAttr);
   auto cmp = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
                                    extendToIntType(lhs.value, cmpType),
                                    extendToIntType(rhs.value, cmpType));
-  return ArithValue{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(), retAttr};
+  return IntTupleValueAdaptor{arith::ExtUIOp::create(builder, loc, retType, cmp).getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::bitwiseXor(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.bitwiseXor(lhs.attr, rhs.attr);
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::min(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.min(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::XOrIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                          extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::MinSIOp::create(builder, loc,
+                                                     extendToIntType(lhs.value, cmpType),
+                                                     extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::bitwiseAnd(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.bitwiseAnd(lhs.attr, rhs.attr);
+IntTupleValueAdaptor IntTupleBuilder<IntTupleValueAdaptor>::max(IntTupleValueAdaptor lhs,
+                                                                IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.max(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::AndIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                          extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::MaxSIOp::create(builder, loc,
+                                                     extendToIntType(lhs.value, cmpType),
+                                                     extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
 }
 
-IntTupleBuilder<IntTupleValueAdaptor>::ArithValue
-IntTupleBuilder<IntTupleValueAdaptor>::shiftRight(ArithValue lhs, ArithValue rhs) const {
-  auto retAttr = attrBuilder.shiftRight(lhs.attr, rhs.attr);
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::safeDiv(IntTupleValueAdaptor lhs,
+                                               IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.safeDiv(lhs.attr, rhs.attr);
   auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
-  return ArithValue{arith::ShRSIOp::create(builder, loc, extendToIntType(lhs.value, cmpType),
-                                           extendToIntType(rhs.value, cmpType))
-                        .getResult(),
-                    retAttr};
+  return IntTupleValueAdaptor{arith::DivSIOp::create(builder, loc,
+                                                     extendToIntType(lhs.value, cmpType),
+                                                     extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::ceilDiv(IntTupleValueAdaptor lhs,
+                                               IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.ceilDiv(lhs.attr, rhs.attr);
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
+                                                         extendToIntType(lhs.value, cmpType),
+                                                         extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::shapeDiv(IntTupleValueAdaptor lhs,
+                                                IntTupleValueAdaptor rhs) const {
+  auto retAttr = attrBuilder.shapeDiv(lhs.attr, rhs.attr);
+  auto cmpType = getCommonIntType(lhs.attr, rhs.attr);
+  return IntTupleValueAdaptor{arith::CeilDivSIOp::create(builder, loc,
+                                                         extendToIntType(lhs.value, cmpType),
+                                                         extendToIntType(rhs.value, cmpType))
+                                  .getResult(),
+                              retAttr};
+}
+
+IntTupleValueAdaptor
+IntTupleBuilder<IntTupleValueAdaptor>::applySwizzle(IntTupleValueAdaptor v,
+                                                    SwizzleAttr swizzle) const {
+  assert(v.isLeafInt() && "applySwizzle only supports leaf IntTupleValueAdaptor");
+
+  auto retAttr = attrBuilder.applySwizzle(v.attr, swizzle);
+
+  // shortcut for trivial swizzle and static value
+  if (swizzle.isTrivialSwizzle()) {
+    return IntTupleValueAdaptor{v.value, retAttr};
+  }
+  if (retAttr.isStatic()) {
+    return materializeConstantLeaf(retAttr.getLeafAsInt());
+  }
+
+  auto intType =
+      v.attr.getLeafAsInt().getWidth() == 64 ? builder.getI64Type() : builder.getI32Type();
+  auto input = extendToIntType(v.value, intType);
+  int64_t bitMaskValue = ((int64_t{1} << swizzle.getMask()) - 1)
+                         << (swizzle.getBase() + swizzle.getShift());
+  auto bitMask = arith::ConstantIntOp::create(builder, loc, intType, bitMaskValue).getResult();
+  auto shiftAmount =
+      arith::ConstantIntOp::create(builder, loc, intType, swizzle.getShift()).getResult();
+  auto masked = arith::AndIOp::create(builder, loc, input, bitMask).getResult();
+  auto shifted = arith::ShRUIOp::create(builder, loc, masked, shiftAmount).getResult();
+  auto result = arith::XOrIOp::create(builder, loc, input, shifted).getResult();
+  return IntTupleValueAdaptor{result, retAttr};
 }
 
 IntTupleAttr intTupleWrap(const IntTupleBuilder<IntTupleAttr> &builder, IntTupleAttr attr) {
@@ -393,17 +595,16 @@ IntTupleAttr intTupleGroup(const IntTupleBuilder<IntTupleAttr> &builder, IntTupl
 // Basis operations
 //===----------------------------------------------------------------------===//
 
-IntTupleAttr intTupleExpandBasis(BasisAttr attr) {
+IntTupleAttr intTupleBasis2Tuple(const IntTupleBuilder<IntTupleAttr> &builder, IntTupleAttr attr) {
   auto *ctx = attr.getContext();
-  ArrayRef<int32_t> modes = attr.getModes();
 
-  if (modes.empty()) {
-    return IntTupleAttr::get(attr.getValue());
-  }
+  assert(attr.isLeafBasis() && "attr must be a basis");
+  BasisAttr basis = attr.getLeafAsBasis();
+  ArrayRef<int32_t> modes = basis.getModes();
+  assert(!modes.empty() && "modes must not be empty");
 
   auto zero = IntTupleAttr::get(IntAttr::getStatic(ctx, 0));
-  IntTupleAttr result = IntTupleAttr::get(attr.getValue());
-
+  IntTupleAttr result = IntTupleAttr::get(basis.getValue());
   for (auto it = modes.rbegin(); it != modes.rend(); ++it) {
     int32_t n = *it;
     SmallVector<Attribute> elements;
@@ -416,63 +617,33 @@ IntTupleAttr intTupleExpandBasis(BasisAttr attr) {
   return result;
 }
 
-namespace {
+IntTupleValueAdaptor intTupleBasis2Tuple(const IntTupleBuilder<IntTupleValueAdaptor> &builder,
+                                         IntTupleValueAdaptor basis) {
+  assert(basis.isLeafBasis());
+  IntTupleAttr attr = builder.getAttr(basis);
+  IntTupleAttr newAttr = intTupleBasis2Tuple(builder.getAttrBuilder(), attr);
+  return IntTupleValueAdaptor::create(builder, basis.getValue(), newAttr);
+}
 
-IntTupleAttr intTupleMakeBasisLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
-                                       SmallVector<int32_t, 4> &modes) {
+static IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
+                                                   SmallVector<int32_t, 4> &modes) {
   if (profile.isLeaf()) {
-    auto one = IntAttr::getStatic(ctx, 1);
-    return IntTupleAttr::get(BasisAttr::get(ctx, one, modes));
+    return IntTupleAttr::get(BasisAttr::get(IntAttr::getStatic(ctx, 1), modes));
   }
-
   SmallVector<Attribute> elements;
   for (int32_t i = 0; i < profile.rank(); ++i) {
     modes.push_back(i);
-    elements.push_back(intTupleMakeBasisLikeImpl(ctx, profile.at(i), modes));
+    elements.push_back(intTupleMakeBasisTupleLikeImpl(ctx, profile.at(i), modes));
     modes.pop_back();
   }
   return IntTupleAttr::get(ArrayAttr::get(ctx, elements));
 }
 
-} // namespace
-
-IntTupleAttr intTupleMakeBasisLike(IntTupleAttr profile) {
+IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile) {
   auto *ctx = profile.getContext();
   SmallVector<int32_t, 4> modes;
-  assert(!profile.isLeaf() && "intTupleMakeBasisLike expects a non-leaf IntTupleAttr");
-  return intTupleMakeBasisLikeImpl(ctx, profile, modes);
-}
-
-IntTupleAttr operator+(BasisAttr lhs, BasisAttr rhs) {
-  IntTupleBuilder<IntTupleAttr> builder(lhs.getContext());
-  return intTupleAdd(builder, intTupleExpandBasis(lhs), intTupleExpandBasis(rhs));
-}
-IntTupleAttr operator+(BasisAttr lhs, IntTupleAttr rhs) {
-  IntTupleBuilder<IntTupleAttr> builder(lhs.getContext());
-  return intTupleAdd(builder, intTupleExpandBasis(lhs), rhs);
-}
-IntTupleAttr operator+(IntTupleAttr lhs, BasisAttr rhs) {
-  IntTupleBuilder<IntTupleAttr> builder(lhs.getContext());
-  return intTupleAdd(builder, lhs, intTupleExpandBasis(rhs));
-}
-
-BasisAttr operator*(BasisAttr lhs, IntAttr rhs) {
-  return BasisAttr::get(lhs.getContext(), cast<IntAttr>(lhs.getValue()) * rhs, lhs.getModes());
-}
-BasisAttr operator*(IntAttr lhs, BasisAttr rhs) {
-  return BasisAttr::get(rhs.getContext(), lhs * cast<IntAttr>(rhs.getValue()), rhs.getModes());
-}
-BasisAttr operator/(BasisAttr lhs, IntAttr rhs) {
-  return BasisAttr::get(lhs.getContext(), cast<IntAttr>(lhs.getValue()) / rhs, lhs.getModes());
-}
-
-BasisAttr basisSafeDiv(BasisAttr lhs, IntAttr rhs) {
-  return BasisAttr::get(lhs.getContext(), intSafeDiv(cast<IntAttr>(lhs.getValue()), rhs),
-                        lhs.getModes());
-}
-BasisAttr basisCeilDiv(BasisAttr lhs, IntAttr rhs) {
-  return BasisAttr::get(lhs.getContext(), intCeilDiv(cast<IntAttr>(lhs.getValue()), rhs),
-                        lhs.getModes());
+  assert(!profile.isLeaf() && "intTupleMakeBasisTupleLike expects a non-leaf IntTupleAttr");
+  return intTupleMakeBasisTupleLikeImpl(ctx, profile, modes);
 }
 
 } // namespace mlir::fly
