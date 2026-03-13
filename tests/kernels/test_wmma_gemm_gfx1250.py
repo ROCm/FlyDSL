@@ -59,7 +59,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     lds_pad = 8
     elem_bytes = 2
     a_buf = tile_m * (tile_k + lds_pad) * elem_bytes
-    b_buf = tile_n * (tile_k + lds_pad) * elem_bytes
+    b_buf = tile_k * (tile_n + lds_pad) * elem_bytes
     total_lds = (a_buf + b_buf) * num_buffers
     if total_lds > 327680:
         pytest.skip(f"LDS budget exceeded: {total_lds} > 327680")
@@ -75,12 +75,12 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     npad = (N + tile_n - 1) // tile_n * tile_n
 
     a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
-    b = torch.randn((N, K), dtype=torch_dtype, device='cpu').cuda()
+    b = torch.randn((K, N), dtype=torch_dtype, device='cpu').cuda()
 
     a_pad = torch.zeros((mpad, K), dtype=torch_dtype, device=device)
-    b_pad = torch.zeros((npad, K), dtype=torch_dtype, device=device)
+    b_pad = torch.zeros((K, npad), dtype=torch_dtype, device=device)
     a_pad[:M, :] = a
-    b_pad[:N, :] = b
+    b_pad[:, :N] = b
 
     c_pad = torch.zeros((mpad, npad), dtype=torch.float32, device=device)
 
@@ -99,7 +99,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     )
     torch.cuda.synchronize()
 
-    ref = torch.mm(a.cpu().to(torch.float32), b.cpu().to(torch.float32).T)
+    ref = torch.mm(a.cpu().to(torch.float32), b.cpu().to(torch.float32))
     rtol = 3e-2
     atol = 3e-2
     assert verify_output(c_pad[:M, :N].cpu().to(torch.float32), ref, rtol=rtol, atol=atol)
