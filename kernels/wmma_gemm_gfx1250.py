@@ -15,7 +15,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
-from kernels.layout_utils import crd2idx, idx2crd
+from kernels.layout_utils import idx2crd
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
@@ -138,9 +138,9 @@ def compile_wmma_gemm_tdm(
     n_accs = wmma_m_rep * wmma_n_rep
 
     lds_a_stride = tile_k + LDS_PAD_A
-    lds_b_stride = tile_k + LDS_PAD_B
+    lds_b_stride = tile_n + LDS_PAD_B
     lds_a_elems = tile_m * lds_a_stride + LDS_PAD_A
-    lds_b_elems = tile_n * lds_b_stride + LDS_PAD_A
+    lds_b_elems = tile_k * lds_b_stride + LDS_PAD_B
 
     buf_size_elems = lds_a_elems + lds_b_elems
 
@@ -214,74 +214,104 @@ def compile_wmma_gemm_tdm(
         def copy_b_to_lds(k_base, lds_b_mem_ref):
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=lds_b_mem_ref,
-                global_offset=(blk_n, k_base),
-                tensor_shape=(tile_n, tile_k), strides=(K, 1),
-                tile_shape=(tile_n, tile_k), elem_bytes=elem_bytes,
-                pad_interval=tile_k, pad_amount=LDS_PAD_B,
+                global_offset=(k_base, blk_n),
+                tensor_shape=(tile_k, tile_n), strides=(N, 1),
+                tile_shape=(tile_k, tile_n), elem_bytes=elem_bytes,
+                pad_interval=tile_n, pad_amount=LDS_PAD_B,
                 num_warps=num_warps)
             tdm_ops.tensor_load_2d(desc)
 
-        layout_smem_a = fx.make_layout((tile_m, lds_a_stride), (lds_a_stride, 1))
-        layout_smem_b = fx.make_layout((tile_n, lds_b_stride), (lds_b_stride, 1))
-
         # --- LDS load helpers ---
-        from flydsl._mlir.dialects import vector as vec_d
-
-        FRAG_K_ELEMS = 8
-
         def _get_lds_memref(lds_ptr):
             """Get the raw memref value from SmemPtr or raw memref."""
             if isinstance(lds_ptr, SmemPtr):
                 return get_op_result_or_value(lds_ptr.get())
             return get_op_result_or_value(lds_ptr)
 
-        def load_wmma_frag(lds_ptr, row_base, k_base, lds_layout):
+        def _precompute_a_lane_bases(lds_ptr):
+            """Precompute per-wm A fragment lane base addresses.
+
+            Returns (lds_buffer, bases) where bases[wm] =
+              (warp_m_base + wm*WMMA_M + lane16) * lds_a_stride + lane_kgrp * 8
+            """
+            lds_buffer = _get_lds_memref(lds_ptr)
+            row_stride_off = (warp_m_base + lane16) * arith.index(lds_a_stride)
+            k_lane_off = lane_kgrp * arith.index(8)
+            bases = []
+            for wm in range_constexpr(wmma_m_rep):
+                a_base = row_stride_off + arith.index(wm * WMMA_M * lds_a_stride) + k_lane_off
+                bases.append(a_base)
+            return lds_buffer, bases
+
+        def load_wmma_frag(a_lds_buffer, a_lane_base, ks):
             """Load one 16x32 WMMA fragment from LDS using vectorized 128-bit loads.
 
-            Uses vector.load to read 8 contiguous fp16 elements at once,
-            avoiding scalar load + v_perm/v_alignbit overhead.
-            Two 128-bit loads per fragment (2 × 8 fp16 = 16 fp16 values).
+            a_lane_base is precomputed by _precompute_a_lane_bases.
+            ks is the K-subtile index (compile-time constant).
             """
-            raw_memref = _get_lds_memref(lds_ptr)
-            row = row_base + lane16
             vec8_ty = ir.VectorType.get([8], elem_ty)
 
-            # Two K-groups per fragment:
-            # Group 0 (values 0-7):  k = k_base + lane_kgrp * 8
-            # Group 1 (values 8-15): k = k_base + (2 + lane_kgrp) * 8
-            k0 = k_base + lane_kgrp * arith.index(8)
-            k1 = k_base + (arith.index(2) + lane_kgrp) * arith.index(8)
+            off0 = a_lane_base + arith.index(ks * WMMA_K)
+            off1 = a_lane_base + arith.index(ks * WMMA_K + 16)
 
-            off0 = crd2idx((row, k0), lds_layout)
-            off1 = crd2idx((row, k1), lds_layout)
+            v0 = vector.load_op(vec8_ty, a_lds_buffer, [off0])
+            v1 = vector.load_op(vec8_ty, a_lds_buffer, [off1])
 
-            idx0 = [get_op_result_or_value(off0)]
-            idx1 = [get_op_result_or_value(off1)]
+            return vector.shuffle(v0, v1, list(range(16)))
 
-            v0 = vec_d.load(vec8_ty, raw_memref, idx0)
-            v1 = vec_d.load(vec8_ty, raw_memref, idx1)
+        def _precompute_b_lane_bases(lds_ptr):
+            """Precompute per-wn B fragment lane base addresses.
 
-            # Concatenate two vec<8> into vec<16> via vector.shuffle
-            mask = ir.DenseI64ArrayAttr.get(list(range(16)))
-            return vec_d.shuffle(v0, v1, mask)
+            Returns a list of (lds_buffer, b_lane_base) for each wn.
+            b_lane_base = (lane_kgrp*8 + lane8) * lds_b_stride
+                        + (warp_n_base + wn*WMMA_N + lane_ngrp*8)
+            where lane8 = lane16 % 8, lane_ngrp = lane16 / 8.
+
+            After precompute, lane8/lane_ngrp are dead → frees VGPRs.
+            """
+            lds_buffer = _get_lds_memref(lds_ptr)
+            lane8 = lane16 % arith.index(8)
+            lane_ngrp = lane16 / arith.index(8)
+            k_lane_off = (lane_kgrp * arith.index(8) + lane8) * arith.index(lds_b_stride)
+            n_lane_off = lane_ngrp * arith.index(8)
+            bases = []
+            for wn in range_constexpr(wmma_n_rep):
+                n_col = warp_n_base + arith.index(wn * WMMA_N) + n_lane_off
+                b_base = k_lane_off + n_col
+                bases.append(b_base)
+            return lds_buffer, bases
+
+        def load_wmma_frag_tr(lds_buffer, b_lane_base, ks):
+            """Load one 16x32 WMMA B fragment using ds_load_tr16_b128.
+
+            b_lane_base is precomputed by _precompute_b_lane_bases.
+            ks is the K-subtile index (compile-time constant from range_constexpr).
+            The K offset is folded into a compile-time constant multiplication.
+            """
+            vec8_ty = ir.VectorType.get([8], elem_ty)
+            results = []
+            for k_half in range_constexpr(2):
+                k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride
+                elem_off = b_lane_base + arith.index(k_row_off)
+                v = rocdl.lds_transpose_load(vec8_ty, lds_buffer, elem_off, elem_bytes)
+                results.append(v)
+            return vector.shuffle(results[0], results[1], list(range(16)))
 
         # --- K-subtile load/compute helpers ---
-        # Number of ds_load_b128 per K-subtile:
-        # B frags: wmma_n_rep * 2, A frags: wmma_m_rep * 2
+        # Number of LDS loads per K-subtile:
+        # B frags: wmma_n_rep * 2 (ds_load_tr16_b128), A frags: wmma_m_rep * 2
         LOADS_PER_SUBTILE = (wmma_m_rep + wmma_n_rep) * 2
 
-        def load_k_subtile_frags(lds_a_ptr, lds_b_ptr, ks):
-            """Batch-load all A and B fragments for one K-subtile (no wait)."""
-            k_off = arith.index(ks * WMMA_K)
+        def load_k_subtile_frags(a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks):
+            """Batch-load all A and B fragments for one K-subtile (no wait).
 
-            b_frags = [load_wmma_frag(
-                lds_b_ptr, warp_n_base + arith.index(wn * WMMA_N),
-                k_off, layout_smem_b)
+            All base addresses are precomputed by _precompute_{a,b}_lane_bases.
+            ks is the K-subtile index (compile-time constant).
+            """
+            b_frags = [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
                 for wn in range_constexpr(wmma_n_rep)]
 
-            a_frags = [load_wmma_frag(
-                lds_a_ptr, warp_m_base + arith.index(wm * WMMA_M),
-                k_off, layout_smem_a)
+            a_frags = [load_wmma_frag(a_lds_buffer, a_bases[wm], ks)
                 for wm in range_constexpr(wmma_m_rep)]
 
             return a_frags, b_frags
@@ -304,20 +334,26 @@ def compile_wmma_gemm_tdm(
         def compute_tile(accs_in, lds_a_ptr, lds_b_ptr, emit_filler=None):
             current_accs = list(accs_in)
 
+            # Precompute all lane bases once per tile
+            a_lds_buffer, a_bases = _precompute_a_lane_bases(lds_a_ptr)
+            b_lds_buffer, b_bases = _precompute_b_lane_bases(lds_b_ptr)
+
             if k_wmma_steps == 1:
-                a_frags, b_frags = load_k_subtile_frags(lds_a_ptr, lds_b_ptr, 0)
+                a_frags, b_frags = load_k_subtile_frags(
+                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
                 rocdl.s_wait_dscnt(0)
                 if emit_filler is not None:
                     emit_filler()
                 current_accs = do_k_subtile_wmma(a_frags, b_frags, current_accs)
             else:
                 # Prologue: batch-load K-subtile 0
-                prev_a, prev_b = load_k_subtile_frags(lds_a_ptr, lds_b_ptr, 0)
+                prev_a, prev_b = load_k_subtile_frags(
+                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
 
                 # Main K-loop: overlap load[ks+1] with compute[ks]
                 for ks in range_constexpr(k_wmma_steps - 1):
                     next_a, next_b = load_k_subtile_frags(
-                        lds_a_ptr, lds_b_ptr, ks + 1)
+                        a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks + 1)
                     rocdl.s_wait_dscnt(LOADS_PER_SUBTILE)
                     current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
                     prev_a, prev_b = next_a, next_b
@@ -384,7 +420,7 @@ def compile_wmma_gemm_tdm(
                 arg_a, (blk_m, pf_k), (tile_m, tile_k), (K, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
-                arg_b, (blk_n, pf_k), (tile_n, tile_k), (K, 1),
+                arg_b, (pf_k, blk_n), (tile_k, tile_n), (N, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
 
         # ====== Multi-stage pipeline ======
