@@ -251,6 +251,7 @@ def test_mfma_a8_flyc_preshuffle(
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
+@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
 @pytest.mark.parametrize(
