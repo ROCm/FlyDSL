@@ -353,8 +353,10 @@ def compile_shmem_kernel(
 
     # Compute content-hash-based cache path (~/.flydsl/cache/shmem/<name>_<hash>.hsaco)
     cache_path = _shmem_cache_path(kernel_fn, chip, shmem_bc)
-    if cache_path.exists():
-        return ShmemKernel(str(cache_path), kernel_fn._kernel_name)
+    name_path  = cache_path.with_suffix(".kernel_name")
+    if cache_path.exists() and name_path.exists():
+        kernel_name = name_path.read_text().strip()
+        return ShmemKernel(str(cache_path), kernel_name)
 
     out_path = str(cache_path)
 
@@ -550,6 +552,9 @@ def compile_shmem_kernel(
 
     _SHMEM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _link_and_compile_hsaco(llvm_ir, chip, out_path, shmem_bc)
+
+    # Persist kernel name so cache hits can recover it without re-emitting
+    name_path.write_text(kernel_fn._kernel_name)
 
     # -----------------------------------------------------------------------
     # 4. Return callable (loads HSACO lazily on first launch)
