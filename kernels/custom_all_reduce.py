@@ -578,3 +578,22 @@ class FlyDSLAllreduce:
                 stream_ptr=stream_ptr,
             )
         return out
+
+    def all_reduce_reg(self, inp, out, open_fp8_quant: bool = False):
+        if isinstance(inp, (list, tuple)):
+            import functools
+            result = functools.reduce(torch.add, inp)
+            out.copy_(result)
+            return out
+        return self.custom_all_reduce(inp, out=out, open_fp8_quant=open_fp8_quant)
+
+    def all_gather_reg(self, inp, out):
+        if isinstance(inp, (list, tuple)):
+            stacked = torch.stack(list(inp), dim=0)
+            out.copy_(stacked)
+        elif self.world_size == 1:
+            out.copy_(inp)
+        else:
+            import torch.distributed as dist
+            dist.all_gather_into_tensor(out, inp, group=self.group)
+        return out
