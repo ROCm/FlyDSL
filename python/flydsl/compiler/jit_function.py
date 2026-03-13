@@ -35,8 +35,7 @@ def _flydsl_key() -> str:
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
          flydsl.runtime.*, flydsl.lang.*, flydsl.utils.*
-      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
-         libmlir_rocm_runtime.so)
+      2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so)
       3. flydsl.__version__
 
     Any change to compiler code, pass pipeline, runtime wrappers, or C++
@@ -79,7 +78,7 @@ def _flydsl_key() -> str:
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
         so_patterns = ["_fly*.so", "_fly_rocdl*.so", "libFly*.so",
-                       "libfly_jit_runtime.so", "libmlir_rocm_runtime.so",
+                       "libfly_jit_runtime.so",
                        "_mlirRegisterEverything*.so"]
         for pattern in so_patterns:
             for so_file in sorted(mlir_libs_dir.glob(pattern)):
