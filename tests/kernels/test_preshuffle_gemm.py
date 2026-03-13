@@ -265,6 +265,7 @@ def test_mfma_a8_flyc_preshuffle(
 )
 def test_mfma_w4_flyc_preshuffle(
     a_dtype, b_dtype,
+    out_dtype,
     M, N, K, tile_m, tile_n, tile_k,
     *,
     lds_stage: int = DEFAULT_LDS_STAGE,
@@ -285,7 +286,7 @@ def test_mfma_w4_flyc_preshuffle(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         a_dtype=a_dtype, b_dtype=b_dtype,
-        out_dtype="bf16", lds_stage=lds_stage,
+        out_dtype=out_dtype, lds_stage=lds_stage,
     )
     print(f"✓ Compiled (lds_stage={lds_stage})")
 
@@ -320,7 +321,8 @@ def test_mfma_w4_flyc_preshuffle(
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
-    c_out = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
     def _to_bytes(t):
         if t.dtype == torch.uint8 or t.dtype == torch.int8:
@@ -408,6 +410,7 @@ if __name__ == "__main__":
             test_mfma_w4_flyc_preshuffle(
                 args.in_dtype if args.in_dtype == "fp8" else "fp4",
                 "fp4",
+                args.out_dtype,
                 M=args.M, N=args.N, K=args.K,
                 tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
                 lds_stage=args.lds_stage,
