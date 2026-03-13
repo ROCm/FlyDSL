@@ -32,6 +32,8 @@ from .kernel_function import (
 )
 from .protocol import fly_construct, fly_pointers, fly_types
 
+_FLYDSL_COV = 6
+
 
 @lru_cache(maxsize=1)
 def _flydsl_key() -> str:
@@ -369,13 +371,20 @@ def _pipeline_fragments(backend) -> tuple:
 
 class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: list | None = None) -> ir.Module:
         module.operation.verify()
 
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         fragments, llvm_opts = _pipeline_fragments(backend)
+
+        if link_libs:
+            link_opt = " " + " ".join(f"l={lib}" for lib in link_libs)
+            fragments = [
+                (f[:-1] + link_opt + "}") if "rocdl-attach-target" in f else f
+                for f in fragments
+            ]
 
         from .llvm_options import llvm_options as _llvm_options
         _llvm_ctx = _llvm_options(llvm_opts) if llvm_opts else nullcontext()
@@ -825,12 +834,22 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
+            link_libs = None
+            needs_shmem = False
+            if any(s.startswith("mori_shmem_") for s in comp_ctx.extern_symbols):
+                from mori.ir.bitcode import find_bitcode
+                link_libs = [find_bitcode(cov=_FLYDSL_COV)]
+                needs_shmem = True
+
+            compiled_module = MlirCompiler.compile(
+                module, arch=backend.target.arch, func_name=self.func.__name__, link_libs=link_libs,
+            )
 
             compiled_func = CompiledArtifact(
                 compiled_module,
                 self.func.__name__,
                 original_ir,
+                needs_shmem=needs_shmem,
             )
 
             # Always keep a reference to the latest compilation result so

@@ -157,6 +157,12 @@ class ExternFunction:
 
         self._declared_in.add(body_id)
 
+        # Register symbol in CompilationContext for auto-detection (e.g. shmem).
+        from ..compiler.kernel_function import CompilationContext
+        ctx = CompilationContext.get_current()
+        if ctx is not None:
+            ctx.extern_symbols.add(self.symbol)
+
     # -- callable interface -------------------------------------------------
     def __call__(self, *args: Any) -> Any:
         """Emit ``llvm.call`` at the current insertion point.
