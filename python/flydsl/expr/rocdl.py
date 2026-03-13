@@ -332,6 +332,43 @@ def wave_id():
     return _ods_wave_id(i32)
 
 
+def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
+    """Transpose-load from LDS memref via ds_load_tr16_b128 (gfx1250).
+
+    Args:
+        result_type: Vector result type, e.g. ``VectorType.get([8], f16)``.
+        lds_memref:  LDS memref value (address-space 3), typically from
+                     ``SmemPtr.get()`` or ``get_op_result_or_value(...)``.
+        elem_offset: Per-lane linearized element offset into the memref
+                     (ArithValue / ir.Value of index type / Python int).
+        elem_bytes:  Element size in bytes (Python int, e.g. 2 for f16).
+
+    Returns:
+        Loaded and transposed vector ``ir.Value``.
+    """
+    from .._mlir import ir as _ir
+    from .._mlir.dialects import (
+        llvm as _llvm,
+        memref as _memref,
+        rocdl as _rocdl,
+    )
+    from . import arith as _arith
+    from .arith import _to_raw
+    from .typing import T
+    from .utils.arith import ArithValue as _AV
+
+    lds_ptr_ty = _ir.Type.parse("!llvm.ptr<3>")
+    raw_memref = _arith.unwrap(lds_memref)
+    lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
+
+    byte_off = _AV(_arith.unwrap(elem_offset, index=True)) * _arith.index(elem_bytes)
+    total_byte_idx = _AV(lds_base) + byte_off
+    addr_i32 = _to_raw(_arith.index_cast(T.i32, total_byte_idx))
+    ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+
+    return _rocdl.ds_load_tr16_b128(result_type, ptr_val)
+
+
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
     'workitem_id_x', 'workitem_id_y', 'workitem_id_z',
@@ -411,6 +448,7 @@ __all__ = [
 
     # Convenience wrappers
     'make_buffer_tensor',
+    'lds_transpose_load',       # memref-level wrapper for gfx1250 ds_load_tr16_b128
 
     # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
     'tensor_load_to_lds',       # 4-group, up to 5D tensor
