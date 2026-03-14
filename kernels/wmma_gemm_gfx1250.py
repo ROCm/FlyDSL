@@ -10,6 +10,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops, vector
+from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -79,6 +80,8 @@ def compile_wmma_gemm_tdm(
     num_buffers: int = 2,
     waves_per_eu: int = None,
     l2_prefetch_distance: int = 2,
+    cluster_m: int = 1,
+    cluster_n: int = 1,
 ):
     """Compile a WMMA GEMM kernel with TDM async copy and multi-stage buffering.
 
@@ -89,6 +92,8 @@ def compile_wmma_gemm_tdm(
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         l2_prefetch_distance: Number of k-tiles ahead to prefetch into L2.
                               0 = disabled, 2 = typical value.
+        cluster_m: Cluster dimension along M (WG rows per cluster, 1=disabled).
+        cluster_n: Cluster dimension along N (WG cols per cluster, 1=disabled).
     """
     _ = (M, N)
     if num_buffers not in (2, 3):
@@ -97,6 +102,20 @@ def compile_wmma_gemm_tdm(
         raise ValueError(f"in_dtype must be 'fp16' or 'bf16', got {in_dtype!r}")
     is_f16 = in_dtype == "fp16"
     elem_bytes = 2
+
+    use_cluster = cluster_m > 1 or cluster_n > 1
+    if use_cluster:
+        if cluster_m * cluster_n > 16:
+            raise ValueError(
+                f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}={cluster_m * cluster_n}")
+        if cluster_m < 1 or cluster_n < 1:
+            raise ValueError(f"cluster dims must be >= 1, got ({cluster_m}, {cluster_n})")
+    effective_waves_per_eu = waves_per_eu
+    if use_cluster and effective_waves_per_eu is None:
+        # Cluster mode can deadlock if a workgroup is split and only a subset
+        # of its waves are resident while hitting early workgroup barriers.
+        # Use conservative occupancy by default for cluster-enabled kernels.
+        effective_waves_per_eu = 1
 
     block_threads = m_warp * n_warp * WAVE_SIZE
 
@@ -174,12 +193,30 @@ def compile_wmma_gemm_tdm(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
+        # Enable back-to-back WMMA issue (SCHED_MODE bit[4] = DISABLE_VALU_STALL)
+        # hwreg(26, 4, 1) = HW_REG_SCHED_MODE, offset=4, size=1
+        llvm_dialect.inline_asm(
+            None, [],  # void result, no operands
+            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
+            "",  # no constraints
+            has_side_effects=True,
+        )
+
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
 
         blk_m = bx * arith.index(tile_m)
         blk_n = by * arith.index(tile_n)
+
+        # --- Cluster MCAST setup ---
+        if use_cluster:
+            local_x, local_y = gpu.compute_cluster_position(bx, by, cluster_m, cluster_n)
+            a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+                local_x, local_y, cluster_m, cluster_n)
+        else:
+            a_mcast_mask = 0
+            b_mcast_mask = 0
 
         # --- Thread/wave decomposition ---
         layout_thr = fx.make_layout(
@@ -200,7 +237,7 @@ def compile_wmma_gemm_tdm(
         c_nrec = m_idx * n_stride * arith.index(4)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
-        # --- TDM async copy helpers ---
+        # --- TDM async copy helpers (MCAST-aware) ---
         def copy_a_to_lds(k_base, lds_a_mem_ref):
             desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a, lds_memref=lds_a_mem_ref,
@@ -208,7 +245,8 @@ def compile_wmma_gemm_tdm(
                 tensor_shape=(tile_m, tile_k), strides=(K, 1),
                 tile_shape=(tile_m, tile_k), elem_bytes=elem_bytes,
                 pad_interval=tile_k, pad_amount=LDS_PAD_A,
-                num_warps=num_warps)
+                num_warps=num_warps,
+                workgroup_mask=a_mcast_mask)
             tdm_ops.tensor_load_2d(desc)
 
         def copy_b_to_lds(k_base, lds_b_mem_ref):
@@ -218,7 +256,8 @@ def compile_wmma_gemm_tdm(
                 tensor_shape=(tile_k, tile_n), strides=(N, 1),
                 tile_shape=(tile_k, tile_n), elem_bytes=elem_bytes,
                 pad_interval=tile_n, pad_amount=LDS_PAD_B,
-                num_warps=num_warps)
+                num_warps=num_warps,
+                workgroup_mask=b_mcast_mask)
             tdm_ops.tensor_load_2d(desc)
 
         # --- LDS load helpers ---
@@ -406,16 +445,30 @@ def compile_wmma_gemm_tdm(
             tdm_ops.tensor_wait(outstanding)
             gpu.barrier()
 
+        def wait_and_cluster_barrier(outstanding=0):
+            """Fused WG barrier + cluster sync: reduces instruction overhead
+            by issuing the cluster signal while tensor_wait is still draining,
+            then waiting for both to complete."""
+            tdm_ops.tensor_wait(outstanding)
+            if use_cluster:
+                gpu.cluster_barrier()
+            else:
+                gpu.barrier()
+
         def _compute_and_schedule(accs_in, lds_a, lds_b):
             rocdl.sched_barrier(0)
             accs_out = compute_tile(accs_in, lds_a, lds_b)
             hot_loop_scheduler()
             return accs_out
 
+        _effective_l2_pf = l2_prefetch_distance
+        if use_cluster and l2_prefetch_distance > 0:
+            _effective_l2_pf = max(1, l2_prefetch_distance - 1)
+
         def _l2_prefetch(k_base):
-            if l2_prefetch_distance <= 0:
+            if _effective_l2_pf <= 0:
                 return
-            pf_k = k_base + arith.index(l2_prefetch_distance * tile_k)
+            pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
             tdm_ops.l2_prefetch_tile(
                 arg_a, (blk_m, pf_k), (tile_m, tile_k), (K, 1),
                 elem_bytes=elem_bytes, thread_id=tx, block_threads=block_threads)
@@ -444,15 +497,12 @@ def compile_wmma_gemm_tdm(
         for i in range_constexpr(pre_loaded):
             copy_a_to_lds(arith.index(i * tile_k), stages_a_mem[i])
             copy_b_to_lds(arith.index(i * tile_k), stages_b_mem[i])
-        # Wait until stage[0] is ready; allow later-stage loads to still be in flight
-        # outstanding = 2 * (num_buffers - 2): 0 for double-buffer, 2 for triple-buffer
         wait_and_barrier(outstanding=2 * (num_buffers - 2))
 
         # Main loop: each iteration covers (num_buffers) K-tiles
-        # Sub-phase s: load the "next" tile, compute the "current" tile, then barrier
-        #   load_stage  = (s + num_buffers - 1) % num_buffers
-        #   load_offset = iv + (s + num_buffers - 1) * tile_k
-        #   compute stage[s]
+        # Sub-phase s: load next tile (MCAST), compute current tile, then barrier
+        # The last sub-phase uses wait_and_cluster_barrier to fuse the WG
+        # barrier with cluster sync for the NEXT iteration's MCAST loads.
         main_end = loop_iters * num_buffers * tile_k
 
         if loop_iters > 0:
@@ -465,13 +515,17 @@ def compile_wmma_gemm_tdm(
                     copy_b_to_lds(iv + arith.index(_load_k_off), stages_b_mem[_load_stage])
                     _l2_prefetch(iv + arith.index(s * tile_k))
                     accs_in = _compute_and_schedule(accs_in, stages_a[s], stages_b[s])
-                    wait_and_barrier(outstanding=2)
+                    if s == num_buffers - 1:
+                        wait_and_cluster_barrier(outstanding=2)
+                    else:
+                        wait_and_barrier(outstanding=2)
                 results = yield list(accs_in)
             accs = list(results)
 
         # Tail: handle remaining tiles using the compile-time plan
-        # Each plan step: optionally load one tile, compute one stage, then wait.
         # outstanding=-1 → last step: use compute_tile (no barrier).
+        if loop_iters == 0 and use_cluster:
+            gpu.cluster_barrier()
         _extra_j = 0
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if _load_stage is not None:
@@ -491,12 +545,16 @@ def compile_wmma_gemm_tdm(
             else:
                 accs = _compute_and_schedule(
                     accs, stages_a[_compute_stage], stages_b[_compute_stage])
-                wait_and_barrier(outstanding=_outstanding)
+                if use_cluster and _load_stage is not None:
+                    wait_and_cluster_barrier(outstanding=_outstanding)
+                else:
+                    wait_and_barrier(outstanding=_outstanding)
 
         epilogue_stores(accs, epi_addrs_box[0])
 
     cache_tag = (in_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                 num_buffers, waves_per_eu, l2_prefetch_distance)
+                 num_buffers, effective_waves_per_eu, l2_prefetch_distance,
+                 cluster_m, cluster_n)
 
     @flyc.jit
     def launch_wmma_gemm_tdm(
@@ -521,17 +579,22 @@ def compile_wmma_gemm_tdm(
         gy = _raw((idx_n + arith.index(tile_n - 1)) / arith.index(tile_n))
 
         launcher = kernel_wmma_gemm_tdm(arg_c, arg_a, arg_b, i32_m, i32_n)
-        if waves_per_eu is not None:
-            _wpe = int(waves_per_eu)
-            if _wpe >= 1:
-                for op in ctx.gpu_module_body.operations:
-                    if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+        for op in ctx.gpu_module_body.operations:
+            if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                if effective_waves_per_eu is not None:
+                    _wpe = int(effective_waves_per_eu)
+                    if _wpe >= 1:
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                             ir.IntegerType.get_signless(32), _wpe)
+                if use_cluster:
+                    op.attributes["rocdl.cluster_dims"] = ir.StringAttr.get(
+                        f"{cluster_m},{cluster_n},1")
+        cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
         launcher.launch(
             grid=(gx, gy, 1),
             block=(block_threads, 1, 1),
             stream=stream,
+            cluster=cluster_arg,
         )
 
     return launch_wmma_gemm_tdm

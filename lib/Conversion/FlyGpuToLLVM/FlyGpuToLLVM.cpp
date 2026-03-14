@@ -158,6 +158,27 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
 
+    // Phase 0: Propagate rocdl.cluster_dims to llvm.func passthrough.
+    // The ROCDL-to-LLVMIR translation does not handle this attribute, so
+    // we convert it to the generic LLVM passthrough mechanism which emits
+    // the "amdgpu-cluster-dims" function attribute for the AMDGPU backend.
+    getOperation()->walk([&](LLVM::LLVMFuncOp func) {
+      auto clusterAttr = func->getAttrOfType<StringAttr>("rocdl.cluster_dims");
+      if (!clusterAttr)
+        return;
+
+      SmallVector<Attribute, 4> passthroughAttrs;
+      if (auto existing = func.getPassthroughAttr())
+        passthroughAttrs.append(existing.begin(), existing.end());
+
+      passthroughAttrs.push_back(ArrayAttr::get(context, {
+          StringAttr::get(context, "amdgpu-cluster-dims"),
+          clusterAttr,
+      }));
+      func.setPassthroughAttr(ArrayAttr::get(context, passthroughAttrs));
+      func->removeAttr("rocdl.cluster_dims");
+    });
+
     // Phase 1: Progressive vector lowering (same as upstream).
     {
       RewritePatternSet patterns(context);

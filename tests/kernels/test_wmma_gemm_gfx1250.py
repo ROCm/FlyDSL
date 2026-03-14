@@ -47,7 +47,8 @@ if not torch.cuda.is_available():
 @pytest.mark.parametrize("num_buffers", [2, 3])
 def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         num_buffers,
-                        m_warp=2, n_warp=4, l2_prefetch_distance=2):
+                        m_warp=2, n_warp=4, l2_prefetch_distance=2,
+                        cluster_m=1, cluster_n=1):
     arch = str(get_rocm_arch(timeout_s=300))
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
@@ -64,15 +65,34 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     if total_lds > 327680:
         pytest.skip(f"LDS budget exceeded: {total_lds} > 327680")
 
-    print(f"Running WMMA GEMM TDM: M={M}, N={N}, K={K}, "
-          f"dtype={in_dtype}, bufs={num_buffers}")
-
     torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
     device = torch.device("cuda")
     torch.manual_seed(0)
 
     mpad = (M + tile_m - 1) // tile_m * tile_m
     npad = (N + tile_n - 1) // tile_n * tile_n
+    wg_m = mpad // tile_m
+    wg_n = npad // tile_n
+
+    if cluster_m < 1 or cluster_n < 1:
+        pytest.skip(f"Invalid cluster dims: ({cluster_m}, {cluster_n}), both must be >= 1")
+    if cluster_m > 1 or cluster_n > 1:
+        if wg_m < cluster_m or wg_n < cluster_n:
+            pytest.skip(
+                "Cluster dims exceed launch grid: "
+                f"wg_grid=({wg_m},{wg_n}), cluster=({cluster_m},{cluster_n})"
+            )
+        if (wg_m % cluster_m) != 0 or (wg_n % cluster_n) != 0:
+            pytest.skip(
+                "WG grid must be divisible by cluster dims: "
+                f"wg_grid=({wg_m},{wg_n}), cluster=({cluster_m},{cluster_n})"
+            )
+
+    print(
+        f"Running WMMA GEMM TDM: M={M}, N={N}, K={K}, "
+        f"dtype={in_dtype}, bufs={num_buffers}, "
+        f"cluster=({cluster_m},{cluster_n})"
+    )
 
     a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
     b = torch.randn((K, N), dtype=torch_dtype, device='cpu').cuda()
@@ -90,6 +110,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
         m_warp=m_warp, n_warp=n_warp, in_dtype=in_dtype,
         num_buffers=num_buffers,
         l2_prefetch_distance=l2_prefetch_distance,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
     )
     launch_fn(
         c_pad.contiguous().view(-1),
@@ -121,6 +143,8 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3])
     parser.add_argument("--l2-prefetch-distance", type=int, default=0)
+    parser.add_argument("--cluster-m", type=int, default=1)
+    parser.add_argument("--cluster-n", type=int, default=1)
     args = parser.parse_args()
 
     test_wmma_gemm_tdm(
@@ -130,4 +154,6 @@ if __name__ == "__main__":
         m_warp=args.m_warp,
         n_warp=args.n_warp,
         l2_prefetch_distance=args.l2_prefetch_distance,
+        cluster_m=args.cluster_m,
+        cluster_n=args.cluster_n,
     )
