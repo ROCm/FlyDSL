@@ -29,22 +29,21 @@ echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
+LLVM_REMOTE="https://github.com/ROCm/llvm-project.git"
+
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Cloning llvm-project..."
-    git clone https://github.com/ROCm/llvm-project.git "$LLVM_SRC_DIR"
+    echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
+    git init "$LLVM_SRC_DIR"
+    pushd "$LLVM_SRC_DIR"
+    git remote add origin "$LLVM_REMOTE"
+else
+    pushd "$LLVM_SRC_DIR"
 fi
 
-echo "Checking out llvm-project commit ${LLVM_COMMIT} (amd-staging)..."
-pushd "$LLVM_SRC_DIR"
-
-# Check if we need to switch remote to ROCm fork
-CURRENT_REMOTE=$(git remote get-url origin)
-if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
-    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
-    git remote set-url origin https://github.com/ROCm/llvm-project.git
+if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
+    echo "Fetching commit ${LLVM_COMMIT} ..."
+    git fetch --depth 1 origin "${LLVM_COMMIT}"
 fi
-
-git fetch origin amd-staging
 git checkout "${LLVM_COMMIT}"
 popd
 
