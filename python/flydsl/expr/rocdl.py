@@ -113,6 +113,14 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
+_ods_cluster_workgroup_id_x = cluster_workgroup_id_x
+_ods_cluster_workgroup_id_y = cluster_workgroup_id_y
+_ods_cluster_workgroup_id_z = cluster_workgroup_id_z
+_ods_cluster_load_async_to_lds_b8 = cluster_load_async_to_lds_b8
+_ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
+_ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
+_ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
+_ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -358,6 +366,70 @@ def wave_id():
     return _ods_wave_id(i32)
 
 
+def cluster_workgroup_id_x():
+    """Get workgroup position within cluster along X (SGPR, gfx1250). """
+    from .._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_cluster_workgroup_id_x(i32)
+
+
+def cluster_workgroup_id_y():
+    """Get workgroup position within cluster along Y (SGPR, gfx1250). """
+    from .._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_cluster_workgroup_id_y(i32)
+
+
+def cluster_workgroup_id_z():
+    """Get workgroup position within cluster along Z (SGPR, gfx1250). """
+    from .._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_cluster_workgroup_id_z(i32)
+
+
+def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0, mask=None):
+    """Per-lane cluster broadcast load: Global -> LDS with MCAST (gfx1250).
+
+    Args:
+        global_ptr: ``!llvm.ptr<1>`` — global address space pointer.
+        lds_ptr:    ``!llvm.ptr<3>`` — LDS address space pointer.
+        size_bytes: Load width: 1, 4, 8, or 16 bytes (selects b8/b32/b64/b128).
+        offset:     Byte offset (int, default 0).
+        cpol:       Cache policy (int, default 0).
+        mask:       i32 workgroup_mask for MCAST broadcast. None means no mask
+                    (falls back to non-cluster global_load_async_to_lds).
+
+    Raises:
+        ValueError: If ``size_bytes`` is not 1, 4, 8, or 16.
+    """
+    _dispatch = {
+        1: _ods_cluster_load_async_to_lds_b8,
+        4: _ods_cluster_load_async_to_lds_b32,
+        8: _ods_cluster_load_async_to_lds_b64,
+        16: _ods_cluster_load_async_to_lds_b128,
+    }
+    fn = _dispatch.get(size_bytes)
+    if fn is None:
+        raise ValueError(
+            f"cluster_load_async_to_lds: size_bytes must be 1, 4, 8, or 16, "
+            f"got {size_bytes}")
+    if mask is None:
+        from .._mlir import ir
+        from . import arith as _arith
+        mask = _arith.unwrap(_arith.constant(0, type=ir.IntegerType.get_signless(32)))
+    fn(global_ptr, lds_ptr, offset, cpol, mask)
+
+
+def s_wait_asynccnt(count=0):
+    """Wait for outstanding async load/store operations (ASYNCcnt counter).
+
+    Args:
+        count: Maximum number of outstanding operations to allow.
+               0 = wait for all.
+    """
+    _ods_s_wait_asynccnt(count)
+
+
 def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
     """Transpose-load from LDS memref via ds_load_tr16_b128 (gfx1250).
 
@@ -421,6 +493,7 @@ __all__ = [
     "s_wait_storecnt",
     "s_wait_dscnt",
     "s_wait_expcnt",
+    "s_wait_asynccnt",
     # Matrix operations - MFMA (Matrix Fused Multiply-Add)
     "mfma_f32_32x32x8f16",
     "mfma_f32_16x16x16f16",
@@ -514,6 +587,11 @@ __all__ = [
     "s_wait_tensorcnt",
     # gfx1250 L2 prefetch
     "global_prefetch",          # per-lane 1-byte prefetch hint
+    # Cluster (gfx1250 workgroup clustering)
+    "cluster_workgroup_id_x",
+    "cluster_workgroup_id_y",
+    "cluster_workgroup_id_z",
+    "cluster_load_async_to_lds",   # per-lane MCAST load (Global → LDS)
 ]
 
 
