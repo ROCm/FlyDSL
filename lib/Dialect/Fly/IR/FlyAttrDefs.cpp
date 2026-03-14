@@ -13,6 +13,8 @@ namespace mlir::fly {
 //===----------------------------------------------------------------------===//
 
 AlignAttr AlignAttr::getTrivialAlignment(Type elemTy) {
+  assert((isa<IntegerType>(elemTy) || isa<FloatType>(elemTy)) &&
+         "Trivial alignment is only supported for integer and float types");
   return get(elemTy.getContext(), (elemTy.getIntOrFloatBitWidth() + 7) / 8);
 }
 

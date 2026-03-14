@@ -247,6 +247,11 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
           auto elemType = unwrap(elemTy);
           int32_t alignSize = alignment.value_or(
               ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
+          int32_t elemByte = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+          if (alignSize <= 0 || alignSize % elemByte != 0)
+            throw std::invalid_argument(
+                "alignment must be a positive multiple of element byte size (" +
+                std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
           return PyPointerType(context->getRef(),
                                wrap(::mlir::fly::PointerType::get(
@@ -299,6 +304,11 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           auto elemType = unwrap(elemTy);
           int32_t alignSize = alignment.value_or(
               ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
+          int32_t elemByte = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+          if (alignSize <= 0 || alignSize % elemByte != 0)
+            throw std::invalid_argument(
+                "alignment must be a positive multiple of element byte size (" +
+                std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
           return PyMemRefType(
               context->getRef(),

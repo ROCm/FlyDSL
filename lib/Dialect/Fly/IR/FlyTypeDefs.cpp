@@ -153,6 +153,11 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
       int32_t val;
       if (parser.parseLess() || parser.parseInteger(val) || parser.parseGreater())
         return failure();
+      int32_t elemByte = (elemTy.getIntOrFloatBitWidth() + 7) / 8;
+      if (val <= 0 || val % elemByte != 0)
+        return parser.emitError(parser.getCurrentLocation(),
+                                "alignment must be a positive multiple of "
+                                "element byte size (") << elemByte << "), got " << val;
       alignment = AlignAttr::get(elemTy.getContext(), val);
       if (succeeded(parser.parseOptionalComma())) {
         auto sw = FieldParser<SwizzleAttr>::parse(parser);
