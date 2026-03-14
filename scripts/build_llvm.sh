@@ -13,12 +13,7 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # Read LLVM commit hash from thirdparty/llvm-hash.txt
 LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
-if [[ -f "${LLVM_HASH_FILE}" ]]; then
-    LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
-else
-    echo "Warning: ${LLVM_HASH_FILE} not found, using hardcoded default."
-    LLVM_COMMIT_DEFAULT="ac5dc54d509169d387fcfd495d71853d81c46484"
-fi
+LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
 LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
 
 echo "Base directory: $BASE_DIR"
@@ -29,7 +24,7 @@ echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
-LLVM_REMOTE="https://github.com/ROCm/llvm-project.git"
+LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
 
 if [ ! -d "$LLVM_SRC_DIR" ]; then
     echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
