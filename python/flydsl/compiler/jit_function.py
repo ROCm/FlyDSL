@@ -287,7 +287,9 @@ def _sanitize_path_component(s: str) -> str:
 
 class MlirCompiler:
     @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
+    def _pipeline_fragments(*, chip: str, fast_fp_math: bool = False, unsafe_fp_math: bool = False) -> list:
+        fast_str = "true" if fast_fp_math else "false"
+        unsafe_str = "true" if unsafe_fp_math else "false"
         return [
             "gpu-kernel-outlining{data-layout-str=}",
             "fly-canonicalize",
@@ -296,8 +298,8 @@ class MlirCompiler:
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64=true}}",
+            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast={fast_str} features= "
+            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math={unsafe_str} wave64=true}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
             "fly-gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
@@ -315,7 +317,11 @@ class MlirCompiler:
             chip = env.compile.arch or get_rocm_arch()
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
+        fragments = cls._pipeline_fragments(
+            chip=chip,
+            fast_fp_math=env.compile.fast_fp_math,
+            unsafe_fp_math=env.compile.unsafe_fp_math,
+        )
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")

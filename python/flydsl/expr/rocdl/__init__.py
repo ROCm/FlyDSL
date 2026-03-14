@@ -14,6 +14,7 @@ This module provides access to ROCm-specific GPU operations including:
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_mfma_f32_32x32x8f16 = mfma_f32_32x32x8f16
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -59,6 +60,13 @@ def _split_mfma_operands(operands, *, loc=None):
     abid = int(operands[4]) if len(operands) > 4 else 0
     blgp = int(operands[5]) if len(operands) > 5 else 0
     return a, b, c, cbsz, abid, blgp
+
+
+def mfma_f32_32x32x8f16(result_type, operands, *, loc=None, ip=None):
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x8f16(
+        result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+    ).result
 
 
 def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
