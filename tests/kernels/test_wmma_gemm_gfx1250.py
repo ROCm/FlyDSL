@@ -8,15 +8,18 @@ This file is the correctness harness.
 import os
 import sys
 
-import pytest
-import torch
-
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
+
+# workaround for simulator
+import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads LLVM
+
+import pytest
+import torch
 
 from flydsl.runtime.device import get_rocm_arch
 from kernels.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm
@@ -49,6 +52,7 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         num_buffers,
                         m_warp=2, n_warp=4, l2_prefetch_distance=2,
                         cluster_m=1, cluster_n=1):
+    """Non-cluster GEMM correctness test."""
     arch = str(get_rocm_arch(timeout_s=300))
     if arch != "gfx1250":
         pytest.skip(f"WMMA requires gfx1250, got {arch}")
@@ -66,7 +70,6 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
         pytest.skip(f"LDS budget exceeded: {total_lds} > 327680")
 
     torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
-    device = torch.device("cuda")
     torch.manual_seed(0)
 
     mpad = (M + tile_m - 1) // tile_m * tile_m
@@ -97,12 +100,12 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
     b = torch.randn((K, N), dtype=torch_dtype, device='cpu').cuda()
 
-    a_pad = torch.zeros((mpad, K), dtype=torch_dtype, device=device)
-    b_pad = torch.zeros((K, npad), dtype=torch_dtype, device=device)
+    a_pad = torch.zeros((mpad, K), dtype=torch_dtype, device='cpu').cuda()
+    b_pad = torch.zeros((K, npad), dtype=torch_dtype, device='cpu').cuda()
     a_pad[:M, :] = a
     b_pad[:, :N] = b
 
-    c_pad = torch.zeros((mpad, npad), dtype=torch.float32, device=device)
+    c_pad = torch.zeros((mpad, npad), dtype=torch.float32, device='cpu').cuda()
 
     launch_fn = compile_wmma_gemm_tdm(
         M=mpad, N=npad, K=K,
@@ -126,6 +129,28 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     atol = 3e-2
     assert verify_output(c_pad[:M, :N].cpu().to(torch.float32), ref, rtol=rtol, atol=atol)
     print("PASSED")
+
+
+@pytest.mark.parametrize("in_dtype", ["fp16"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (1024, 1024, 1024, 128, 256, 128),
+        (2048, 2048, 1024, 128, 256, 128),
+        (2048, 2048, 2048, 128, 256, 128),
+        (4096, 4096, 1024, 128, 256, 128),
+    ],
+)
+@pytest.mark.parametrize("cluster_m, cluster_n", [(2, 2), (4, 4)])
+def test_wmma_gemm_tdm_mcast(in_dtype, M, N, K, tile_m, tile_n, tile_k,
+                              cluster_m, cluster_n):
+    """Cluster multicast GEMM correctness test (large shapes only)."""
+    test_wmma_gemm_tdm(
+        in_dtype, M, N, K, tile_m, tile_n, tile_k,
+        num_buffers=2, m_warp=2, n_warp=4,
+        l2_prefetch_distance=2,
+        cluster_m=cluster_m, cluster_n=cluster_n,
+    )
 
 
 if __name__ == "__main__":
