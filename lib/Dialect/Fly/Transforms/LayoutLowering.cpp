@@ -2504,8 +2504,8 @@ public:
   static void emitCopyOrAtomCall(PatternRewriter &rewriter, Location loc, Value copyAtomVal,
                                  CopyAtomType copyAtomTy, Value srcPtr,
                                  LayoutValueAdaptor valSrcLayout, Value dstPtr,
-                                 LayoutValueAdaptor valDstLayout,
-                                 LayoutBuilder<LayoutValueAdaptor> &layoutBuilder) {
+                                 LayoutValueAdaptor valDstLayout, Value predPtr = nullptr,
+                                 LayoutValueAdaptor valPredLayout = LayoutValueAdaptor{}) {
     auto *ctx = rewriter.getContext();
     LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 
@@ -2514,17 +2514,19 @@ public:
         intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     int64_t numValSrc = numValSrcAttr.getValue();
 
-    IntTupleAttr valSrcSizeAttr =
-        layoutSize(attrBuilder, layoutBuilder.getLayoutAttr(valSrcLayout));
+    IntTupleAttr valSrcSizeAttr = layoutSize(attrBuilder, cast<LayoutAttr>(valSrcLayout.getAttr()));
     int64_t valSize = valSrcSizeAttr.getLeafAsInt().getValue();
 
     Value srcView = MakeViewOp::create(rewriter, loc, srcPtr, valSrcLayout.getValue());
     Value dstView = MakeViewOp::create(rewriter, loc, dstPtr, valDstLayout.getValue());
+    Value predView = nullptr;
+    if (predPtr)
+      predView = MakeViewOp::create(rewriter, loc, predPtr, valPredLayout.getValue());
 
     if (valSize == numValSrc) {
-      CopyAtomCall::create(rewriter, loc, copyAtomVal, srcView, dstView);
+      CopyAtomCall::create(rewriter, loc, copyAtomVal, srcView, dstView, predView);
     } else {
-      CopyOp::create(rewriter, loc, copyAtomVal, srcView, dstView, /*pred=*/nullptr);
+      CopyOp::create(rewriter, loc, copyAtomVal, srcView, dstView, predView);
     }
   }
 
@@ -2569,13 +2571,32 @@ public:
     if (!isNormalForm(cast<TypedValue<LayoutType>>(dstLayoutValue)))
       return failure();
 
+    Value pred = op.getPred();
+    Value predPtr = nullptr;
+    Value predLayoutValue = nullptr;
+    LayoutAttr predLayout;
+    if (pred) {
+      auto predMemRefTy = dyn_cast<fly::MemRefType>(pred.getType());
+      if (!predMemRefTy)
+        return failure();
+      predLayout = cast<LayoutAttr>(predMemRefTy.getLayout());
+      auto [pp, pl] = getMemRefPtrAndLayout(rewriter, loc, pred);
+      predPtr = pp;
+      predLayoutValue = pl;
+      if (!isNormalForm(cast<TypedValue<LayoutType>>(predLayoutValue)))
+        return failure();
+    }
+
     LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
     LayoutValueAdaptor srcLayoutAdaptor(srcLayoutValue, srcLayout);
     LayoutValueAdaptor dstLayoutAdaptor(dstLayoutValue, dstLayout);
 
     if (srcRank == 1) {
+      LayoutValueAdaptor predLayoutAdaptor;
+      if (predPtr)
+        predLayoutAdaptor = LayoutValueAdaptor(predLayoutValue, predLayout);
       emitCopyOrAtomCall(rewriter, loc, copyAtomVal, copyAtomTy, srcPtr, srcLayoutAdaptor, dstPtr,
-                         dstLayoutAdaptor, layoutBuilder);
+                         dstLayoutAdaptor, predPtr, predLayoutAdaptor);
       rewriter.eraseOp(op);
       return success();
     }
@@ -2610,6 +2631,22 @@ public:
     LayoutValueAdaptor valSrcLayoutAdaptor = layoutBuilder.makeLayout(valSrcShape, valSrcStride);
     LayoutValueAdaptor valDstLayoutAdaptor = layoutBuilder.makeLayout(valDstShape, valDstStride);
 
+    using IntTuple = LayoutBuilder<LayoutValueAdaptor>::IntTuple;
+    IntTuple restPredShape, restPredStride;
+    IntTuple valPredShape, valPredStride;
+    if (predPtr) {
+      LayoutValueAdaptor predLayoutAdaptor(predLayoutValue, predLayout);
+      int32_t predRank = predLayout.rank();
+      auto predShapeAdaptor = layoutBuilder.getShape(predLayoutAdaptor);
+      auto predStrideAdaptor = layoutBuilder.getStride(predLayoutAdaptor);
+      auto groupedPredShape = intTupleGroup(layoutBuilder, predShapeAdaptor, 1, predRank);
+      auto groupedPredStride = intTupleGroup(layoutBuilder, predStrideAdaptor, 1, predRank);
+      restPredShape = layoutBuilder.at(groupedPredShape, 1);
+      restPredStride = layoutBuilder.at(groupedPredStride, 1);
+      valPredShape = layoutBuilder.at(groupedPredShape, 0);
+      valPredStride = layoutBuilder.at(groupedPredStride, 0);
+    }
+
     for (int32_t i = 0; i < numIter; ++i) {
       auto coordAdaptor = layoutBuilder.materializeConstantLeaf(i);
 
@@ -2624,8 +2661,18 @@ public:
       Value srcIterPtr = AddOffsetOp::create(rewriter, loc, srcPtr, srcOffsetValue);
       Value dstIterPtr = AddOffsetOp::create(rewriter, loc, dstPtr, dstOffsetValue);
 
+      Value predIterPtr = nullptr;
+      LayoutValueAdaptor valPredLayoutAdaptor;
+      if (predPtr) {
+        auto predOffsetAdaptor =
+            layoutCrd2Idx(layoutBuilder, coordAdaptor, restPredShape, restPredStride);
+        Value predOffsetValue = layoutBuilder.finalize(predOffsetAdaptor);
+        predIterPtr = AddOffsetOp::create(rewriter, loc, predPtr, predOffsetValue);
+        valPredLayoutAdaptor = layoutBuilder.makeLayout(valPredShape, valPredStride);
+      }
+
       emitCopyOrAtomCall(rewriter, loc, copyAtomVal, copyAtomTy, srcIterPtr, valSrcLayoutAdaptor,
-                         dstIterPtr, valDstLayoutAdaptor, layoutBuilder);
+                         dstIterPtr, valDstLayoutAdaptor, predIterPtr, valPredLayoutAdaptor);
     }
 
     rewriter.eraseOp(op);
