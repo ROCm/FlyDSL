@@ -211,7 +211,7 @@ def compile_wmma_gemm_tdm(
 
         # --- Cluster MCAST setup ---
         if use_cluster:
-            local_x, local_y = gpu.compute_cluster_position(bx, by, cluster_m, cluster_n)
+            local_x, local_y = gpu.compute_cluster_position()
             a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
                 local_x, local_y, cluster_m, cluster_n)
         else:
