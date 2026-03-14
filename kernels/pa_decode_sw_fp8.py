@@ -11,8 +11,8 @@ Supports:
 """
 
 from __future__ import annotations
-import math as _math
-import torch as _torch
+import math
+import torch
 import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -23,6 +23,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.autotune import autotune, Config
+from flydsl._mlir.dialects import arith as _mlir_arith
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 # ── Kernel geometry constants ────────────────────────────────────────
@@ -58,6 +59,7 @@ def _pack_i32_pair_to_i64(a_i32, b_i32):
 # =====================================================================
 # compile_pa_decode_sw  — sliding-window PA decode kernel
 # =====================================================================
+@functools.lru_cache(maxsize=1024)
 def compile_pa_decode_sw(
     num_seqs,
     num_kv_heads,
@@ -65,9 +67,6 @@ def compile_pa_decode_sw(
     sliding_window,
     max_blocks_per_seq=256,
     softmax_scale=None,
-    query_scale=1.0,
-    key_scale=1.0,
-    value_scale=1.0,
     kv_block_size=16,
     trans_v=False,
     one_shot=False,
@@ -75,8 +74,7 @@ def compile_pa_decode_sw(
     arch = get_hip_arch()
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
-    _qk_scale = float(softmax_scale * query_scale * key_scale)
-    _prob_scale = float(value_scale / FP8_MAX)
+    _softmax_scale = float(softmax_scale)
     _sliding_window = int(sliding_window)
 
     _bs = kv_block_size
@@ -105,7 +103,7 @@ def compile_pa_decode_sw(
     _stride_bt_seq = max_blocks_per_seq
 
     # ── Grid sizing ──────────────────────────────────────────────────
-    _sw_max_parts = _math.ceil(_sliding_window / KV_COMPUTE_BLOCK) + 1
+    _sw_max_parts = math.ceil(_sliding_window / KV_COMPUTE_BLOCK) + 1
     _grid_z = 1 if one_shot else min(_sw_max_parts, num_partitions)
     _out_num_parts = _grid_z
     _direct_output = one_shot
@@ -145,6 +143,9 @@ def compile_pa_decode_sw(
         value_cache_ptr: fx.Tensor,
         block_tables_ptr: fx.Tensor,
         context_lengths_ptr: fx.Tensor,
+        query_scale_ptr: fx.Tensor,
+        key_scale_ptr: fx.Tensor,
+        value_scale_ptr: fx.Tensor,
     ):
         tid = gpu.thread_idx.x
         seq = gpu.block_idx.x
@@ -181,6 +182,13 @@ def compile_pa_decode_sw(
         # Per-sequence context length: context_lengths_ptr[seq]
         cl_rsrc = buffer_ops.create_buffer_resource(context_lengths_ptr, max_size=True)
         context_length_i32 = buffer_ops.buffer_load(cl_rsrc, seq, vec_width=1, dtype=T.i32)
+
+        qs_rsrc = buffer_ops.create_buffer_resource(query_scale_ptr, max_size=True)
+        ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
+        vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
+        query_scale_val = buffer_ops.buffer_load(qs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        key_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
+        value_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
         # ────────────────────────────────────────────────────────────
         # LDS views (via SmemAllocator)
@@ -259,23 +267,15 @@ def compile_pa_decode_sw(
         # QK accumulators: QK_N_TILES_WARP × f32x4
         # PV accumulators: PV_N_TILES_WARP × f32x4
         # ────────────────────────────────────────────────────────────
-        # Register accumulators — allocated as f32x4 register fragments
-        # (Using memref_alloca for register-backed storage)
-        _acc_layout = fx.make_layout(4, 1)
-        _AccMemRefTy = fx.MemRefType.get(
-            T.f32, fx.LayoutType.get(4, 1), fx.AddressSpace.Register)
-        acc_qk_regs = [fx.memref_alloca(_AccMemRefTy, _acc_layout)
-                       for _ in range_constexpr(QK_N_TILES_WARP)]
-        acc_pv_regs = [fx.memref_alloca(_AccMemRefTy, _acc_layout)
-                       for _ in range_constexpr(PV_N_TILES_WARP)]
 
         # Scalar constants
         NEG_INF = arith.constant(float("-inf"), type=T.f32)
         ZERO_F = arith.constant(0.0, type=T.f32)
         LOG2E_C = arith.constant(LOG2E, type=T.f32)
-        QK_SCALE = arith.constant(_qk_scale, type=T.f32)
+        SOFTMAX_SCALE_C = arith.constant(_softmax_scale, type=T.f32)
+        QK_SCALE = SOFTMAX_SCALE_C * query_scale_val * key_scale_val
         F240 = arith.constant(FP8_MAX, type=T.f32)
-        PROB_SCALE_C = arith.constant(_prob_scale, type=T.f32)
+        PROB_SCALE_C = value_scale_val / F240
         warp_head_base = warp_id * arith.constant(32, type=T.i32)
 
         # ────────────────────────────────────────────────────────────
@@ -621,11 +621,12 @@ def compile_pa_decode_sw(
     _cache_tag = (num_seqs, num_kv_heads, _grid_z, _sliding_window)
 
     @autotune(
-        configs=[Config(waves_per_eu=1), Config(waves_per_eu=2), Config(waves_per_eu=3)],
+        configs=[Config(waves_per_eu=1), Config(waves_per_eu=2), Config(waves_per_eu=3), Config(waves_per_eu=4)],
         key=['gy', 'gz'], warmup=3, rep=10,
     )
     @flyc.jit
     def launch_pa_decode_sw(out, es, ml, q, kc, vc, bt, cl,
+                            qs, ks, vs,
                             gx, gy, gz,
                             stream: fx.Stream = fx.Stream(None)):
         _ = _cache_tag
@@ -633,7 +634,7 @@ def compile_pa_decode_sw(
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
-        pa_decode_sw_kernel(out, es, ml, q, kc, vc, bt, cl).launch(
+        pa_decode_sw_kernel(out, es, ml, q, kc, vc, bt, cl, qs, ks, vs).launch(
             grid=(gx, gy, gz),
             block=(BLOCK_THREADS, 1, 1), stream=stream)
 
@@ -645,6 +646,131 @@ def compile_pa_decode_sw(
         'direct_output': _direct_output,
         'out_num_parts': _out_num_parts,
     }
+
+
+# =====================================================================
+# Partition-sum reduce kernel (replaces _torch_reduce_partitions)
+# =====================================================================
+
+def _ext_f(target_type, value):
+    """Extend float precision (e.g. vec<8×bf16> → vec<8×f32>)."""
+    return _mlir_arith.ExtFOp(target_type, value).result
+
+
+@functools.lru_cache(maxsize=256)
+def compile_ps_reduce(num_seqs, num_kv_heads, num_parts):
+    """Compile a GPU kernel that reduces partial attention outputs.
+
+    Grid: (num_seqs, num_kv_heads).  256 threads per CTA.
+    Each thread reduces ``num_parts`` partitions for 8 contiguous bf16
+    output elements (one (qg, hs_chunk) slice).
+
+    Algorithm per thread:
+      1. Find global max of ``max_logits`` across partitions.
+      2. Rescale ``exp_sums`` and accumulate weighted ``partial_out``.
+      3. Normalise and store bf16 result.
+    """
+    QG = QUERY_GROUP_SIZE
+    HS = HEAD_SIZE
+    THREADS = BLOCK_THREADS
+
+    _po_stride_seq = num_kv_heads * num_parts * QG * HS
+    _po_stride_kv_h = num_parts * QG * HS
+    _po_stride_part = QG * HS
+
+    _es_stride_seq = num_kv_heads * num_parts * QG
+    _es_stride_kv_h = num_parts * QG
+    _es_stride_part = QG
+
+    _out_stride_seq = num_kv_heads * QG * HS
+    _out_stride_kv_h = QG * HS
+
+    @flyc.kernel
+    def ps_reduce_kernel(
+        output_ptr: fx.Tensor,
+        partial_out_ptr: fx.Tensor,
+        exp_sums_ptr: fx.Tensor,
+        max_logits_ptr: fx.Tensor,
+    ):
+        tid = gpu.thread_idx.x
+        seq = gpu.block_idx.x
+        kv_h = gpu.block_idx.y
+
+        qg = tid >> 4
+        hs_chunk = tid & 15
+
+        out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
+        po_rsrc = buffer_ops.create_buffer_resource(partial_out_ptr, max_size=True)
+        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
+        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
+
+        es_base = (seq * arith.constant(_es_stride_seq, type=T.i32)
+                   + kv_h * arith.constant(_es_stride_kv_h, type=T.i32)
+                   + qg)
+
+        po_base_bf16 = (seq * arith.constant(_po_stride_seq, type=T.i32)
+                        + kv_h * arith.constant(_po_stride_kv_h, type=T.i32)
+                        + qg * arith.constant(HS, type=T.i32)
+                        + hs_chunk * arith.constant(8, type=T.i32))
+
+        NEG_INF_C = arith.constant(float("-inf"), type=T.f32)
+        LOG2E_C = arith.constant(LOG2E, type=T.f32)
+        ZERO_F = arith.constant(0.0, type=T.f32)
+        ONE_F = arith.constant(1.0, type=T.f32)
+
+        # Pass 1: global max across partitions
+        global_max = NEG_INF_C
+        for p in range_constexpr(num_parts):
+            ml_off = es_base + arith.constant(p * _es_stride_part, type=T.i32)
+            ml_val = buffer_ops.buffer_load(ml_rsrc, ml_off, vec_width=1)
+            global_max = global_max.maximumf(ml_val)
+
+        # Pass 2: accumulate weighted partial outputs
+        total_sum = ZERO_F
+        acc = arith.constant_vector(0.0, T.vec(8, T.f32))
+
+        for p in range_constexpr(num_parts):
+            es_off = es_base + arith.constant(p * _es_stride_part, type=T.i32)
+            es_val = buffer_ops.buffer_load(es_rsrc, es_off, vec_width=1)
+            ml_val = buffer_ops.buffer_load(ml_rsrc, es_off, vec_width=1)
+
+            w = es_val * ((ml_val - global_max) * LOG2E_C).exp2(
+                fastmath=arith.FastMathFlags.fast)
+            total_sum = total_sum + w
+
+            po_off_i32 = (po_base_bf16
+                          + arith.constant(p * _po_stride_part, type=T.i32)
+                          ) // arith.constant(2, type=T.i32)
+            data_4xi32 = buffer_ops.buffer_load(po_rsrc, po_off_i32,
+                                                vec_width=4, dtype=T.i32)
+            data_8xbf16 = vector.bitcast(T.vec(8, T.bf16), data_4xi32)
+            data_8xf32 = _ext_f(T.vec(8, T.f32), data_8xbf16)
+
+            w_vec = vector.broadcast(T.vec(8, T.f32), w)
+            acc = acc + data_8xf32 * w_vec
+
+        # Normalise and store bf16
+        rcp = ONE_F / total_sum
+        result_8xf32 = acc * vector.broadcast(T.vec(8, T.f32), rcp)
+        result_8xbf16 = arith.trunc_f(T.vec(8, T.bf16), result_8xf32)
+        result_4xi32 = vector.bitcast(T.vec(4, T.i32), result_8xbf16)
+
+        out_off_i32 = (seq * arith.constant(_out_stride_seq, type=T.i32)
+                       + kv_h * arith.constant(_out_stride_kv_h, type=T.i32)
+                       + qg * arith.constant(HS, type=T.i32)
+                       + hs_chunk * arith.constant(8, type=T.i32)
+                       ) // arith.constant(2, type=T.i32)
+        buffer_ops.buffer_store(result_4xi32, out_rsrc, out_off_i32)
+
+    @flyc.jit
+    def launch_ps_reduce(out, partial_out, exp_sums, max_logits,
+                         gx, gy,
+                         stream: fx.Stream = fx.Stream(None)):
+        ps_reduce_kernel(out, partial_out, exp_sums, max_logits).launch(
+            grid=(gx, gy, 1),
+            block=(THREADS, 1, 1), stream=stream)
+
+    return launch_ps_reduce
 
 
 # =====================================================================
@@ -663,7 +789,7 @@ def _torch_reduce_partitions(output_5d, partial_out, exp_sums, max_logits):
     max_logits:  [batch, num_kv_heads, num_parts, query_group_size]
     """
     global_max = max_logits.max(dim=2, keepdim=True).values
-    rescale = _torch.exp2((max_logits - global_max) * LOG2E)
+    rescale = torch.exp2((max_logits - global_max) * LOG2E)
     rescaled_sums = exp_sums * rescale
     total_sum = rescaled_sums.sum(dim=2, keepdim=True)
     weights = rescaled_sums / total_sum.clamp(min=1e-12)
@@ -672,25 +798,25 @@ def _torch_reduce_partitions(output_5d, partial_out, exp_sums, max_logits):
 
 
 def pa_decode_sw_launch(
-    output: _torch.Tensor,           # [num_seqs * query_length, num_query_heads, head_size]
-    query: _torch.Tensor,            # [num_seqs * query_length, num_query_heads, head_size]
-    key_cache: _torch.Tensor,        # [num_blocks, num_kv_heads, head_size//x, kv_block_size, x]
-    value_cache: _torch.Tensor,      # 4D or 5D (transposed)
-    context_lengths: _torch.Tensor,  # [num_seqs]
-    block_tables: _torch.Tensor,     # [num_seqs, max_num_blocks_per_seq]
+    output: torch.Tensor,           # [num_seqs * query_length, num_query_heads, head_size]
+    query: torch.Tensor,            # [num_seqs * query_length, num_query_heads, head_size]
+    key_cache: torch.Tensor,        # [num_blocks, num_kv_heads, head_size//x, kv_block_size, x]
+    value_cache: torch.Tensor,      # 4D or 5D (transposed)
+    context_lengths: torch.Tensor,  # [num_seqs]
+    block_tables: torch.Tensor,     # [num_seqs, max_num_blocks_per_seq]
     softmax_scale: float,
-    query_scale: float = 1.0,        # per-tensor scalar float
-    key_scale: float = 1.0,          # per-tensor scalar float
-    value_scale: float = 1.0,        # per-tensor scalar float
+    query_scale: torch.Tensor = None, # per-tensor scalar, shape [1]
+    key_scale: torch.Tensor = None,   # per-tensor scalar, shape [1]
+    value_scale: torch.Tensor = None, # per-tensor scalar, shape [1]
     *,
     sliding_window: int = 0,
     max_context_len: int = 0,
     kv_block_size: int = 0,
     query_length: int = 1,
     context_partition_size: int = KV_COMPUTE_BLOCK,
-    exp_sums: _torch.Tensor = None,
-    max_logits: _torch.Tensor = None,
-    temporary_output: _torch.Tensor = None,
+    exp_sums: torch.Tensor = None,
+    max_logits: torch.Tensor = None,
+    temporary_output: torch.Tensor = None,
     stream=None,
 ) -> str:
     """Sliding-window PA decode — follows pa_decode_gluon calling convention.
@@ -706,7 +832,7 @@ def pa_decode_sw_launch(
         context_lengths: [num_seqs] i32 — passed through to the kernel.
         block_tables: [num_seqs, max_blocks_per_seq] i32.
         softmax_scale: 1/sqrt(head_size).
-        query_scale / key_scale / value_scale: per-tensor float scalars.
+        query_scale / key_scale / value_scale: per-tensor scalar tensors, shape [1].
         sliding_window: 0 = full context, >0 = attend to last N tokens.
         max_context_len: Upper bound on context length (for grid sizing).
             When sliding_window > 0, this can be 0 (grid derived from sliding_window).
@@ -726,9 +852,13 @@ def pa_decode_sw_launch(
     blocks_per_seq = block_tables.shape[1]
     trans_v = len(value_cache.shape) == 5
 
-    q_scale_f = float(query_scale)
-    k_scale_f = float(key_scale)
-    v_scale_f = float(value_scale)
+    dev = query.device
+    if not isinstance(query_scale, torch.Tensor):
+        query_scale = torch.tensor([float(query_scale or 1.0)], device=dev, dtype=torch.float32)
+    if not isinstance(key_scale, torch.Tensor):
+        key_scale = torch.tensor([float(key_scale or 1.0)], device=dev, dtype=torch.float32)
+    if not isinstance(value_scale, torch.Tensor):
+        value_scale = torch.tensor([float(value_scale or 1.0)], device=dev, dtype=torch.float32)
 
     # ── Partition / grid sizing (no GPU→CPU sync) ────────────────────
     if sliding_window > 0:
@@ -741,68 +871,63 @@ def pa_decode_sw_launch(
         sw_val = max_context_len
         effective_len = max_context_len
 
-    actual_parts_needed = _math.ceil(effective_len / context_partition_size)
+    actual_parts_needed = math.ceil(effective_len / context_partition_size)
     one_shot = (actual_parts_needed <= 1)
     num_parts = 1 if one_shot else actual_parts_needed
 
-    # ── Allocate intermediate buffers ────────────────────────────────
-    eqgs = query_length * query_group_size
-    dev = query.device
-    if exp_sums is None:
-        exp_sums = _torch.empty(batch_size, num_kv_heads, num_parts, eqgs,
-                                device=dev, dtype=_torch.float32)
-    if max_logits is None:
-        max_logits = _torch.empty(batch_size, num_kv_heads, num_parts, eqgs,
-                                  device=dev, dtype=_torch.float32)
-    if temporary_output is None:
-        temporary_output = _torch.empty(
-            batch_size, num_kv_heads, num_parts, eqgs, head_size,
-            device=dev, dtype=query.dtype)
-
     # ── Compile kernel (cached) ──────────────────────────────────────
-    lk = (batch_size, num_kv_heads, num_parts, blocks_per_seq,
-          kv_block_size, trans_v, sw_val, q_scale_f, k_scale_f, v_scale_f)
+    compiled = compile_pa_decode_sw(
+        batch_size, num_kv_heads, num_parts,
+        sliding_window=sw_val,
+        max_blocks_per_seq=blocks_per_seq,
+        softmax_scale=softmax_scale,
+        kv_block_size=kv_block_size, trans_v=trans_v,
+        one_shot=one_shot)
 
-    if lk not in _compiled_cache:
-        compiled = compile_pa_decode_sw(
-            batch_size, num_kv_heads, num_parts,
-            sliding_window=sw_val,
-            max_blocks_per_seq=blocks_per_seq,
-            softmax_scale=softmax_scale,
-            query_scale=q_scale_f, key_scale=k_scale_f, value_scale=v_scale_f,
-            kv_block_size=kv_block_size, trans_v=trans_v,
-            one_shot=one_shot)
-        _compiled_cache[lk] = compiled
-
-    compiled = _compiled_cache[lk]
     grid_z = compiled['grid_z']
     direct = compiled['direct_output']
-    s = stream or _torch.cuda.current_stream()
+    s = stream or torch.cuda.current_stream()
 
     # ── Reshape to 5D ────────────────────────────────────────────────
-    output_5d = output.reshape(
-        batch_size, query_length, num_kv_heads, query_group_size, head_size)
+    output_5d = output
+    # output_5d = output.reshape(
+    #     batch_size, query_length, num_kv_heads, query_group_size, head_size)
 
-    # ── Choose output target ─────────────────────────────────────────
     if direct:
-        out_buf = output_5d
-        es_buf = exp_sums
-        ml_buf = max_logits
+        # one_shot: kernel writes directly to output, no intermediates needed.
+        # Still need valid tensor pointers for buffer resource creation in kernel.
+        if exp_sums is None:
+            exp_sums = torch.empty(1, device=dev, dtype=torch.float32)
+        if max_logits is None:
+            max_logits = torch.empty(1, device=dev, dtype=torch.float32)
+        compiled['launch'](
+            output_5d, exp_sums, max_logits,
+            query, key_cache, value_cache, block_tables,
+            context_lengths, query_scale, key_scale, value_scale,
+            batch_size, num_kv_heads, grid_z, s)
     else:
-        out_buf = temporary_output
-        es_buf = exp_sums
-        ml_buf = max_logits
-        es_buf.zero_()
-        ml_buf.fill_(float('-inf'))
+        # partitioned: allocate intermediates, run kernel, then GPU reduce
+        eqgs = query_length * query_group_size
+        if exp_sums is None:
+            exp_sums = torch.empty(batch_size, num_kv_heads, num_parts, eqgs,
+                                    device=dev, dtype=torch.float32)
+        if max_logits is None:
+            max_logits = torch.empty(batch_size, num_kv_heads, num_parts, eqgs,
+                                      device=dev, dtype=torch.float32)
+        if temporary_output is None:
+            temporary_output = torch.empty(
+                batch_size, num_kv_heads, num_parts, eqgs, head_size,
+                device=dev, dtype=torch.bfloat16)
 
-    # ── Launch dot kernel ────────────────────────────────────────────
-    compiled['launch'](
-        out_buf, es_buf, ml_buf,
-        query, key_cache, value_cache, block_tables,
-        context_lengths, batch_size, num_kv_heads, grid_z, s)
 
-    # ── Reduce (partitioned mode) ────────────────────────────────────
-    if not direct:
-        _torch_reduce_partitions(output_5d, temporary_output, exp_sums, max_logits)
+        compiled['launch'](
+            temporary_output, exp_sums, max_logits,
+            query, key_cache, value_cache, block_tables,
+            context_lengths, query_scale, key_scale, value_scale,
+            batch_size, num_kv_heads, grid_z, s)
+
+        reduce_fn = compile_ps_reduce(batch_size, num_kv_heads, num_parts)
+        reduce_fn(output_5d, temporary_output, exp_sums, max_logits,
+                  batch_size, num_kv_heads, s)
 
     return "sw_one_shot" if one_shot else f"sw_partitioned({grid_z})"
