@@ -66,6 +66,61 @@ extern "C" void mgpuLaunchKernel(hipFunction_t function, intptr_t gridX,
                                             stream, params, extra));
 }
 
+extern "C" void mgpuLaunchClusterKernel(hipFunction_t function,
+                                        intptr_t clusterX, intptr_t clusterY,
+                                        intptr_t clusterZ,
+                                        intptr_t gridX, intptr_t gridY,
+                                        intptr_t gridZ,
+                                        intptr_t blockX, intptr_t blockY,
+                                        intptr_t blockZ, int32_t smem,
+                                        hipStream_t stream, void **params,
+                                        void **extra, size_t /*paramsCount*/) {
+  hipLaunchAttribute attrs[1];
+  attrs[0].id = hipLaunchAttributeClusterDimension;
+  attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
+  attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
+  attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
+
+  HIP_LAUNCH_CONFIG config{};
+  config.gridDimX = static_cast<unsigned>(gridX);
+  config.gridDimY = static_cast<unsigned>(gridY);
+  config.gridDimZ = static_cast<unsigned>(gridZ);
+  config.blockDimX = static_cast<unsigned>(blockX);
+  config.blockDimY = static_cast<unsigned>(blockY);
+  config.blockDimZ = static_cast<unsigned>(blockZ);
+  config.sharedMemBytes = static_cast<unsigned>(smem);
+  config.hStream = stream;
+  config.attrs = attrs;
+  config.numAttrs = 1;
+
+  hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
+  if (err == hipSuccess)
+    return;
+
+  const bool requestedRealCluster =
+      (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
+  if (requestedRealCluster) {
+    fprintf(stderr,
+            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+            "for requested cluster=(%ld,%ld,%ld); not falling back to "
+            "hipModuleLaunchKernel.\n",
+            static_cast<int>(err), static_cast<long>(clusterX),
+            static_cast<long>(clusterY), static_cast<long>(clusterZ));
+    HIP_REPORT_IF_ERROR(err);
+    HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, 0, 0, 0, 0, 0, 0, smem,
+                                              stream, params, extra));
+    return;
+  }
+
+  fprintf(stderr,
+          "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
+          "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
+          static_cast<int>(err));
+  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ,
+                                            blockX, blockY, blockZ, smem,
+                                            stream, params, extra));
+}
+
 extern "C" hipStream_t mgpuStreamCreate() {
   hipStream_t stream = nullptr;
   HIP_REPORT_IF_ERROR(hipStreamCreate(&stream));
