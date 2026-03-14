@@ -237,6 +237,7 @@ class KernelLauncher:
         block: DimType = (1, 1, 1),
         smem: Union[int, ir.Value] = 0,
         stream: Optional[ir.Value] = None,
+        cluster: Optional[DimType] = None,
     ) -> None:
         """Emit gpu.launch_func operation with the given configuration.
 
@@ -245,6 +246,8 @@ class KernelLauncher:
             block: Block dimensions (x, y, z). Can be int, ir.Value, tuple, or list.
             smem: Dynamic shared memory size in bytes. Can be int or ir.Value.
             stream: CUDA/HIP stream as ir.Value. None means default stream.
+            cluster: Cluster dimensions (x, y, z) for workgroup clustering.
+                     None means no clustering. Enables MCAST and cluster barriers.
         """
         launch_loc = create_caller_location(depth=2)
 
@@ -275,6 +278,15 @@ class KernelLauncher:
                 ctx = CompilationContext.get_current()
                 async_object = ctx.stream_arg if ctx and ctx.stream_arg else None
 
+            cluster_size = None
+            if cluster is not None:
+                cx, cy, cz = _normalize_dim(cluster)
+                cluster_size = (
+                    _to_index_value(cx),
+                    _to_index_value(cy),
+                    _to_index_value(cz),
+                )
+
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
@@ -282,6 +294,7 @@ class KernelLauncher:
                 kernel_operands,
                 dynamic_shared_memory_size=smem_val,
                 async_object=async_object,
+                cluster_size=cluster_size,
                 loc=launch_loc,
                 ip=None,
             )
