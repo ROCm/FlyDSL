@@ -79,20 +79,14 @@ def cluster_barrier():
     cluster_wait()
 
 
-def compute_cluster_position(bx, by, cluster_m: _int, cluster_n: _int):
+def compute_cluster_position():
     """Compute a workgroup's (row, col) position within its cluster.
-
-    Args:
-        bx: Block index X (M direction), MLIR index value.
-        by: Block index Y (N direction), MLIR index value.
-        cluster_m: Cluster dimension along M (number of WG rows per cluster).
-        cluster_n: Cluster dimension along N (number of WG cols per cluster).
 
     Returns:
         (local_x, local_y) as MLIR index values — position within the cluster.
     """
-    local_x = bx % _arith_ext.index(cluster_m)
-    local_y = by % _arith_ext.index(cluster_n)
+    local_x = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_x())
+    local_y = _arith_ext.index_cast(T.index, _rocdl_ext.cluster_workgroup_id_y())
     return local_x, local_y
 
 
