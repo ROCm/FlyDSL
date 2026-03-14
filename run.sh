@@ -30,6 +30,9 @@ rocprofv3 --version
 
 function run_flydsl_op {
     # export MLIR_ASM_VERBOSE=1
+    # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_v_interleave.sh
+    # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_pipeline.sh
+    # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_vcc_to_sgpr.sh
     export FLIR_LOG_MORE=1
     export FLYDSL_DUMP_IR=1
     export FLYDSL_RUNTIME_ENABLE_CACHE=1
