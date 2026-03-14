@@ -21,6 +21,18 @@ def Fly_LayoutLikeType : AnyTypeOf<[Fly_NarrowLayoutType, Fly_TensorLikeType]>;
 def Fly_IntTupleLikeType : AnyTypeOf<[Fly_IntTuple, Fly_LayoutLikeType]>;
 
 //===----------------------------------------------------------------------===//
+// Constraints
+//===----------------------------------------------------------------------===//
+
+def Fly_SimpleLayoutMemRef : Constraint<
+  CPred<"isa<fly::LayoutAttr>(cast<fly::MemRefType>($0.getType()).getLayout())">>;
+def Fly_SimpleLayoutCoordTensor : Constraint<
+  CPred<"isa<fly::LayoutAttr>(cast<fly::CoordTensorType>($0.getType()).getLayout())">>;
+
+def Fly_ComposedLayoutMemRef : Constraint<Neg<Fly_SimpleLayoutMemRef.predicate>>;
+def Fly_ComposedLayoutCoordTensor : Constraint<Neg<Fly_SimpleLayoutCoordTensor.predicate>>;
+
+//===----------------------------------------------------------------------===//
 // Constructors
 //===----------------------------------------------------------------------===//
 
@@ -381,52 +393,59 @@ def Fly_GemmOp : Fly_Op<"gemm"> {
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
-def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
-  let arguments = (ins Fly_Layout:$layout);
-  let results = (outs Fly_MemRef:$result);
-}
-
-def Fly_MemRefLoadOp : Fly_Op<"memref.load", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MemRef:$memref, Fly_IntTuple:$indices);
-  let results = (outs AnyType:$result);
-}
-def Fly_MemRefStoreOp : Fly_Op<"memref.store", []> {
-  let arguments = (ins AnyType:$value, Fly_MemRef:$memref, Fly_IntTuple:$indices);
-}
-
-def Fly_MemRefLoadVecOp : Fly_Op<"memref.load_vec", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MemRef:$memref); // restrict to register tensor
-  let results = (outs AnyType:$result);
-}
-def Fly_MemRefStoreVecOp : Fly_Op<"memref.store_vec", []> {
-  let arguments = (ins AnyType:$vector, Fly_MemRef:$memref); // restrict to register tensor
-  let results = (outs);
-}
-
-
 def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
   let arguments = (ins Variadic<AnyType>:$args);
   let results = (outs Fly_Pointer:$result);
 }
-def Fly_PtrLoadOp : Fly_Op<"ptr.load"> {
-  let arguments = (ins Fly_Pointer:$ptr);
-  let results = (outs AnyType:$result);
+def Fly_IntToPtrOp : Fly_Op<"inttoptr", [Pure]> {
+  let arguments = (ins AnyTypeOf<[I64, I32]>:$src);
+  let results = (outs Fly_Pointer:$result);
 }
-def Fly_PtrStoreOp : Fly_Op<"ptr.store"> {
-  let arguments = (ins AnyType:$value, Fly_Pointer:$ptr);
+def Fly_PtrToIntOp : Fly_Op<"ptrtoint", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_Pointer:$ptr);
+  let results = (outs AnyTypeOf<[I64, I32]>:$result);
+}
+def Fly_AddOffsetOp : Fly_Op<"add_offset", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_IteratorLikeType:$ptr, Fly_IntTuple:$offset);
+  let results = (outs Fly_IteratorLikeType:$result);
 }
 def Fly_ApplySwizzleOp : Fly_Op<"apply_swizzle", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_Pointer:$ptr, Fly_Swizzle:$swizzle);
   let results = (outs Fly_Pointer:$result);
 }
-def Fly_RecastIterOp : Fly_Op<"recast_iter", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+
+def Fly_PtrLoadOp : Fly_Op<"ptr.load", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_IteratorLikeType:$ptr);
+  let results = (outs AnyType:$result);
+}
+def Fly_PtrStoreOp : Fly_Op<"ptr.store"> {
+  let arguments = (ins AnyType:$value, Fly_Pointer:$ptr);
+}
+
+def Fly_RecastIterOp : Fly_Op<"recast_iter", [Pure]> {
   let arguments = (ins Fly_Pointer:$src);
   let results = (outs Fly_Pointer:$result);
 }
 
-def Fly_AddOffsetOp : Fly_Op<"add_offset", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_Pointer:$ptr, Fly_IntTuple:$offset);
-  let results = (outs Fly_Pointer:$result);
+def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
+  let arguments = (ins Fly_Layout:$layout);
+  let results = (outs Fly_MemRef:$result);
+}
+def Fly_MemRefLoadVecOp : Fly_Op<"memref.load_vec", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_MemRef:$memref); 
+  let results = (outs AnyType:$result);
+}
+def Fly_MemRefStoreVecOp : Fly_Op<"memref.store_vec", []> {
+  let arguments = (ins AnyType:$vector, Fly_MemRef:$memref); 
+  let results = (outs);
+}
+
+def Fly_MemRefLoadOp : Fly_Op<"memref.load", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let arguments = (ins Fly_TensorLikeType:$memref, Fly_IntTuple:$indices);
+  let results = (outs AnyType:$result);
+}
+def Fly_MemRefStoreOp : Fly_Op<"memref.store", []> {
+  let arguments = (ins AnyType:$value, Fly_MemRef:$memref, Fly_IntTuple:$indices);
 }
 
 //===----------------------------------------------------------------------===//

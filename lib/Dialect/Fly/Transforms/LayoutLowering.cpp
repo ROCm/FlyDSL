@@ -2883,6 +2883,10 @@ namespace layout_rewrite {
 #include "flydsl/Dialect/Fly/Transforms/LayoutLowering.cpp.inc"
 } // namespace layout_rewrite
 
+namespace memref_rewrite {
+#include "flydsl/Dialect/Fly/Transforms/MemrefLowering.cpp.inc"
+} // namespace memref_rewrite
+
 //===----------------------------------------------------------------------===//
 // Pass Definition
 //===----------------------------------------------------------------------===//
@@ -2936,6 +2940,7 @@ public:
 
     int_tuple_rewrite::populateWithGenerated(patterns);
     layout_rewrite::populateWithGenerated(patterns);
+    memref_rewrite::populateWithGenerated(patterns);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();
