@@ -81,6 +81,16 @@ ComposedLayoutType ComposedLayoutType::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutType::get(getContext(), getAttr().at(idxs));
 }
 
+int32_t PointerType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  return getAlignment().getAlignment() * 8 / bitWidth;
+}
+
+int32_t MemRefType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  return getAlignment().getAlignment() * 8 / bitWidth;
+}
+
 MemRefType MemRefType::at(int32_t idx) const {
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))

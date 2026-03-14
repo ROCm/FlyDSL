@@ -49,6 +49,14 @@ def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
   let parameters = (ins "int32_t":$alignment);
   let assemblyFormat = "`align` `<` `` $alignment `` `>`";
 
+  let builders = [
+    AttrBuilderWithInferredContext<(ins "Type":$elemTy, "int32_t":$divisibility), [{
+      int32_t bitWidth = elemTy.getIntOrFloatBitWidth();
+      divisibility = divisibility > 0 ? divisibility : 1;
+      return $_get(elemTy.getContext(), bitWidth * divisibility / 8);
+    }]>
+  ];
+
   let extraClassDeclaration = [{
     static AlignAttr getTrivialAlignment(MLIRContext *context);
   }];

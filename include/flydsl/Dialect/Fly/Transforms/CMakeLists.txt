@@ -9,5 +9,7 @@ set(LLVM_TARGET_DEFINITIONS IntTupleLowering.td)
 mlir_tablegen(IntTupleLowering.cpp.inc -gen-rewriters)
 set(LLVM_TARGET_DEFINITIONS LayoutLowering.td)
 mlir_tablegen(LayoutLowering.cpp.inc -gen-rewriters)
+set(LLVM_TARGET_DEFINITIONS MemrefLowering.td)
+mlir_tablegen(MemrefLowering.cpp.inc -gen-rewriters)
 
 add_mlir_generic_tablegen_target(FlyRewritePatternsIncGen)
