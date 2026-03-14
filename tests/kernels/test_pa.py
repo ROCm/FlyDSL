@@ -1,24 +1,20 @@
-"""PA Decode FP8 — FlyDSL vs Gluon, with Gluon reduce + one-shot + PS modes."""
+"""PA Decode FP8 — FlyDSL (sliding-window kernel) vs Gluon benchmark."""
 import sys, os, torch, math, logging, random, gc
 sys.path.insert(0, 'build-fly/python_packages'); sys.path.insert(1, '.')
 os.environ['FLYDSL_RUNTIME_ENABLE_CACHE'] = '1'
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-from tests.test_common import run_perftest, verify_output, checkAllclose
-from kernels.pa_decode_fp8 import build_pa_decode_module, BLOCK_THREADS, QUERY_GROUP_SIZE, HEAD_SIZE, KV_COMPUTE_BLOCK
-import kernels.pa_decode_fp8 as _pa
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir import ir as _ir
-import flydsl.compiler as flyc, flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl.expr.typing import T
+from tests.test_common import run_perftest, checkAllclose
+from kernels.pa_decode_sw_fp8 import (
+    pa_decode_sw_launch,
+    QUERY_GROUP_SIZE, HEAD_SIZE, KV_COMPUTE_BLOCK,
+)
 from aiter.ops.triton.gluon.pa_decode_gluon import (
     pa_decode_gluon, get_recommended_splits,
-    _paged_attention_decode_v2_reduce_kernel_wrapper,
 )
 from aiter import per_tensor_quant, dtypes as aiter_dtypes
 
-CPSZ = 256; QG = QUERY_GROUP_SIZE
+CPSZ = KV_COMPUTE_BLOCK; QG = QUERY_GROUP_SIZE
 fp8 = torch.float8_e4m3fnuz; bf16 = torch.bfloat16; dev = 'cuda'
 UNIFORM_RANGE = (-1, 1)
 SEED = 0
@@ -83,25 +79,6 @@ def torch_ref_attention(query, key_cache, value_cache, block_tables,
     return torch.stack(outputs).to(query.dtype)
 
 
-def gluon_reduce(fd_out, fd_es, fd_ml, context_lengths, num_parts, ps_mode=False):
-    """Call Gluon's Triton reduce kernel on FlyDSL's partial outputs."""
-    batch_size, num_kv_heads, _, qg, head_size = fd_out.shape
-    output_5d = torch.empty(batch_size, 1, num_kv_heads, qg, head_size,
-                            dtype=bf16, device=dev)
-    grid = (batch_size, num_kv_heads, 1)
-    _paged_attention_decode_v2_reduce_kernel_wrapper(
-        grid, output_5d, fd_es, fd_ml, fd_out, context_lengths, None,
-        output_5d.stride(0), output_5d.stride(1),
-        output_5d.stride(2), output_5d.stride(3),
-        fd_es.stride(0), fd_es.stride(1), fd_es.stride(2),
-        fd_out.stride(0), fd_out.stride(1), fd_out.stride(2), fd_out.stride(3),
-        query_seq_len=1, query_group_size=qg,
-        HEAD_SIZE=head_size, CONTEXT_PARTITION_SIZE=CPSZ,
-        PS=ps_mode, context_partition_num=num_parts,
-    )
-    return output_5d.reshape(batch_size, num_kv_heads, qg, head_size)
-
-
 def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
                block_size=16, trans_v=False, ps=True, quant_q=True,
                num_iters=100, test_graph=False):
@@ -116,9 +93,6 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
     total_blocks = max_blocks_per_seq * batch_size
     blocks_per_seq = (context_length + block_size - 1) // block_size
     num_parts = (context_length + CPSZ - 1) // CPSZ
-    _one_shot = (num_parts <= 1)
-
-    fd_num_splits = get_recommended_splits(batch_size, num_kv_heads) if ps else 0
 
     query = torch.empty(batch_size, num_query_heads, head_size, dtype=bf16, device=dev)
     query.uniform_(*UNIFORM_RANGE)
@@ -154,71 +128,32 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
                     gl_es, gl_ml, gl_tmp, None, ps=ps)
     torch.cuda.synchronize()
 
-    # ── FlyDSL ──────────────────────────────────────────────────
+    # ── FlyDSL (sliding-window kernel) ───────────────────────────
     if quant_q:
         fd_query = quantized_query
-        _qs = q_scale.item()
+        fd_q_scale = q_scale
     else:
-        fd_query, _fd_q_scale = per_tensor_quant(query, quant_dtype=aiter_dtypes.fp8)
-        _qs = _fd_q_scale.item()
+        fd_query, fd_q_scale = per_tensor_quant(query, quant_dtype=aiter_dtypes.fp8)
+    if not isinstance(fd_q_scale, torch.Tensor):
+        fd_q_scale = torch.tensor([float(fd_q_scale)], device=dev, dtype=torch.float32)
 
-    grid_z = fd_num_splits if fd_num_splits > 0 else (1 if _one_shot else num_parts)
-    fd_kfn = build_pa_decode_module(batch_size, num_kv_heads, num_parts,
-                                     blocks_per_seq, kv_block_size=block_size,
-                                     trans_v=trans_v,
-                                     softmax_scale=softmax_scale,
-                                     query_scale=_qs,
-                                     key_scale=key_scale.item(),
-                                     value_scale=val_scale.item(),
-                                     one_shot=_one_shot,
-                                     ps_num_splits=fd_num_splits)
-    fd_al = _pa.allocator
+    fd_k_scale = key_scale if isinstance(key_scale, torch.Tensor) else torch.tensor([key_scale.item()], device=dev, dtype=torch.float32)
+    fd_v_scale = val_scale if isinstance(val_scale, torch.Tensor) else torch.tensor([val_scale.item()], device=dev, dtype=torch.float32)
 
-    if _one_shot:
-        fd_out = torch.zeros(batch_size, num_kv_heads, 1, qg, head_size, dtype=bf16, device=dev)
-        fd_es  = torch.zeros(1, dtype=torch.float32, device=dev)
-        fd_ml  = torch.zeros(1, dtype=torch.float32, device=dev)
-    else:
-        fd_out = torch.zeros(batch_size, num_kv_heads, num_parts, qg, head_size, dtype=bf16, device=dev)
-        fd_es  = torch.zeros(batch_size, num_kv_heads, num_parts, qg, dtype=torch.float32, device=dev)
-        fd_ml  = torch.full((batch_size, num_kv_heads, num_parts, qg), float('-inf'),
-                            dtype=torch.float32, device=dev)
+    fd_out = torch.empty(batch_size, num_query_heads, head_size, dtype=bf16, device=dev)
 
-    _cache_tag = (batch_size, num_kv_heads, grid_z)
-
-    @flyc.jit
-    def fd_launch(out, es, ml, q, kc, vc, bt, cl: fx.Int32,
-                  gx: fx.Int32, gy: fx.Int32, gz: fx.Int32,
-                  stream: fx.Stream):
-        _ = _cache_tag
-        fd_al.finalized = False
-        ctx = CompilationContext.get_current()
-        with _ir.InsertionPoint(ctx.gpu_module_body):
-            fd_al.finalize()
-        grid_x = arith.index_cast(T.index, gx.ir_value())
-        grid_y = arith.index_cast(T.index, gy.ir_value())
-        grid_z_val = arith.index_cast(T.index, gz.ir_value())
-        fd_kfn(out, es, ml, q, kc, vc, bt, cl).launch(
-            grid=(grid_x, grid_y, grid_z_val),
-            block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    # Warmup (compilation happens here)
-    fd_launch(fd_out, fd_es, fd_ml, fd_query, q_keys, q_vals,
-              block_tables, context_length,
-              batch_size, num_kv_heads, grid_z,
-              torch.cuda.current_stream())
+    mode_str = pa_decode_sw_launch(
+        fd_out, fd_query, q_keys, q_vals,
+        context_lengths, block_tables,
+        softmax_scale, fd_q_scale, fd_k_scale, fd_v_scale,
+        sliding_window=0, max_context_len=context_length,
+        kv_block_size=block_size,
+    )
     torch.cuda.synchronize()
-
-    if _one_shot:
-        fd_final = fd_out.squeeze(2)
-    else:
-        fd_final = gluon_reduce(fd_out, fd_es, fd_ml, context_lengths,
-                                num_parts, ps_mode=(fd_num_splits > 0))
-        torch.cuda.synchronize()
 
     # ── Verify ──────────────────────────────────────────────────
     diff_tol = 5e-2
-    fd_flat = fd_final.reshape(batch_size, num_query_heads, head_size).float()
+    fd_flat = fd_out.float()
     gl_flat = gl_out.float()
     ref_flat = ref_out.float()
 
@@ -229,35 +164,12 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
     gl_ok = err_gl < 0.05
     fd_ok = err_fd < 0.05
 
-    mode_str = "one_shot" if _one_shot else (f"ps({fd_num_splits})" if fd_num_splits > 0 else "partitioned")
-
-    # ── Perf (GEMM-style: wrapper + run_perftest with tensor args) ──
-    if _one_shot:
-        def launch_fd(out, es, ml, q, kc, vc, bt):
-            fd_launch(out, es, ml, q, kc, vc, bt,
-                      context_length, batch_size, num_kv_heads, grid_z,
-                      torch.cuda.current_stream())
-    else:
-        fd_reduce_out = torch.empty(batch_size, 1, num_kv_heads, qg, head_size,
-                                    dtype=bf16, device=dev)
-        _reduce_grid = (batch_size, num_kv_heads, 1)
-        _is_ps = fd_num_splits > 0
-
-        def launch_fd(out, es, ml, q, kc, vc, bt):
-            fd_launch(out, es, ml, q, kc, vc, bt,
-                      context_length, batch_size, num_kv_heads, grid_z,
-                      torch.cuda.current_stream())
-            _paged_attention_decode_v2_reduce_kernel_wrapper(
-                _reduce_grid, fd_reduce_out,
-                es, ml, out, context_lengths, None,
-                fd_reduce_out.stride(0), fd_reduce_out.stride(1),
-                fd_reduce_out.stride(2), fd_reduce_out.stride(3),
-                es.stride(0), es.stride(1), es.stride(2),
-                out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-                query_seq_len=1, query_group_size=qg,
-                HEAD_SIZE=head_size, CONTEXT_PARTITION_SIZE=CPSZ,
-                PS=_is_ps, context_partition_num=num_parts,
-            )
+    # ── Perf (torch.profiler trace → self_device_time_total) ──
+    def launch_fd(out, q, kc, bt):
+        pa_decode_sw_launch(out, q, kc, q_vals, context_lengths, bt,
+                            softmax_scale, fd_q_scale, fd_k_scale, fd_v_scale,
+                            sliding_window=0, max_context_len=context_length,
+                            kv_block_size=block_size)
 
     def launch_gl(out, q, kc, vc, bt):
         pa_decode_gluon(out, q, kc, vc, context_lengths,
@@ -265,14 +177,12 @@ def run_single(num_query_heads, num_kv_heads, batch_size, context_length,
                         q_scale, key_scale, val_scale,
                         gl_es, gl_ml, gl_tmp, None, ps=ps)
 
-    _, fd_us = run_perftest(launch_fd, fd_out, fd_es, fd_ml, fd_query,
-                            q_keys, q_vals, block_tables,
-                            num_iters=num_iters, num_warmup=5,
-                            testGraph=test_graph)
+    _, fd_us = run_perftest(launch_fd, fd_out, fd_query,
+                            q_keys, block_tables,
+                            num_iters=num_iters, num_warmup=5)
     _, gl_us = run_perftest(launch_gl, gl_out, quantized_query, q_keys,
                             q_vals, block_tables,
-                            num_iters=num_iters, num_warmup=5,
-                            testGraph=test_graph)
+                            num_iters=num_iters, num_warmup=5)
 
     torch.cuda.empty_cache(); gc.collect()
     return fd_ok, gl_ok, fd_us, gl_us, mode_str, err_fd
