@@ -12,7 +12,9 @@ namespace mlir::fly {
 // AlignAttr
 //===----------------------------------------------------------------------===//
 
-AlignAttr AlignAttr::getTrivialAlignment(MLIRContext *context) { return get(context, 1); }
+AlignAttr AlignAttr::getTrivialAlignment(Type elemTy) {
+  return get(elemTy.getContext(), (elemTy.getIntOrFloatBitWidth() + 7) / 8);
+}
 
 //===----------------------------------------------------------------------===//
 // IntAttr

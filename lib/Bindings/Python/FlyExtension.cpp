@@ -244,12 +244,13 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
           if (addressSpace.has_value())
             addr = static_cast<::mlir::fly::AddressSpace>(addressSpace.value());
 
-          int32_t alignSize = alignment.value_or(1);
-          assert(alignSize > 0 && "alignment must be positive");
+          auto elemType = unwrap(elemTy);
+          int32_t alignSize = alignment.value_or(
+              ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
 
           return PyPointerType(context->getRef(),
                                wrap(::mlir::fly::PointerType::get(
-                                   unwrap(elemTy), ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
+                                   elemType, ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
                                    ::mlir::fly::AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(), nb::kw_only(),
@@ -294,15 +295,16 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           if (addressSpace.has_value())
             addr = static_cast<::mlir::fly::AddressSpace>(addressSpace.value());
 
-          int32_t alignSize = alignment.value_or(1);
-          assert(alignSize > 0 && "alignment must be positive");
-
           MlirType elemTy = elemTyObj;
+          auto elemType = unwrap(elemTy);
+          int32_t alignSize = alignment.value_or(
+              ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
+
           return PyMemRefType(
               context->getRef(),
               wrap(::mlir::fly::MemRefType::get(
-                  unwrap(elemTy), ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
-                  layoutType.getAttr(), ::mlir::fly::AlignAttr::get(ctx, alignSize))));
+                  elemType, ::mlir::fly::AddressSpaceAttr::get(ctx, addr), layoutType.getAttr(),
+                  ::mlir::fly::AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "layout"_a, "address_space"_a = 0, "alignment"_a = nb::none(), nb::kw_only(),
         "context"_a = nb::none(),
