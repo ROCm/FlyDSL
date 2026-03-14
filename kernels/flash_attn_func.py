@@ -640,23 +640,27 @@ def build_flash_attn_func_module_primary(
                     if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                         op.attributes["rocdl.flat_work_group_size"] = flat_wg_attr
 
+        passthrough_entries = []
         if daz:
-            for op in ctx.gpu_module_body.operations:
-                if getattr(op, "OPERATION_NAME", None) == "gpu.func":
-                    op.attributes["passthrough"] = ir.ArrayAttr.get([
-                        ir.ArrayAttr.get([
-                            ir.StringAttr.get("denormal-fp-math-f32"),
-                            ir.StringAttr.get("preserve-sign,preserve-sign"),
-                        ]),
-                        # ir.ArrayAttr.get([
-                        #     ir.StringAttr.get("no-nans-fp-math"),
-                        #     ir.StringAttr.get("true"),
-                        # ]),
-                        # ir.ArrayAttr.get([
-                        #     ir.StringAttr.get("unsafe-fp-math"),
-                        #     ir.StringAttr.get("true"),
-                        # ]),
-                    ])
+            passthrough_entries.append(ir.ArrayAttr.get([
+                ir.StringAttr.get("denormal-fp-math-f32"),
+                ir.StringAttr.get("preserve-sign,preserve-sign"),
+            ]))
+            # passthrough_entries.append(ir.ArrayAttr.get([
+            #     ir.StringAttr.get("no-nans-fp-math"),
+            #     ir.StringAttr.get("true"),
+            # ]))
+            # passthrough_entries.append(ir.ArrayAttr.get([
+            #     ir.StringAttr.get("unsafe-fp-math"),
+            #     ir.StringAttr.get("true"),
+            # ]))
+        passthrough_entries.append(ir.ArrayAttr.get([
+            ir.StringAttr.get("amdgpu-gemm-schedule-opt"),
+            ir.StringAttr.get("true"),
+        ]))
+        for op in ctx.gpu_module_body.operations:
+            if getattr(op, "OPERATION_NAME", None) == "gpu.func":
+                op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
 
         launcher.launch(
             grid=(grid_x, 1, 1),

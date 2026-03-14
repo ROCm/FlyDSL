@@ -58,6 +58,16 @@ for idx, line in enumerate(result):
     if '.sgpr_count:' in line:
         result[idx] = re.sub(r'sgpr_count:\s*\d+', f'sgpr_count:     {max_sgpr + 6}', line)
 
+final_isa = '\n'.join(result) + '\n'
 with open(sys.argv[2], 'w') as f:
-    f.write('\n'.join(result) + '\n')
+    f.write(final_isa)
+
+import os
+dump_dir = os.environ.get('FLYDSL_DUMP_DIR', '')
+if dump_dir:
+    dump_path = os.path.join(dump_dir, 'postprocessed_final_isa.s')
+    os.makedirs(dump_dir, exist_ok=True)
+    with open(dump_path, 'w') as f:
+        f.write(final_isa)
+    print(f"[postprocess_vcc_to_sgpr] saved to {dump_path}", file=sys.stderr)
 PYEOF

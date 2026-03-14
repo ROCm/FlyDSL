@@ -62,6 +62,26 @@ fi
 git fetch origin amd-staging
 >>>>>>> 56e7961 (flash_attn: add mfma_f32_32x32x8f16 wrapper and remove fp_math params)
 git checkout "${LLVM_COMMIT}"
+
+# 1b. Apply FlyDSL patches (if any)
+PATCHES_DIR="${REPO_ROOT}/patches"
+if [[ -d "${PATCHES_DIR}" ]]; then
+    PATCH_FILES=("${PATCHES_DIR}"/*.patch)
+    if [[ -e "${PATCH_FILES[0]}" ]]; then
+        echo "Applying FlyDSL LLVM patches from ${PATCHES_DIR}..."
+        for pf in "${PATCH_FILES[@]}"; do
+            PATCH_SUBJECT=$(head -5 "$pf" | grep '^Subject:' | head -1 || true)
+            echo "  Applying: $(basename "$pf")"
+            if git am --check "$pf" &>/dev/null; then
+                git am "$pf"
+            else
+                echo "  (already applied or not applicable, skipping)"
+            fi
+        done
+        echo "Patches applied. Current HEAD: $(git log --oneline -1)"
+    fi
+fi
+
 popd
 
 # 2. Create Build Directory
