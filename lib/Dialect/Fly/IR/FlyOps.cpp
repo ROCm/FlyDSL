@@ -81,6 +81,25 @@ Type applyIntTupleTransform(Type inputTy, function_ref<IntTupleAttr(IntTupleAttr
   return RebuildLayoutLikeType(inputTy, transformed);
 }
 
+Type applyOffsetOnMemRef(LayoutBuilder<LayoutAttr> &builder, fly::MemRefType memrefTy,
+                         IntTupleAttr offset, LayoutAttr layoutAttr) {
+  if (auto composed = dyn_cast<ComposedLayoutAttr>(memrefTy.getLayout())) {
+    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
+    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
+    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
+                                memrefTy.getAlignment(), memrefTy.getSwizzle());
+  } else {
+    int32_t valDiv = memrefTy.getValueDivisibility();
+    IntAttr offsetInt = offset.extractIntFromLeaf();
+    int32_t offsetDiv =
+        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
+    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), layoutAttr,
+                                AlignAttr::get(memrefTy.getElemTy(), newValDiv),
+                                memrefTy.getSwizzle());
+  }
+}
+
 } // namespace
 
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
@@ -1408,30 +1427,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
       intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
   LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
 
-  Attribute memrefLayout = memrefTy.getLayout();
-  if (isa<ComposedLayoutAttr>(memrefLayout)) {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    auto composed = cast<ComposedLayoutAttr>(memrefLayout);
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, partitioned);
-    inferredReturnTypes.assign(
-        {fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
-                              memrefTy.getAlignment(), memrefTy.getSwizzle())});
-  } else {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offsetAttr = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    int32_t valDiv = memrefTy.getValueDivisibility();
-    IntAttr offsetInt = offsetAttr.extractIntFromLeaf();
-    int32_t offsetDiv =
-        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
-    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
-    inferredReturnTypes.assign({fly::MemRefType::get(
-        memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
-        AlignAttr::get(memrefTy.getElemTy(), newValDiv), memrefTy.getSwizzle())});
-  }
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
@@ -1483,30 +1482,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
       intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
   LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
 
-  Attribute memrefLayout = memrefTy.getLayout();
-  if (isa<ComposedLayoutAttr>(memrefLayout)) {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    auto composed = cast<ComposedLayoutAttr>(memrefLayout);
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, partitioned);
-    inferredReturnTypes.assign(
-        {fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
-                              memrefTy.getAlignment(), memrefTy.getSwizzle())});
-  } else {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offsetAttr = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    int32_t valDiv = memrefTy.getValueDivisibility();
-    IntAttr offsetInt = offsetAttr.extractIntFromLeaf();
-    int32_t offsetDiv =
-        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
-    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
-    inferredReturnTypes.assign({fly::MemRefType::get(
-        memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
-        AlignAttr::get(memrefTy.getElemTy(), newValDiv), memrefTy.getSwizzle())});
-  }
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
@@ -1591,30 +1570,10 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   LayoutAttr partitioned = LayoutAttr::get(intTupleExpand(builder, resultShape, {1}),
                                            intTupleExpand(builder, resultStride, {1}));
 
-  Attribute memrefLayout = memrefTy.getLayout();
-  if (isa<ComposedLayoutAttr>(memrefLayout)) {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    auto composed = cast<ComposedLayoutAttr>(memrefLayout);
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, partitioned);
-    inferredReturnTypes.assign(
-        {fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
-                              memrefTy.getAlignment(), memrefTy.getSwizzle())});
-  } else {
-    IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
-    IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
-    IntTupleAttr offsetAttr = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-    int32_t valDiv = memrefTy.getValueDivisibility();
-    IntAttr offsetInt = offsetAttr.extractIntFromLeaf();
-    int32_t offsetDiv =
-        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
-    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
-    inferredReturnTypes.assign({fly::MemRefType::get(
-        memrefTy.getElemTy(), memrefTy.getAddressSpace(), partitioned,
-        AlignAttr::get(memrefTy.getElemTy(), newValDiv), memrefTy.getSwizzle())});
-  }
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
