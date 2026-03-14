@@ -16,6 +16,12 @@ LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
 LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
 LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
 
+if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
+    echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
+    echo "Shallow fetch does not support short hashes."
+    exit 1
+fi
+
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"

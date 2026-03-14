@@ -58,12 +58,6 @@ jobs:
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
 
-      - name: Read LLVM commit from thirdparty/llvm-hash.txt
-        run: |
-          LLVM_COMMIT=$(cat flydsl-test/thirdparty/llvm-hash.txt | tr -d '[:space:]' | cut -c1-12)
-          echo "LLVM_COMMIT=${LLVM_COMMIT}" >> $GITHUB_ENV
-          echo "Using LLVM commit: ${LLVM_COMMIT}"
-
       - name: Install dependencies
         run: |
           docker exec flydsl_test bash -c "apt-get update && apt-get install -y cmake build-essential"
@@ -80,7 +74,7 @@ jobs:
           path: mlir_install.tgz
           # Key includes LLVM commit and hashes of build scripts/workflow.
           # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ env.LLVM_COMMIT }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          key: mlir-install-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -94,7 +88,7 @@ jobs:
         if: steps.mlir-cache.outputs.cache-hit != 'true'
         run: |
           set -ex
-          docker exec flydsl_test bash -c "cd /flydsl-test && LLVM_COMMIT=${{ env.LLVM_COMMIT }} bash scripts/build_llvm.sh"
+          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/build_llvm.sh"
           docker exec flydsl_test bash -c "ls -la /llvm-project/mlir_install/lib/cmake/mlir"
           docker cp flydsl_test:/llvm-project/mlir_install.tgz ./mlir_install.tgz || true
           ls -lh ./mlir_install.tgz || true
@@ -127,7 +121,7 @@ jobs:
         if: steps.mlir-cache.outputs.cache-hit != 'true' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         uses: actions/upload-artifact@v4
         with:
-          name: mlir_install-${{ matrix.runners }}-${{ env.LLVM_COMMIT }}
+          name: mlir_install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt') }}
           path: mlir_install.tgz
           if-no-files-found: ignore
           retention-days: 7
