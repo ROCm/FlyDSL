@@ -176,6 +176,7 @@ def make_tensor_descriptor_2d(
     num_warps: int = 1,
     cache_policy: int = 0,
     pred: int = 1,
+    workgroup_mask: Union[int, "ir.Value"] = 0,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -206,6 +207,10 @@ def make_tensor_descriptor_2d(
         num_warps:     Total warps in the workgroup.
         cache_policy:  Cache policy (0 = default).
         pred:          Predicate (1 = enabled).
+        workgroup_mask: MCAST workgroup mask [15:0] for TDM GROUP1 descriptor.
+                       int: compile-time constant folded into descriptor.
+                       ir.Value (i32 SGPR): runtime mask, ORed with upper config bits.
+                       0 = no multicast (default).
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -307,9 +312,8 @@ def make_tensor_descriptor_2d(
         pad_enable = 0
 
     # sgpr0: config bitfields
-    g1_s0_val = (
-        (0)                           # workgroup_mask [15:0]
-        | (data_size_code << 16)      # data_size [17:16]
+    g1_s0_upper = (
+        (data_size_code << 16)      # data_size [17:16]
         | (0 << 18)                   # atomic_barrier_enable
         | (0 << 19)                   # iterate_enable
         | (pad_enable << 20)          # pad_enable
@@ -317,7 +321,14 @@ def make_tensor_descriptor_2d(
         | (enc_interval << 22)        # pad_interval [24:22]
         | (enc_amount << 25)          # pad_amount [31:25]
     )
-    g1_s0 = arith.constant(g1_s0_val, type=T.i32)
+
+    if isinstance(workgroup_mask, int):
+        g1_s0_val = (workgroup_mask & 0xFFFF) | g1_s0_upper
+        g1_s0 = arith.constant(g1_s0_val, type=T.i32)
+    else:
+        upper_const = arith.constant(g1_s0_upper, type=T.i32)
+        mask_i32 = arith.andi(workgroup_mask, arith.constant(0xFFFF, type=T.i32))
+        g1_s0 = arith.ori(upper_const, mask_i32)
 
     # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
     g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
