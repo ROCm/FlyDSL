@@ -73,4 +73,13 @@ if len(matches) == 16:
 
 with open(sys.argv[2], 'w') as f:
     f.write(content)
+
+import os
+dump_dir = os.environ.get('FLYDSL_DUMP_DIR', '')
+if dump_dir:
+    dump_path = os.path.join(dump_dir, 'postprocessed_final_isa.s')
+    os.makedirs(dump_dir, exist_ok=True)
+    with open(dump_path, 'w') as f:
+        f.write(content)
+    print(f"[postprocess_pipeline] saved to {dump_path}", file=sys.stderr)
 PYEOF
