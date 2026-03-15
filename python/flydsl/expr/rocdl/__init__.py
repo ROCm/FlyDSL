@@ -14,6 +14,12 @@ This module provides access to ROCm-specific GPU operations including:
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_wmma_scale_f32_16x16x128_f8f6f4 = (
+    globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
+)
+_ods_wmma_scale_f32_32x16x128_f4 = (
+    globals().get("wmma_scale_f32_32x16x128_f4", None)
+)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_cluster_workgroup_id_x = cluster_workgroup_id_x
 _ods_cluster_workgroup_id_y = cluster_workgroup_id_y
@@ -106,6 +112,74 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     scaleB = _unwrap_mfma_operand(operands[8], loc=loc) if len(operands) > 8 else b
     return _ods_mfma_scale_f32_16x16x128_f8f6f4(
         result_type, a, b, c, cbsz, blgp, opselA, scaleA, opselB, scaleB,
+        loc=loc, ip=ip,
+    ).result
+
+
+def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
+                                      *, fmtA=4, fmtB=4, modC=0,
+                                      scaleAType=0, fmtScaleA=0,
+                                      scaleBType=0, fmtScaleB=0,
+                                      reuseA=False, reuseB=False,
+                                      loc=None, ip=None):
+    """V_WMMA_SCALE_F32_16X16X128_F8F6F4 for gfx1250 (wave32).
+
+    Operand types (wave32):
+        a: vector<8xi32> (16x128 FP4 data)
+        b: vector<8xi32> (128x16 FP4 data)
+        c: vector<8xf32> (16x16 FP32 accumulator)
+        scaleA: i32 (A scale VGPR)
+        scaleB: i32 (B scale VGPR)
+
+    fmtA/fmtB: data type encoding (4=FP4/E2M1)
+    scaleAType/scaleBType: opsel – selects lo/hi 16-bit half of scale VGPR (0=lo, 1=hi)
+    fmtScaleA/fmtScaleB: scale format (0=E8M0, 1=E5M3, 2=E4M3)
+    """
+    if _ods_wmma_scale_f32_16x16x128_f8f6f4 is None:
+        raise AttributeError("ROCDL op not found: wmma_scale_f32_16x16x128_f8f6f4")
+    a_v = _unwrap_mfma_operand(a, loc=loc)
+    b_v = _unwrap_mfma_operand(b, loc=loc)
+    c_v = _unwrap_mfma_operand(c, loc=loc)
+    sA = _unwrap_mfma_operand(scaleA, loc=loc)
+    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    return _ods_wmma_scale_f32_16x16x128_f8f6f4(
+        result_type, a_v, b_v, c_v, sA, sB,
+        fmtA=fmtA, fmtB=fmtB, modC=modC,
+        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
+        reuseA=reuseA, reuseB=reuseB,
+        loc=loc, ip=ip,
+    ).result
+
+
+def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
+                                  *, modC=0,
+                                  scaleAType=0, fmtScaleA=0,
+                                  scaleBType=0, fmtScaleB=0,
+                                  reuseA=False, reuseB=False,
+                                  loc=None, ip=None):
+    """V_WMMA_SCALE_F32_32X16X128_F4 for gfx1250 (wave32).
+
+    Operand types (wave32):
+        a: vector<16xi32> (32x128 FP4 data)
+        b: vector<8xi32>  (128x16 FP4 data)
+        c: vector<16xf32> (32x16 FP32 accumulator)
+        scaleA: i32 (A scale VGPR)
+        scaleB: i32 (B scale VGPR)
+    """
+    if _ods_wmma_scale_f32_32x16x128_f4 is None:
+        raise AttributeError("ROCDL op not found: wmma_scale_f32_32x16x128_f4")
+    a_v = _unwrap_mfma_operand(a, loc=loc)
+    b_v = _unwrap_mfma_operand(b, loc=loc)
+    c_v = _unwrap_mfma_operand(c, loc=loc)
+    sA = _unwrap_mfma_operand(scaleA, loc=loc)
+    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    return _ods_wmma_scale_f32_32x16x128_f4(
+        result_type, a_v, b_v, c_v, sA, sB,
+        modC=modC,
+        scaleAType=scaleAType, fmtScaleA=fmtScaleA,
+        scaleBType=scaleBType, fmtScaleB=fmtScaleB,
+        reuseA=reuseA, reuseB=reuseB,
         loc=loc, ip=ip,
     ).result
 

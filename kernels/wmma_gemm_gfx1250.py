@@ -17,6 +17,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
 from kernels.layout_utils import idx2crd
+from kernels.pipeline_utils import make_tail_plan
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
@@ -27,43 +28,7 @@ LDS_PAD_B = 8
 _STAGE_NAMES = ("ping", "pong", "pang")
 
 
-def _make_tail_plan(num_buffers, pre_loaded, extra):
-    """Compute a compile-time tail execution plan for the N-stage pipeline.
-
-    Returns a list of (load_stage, compute_stage, outstanding) tuples, one per
-    tail step.  outstanding=-1 means "last step, use compute_tile (no barrier)".
-
-    Args:
-        num_buffers: total number of pipeline stages.
-        pre_loaded:  stages already loaded and ready to compute (= num_buffers - 1).
-        extra:       additional tiles that must be loaded in the tail.
-    """
-    steps = pre_loaded + extra
-    plan = []
-    for i in range(steps):
-        compute_stage = (
-            i if i < pre_loaded
-            else (i - pre_loaded + num_buffers - 1) % num_buffers
-        )
-        load_stage = (
-            (i + num_buffers - 1) % num_buffers if i < extra
-            else None
-        )
-        is_last = (i == steps - 1)
-        if is_last:
-            outstanding = -1
-        else:
-            j = i + 1
-            next_compute = (
-                j if j < pre_loaded
-                else (j - pre_loaded + num_buffers - 1) % num_buffers
-            )
-            outstanding = (
-                2 if (load_stage is not None and load_stage != next_compute)
-                else 0
-            )
-        plan.append((load_stage, compute_stage, outstanding))
-    return plan
+_make_tail_plan = make_tail_plan
 
 
 def compile_wmma_gemm_tdm(
