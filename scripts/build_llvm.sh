@@ -72,7 +72,7 @@ if [[ -d "${PATCHES_DIR}" ]]; then
         for pf in "${PATCH_FILES[@]}"; do
             PATCH_SUBJECT=$(head -5 "$pf" | grep '^Subject:' | head -1 || true)
             echo "  Applying: $(basename "$pf")"
-            if git am --check "$pf" &>/dev/null; then
+            if git apply --check "$pf" &>/dev/null; then
                 git am "$pf"
             else
                 echo "  (already applied or not applicable, skipping)"
