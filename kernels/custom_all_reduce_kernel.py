@@ -235,6 +235,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     """Build and return compiled allreduce launcher functions.
 
     Captures compile-time constants as closures, returns a dict with:
+      "run_1stage_arr"        — CUDAGraph-compatible 1-stage allreduce (small N)
       "run_2stage_arr"        — CUDAGraph-compatible 2-stage allreduce
       "run_2stage_write_mode" — Large-tensor 2-stage allreduce (N > 512*4096, ws=8)
 
@@ -261,6 +262,96 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     is_f32 = dtype_str.lower().strip() in {"f32", "fp32"}
     # Vectorized gather path: requires perfect partition + no world_size=6
     vec_ok = (num_packs % world_size == 0) and (world_size != 6)
+
+    # -----------------------------------------------------------------------
+    # GPU Kernel: 1-stage arr (full allreduce in one pass, CUDAGraph-compatible)
+    # All ranks reduce all data in a single barrier-sync pass.
+    # Args: rank, self_sg, sg_ptrs, in_ptrs, out_ptr  (all raw i64)
+    # -----------------------------------------------------------------------
+    @flyc.kernel
+    def allreduce_1stage_arr(
+        rank: Int32,
+        self_sg: Int64,
+        sg_ptrs: Int64,
+        in_ptrs: Int64,
+        out_ptr: Int64,
+    ):
+        from flydsl._mlir.dialects import arith, gpu, scf, vector
+        from flydsl.expr.buffer_ops import _unwrap_value
+
+        i32 = _i32()
+        i64 = _i64()
+        if is_f32:
+            v4f32 = ir.VectorType.get([4], ir.F32Type.get())
+        else:
+            v8f16 = ir.VectorType.get([8], ir.F16Type.get())
+            v8f32 = ir.VectorType.get([8], ir.F32Type.get())
+
+        # Required work group size for correct resource allocation
+        _entry_block = ir.InsertionPoint.current.block
+        _gpu_func_op = _entry_block.owner
+        _gpu_func_op.operation.attributes["rocdl.reqd_work_group_size"] = ir.DenseI32ArrayAttr.get([threads, 1, 1])
+        _gpu_func_op.operation.attributes["rocdl.flat_work_group_size"] = ir.StringAttr.get(f"{threads},{threads}")
+
+        lane_i32    = ea.index_cast(i32, gpu.thread_id("x"))
+        bid_i32     = ea.index_cast(i32, gpu.block_id("x"))
+        rank_i32    = _unwrap_value(rank)
+        self_sg_i64 = _unwrap_value(self_sg)
+        sg_ptrs_i64 = _unwrap_value(sg_ptrs)
+        in_ptrs_i64 = _unwrap_value(in_ptrs)
+        out_ptr_i64 = _unwrap_value(out_ptr)
+
+        sgs         = [_load_ptr_from_array(sg_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+        in_ptrs_arr = [_load_ptr_from_array(in_ptrs_i64, ea.constant(i, type=i32)) for i in range(8)]
+
+        _signal_start_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
+                           self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
+
+        # Grid-stride loop: each thread reduces one pack (pack_elems elements)
+        pack0    = bid_i32 * ea.constant(threads, type=i32) + lane_i32
+        stride_p = ea.index_cast(i32, gpu.grid_dim("x")) * ea.constant(threads, type=i32)
+
+        loop = scf.WhileOp([i32], [pack0])
+        bfor = ir.Block.create_at_start(loop.before, [i32])
+        afor = ir.Block.create_at_start(loop.after,  [i32])
+        with ir.InsertionPoint(bfor):
+            p = bfor.arguments[0]
+            cond = arith.CmpIOp(arith.CmpIPredicate.ult, p,
+                                ea.constant(num_packs, type=i32)).result
+            scf.ConditionOp(cond, [p])
+        with ir.InsertionPoint(afor):
+            p = afor.arguments[0]
+
+            # Accumulate contribution from every rank for this pack.
+            # in_ptrs_arr[r] is a compile-time-indexed value (loaded before loop),
+            # so we directly index it - no runtime select needed.
+            acc = None
+            off16 = arith.ExtUIOp(i64, p).result * ea.constant(16, type=i64)
+            for r in range_constexpr(world_size):
+                raw = _ld_16b(in_ptrs_arr[r] + off16)
+                if is_f32:
+                    vf = vector.BitCastOp(v4f32, raw).result
+                    acc = vf if acc is None else acc + vf
+                else:
+                    v16 = vector.BitCastOp(v8f16, raw).result
+                    v32 = arith.ExtFOp(v8f32, v16).result
+                    acc = v32 if acc is None else acc + v32
+
+            # Bitcast accumulated result to v4i32 and store 16 bytes
+            if is_f32:
+                out_bits = vector.BitCastOp(ir.VectorType.get([4], i32), acc).result
+            else:
+                from flydsl._mlir.dialects import llvm
+                out_bits = llvm.BitcastOp(
+                    ir.VectorType.get([4], i32), acc.truncf(v8f16)).result
+
+            dst_off = arith.ExtUIOp(i64, p).result * ea.constant(16, type=i64)
+            _st_16b(out_ptr_i64 + dst_off, out_bits)
+
+            scf.YieldOp([p + stride_p])
+
+        _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
+                         self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size)
 
     # -----------------------------------------------------------------------
     # GPU Kernel: 2-stage arr (reduce-scatter + all-gather)
@@ -625,6 +716,22 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # -----------------------------------------------------------------------
 
     @flyc.jit
+    def run_1stage_arr(
+        rank: Int32,
+        grid_x: Int32,
+        self_sg: Int64,
+        sg_ptrs: Int64,
+        in_ptrs: Int64,
+        out_ptr: Int64,
+        stream: Stream = Stream(None),
+    ):
+        allreduce_1stage_arr(rank, self_sg, sg_ptrs, in_ptrs, out_ptr).launch(
+            grid=(grid_x, 1, 1),
+            block=(threads, 1, 1),
+            stream=stream,
+        )
+
+    @flyc.jit
     def run_2stage_arr(
         rank: Int32,
         grid_x: Int32,
@@ -663,10 +770,12 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     # Unique function names per (N, dtype_str, world_size, threads) to prevent
     # file-cache collisions (N is baked into kernel body, not the cache key).
     _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}"
-    run_2stage_arr.func.__name__ = f"run_2stage_arr{_suffix}"
+    run_1stage_arr.func.__name__        = f"run_1stage_arr{_suffix}"
+    run_2stage_arr.func.__name__        = f"run_2stage_arr{_suffix}"
     run_2stage_write_mode.func.__name__ = f"run_2stage_write_mode{_suffix}"
 
     return {
+        "run_1stage_arr": run_1stage_arr,
         "run_2stage_arr": run_2stage_arr,
         "run_2stage_write_mode": run_2stage_write_mode,
     }
