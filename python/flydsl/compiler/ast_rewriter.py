@@ -46,6 +46,7 @@ def _unwrap_constexpr(node):
 class ASTRewriter:
     transformers: List = []
     rewrite_globals: dict = {}
+    _function_marker = "__flydsl_ast_rewritten__"
 
     @classmethod
     def register(cls, transformer):
@@ -56,6 +57,8 @@ class ASTRewriter:
 
     @classmethod
     def transform(cls, f):
+        if getattr(f, cls._function_marker, False):
+            return f
         if not cls.transformers:
             return f
 
@@ -116,6 +119,7 @@ class ASTRewriter:
         for name, val in cls.rewrite_globals.items():
             f.__globals__[name] = val
 
+        setattr(f, cls._function_marker, True)
         return f
 
 
@@ -340,9 +344,14 @@ class InsertEmptyYieldForSCFFor(Transformer):
     @staticmethod
     def _to_index(val):
         if isinstance(val, ir.Value):
-            return val
+            if val.type == ir.IndexType.get():
+                return val
+            return arith.IndexCastOp(ir.IndexType.get(), val).result
         if hasattr(val, "ir_value"):
-            return val.ir_value()
+            raw = val.ir_value()
+            if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
+                return arith.IndexCastOp(ir.IndexType.get(), raw).result
+            return raw
         return arith.ConstantOp(ir.IndexType.get(), val).result
 
     @staticmethod
