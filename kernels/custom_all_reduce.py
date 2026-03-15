@@ -423,29 +423,49 @@ class FlyDSLAllreduce:
         use_write_mode: bool = False,
         stream_ptr: int | None = None,
     ):
-        """Launch 2-stage allreduce kernel."""
+        """Launch allreduce kernel (1-stage or 2-stage depending on env FLYDSL_ALLREDUCE_STAGE)."""
+        from flydsl.expr.typing import Int32, Int64, Stream
+
+        import os as _os
+        _stage = str(_os.environ.get("FLYDSL_ALLREDUCE_STAGE", "2")).strip()
         try:
-            grid_x = self._grid_x_cache[(int(N), str(dtype_str))]
+            grid_x = self._grid_x_cache[(int(N), str(dtype_str), _stage)]
         except Exception:
             pack_elems = 8 if dtype_str == "f16" else 4
             num_packs = int(N) // int(pack_elems)
-            part_p = int(num_packs) // int(self.world_size)
-            grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + self._threads - 1) // self._threads)))
-            self._grid_x_cache[(int(N), str(dtype_str))] = int(grid_x)
+            if _stage == "1":
+                # 1-stage: one thread per pack, grid covers all packs
+                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (num_packs + self._threads - 1) // self._threads)))
+            else:
+                part_p = int(num_packs) // int(self.world_size)
+                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + self._threads - 1) // self._threads)))
+            self._grid_x_cache[(int(N), str(dtype_str), _stage)] = int(grid_x)
 
         if stream_ptr is None:
             stream_ptr = int(torch.cuda.current_stream().cuda_stream)
 
         exe = self._compile(N=N, dtype_str=dtype_str)
 
-        if use_write_mode:
-            exe.run_2stage_write_mode(
-                self.rank, grid_x, self._self_sg,
-                int(self._gpu_sg_ptrs_array.data_ptr()),
-                inp_ptr,
-                int(gpu_out_ptrs_array.data_ptr()),
-                int(self._gpu_tmp_ptrs_nonrotated_array.data_ptr()),
-                stream_ptr,
+        if _stage == "1" and not use_write_mode:
+            fns["run_1stage_arr"](
+                Int32(self.rank),
+                Int32(grid_x),
+                Int64(self._self_sg),
+                Int64(int(self._gpu_sg_ptrs_array.data_ptr())),
+                Int64(int(gpu_in_ptrs_array.data_ptr())),
+                Int64(int(out_ptr)),
+                stream=stream_obj,
+            )
+        elif use_write_mode:
+            fns["run_2stage_write_mode"](
+                Int32(self.rank),
+                Int32(grid_x),
+                Int64(self._self_sg),
+                Int64(int(self._gpu_sg_ptrs_array.data_ptr())),
+                Int64(int(inp_ptr)),
+                Int64(int(gpu_out_ptrs_array.data_ptr())),
+                Int64(int(self._gpu_tmp_ptrs_nonrotated_array.data_ptr())),
+                stream=stream_obj,
             )
         else:
             exe.run_2stage_arr(
