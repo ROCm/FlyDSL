@@ -2533,7 +2533,11 @@ def compile_moe_gemm2(
     return launch_moe_gemm2
 
 
-# MoE Reduction Kernel (reduce sum over topk dimension)
+# MoE Reduction Kernel — vectorized buffer_load (vec_width=4)
+#
+# Performs: Y[t, d] = sum(X[t, :, d])  for all t, d
+# Uses vec4 buffer_load/store (2 loads per topk slot per thread) with f32
+# accumulation. soffset_bytes encodes the compile-time topk stride.
 @functools.lru_cache(maxsize=1024)
 def compile_moe_reduction(
     *,
@@ -2551,103 +2555,147 @@ def compile_moe_reduction(
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
     When use_mask=True, only sums slots where valid_mask[t,k]=1.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
+
+    Args:
+        topk: Number of expert slots to reduce.
+        model_dim: Hidden dimension (must be >= VEC_WIDTH for fast path).
+        dtype_str: Element type — ``"f16"`` | ``"bf16"`` | ``"f32"``.
+        use_mask: If True, applies valid_mask to filter accumulated values.
+
+    Returns:
+        A compiled executable callable as ``exe(X, Y, valid_mask, m_tokens, stream)``.
     """
-    gpu_arch = get_hip_arch()
-    DYN = ir.ShapedType.get_dynamic_size()
-
-    # Kernel Config
     BLOCK_SIZE = 256
-    VEC_WIDTH = 8
-    USE_NONTEMPORAL = True
-    VEC_ALIGN = 16
+    VEC_WIDTH = 8        # elements per thread
+    VEC4 = 4             # elements per buffer_load
+    NUM_VEC_GROUPS = VEC_WIDTH // VEC4   # 2
 
-    masked = "masked" if use_mask else ""
-
-    if dtype_str == "f32":
-        elem_type_tag = "f32"
-    elif dtype_str == "f16":
-        elem_type_tag = "f16"
-    elif dtype_str == "bf16":
-        elem_type_tag = "bf16"
-    else:
+    ELEM_BYTES = 4 if dtype_str == "f32" else 2
+    if dtype_str not in ("f16", "bf16", "f32"):
         raise ValueError(f"Unsupported dtype: {dtype_str}")
+
+    # Topk stride in bytes — compile-time constant folded into soffset
+    TOPK_STRIDE_BYTES = model_dim * ELEM_BYTES
+
     compute_type = lambda: (T.f32() if callable(T.f32) else T.f32)
     i32_type = lambda: (T.i32() if callable(T.i32) else T.i32)
     i8_type = lambda: (T.i8() if callable(T.i8) else T.i8)
 
     def elem_type():
-        ty = T.f32 if elem_type_tag == "f32" else (T.f16 if elem_type_tag == "f16" else T.bf16)
+        ty = T.f32 if dtype_str == "f32" else (T.f16 if dtype_str == "f16" else T.bf16)
         return ty() if callable(ty) else ty
 
-    if True:
-        @flyc.kernel
-        def moe_reduction_kernel(
-            X: fx.Tensor,
-            Y: fx.Tensor,
-            valid_mask: fx.Tensor,
-            i32_m_tokens: fx.Int32,
-        ):
-            m_tokens = arith.index_cast(T.index, i32_m_tokens.ir_value())
-            c_topk = arith.index(topk)
-            c_model_dim = arith.index(model_dim)
-            c_elem_bytes = arith.index(4 if dtype_str == "f32" else 2)
-            x_nbytes_idx = m_tokens * c_topk * c_model_dim * c_elem_bytes
-            y_nbytes_idx = m_tokens * c_model_dim * c_elem_bytes
-            mask_nbytes_idx = m_tokens * c_topk
-            x_rsrc = buffer_ops.create_buffer_resource(
-                X, max_size=False, num_records_bytes=x_nbytes_idx
-            )
-            y_rsrc = buffer_ops.create_buffer_resource(
-                Y, max_size=False, num_records_bytes=y_nbytes_idx
-            )
-            mask_rsrc = buffer_ops.create_buffer_resource(
-                valid_mask, max_size=False, num_records_bytes=mask_nbytes_idx
-            )
+    def vec4_elem_type():
+        return T.vec(VEC4, elem_type())
 
-            token_idx = gpu.block_id("x")
-            tile_idx = gpu.block_id("y")
-            tid = gpu.thread_id("x")
+    def vec4_compute_type():
+        return T.vec(VEC4, compute_type())
 
-            # Guard: token in range
-            token_i32 = arith.index_cast(i32_type(), token_idx)
-            m_tokens_i32 = arith.index_cast(i32_type(), m_tokens)
-            tok_ok = arith.cmpi(arith.CmpIPredicate.ult, token_i32, m_tokens_i32)
-            _if_tok = scf.IfOp(tok_ok)
-            with _if_then(_if_tok):
-                tile_cols = BLOCK_SIZE * VEC_WIDTH
-                c_tile_cols = arith.index(tile_cols)
-                c_vecw = arith.index(VEC_WIDTH)
+    @flyc.kernel
+    def moe_reduction_kernel(
+        X: fx.Tensor,
+        Y: fx.Tensor,
+        valid_mask: fx.Tensor,
+        i32_m_tokens: fx.Int32,
+    ):
+        m_tokens = arith.index_cast(T.index, i32_m_tokens.ir_value())
+        c_topk = arith.index(topk)
+        c_model_dim = arith.index(model_dim)
+        c_elem_bytes = arith.index(ELEM_BYTES)
 
-                col_base = tile_idx * c_tile_cols + tid * c_vecw
+        # Buffer resources with dynamic size bounds
+        x_rsrc = buffer_ops.create_buffer_resource(
+            X, max_size=False,
+            num_records_bytes=m_tokens * c_topk * c_model_dim * c_elem_bytes,
+        )
+        y_rsrc = buffer_ops.create_buffer_resource(
+            Y, max_size=False,
+            num_records_bytes=m_tokens * c_model_dim * c_elem_bytes,
+        )
+        mask_rsrc = buffer_ops.create_buffer_resource(
+            valid_mask, max_size=False,
+            num_records_bytes=m_tokens * c_topk,
+        )
 
-                # Guard: any work in bounds
-                col_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                    arith.index_cast(i32_type(), col_base),
-                    arith.index_cast(i32_type(), c_model_dim),
-                )
-                _if_col = scf.IfOp(col_ok)
-                with _if_then(_if_col):
-                    acc = [arith.constant(0.0, type=compute_type()) for _ in range(VEC_WIDTH)]
+        token_idx = gpu.block_id("x")
+        tile_idx = gpu.block_id("y")
+        tid = gpu.thread_id("x")
 
-                    # Fast path: full vector in-bounds -> vector load/store.
-                    end_ok = arith.cmpi(arith.CmpIPredicate.ule,
-                        arith.index_cast(i32_type(), col_base + c_vecw),
-                        arith.index_cast(i32_type(), c_model_dim),
-                    )
-                    _if_full = scf.IfOp(end_ok, has_else=True)
-                    with _if_then(_if_full):
+        # Guard: token in range
+        token_i32 = arith.index_cast(i32_type(), token_idx)
+        m_tokens_i32 = arith.index_cast(i32_type(), m_tokens)
+        tok_ok = arith.cmpi(arith.CmpIPredicate.ult, token_i32, m_tokens_i32)
+        _if_tok = scf.IfOp(tok_ok)
+        with _if_then(_if_tok):
+            tile_cols = BLOCK_SIZE * VEC_WIDTH
+            c_vecw = arith.index(VEC_WIDTH)
+            col_base = tile_idx * arith.index(tile_cols) + tid * c_vecw
+
+            # Guard: first element of this thread's chunk in bounds
+            col_base_i32 = arith.index_cast(i32_type(), col_base)
+            model_dim_i32 = arith.index_cast(i32_type(), c_model_dim)
+            col_ok = arith.cmpi(arith.CmpIPredicate.ult, col_base_i32, model_dim_i32)
+            _if_col = scf.IfOp(col_ok)
+            with _if_then(_if_col):
+                # Fast path: full VEC_WIDTH elements in-bounds → vec4 load/store
+                col_end_i32 = arith.index_cast(i32_type(), col_base + c_vecw)
+                end_ok = arith.cmpi(arith.CmpIPredicate.ule, col_end_i32, model_dim_i32)
+                _if_full = scf.IfOp(end_ok, has_else=True)
+                with _if_then(_if_full):
+                    token_base = token_idx * c_topk
+
+                    # Pre-load mask values (hoisted out of inner loops)
+                    if use_mask:
                         c0_i8 = arith.constant(0, type=i8_type())
-                        token_base = token_idx * c_topk
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + arith.index(lane)
+                        mask_vals = []
+                        for k in range_constexpr(topk):
+                            m_idx_i32 = arith.index_cast(i32_type(), token_base + arith.index(k))
+                            mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
+                            mask_vals.append(arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8))
+
+                    # Base element offset for k=0; topk stride via soffset_bytes
+                    x_base_elem = token_base * c_model_dim
+
+                    for vg in range_constexpr(NUM_VEC_GROUPS):
+                        col = col_base + arith.index(vg * VEC4)
+                        x_vg_i32 = arith.index_cast(i32_type(), x_base_elem + col)
+                        acc = arith.constant_vector(0.0, vec4_compute_type())
+
+                        for k in range_constexpr(topk):
+                            v = buffer_ops.buffer_load(
+                                x_rsrc, x_vg_i32, vec_width=VEC4,
+                                dtype=elem_type(),
+                                soffset_bytes=k * TOPK_STRIDE_BYTES,
+                            )
+                            if use_mask:
+                                v = arith.select(
+                                    mask_vals[k], v,
+                                    arith.constant_vector(0.0, vec4_elem_type()),
+                                )
+                            if dtype_str in ("f16", "bf16"):
+                                v = arith.extf(vec4_compute_type(), v)
+                            acc = arith.addf(acc, v)
+
+                        result = arith.trunc_f(vec4_elem_type(), acc) if dtype_str in ("f16", "bf16") else acc
+                        y_idx_i32 = arith.index_cast(i32_type(), token_idx * c_model_dim + col)
+                        buffer_ops.buffer_store(result, y_rsrc, y_idx_i32)
+
+                with _if_else(_if_full):
+                    # Tail path: per-lane scalar load/store for partial vectors
+                    token_base = token_idx * c_topk
+                    for lane in range_constexpr(VEC_WIDTH):
+                        col = col_base + arith.index(lane)
+                        lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
+                            arith.index_cast(i32_type(), col), model_dim_i32)
+                        _if_lane = scf.IfOp(lane_ok)
+                        with _if_then(_if_lane):
                             a = arith.constant(0.0, type=compute_type())
                             for k in range_constexpr(topk):
-                                k_idx = arith.index(k)
-                                x_idx = (token_base + k_idx) * c_model_dim + col
-                                x_idx_i32 = arith.index_cast(i32_type(), x_idx)
+                                x_idx_i32 = arith.index_cast(i32_type(),
+                                    (token_base + arith.index(k)) * c_model_dim + col)
                                 if use_mask:
-                                    m_idx = token_base + k_idx
-                                    m_idx_i32 = arith.index_cast(i32_type(), m_idx)
+                                    c0_i8 = arith.constant(0, type=i8_type())
+                                    m_idx_i32 = arith.index_cast(i32_type(), token_base + arith.index(k))
                                     mv = buffer_ops.buffer_load(mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type())
                                     mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
                                     v = arith.select(
@@ -2660,58 +2708,10 @@ def compile_moe_reduction(
                                 if dtype_str in ("f16", "bf16"):
                                     v = arith.extf(compute_type(), v)
                                 a = a + v
-                            v = a
-                            if dtype_str in ("f16", "bf16"):
-                                v = arith.trunc_f(elem_type(), v)
-                            y_idx = token_idx * c_model_dim + col
-                            y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                            buffer_ops.buffer_store(v, y_rsrc, y_idx_i32)
+                            out = arith.trunc_f(elem_type(), a) if dtype_str in ("f16", "bf16") else a
+                            y_idx_i32 = arith.index_cast(i32_type(), token_idx * c_model_dim + col)
+                            buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
 
-                    with _if_else(_if_full):
-                        # Tail path: scalar load/store per lane.
-                        for lane in range_constexpr(VEC_WIDTH):
-                            col = col_base + arith.index(lane)
-                            lane_ok = arith.cmpi(arith.CmpIPredicate.ult,
-                                arith.index_cast(i32_type(), col),
-                                arith.index_cast(i32_type(), c_model_dim),
-                            )
-                            _if_lane = scf.IfOp(lane_ok)
-                            with _if_then(_if_lane):
-                                a = arith.constant(0.0, type=compute_type())
-                                token_base = token_idx * c_topk
-                                c0_i8 = arith.constant(0, type=i8_type())
-                                for k in range_constexpr(topk):
-                                    k_idx = arith.index(k)
-                                    x_idx = (token_base + k_idx) * c_model_dim + col
-                                    x_idx_i32 = arith.index_cast(i32_type(), x_idx)
-                                    if use_mask:
-                                        m_idx = token_base + k_idx
-                                        m_idx_i32 = arith.index_cast(i32_type(), m_idx)
-                                        mv = buffer_ops.buffer_load(
-                                            mask_rsrc, m_idx_i32, vec_width=1, dtype=i8_type()
-                                        )
-                                        mv_ok = arith.cmpi(arith.CmpIPredicate.ne, mv, c0_i8)
-                                        v = arith.select(
-                                            mv_ok,
-                                            buffer_ops.buffer_load(x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()),
-                                            arith.constant(0.0, type=elem_type()),
-                                        )
-                                    else:
-                                        v = buffer_ops.buffer_load(
-                                            x_rsrc, x_idx_i32, vec_width=1, dtype=elem_type()
-                                        )
-                                    if dtype_str in ("f16", "bf16"):
-                                        v = arith.extf(compute_type(), v)
-                                    a = a + v
-
-                                out = a
-                                if dtype_str in ("f16", "bf16"):
-                                    out = arith.trunc_f(elem_type(), out)
-                                y_idx = token_idx * c_model_dim + col
-                                y_idx_i32 = arith.index_cast(i32_type(), y_idx)
-                                buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
-
-    # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
     _cache_tag = (topk, model_dim, dtype_str, use_mask)
     tile_size = BLOCK_SIZE * VEC_WIDTH
     gy_static = (model_dim + tile_size - 1) // tile_size
