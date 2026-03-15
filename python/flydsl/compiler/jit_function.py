@@ -17,8 +17,10 @@ from .._mlir.passmanager import PassManager
 from ..runtime.device import get_rocm_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+import threading
+
 from ..expr.typing import Constexpr, Stream
-from .jit_argument import convert_to_jit_arguments, TensorAdaptor
+from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -436,17 +438,10 @@ class JitCacheManager:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
 
 
-def _build_fast_path_descriptor(sig, bound, jit_args, has_user_stream):
-    """Build a descriptor for fast pointer extraction on subsequent cache hits.
+def _build_fast_call_state(sig, bound, jit_args, has_user_stream, func_exe):
+    """Build a FastCallState for pre-allocated fast dispatch on subsequent cache hits.
 
-    Returns a list of (param_name_or_None, kind, n_ptrs) tuples where kind is:
-      'tensor'   - torch.Tensor → data_ptr
-      'int'      - int → c_int32
-      'stream'   - Stream → cuda_stream
-      'skip'     - Constexpr/Type param, not passed to JIT
-      'auto_stream' - auto-appended Stream(None)
-
-    n_ptrs is how many C pointers this arg contributes (determined from jit_args).
+    Returns a FastCallState, or None if the kernel can't be fast-pathed.
     """
     from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
 
@@ -458,11 +453,9 @@ def _build_fast_path_descriptor(sig, bound, jit_args, has_user_stream):
         annotation = param.annotation
 
         if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
-            descriptor.append((param_name, 'skip', 0))
             continue
 
         if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
-            descriptor.append((param_name, 'skip', 0))
             continue
 
         jit_arg = jit_args[jit_idx]
@@ -470,86 +463,94 @@ def _build_fast_path_descriptor(sig, bound, jit_args, has_user_stream):
         n_ptrs = len(ptrs)
 
         if isinstance(value, torch.Tensor):
-            descriptor.append((param_name, 'tensor', n_ptrs))
+            if n_ptrs != 1:
+                return None  # multi-ptr (dynamic stride) tensor, can't fast-path
+            descriptor.append((param_name, 'tensor'))
         elif isinstance(value, int) and annotation is not Stream:
-            descriptor.append((param_name, 'int', n_ptrs))
+            descriptor.append((param_name, 'int'))
         elif isinstance(value, Stream) or (isinstance(value, int) and annotation is Stream):
-            descriptor.append((param_name, 'stream', n_ptrs))
+            descriptor.append((param_name, 'stream'))
         elif isinstance(value, torch.cuda.streams.Stream):
-            descriptor.append((param_name, 'cuda_stream', n_ptrs))
-        elif isinstance(value, TensorAdaptor):
-            descriptor.append((param_name, 'tensor_adaptor', n_ptrs))
+            descriptor.append((param_name, 'cuda_stream'))
         else:
-            # Unknown type — can't fast-path
             return None
 
         jit_idx += 1
 
     if not has_user_stream:
-        # Auto-appended Stream(None) at the end
-        stream_arg = jit_args[jit_idx]
-        ptrs = fly_pointers(stream_arg)
-        descriptor.append((None, 'auto_stream', len(ptrs)))
+        descriptor.append((None, 'auto_stream'))
 
-    return descriptor
+    return FastCallState(descriptor, func_exe)
 
 
-def _fast_extract_ptrs(descriptor, bound_arguments):
-    """Extract C pointers directly from raw Python args using the descriptor.
+class FastCallState:
+    """Pre-allocated state for fast kernel dispatch.
 
-    Returns a list of ctypes.c_void_p, or None if extraction fails.
-    The _storage list keeps Python ctypes objects alive until the JIT call completes.
+    Pre-allocates typed ctypes storage and a packed pointer array at init time.
+    On each call, only updates .value on existing storage objects — no ctypes
+    object allocation, no pointer()/cast() calls. Uses thread-local storage
+    for thread safety.
     """
-    c_ptrs = []
-    _storage = []
 
-    for param_name, kind, n_ptrs in descriptor:
-        if kind == 'skip':
-            continue
-        elif kind == 'tensor':
-            tensor = bound_arguments[param_name]
-            # For static-layout tensors (n_ptrs == 1), we just need data_ptr
-            # For dynamic-layout tensors (n_ptrs == 2), we can't skip DLTensorAdaptor
-            if n_ptrs != 1:
-                return None, None
-            ptr_storage = ctypes.c_void_p(tensor.data_ptr())
-            _storage.append(ptr_storage)
-            c_ptrs.append(ctypes.cast(ctypes.pointer(ptr_storage), ctypes.c_void_p))
-        elif kind == 'int':
-            value = bound_arguments[param_name]
-            c_val = ctypes.c_int32(value)
-            _storage.append(c_val)
-            c_ptrs.append(ctypes.cast(ctypes.pointer(c_val), ctypes.c_void_p))
-        elif kind == 'stream':
-            value = bound_arguments[param_name]
-            if isinstance(value, Stream):
-                raw = value.value
-            else:
-                raw = value
-            if isinstance(raw, int):
-                ptr_storage = ctypes.c_void_p(raw)
-            elif raw is None:
-                ptr_storage = ctypes.c_void_p(0)
-            else:
-                ptr_storage = ctypes.c_void_p(raw.cuda_stream)
-            _storage.append(ptr_storage)
-            c_ptrs.append(ctypes.cast(ctypes.pointer(ptr_storage), ctypes.c_void_p))
-        elif kind == 'cuda_stream':
-            stream_obj = bound_arguments[param_name]
-            ptr_storage = ctypes.c_void_p(stream_obj.cuda_stream)
-            _storage.append(ptr_storage)
-            c_ptrs.append(ctypes.cast(ctypes.pointer(ptr_storage), ctypes.c_void_p))
-        elif kind == 'tensor_adaptor':
-            # TensorAdaptor passed directly — can't skip DLPack
-            return None, None
-        elif kind == 'auto_stream':
-            ptr_storage = ctypes.c_void_p(0)
-            _storage.append(ptr_storage)
-            c_ptrs.append(ctypes.cast(ctypes.pointer(ptr_storage), ctypes.c_void_p))
-        else:
-            return None, None
+    __slots__ = ('_func_exe', '_descriptor', '_n_ptrs', '_tls')
 
-    return c_ptrs, _storage
+    def __init__(self, descriptor, func_exe):
+        self._func_exe = func_exe
+        self._descriptor = descriptor
+        self._n_ptrs = len(descriptor)
+        self._tls = threading.local()
+
+    def _init_buffers(self):
+        """Create thread-local pre-allocated buffers."""
+        packed = (ctypes.c_void_p * self._n_ptrs)()
+        extractors = []
+
+        for idx, (param_name, kind) in enumerate(self._descriptor):
+            if kind == 'tensor':
+                s = ctypes.c_void_p(0)
+                packed[idx] = ctypes.addressof(s)
+                extractors.append((param_name, kind, s))
+            elif kind == 'int':
+                s = ctypes.c_int32(0)
+                packed[idx] = ctypes.addressof(s)
+                extractors.append((param_name, kind, s))
+            elif kind in ('stream', 'cuda_stream'):
+                s = ctypes.c_void_p(0)
+                packed[idx] = ctypes.addressof(s)
+                extractors.append((param_name, kind, s))
+            elif kind == 'auto_stream':
+                s = ctypes.c_void_p(0)
+                packed[idx] = ctypes.addressof(s)
+                # value stays 0, no extractor needed
+
+        self._tls.packed = packed
+        self._tls.extractors = extractors
+
+    def __call__(self, bound_arguments):
+        if not hasattr(self._tls, 'packed'):
+            self._init_buffers()
+
+        for param_name, kind, storage in self._tls.extractors:
+            if kind == 'tensor':
+                storage.value = bound_arguments[param_name].data_ptr()
+            elif kind == 'int':
+                storage.value = bound_arguments[param_name]
+            elif kind == 'cuda_stream':
+                storage.value = bound_arguments[param_name].cuda_stream
+            elif kind == 'stream':
+                val = bound_arguments[param_name]
+                if isinstance(val, Stream):
+                    raw = val.value
+                else:
+                    raw = val
+                if raw is None:
+                    storage.value = 0
+                elif isinstance(raw, int):
+                    storage.value = raw
+                else:
+                    storage.value = raw.cuda_stream
+
+        return self._func_exe(self._tls.packed)
 
 
 class JitFunction:
@@ -557,7 +558,9 @@ class JitFunction:
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
-        self._fast_path_cache = {}  # cache_key -> descriptor
+        self._fast_path_cache = {}  # cache_key -> FastCallState
+        self._sig = inspect.signature(self.func)
+        self._mem_cache = {}
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -571,20 +574,28 @@ class JitFunction:
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
 
-    def _make_cache_key(self, bound_args: Dict) -> str:
+    def _make_cache_key(self, bound_args: Dict):
+        """Build a tuple cache key (fast to construct and hash)."""
         key_parts = []
         for name, arg in bound_args.items():
-            key_parts.append(f"{name}:{self._get_type_signature(arg)}")
-        return "|".join(key_parts)
+            if isinstance(arg, torch.Tensor):
+                key_parts.append((name, arg.dtype, tuple(arg.shape)))
+            elif isinstance(arg, (int, float, bool)):
+                key_parts.append((name, type(arg), arg))
+            elif isinstance(arg, str):
+                key_parts.append((name, str, arg))
+            elif hasattr(arg, "__cache_signature__"):
+                key_parts.append((name, arg.__cache_signature__()))
+            else:
+                # Use type object (not name) to avoid collisions
+                # e.g. fx.Stream vs torch.cuda.streams.Stream
+                key_parts.append((name, type(arg)))
+        return tuple(key_parts)
 
-    def _get_type_signature(self, obj) -> str:
-        if hasattr(obj, "__cache_signature__"):
-            return obj.__cache_signature__()
-        elif hasattr(obj, "dtype") and hasattr(obj, "shape"):
-            return f"tensor[{obj.dtype},{obj.shape}]"
-        elif isinstance(obj, (int, float, bool, str)):
-            return f"{type(obj).__name__}:{obj}"
-        return type(obj).__name__
+    @staticmethod
+    def _cache_key_to_str(cache_key) -> str:
+        """Convert tuple cache key to string for disk cache."""
+        return str(cache_key)
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
@@ -592,54 +603,48 @@ class JitFunction:
 
         self._ensure_cache_manager()
 
-        if not hasattr(self, "_sig"):
-            self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
 
+        # Fast path: pre-allocated dispatch (no ctypes alloc, no DLPack)
+        fast_state = self._fast_path_cache.get(cache_key)
+        if fast_state is not None:
+            return fast_state(bound.arguments)
+
+        # Normal path: check caches
         cached_func = None
-        dump_ir = env.debug.dump_ir
         use_cache = env.runtime.enable_cache
-        if not hasattr(self, "_mem_cache"):
-            self._mem_cache = {}
         if use_cache:
-            compiled_func = self._mem_cache.get(cache_key)
-            if compiled_func is not None:
-                cached_func = compiled_func
-            elif not dump_ir:
-                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            cached_func = self._mem_cache.get(cache_key)
+            if cached_func is None and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+                if cached_func is not None:
+                    self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
-            # Fast path: if we have a descriptor for this cache_key,
-            # extract pointers directly without convert_to_jit_arguments
-            descriptor = self._fast_path_cache.get(cache_key)
-            if descriptor is not None:
-                c_ptrs, _storage = _fast_extract_ptrs(descriptor, bound.arguments)
-                if c_ptrs is not None:
-                    return cached_func.fast_call(c_ptrs)
-
-            # First cache hit or fast path failed: use normal path
-            # and record descriptor for next time
+            # First cache hit: use normal path, build FastCallState for next time
             if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
             with self._cached_ctx:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
                 has_user_stream = _ensure_stream_arg(jit_args)
-                # Record descriptor for future fast path
-                if descriptor is None:
-                    try:
-                        desc = _build_fast_path_descriptor(
-                            sig, bound, jit_args, has_user_stream
-                        )
-                        if desc is not None:
-                            self._fast_path_cache[cache_key] = desc
-                    except Exception:
-                        pass  # Silently fall back to normal path
-                return cached_func(*jit_args)
+                result = cached_func(*jit_args)
+                # Build FastCallState for subsequent calls
+                try:
+                    state = _build_fast_call_state(
+                        sig, bound, jit_args, has_user_stream,
+                        cached_func._get_func_exe(),
+                    )
+                    if state is not None:
+                        self._fast_path_cache[cache_key] = state
+                except Exception:
+                    pass
+                return result
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
@@ -695,8 +700,9 @@ class JitFunction:
 
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not dump_ir:
-                    self.cache_manager.set(cache_key, compiled_func)
+                if self.cache_manager and not env.debug.dump_ir:
+                    str_key = self._cache_key_to_str(cache_key)
+                    self.cache_manager.set(str_key, compiled_func)
 
             return compiled_func(*jit_args)
 
