@@ -59,8 +59,12 @@ if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
     git remote set-url origin https://github.com/ROCm/llvm-project.git
 fi
 
+<<<<<<< HEAD
 git fetch origin amd-staging
 >>>>>>> 56e7961 (flash_attn: add mfma_f32_32x32x8f16 wrapper and remove fp_math params)
+=======
+# git fetch origin amd-staging
+>>>>>>> e087936 (flash_attn: CK-aligned architecture with BLOCK_M=256, BLOCK_N=64, K=16 MFMA)
 git checkout "${LLVM_COMMIT}"
 
 # 1b. Apply FlyDSL patches (if any)

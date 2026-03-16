@@ -7,11 +7,11 @@ alias ll='ls -l --color=auto'
 alias ls='ls --color=auto'
 alias python='python3'
 
-# export HIP_VISIBLE_DEVICES=0
+export HIP_VISIBLE_DEVICES=0
 # export HIP_VISIBLE_DEVICES=1
 # export HIP_VISIBLE_DEVICES=3
 # export HIP_VISIBLE_DEVICES=4
-export HIP_VISIBLE_DEVICES=6
+# export HIP_VISIBLE_DEVICES=6
 # export HIP_VISIBLE_DEVICES=7
 
 MLIR_LIBS_DIR="$(cd "$(dirname "$0")" && pwd)/build-fly/python_packages/flydsl/_mlir/_mlir_libs"
