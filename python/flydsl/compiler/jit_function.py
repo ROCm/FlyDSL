@@ -16,22 +16,8 @@ from .._mlir.passmanager import PassManager
 from ..runtime.device import get_rocm_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
-from ..expr.typing import Constexpr, Stream
+from ..expr.typing import Stream
 from .jit_argument import convert_to_jit_arguments
-
-# Lazy torch import — avoid importing torch at module level (triggers CUDA init)
-_torch = None
-_torch_Tensor = None
-_torch_cuda_Stream = None
-
-def _get_torch():
-    global _torch, _torch_Tensor, _torch_cuda_Stream
-    if _torch is None:
-        import torch
-        _torch = torch
-        _torch_Tensor = torch.Tensor
-        _torch_cuda_Stream = torch.cuda.streams.Stream
-    return _torch
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -452,17 +438,18 @@ class JitCacheManager:
 def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe):
     """Build a FastCallState for pre-allocated fast dispatch on subsequent cache hits.
 
-    Uses positional indices into args_tuple for zero-dict-lookup dispatch.
+    Classifies args by their already-computed jit_arg type (from
+    convert_to_jit_arguments) rather than re-inspecting the original Python
+    values, and derives the ctypes storage type from jit_arg metadata.
     Returns a FastCallState, or None if the kernel can't be fast-pathed.
     """
-    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
+    from .jit_argument import TensorAdaptor, _is_constexpr_annotation, _is_type_param_annotation
 
-    extractors_spec = []  # list of (args_tuple_index, kind)
+    extractors_spec = []  # list of (args_tuple_index, kind, ctype)
     jit_idx = 0
 
     for i, (param_name, param) in enumerate(sig.parameters.items()):
         annotation = param.annotation
-        value = args_tuple[i]
 
         if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
             continue
@@ -472,101 +459,83 @@ def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe)
 
         jit_arg = jit_args[jit_idx]
         ptrs = fly_pointers(jit_arg)
-        n_ptrs = len(ptrs)
+        if len(ptrs) != 1:
+            return None
 
-        if isinstance(value, _torch_Tensor):
-            if n_ptrs != 1:
-                return None  # multi-ptr (dynamic stride) tensor, can't fast-path
-            extractors_spec.append((i, 'tensor'))
-        elif isinstance(value, int) and annotation is not Stream:
-            extractors_spec.append((i, 'int'))
-        elif isinstance(value, Stream) or (isinstance(value, int) and annotation is Stream):
-            extractors_spec.append((i, 'stream'))
-        elif isinstance(value, _torch_cuda_Stream):
-            extractors_spec.append((i, 'cuda_stream'))
+        if isinstance(jit_arg, TensorAdaptor):
+            extractors_spec.append((i, 'tensor', ctypes.c_void_p))
+        elif isinstance(jit_arg, Stream):
+            extractors_spec.append((i, 'stream', ctypes.c_void_p))
+        elif hasattr(type(jit_arg), 'width') and hasattr(type(jit_arg), 'signed'):
+            jit_type = type(jit_arg)
+            prefix = "c_int" if jit_type.signed else "c_uint"
+            ctype = getattr(ctypes, f"{prefix}{jit_type.width}")
+            extractors_spec.append((i, 'int', ctype))
         else:
             return None
 
         jit_idx += 1
 
     if not has_user_stream:
-        extractors_spec.append((-1, 'auto_stream'))
+        extractors_spec.append((-1, 'auto_stream', ctypes.c_void_p))
 
     return FastCallState(extractors_spec, func_exe)
-
-
-def _codegen_dispatch(extractors_spec, func_exe):
-    """Generate a specialized dispatch function with no loops or branches.
-
-    Emits straight-line Python like:
-        s0.value = a[0].data_ptr()   # tensor
-        s1.value = a[3]              # int
-        s2.value = a[7].cuda_stream  # cuda_stream
-        return _exe(_packed)
-    """
-    n_ptrs = len(extractors_spec)
-    packed = (ctypes.c_void_p * n_ptrs)()
-    storages = []
-    lines = []
-
-    for packed_idx, (arg_idx, kind) in enumerate(extractors_spec):
-        if kind in ('tensor', 'stream', 'cuda_stream', 'auto_stream'):
-            s = ctypes.c_void_p(0)
-        elif kind == 'int':
-            s = ctypes.c_int32(0)
-        else:
-            continue
-        packed[packed_idx] = ctypes.addressof(s)
-        storages.append(s)
-        si = f"s{len(storages) - 1}"
-
-        if kind == 'auto_stream':
-            continue
-        elif kind == 'tensor':
-            lines.append(f"  {si}.value = a[{arg_idx}].data_ptr()")
-        elif kind == 'int':
-            lines.append(f"  {si}.value = a[{arg_idx}]")
-        elif kind == 'cuda_stream':
-            lines.append(f"  {si}.value = a[{arg_idx}].cuda_stream")
-        elif kind == 'stream':
-            lines.append(f"  _v = a[{arg_idx}]")
-            lines.append(f"  _v = _v.value if _v.__class__ is _Stream else _v")
-            lines.append(f"  {si}.value = 0 if _v is None else (_v if isinstance(_v, int) else _v.cuda_stream)")
-
-    body = "\n".join(lines)
-    code = f"def _dispatch(a):\n{body}\n  return _exe(_packed)"
-
-    local_ns: dict = {"_packed": packed, "_exe": func_exe, "_Stream": Stream}
-    for i, s in enumerate(storages):
-        local_ns[f"s{i}"] = s
-    exec(compile(code, "<fast_dispatch>", "exec"), local_ns)
-    fn = local_ns["_dispatch"]
-    fn._keepalive = (packed, storages, func_exe)
-    return fn
 
 
 class FastCallState:
     """Pre-allocated state for fast kernel dispatch.
 
-    Uses code-generated straight-line dispatch (no loops, no branches).
-    Thread-local storage for thread safety; each thread gets its own
-    generated function + pre-allocated ctypes buffers.
+    Uses positional indices into args_tuple (not dict lookups).
+    Pre-allocates typed ctypes storage and a packed pointer array at init time.
+    On each call, only updates .value on existing storage objects — no ctypes
+    object allocation, no pointer()/cast() calls. Uses thread-local storage
+    for thread safety.
     """
 
-    __slots__ = ('_func_exe', '_spec', '_tls')
+    __slots__ = ('_func_exe', '_spec', '_n_ptrs', '_tls')
 
     def __init__(self, extractors_spec, func_exe):
         self._func_exe = func_exe
         self._spec = extractors_spec
+        self._n_ptrs = len(extractors_spec)
         self._tls = threading.local()
 
+    def _init_buffers(self):
+        packed = (ctypes.c_void_p * self._n_ptrs)()
+        storages = []
+        extractors = []
+
+        for packed_idx, (arg_idx, kind, ctype) in enumerate(self._spec):
+            s = ctype(0)
+            packed[packed_idx] = ctypes.addressof(s)
+            storages.append(s)
+            if kind != 'auto_stream':
+                extractors.append((arg_idx, kind, s))
+
+        self._tls.packed = packed
+        self._tls.extractors = extractors
+        self._tls._storages = storages
+
     def __call__(self, args_tuple):
-        tls = self._tls
-        dispatch = getattr(tls, 'dispatch', None)
-        if dispatch is None:
-            dispatch = _codegen_dispatch(self._spec, self._func_exe)
-            tls.dispatch = dispatch
-        return dispatch(args_tuple)
+        if not hasattr(self._tls, 'packed'):
+            self._init_buffers()
+
+        for arg_idx, kind, storage in self._tls.extractors:
+            arg = args_tuple[arg_idx]
+            if kind == 'tensor':
+                storage.value = arg.data_ptr()
+            elif kind == 'int':
+                storage.value = arg
+            elif kind == 'stream':
+                raw = arg.value if isinstance(arg, Stream) else arg
+                if raw is None:
+                    storage.value = 0
+                elif isinstance(raw, int):
+                    storage.value = raw
+                else:
+                    storage.value = raw.cuda_stream
+
+        return self._func_exe(self._tls.packed)
 
 
 class JitFunction:
@@ -580,15 +549,11 @@ class JitFunction:
         self._param_names = None
         self._n_params = 0
         self._param_defaults = {}
-        # Per-thread identity cache: skip _make_cache_key + dict lookup when
-        # all arg objects are identical to the previous call.
-        self._id_tls = threading.local()
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
-        _get_torch()  # ensure torch types are cached
         self._sig = inspect.signature(self.func)
         params = list(self._sig.parameters.values())
         self._param_names = tuple(p.name for p in params)
@@ -616,7 +581,7 @@ class JitFunction:
         names = self._param_names
         for i, arg in enumerate(args_tuple):
             name = names[i]
-            if isinstance(arg, _torch_Tensor):
+            if hasattr(arg, "dtype") and hasattr(arg, "shape"):
                 key_parts.append((name, arg.dtype, tuple(arg.shape)))
             elif isinstance(arg, (int, float, bool)):
                 key_parts.append((name, type(arg), arg))
@@ -648,7 +613,9 @@ class JitFunction:
                 return args
             if n_args < n_params:
                 defs = self._param_defaults
-                return args + tuple(defs[i] for i in range(n_args, n_params))
+                if all(i in defs for i in range(n_args, n_params)):
+                    return args + tuple(defs[i] for i in range(n_args, n_params))
+                return None
             return None  # too many args
         # Has kwargs: fill positions after positional args
         result = list(args)
@@ -665,31 +632,6 @@ class JitFunction:
         return tuple(result)
 
     def __call__(self, *args, **kwargs):
-        # Ultra-fast identity path: compare arg objects with `is` (pointer
-        # comparison) against the previous call.  Skips _fast_bind,
-        # _make_cache_key, and dict lookup entirely.
-        _itls = self._id_tls
-        _prev = getattr(_itls, 'dispatch', None)
-        if _prev is not None:
-            _la = _itls.prev_args
-            if len(args) == len(_la):
-                _match = True
-                for _i in range(len(args)):
-                    if args[_i] is not _la[_i]:
-                        _match = False
-                        break
-                if _match:
-                    _lk = _itls.prev_kwargs
-                    if len(kwargs) != len(_lk):
-                        _match = False
-                    else:
-                        for _k in kwargs:
-                            if kwargs[_k] is not _lk.get(_k):
-                                _match = False
-                                break
-                if _match:
-                    return _prev(_itls.prev_at)
-
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
@@ -707,15 +649,7 @@ class JitFunction:
         # Fast path: pre-allocated dispatch (no ctypes alloc, no DLPack, no dict)
         fast_state = self._fast_path_cache.get(cache_key)
         if fast_state is not None:
-            result = fast_state(args_tuple)
-            # Populate identity cache for next call (thread-local, safe)
-            _gen = getattr(fast_state._tls, 'dispatch', None)
-            if _gen is not None:
-                _itls.dispatch = _gen
-                _itls.prev_args = args
-                _itls.prev_kwargs = kwargs
-                _itls.prev_at = args_tuple
-            return result
+            return fast_state(args_tuple)
 
         # Normal path: check caches
         cached_func = None
@@ -748,8 +682,8 @@ class JitFunction:
                     )
                     if state is not None:
                         self._fast_path_cache[cache_key] = state
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log().debug(f"FastCallState build failed: {exc}")
                 return result
 
         # Cache miss: full compilation (sig.bind needed for convert_to_jit_arguments)

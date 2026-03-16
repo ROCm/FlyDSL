@@ -110,11 +110,6 @@ class CompiledArtifact:
         packed_args = self._packer.pack(all_c_ptrs)
         return func_exe(packed_args)
 
-    def fast_call(self, c_ptrs: List[ctypes.c_void_p]):
-        func_exe = self._get_func_exe()
-        packed_args = self._packer.pack(c_ptrs)
-        return func_exe(packed_args)
-
     def dump(self, compiled: bool = True):
         if compiled:
             print("=" * 60)
