@@ -466,7 +466,7 @@ def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe)
             extractors_spec.append((i, 'tensor', ctypes.c_void_p))
         elif isinstance(jit_arg, Stream):
             extractors_spec.append((i, 'stream', ctypes.c_void_p))
-        elif hasattr(type(jit_arg), 'width') and hasattr(type(jit_arg), 'signed'):
+        elif hasattr(type(jit_arg), 'width') and getattr(type(jit_arg), 'signed', None) is not None:
             jit_type = type(jit_arg)
             prefix = "c_int" if jit_type.signed else "c_uint"
             ctype = getattr(ctypes, f"{prefix}{jit_type.width}")
@@ -546,22 +546,12 @@ class JitFunction:
         self._fast_path_cache = {}  # cache_key -> FastCallState
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
-        self._param_names = None
-        self._n_params = 0
-        self._param_defaults = {}
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
             return
         self._sig = inspect.signature(self.func)
-        params = list(self._sig.parameters.values())
-        self._param_names = tuple(p.name for p in params)
-        self._n_params = len(params)
-        self._param_defaults = {}
-        for i, p in enumerate(params):
-            if p.default is not inspect.Parameter.empty:
-                self._param_defaults[i] = p.default
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -575,61 +565,38 @@ class JitFunction:
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
 
-    def _make_cache_key(self, args_tuple):
-        """Build a tuple cache key from positional args (fast to construct and hash)."""
+    @staticmethod
+    def _arg_cache_sig(arg):
+        """Cache signature for a single argument value."""
+        if hasattr(arg, "dtype") and hasattr(arg, "shape"):
+            strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
+            return (arg.dtype, tuple(arg.shape), strides)
+        elif isinstance(arg, (int, float, bool)):
+            return (type(arg), arg)
+        elif isinstance(arg, str):
+            return (str, arg)
+        elif hasattr(arg, "__cache_signature__"):
+            return arg.__cache_signature__()
+        else:
+            # Value-independent types (e.g. Stream): only the type
+            # matters for compilation. Types whose values affect codegen
+            # should implement __cache_signature__.
+            return type(arg)
+
+    def _make_cache_key(self, bound_args):
+        """Build a tuple cache key from bound arguments."""
         key_parts = []
-        names = self._param_names
-        for i, arg in enumerate(args_tuple):
-            name = names[i]
-            if hasattr(arg, "dtype") and hasattr(arg, "shape"):
-                key_parts.append((name, arg.dtype, tuple(arg.shape)))
-            elif isinstance(arg, (int, float, bool)):
-                key_parts.append((name, type(arg), arg))
-            elif isinstance(arg, str):
-                key_parts.append((name, str, arg))
-            elif hasattr(arg, "__cache_signature__"):
-                key_parts.append((name, arg.__cache_signature__()))
+        for name, arg in bound_args.items():
+            if isinstance(arg, tuple):
+                key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
-                # Use type object (not name) to avoid collisions
-                # e.g. fx.Stream vs torch.cuda.streams.Stream
-                key_parts.append((name, type(arg)))
+                key_parts.append((name, self._arg_cache_sig(arg)))
         return tuple(key_parts)
 
     @staticmethod
     def _cache_key_to_str(cache_key) -> str:
         """Convert tuple cache key to string for disk cache."""
         return str(cache_key)
-
-    def _fast_bind(self, args, kwargs):
-        """Fast positional bind — returns tuple of all arg values in param order.
-
-        Bypasses inspect.Signature.bind (~6µs) by using pre-computed param
-        metadata. Returns None for unusual cases (fall back to sig.bind).
-        """
-        n_args = len(args)
-        n_params = self._n_params
-        if not kwargs:
-            if n_args == n_params:
-                return args
-            if n_args < n_params:
-                defs = self._param_defaults
-                if all(i in defs for i in range(n_args, n_params)):
-                    return args + tuple(defs[i] for i in range(n_args, n_params))
-                return None
-            return None  # too many args
-        # Has kwargs: fill positions after positional args
-        result = list(args)
-        names = self._param_names
-        defs = self._param_defaults
-        for i in range(n_args, n_params):
-            name = names[i]
-            if name in kwargs:
-                result.append(kwargs[name])
-            elif i in defs:
-                result.append(defs[i])
-            else:
-                return None  # missing required arg
-        return tuple(result)
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
@@ -638,13 +605,13 @@ class JitFunction:
         self._ensure_sig()
         self._ensure_cache_manager()
 
-        args_tuple = self._fast_bind(args, kwargs)
-        if args_tuple is None:
-            bound = self._sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            args_tuple = tuple(bound.arguments.values())
+        sig = self._sig
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
 
-        cache_key = self._make_cache_key(args_tuple)
+        cache_key = self._make_cache_key(bound.arguments)
+
+        args_tuple = tuple(bound.arguments.values())
 
         # Fast path: pre-allocated dispatch (no ctypes alloc, no DLPack, no dict)
         fast_state = self._fast_path_cache.get(cache_key)
@@ -663,10 +630,6 @@ class JitFunction:
                     self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
-            # First cache hit: use normal path, build FastCallState for next time
-            sig = self._sig
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
             if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
@@ -685,11 +648,6 @@ class JitFunction:
                 except Exception as exc:
                     log().debug(f"FastCallState build failed: {exc}")
                 return result
-
-        # Cache miss: full compilation (sig.bind needed for convert_to_jit_arguments)
-        sig = self._sig
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)

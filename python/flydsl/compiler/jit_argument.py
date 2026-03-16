@@ -149,6 +149,9 @@ class TensorAdaptor:
         self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
+        self._orig_dtype = tensor.dtype
+        self._orig_shape = tensor.shape
+        self._orig_strides = tensor.stride()
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):
@@ -164,6 +167,15 @@ class TensorAdaptor:
     @requires_memref_desc
     def __fly_ptrs__(self):
         return self.tensor_adaptor.get_c_pointers()
+
+    def __cache_signature__(self):
+        return (
+            self._orig_dtype,
+            tuple(self._orig_shape),
+            tuple(self._orig_strides),
+            self.assumed_align,
+            self.use_32bit_stride,
+        )
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:
