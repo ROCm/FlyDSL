@@ -12,9 +12,9 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..runtime.device import get_rocm_arch, is_rdna_arch
+from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
-from ..expr.typing import Stream
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -24,8 +24,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_types, fly_construct
-
+from .protocol import fly_construct, fly_types
 
 
 @lru_cache(maxsize=1)
@@ -78,9 +77,14 @@ def _flydsl_key() -> str:
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
-        so_patterns = ["_fly*.so", "_fly_rocdl*.so", "libFly*.so",
-                       "libfly_jit_runtime.so", "libmlir_rocm_runtime.so",
-                       "_mlirRegisterEverything*.so"]
+        so_patterns = [
+            "_fly*.so",
+            "_fly_rocdl*.so",
+            "libFly*.so",
+            "libfly_jit_runtime.so",
+            "libmlir_rocm_runtime.so",
+            "_mlirRegisterEverything*.so",
+        ]
         for pattern in so_patterns:
             for so_file in sorted(mlir_libs_dir.glob(pattern)):
                 h = hashlib.sha256()
@@ -171,9 +175,10 @@ def _jit_function_cache_key(func: Callable) -> str:
 def _stage_label_from_fragment(fragment: str) -> str:
     """Make a stable, filename-friendly label from a pipeline fragment."""
     import re as _re
+
     base = fragment.strip()
     if base.startswith("gpu.module(") and base.endswith(")"):
-        base = base[len("gpu.module("):-1].strip()
+        base = base[len("gpu.module(") : -1].strip()
     base = base.split("{", 1)[0].strip()
     base = _re.sub(r"[^0-9A-Za-z]+", "_", base).strip("_").lower()
     return base or "stage"
@@ -209,10 +214,10 @@ def _extract_isa_text(mlir_asm: str) -> str:
         ch = mlir_asm[i]
         if ch == '"':
             break
-        if ch == '\\' and i + 1 < len(mlir_asm):
+        if ch == "\\" and i + 1 < len(mlir_asm):
             nxt = mlir_asm[i + 1]
-            if nxt == '\\':
-                chars.append('\\')
+            if nxt == "\\":
+                chars.append("\\")
                 i += 2
                 continue
             if nxt == '"':
@@ -221,7 +226,7 @@ def _extract_isa_text(mlir_asm: str) -> str:
                 continue
             # MLIR hex escape: \XX
             if i + 3 <= len(mlir_asm):
-                hex_str = mlir_asm[i + 1:i + 3]
+                hex_str = mlir_asm[i + 1 : i + 3]
                 try:
                     chars.append(chr(int(hex_str, 16)))
                     i += 3
@@ -231,11 +236,10 @@ def _extract_isa_text(mlir_asm: str) -> str:
         chars.append(ch)
         i += 1
 
-    return ''.join(chars)
+    return "".join(chars)
 
 
-def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str,
-              verify: bool, stage_name: str = "15_final_isa"):
+def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_name: str = "15_final_isa"):
     """Best-effort dump of final GPU ISA/assembly (.s).
 
     Runs ``gpu-module-to-binary{format=isa}`` on a *cloned* module so the
@@ -281,6 +285,7 @@ def _infer_kernel_names_from_asm(asm: str) -> list:
 
 def _sanitize_path_component(s: str) -> str:
     import re as _re
+
     s = str(s).strip()
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
@@ -301,7 +306,7 @@ class MlirCompiler:
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
-            "fly-gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
+            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
@@ -532,7 +537,7 @@ class JitFunction:
                         ir_args = list(func_op.regions[0].blocks[0].arguments)
                         if not has_user_stream:
                             comp_ctx.stream_arg = ir_args[-1]
-                        user_jit_args = jit_args[:len(param_names)]
+                        user_jit_args = jit_args[: len(param_names)]
                         dsl_args = fly_construct(dsl_types, user_jit_args, ir_args)
                         log().info(f"dsl_args={dsl_args}")
                         named_args = dict(zip(param_names, dsl_args))

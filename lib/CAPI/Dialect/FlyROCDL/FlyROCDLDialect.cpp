@@ -80,5 +80,3 @@ int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type) {
 //===----------------------------------------------------------------------===//
 
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
-
-void mlirRegisterFlyGpuToLLVMPass(void) { mlir::registerFlyGpuToLLVMPass(); }
