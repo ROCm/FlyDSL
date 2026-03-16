@@ -228,64 +228,50 @@ def compile_pa_decode_sw(
         part_end = (seq_end + c_cps - c_one) // c_cps + block_split_idx
 
         # ════════════════════════════════════════════════════════════
-        # scf.for loop: process multiple partitions per CTA
-        # Loop-carried state: [running_max, running_sum, outelems[0], outelems[1]]
+        # Helper: load K data for a partition index → flat list of _N_K i64
         # ════════════════════════════════════════════════════════════
-        def _unwrap(v):
-            return v.ir_value() if hasattr(v, 'ir_value') else v
+        _N_K = TLOOP * QKHELOOP * 2  # 16
 
-        def _pack_state(rmax, rsum, o0, o1):
-            return [_unwrap(rmax), _unwrap(rsum), _unwrap(o0), _unwrap(o1)]
-
-        _loop_start = arith.index_cast(T.index, arith.unwrap(part_start))
-        _loop_stop = arith.index_cast(T.index, arith.unwrap(part_end))
-        _loop_step = arith.index(int(_cpb))
-
-        init_state = _pack_state(
-            NEG_INF, ZERO_F,
-            arith.constant_vector(0.0, T.f32x4),
-            arith.constant_vector(0.0, T.f32x4))
-
-        for iv, state in range(_loop_start, _loop_stop, _loop_step,
-                               init=init_state):
-            running_max = state[0]
-            running_sum = state[1]
-            out0 = state[2]
-            out1 = state[3]
-
-            part_idx = arith.index_cast(T.i32, iv)
-            partition_start = part_idx * c_cps
-
-            # ── Stage 2: K load ──
-            k_ops_all = []
+        def _load_k_flat(part_idx_i32):
+            pstart = part_idx_i32 * c_cps
+            k_flat = []
             for td in range_constexpr(TLOOP):
-                klocal_token_idx = (warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
-                                    + arith.constant(td * MFMA_N, type=T.i32) + lane16id)
-                kglobal_token_idx = partition_start + klocal_token_idx
-                kblock_idx = kglobal_token_idx // arith.constant(_bs, type=T.i32)
-                kblock_off = kglobal_token_idx % arith.constant(_bs, type=T.i32)
-                kphys = buffer_ops.buffer_load(bt_rsrc, seq * c_bt + kblock_idx, vec_width=1, dtype=T.i32)
-
-                k_frags_tile = []
+                klocal = (warp_id * arith.constant(TOKENS_PER_WARP, type=T.i32)
+                          + arith.constant(td * MFMA_N, type=T.i32) + lane16id)
+                kglobal = pstart + klocal
+                kbi = kglobal // arith.constant(_bs, type=T.i32)
+                kbo = kglobal % arith.constant(_bs, type=T.i32)
+                kphys = buffer_ops.buffer_load(bt_rsrc, seq * c_bt + kbi,
+                                               vec_width=1, dtype=T.i32)
                 for qkhe in range_constexpr(QKHELOOP):
-                    head_elem = row_head_elem + arith.constant(qkhe * QKHE_PER_FETCH, type=T.i32)
-                    off1 = head_elem // arith.constant(FP8_ELEMS_16B, type=T.i32)
-                    off2 = head_elem % arith.constant(FP8_ELEMS_16B, type=T.i32)
-                    k_addr = (kphys * c_kb + _k_head_off
-                              + off1 * arith.constant(_bs * FP8_ELEMS_16B, type=T.i32)
-                              + kblock_off * arith.constant(FP8_ELEMS_16B, type=T.i32)
-                              + off2)
-                    k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr // arith.constant(4, type=T.i32),
-                        vec_width=4, dtype=T.i32)
-                    k_frags_tile.append(_pack_i32_pair_to_i64(
-                        vector.extract(k_4xi32, static_position=[0]),
-                        vector.extract(k_4xi32, static_position=[1])))
-                    k_frags_tile.append(_pack_i32_pair_to_i64(
-                        vector.extract(k_4xi32, static_position=[2]),
-                        vector.extract(k_4xi32, static_position=[3])))
-                k_ops_all.append(k_frags_tile)
+                    he = row_head_elem + arith.constant(qkhe * QKHE_PER_FETCH, type=T.i32)
+                    o1 = he // arith.constant(FP8_ELEMS_16B, type=T.i32)
+                    o2 = he % arith.constant(FP8_ELEMS_16B, type=T.i32)
+                    ka = (kphys * c_kb + _k_head_off
+                          + o1 * arith.constant(_bs * FP8_ELEMS_16B, type=T.i32)
+                          + kbo * arith.constant(FP8_ELEMS_16B, type=T.i32) + o2)
+                    k4 = buffer_ops.buffer_load(k_rsrc, ka // arith.constant(4, type=T.i32),
+                                                vec_width=4, dtype=T.i32)
+                    k_flat.append(_pack_i32_pair_to_i64(
+                        vector.extract(k4, static_position=[0]),
+                        vector.extract(k4, static_position=[1])))
+                    k_flat.append(_pack_i32_pair_to_i64(
+                        vector.extract(k4, static_position=[2]),
+                        vector.extract(k4, static_position=[3])))
+            return k_flat
 
-            # ── Stage 3: QK MFMA ──
+        def _unflatten_k(k_flat):
+            return [[k_flat[td * (QKHELOOP * 2) + j]
+                      for j in range(QKHELOOP * 2)]
+                     for td in range(TLOOP)]
+
+        # ════════════════════════════════════════════════════════════
+        # Helper: compute one partition body (QK → softmax → PV)
+        # Returns (running_max, running_sum, out0, out1)
+        # ════════════════════════════════════════════════════════════
+        def _compute_partition(partition_start, k_ops_all,
+                               running_max, running_sum, out0, out1):
+            # ── QK MFMA ──
             d_out = []
             for td in range_constexpr(TLOOP):
                 acc = arith.constant_vector(0.0, T.f32x4)
@@ -294,7 +280,7 @@ def compile_pa_decode_sw(
                         T.f32x4, [k_ops_all[td][k_step], q_frags[k_step], acc, 0, 0, 0])
                 d_out.append(acc * vector.broadcast(T.f32x4, _scale))
 
-            # ── Stage 4: Per-partition softmax ──
+            # ── Intra-warp softmax ──
             qk_max = NEG_INF
             for td in range_constexpr(TLOOP):
                 for i in range_constexpr(4):
@@ -305,7 +291,6 @@ def compile_pa_decode_sw(
                     s = vector.extract(d_out[td], static_position=[i], dynamic_position=[])
                     s = arith.select(kv_tok < context_len, s, NEG_INF)
                     qk_max = qk_max.maximumf(s)
-
             for sh in [32, 16]:
                 qk_max = qk_max.maximumf(qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
 
@@ -323,11 +308,10 @@ def compile_pa_decode_sw(
                                      ZERO_F)
                     exp_sum = exp_sum + p
                     d_out[td] = vector.insert(p, d_out[td], static_position=[i], dynamic_position=[])
-
             for sh in [32, 16]:
                 exp_sum = exp_sum + exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
 
-            # Cross-warp via LDS
+            # ── Cross-warp via LDS ──
             gpu.barrier()
             sm_max_off = arith.index_cast(T.index,
                 warp_id * arith.constant(MFMA_N, type=T.i32) + lane16id)
@@ -346,7 +330,6 @@ def compile_pa_decode_sw(
                 w_max = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [rd_max_off]), static_position=[0])
                 partition_max = partition_max.maximumf(w_max)
                 warp_rescale_factors.append(w_max)
-
             for w in range_constexpr(NUM_WARPS):
                 diff_w = warp_rescale_factors[w] - partition_max
                 safe_diff = arith.select(partition_max > arith.constant(float("-inf"), type=T.f32),
@@ -358,7 +341,6 @@ def compile_pa_decode_sw(
                 w_sum = vector.extract(vector.load_op(T.vec(1, T.f32), softmax_lds_f32, [rd_sum_off]), static_position=[0])
                 partition_sum = partition_sum + w_sum * wf
                 warp_rescale_factors[w] = wf
-
             my_warp_rescale = warp_rescale_factors[0]
             for w in range_constexpr(1, NUM_WARPS):
                 my_warp_rescale = arith.select(
@@ -377,19 +359,15 @@ def compile_pa_decode_sw(
                 ((partition_max - new_running_max) * arith.constant(LOG2E, type=T.f32)).exp2(
                     fastmath=arith.FastMathFlags.fast),
                 ZERO_F)
-
             running_sum = accum_scale * running_sum + partition_sum * part_to_new
             running_max = new_running_max
-
-            # Rescale old outelems
             out0 = out0 * vector.broadcast(T.f32x4, accum_scale)
             out1 = out1 * vector.broadcast(T.f32x4, accum_scale)
 
-            # ── Stage 5: Prob FP8 pack + LDS store ──
+            # ── Prob FP8 pack + LDS store ──
             prob_scale = my_warp_rescale * part_to_new
             for td in range_constexpr(TLOOP):
                 d_out[td] = d_out[td] * vector.broadcast(T.f32x4, prob_scale)
-
             gpu.barrier()
             for td in range_constexpr(TLOOP):
                 p0 = vector.extract(d_out[td], static_position=[0], dynamic_position=[])
@@ -410,15 +388,13 @@ def compile_pa_decode_sw(
                 vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
             gpu.barrier()
 
-            # ── Stages 6+7: V load + PV MFMA ──
+            # ── V load + PV MFMA ──
             pv_results = [arith.constant_vector(0.0, T.f32x4)
                           for _ in range_constexpr(VHELOOP)]
-
             for vhe in range_constexpr(VHELOOP):
                 vhead_elem = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
                               + warp_id * arith.constant(MFMA_N, type=T.i32) + lane16id)
                 tmp_out = arith.constant_vector(0.0, T.f32x4)
-
                 for vt in range_constexpr(VTLOOP):
                     vtoken_base = (partition_start
                                    + arith.constant(vt * TOKENS_PER_WARP, type=T.i32)
@@ -427,12 +403,17 @@ def compile_pa_decode_sw(
                     vblock_off = vtoken_base % arith.constant(_bs, type=T.i32)
                     vphys = buffer_ops.buffer_load(bt_rsrc,
                         seq * c_bt + vblock_idx, vec_width=1, dtype=T.i32)
-                    _vb = (vphys * c_vb + _v_head_off
-                           + vhead_elem * arith.constant(_bs, type=T.i32) + vblock_off)
+                    if trans_v:
+                        _vb = (vphys * c_vb + _v_head_off
+                               + (vblock_off // arith.constant(FP8_ELEMS_16B, type=T.i32))
+                                 * arith.constant(HEAD_SIZE * FP8_ELEMS_16B, type=T.i32)
+                               + vhead_elem * arith.constant(FP8_ELEMS_16B, type=T.i32))
+                    else:
+                        _vb = (vphys * c_vb + _v_head_off
+                               + vhead_elem * arith.constant(_bs, type=T.i32) + vblock_off)
                     v_4xi32 = buffer_ops.buffer_load(
                         v_rsrc, _vb // arith.constant(4, type=T.i32),
                         vec_width=4, dtype=T.i32)
-
                     for j in range_constexpr(2):
                         v_i64 = _pack_i32_pair_to_i64(
                             vector.extract(v_4xi32, static_position=[j * 2]),
@@ -452,20 +433,66 @@ def compile_pa_decode_sw(
                         p_i64 = _pack_i32_pair_to_i64(pw0, pw1)
                         tmp_out = rocdl.mfma_f32_16x16x32_fp8_fp8(
                             T.f32x4, [v_i64, p_i64, tmp_out, 0, 0, 0])
-
                 pv_results[vhe] = tmp_out
-
-            # Accumulate PV into outelems (v_scale dequantizes V)
             out0 = out0 + pv_results[0] * vector.broadcast(T.f32x4, v_scale_val)
             out1 = out1 + pv_results[1] * vector.broadcast(T.f32x4, v_scale_val)
+            return running_max, running_sum, out0, out1
 
-            results = yield _pack_state(running_max, running_sum, out0, out1)
+        # ════════════════════════════════════════════════════════════
+        # scf.for loop with K prefetch (prologue + loop + epilogue)
+        # Loop-carried state: [rmax, rsum, out0, out1, k_flat[_N_K]]
+        # ════════════════════════════════════════════════════════════
+        def _unwrap(v):
+            return v.ir_value() if hasattr(v, 'ir_value') else v
 
-        # ── Post-loop: unpack final state ──
-        running_max = results[0]
-        running_sum = results[1]
-        out0 = results[2]
-        out1 = results[3]
+        def _pack_state(rmax, rsum, o0, o1, k_flat):
+            return [_unwrap(v) for v in [rmax, rsum, o0, o1] + k_flat]
+
+        def _unpack_state(state):
+            return state[0], state[1], state[2], state[3], list(state[4:4 + _N_K])
+
+        # ── Prologue: load first partition's K data ──
+        k0_flat = _load_k_flat(part_start)
+
+        init_state = _pack_state(
+            NEG_INF, ZERO_F,
+            arith.constant_vector(0.0, T.f32x4),
+            arith.constant_vector(0.0, T.f32x4),
+            k0_flat)
+
+        # Loop runs from part_start to part_end - _cpb (exclusive).
+        # Each iteration: compute current partition + prefetch next K.
+        # Epilogue handles the last partition.
+        _loop_start = arith.index_cast(T.index, arith.unwrap(part_start))
+        _loop_stop = arith.index_cast(T.index, arith.unwrap(part_end - c_cpb))
+        _loop_step = arith.index(int(_cpb))
+
+        for iv, state in range(_loop_start, _loop_stop, _loop_step,
+                               init=init_state):
+            running_max, running_sum, out0, out1, k_flat = _unpack_state(state)
+            k_ops_all = _unflatten_k(k_flat)
+            part_idx = arith.index_cast(T.i32, iv)
+            partition_start = part_idx * c_cps
+
+            running_max, running_sum, out0, out1 = _compute_partition(
+                partition_start, k_ops_all,
+                running_max, running_sum, out0, out1)
+
+            # Prefetch next partition's K (overlaps with PV MFMA latency)
+            next_part = part_idx + c_cpb
+            k_next_flat = _load_k_flat(next_part)
+
+            results = yield _pack_state(running_max, running_sum, out0, out1, k_next_flat)
+
+        # ── Epilogue: compute last partition from loop results ──
+        running_max, running_sum, out0, out1, k_last_flat = _unpack_state(results)
+        k_ops_last = _unflatten_k(k_last_flat)
+        last_part_idx = part_end - c_cpb
+        last_partition_start = last_part_idx * c_cps
+
+        running_max, running_sum, out0, out1 = _compute_partition(
+            last_partition_start, k_ops_last,
+            running_max, running_sum, out0, out1)
 
         # Normalize by running_sum
         safe_sum = arith.select(running_sum > ZERO_F, running_sum,
