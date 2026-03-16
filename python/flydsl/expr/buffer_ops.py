@@ -25,6 +25,44 @@ from .._mlir import ir
 from .._mlir.dialects import llvm, rocdl, arith as std_arith
 from .._mlir.extras import types as T
 from typing import Optional, Union
+from ..runtime.device import is_rdna_arch
+
+
+def _get_buffer_flags(arch=None):
+    """Get AMD buffer resource descriptor (V#) flags word (bits 127:96).
+
+    Constructs the 32-bit flags field for rocdl.make.buffer.rsrc, following the
+    same logic as LLVM's AMDGPUToROCDL makeBufferRsrc():
+      https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp
+
+    Bit layout (common to all architectures):
+      bits [11:0]  - DST_SEL: ignored by raw buffer intrinsics
+      bits [14:12] - DATA_FORMAT: must be nonzero, 7 = float
+      bits [18:15] - NUM_FORMAT:  must be nonzero, 4 = 32-bit
+      bit  [19]    - In nested heap (0)
+      bit  [20]    - Behavior on unmap (0 = return 0 / ignore)
+      bits [22:21] - Index stride for swizzles (0)
+      bit  [23]    - Add thread ID (0)
+      bit  [24]    - Reserved: must be 1 on RDNA, 0 on CDNA
+      bits [26:25] - Reserved (0)
+      bit  [27]    - Non-volatile (CDNA only, 0)
+      bits [29:28] - OOB_SELECT (RDNA only): 0=structured, 2=none, 3=check offset
+      bits [31:30] - Type (must be 0)
+
+    CDNA (gfx9xx):    (7 << 12) | (4 << 15)                         = 0x20070
+    RDNA (gfx10+):    (7 << 12) | (4 << 15) | (1 << 24) | (2 << 28) = 0x21020070
+      - bit 24 set to 1 (required on RDNA)
+      - OOB_SELECT=2 (no bounds checking, matching LLVM boundsCheck=false)
+    """
+    import os
+
+    if arch is None:
+        arch = os.environ.get("FLYDSL_GPU_ARCH")
+    flags = (7 << 12) | (4 << 15)
+    if is_rdna_arch(arch):
+        flags |= (1 << 24)   # reserved bit, must be 1 on RDNA
+        flags |= (2 << 28)   # OOB_SELECT = 2 (no bounds checking)
+    return flags
 
 __all__ = [
     'create_buffer_resource',
@@ -137,7 +175,7 @@ class BufferResourceDescriptor:
         base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
         
         # Create buffer resource descriptor
-        flags_val = (7 << 12) | (4 << 15)  # data_format=7 (float), num_format=4 (32bit)
+        flags_val = _get_buffer_flags()
         flags = _create_i32_constant(flags_val)
         stride_val = _create_i16_constant(stride)
         
