@@ -412,12 +412,25 @@ def _dist_worker(
                 try:
                     # Capture using simplified interface - tensors recorded during capture
                     with fa.capture():
-                        # Warmup inside capture context to populate exe cache
+                        # Warmup inside capture context to populate exe cache.
+                        # Must synchronize + barrier between runs to keep signal
+                        # counters aligned across ranks (same as eager warmup).
                         for _ in range(3):
-                            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
-                        torch.cuda.synchronize()
+                            if allreduce_impl == "aiter":
+                                result = fa.custom_all_reduce(x_flat, open_fp8_quant=False)
+                                if result is not None:
+                                    out.copy_(result)
+                            else:
+                                fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                            torch.cuda.synchronize()
+                            dist.barrier(device_ids=[rank])
                         with torch.cuda.graph(graph):
-                            fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
+                            if allreduce_impl == "aiter":
+                                result = fa.custom_all_reduce(x_flat, open_fp8_quant=False)
+                                if result is not None:
+                                    out.copy_(result)
+                            else:
+                                fa.custom_all_reduce(x_flat, out=out, open_fp8_quant=False)
                     # IPC handles exchanged at capture exit
                 except Exception as cap_e:
                     if rank == 0:

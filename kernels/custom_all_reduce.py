@@ -423,22 +423,36 @@ class FlyDSLAllreduce:
         use_write_mode: bool = False,
         stream_ptr: int | None = None,
     ):
-        """Launch allreduce kernel (1-stage or 2-stage depending on env FLYDSL_ALLREDUCE_STAGE)."""
+        """Launch allreduce kernel (auto-selects 1-stage or 2-stage by data size)."""
         from flydsl.expr.typing import Int32, Int64, Stream
 
-        import os as _os
-        _stage = str(_os.environ.get("FLYDSL_ALLREDUCE_STAGE", "2")).strip()
+        # Auto-select stage by data size (match aiter thresholds):
+        #   world_size == 2              → always 1-stage
+        #   world_size <= 4, bytes < 160KB → 1-stage
+        #   world_size <= 8, bytes < 80KB  → 1-stage
+        #   otherwise                      → 2-stage
+        elem_bytes = 2 if dtype_str == "f16" else 4
+        bytes_n = N * elem_bytes
+        if self.world_size == 2:
+            _stage = "1"
+        elif (self.world_size <= 4 and bytes_n < 160 * 1024) or bytes_n < 80 * 1024:
+            _stage = "1"
+        else:
+            _stage = "2"
+
         try:
             grid_x = self._grid_x_cache[(int(N), str(dtype_str), _stage)]
         except Exception:
             pack_elems = 8 if dtype_str == "f16" else 4
             num_packs = int(N) // int(pack_elems)
             if _stage == "1":
-                # 1-stage: one thread per pack, grid covers all packs
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (num_packs + self._threads - 1) // self._threads)))
+                # 1-stage: tnum_gpu threads per warp handle one pack each (match aiter)
+                tnum_gpu = self._threads // self.world_size
+                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (num_packs + tnum_gpu - 1) // tnum_gpu)))
             else:
                 part_p = int(num_packs) // int(self.world_size)
-                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + self._threads - 1) // self._threads)))
+                tnum_gpu = self._threads // self.world_size
+                grid_x = int(max(1, min(_AITER_KMAXBLOCKS, (max(1, part_p) + tnum_gpu - 1) // tnum_gpu)))
             self._grid_x_cache[(int(N), str(dtype_str), _stage)] = int(grid_x)
 
         if stream_ptr is None:
@@ -519,7 +533,7 @@ class FlyDSLAllreduce:
             bytes_n = int(inp.numel()) * int(inp.element_size())
         N = int(out.numel())
 
-        use_write_mode = (N > 512 * 4096 and self.world_size == 8)
+        use_write_mode = (bytes_n > 512 * 4096 * 2 and self.world_size == 8)
 
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
