@@ -356,7 +356,7 @@ def compile(
                         if compile_only:
                             if dump_enabled or print_final_module:
                                 print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
-                            return None
+                            return cached_mod
                         from .executor import ExecutionEngineExecutor as Executor
                         if shared_libs is None:
                             shared_libs = default_shared_libs().as_list()
@@ -430,11 +430,11 @@ def compile(
                 except Exception:
                     pass
 
-    # In compile-only mode, skip executor creation and return None
+    # In compile-only mode, skip executor creation and return the compiled module.
     if compile_only:
         if dump_enabled or print_final_module:
             print(f"[flir.compile] FLYDSL_COMPILE_ONLY=1, skipping executor creation (arch={chip})")
-        return None
+        return module
 
     from .executor import ExecutionEngineExecutor as Executor
 
