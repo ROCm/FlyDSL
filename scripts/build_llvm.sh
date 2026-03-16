@@ -44,7 +44,7 @@ if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
     git remote set-url origin https://github.com/ROCm/llvm-project.git
 fi
 
-git fetch origin amd-staging
+# git fetch origin amd-staging
 git checkout "${LLVM_COMMIT}"
 
 # 1b. Apply FlyDSL patches (if any)
