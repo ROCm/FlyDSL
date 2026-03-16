@@ -22,5 +22,4 @@ NB_MODULE(_mlirRegisterEverything, m) {
   mlirRegisterAllPasses();
   mlirRegisterFlyPasses();
   mlirRegisterFlyToROCDLConversionPass();
-  mlirRegisterFlyGpuToLLVMPass();
 }

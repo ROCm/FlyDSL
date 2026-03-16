@@ -3,5 +3,4 @@ add_mlir_public_c_api_library(MLIRCPIFlyROCDL
   LINK_LIBS PUBLIC
   MLIRFlyROCDLDialect
   MLIRFlyToROCDL
-  MLIRFlyGpuToLLVM
 )
