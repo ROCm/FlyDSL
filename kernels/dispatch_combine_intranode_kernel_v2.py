@@ -27,7 +27,7 @@ for _p in [os.path.join(_HERE, "../python"), "/home/yashao/FlyDSL/python",
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr   # Python-level loop (no scf.for transform)
-from flydsl.compiler.shmem_compile import compile_shmem_kernel, ShmemKernel
+import torch  # 用于 element_size
 
 import mori.ir.flydsl as mori_shmem
 
@@ -43,6 +43,8 @@ from flydsl.expr.lowlevel import (
     load_i32_global,
     load_i64_at,
     store_i32_at,
+    store_i32_global,
+    store_i32_system,
     zext_i32_to_i64,
     const_i32,
     const_i64,
@@ -80,6 +82,14 @@ def _sel_pe(rem_list, dest_pe):
     for pe in reversed(range(len(rem_list) - 1)):
         result = select_i64(icmp_eq_i32(dest_pe, const_i32(pe)), rem_list[pe], result)
     return result
+
+
+def _bitcast_f32_to_i32(val):
+    """Bitcast f32 value to i32 for store_i32_at."""
+    from flydsl._mlir.dialects import llvm
+    from flydsl._mlir.ir import IntegerType
+    from flydsl.expr.lowlevel import _unwrap
+    return llvm.BitcastOp(IntegerType.get_signless(32), _unwrap(val)).res
 
 
 # ============================================================
@@ -130,7 +140,7 @@ def make_dispatch_kernel(
         gw_num = block_num * warp_num_per_block     # global warp 总数（grid-stride 步长）
         limit  = cur_tok * experts_per_token        # 外层循环总迭代数
 
-        # 预计算各 PE 的 XGMI 基地址（编译期展开，避免循环内重复调用 ptr_p2p）
+        # 预计算各 PE 的 XGMI P2P 基地址（编译期展开，避免循环内重复调用 ptr_p2p）
         rem_tok     = [mori_shmem.ptr_p2p(addr_out_tok, rank, pe) for pe in range(npes)]
         rem_wts     = [mori_shmem.ptr_p2p(addr_out_wts, rank, pe) for pe in range(npes)]
         rem_idx     = [mori_shmem.ptr_p2p(addr_out_idx, rank, pe) for pe in range(npes)]
@@ -189,26 +199,30 @@ def make_dispatch_kernel(
                 store_i32_at(addr_tok_map, i, dtm_val)
 
             # 仅非重复时写入 tok_id_to_src 和更新 dest_pe_ctr（lane0）
-            # int32_p 使用 LOCAL symmetric 地址（非 ptr_p2p 地址）
+            # P2P global store（与 mori GetAs<T*>(destPe)[offset] = val 一致）
             if icmp_eq_i32(lane, const_i32(0)):
                 if _icmp_eq_i64(dup_ballot, const_i64(0)):
                     src_enc  = rank * max_tok_per_rank + src_tok
-                    tis_local = addr_tis + zext_i32_to_i64(dest_tok_all) * 4
-                    mori_shmem.int32_p(tis_local, src_enc, dest_pe, 0)
+                    store_i32_global(
+                        _sel_pe(rem_tis, dest_pe),
+                        dest_tok_all, src_enc)
                     ctr_addr = addr_dest_ctr + zext_i32_to_i64(dest_pe) * 4
                     atomic_add_i32_at(ctr_addr, const_i32(1))
 
             # 写入权重 + 索引（lanes 0..k-1，仅非重复路径）
-            # int32_p/float_p 使用 LOCAL symmetric 地址（非 ptr_p2p 地址）
+            # P2P global store（与 mori 一致）
             if icmp_ult_i32(lane, const_i32(experts_per_token)):
                 if _icmp_eq_i64(dup_ballot, const_i64(0)):
                     wt_src   = src_tok * experts_per_token + lane
                     wt_val   = load_f32_at(addr_wts, wt_src)
                     ix_val   = load_i32_at(addr_idx, wt_src)
                     dst_slot = dest_tok_all * experts_per_token + lane
-                    off      = zext_i32_to_i64(dst_slot) * 4
-                    mori_shmem.float_p(addr_out_wts + off, wt_val, dest_pe, 0)
-                    mori_shmem.int32_p(addr_out_idx + off, ix_val, dest_pe, 0)
+                    store_i32_global(
+                        _sel_pe(rem_wts, dest_pe),
+                        dst_slot, _bitcast_f32_to_i32(wt_val))
+                    store_i32_global(
+                        _sel_pe(rem_idx, dest_pe),
+                        dst_slot, ix_val)
 
             # 写入 token embedding（inp_tok 不在 shmem heap，用 XGMI 直接写）
             tok_remote = _sel_pe(rem_tok, dest_pe) + zext_i32_to_i64(
@@ -224,7 +238,8 @@ def make_dispatch_kernel(
                     store_v4i32_global(vec4, tok_remote + ec4_byt)
 
         # ── Phase 2: 栅栏 + 发送 token 数量信号 ──────────────────────────────
-        # 用 GPU 原子累加 dispatch_bar，确保所有 block 的 Phase 1 都完成后再发信号
+        # Phase 1 全部使用 XGMI P2P store（非 NIC put），无需 quiet。
+        # sync_threads + atomicAdd barrier 确保本 block 所有 warp 的 P2P store 已完成。
         sync_threads()
         if icmp_eq_i32(tid, const_i32(0)):
             atomic_add_i32_at(addr_disp_bar, const_i32(1))
@@ -236,13 +251,12 @@ def make_dispatch_kernel(
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
                 store_i32_at(addr_disp_bar, const_i32(0), const_i32(0))
                 nsig       = load_i32_at(addr_dest_ctr, dest_pe) + 1
-                rtn_local  = addr_recv_num + rtn_local_off
                 rtn_remote = mori_shmem.ptr_p2p(addr_recv_num, rank, dest_pe) + rtn_local_off
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
                 fence_one_as_seq_cst()
-                # uint32_p → P2P AtomicStoreRelaxedSystem（单条 XGMI store）
-                # 等到 rtn_remote==0 后直接 store nsig，无需 RMW
-                mori_shmem.uint32_p(rtn_local, nsig, dest_pe, 0)
+                # AtomicStoreRelaxedSystem（与 mori 一致）：
+                # global addrspace(1) + monotonic + one-as syncscope
+                store_i32_system(rtn_remote, const_i32(0), nsig)
 
         # ── Phase 3: 接收信号，累计 total_recv ───────────────────────────────
         for src_pe in range(as_index(lane), as_index(npes), 64):
@@ -251,8 +265,8 @@ def make_dispatch_kernel(
                 rtn_src  = addr_recv_num + zext_i32_to_i64(src_pe) * 4
                 sig_val  = mori_shmem.int32_wait_until_greater_than(rtn_src, 0)
                 recv_cnt = sig_val - 1
-                # 直接写 0 重置信号（·sig_val 已知，无并发写入者）
-                mori_shmem.uint32_p(rtn_src, const_i32(0), rank, 0)
+                # AtomicStoreRelaxedSystem 重置信号（本地地址，P2P 可见）
+                store_i32_system(rtn_src, const_i32(0), const_i32(0))
                 atomic_add_i32_at(addr_total_rv, recv_cnt)
                 store_i32_at(addr_dest_ctr, src_pe, const_i32(0))
 
@@ -438,82 +452,83 @@ def make_combine_kernel(
 
 
 # ============================================================
-# Build + compile helpers（公开 API）
+# @flyc.jit launcher factories（公开 API）
 # ============================================================
 
-def _find_mori_shmem_bc() -> str:
-    from mori.ir.bitcode import find_bitcode
-    return find_bitcode()
-
-
-def build_and_compile_dispatch(
-    *,
-    rank: int,
-    npes: int,
-    experts_per_rank: int,
-    experts_per_token: int,
-    hidden_dim: int,
-    max_tok_per_rank: int,
-    block_num: int,
-    warp_num_per_block: int,
-    data_type,
-    chip: str = "gfx942",
-    shmem_bc: str = None,
-) -> ShmemKernel:
-    """编译 v2 dispatch kernel，返回 ShmemKernel callable。
-
-    编译产物缓存在 ~/.flydsl/cache/shmem/，基于内容 hash 自动管理。
-    """
-    import torch
+def make_dispatch_jit(*, rank, npes, experts_per_rank, experts_per_token,
+                      hidden_dim, max_tok_per_rank, block_num,
+                      warp_num_per_block, data_type):
+    """创建 dispatch kernel 的 @flyc.jit launcher。"""
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
-    if shmem_bc is None:
-        shmem_bc = _find_mori_shmem_bc()
-
-    kernel_fn = make_dispatch_kernel(
+    kernel = make_dispatch_kernel(
         rank=rank, npes=npes,
-        experts_per_rank=experts_per_rank, experts_per_token=experts_per_token,
-        hidden_dim=hidden_dim, hidden_elem_size=hidden_elem_size,
+        experts_per_rank=experts_per_rank,
+        experts_per_token=experts_per_token,
+        hidden_dim=hidden_dim,
+        hidden_elem_size=hidden_elem_size,
         max_tok_per_rank=max_tok_per_rank,
-        block_num=block_num, warp_num_per_block=warp_num_per_block,
-    )
-    dummy = [fx.Int64(0)] * 13 + [fx.Int32(1)]
-    return compile_shmem_kernel(
-        kernel_fn, dummy_args=dummy,
-        chip=chip, shmem_bc=shmem_bc,
+        block_num=block_num,
+        warp_num_per_block=warp_num_per_block,
     )
 
+    _rank_id = rank  # expose rank as simple-type closure var → enters cache key
+    _npes_id = npes  # expose npes as simple-type closure var → enters cache key
 
-def build_and_compile_combine(
-    *,
-    rank: int,
-    npes: int,
-    experts_per_token: int,
-    hidden_dim: int,
-    max_tok_per_rank: int,
-    block_num: int,
-    warp_num_per_block: int,
-    data_type,
-    chip: str = "gfx942",
-    shmem_bc: str = None,
-) -> ShmemKernel:
-    """编译 v2 combine kernel，返回 ShmemKernel callable。
+    @flyc.jit
+    def dispatch_launch(
+        addr_inp_tok: fx.Int64, addr_idx: fx.Int64, addr_wts: fx.Int64,
+        addr_out_tok: fx.Int64, addr_out_wts: fx.Int64, addr_out_idx: fx.Int64,
+        addr_tok_off: fx.Int64, addr_recv_num: fx.Int64,
+        addr_dest_ctr: fx.Int64, addr_disp_bar: fx.Int64,
+        addr_tok_map: fx.Int64, addr_tis: fx.Int64,
+        addr_total_rv: fx.Int64, cur_tok: fx.Int32,
+    ):
+        _ = (_rank_id, _npes_id)  # referenced to include in cache key
+        kernel(addr_inp_tok, addr_idx, addr_wts,
+               addr_out_tok, addr_out_wts, addr_out_idx,
+               addr_tok_off, addr_recv_num, addr_dest_ctr,
+               addr_disp_bar, addr_tok_map, addr_tis,
+               addr_total_rv, cur_tok).launch(
+            grid=(block_num, 1, 1),
+            block=(warp_num_per_block * 64, 1, 1),
+        )
 
-    编译产物缓存在 ~/.flydsl/cache/shmem/，基于内容 hash 自动管理。
-    """
-    import torch
+    return dispatch_launch
+
+
+def make_combine_jit(*, rank, npes, experts_per_token, hidden_dim,
+                     max_tok_per_rank, block_num, warp_num_per_block,
+                     data_type):
+    """创建 combine kernel 的 @flyc.jit launcher。"""
     hidden_elem_size = torch.tensor([], dtype=data_type).element_size()
-    if shmem_bc is None:
-        shmem_bc = _find_mori_shmem_bc()
-
-    kernel_fn = make_combine_kernel(
+    kernel = make_combine_kernel(
         rank=rank, npes=npes,
         experts_per_token=experts_per_token,
-        hidden_dim=hidden_dim, hidden_elem_size=hidden_elem_size,
+        hidden_dim=hidden_dim,
+        hidden_elem_size=hidden_elem_size,
         max_tok_per_rank=max_tok_per_rank,
-        block_num=block_num, warp_num_per_block=warp_num_per_block,
+        block_num=block_num,
+        warp_num_per_block=warp_num_per_block,
     )
-    dummy = [fx.Int64(0)] * 8 + [fx.Int32(1), fx.Int32(1)]
-    return compile_shmem_kernel(
-        kernel_fn, dummy_args=dummy,
-        chip=chip, shmem_bc=shmem_bc,
-    )
+
+    _rank_id = rank  # expose rank as simple-type closure var → enters cache key
+    _npes_id = npes  # expose npes as simple-type closure var → enters cache key
+
+    @flyc.jit
+    def combine_launch(
+        addr_inp_tok: fx.Int64, addr_comb_inp: fx.Int64,
+        addr_comb_out: fx.Int64, addr_xdb_mem: fx.Int64,
+        addr_xdb_flag: fx.Int64, addr_tok_map: fx.Int64,
+        addr_comb_bar: fx.Int64, addr_trecv: fx.Int64,
+        cur_tok: fx.Int32, total_recv_val: fx.Int32,
+    ):
+        _ = (_rank_id, _npes_id)  # referenced to include in cache key
+        kernel(addr_inp_tok, addr_comb_inp, addr_comb_out,
+               addr_xdb_mem, addr_xdb_flag, addr_tok_map,
+               addr_comb_bar, addr_trecv,
+               cur_tok, total_recv_val).launch(
+            grid=(block_num, 1, 1),
+            block=(warp_num_per_block * 64, 1, 1),
+        )
+
+    return combine_launch
