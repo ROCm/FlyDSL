@@ -61,7 +61,7 @@ def build_flash_attn_func_module_primary(
     dtype_str="f16",
     sm_scale=None,
     waves_per_eu=2,
-    flat_work_group_size=512,
+    flat_work_group_size=None,
     unsafe_fp_math=True,
     fast_fp_math=True,
     daz=True,
@@ -71,13 +71,12 @@ def build_flash_attn_func_module_primary(
     env.compile.fast_fp_math = fast_fp_math
     gpu_arch = get_hip_arch()
 
-    # CK-aligned architecture: BLOCK_M=256, BLOCK_N=64, 8 waves.
     BLOCK_M = 256
     BLOCK_N = 64
-    K_SUB_N = 32  # MFMA sub-tile within BLOCK_N (two 32-wide passes)
+    K_SUB_N = 32
     NUM_WAVES = 8
     WARP_SIZE = 64
-    BLOCK_SIZE = NUM_WAVES * WARP_SIZE  # 512
+    BLOCK_SIZE = NUM_WAVES * WARP_SIZE
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES  # 32
     PATH_TAG = select_flash_attn_func_path(
         num_heads, head_dim, causal=causal, dtype_str=dtype_str
@@ -87,6 +86,11 @@ def build_flash_attn_func_module_primary(
     ENABLE_PREFETCH_3BUF = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_PREFETCH3", "0") == "1"
     )
+    ENABLE_DMA = (
+        os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
+    )
+    if flat_work_group_size is None:
+        flat_work_group_size = BLOCK_SIZE
     ENABLE_LDS_VEC16 = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     )
@@ -121,9 +125,11 @@ def build_flash_attn_func_module_primary(
     CAUSAL = causal
     STRIDE_TOKEN = NUM_HEADS * HEAD_DIM
 
-    # Bank-conflict-friendly LDS strides.
-    K_STRIDE = HEAD_DIM + 2
-    VT_STRIDE = BLOCK_N + 2
+    # Bank-conflict-free LDS strides.
+    # K uses XOR swizzle (col ^ ((row & 7) << 4)) at 16-element granularity
+    # instead of padding. This enables ds_read_b128 (stride is 256B-aligned).
+    K_STRIDE = HEAD_DIM
+    V_STRIDE = HEAD_DIM + 4  # row-major V with padding for bank-conflict avoidance
 
     # Vectorized cooperative load constants.
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
@@ -140,13 +146,13 @@ def build_flash_attn_func_module_primary(
         NUM_BATCHES_KV = BLOCK_N // ROWS_PER_BATCH_LOAD
         KV_NEEDS_GUARD = False
 
-    # K/VT circular buffers; defaults to 1/1, optional 3/3 with CK-like LDS sequence.
+    # K/V circular buffers; defaults to 1/1, optional 3/3 with CK-like LDS sequence.
     LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
-    LDS_VT_TILE_SIZE = HEAD_DIM * VT_STRIDE
+    LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE  # row-major V: BLOCK_N rows × V_STRIDE columns
     LDS_K_TOTAL_SIZE = NUM_PREFETCH_K * LDS_K_TILE_SIZE
-    LDS_VT_BASE = LDS_K_TOTAL_SIZE
-    LDS_VT_TOTAL_SIZE = NUM_PREFETCH_V * LDS_VT_TILE_SIZE
-    LDS_KV_TOTAL_SIZE = LDS_K_TOTAL_SIZE + LDS_VT_TOTAL_SIZE
+    LDS_V_BASE = LDS_K_TOTAL_SIZE
+    LDS_V_TOTAL_SIZE = NUM_PREFETCH_V * LDS_V_TILE_SIZE
+    LDS_KV_TOTAL_SIZE = LDS_K_TOTAL_SIZE + LDS_V_TOTAL_SIZE
 
     allocator = SmemAllocator(
         None,
@@ -162,6 +168,7 @@ def build_flash_attn_func_module_primary(
         HEAD_DIM,
         CAUSAL,
         ENABLE_PREFETCH_3BUF,
+        ENABLE_DMA,
         ENABLE_LDS_VEC16,
         REDUCE_MODE,
         NUM_PREFETCH_K,
@@ -224,6 +231,32 @@ def build_flash_attn_func_module_primary(
         lane_mod_32 = lane % 32
         lane_div_32 = lane // 32  # 0/1
 
+        # ---- ds_read_b64_tr_b16 lane decomposition ----
+        # Hardware does 4×4 transpose within blocks of 16 lanes.
+        # tr_k_group selects which of 4 K-rows within the block,
+        # tr_col_sub selects which 4-column sub-group within 16 columns.
+        tr_k_group = (lane % 16) // 4   # 0..3: K-row offset within 4-row group
+        tr_col_sub = lane % 4            # 0..3: 4-column sub-group
+        tr_col_half = (lane % 32) // 16  # 0 or 1: first/second 16-column half
+
+        # ---- ds_read_b64_tr_b16 helper ----
+        lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+
+        def ds_read_tr_v4f16(lds_elem_idx):
+            """Read v4f16 from LDS with hardware transpose.
+
+            Within each block of 16 lanes, the hardware performs a 4×4
+            transpose across 4 groups of 4 lanes.  After the transpose,
+            result[lane, elem_e] = Input[source_lane, lane%4] where
+            source_lane = e*4 + (lane%16)//4.  This naturally produces
+            the MFMA A-operand layout when per-lane addresses point to
+            the correct K-row and D-column sub-group.
+            """
+            byte_offset = lds_elem_idx * 2 + lds_kv_offset
+            byte_i64 = arith.index_cast(T.i64, byte_offset)
+            ptr = _llvm.IntToPtrOp(lds_ptr_ty, byte_i64).result
+            return rocdl.ds_read_tr16_b64(v4f16_type, ptr).result
+
         # ---- Wave offsets ----
         wave_q_offset = wave_id * ROWS_PER_WAVE
 
@@ -275,10 +308,15 @@ def build_flash_attn_func_module_primary(
         def k_buf_base(buf_id):
             return arith.index(buf_id * LDS_K_TILE_SIZE)
 
-        def vt_buf_base(buf_id):
-            return arith.index(LDS_VT_BASE + buf_id * LDS_VT_TILE_SIZE)
+        def v_buf_base(buf_id):
+            return arith.index(LDS_V_BASE + buf_id * LDS_V_TILE_SIZE)
 
-        # ---- Cooperative K load (row-major, padded stride) ----
+        # ---- K XOR swizzle: col ^ ((row & 7) << 4) at 16-element granularity ----
+        def _k_swizzle(row_idx, col_idx):
+            mask = (row_idx & arith.index(0x7)) << arith.index(4)
+            return col_idx ^ mask
+
+        # ---- Cooperative K load (row-major, XOR-swizzled) ----
         def coop_load_k(tile_start, buf_id=0):
             k_base = k_buf_base(buf_id)
             for batch in range_constexpr(NUM_BATCHES_KV):
@@ -294,20 +332,22 @@ def build_flash_attn_func_module_primary(
                     with ir.InsertionPoint(_if_k.then_block):
                         g_idx = global_idx(row_idx, load_col_base)
                         lds_row = load_row_in_batch + row_offset
-                        lds_idx = k_base + lds_row * K_STRIDE + load_col_base
+                        swz_col = _k_swizzle(lds_row, load_col_base)
+                        lds_idx = k_base + lds_row * K_STRIDE + swz_col
                         vec = load_global_f16xN(k_ptr, g_idx)
                         vector.store(vec, lds_kv, [lds_idx])
                         scf.YieldOp([])
                 else:
                     g_idx = global_idx(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
-                    lds_idx = k_base + lds_row * K_STRIDE + load_col_base
+                    swz_col = _k_swizzle(lds_row, load_col_base)
+                    lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     vec = load_global_f16xN(k_ptr, g_idx)
                     vector.store(vec, lds_kv, [lds_idx])
 
-        # ---- Cooperative V load (transposed, padded stride) ----
-        def coop_load_v_transposed(tile_start, buf_id=0):
-            vt_base = vt_buf_base(buf_id)
+        # ---- Cooperative V load (row-major, padded stride) ----
+        def coop_load_v(tile_start, buf_id=0):
+            v_base = v_buf_base(buf_id)
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
                 row_idx = tile_start + load_row_in_batch + row_offset
@@ -320,31 +360,95 @@ def build_flash_attn_func_module_primary(
                     _if_v = scf.IfOp(row_valid)
                     with ir.InsertionPoint(_if_v.then_block):
                         g_idx = global_idx(row_idx, load_col_base)
-                        load_row = load_row_in_batch + row_offset
+                        lds_row = load_row_in_batch + row_offset
+                        lds_idx = v_base + lds_row * V_STRIDE + load_col_base
                         vec = load_global_f16xN(v_ptr, g_idx)
-                        for e in range_constexpr(VEC_WIDTH):
-                            elem = vector.extract(
-                                vec,
-                                static_position=[e],
-                                dynamic_position=[],
-                            )
-                            col_e = load_col_base + e
-                            lds_idx = vt_base + col_e * VT_STRIDE + load_row
-                            _memref.StoreOp(elem, lds_kv, [lds_idx])
+                        vector.store(vec, lds_kv, [lds_idx])
                         scf.YieldOp([])
                 else:
                     g_idx = global_idx(row_idx, load_col_base)
-                    load_row = load_row_in_batch + row_offset
+                    lds_row = load_row_in_batch + row_offset
+                    lds_idx = v_base + lds_row * V_STRIDE + load_col_base
                     vec = load_global_f16xN(v_ptr, g_idx)
-                    for e in range_constexpr(VEC_WIDTH):
-                        elem = vector.extract(
-                            vec,
-                            static_position=[e],
-                            dynamic_position=[],
-                        )
-                        col_e = load_col_base + e
-                        lds_idx = vt_base + col_e * VT_STRIDE + load_row
-                        _memref.StoreOp(elem, lds_kv, [lds_idx])
+                    vector.store(vec, lds_kv, [lds_idx])
+
+        def coop_load_v_global(tile_start):
+            """Issue global loads for V, return vectors (non-blocking)."""
+            vecs = []
+            for batch in range_constexpr(NUM_BATCHES_KV):
+                row_offset = batch * ROWS_PER_BATCH_LOAD
+                row_idx = tile_start + load_row_in_batch + row_offset
+                g_idx = global_idx(row_idx, load_col_base)
+                vecs.append(load_global_f16xN(v_ptr, g_idx))
+            return vecs
+
+        def coop_store_v_lds(vecs, buf_id=0):
+            """Write previously-loaded V vectors to LDS."""
+            v_base = v_buf_base(buf_id)
+            for batch in range_constexpr(NUM_BATCHES_KV):
+                row_offset = batch * ROWS_PER_BATCH_LOAD
+                if KV_NEEDS_GUARD:
+                    row_valid = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        load_row_in_batch,
+                        arith.index(BLOCK_N),
+                    )
+                    _if_v = scf.IfOp(row_valid)
+                    with ir.InsertionPoint(_if_v.then_block):
+                        lds_row = load_row_in_batch + row_offset
+                        lds_idx = v_base + lds_row * V_STRIDE + load_col_base
+                        vector.store(vecs[batch], lds_kv, [lds_idx])
+                        scf.YieldOp([])
+                else:
+                    lds_row = load_row_in_batch + row_offset
+                    lds_idx = v_base + lds_row * V_STRIDE + load_col_base
+                    vector.store(vecs[batch], lds_kv, [lds_idx])
+
+        # ---- DMA loading for K (buffer_load_dwordx4 ... lds) ----
+        if ENABLE_DMA:
+            from flydsl._mlir.dialects import llvm
+            k_rsrc = buffer_ops.create_buffer_resource(K.value, max_size=True)
+            _lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+            DMA_BYTES = 16  # buffer_load_dwordx4 = 16 bytes per lane
+            DMA_BATCH_BYTES = BLOCK_SIZE * DMA_BYTES
+            K_TILE_BYTES = BLOCK_N * K_STRIDE * 2
+            NUM_DMA_K = K_TILE_BYTES // DMA_BATCH_BYTES
+            LANES_PER_K_ROW = HEAD_DIM * 2 // DMA_BYTES
+            ROWS_PER_DMA_BATCH = DMA_BATCH_BYTES // (HEAD_DIM * 2)
+            lds_kv_base_idx = _memref.extract_aligned_pointer_as_index(lds_kv)
+            _dma_size = arith.constant(DMA_BYTES, type=T.i32)
+            _dma_soff = arith.constant(0, type=T.i32)
+            _dma_off = arith.constant(0, type=T.i32)
+            _dma_aux = arith.constant(1, type=T.i32)
+
+            def coop_dma_k(tile_start, buf_id=0):
+                """Load K tile via DMA with XOR-swizzled global fetch."""
+                k_lds_byte_base = lds_kv_base_idx + arith.index(buf_id * LDS_K_TILE_SIZE * 2)
+                for d in range_constexpr(NUM_DMA_K):
+                    lds_addr = (k_lds_byte_base
+                                + wave_id * arith.index(WARP_SIZE * DMA_BYTES)
+                                + arith.index(d * DMA_BATCH_BYTES))
+                    lds_i64 = arith.index_cast(T.i64, lds_addr)
+                    lds_lane0 = rocdl.readfirstlane(T.i64, lds_i64)
+                    lds_ptr = llvm.IntToPtrOp(_lds_ptr_ty, lds_lane0).result
+
+                    row_in_tile = (tid // LANES_PER_K_ROW
+                                   + arith.index(d * ROWS_PER_DMA_BATCH))
+                    swiz_col_f16 = (tid % LANES_PER_K_ROW) * (DMA_BYTES // 2)
+                    xor_mask = (row_in_tile & arith.index(0x7)) << arith.index(4)
+                    unsw_col_f16 = swiz_col_f16 ^ xor_mask
+                    col_byte = unsw_col_f16 * 2
+                    global_row = (batch_idx * seq_len_v + tile_start
+                                  + row_in_tile)
+                    global_byte = (global_row * arith.index(STRIDE_TOKEN * 2)
+                                   + head_idx * arith.index(HEAD_DIM * 2)
+                                   + col_byte)
+                    voffset = arith.index_cast(T.i32, global_byte)
+
+                    rocdl.raw_ptr_buffer_load_lds(
+                        k_rsrc, lds_ptr, _dma_size, voffset,
+                        _dma_soff, _dma_off, _dma_aux,
+                    )
 
         # ---- Preload Q^T B-operand packs once (register-resident) ----
         # B operand uses j = lane_mod_32, k-subblock = lane_div_32*MFMA_LANE_K.
@@ -403,8 +507,14 @@ def build_flash_attn_func_module_primary(
                 for pre_k in range_constexpr(preload_k_count):
                     pre_k_slot = CK_LDS_SEQ[pre_k % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
                     pre_k_start = kv_block_start + pre_k * BLOCK_N
-                    coop_load_k(pre_k_start, pre_k_slot)
-                rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
+                    if ENABLE_DMA:
+                        coop_dma_k(pre_k_start, pre_k_slot)
+                    else:
+                        coop_load_k(pre_k_start, pre_k_slot)
+                if ENABLE_DMA:
+                    rocdl.s_waitcnt(0)
+                else:
+                    rocdl.sched_group_barrier(rocdl.mask_vmem_rd, 1, 0)
                 gpu.barrier()
 
             for kv_sub in range_constexpr(N_SUBTILES):
@@ -412,40 +522,53 @@ def build_flash_attn_func_module_primary(
 
                 if ENABLE_PREFETCH_3BUF:
                     k_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
+                elif ENABLE_DMA:
+                    k_slot = 0
+                    coop_dma_k(kv_start, k_slot)
+                    rocdl.s_waitcnt(0)
+                    gpu.barrier()
                 else:
                     k_slot = 0
                     coop_load_k(kv_start, k_slot)
                     gpu.barrier()
                 k_base = k_buf_base(k_slot)
 
-                # ==== GEMM1 lo: S_lo = K[0:32] @ Q^T ====
-                k_packs_lo = []
-                for ks in range_constexpr(K_STEPS_QK):
-                    k_idx = (
-                        k_base
-                        + lane_mod_32 * K_STRIDE
-                        + ks * K_STEP_QK
-                        + lane_div_32 * MFMA_LANE_K
-                    )
-                    k_packs_lo.append(vector.load_op(mfma_pack_type, lds_kv, [k_idx]))
-                s_acc_lo = c_zero_v16f32
-                for ks in range_constexpr(K_STEPS_QK):
-                    s_acc_lo = do_mfma(k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
-
-                # ==== GEMM1 hi: S_hi = K[32:64] @ Q^T ====
+                # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
                 k_hi_offset = K_SUB_N * K_STRIDE
-                k_packs_hi = []
-                for ks in range_constexpr(K_STEPS_QK):
-                    k_idx = (
-                        k_base + k_hi_offset
-                        + lane_mod_32 * K_STRIDE
-                        + ks * K_STEP_QK
-                        + lane_div_32 * MFMA_LANE_K
-                    )
-                    k_packs_hi.append(vector.load_op(mfma_pack_type, lds_kv, [k_idx]))
+                k_swz_mask = (lane_mod_32 & arith.index(0x7)) << arith.index(4)
+
+                def _k_idx_lo(ks):
+                    col = arith.index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+                    return k_base + lane_mod_32 * K_STRIDE + (col ^ k_swz_mask)
+
+                def _k_idx_hi(ks):
+                    col = arith.index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+                    return (k_base + k_hi_offset
+                            + lane_mod_32 * K_STRIDE + (col ^ k_swz_mask))
+
+                PREFETCH_K = 2
+                k_packs_lo = [None] * K_STEPS_QK
+                k_packs_hi = [None] * K_STEPS_QK
+                for p in range_constexpr(PREFETCH_K):
+                    k_packs_lo[p] = vector.load_op(
+                        mfma_pack_type, lds_kv, [_k_idx_lo(p)])
+                    k_packs_hi[p] = vector.load_op(
+                        mfma_pack_type, lds_kv, [_k_idx_hi(p)])
+
+                s_acc_lo = c_zero_v16f32
                 s_acc_hi = c_zero_v16f32
                 for ks in range_constexpr(K_STEPS_QK):
-                    s_acc_hi = do_mfma(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
+                    s_acc_lo = do_mfma(
+                        k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
+                    s_acc_hi = do_mfma(
+                        k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
+                    if ks + PREFETCH_K < K_STEPS_QK:
+                        k_packs_lo[ks + PREFETCH_K] = vector.load_op(
+                            mfma_pack_type, lds_kv,
+                            [_k_idx_lo(ks + PREFETCH_K)])
+                        k_packs_hi[ks + PREFETCH_K] = vector.load_op(
+                            mfma_pack_type, lds_kv,
+                            [_k_idx_hi(ks + PREFETCH_K)])
 
                 # ==== Online softmax over 64 KV positions ====
                 if CAUSAL:
@@ -521,17 +644,23 @@ def build_flash_attn_func_module_primary(
                     next_k_slot = (
                         CK_LDS_SEQ[next_k_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
                     )
-                    coop_load_k(next_k_start, next_k_slot)
+                    if ENABLE_DMA:
+                        coop_dma_k(next_k_start, next_k_slot)
+                    else:
+                        coop_load_k(next_k_start, next_k_slot)
 
                 if ENABLE_PREFETCH_3BUF:
                     v_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_V
+                    v_base = v_buf_base(v_slot)
+                    coop_load_v(kv_start, v_slot)
+                    rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                    gpu.barrier()
                 else:
                     v_slot = 0
-                v_base = vt_buf_base(v_slot)
-
-                coop_load_v_transposed(kv_start, v_slot)
-                rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
-                gpu.barrier()
+                    v_base = v_buf_base(v_slot)
+                    coop_load_v(kv_start, v_slot)
+                    rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
+                    gpu.barrier()
 
                 # ==== Build P packs for lo and hi halves ====
                 p_f16_lo = []
@@ -541,12 +670,6 @@ def build_flash_attn_func_module_primary(
                     p_f16_hi.append(arith.trunc_f(elem_type, p_vals_hi[r]))
 
                 if USE_K16:
-                    # K=16 GEMM2: interleaved V loading matches GEMM1 C output
-                    # layout so P values can be packed directly (no exchange).
-                    # GEMM1 C per-half element layout (KV positions):
-                    #   half 0: {0,1,2,3, 8,9,10,11, 16,17,18,19, 24,25,26,27}
-                    #   half 1: {4,5,6,7, 12,13,14,15, 20,21,22,23, 28,29,30,31}
-                    # Load V^T with same interleaved pattern (2 x v4f16 per pack).
                     p_packs_lo = []
                     p_packs_hi = []
                     for pks in range_constexpr(PV_K_STEPS):
@@ -561,32 +684,6 @@ def build_flash_attn_func_module_primary(
                             p_f16_hi[p_base+2], p_f16_hi[p_base+3],
                             p_f16_hi[p_base+4], p_f16_hi[p_base+5],
                             p_f16_hi[p_base+6], p_f16_hi[p_base+7]]))
-
-                    v_packs_lo = []
-                    v_packs_hi = []
-                    for dc in range_constexpr(D_CHUNKS):
-                        for pks in range_constexpr(PV_K_STEPS):
-                            v_row_base = (
-                                v_base
-                                + (dc * D_CHUNK + lane_mod_32) * VT_STRIDE
-                                + pks * PV_K_STEP
-                            )
-                            v_grp0 = vector.load_op(v4f16_type, lds_kv,
-                                [v_row_base + lane_div_32 * 4])
-                            v_grp1 = vector.load_op(v4f16_type, lds_kv,
-                                [v_row_base + 8 + lane_div_32 * 4])
-                            v8_lo = vector.shuffle(
-                                v_grp0, v_grp1,
-                                [0, 1, 2, 3, 4, 5, 6, 7])
-                            v_packs_lo.append(v8_lo)
-                            v_grp0_hi = vector.load_op(v4f16_type, lds_kv,
-                                [v_row_base + K_SUB_N + lane_div_32 * 4])
-                            v_grp1_hi = vector.load_op(v4f16_type, lds_kv,
-                                [v_row_base + K_SUB_N + 8 + lane_div_32 * 4])
-                            v8_hi = vector.shuffle(
-                                v_grp0_hi, v_grp1_hi,
-                                [0, 1, 2, 3, 4, 5, 6, 7])
-                            v_packs_hi.append(v8_hi)
                 else:
                     p_packs_lo = []
                     p_packs_hi = []
@@ -599,30 +696,51 @@ def build_flash_attn_func_module_primary(
                             p_f16_hi[p_base], p_f16_hi[p_base+1],
                             p_f16_hi[p_base+2], p_f16_hi[p_base+3]]))
 
-                    v_packs_lo = []
-                    v_packs_hi = []
-                    for dc in range_constexpr(D_CHUNKS):
-                        for pks in range_constexpr(PV_K_STEPS):
-                            v_idx_lo = (
-                                v_base
-                                + (dc * D_CHUNK + lane_mod_32) * VT_STRIDE
-                                + pks * PV_K_STEP
-                                + lane_div_32 * 4
-                            )
-                            v_packs_lo.append(vector.load_op(
-                                v4f16_type, lds_kv, [v_idx_lo]))
-                            v_packs_hi.append(vector.load_op(
-                                v4f16_type, lds_kv, [v_idx_lo + K_SUB_N]))
+                # Build flat (dc, pks) schedule for interleaved GEMM2.
+                _steps = [(dc, pks)
+                          for dc in range(D_CHUNKS)
+                          for pks in range(PV_K_STEPS)]
+                TOTAL_PV = len(_steps)
+
+                def _read_v_pack(step_idx):
+                    dc, pks = _steps[step_idx]
+                    d_col = (arith.index(dc * D_CHUNK)
+                             + tr_col_half * 16 + tr_col_sub * 4)
+                    k_row = (arith.index(pks * PV_K_STEP)
+                             + lane_div_32 * 4 + tr_k_group)
+                    lds_lo = v_base + k_row * V_STRIDE + d_col
+                    lds_hi = lds_lo + arith.index(K_SUB_N * V_STRIDE)
+                    if USE_K16:
+                        vl_a = ds_read_tr_v4f16(lds_lo)
+                        vl_b = ds_read_tr_v4f16(
+                            lds_lo + arith.index(8 * V_STRIDE))
+                        vl = vector.shuffle(
+                            vl_a, vl_b, [0, 1, 2, 3, 4, 5, 6, 7])
+                        vh_a = ds_read_tr_v4f16(lds_hi)
+                        vh_b = ds_read_tr_v4f16(
+                            lds_hi + arith.index(8 * V_STRIDE))
+                        vh = vector.shuffle(
+                            vh_a, vh_b, [0, 1, 2, 3, 4, 5, 6, 7])
+                    else:
+                        vl = ds_read_tr_v4f16(lds_lo)
+                        vh = ds_read_tr_v4f16(lds_hi)
+                    return vl, vh
+
+                # Pre-read V for the first step.
+                v_lo_cur, v_hi_cur = _read_v_pack(0)
 
                 # ==== GEMM2: O += V^T_lo @ P_lo + V^T_hi @ P_hi ====
-                vi = 0
-                for dc in range_constexpr(D_CHUNKS):
-                    for pks in range_constexpr(PV_K_STEPS):
-                        o_accs[dc] = do_mfma(
-                            v_packs_lo[vi], p_packs_lo[pks], o_accs[dc])
-                        o_accs[dc] = do_mfma(
-                            v_packs_hi[vi], p_packs_hi[pks], o_accs[dc])
-                        vi += 1
+                for si in range_constexpr(TOTAL_PV):
+                    dc, pks = _steps[si]
+                    if si + 1 < TOTAL_PV:
+                        v_lo_nxt, v_hi_nxt = _read_v_pack(si + 1)
+                    o_accs[dc] = do_mfma(
+                        v_lo_cur, p_packs_lo[pks], o_accs[dc])
+                    o_accs[dc] = do_mfma(
+                        v_hi_cur, p_packs_hi[pks], o_accs[dc])
+                    if si + 1 < TOTAL_PV:
+                        v_lo_cur = v_lo_nxt
+                        v_hi_cur = v_hi_nxt
 
                 m_running = m_new_raw
                 l_running = l_new
