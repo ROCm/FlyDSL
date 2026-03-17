@@ -466,11 +466,18 @@ def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe)
             extractors_spec.append((i, 'tensor', ctypes.c_void_p))
         elif isinstance(jit_arg, Stream):
             extractors_spec.append((i, 'stream', ctypes.c_void_p))
-        elif hasattr(type(jit_arg), 'width') and getattr(type(jit_arg), 'signed', None) is not None:
+        elif hasattr(type(jit_arg), 'width'):
             jit_type = type(jit_arg)
-            prefix = "c_int" if jit_type.signed else "c_uint"
-            ctype = getattr(ctypes, f"{prefix}{jit_type.width}")
-            extractors_spec.append((i, 'int', ctype))
+            signed = getattr(jit_type, 'signed', None)
+            if signed is not None:
+                prefix = "c_int" if signed else "c_uint"
+                ctype = getattr(ctypes, f"{prefix}{jit_type.width}", None)
+            else:
+                _float_ctypes = {32: ctypes.c_float, 64: ctypes.c_double}
+                ctype = _float_ctypes.get(jit_type.width)
+            if ctype is None:
+                return None
+            extractors_spec.append((i, 'scalar', ctype))
         else:
             return None
 
@@ -524,7 +531,7 @@ class FastCallState:
             arg = args_tuple[arg_idx]
             if kind == 'tensor':
                 storage.value = arg.data_ptr()
-            elif kind == 'int':
+            elif kind == 'scalar':
                 storage.value = arg
             elif kind == 'stream':
                 raw = arg.value if isinstance(arg, Stream) else arg
