@@ -3463,11 +3463,12 @@ def compile_moe_reduction(
     """Compile a reduction kernel that sums over the topk dimension.
 
     Input:  X [tokens, topk, model_dim]
-            valid_mask [tokens, topk] (optional, if use_mask=True)
+            topk_ids [tokens, topk] (optional, if use_mask=True)
+            expert_mask [total_experts] (optional, if use_mask=True)
     Output: Y [tokens, model_dim]
 
     This kernel performs: Y[t, d] = sum(X[t, :, d]) for all t, d.
-    When use_mask=True, only sums slots where valid_mask[t,k]=1.
+    When use_mask=True, only sums slots where expert_mask[topk_ids[t, k]] != 0.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
     """
     gpu_arch = get_hip_arch()
@@ -3505,7 +3506,8 @@ def compile_moe_reduction(
             self: flir.T.i64,
             X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
-            valid_mask: lambda: T.memref(DYN, topk, T.i8()),
+            topk_ids: lambda: T.memref(DYN, topk, T.i32()),
+            expert_mask: lambda: T.memref(DYN, T.i32()),
             m_tokens: lambda: T.index(),
         ):
             from _mlir.dialects import vector as mlir_vector
@@ -3565,14 +3567,14 @@ def compile_moe_reduction(
 
             mask_values = None
             if bool(use_mask):
-                c_zero_i8 = arith.constant(0, type=T.i8())
+                c_zero_i32 = arith.constant(0, type=T.i32())
                 mask_values = []
                 for k in range_constexpr(topk):
                     k_idx = arith.constant(k, index=True)
-                    mask_val_i8 = flir.memref.load(
-                        valid_mask, [token_idx, arith.as_value(k_idx)]
-                    )
-                    is_valid = arith.cmpu(mask_val_i8, c_zero_i8, "ne")
+                    expert_i32 = flir.memref.load(topk_ids, [token_idx, arith.as_value(k_idx)])
+                    expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
+                    mask_val_i32 = flir.memref.load(expert_mask, [arith.as_value(expert_idx)])
+                    is_valid = arith.cmpu(mask_val_i32, c_zero_i32, "ne")
                     mask_values.append(is_valid)
 
             _if_in_bounds = scf.IfOp(arith.as_value(in_bounds))
@@ -3647,7 +3649,8 @@ def compile_moe_reduction(
             self: flir.T.i64,
             X: lambda: T.memref(DYN, topk, model_dim, _state["elem_type"]),
             Y: lambda: T.memref(DYN, model_dim, _state["elem_type"]),
-            valid_mask: lambda: T.memref(DYN, topk, T.i8()),
+            topk_ids: lambda: T.memref(DYN, topk, T.i32()),
+            expert_mask: lambda: T.memref(DYN, T.i32()),
             m_tokens: lambda: T.index(),
             stream_ptr: lambda: T.i64(),  # PyTorch stream pointer
         ):
@@ -3664,7 +3667,7 @@ def compile_moe_reduction(
                 [f"moe_reduction_{topk}_{model_dim}_{dtype_str}{suffix}", "moe_reduction_kernel"],
                 grid_size=(gx, gy, c1),
                 block_size=(bx, c1, c1),
-                kernel_operands=[X, Y, valid_mask, m_tokens],
+                kernel_operands=[X, Y, topk_ids, expert_mask, m_tokens],
                 async_dependencies=[stream_token],
             )
 
@@ -3736,6 +3739,8 @@ class _MoeGemm2ReduceWrapper:
         size_expert_ids_in,
         intermediate = None,
         valid_mask = None,
+        topk_ids = None,
+        expert_mask = None,
         stream_ptr = None
     ):
         """Execute GEMM2 + reduce.
@@ -3752,6 +3757,7 @@ class _MoeGemm2ReduceWrapper:
                 )
         if self._zero_intermediate and not self._use_mask:
             intermediate.zero_()
+        # intermediate.zero_()
         # Phase 1: GEMM2 (no atomics) -> [tokens*topk, model_dim]
         self._gemm2_exe(
             intermediate.view(-1),
@@ -3764,12 +3770,24 @@ class _MoeGemm2ReduceWrapper:
         # Phase 2: Reduce over topk -> [tokens, model_dim]
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         Y = arg_out.view(tokens_in, self._model_dim)
-        if not self._use_mask:
+        if self._use_mask:
+            if topk_ids is None or expert_mask is None:
+                if valid_mask is None:
+                    raise ValueError(
+                        "Masked reduction requires topk_ids and expert_mask"
+                    )
+                # Backward-compatible fallback for older callers that still provide
+                # a precomputed valid_mask instead of topk_ids/expert_mask.
+                Y.copy_(torch.sum(X * valid_mask.view(tokens_in, self._topk, 1).to(dtype=X.dtype), dim=1))
+                return
+            topk_ids = topk_ids.contiguous()
+            expert_mask = expert_mask.contiguous()
+        else:
             if valid_mask is not None:
                 logging.warning("valid_mask provided but use_mask=False; ignoring valid_mask")
-            valid_mask = torch.empty(
-                (0, self._topk), device=arg_out.device, dtype=torch.uint8)
-        self._reduce_exe(X, Y, valid_mask, tokens_in, stream_ptr)
+            topk_ids = torch.empty((0, self._topk), device=arg_out.device, dtype=torch.int32)
+            expert_mask = torch.empty((0,), device=arg_out.device, dtype=torch.int32)
+        self._reduce_exe(X, Y, topk_ids, expert_mask, tokens_in, stream_ptr)
 
     @property
     def mode(self) -> str:
@@ -3793,6 +3811,7 @@ def compile_moe_gemm2_ex(
     # Extended parameters for mode control
     mode: str = MoeGemm2Mode.ATOMIC,
     valid_mask = None,
+    expert_mask = None,
     zero_intermediate: bool = True,
 ):
     """Compile MoE GEMM2 kernel with optional reduction.
@@ -3810,7 +3829,7 @@ def compile_moe_gemm2_ex(
     # Compile based on mode
     if mode == MoeGemm2Mode.REDUCE:
         # Determine if we need masked reduction
-        use_mask = valid_mask is not None
+        use_mask = (valid_mask is not None) or (expert_mask is not None)
         
         # Compile GEMM2 with accumulate=False
         gemm2_exe = compile_moe_gemm2(

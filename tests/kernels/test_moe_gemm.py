@@ -1776,16 +1776,17 @@ def profile_reduce_kernel(
 
     results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
     stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
+    topk_ids = torch.empty((0, topk), device="cuda", dtype=torch.int32)
+    expert_mask = torch.empty((0,), device="cuda", dtype=torch.int32)
 
     # Benchmark FlyDSL reduce
     for _ in range(num_warmup):
-        reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
+        reduce_exe(X, Y, topk_ids, expert_mask, tokens, stream_ptr)
     torch.cuda.synchronize()
 
     with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
         for _ in range(num_iters):
-            reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
+            reduce_exe(X, Y, topk_ids, expert_mask, tokens, stream_ptr)
         torch.cuda.synchronize()
 
     flydsl_us = _get_kernel_time_us(prof) / num_iters
@@ -1846,8 +1847,9 @@ def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
 
     # Run kernels
     stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
+    topk_ids = torch.empty((0, topk), device="cuda", dtype=torch.int32)
+    expert_mask = torch.empty((0,), device="cuda", dtype=torch.int32)
+    reduce_exe(X, Y_flydsl, topk_ids, expert_mask, tokens, stream_ptr)
     torch.sum(X, dim=1, out=Y_ref)
     torch.cuda.synchronize()
 
