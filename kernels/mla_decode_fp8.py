@@ -233,15 +233,8 @@ def _index_cast_to_i32(value):
 
 
 def _fast_exp2(val):
-    """Bare v_exp_f32 — softmax inputs are bounded, range reduction unnecessary."""
-    return llvm.InlineAsmOp(
-        res=ir.F32Type.get(),
-        operands_=[_raw(val)],
-        asm_string="v_exp_f32 $0, $1",
-        constraints="=v,v",
-        has_side_effects=False,
-        is_align_stack=False,
-    ).result
+    """Bare v_exp_f32 via rocdl.exp2 — no range reduction."""
+    return rocdl.exp2(ir.F32Type.get(), _raw(val))
 
 
 def _math_log(val, fastmath=None):
