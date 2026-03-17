@@ -11,9 +11,10 @@
 | **JIT host func** | `@flyc.jit` | Emit host-side launcher with JIT compilation |
 | **GPU kernel** | `@flyc.kernel` | Define GPU kernel function |
 | **Launch** | `kernel(...).launch(grid=, block=)` | Configure and emit GPU launch |
-| **Thread ID** | `fx.gpu.thread_idx.x` | Get thread index in workgroup |
-| **Block ID** | `fx.gpu.block_idx.x` | Get block/workgroup index |
-| **Block dim** | `fx.gpu.block_dim.x` | Get block dimension size |
+| **Thread ID** | `fx.gpu.thread_idx("x")` | Get thread index in workgroup |
+| **Block ID** | `fx.gpu.block_idx("x")` | Get block/workgroup index |
+| **Block dim** | `fx.gpu.block_dim("x")` | Get block dimension size |
+| **Grid dim** | `fx.gpu.grid_dim("x")` | Get grid dimension size |
 | **Compile-time** | `fx.Constexpr[int]` | Compile-time constant parameter |
 | **Tensor arg** | `fx.Tensor` | GPU tensor argument (via DLPack) |
 | **Stream arg** | `fx.Stream` | CUDA/HIP stream argument |
