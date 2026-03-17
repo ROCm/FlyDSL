@@ -1,3 +1,4 @@
+import ctypes
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
@@ -154,6 +155,21 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
+
+    @staticmethod
+    def _extract_data_ptr(arg):
+        return arg.data_ptr()
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        """Reusable slot for tensor arguments.
+
+        For bare-pointer calling convention, only the data pointer changes
+        between calls with the same shape/dtype/strides.
+        """
+        if not hasattr(arg, 'data_ptr'):
+            return None
+        return ctypes.c_void_p, cls._extract_data_ptr
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):

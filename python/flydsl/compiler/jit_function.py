@@ -442,18 +442,32 @@ class JitCacheManager:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
 
 
-def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe):
-    """Build a FastCallState for pre-allocated fast dispatch on subsequent cache hits.
+def _resolve_jit_arg_type(arg, annotation):
+    """Resolve the JitArgument type for an argument, using the same dispatch
+    logic as convert_to_jit_arguments.  Returns the type (not an instance)."""
+    from .jit_argument import JitArgumentRegistry
 
-    Classifies args by their already-computed jit_arg type (from
-    convert_to_jit_arguments) rather than re-inspecting the original Python
-    values, and derives the ctypes storage type from jit_arg metadata.
-    Returns a FastCallState, or None if the kernel can't be fast-pathed.
+    if isinstance(arg, int) and annotation is Stream:
+        return Stream
+    if hasattr(arg, '__fly_ptrs__'):
+        return type(arg)
+    constructor, _ = JitArgumentRegistry.get(type(arg))
+    return constructor
+
+
+def _build_call_state(sig, args_tuple, func_exe):
+    """Build a CallState for fast repeated dispatch.
+
+    Resolves each parameter's JitArgument type using the same registry as
+    convert_to_jit_arguments, then asks it for a reusable slot specification.
+    This ensures a single source of truth for argument packing.
+
+    Returns a CallState, or None if any parameter can't be fast-pathed.
     """
-    from .jit_argument import TensorAdaptor, _is_constexpr_annotation, _is_type_param_annotation
+    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
 
-    extractors_spec = []  # list of (args_tuple_index, kind, ctype)
-    jit_idx = 0
+    slot_specs = []
+    has_user_stream = False
 
     for i, (param_name, param) in enumerate(sig.parameters.items()):
         annotation = param.annotation
@@ -464,90 +478,80 @@ def _build_fast_call_state(sig, args_tuple, jit_args, has_user_stream, func_exe)
         if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
             continue
 
-        jit_arg = jit_args[jit_idx]
-        ptrs = fly_pointers(jit_arg)
-        if len(ptrs) != 1:
+        if getattr(annotation, '_is_stream_param', False):
+            has_user_stream = True
+
+        arg = args_tuple[i]
+
+        jit_arg_type = _resolve_jit_arg_type(arg, annotation)
+        if jit_arg_type is None or not hasattr(jit_arg_type, '_reusable_slot_spec'):
             return None
 
-        if isinstance(jit_arg, TensorAdaptor):
-            extractors_spec.append((i, 'tensor', ctypes.c_void_p))
-        elif isinstance(jit_arg, Stream):
-            extractors_spec.append((i, 'stream', ctypes.c_void_p))
-        elif hasattr(type(jit_arg), 'width'):
-            jit_type = type(jit_arg)
-            signed = getattr(jit_type, 'signed', None)
-            if signed is not None:
-                prefix = "c_int" if signed else "c_uint"
-                ctype = getattr(ctypes, f"{prefix}{jit_type.width}", None)
-            else:
-                _float_ctypes = {32: ctypes.c_float, 64: ctypes.c_double}
-                ctype = _float_ctypes.get(jit_type.width)
-            if ctype is None:
-                return None
-            extractors_spec.append((i, 'scalar', ctype))
-        else:
+        spec = jit_arg_type._reusable_slot_spec(arg)
+        if spec is None:
             return None
 
-        jit_idx += 1
+        ctype, extract = spec
 
+        try:
+            extract(arg)
+        except (AttributeError, TypeError):
+            return None
+
+        slot_specs.append((i, ctype, extract))
+
+    # Auto-stream: append a zero-valued slot for the default (NULL) stream.
+    # When no user-declared stream parameter exists, the compiled kernel
+    # still expects a stream pointer as the last argument.  A NULL pointer
+    # (value 0) selects the HIP default stream.
     if not has_user_stream:
-        extractors_spec.append((-1, 'auto_stream', ctypes.c_void_p))
+        slot_specs.append((-1, ctypes.c_void_p, None))
 
-    return FastCallState(extractors_spec, func_exe)
+    return CallState(slot_specs, func_exe)
 
 
-class FastCallState:
+class CallState:
     """Pre-allocated state for fast kernel dispatch.
 
-    Uses positional indices into args_tuple (not dict lookups).
-    Pre-allocates typed ctypes storage and a packed pointer array at init time.
-    On each call, only updates .value on existing storage objects — no ctypes
-    object allocation, no pointer()/cast() calls. Uses thread-local storage
-    for thread safety.
+    Built from JitArgument types' _reusable_slot_spec protocol — the same
+    types used by convert_to_jit_arguments for the full DLPack path.
+
+    Pre-allocates typed ctypes storage and a packed pointer array at init
+    time.  On each call, only updates .value on existing storage objects —
+    no ctypes object allocation, no pointer()/cast() calls.  Uses
+    thread-local storage for thread safety.
     """
 
-    __slots__ = ('_func_exe', '_spec', '_n_ptrs', '_tls')
+    __slots__ = ('_func_exe', '_spec', '_tls')
 
-    def __init__(self, extractors_spec, func_exe):
+    def __init__(self, slot_specs, func_exe):
         self._func_exe = func_exe
-        self._spec = extractors_spec
-        self._n_ptrs = len(extractors_spec)
+        self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
         self._tls = threading.local()
 
     def _init_buffers(self):
-        packed = (ctypes.c_void_p * self._n_ptrs)()
+        n_ptrs = len(self._spec)
+        packed = (ctypes.c_void_p * n_ptrs)()
         storages = []
-        extractors = []
+        updaters = []
 
-        for packed_idx, (arg_idx, kind, ctype) in enumerate(self._spec):
+        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
             s = ctype(0)
             packed[packed_idx] = ctypes.addressof(s)
             storages.append(s)
-            if kind != 'auto_stream':
-                extractors.append((arg_idx, kind, s))
+            if extract is not None:
+                updaters.append((arg_idx, s, extract))
 
         self._tls.packed = packed
-        self._tls.extractors = extractors
+        self._tls.updaters = updaters
         self._tls._storages = storages
 
     def __call__(self, args_tuple):
         if not hasattr(self._tls, 'packed'):
             self._init_buffers()
 
-        for arg_idx, kind, storage in self._tls.extractors:
-            arg = args_tuple[arg_idx]
-            if kind == 'tensor':
-                storage.value = arg.data_ptr()
-            elif kind == 'scalar':
-                storage.value = arg
-            elif kind == 'stream':
-                raw = arg.value if isinstance(arg, Stream) else arg
-                if raw is None:
-                    storage.value = 0
-                elif isinstance(raw, int):
-                    storage.value = raw
-                else:
-                    storage.value = raw.cuda_stream
+        for arg_idx, storage, extract in self._tls.updaters:
+            storage.value = extract(args_tuple[arg_idx])
 
         return self._func_exe(self._tls.packed)
 
@@ -557,7 +561,7 @@ class JitFunction:
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
-        self._fast_path_cache = {}  # cache_key -> FastCallState
+        self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
 
@@ -627,10 +631,10 @@ class JitFunction:
 
         args_tuple = tuple(bound.arguments.values())
 
-        # Fast path: pre-allocated dispatch (no ctypes alloc, no DLPack, no dict)
-        fast_state = self._fast_path_cache.get(cache_key)
-        if fast_state is not None:
-            return fast_state(args_tuple)
+        # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
+        call_state = self._call_state_cache.get(cache_key)
+        if call_state is not None:
+            return call_state(args_tuple)
 
         # Normal path: check caches
         cached_func = None
@@ -644,24 +648,26 @@ class JitFunction:
                     self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            # Build CallState via JitArgument registry (same dispatch as compile path)
+            try:
+                state = _build_call_state(
+                    sig, args_tuple, cached_func._get_func_exe(),
+                )
+            except Exception:
+                state = None
+            if state is not None:
+                self._call_state_cache[cache_key] = state
+                return state(args_tuple)
+
+            # Fallback: run through DLPack (should not happen for static layout)
+            log().warning("CallState build failed on cache hit, falling back to DLPack path")
             if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
             with self._cached_ctx:
                 _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-                has_user_stream = _ensure_stream_arg(jit_args)
-                result = cached_func(*jit_args)
-                # Build FastCallState for subsequent calls
-                try:
-                    state = _build_fast_call_state(
-                        sig, args_tuple, jit_args, has_user_stream,
-                        cached_func._get_func_exe(),
-                    )
-                    if state is not None:
-                        self._fast_path_cache[cache_key] = state
-                except Exception as exc:
-                    log().debug(f"FastCallState build failed: {exc}")
-                return result
+                _ensure_stream_arg(jit_args)
+                return cached_func(*jit_args)
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
@@ -721,7 +727,20 @@ class JitFunction:
                     str_key = self._cache_key_to_str(cache_key)
                     self.cache_manager.set(str_key, compiled_func)
 
-            return compiled_func(*jit_args)
+            result = compiled_func(*jit_args)
+
+            # Build CallState so subsequent calls skip DLPack
+            try:
+                state = _build_call_state(
+                    sig, args_tuple,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._call_state_cache[cache_key] = state
+            except Exception:
+                pass
+
+            return result
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:

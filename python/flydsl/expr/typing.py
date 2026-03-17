@@ -297,6 +297,8 @@ class Tensor:
 
 
 class Stream:
+    _is_stream_param = True
+
     def __init__(self, value=None):
         self.value = value
         self._stream_storage = None
@@ -312,6 +314,19 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    @staticmethod
+    def _extract_stream_value(arg):
+        raw = arg.value if isinstance(arg, Stream) else arg
+        if raw is None:
+            return 0
+        elif isinstance(raw, int):
+            return raw
+        return raw.cuda_stream
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod
     def __fly_construct__(cls, values):
