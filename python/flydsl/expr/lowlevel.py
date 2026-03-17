@@ -257,6 +257,49 @@ def fence_one_as_seq_cst() -> None:
     )
 
 
+def store_i32_system(addr_i64: Any, offset: Any, val: Any) -> None:
+    """Atomic store i32 with system scope (``syncscope("one-as") monotonic``).
+
+    Equivalent to mori's ``AtomicStoreRelaxedSystem``:
+    ``__hip_atomic_store(ptr, val, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM)``
+
+    Uses global pointer (addrspace 1) with monotonic ordering and one-as
+    syncscope so the store is immediately visible across all GPUs via XGMI.
+    """
+    base = _unwrap(addr_i64)
+    off  = _unwrap(offset)
+    val_ = _unwrap(val)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, addr).result
+    llvm.StoreOp(
+        val_, gptr,
+        alignment=4,
+        ordering=llvm.AtomicOrdering.monotonic,
+        syncscope="one-as",
+    )
+
+
+def store_i32_global(addr_i64: Any, offset: Any, val: Any) -> None:
+    """Plain store i32 via ``ptr addrspace(1)`` (global address space).
+
+    Like mori's direct P2P writes: ``memObj->GetAs<int*>(destPe)[offset] = val``.
+    Uses global addrspace(1) pointer so that XGMI P2P addresses work correctly.
+    Does NOT use atomic ordering — caller must ensure data-race safety.
+    """
+    base = _unwrap(addr_i64)
+    off  = _unwrap(offset)
+    val_ = _unwrap(val)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr_global_ty = llvm.PointerType.get(address_space=1)
+    gptr = llvm.IntToPtrOp(ptr_global_ty, addr).result
+    llvm.StoreOp(val_, gptr, alignment=4)
+
+
 # ---------------------------------------------------------------------------
 # Vectorized memory ops (128-bit load/store for token data)
 # ---------------------------------------------------------------------------

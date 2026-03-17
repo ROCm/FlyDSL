@@ -176,7 +176,7 @@ class ExternFunction:
         if ctx is None or ctx.gpu_module_body is None:
             raise RuntimeError(
                 "ExternFunction can only be called inside a @flyc.kernel body. "
-                "Make sure the kernel is compiled via @flyc.jit or compile_shmem_kernel()."
+                "Make sure the kernel is compiled via @flyc.jit."
             )
 
         # Ensure the function is declared in the GPU module.
