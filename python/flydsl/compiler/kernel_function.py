@@ -264,10 +264,17 @@ class KernelLauncher:
             block_z = _to_index_value(block_dims[2])
 
             smem_val = None
-            if isinstance(smem, ir.Value):
-                smem_val = smem
-            elif smem > 0:
-                smem_val = arith.constant(ir.IntegerType.get_signless(32), smem)
+            smem_raw = _unwrap_to_raw(smem)
+            if isinstance(smem_raw, ir.Value):
+                smem_val = smem_raw
+            else:
+                smem_py = None
+                try:
+                    smem_py = int(smem_raw)
+                except (TypeError, ValueError):
+                    smem_py = None
+                if smem_py is not None and smem_py > 0:
+                    smem_val = arith.constant(ir.IntegerType.get_signless(32), smem_py)
 
             if stream is not None:
                 async_object = _unwrap_to_raw(stream)
