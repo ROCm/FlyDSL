@@ -523,11 +523,11 @@ NB_MODULE(_fly, m) {
   using DLTensorAdaptor = utils::DLTensorAdaptor;
 
   nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
-      .def(nb::init<nb::object, std::optional<int32_t>, bool>(), "dlpack_capsule"_a,
-           "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
-           "Create a DLTensorAdaptor from a DLPack capsule. "
-           "If alignment is None, defaults to element size in bytes (minimum "
-           "1). ")
+      .def(nb::init<int64_t, nb::tuple, nb::tuple, uint8_t, uint8_t, int,
+                    std::optional<int32_t>, bool>(),
+           "data_ptr"_a, "shape"_a, "strides"_a, "dtype_code"_a, "dtype_bits"_a,
+           "device_type"_a, "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
+           "Create a DLTensorAdaptor from raw tensor attributes.")
       .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
       .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
@@ -539,10 +539,34 @@ NB_MODULE(_fly, m) {
       .def("get_memref_type", &DLTensorAdaptor::getMemRefType,
            "Get fly.memref MLIR type based on current dynamic marks")
       .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
+      .def("update_data_ptr", &DLTensorAdaptor::updateDataPtr, "new_data_ptr"_a,
+           "Update only data pointer for hot-path dispatch")
+      .def("get_stable_pointers", &DLTensorAdaptor::getStablePointers,
+           "Get stable pointer addresses for hot-path dispatch")
       .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
            "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
       .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
            "Decide whether to use 32-bit stride");
+
+  // -------------------------------------------------------------------------
+  // FastDispatcher (C++ hot-path dispatch)
+  // -------------------------------------------------------------------------
+  using FastDispatcher = utils::FastDispatcher;
+
+  nb::class_<FastDispatcher>(m, "FastDispatcher")
+      .def(nb::init<int64_t>(), "func_ptr"_a,
+           "Create a FastDispatcher with a raw JIT function pointer.")
+      .def("add_tensor_slot", &FastDispatcher::addTensorSlot, "arg_idx"_a, "adaptor"_a)
+      .def("add_scalar_slot", &FastDispatcher::addScalarSlot, "arg_idx"_a, "byte_width"_a, "kind"_a)
+      .def_ro_static("SK_INT", &FastDispatcher::SK_INT)
+      .def_ro_static("SK_FLOAT", &FastDispatcher::SK_FLOAT)
+      .def_ro_static("SK_STREAM", &FastDispatcher::SK_STREAM)
+      .def("add_constexpr_guard", &FastDispatcher::addConstexprGuard, "arg_idx"_a,
+           "expected_value"_a)
+      .def("set_kwargs_info", &FastDispatcher::setKwargsInfo, "n_positional"_a, "names"_a,
+           "defaults"_a)
+      .def("finalize", &FastDispatcher::finalize, "has_user_stream"_a)
+      .def("__call__", &FastDispatcher::call);
 
   // -------------------------------------------------------------------------
   // Module-level helper functions

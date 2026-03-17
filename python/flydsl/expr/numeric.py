@@ -19,6 +19,11 @@ from .utils.arith import (
 )
 
 
+def _pass_through(arg):
+    """Identity extractor for fast dispatch — scalars pass value directly."""
+    return arg
+
+
 def _infer_np_dtype(width, signed, name):
     if signed is not None:
         if width == 1:
@@ -69,8 +74,10 @@ class NumericMeta(type):
             "__fly_values__": _fly_values,
             "__fly_construct__": classmethod(_fly_construct),
         }
-        if signed is not None:
-            new_attrs["__fly_ptrs__"] = _c_pointers
+        new_attrs["__fly_ptrs__"] = _c_pointers
+        def _fast_dispatch_info(cls):
+            return cls._fast_dispatch_cache
+        new_attrs["_fast_dispatch_info"] = classmethod(_fast_dispatch_info)
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -79,6 +86,19 @@ class NumericMeta(type):
         new_cls._np_dtype = inferred_np
         new_cls.signed = signed
         new_cls._zero = zero
+        new_cls._is_runtime_param = True
+
+        # Build _fast_dispatch_cache: (ctype, extract_fn) for fast-path dispatch
+        if signed is not None:
+            # Integer types: c_int{width} or c_uint{width}
+            prefix = "c_int" if signed else "c_uint"
+            ctype = getattr(ctypes, f"{prefix}{width}", None)
+            new_cls._fast_dispatch_cache = (ctype, _pass_through) if ctype else None
+        else:
+            # Float types: only f32/f64 have proper ctypes; f16/bf16/f8 fall back
+            _float_ctypes = {32: ctypes.c_float, 64: ctypes.c_double}
+            ctype = _float_ctypes.get(width)
+            new_cls._fast_dispatch_cache = (ctype, _pass_through) if ctype else None
         return new_cls
 
     def __str__(cls):

@@ -8,7 +8,6 @@ from .._mlir._mlir_libs._fly import DLTensorAdaptor
 from ..expr.typing import Constexpr, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
 
-
 _FLOAT8_DTYPES = tuple(
     dt
     for dt in (
@@ -100,10 +99,13 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        if isinstance(value, JitArgument) and isinstance(value, DslType):
+        # Fast duck-type checks instead of isinstance(Protocol) (~6.6µs each)
+        is_jit_arg = hasattr(value, '__fly_types__') and hasattr(value, '__fly_ptrs__')
+        is_dsl_type = hasattr(value, '__fly_construct__') and hasattr(value, '__fly_values__')
+        if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
-        elif isinstance(value, JitArgument):
+        elif is_jit_arg:
             jit_arg = value
             dsl_type = JitArgumentRegistry.get_dsl_type(type(value))
             if dsl_type is None:
@@ -132,6 +134,22 @@ def convert_to_jit_arguments(
 # ================================ Common useful JitArguments ================================
 
 
+# torch.dtype → (DLDataType.code, DLDataType.bits)
+# kDLInt=0, kDLUInt=1, kDLFloat=2, kDLBfloat=6
+_TORCH_DTYPE_TO_DL = {
+    torch.float16: (2, 16),
+    torch.float32: (2, 32),
+    torch.float64: (2, 64),
+    torch.bfloat16: (6, 16),
+    torch.int8: (0, 8),
+    torch.int16: (0, 16),
+    torch.int32: (0, 32),
+    torch.int64: (0, 64),
+    torch.uint8: (1, 8),
+    torch.bool: (1, 1),
+}
+
+
 @JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
 class TensorAdaptor:
     def __init__(
@@ -141,12 +159,22 @@ class TensorAdaptor:
         use_32bit_stride: bool = False,
     ):
         self._tensor_keepalive = tensor
-        dlpack_tensor = tensor
-        if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
-            dlpack_tensor = tensor.view(torch.uint8)
-            self._tensor_keepalive = dlpack_tensor
+        t = tensor
+        if _FLOAT8_DTYPES and t.dtype in _FLOAT8_DTYPES:
+            t = t.view(torch.uint8)
+            self._tensor_keepalive = t
 
-        self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
+        dl = _TORCH_DTYPE_TO_DL.get(t.dtype)
+        if dl is None:
+            raise TypeError(f"Unsupported torch dtype: {t.dtype}")
+        dtype_code, dtype_bits = dl
+        device_type = 2 if t.device.type == 'cuda' else 1  # kDLCUDA or kDLCPU
+
+        self.tensor_adaptor = DLTensorAdaptor(
+            t.data_ptr(), tuple(t.shape), tuple(t.stride()),
+            dtype_code, dtype_bits, device_type,
+            assumed_align, use_32bit_stride,
+        )
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
 
@@ -164,6 +192,20 @@ class TensorAdaptor:
     @requires_memref_desc
     def __fly_ptrs__(self):
         return self.tensor_adaptor.get_c_pointers()
+
+    @property
+    def dtype(self):
+        return self._tensor_keepalive.dtype
+
+    @property
+    def shape(self):
+        return self._tensor_keepalive.shape
+
+    def stride(self):
+        return self._tensor_keepalive.stride()
+
+    def data_ptr(self):
+        return self._tensor_keepalive.data_ptr()
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:

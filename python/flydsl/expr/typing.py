@@ -282,6 +282,18 @@ class Swizzle:
 
 
 class Tensor:
+    @staticmethod
+    def _extract_data_ptr(arg):
+        return arg.data_ptr()
+
+    @staticmethod
+    def _cache_signature(arg):
+        return (arg.dtype, tuple(arg.shape), tuple(arg.stride()))
+
+    @classmethod
+    def _fast_dispatch_info(cls):
+        return ctypes.c_void_p, cls._extract_data_ptr
+
     def __init__(self, value: ir.Value):
         self.value = value
 
@@ -297,6 +309,9 @@ class Tensor:
 
 
 class Stream:
+    _is_runtime_param = True
+    _is_stream_param = True
+
     def __init__(self, value=None):
         self.value = value
         self._stream_storage = None
@@ -312,6 +327,19 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    @staticmethod
+    def _extract_handle(arg):
+        raw = arg.value if isinstance(arg, Stream) else arg
+        if raw is None:
+            return 0
+        elif isinstance(raw, int):
+            return raw
+        return raw.cuda_stream
+
+    @classmethod
+    def _fast_dispatch_info(cls):
+        return ctypes.c_void_p, cls._extract_handle
 
     @classmethod
     def __fly_construct__(cls, values):

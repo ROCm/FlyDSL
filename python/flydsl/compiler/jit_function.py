@@ -14,7 +14,7 @@ from .._mlir.passmanager import PassManager
 from ..runtime.device import get_rocm_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
-from ..expr.typing import Stream
+from ..expr.typing import Stream, Tensor
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -119,6 +119,7 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
     if visited is None:
         visited = set()
     sources = []
+    # Scan global names referenced in function body
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -133,7 +134,52 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # Scan closure variables for captured functions (KernelFunction, JitFunction, etc.)
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            if not _is_user_function(underlying, rootFile):
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
+
+
+def _collect_all_closure_vals(func, vals, visited, prefix=""):
+    """Recursively collect hashable closure values from func and its captured functions."""
+    if id(func) in visited:
+        return
+    visited.add(id(func))
+    if not getattr(func, "__code__", None) or not func.__code__.co_freevars:
+        return
+    closure = getattr(func, "__closure__", None)
+    if not closure:
+        return
+    for name, cell in zip(func.__code__.co_freevars, closure):
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        key = f"{prefix}{name}" if prefix else name
+        if isinstance(val, (int, float, bool, str, type(None), tuple, list)):
+            vals.append(f"{key}={val!r}")
+        else:
+            underlying = _get_underlying_func(val)
+            if underlying is not None:
+                _collect_all_closure_vals(underlying, vals, visited, f"{key}.")
 
 
 def _jit_function_cache_key(func: Callable) -> str:
@@ -154,14 +200,9 @@ def _jit_function_cache_key(func: Callable) -> str:
 
     if func.__code__.co_freevars and getattr(func, "__closure__", None):
         closure_vals = []
-        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            try:
-                val = cell.cell_contents
-                if isinstance(val, (int, float, bool, str, type(None), tuple)):
-                    closure_vals.append(f"{name}={val!r}")
-            except ValueError:
-                pass
+        _collect_all_closure_vals(func, closure_vals, set())
         if closure_vals:
+            closure_vals.sort()
             parts.append("closure:" + ",".join(closure_vals))
 
     combined = "\n".join(parts)
@@ -433,11 +474,88 @@ class JitCacheManager:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
 
 
+def _has_user_stream(sig):
+    """Check if the function signature has a user-declared Stream parameter."""
+    return any(
+        getattr(param.annotation, '_is_stream_param', False)
+        for param in sig.parameters.values()
+    )
+
+
+def _build_fast_dispatcher(sig, args_tuple, jit_args, has_user_stream, func_ptr,
+                           n_positional_args):
+    """Build a C++ FastDispatcher for hot-path kernel calls.
+
+    Everything (shape guard, data-ptr update, scalar/stream packing, JIT call)
+    happens in a single Python→C++ crossing.
+
+    Returns a FastDispatcher, or None if the kernel can't be fast-pathed.
+    """
+    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation, TensorAdaptor
+    from .._mlir._mlir_libs._fly import FastDispatcher
+
+    fd = FastDispatcher(func_ptr)
+
+    jit_arg_idx = 0
+    for i, (param_name, param) in enumerate(sig.parameters.items()):
+        annotation = param.annotation
+
+        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+            fd.add_constexpr_guard(i, int(args_tuple[i]))
+            continue
+        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+            continue
+
+        jit_arg = jit_args[jit_arg_idx]
+        jit_arg_idx += 1
+
+        if isinstance(jit_arg, TensorAdaptor):
+            fd.add_tensor_slot(i, jit_arg.tensor_adaptor)
+        else:
+            import ctypes as _ct
+            _FLOAT_CTYPES = (_ct.c_float, _ct.c_double)
+            is_stream = (annotation is not inspect.Parameter.empty
+                         and getattr(annotation, '_is_stream_param', False))
+            if is_stream:
+                fd.add_scalar_slot(i, _ct.sizeof(_ct.c_void_p), FastDispatcher.SK_STREAM)
+            elif hasattr(annotation, '_fast_dispatch_info'):
+                fdi = annotation._fast_dispatch_info()
+                if fdi is not None:
+                    ctype = fdi[0]
+                    bw = _ct.sizeof(ctype)
+                    kind = FastDispatcher.SK_FLOAT if ctype in _FLOAT_CTYPES else FastDispatcher.SK_INT
+                    fd.add_scalar_slot(i, bw, kind)
+                else:
+                    return None
+            else:
+                fd.add_scalar_slot(i, 8, FastDispatcher.SK_INT)
+
+    # Kwargs info for trailing parameters
+    params = list(sig.parameters.values())
+    n_params = len(params)
+    if n_positional_args < n_params:
+        trailing_names = [p.name for p in params[n_positional_args:]]
+        trailing_defaults = [p.default for p in params[n_positional_args:]]
+        fd.set_kwargs_info(n_positional_args, trailing_names, trailing_defaults)
+
+    fd.finalize(has_user_stream)
+    return fd
+
+
 class JitFunction:
     def __init__(self, func: Callable):
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
+        self._sig = None  # lazy: set on first call
+        self._mem_cache = {}
+        self._fast_dispatcher = None  # C++ FastDispatcher for hot-path
+
+    def _ensure_sig(self):
+        """Initialize signature + param metadata on first call (not at decoration time)."""
+        if self._sig is not None:
+            return
+        self._sig = inspect.signature(self.func)
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -451,55 +569,106 @@ class JitFunction:
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
 
-    def _make_cache_key(self, bound_args: Dict) -> str:
+    @staticmethod
+    def _arg_cache_sig(arg, ann=None):
+        """Cache signature for a single non-Constexpr argument value.
+
+        Uses annotation's _cache_signature protocol if available.
+        Falls back to duck-typing for unannotated tensors.
+        Everything else: type only (runtime parameter).
+        """
+        if ann is not None and hasattr(ann, '_cache_signature'):
+            return ann._cache_signature(arg)
+        # Unannotated tensor fallback
+        if hasattr(arg, "data_ptr") and hasattr(arg, "stride"):
+            return Tensor._cache_signature(arg)
+        return type(arg)
+
+    def _make_cache_key(self, bound_args):
+        """Build a tuple cache key from bound arguments.
+
+        Constexpr: type + value (affects compiled code).
+        Tensors: dtype/shape/strides (determines MLIR memref type).
+        Everything else: type only (runtime parameter).
+        """
+        from .jit_argument import _is_constexpr_annotation
+        sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
-            key_parts.append(f"{name}:{self._get_type_signature(arg)}")
-        return "|".join(key_parts)
+            param = sig.parameters.get(name)
+            ann = param.annotation if param else inspect.Parameter.empty
 
-    def _get_type_signature(self, obj) -> str:
-        if hasattr(obj, "__cache_signature__"):
-            return obj.__cache_signature__()
-        elif hasattr(obj, "dtype") and hasattr(obj, "shape"):
-            return f"tensor[{obj.dtype},{obj.shape}]"
-        elif isinstance(obj, (int, float, bool, str)):
-            return f"{type(obj).__name__}:{obj}"
-        return type(obj).__name__
+            if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
+                key_parts.append((name, type(arg), arg))
+            else:
+                resolved_ann = ann if ann is not inspect.Parameter.empty else None
+                if isinstance(arg, tuple):
+                    key_parts.append((name, tuple(self._arg_cache_sig(a, resolved_ann) for a in arg)))
+                else:
+                    key_parts.append((name, self._arg_cache_sig(arg, resolved_ann)))
+        return tuple(key_parts)
+
+    @staticmethod
+    def _cache_key_to_str(cache_key) -> str:
+        """Convert tuple cache key to string for disk cache."""
+        return str(cache_key)
+
+    def _setup_fast_dispatcher(self, sig, args_tuple, jit_args, func_ptr, n_positional_args):
+        """Build C++ FastDispatcher for hot-path dispatch."""
+        has_user_stream = _has_user_stream(sig)
+        fd = _build_fast_dispatcher(sig, args_tuple, jit_args, has_user_stream,
+                                    func_ptr, n_positional_args)
+        if fd is not None:
+            self._fast_dispatcher = fd
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
+        # C++ fast dispatch: one Python→C++ crossing for everything
+        fd = self._fast_dispatcher
+        if fd is not None:
+            rc = fd(*args, **kwargs)
+            if rc == 0:
+                return None  # kernel returns void
+            self._fast_dispatcher = None  # guard failed, fall through
+
+        self._ensure_sig()
         self._ensure_cache_manager()
 
-        if not hasattr(self, "_sig"):
-            self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
 
+        args_tuple = tuple(bound.arguments.values())
+
+        # Normal path: check caches
         cached_func = None
-        dump_ir = env.debug.dump_ir
         use_cache = env.runtime.enable_cache
-        if not hasattr(self, "_mem_cache"):
-            self._mem_cache = {}
         if use_cache:
-            compiled_func = self._mem_cache.get(cache_key)
-            if compiled_func is not None:
-                cached_func = compiled_func
-            elif not dump_ir:
-                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            cached_func = self._mem_cache.get(cache_key)
+            if cached_func is None and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+                if cached_func is not None:
+                    self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
-            if not hasattr(self, "_cached_ctx"):
-                self._cached_ctx = ir.Context()
-                self._cached_ctx.load_all_available_dialects()
-            with self._cached_ctx:
-                _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-                _ensure_stream_arg(jit_args)
-                return cached_func(*jit_args)
+            # Cache hit: build FastDispatcher and dispatch — no MLIR context needed.
+            # convert_to_jit_arguments creates TensorAdaptors via raw constructor (pure C++),
+            # _get_raw_func_ptr initializes engine with its own internal context.
+            func_ptr = cached_func._get_raw_func_ptr()
+            _, jit_args_for_dd, _, _ = convert_to_jit_arguments(sig, bound)
+            _ensure_stream_arg(jit_args_for_dd)
+            self._setup_fast_dispatcher(sig, args_tuple, jit_args_for_dd,
+                                        func_ptr, len(args))
+            if self._fast_dispatcher is not None:
+                self._fast_dispatcher(*args, **kwargs)
+                return None
+            # FastDispatcher build failed — fall back to artifact call (needs MLIR)
+            return cached_func(*jit_args_for_dd)
 
         with ir.Context() as ctx:
             param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
@@ -555,10 +724,18 @@ class JitFunction:
 
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not dump_ir:
-                    self.cache_manager.set(cache_key, compiled_func)
+                if self.cache_manager and not env.debug.dump_ir:
+                    str_key = self._cache_key_to_str(cache_key)
+                    self.cache_manager.set(str_key, compiled_func)
 
-            return compiled_func(*jit_args)
+            result = compiled_func(*jit_args)
+
+            if use_cache and not env.debug.dump_ir:
+                func_ptr = compiled_func._get_raw_func_ptr()
+                self._setup_fast_dispatcher(sig, args_tuple, jit_args,
+                                            func_ptr, len(args))
+
+            return result
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:
