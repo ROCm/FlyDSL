@@ -215,9 +215,13 @@ def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
   let parameters = (ins
     "Type":$mmaAtom,
     Fly_Layout:$atomLayout,
-    Fly_Tile:$permutation
+    DefaultValuedParameter<"TileType", "TiledMmaType::getDefaultPermutationMNK($_ctxt)">:$permutation
   );
-  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout `,` $permutation `>`";
+  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout (`,` $permutation^)? `>`";
+
+  let extraClassDeclaration = [{
+    static TileType getDefaultPermutationMNK(MLIRContext *ctx);
+  }];
 }
 
 def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [

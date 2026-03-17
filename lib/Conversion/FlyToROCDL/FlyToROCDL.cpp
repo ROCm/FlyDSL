@@ -463,6 +463,7 @@ public:
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
+    Value pred = adaptor.getPred();
 
     auto srcFlyTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
     auto dstFlyTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
@@ -475,14 +476,29 @@ public:
     Location loc = op.getLoc();
     Type copyOpType = copyAtom.getCopyOp();
 
-    if (isa<CopyOpUniversalCopyType>(copyOpType)) {
-      if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
-        return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
-      return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
-    } else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
-      return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
+    auto emitCopyBody = [&](ConversionPatternRewriter &rewriter) -> LogicalResult {
+      if (isa<CopyOpUniversalCopyType>(copyOpType)) {
+        if (!isa<LLVM::LLVMPointerType>(src.getType()) ||
+            !isa<LLVM::LLVMPointerType>(dst.getType()))
+          return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
+        return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
+      } else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
+        return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
+      return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
+    };
 
-    return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
+    if (pred) {
+      auto predFlyTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
+      if (!predFlyTy)
+        return rewriter.notifyMatchFailure(op, "pred is not a Fly memref type");
+      Type predElemTy = predFlyTy.getElemTy();
+      Value predVal = LLVM::LoadOp::create(rewriter, loc, predElemTy, pred);
+      auto ifOp = scf::IfOp::create(rewriter, loc, TypeRange{}, predVal, false);
+      rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
+      return emitCopyBody(rewriter);
+    } else {
+      return emitCopyBody(rewriter);
+    }
   }
 
 private:

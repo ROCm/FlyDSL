@@ -251,6 +251,12 @@ void MemRefType::print(AsmPrinter &printer) const {
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
+TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
+  Attribute noneVal = IntAttr::getNone(ctx);
+  SmallVector<Attribute> elems(3, noneVal);
+  return TileType::get(ctx, TileAttr::get(ArrayAttr::get(ctx, elems)));
+}
+
 bool CopyOpUniversalCopyType::isStatic() const { return true; }
 
 Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
@@ -300,6 +306,11 @@ Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
 }
 
 Attribute MmaAtomUniversalFMAType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+
+Type MmaAtomUniversalFMAType::getValTypeA() const { return getElemTy(); }
+Type MmaAtomUniversalFMAType::getValTypeB() const { return getElemTy(); }
+Type MmaAtomUniversalFMAType::getValTypeC() const { return getElemTy(); }
+Type MmaAtomUniversalFMAType::getValTypeD() const { return getElemTy(); }
 
 Attribute MmaAtomUniversalFMAType::getThrValLayoutA() const {
   return FxLayout(FxShape(FxC(1), FxC(1)), FxStride(FxC(1), FxC(1)));

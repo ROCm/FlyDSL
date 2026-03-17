@@ -55,6 +55,10 @@ def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface", [Fly_MaySta
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getShapeMNK", (ins)>,
+    InterfaceMethod<"", "::mlir::Type", "getValTypeA", (ins)>,
+    InterfaceMethod<"", "::mlir::Type", "getValTypeB", (ins)>,
+    InterfaceMethod<"", "::mlir::Type", "getValTypeC", (ins)>,
+    InterfaceMethod<"", "::mlir::Type", "getValTypeD", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>
