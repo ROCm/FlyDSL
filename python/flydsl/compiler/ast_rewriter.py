@@ -129,8 +129,9 @@ class Transformer(ast.NodeTransformer):
         self.first_lineno = first_lineno
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        if getattr(node, _ASTREWRITE_MARKER, False):
-            return node
+        # Always visit children so nested control flow inside generated
+        # helpers (e.g. __then_X / __else_X from scf_if_dispatch) is still
+        # lowered by subsequent transformers.
         node = self.generic_visit(node)
         return node
 
@@ -454,6 +455,8 @@ class ReplaceYieldWithSCFYield(Transformer):
 
 @ASTRewriter.register
 class CanonicalizeWhile(Transformer):
+    _last_while_op = None
+
     @staticmethod
     def scf_while_init(cond, *, loc=None, ip=None):
         if loc is None:
@@ -464,15 +467,36 @@ class CanonicalizeWhile(Transformer):
             inits = list(cond.owner.operands)
             result_types = [i.type for i in inits]
             while_op = scf.WhileOp(result_types, inits, loc=loc, ip=ip)
-            while_op.regions[0].blocks.append(*[i.type for i in inits])
+            CanonicalizeWhile._last_while_op = while_op
+
+            # before region: clone the condition op with block arguments so
+            # the condition is re-evaluated with updated loop-carried values.
+            while_op.regions[0].blocks.append(*result_types)
             before = while_op.regions[0].blocks[0]
-            while_op.regions[1].blocks.append(*[i.type for i in inits])
+
+            with ir.InsertionPoint(before):
+                operand_map = {id(v): ba for v, ba in zip(inits, before.arguments)}
+                cond_def = cond.owner
+                new_operands = [operand_map.get(id(o), o) for o in cond_def.operands]
+                cond_rtypes = [r.type for r in cond_def.results]
+                attrs = {n: cond_def.attributes[n] for n in cond_def.attributes}
+                new_cond_op = ir.Operation.create(
+                    cond_def.name,
+                    results=cond_rtypes,
+                    operands=new_operands,
+                    attributes=attrs,
+                )
+                scf.ConditionOp(new_cond_op.results[0], list(before.arguments))
+
+            # after region: the body will be traced here.
+            while_op.regions[1].blocks.append(*result_types)
             after = while_op.regions[1].blocks[0]
-            with ir.InsertionPoint(before) as ip:
-                cond_op = scf.ConditionOp(cond, list(before.arguments))
-                cond.owner.move_before(cond_op)
+
             with ir.InsertionPoint(after):
-                yield inits
+                # Yield block arguments so the caller can rebind Python vars.
+                yield list(after.arguments)
+                # Body has completed; scf_while_yield_ should have emitted
+                # the scf.YieldOp terminator already.
 
         if hasattr(CanonicalizeWhile.scf_while_init, "wrapper"):
             next(CanonicalizeWhile.scf_while_init.wrapper, False)
@@ -487,12 +511,50 @@ class CanonicalizeWhile(Transformer):
         yield CanonicalizeWhile.scf_while_init(cond, loc=loc, ip=ip)
         yield CanonicalizeWhile.scf_while_init(cond, loc=loc, ip=ip)
 
+    @staticmethod
+    def scf_while_yield_(yield_vals):
+        """Emit scf.YieldOp for the while-loop after region."""
+        processed = []
+        for v in yield_vals:
+            if isinstance(v, ir.Value):
+                processed.append(v)
+            elif hasattr(v, "ir_value"):
+                processed.append(v.ir_value())
+            else:
+                processed.append(v)
+        scf.YieldOp(processed)
+
+    @staticmethod
+    def scf_while_get_results_():
+        """Return the results of the most recent WhileOp."""
+        if CanonicalizeWhile._last_while_op is not None:
+            return list(CanonicalizeWhile._last_while_op.results)
+        return []
+
     @classmethod
     def rewrite_globals(cls):
         return {
             "scf_while_gen": cls.scf_while_gen,
             "scf_while_init": cls.scf_while_init,
+            "scf_while_yield_": cls.scf_while_yield_,
+            "scf_while_get_results_": cls.scf_while_get_results_,
         }
+
+    @staticmethod
+    def _extract_carry_names(test_node):
+        """Map {operand_index: variable_name} for Name nodes in Compare."""
+        if isinstance(test_node, ast.NamedExpr):
+            return CanonicalizeWhile._extract_carry_names(test_node.value)
+        carry = {}
+        if isinstance(test_node, ast.Compare):
+            if isinstance(test_node.left, ast.Name):
+                carry[0] = test_node.left.id
+            for i, comp in enumerate(test_node.comparators):
+                if isinstance(comp, ast.Name):
+                    carry[i + 1] = comp.id
+        elif isinstance(test_node, ast.Name):
+            carry[0] = test_node.id
+        return carry
 
     def visit_While(self, node: ast.While) -> List[ast.AST]:
         if _is_constexpr(node.test):
@@ -500,34 +562,118 @@ class CanonicalizeWhile(Transformer):
             node = self.generic_visit(node)
             return node
         node = self.generic_visit(node)
+
+        carry_names = self._extract_carry_names(node.test)
+
         if isinstance(node.test, ast.NamedExpr):
             test = node.test.value
         else:
             test = node.test
-        w = ast.Call(func=ast.Name("scf_while_gen", ctx=ast.Load()), args=[test], keywords=[])
-        w = ast.copy_location(w, node)
-        assign = ast.Assign(
-            targets=[ast.Name(f"w_{node.lineno}", ctx=ast.Store())],
-            value=w,
-        )
-        assign = ast.fix_missing_locations(ast.copy_location(assign, node))
 
-        next_ = ast.Call(
+        uid = node.lineno
+        init_name = f"__init__{uid}"
+        gen_name = f"__wgen_{uid}"
+        yield_name = f"__wyield_{uid}"
+        results_name = f"__wres_{uid}"
+
+        # --- w = scf_while_gen(cond) ---
+        gen_call = ast.Call(
+            func=ast.Name("scf_while_gen", ctx=ast.Load()),
+            args=[test], keywords=[],
+        )
+        gen_assign = ast.Assign(
+            targets=[ast.Name(gen_name, ctx=ast.Store())],
+            value=gen_call,
+        )
+        gen_assign = ast.fix_missing_locations(ast.copy_location(gen_assign, node))
+
+        # --- while (__init__ := next(w, False)): ---
+        next_call = ast.Call(
             func=ast.Name("next", ctx=ast.Load()),
             args=[
-                ast.Name(f"w_{node.lineno}", ctx=ast.Load()),
+                ast.Name(gen_name, ctx=ast.Load()),
                 ast.Constant(False, kind="bool"),
             ],
             keywords=[],
         )
-        next_ = ast.fix_missing_locations(ast.copy_location(next_, node))
-        if isinstance(node.test, ast.NamedExpr):
-            node.test.value = next_
-        else:
-            new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}", ctx=ast.Store()), value=next_)
-            new_test = ast.copy_location(new_test, node)
-            node.test = new_test
+        next_call = ast.fix_missing_locations(ast.copy_location(next_call, node))
+        walrus = ast.NamedExpr(
+            target=ast.Name(init_name, ctx=ast.Store()),
+            value=next_call,
+        )
+        walrus = ast.copy_location(walrus, node)
+        node.test = walrus
+
+        # --- Body prologue: rebind carry vars from after-region block args ---
+        prologue = []
+        for idx, name in carry_names.items():
+            stmt = ast.Assign(
+                targets=[ast.Name(name, ctx=ast.Store())],
+                value=ast.Subscript(
+                    value=ast.Name(init_name, ctx=ast.Load()),
+                    slice=ast.Constant(idx),
+                    ctx=ast.Load(),
+                ),
+            )
+            prologue.append(ast.fix_missing_locations(ast.copy_location(stmt, node)))
+
+        # --- Body epilogue: yield updated carry vars back ---
+        epilogue = []
+
+        # __wyield__ = list(__init__)
+        epilogue.append(ast.fix_missing_locations(ast.copy_location(
+            ast.Assign(
+                targets=[ast.Name(yield_name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name("list", ctx=ast.Load()),
+                    args=[ast.Name(init_name, ctx=ast.Load())],
+                    keywords=[],
+                ),
+            ), node)))
+
+        # __wyield__[i] = var  (override with updated values)
+        for idx, name in carry_names.items():
+            epilogue.append(ast.fix_missing_locations(ast.copy_location(
+                ast.Assign(
+                    targets=[ast.Subscript(
+                        value=ast.Name(yield_name, ctx=ast.Load()),
+                        slice=ast.Constant(idx),
+                        ctx=ast.Store(),
+                    )],
+                    value=ast.Name(name, ctx=ast.Load()),
+                ), node)))
+
+        # scf_while_yield_(__wyield__)
+        epilogue.append(ast.fix_missing_locations(ast.copy_location(
+            ast.Expr(value=ast.Call(
+                func=ast.Name("scf_while_yield_", ctx=ast.Load()),
+                args=[ast.Name(yield_name, ctx=ast.Load())],
+                keywords=[],
+            )), node)))
+
+        node.body = prologue + node.body + epilogue
+
+        # --- Post-loop: rebind carry vars from WhileOp results ---
+        post = []
+        post.append(ast.fix_missing_locations(ast.copy_location(
+            ast.Assign(
+                targets=[ast.Name(results_name, ctx=ast.Store())],
+                value=ast.Call(
+                    func=ast.Name("scf_while_get_results_", ctx=ast.Load()),
+                    args=[], keywords=[],
+                ),
+            ), node)))
+
+        for idx, name in carry_names.items():
+            post.append(ast.fix_missing_locations(ast.copy_location(
+                ast.Assign(
+                    targets=[ast.Name(name, ctx=ast.Store())],
+                    value=ast.Subscript(
+                        value=ast.Name(results_name, ctx=ast.Load()),
+                        slice=ast.Constant(idx),
+                        ctx=ast.Load(),
+                    ),
+                ), node)))
 
         node = ast.fix_missing_locations(node)
-        assign = ast.fix_missing_locations(assign)
-        return [assign, node]
+        return [gen_assign, node] + post

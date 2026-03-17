@@ -66,11 +66,17 @@ def compile_preshuffle_gemm_a8(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
             f"got {in_dtype!r}"
         )
-    if out_dtype not in ("fp16", "bf16"):
+    if out_dtype not in ("fp16", "bf16", "fp32"):
         raise ValueError(
-            f"out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}"
+            f"out_dtype must be 'fp16', 'bf16', or 'fp32', got {out_dtype!r}"
+        )
+    if out_dtype == "fp32" and use_cshuffle_epilog:
+        raise ValueError(
+            "fp32 output is only supported with the direct epilog "
+            "(use_cshuffle_epilog=False)"
         )
     _out_is_bf16 = out_dtype == "bf16"
+    _out_is_fp32 = out_dtype == "fp32"
     is_fp4 = in_dtype == "fp4"
     is_int4 = in_dtype == "int4"
     is_int8 = (in_dtype == "int8") or is_int4
@@ -169,7 +175,11 @@ def compile_preshuffle_gemm_a8(
             return T.i16x4
         return T.i64
 
+    _out_elem_bytes = 4 if _out_is_fp32 else 2
+
     def _out_elem():
+        if _out_is_fp32:
+            return T.f32
         return T.bf16 if _out_is_bf16 else T.f16
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
@@ -177,7 +187,7 @@ def compile_preshuffle_gemm_a8(
 
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────────
     lds_tile_bytes = int(tile_m) * int(lds_stride_bytes) // a_elem_vec_pack
-    lds_out_bytes = 2 * int(tile_m) * int(tile_n) if use_cshuffle_epilog else 0
+    lds_out_bytes = _out_elem_bytes * int(tile_m) * int(tile_n) if use_cshuffle_epilog else 0
 
     if int(lds_stage) == 2:
         assert lds_out_bytes % 2 == 0, "lds_out_bytes should be multiple of 2"
@@ -278,7 +288,7 @@ def compile_preshuffle_gemm_a8(
 
         # ---- Buffer resources (runtime byte sizes for OOB protection) ----
         _a_nrec = arith.index_cast(T.i64, c_m * (K * elem_bytes // a_elem_vec_pack))
-        _c_nrec = arith.index_cast(T.i64, c_m * c_n * 2)
+        _c_nrec = arith.index_cast(T.i64, c_m * c_n * _out_elem_bytes)
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False,
                                                    num_records_bytes=_a_nrec)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False,
@@ -862,9 +872,9 @@ def compile_preshuffle_gemm_a8(
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
-                    val_f16 = arith.trunc_f(_out_elem(), val_s)
+                    val_out = val_s if _out_is_fp32 else arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
-                    buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
+                    buffer_ops.buffer_store(val_out, c_rsrc, idx_out)
 
             mfma_epilog(
                 use_cshuffle=False, arith=arith, range_constexpr=range_constexpr,
