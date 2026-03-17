@@ -13,6 +13,8 @@
 #include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
+#include <functional>
+
 using namespace mlir;
 using namespace mlir::fly;
 
@@ -543,7 +545,7 @@ void sinkStaticArgsFromFunc(FunctionOpInterface funcOp) {
   funcOp.setType(FunctionType::get(funcOp.getContext(), newArgTypes, funcOp.getResultTypes()));
 
   if (hasBody) {
-    for (size_t i = staticArgIndices.size() - 1; i >= 0; --i)
+    for (int i = static_cast<int>(staticArgIndices.size()) - 1; i >= 0; --i)
       entry->eraseArgument(staticArgIndices[i]);
   }
 }
