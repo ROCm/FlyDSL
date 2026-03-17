@@ -5,9 +5,7 @@ Measures pure CPU-side dispatch time (no GPU sync) for a small vec_add kernel.
 This isolates the Python → JIT call overhead from actual GPU execution time.
 
 Usage:
-    cd /home/yanronli/flydsl39
-    LD_LIBRARY_PATH=build-fly/python_packages/flydsl/_mlir/_mlir_libs:$LD_LIBRARY_PATH \
-        python tests/kernels/_bench_dispatch_overhead.py
+    python tests/pyir/test_launch_overhead.py
 """
 
 import time
