@@ -16,8 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
+from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
@@ -301,7 +301,7 @@ class MlirCompiler:
     def _pipeline_fragments(*, chip: str) -> list:
         wave64 = "false" if is_rdna_arch(chip) else "true"
         return [
-            "gpu-kernel-outlining{data-layout-str=}",
+            "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
             "convert-fly-to-rocdl",

@@ -8,6 +8,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   Utils/NormalForm.cpp
   Transforms/LayoutLowering.cpp
   Transforms/FlyCanonicalize.cpp
+  Transforms/RewriteFuncSignature.cpp
   
   DEPENDS
   MLIRFlyIncGen

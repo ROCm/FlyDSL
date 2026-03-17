@@ -18,6 +18,7 @@
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
@@ -31,20 +32,6 @@ using namespace mlir;
 using namespace mlir::fly;
 
 namespace {
-
-static unsigned mapAddressSpace(AddressSpace space) {
-  switch (space) {
-  case AddressSpace::Global:
-    return 1;
-  case AddressSpace::Shared:
-    return 3;
-  case AddressSpace::Register:
-    return 5;
-  case AddressSpace::BufferDesc:
-    return 8;
-  }
-  return 0;
-}
 
 static LLVM::LLVMStructType getBufferFatPtrType(MLIRContext *ctx) {
   return LLVM::LLVMStructType::getLiteral(
@@ -913,13 +900,13 @@ public:
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (flyMemRefTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
         return getBufferFatPtrType(flyMemRefTy.getContext());
-      unsigned as = mapAddressSpace(flyMemRefTy.getAddressSpace().getValue());
+      unsigned as = mapToLLVMAddressSpace(flyMemRefTy.getAddressSpace().getValue());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
         return getBufferFatPtrType(flyPtrTy.getContext());
-      unsigned as = mapAddressSpace(flyPtrTy.getAddressSpace().getValue());
+      unsigned as = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
   }
@@ -958,8 +945,8 @@ public:
 
     target.addLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
                            gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
-                           ROCDL::ROCDLDialect, fly_rocdl::FlyROCDLDialect>();
-    target.addIllegalDialect<fly::FlyDialect>();
+                           ROCDL::ROCDLDialect>();
+    target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
 
     // Constructors
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeTileOp, MakeComposedLayoutOp>();

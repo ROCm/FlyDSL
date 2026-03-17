@@ -117,6 +117,10 @@ MemRefType MemRefType::at(ArrayRef<int32_t> idxs) const {
                          getSwizzle());
 }
 
+PointerType MemRefType::getPointerType() const {
+  return PointerType::get(getElemTy(), getAddressSpace(), getAlignment(), getSwizzle());
+}
+
 CoordTensorType CoordTensorType::at(int32_t idx) const {
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))

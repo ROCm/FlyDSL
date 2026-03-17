@@ -6,6 +6,27 @@
 
 include "mlir/Pass/PassBase.td"
 
+def FlyRewriteFuncSignaturePass : Pass<"fly-rewrite-func-signature"> {
+  let summary = "Rewrite function signatures to use LLVM struct types";
+  let description = [{
+    This pass does the following:
+    1. DSLTypes (IntTuple, Layout, ComposedLayout, CoordTensor, MemRef) which contain dynamic 
+       leaves are lowered to packed LLVM struct types. They are reconstructed in the function body 
+       using constructor ops (e.g. `MakeIntTupleOp`, `MakeLayoutOp`)
+    2. Fully static DSL arguments are removed from function signatures and reconstructed via 
+       `fly.static` inside the function body.
+    3. On the caller side (`gpu.launch_func`), DSL operands are packed into the corresponding 
+       struct values and static operands are dropped.
+  }];
+  
+  let dependentDialects = [
+    "arith::ArithDialect",
+    "func::FuncDialect",
+    "gpu::GPUDialect",
+    "LLVM::LLVMDialect"
+  ];
+}
+
 def FlyCanonicalizePass : Pass<"fly-canonicalize"> {
   let summary = "Canonicalize Pattern";
   let description = [{

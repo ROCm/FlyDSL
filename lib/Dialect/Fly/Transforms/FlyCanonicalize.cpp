@@ -24,67 +24,6 @@ namespace fly {
 
 namespace {
 
-bool isStaticArg(Type ty) {
-  if (auto mayStatic = dyn_cast<MayStaticTypeInterface>(ty))
-    return mayStatic.isStatic();
-  return false;
-}
-
-void removeStaticArgsFromFunc(FunctionOpInterface funcOp) {
-  ArrayRef<Type> argTypes = funcOp.getArgumentTypes();
-  if (argTypes.empty())
-    return;
-
-  bool hasBody = !funcOp.getFunctionBody().empty();
-  Block *entry = hasBody ? &funcOp.getFunctionBody().front() : nullptr;
-  OpBuilder builder(funcOp.getContext());
-  if (hasBody)
-    builder.setInsertionPointToStart(entry);
-  Location loc = funcOp.getLoc();
-
-  SmallVector<unsigned> staticArgIndices;
-  SmallVector<Type> newArgTypes;
-  for (unsigned i = 0; i < argTypes.size(); ++i) {
-    if (isStaticArg(argTypes[i])) {
-      staticArgIndices.push_back(i);
-      if (hasBody) {
-        BlockArgument arg = entry->getArgument(i);
-        Value staticVal = StaticOp::create(builder, loc, arg.getType());
-        arg.replaceAllUsesWith(staticVal);
-      }
-    } else {
-      newArgTypes.push_back(argTypes[i]);
-    }
-  }
-  if (staticArgIndices.empty())
-    return;
-
-  funcOp.setType(FunctionType::get(funcOp.getContext(), newArgTypes, funcOp.getResultTypes()));
-
-  if (hasBody) {
-    for (int i = staticArgIndices.size() - 1; i >= 0; --i)
-      entry->eraseArgument(staticArgIndices[i]);
-  }
-}
-
-void removeStaticOperandsFromLaunchFunc(gpu::LaunchFuncOp launchOp) {
-  SmallVector<Value> oldOperands(launchOp.getKernelOperands().begin(),
-                                 launchOp.getKernelOperands().end());
-  SmallVector<Value> newOperands;
-  bool changed = false;
-
-  for (auto operand : oldOperands) {
-    if (isStaticArg(operand.getType())) {
-      changed = true;
-      continue;
-    }
-    newOperands.push_back(operand);
-  }
-
-  if (changed)
-    launchOp.getKernelOperandsMutable().assign(newOperands);
-}
-
 template <typename IntTupleLikeOp>
 class RewriteToMakeIntTuple final : public OpRewritePattern<IntTupleLikeOp> {
   using OpRewritePattern<IntTupleLikeOp>::OpRewritePattern;
@@ -158,10 +97,6 @@ public:
   using mlir::fly::impl::FlyCanonicalizePassBase<FlyCanonicalizePass>::FlyCanonicalizePassBase;
 
   void runOnOperation() override {
-    getOperation()->walk(
-        [&](gpu::LaunchFuncOp launchOp) { removeStaticOperandsFromLaunchFunc(launchOp); });
-    getOperation()->walk([&](FunctionOpInterface funcOp) { removeStaticArgsFromFunc(funcOp); });
-
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
 
