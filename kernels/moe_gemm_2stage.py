@@ -38,6 +38,8 @@ except ImportError:
 
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf, memref
+from flydsl._mlir.dialects import fly as _fly_dialect
+from kernels.kernels_common import _create_llvm_ptr
 from flydsl.expr.typing import T
 
 
@@ -2770,7 +2772,7 @@ def compile_moe_gemm2(
                     # stable path here.)
                     out_base_idx = None
                     if out_is_bf16:
-                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                        _out_raw = arg_out.value if hasattr(arg_out, "value") else arg_out; _out_ptr = _fly_dialect.extract_aligned_pointer_as_index(ir.Type.parse("!llvm.ptr"), _out_raw); out_base_idx = arith.index_cast(T.index, llvm.PtrToIntOp(T.i64, _out_ptr).result)
 
                     def write_row_to_lds(
                         *,
@@ -2861,7 +2863,7 @@ def compile_moe_gemm2(
                                 byte_off = idx_elem_even * c2_i32
                                 byte_off_idx = arith.index_cast(T.index, byte_off)
                                 ptr_addr_idx = out_base_idx + byte_off_idx
-                                out_ptr = buffer_ops.create_llvm_ptr(ptr_addr_idx, address_space=1)
+                                out_ptr = _create_llvm_ptr(ptr_addr_idx, address_space=1)
                                 out_ptr_v = out_ptr._value if hasattr(out_ptr, "_value") else out_ptr
                                 frag_v = frag._value if hasattr(frag, "_value") else frag
                                 llvm.AtomicRMWOp(
