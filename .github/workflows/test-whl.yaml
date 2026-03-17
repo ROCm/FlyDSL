@@ -82,8 +82,8 @@ jobs:
       - name: Show benchmark logs
         if: failure()
         run: |
-          docker exec flydsl_test bash -c 'cd /tmp/flir_bench && tar czf /tmp/flir_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flir_bench/logs.tgz . || true
+          docker exec flydsl_test bash -c 'cd /tmp/flydsl_bench && tar czf /tmp/flydsl_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/flydsl_bench/logs.tgz . || true
           if [ -f logs.tgz ]; then
             tar -xzf logs.tgz || true
             cat *.log || true

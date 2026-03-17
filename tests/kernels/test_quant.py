@@ -280,7 +280,7 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
         bool: True if correctness check passed
     """
     print("\n" + "=" * 80)
-    print(f"Benchmark: Per-Token Quantization Performance (FLIR) [M={M}, N={N}]")
+    print(f"Benchmark: Per-Token Quantization Performance (FlyDSL) [M={M}, N={N}]")
     print("=" * 80)
 
     if launch_fn is None or config is None:
@@ -340,7 +340,7 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
         np.abs(output_host.astype(np.float32) - output_ref.astype(np.float32))
     )
 
-    print(f"\nFLIR Kernel Results:")
+    print(f"\nFlyDSL Kernel Results:")
     print(f"  Max Scale Diff:  {scale_diff:.2e}")
     print(f"  Max Output Diff: {output_diff:.2e}")
     print(f"\nBandwidth: {bandwidth_gbs:.2f} GB/s")
@@ -384,14 +384,14 @@ def benchmark_per_token_quant(M=4096, N=8192, launch_fn=None, config=None):
             print(f"  Max Scale Diff:  {scale_diff_ref:.2e}")
             print(f"  Max Output Diff: {output_diff_ref:.2e}")
 
-            flir_time = results["avg_ms"]
+            flydsl_time = results["avg_ms"]
             aiter_time = aiter_results["avg_ms"]
-            speedup = aiter_time / flir_time
+            speedup = aiter_time / flydsl_time
 
             print(f"\n" + "=" * 80)
             print(f"Performance Comparison:")
             print(
-                f"  FLIR:     {flir_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
+                f"  FlyDSL:   {flydsl_time:7.3f} ms  ({results['bandwidth_gbs']:8.2f} GB/s)"
             )
             print(
                 f"  Reference:  {aiter_time:7.3f} ms  ({aiter_results['bandwidth_gbs']:8.2f} GB/s)"

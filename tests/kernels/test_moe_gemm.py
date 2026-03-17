@@ -77,8 +77,8 @@ from kernels.moe_gemm_2stage import (
 logging.basicConfig(level=logging.INFO)
 
 # Reduce noisy aiter log spam (e.g. "type hints mismatch, override to --> ...") so test output
-# stays readable. You can override via env: FLIR_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
-_aiter_level = os.environ.get("FLIR_AITER_LOG_LEVEL", "ERROR").upper().strip()
+# stays readable. You can override via env: FLYDSL_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
+_aiter_level = os.environ.get("FLYDSL_AITER_LOG_LEVEL", "ERROR").upper().strip()
 try:
     logging.getLogger("aiter").setLevel(getattr(logging, _aiter_level, logging.ERROR))
 except Exception:
@@ -467,7 +467,7 @@ def run_moe_stage1(
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
 
-    # Flatten W1 for our flir kernel (treat expert dim as part of N).
+    # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
     scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
@@ -597,7 +597,7 @@ def run_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"FLIR MoE stage1[{in_dtype}]: "
+        f"FlyDSL MoE stage1[{in_dtype}]: "
         f"{us:.1f} us, "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
@@ -664,16 +664,16 @@ def run_moe_stage1(
                 testGraph=test_graph,
             )
 
-            # Correctness: flir vs aiter
-            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="flir vs aiter:")
+            # Correctness: FlyDSL vs aiter
+            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="FlyDSL vs aiter:")
 
             # Perf print: use the same flop model for both
             flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
-            print(f"[aiter] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, flir vs aiter speedups: {tflops / tflops_ck:.2f}x")
+            print(f"[aiter] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x")
         except Exception as e:
             # Treat aiter compare as best-effort: many environments can import `aiter` but can't load
-            # the full JIT .so dependency chain. Don't fail the FLIR test suite for that.
+            # the full JIT .so dependency chain. Don't fail the FlyDSL test suite for that.
             logging.warning(f"Skipping aiter moe stage1 compare (not runnable here): {e}")
     if return_outputs:
         return out, us
@@ -1092,7 +1092,7 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
+        f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
@@ -1151,12 +1151,12 @@ def run_moe_stage2(
                 testGraph=test_graph,
             )
 
-            # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
+            # Perf print (report both executed vs logical FLOPs, same convention as FlyDSL).
             flops = 2 * tokens * topk * model_dim * inter_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
             print(
                 f"[aiter] stage2: {us_ck:.1f} us, "
-                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), flir vs aiter speedups: {tflops / tflops_ck:.2f}x"
+                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x"
             )
 
             # Correctness run (best-effort; do not fail perf comparison if aiter diverges).
@@ -1175,7 +1175,7 @@ def run_moe_stage2(
             )
             torch.cuda.synchronize()
             if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter] stage2:"):
-                    logging.warning("[aiter] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
+                    logging.warning("[aiter] stage2 correctness mismatch vs FlyDSL (continuing; perf numbers still printed).")
         except Exception as e:
             logging.warning(f"Skipping aiter moe stage2 compare (not runnable here): {e}")
 
@@ -1600,7 +1600,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
-        description="MoE 2-stage (FLIR MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
+        description="MoE 2-stage (FlyDSL MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
     )
     parser.add_argument(
         "--in_dtype",

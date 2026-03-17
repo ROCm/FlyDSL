@@ -14,11 +14,11 @@ import torch.nn.functional as F
 import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-_PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
+_PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if _PYFLIR_SRC not in sys.path:
-    sys.path.insert(0, _PYFLIR_SRC)
+if _PYFLYDSL_SRC not in sys.path:
+    sys.path.insert(0, _PYFLYDSL_SRC)
 
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_w4

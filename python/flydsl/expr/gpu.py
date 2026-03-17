@@ -1,3 +1,18 @@
+"""GPU intrinsics and address space helpers.
+
+Provides thread/block indexing (``thread_idx``, ``block_idx``),
+synchronization (``barrier``), and shared memory address space
+(``smem_space``/``lds_space``) for kernel authoring.
+
+Usage::
+
+    import flydsl.expr as fx
+
+    tid = fx.thread_idx.x
+    bid = fx.block_idx.x
+    fx.gpu.barrier()
+"""
+
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.ir import Attribute
@@ -17,6 +32,12 @@ _int = int
 
 
 def smem_space(int=False):
+    """Return the GPU shared memory (LDS/workgroup) address space.
+
+    Args:
+        int: If True, return the integer value; otherwise return an
+             MLIR ``#gpu.address_space<workgroup>`` attribute.
+    """
     a = gpu.AddressSpace.Workgroup
     if int:
         return _int(a)
@@ -27,6 +48,7 @@ lds_space = smem_space
 
 
 class SharedAllocator:
+    """Placeholder for shared memory allocation (see ``flydsl.utils.smem_allocator``)."""
     pass
 
 
