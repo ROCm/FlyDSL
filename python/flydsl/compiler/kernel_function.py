@@ -6,7 +6,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
-from .protocol import fly_values, fly_types, fly_construct
+from .protocol import fly_construct, fly_types, fly_values
 
 # =============================================================================
 # GPU Operation Helpers
@@ -270,18 +270,20 @@ class KernelLauncher:
                 smem_val = arith.constant(ir.IntegerType.get_signless(32), smem)
 
             if stream is not None:
-                async_object = _unwrap_to_raw(stream)
+                stream_val = _unwrap_to_raw(stream)
             else:
                 ctx = CompilationContext.get_current()
-                async_object = ctx.stream_arg if ctx and ctx.stream_arg else None
+                stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
+
+            async_deps = [stream_val] if stream_val is not None else None
 
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
+                async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
-                async_object=async_object,
                 loc=launch_loc,
                 ip=None,
             )

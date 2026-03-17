@@ -105,17 +105,17 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
     torch.cuda.synchronize()
-    flir_gpu_us = None
+    flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (2 * M * N + 2 * N) * elem_bytes  # read input + write output + (gamma+beta)
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
-    if flir_gpu_us is not None:
-        print(f"[Perf] FLIR layernorm gpu: {flir_gpu_us:.1f} us")
+    if flydsl_gpu_us is not None:
+        print(f"[Perf] FlyDSL layernorm gpu: {flydsl_gpu_us:.1f} us")
 
     # Verification (pure torch style; compute max error in torch)
     output_ref = output_dev.to(DTYPE_FP32)
@@ -134,7 +134,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print(output_ref[0, :5])
         ok = False
 
-    return ok, flir_gpu_us
+    return ok, flydsl_gpu_us
 
 def test_all():
     print("="*80)
@@ -166,7 +166,7 @@ def test_all():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flir_gpu_us = run_test(M, N, dtype)
+        ok, flydsl_gpu_us = run_test(M, N, dtype)
         if not ok:
             failures += 1
 
@@ -188,7 +188,7 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter layernorm skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="layernorm", shape=f"{M}x{N}", dtype=dtype, flir_gpu_us=flir_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(PerfRow(op="layernorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
 
     print("\n" + "="*80)
     if failures == 0:

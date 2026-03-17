@@ -1,6 +1,6 @@
 """Pytest configuration for Fly DSL tests.
 
-Supports both the new Fly dialect (build-fly/) and the legacy FLIR dialect.
+Supports both the new Fly dialect (build-fly/) and legacy build paths.
 """
 
 import os
@@ -22,9 +22,9 @@ if _fly_pkg_dir.exists():
     if not _already:
         sys.path.insert(0, _p)
 
-# Legacy: .flir/build or build/ (old flir dialect)
+# Legacy: .flydsl/build or build/
 for _legacy in [
-    _repo_root / ".flir" / "build" / "python_packages" / "flydsl",
+    _repo_root / ".flydsl" / "build" / "python_packages" / "flydsl",
     _repo_root / "build" / "python_packages" / "flydsl",
     _repo_root / "build" / "lib.linux-x86_64-cpython-312",
 ]:
@@ -44,8 +44,8 @@ if _src_py_dir.exists() and (_src_py_dir / "flydsl").exists():
 # Try importing new or old context setup
 _ensure_extensions = None
 try:
-    from flydsl.compiler.context import ensure_flir_python_extensions
-    _ensure_extensions = ensure_flir_python_extensions
+    from flydsl.compiler.context import ensure_flydsl_python_extensions
+    _ensure_extensions = ensure_flydsl_python_extensions
 except ImportError:
     pass
 

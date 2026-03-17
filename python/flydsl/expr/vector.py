@@ -14,9 +14,11 @@ from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
 
 
 def from_elements(*args, loc=None, ip=None, **kwargs):
-    # The upstream `vector.from_elements` expects each element to be an `ir.Value`.
-    # In our codebase, scalar values may be auto-wrapped as `arith.ArithValue`.
-    # Unwrap them here so call sites don't need to sprinkle `arith.as_value(...)`.
+    """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers.
+
+    Accepts the same arguments as ``vector.from_elements`` but transparently
+    handles ``ArithValue`` scalars so callers don't need explicit unwrapping.
+    """
     from . import arith as _arith_ext
 
     if len(args) >= 2:
