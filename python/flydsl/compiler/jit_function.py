@@ -518,7 +518,16 @@ def _build_fast_call_state(sig, args_tuple, has_user_stream, func_exe):
         arg = args_tuple[i]
 
         if hasattr(annotation, '_fast_dispatch_info'):
-            ctype, extract = annotation._fast_dispatch_info()
+            info = annotation._fast_dispatch_info()
+            if info is None:
+                return None
+            ctype, extract = info
+            # Verify the extractor works for this arg (e.g., Tensor annotation
+            # but TensorAdaptor arg which lacks data_ptr)
+            try:
+                extract(arg)
+            except (AttributeError, TypeError):
+                return None
             extractors_spec.append((i, ctype, extract))
         elif hasattr(arg, 'data_ptr'):
             # Unannotated tensor fallback (annotation is empty)
@@ -614,7 +623,10 @@ class JitFunction:
         Everything else: type only (runtime parameter).
         """
         if ann is not None and hasattr(ann, '_cache_signature'):
-            return ann._cache_signature(arg)
+            try:
+                return ann._cache_signature(arg)
+            except (AttributeError, TypeError):
+                pass
         # Unannotated tensor fallback
         if hasattr(arg, "data_ptr") and hasattr(arg, "stride"):
             return Tensor._cache_signature(arg)

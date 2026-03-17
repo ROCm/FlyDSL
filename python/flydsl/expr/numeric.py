@@ -77,7 +77,7 @@ class NumericMeta(type):
         if signed is not None:
             new_attrs["__fly_ptrs__"] = _c_pointers
             def _fast_dispatch_info(cls):
-                return cls._fast_dispatch_cache
+                return getattr(cls, '_fast_dispatch_cache', None)
             new_attrs["_fast_dispatch_info"] = classmethod(_fast_dispatch_info)
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
@@ -90,9 +90,9 @@ class NumericMeta(type):
         new_cls._is_runtime_param = True
         if signed is not None:
             prefix = "c_int" if signed else "c_uint"
-            new_cls._fast_dispatch_cache = (
-                getattr(ctypes, f"{prefix}{width}"), _pass_through,
-            )
+            ctype = getattr(ctypes, f"{prefix}{width}", None)
+            if ctype is not None:
+                new_cls._fast_dispatch_cache = (ctype, _pass_through)
         return new_cls
 
     def __str__(cls):
