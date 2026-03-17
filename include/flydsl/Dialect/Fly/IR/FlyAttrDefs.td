@@ -50,7 +50,7 @@ def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
   let assemblyFormat = "`align` `<` `` $alignment `` `>`";
 
   let extraClassDeclaration = [{
-    static AlignAttr getTrivialAlignment(MLIRContext *context);
+    static AlignAttr getTrivialAlignment(Type elemTy);
   }];
 }
 

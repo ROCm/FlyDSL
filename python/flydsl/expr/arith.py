@@ -15,6 +15,7 @@ from .utils.arith import (  # noqa: F401
     constant_vector,
     index,
     index_cast,
+    int_to_fp,
     select,
     sitofp,
     trunc_f,
