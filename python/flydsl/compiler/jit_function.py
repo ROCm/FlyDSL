@@ -1,8 +1,10 @@
+import ctypes
 import hashlib
 import inspect
 import os
 import pickle
 import pkgutil
+import threading
 import types
 from functools import lru_cache
 from pathlib import Path
@@ -11,8 +13,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr.typing import Stream, Tensor
 from ..runtime.device import get_rocm_arch, is_rdna_arch
-from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
@@ -123,6 +125,7 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
     if visited is None:
         visited = set()
     sources = []
+    # Scan global names referenced in function body
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -137,7 +140,52 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # Scan closure variables for captured functions (KernelFunction, JitFunction, etc.)
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            if not _is_user_function(underlying, rootFile):
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
+
+
+def _collect_all_closure_vals(func, vals, visited, prefix=""):
+    """Recursively collect hashable closure values from func and its captured functions."""
+    if id(func) in visited:
+        return
+    visited.add(id(func))
+    if not getattr(func, "__code__", None) or not func.__code__.co_freevars:
+        return
+    closure = getattr(func, "__closure__", None)
+    if not closure:
+        return
+    for name, cell in zip(func.__code__.co_freevars, closure):
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        key = f"{prefix}{name}" if prefix else name
+        if isinstance(val, (int, float, bool, str, type(None), tuple, list)):
+            vals.append(f"{key}={val!r}")
+        else:
+            underlying = _get_underlying_func(val)
+            if underlying is not None:
+                _collect_all_closure_vals(underlying, vals, visited, f"{key}.")
 
 
 def _jit_function_cache_key(func: Callable) -> str:
@@ -158,14 +206,9 @@ def _jit_function_cache_key(func: Callable) -> str:
 
     if func.__code__.co_freevars and getattr(func, "__closure__", None):
         closure_vals = []
-        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            try:
-                val = cell.cell_contents
-                if isinstance(val, (int, float, bool, str, type(None), tuple)):
-                    closure_vals.append(f"{name}={val!r}")
-            except ValueError:
-                pass
+        _collect_all_closure_vals(func, closure_vals, set())
         if closure_vals:
+            closure_vals.sort()
             parts.append("closure:" + ",".join(closure_vals))
 
     combined = "\n".join(parts)
@@ -439,11 +482,116 @@ class JitCacheManager:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
 
 
+def _has_user_stream(sig):
+    """Check if the function signature has a user-declared Stream parameter."""
+    return any(
+        getattr(param.annotation, '_is_stream_param', False)
+        for param in sig.parameters.values()
+    )
+
+
+def _build_fast_call_state(sig, args_tuple, has_user_stream, func_exe):
+    """Build a FastCallState using annotation protocols.
+
+    Each annotation type (Tensor, Int32, Stream, ...) declares its own
+    dispatch info via _fast_dispatch_info() → (ctype, extractor_fn).
+    No isinstance chains — new types are handled automatically by their
+    metaclass or class definition.
+
+    Unannotated tensor params fall back to duck-typing (data_ptr attribute).
+
+    Returns a FastCallState, or None if the kernel can't be fast-pathed.
+    """
+    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
+
+    extractors_spec = []  # list of (args_tuple_index, ctype, extract_fn)
+
+    for i, (param_name, param) in enumerate(sig.parameters.items()):
+        annotation = param.annotation
+
+        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+            continue
+
+        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+            continue
+
+        arg = args_tuple[i]
+
+        if hasattr(annotation, '_fast_dispatch_info'):
+            ctype, extract = annotation._fast_dispatch_info()
+            extractors_spec.append((i, ctype, extract))
+        elif hasattr(arg, 'data_ptr'):
+            # Unannotated tensor fallback (annotation is empty)
+            extractors_spec.append((i, ctypes.c_void_p, Tensor._extract_data_ptr))
+        else:
+            return None
+
+    if not has_user_stream:
+        extractors_spec.append((-1, ctypes.c_void_p, None))  # auto_stream
+
+    return FastCallState(extractors_spec, func_exe)
+
+
+class FastCallState:
+    """Pre-allocated state for fast kernel dispatch.
+
+    Uses positional indices into args_tuple (not dict lookups).
+    Pre-allocates typed ctypes storage and a packed pointer array at init time.
+    On each call, only updates .value on existing storage objects — no ctypes
+    object allocation, no pointer()/cast() calls. Uses thread-local storage
+    for thread safety.
+
+    Each argument type declares its own (ctype, extractor) via _fast_dispatch_info().
+    """
+
+    __slots__ = ('_func_exe', '_spec', '_tls')
+
+    def __init__(self, extractors_spec, func_exe):
+        self._func_exe = func_exe
+        self._spec = extractors_spec  # list of (arg_idx, ctype, extract_fn)
+        self._tls = threading.local()
+
+    def _init_buffers(self):
+        n_ptrs = len(self._spec)
+        packed = (ctypes.c_void_p * n_ptrs)()
+        storages = []
+        extractors = []
+
+        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
+            s = ctype(0)
+            packed[packed_idx] = ctypes.addressof(s)
+            storages.append(s)
+            if extract is not None:  # skip auto_stream
+                extractors.append((arg_idx, s, extract))
+
+        self._tls.packed = packed
+        self._tls.extractors = extractors
+        self._tls._storages = storages
+
+    def __call__(self, args_tuple):
+        if not hasattr(self._tls, 'packed'):
+            self._init_buffers()
+
+        for arg_idx, storage, extract in self._tls.extractors:
+            storage.value = extract(args_tuple[arg_idx])
+
+        return self._func_exe(self._tls.packed)
+
+
 class JitFunction:
     def __init__(self, func: Callable):
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
+        self._fast_path_cache = {}  # cache_key -> FastCallState
+        self._sig = None  # lazy: set on first call
+        self._mem_cache = {}
+
+    def _ensure_sig(self):
+        """Initialize signature + param metadata on first call (not at decoration time)."""
+        if self._sig is not None:
+            return
+        self._sig = inspect.signature(self.func)
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -457,48 +605,96 @@ class JitFunction:
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
 
-    def _make_cache_key(self, bound_args: Dict) -> str:
+    @staticmethod
+    def _arg_cache_sig(arg, ann=None):
+        """Cache signature for a single non-Constexpr argument value.
+
+        Uses annotation's _cache_signature protocol if available.
+        Falls back to duck-typing for unannotated tensors.
+        Everything else: type only (runtime parameter).
+        """
+        if ann is not None and hasattr(ann, '_cache_signature'):
+            return ann._cache_signature(arg)
+        # Unannotated tensor fallback
+        if hasattr(arg, "data_ptr") and hasattr(arg, "stride"):
+            return Tensor._cache_signature(arg)
+        return type(arg)
+
+    def _make_cache_key(self, bound_args):
+        """Build a tuple cache key from bound arguments.
+
+        Constexpr: type + value (affects compiled code).
+        Tensors: dtype/shape/strides (determines MLIR memref type).
+        Everything else: type only (runtime parameter).
+        """
+        from .jit_argument import _is_constexpr_annotation
+        sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
-            key_parts.append(f"{name}:{self._get_type_signature(arg)}")
-        return "|".join(key_parts)
+            param = sig.parameters.get(name)
+            ann = param.annotation if param else inspect.Parameter.empty
 
-    def _get_type_signature(self, obj) -> str:
-        if hasattr(obj, "__cache_signature__"):
-            return obj.__cache_signature__()
-        elif hasattr(obj, "dtype") and hasattr(obj, "shape"):
-            return f"tensor[{obj.dtype},{obj.shape}]"
-        elif isinstance(obj, (int, float, bool, str)):
-            return f"{type(obj).__name__}:{obj}"
-        return type(obj).__name__
+            if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
+                key_parts.append((name, type(arg), arg))
+            else:
+                resolved_ann = ann if ann is not inspect.Parameter.empty else None
+                if isinstance(arg, tuple):
+                    key_parts.append((name, tuple(self._arg_cache_sig(a, resolved_ann) for a in arg)))
+                else:
+                    key_parts.append((name, self._arg_cache_sig(arg, resolved_ann)))
+        return tuple(key_parts)
+
+    @staticmethod
+    def _cache_key_to_str(cache_key) -> str:
+        """Convert tuple cache key to string for disk cache."""
+        return str(cache_key)
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
+        self._ensure_sig()
         self._ensure_cache_manager()
 
-        if not hasattr(self, "_sig"):
-            self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
 
+        args_tuple = tuple(bound.arguments.values())
+
+        # Fast path: pre-allocated dispatch (no ctypes alloc, no DLPack, no dict)
+        fast_state = self._fast_path_cache.get(cache_key)
+        if fast_state is not None:
+            return fast_state(args_tuple)
+
+        # Normal path: check caches
         cached_func = None
-        dump_ir = env.debug.dump_ir
         use_cache = env.runtime.enable_cache
-        if not hasattr(self, "_mem_cache"):
-            self._mem_cache = {}
         if use_cache:
-            compiled_func = self._mem_cache.get(cache_key)
-            if compiled_func is not None:
-                cached_func = compiled_func
-            elif not dump_ir:
-                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            cached_func = self._mem_cache.get(cache_key)
+            if cached_func is None and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+                if cached_func is not None:
+                    self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            # Build FastCallState directly from annotations + raw args — no DLPack.
+            has_user_stream = _has_user_stream(sig)
+            try:
+                state = _build_fast_call_state(
+                    sig, args_tuple, has_user_stream, cached_func._get_func_exe(),
+                )
+            except Exception:
+                state = None
+            if state is not None:
+                self._fast_path_cache[cache_key] = state
+                return state(args_tuple)
+
+            # Fallback: run through DLPack (should not happen for static layout)
+            log().warning("FastCallState build failed on cache hit, falling back to DLPack path")
             if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
@@ -561,10 +757,24 @@ class JitFunction:
 
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not dump_ir:
-                    self.cache_manager.set(cache_key, compiled_func)
+                if self.cache_manager and not env.debug.dump_ir:
+                    str_key = self._cache_key_to_str(cache_key)
+                    self.cache_manager.set(str_key, compiled_func)
 
-            return compiled_func(*jit_args)
+            result = compiled_func(*jit_args)
+
+            # Build FastCallState so 2nd call skips DLPack
+            try:
+                state = _build_fast_call_state(
+                    sig, args_tuple, has_user_stream,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._fast_path_cache[cache_key] = state
+            except Exception:
+                pass
+
+            return result
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:

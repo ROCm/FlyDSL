@@ -19,6 +19,11 @@ from .utils.arith import (
 )
 
 
+def _pass_through(arg):
+    """Identity extractor for fast dispatch — scalars pass value directly."""
+    return arg
+
+
 def _infer_np_dtype(width, signed, name):
     if signed is not None:
         if width == 1:
@@ -71,6 +76,9 @@ class NumericMeta(type):
         }
         if signed is not None:
             new_attrs["__fly_ptrs__"] = _c_pointers
+            def _fast_dispatch_info(cls):
+                return cls._fast_dispatch_cache
+            new_attrs["_fast_dispatch_info"] = classmethod(_fast_dispatch_info)
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -79,6 +87,12 @@ class NumericMeta(type):
         new_cls._np_dtype = inferred_np
         new_cls.signed = signed
         new_cls._zero = zero
+        new_cls._is_runtime_param = True
+        if signed is not None:
+            prefix = "c_int" if signed else "c_uint"
+            new_cls._fast_dispatch_cache = (
+                getattr(ctypes, f"{prefix}{width}"), _pass_through,
+            )
         return new_cls
 
     def __str__(cls):
