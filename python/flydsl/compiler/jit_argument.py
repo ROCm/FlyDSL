@@ -100,10 +100,12 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        if isinstance(value, JitArgument) and isinstance(value, DslType):
+        is_jit_arg = hasattr(value, '__fly_types__') and hasattr(value, '__fly_ptrs__')
+        is_dsl_type = hasattr(value, '__fly_construct__') and hasattr(value, '__fly_values__')
+        if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
-        elif isinstance(value, JitArgument):
+        elif is_jit_arg:
             jit_arg = value
             dsl_type = JitArgumentRegistry.get_dsl_type(type(value))
             if dsl_type is None:
