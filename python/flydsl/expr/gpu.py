@@ -20,11 +20,11 @@ from .typing import Tuple3D
 
 thread_id = gpu.thread_id
 block_id = gpu.block_id
+block_dim = gpu.block_dim
+grid_dim = gpu.grid_dim
 
 thread_idx = Tuple3D(gpu.thread_id)
 block_idx = Tuple3D(gpu.block_id)
-block_dim = Tuple3D(gpu.block_dim)
-grid_dim = Tuple3D(gpu.grid_dim)
 
 barrier = gpu.barrier
 

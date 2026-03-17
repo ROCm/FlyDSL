@@ -174,10 +174,10 @@ bid_x = gpu.block_idx.x
 bid_y = gpu.block_idx.y
 
 # Block dimensions
-bdim_x = gpu.block_dim.x
+bdim_x = gpu.block_dim("x")
 
 # Grid dimensions
-gdim_x = gpu.grid_dim.x
+gdim_x = gpu.grid_dim("x")
 
 # Low-level (returns raw ir.Value)
 raw_tid = gpu.thread_id("x")
