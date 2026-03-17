@@ -541,8 +541,8 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 
 @traced_op
-def copy_atom_call(copy_atom, src, dst, loc=None, ip=None):
-    return fly.copy_atom_call(copy_atom, src, dst, loc=loc, ip=ip)
+def copy_atom_call(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
+    return fly.copy_atom_call(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
 
 
 @traced_op
