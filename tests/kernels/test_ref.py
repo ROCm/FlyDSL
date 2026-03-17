@@ -10,8 +10,16 @@ def torch_moe_gemm1(
     topk_weights: torch.Tensor,
     inter_dim: int,
     doweight_stage1: bool,
+    group_size: int = -1,
+    scale_w1_groups: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Return [tokens, topk, inter_dim] fp32."""
+    """Return [tokens, topk, inter_dim] fp32.
+
+    Args:
+        group_size: -1 for per-row scale (uses scale_w1_flat), >0 for group-wise scale.
+        scale_w1_groups: Group-wise scale tensor of shape [E, K//group_size, 2*inter_dim] (Opt 0 layout).
+                         Required when group_size > 0; ignored otherwise.
+    """
     topk = topk_ids.shape[1]
     if x_fp8.dim() == 2:
         tokens, model_dim = x_fp8.shape
@@ -29,12 +37,23 @@ def torch_moe_gemm1(
         experts = int(w1_fp8_flat.shape[0])
 
     x = x_fp8.to(torch.float32) if scale_x is None else (x_fp8.to(torch.float32) * scale_x)
-    w1 = (
-        w1_fp8_flat.to(torch.float32)
-        if scale_w1_flat is None
-        else (w1_fp8_flat.to(torch.float32) * scale_w1_flat)
-    )
-    w1 = w1.view(experts, 2 * inter_dim, model_dim)
+
+    if group_size > 0 and scale_w1_groups is not None:
+        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
+        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
+        w1 = w1_fp8_flat.to(torch.float32).view(experts, 2 * inter_dim, model_dim)
+        num_groups = model_dim // group_size
+        for g in range(num_groups):
+            k_s, k_e = g * group_size, (g + 1) * group_size
+            w1[:, :, k_s:k_e] *= scale_w1_groups[:, g, :].unsqueeze(-1)
+    else:
+        # Per-row dequantization.
+        w1 = (
+            w1_fp8_flat.to(torch.float32)
+            if scale_w1_flat is None
+            else (w1_fp8_flat.to(torch.float32) * scale_w1_flat)
+        )
+        w1 = w1.view(experts, 2 * inter_dim, model_dim)
 
     out = torch.zeros((tokens, topk, inter_dim), device="cuda", dtype=torch.float32)
     for e in range(experts):
@@ -65,6 +84,8 @@ def torch_moe_gemm2(
     topk_weights: torch.Tensor,
     model_dim: int,
     doweight_stage2: bool,
+    group_size: int = -1,
+    scale_w2_groups: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return [tokens, model_dim] fp32.
 
@@ -73,6 +94,11 @@ def torch_moe_gemm2(
     - For each routed (token, slot) -> expert, compute y = a2 @ W2[expert]^T.
     - Optionally multiply routed weight in stage2 (when stage1 did *not*).
     - Reduce across topk by summing into [tokens, model_dim].
+
+    Args:
+        group_size: -1 for per-row scale (uses scale_w2), >0 for group-wise scale.
+        scale_w2_groups: Group-wise scale tensor of shape [E, inter_dim//group_size, model_dim] (Opt 0 layout).
+                         Required when group_size > 0; ignored otherwise.
     """
     assert a2_fp8.is_cuda and w2_fp8.is_cuda
     tokens, topk, inter_dim = a2_fp8.shape
@@ -84,8 +110,19 @@ def torch_moe_gemm2(
 
     # Dequantize inputs.
     a2 = a2_fp8.to(torch.float32) if scale_a2 is None else (a2_fp8.to(torch.float32) * scale_a2)
-    w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
-    w2 = w2.view(experts, model_dim, inter_dim)
+
+    if group_size > 0 and scale_w2_groups is not None:
+        # Group-wise dequantization: w_dequant[e,n,k] = w_int[e,n,k] * scale[e, k//group_size, n]
+        # Scale layout: [E, num_groups, N] (Opt 0: cache-friendly)
+        w2 = w2_fp8.to(torch.float32).view(experts, model_dim, inter_dim)
+        num_groups = inter_dim // group_size
+        for g in range(num_groups):
+            k_s, k_e = g * group_size, (g + 1) * group_size
+            w2[:, :, k_s:k_e] *= scale_w2_groups[:, g, :].unsqueeze(-1)
+    else:
+        # Per-row dequantization.
+        w2 = w2_fp8.to(torch.float32) if scale_w2 is None else (w2_fp8.to(torch.float32) * scale_w2)
+        w2 = w2.view(experts, model_dim, inter_dim)
 
     out = torch.zeros((tokens, model_dim), device="cuda", dtype=torch.float32)
     for e in range(experts):

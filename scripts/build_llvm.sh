@@ -1,40 +1,50 @@
 #!/bin/bash
 set -e
 
-# Default to downloading llvm-project in the parent directory of flir
+# Default to downloading llvm-project in the parent directory of flydsl
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-project"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/buildmlir"
+LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
 LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
 LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
-LLVM_COMMIT="${LLVM_COMMIT:-04f968b02917}"
+
+# Read LLVM commit hash from thirdparty/llvm-hash.txt
+LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
+LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
+LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
+
+if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
+    echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
+    echo "Shallow fetch does not support short hashes."
+    exit 1
+fi
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
+echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
+LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Cloning llvm-project..."
-    git clone https://github.com/ROCm/llvm-project.git "$LLVM_SRC_DIR"
+    echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
+    git init "$LLVM_SRC_DIR"
+    pushd "$LLVM_SRC_DIR"
+    git remote add origin "$LLVM_REMOTE"
+else
+    pushd "$LLVM_SRC_DIR"
 fi
 
-echo "Checking out llvm-project commit ${LLVM_COMMIT} (amd-staging)..."
-pushd "$LLVM_SRC_DIR"
-
-# Check if we need to switch remote to ROCm fork
-CURRENT_REMOTE=$(git remote get-url origin)
-if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
-    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
-    git remote set-url origin https://github.com/ROCm/llvm-project.git
+if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
+    echo "Fetching commit ${LLVM_COMMIT} ..."
+    git fetch --depth 1 origin "${LLVM_COMMIT}"
 fi
-
-git fetch origin amd-staging
 git checkout "${LLVM_COMMIT}"
 popd
 
@@ -67,20 +77,32 @@ cmake -G "$GENERATOR" \
     -B "$LLVM_BUILD_DIR" \
     -DLLVM_ENABLE_PROJECTS="mlir;clang" \
     -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
+    -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=17 \
     -DLLVM_ENABLE_ASSERTIONS=ON \
     -DLLVM_INSTALL_UTILS=ON \
     -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+    -DMLIR_ENABLE_ROCM_RUNNER=ON \
+    -DMLIR_BINDINGS_PYTHON_NB_DOMAIN=mlir \
     -DPython3_EXECUTABLE=$(which python3) \
     -Dnanobind_DIR="$NANOBIND_DIR" \
     -DBUILD_SHARED_LIBS=OFF \
     -DLLVM_BUILD_LLVM_DYLIB=OFF \
-    -DLLVM_LINK_LLVM_DYLIB=OFF 
+    -DLLVM_LINK_LLVM_DYLIB=OFF \
+    -DCMAKE_INSTALL_RPATH="\$ORIGIN"
 
 # 4. Build
-echo "Starting build with $(nproc) parallel jobs..."
-cmake --build . -j$(nproc)
+PARALLEL_JOBS=$(( $(nproc) / 2 ))
+for arg in "$@"; do
+    if [[ "$arg" =~ ^-j([0-9]+)$ ]]; then
+        PARALLEL_JOBS="${BASH_REMATCH[1]}"
+    elif [[ "$arg" == "--no-install" ]]; then
+        LLVM_PACKAGE_INSTALL=0
+    fi
+done
+echo "Starting build with ${PARALLEL_JOBS} parallel jobs..."
+cmake --build . -j${PARALLEL_JOBS}
 
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo "=============================================="
@@ -95,13 +117,18 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   fi
 
   echo "Creating tarball..."
-  tar -C "$(dirname "${LLVM_INSTALL_DIR}")" -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
+  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
+  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
+  # non-fatal for packaging.
+  tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
+      -C "$(dirname "${LLVM_INSTALL_DIR}")" \
+      -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
 fi
 
 echo "=============================================="
 echo "LLVM/MLIR build completed successfully!"
 echo ""
-echo "To configure flir, use:"
+echo "To configure flydsl, use:"
 echo "cmake .. -DMLIR_DIR=$LLVM_BUILD_DIR/lib/cmake/mlir"
 if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   echo ""

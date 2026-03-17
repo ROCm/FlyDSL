@@ -9,21 +9,7 @@ Implementation of a Block-wise LayerNorm:
 LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 """
 
-import sys
 import os
-from pathlib import Path
-
-# Prefer embedded MLIR/rocdsl to avoid mixing multiple runtimes.
-# Repo root is two levels above `tests/kernels/`.
-_repo = Path(__file__).resolve().parents[2]
-_embedded = _repo / "build" / "python_packages" / "rocdsl"
-if _embedded.exists():
-    os.environ.setdefault("ROCDSL_USE_EMBEDDED_MLIR", "1")
-    sys.path.insert(0, str(_embedded))
-_src_py = _repo / "python"
-if _src_py.exists():
-    sys.path.insert(0, str(_src_py))
-sys.path.insert(0, str(_repo))
 
 from tests.test_common import run_perftest
 from tests.kernels.benchmark_common import (
@@ -44,8 +30,6 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-import flydsl
-
 EPS: float = 1e-5
 from kernels.layernorm_kernel import (
     build_layernorm_module,
@@ -60,11 +44,8 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        m = build_layernorm_module(M, N, dtype)
-        exe = flydsl.compile(m)
+        launch_fn = build_layernorm_module(M, N, dtype)
     except ValueError as e:
-        # Treat compile-time failures as test failures so wrapper scripts (run_tests.sh)
-        # can detect them via a non-zero exit code.
         print(f"[FAIL] Compile failed: {e}")
         return False, None
 
@@ -113,9 +94,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     expected = expected.to(DTYPE_FP32)
 
     print("Launching kernel...")
+    stream = torch.cuda.current_stream()
 
     def kernel_launch():
-        exe(input_dev, gamma_dev, beta_dev, output_dev, M)
+        launch_fn(input_dev, gamma_dev, beta_dev, output_dev, M, stream=stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -123,17 +105,17 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     _, avg_us = run_perftest(lambda: (kernel_launch(), torch.cuda.synchronize()), num_iters=BENCH_ITERS, num_warmup=WARMUP_ITERS)
     torch.cuda.synchronize()
-    flir_gpu_us = None
+    flydsl_gpu_us = None
     if os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1":
-        flir_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
+        flydsl_gpu_us = bench_gpu_us_torch(kernel_launch, warmup=WARMUP_ITERS, iters=BENCH_ITERS)
     avg_ms = avg_us / 1000.0
     elem_bytes = 4 if dtype == "f32" else 2
     total_bytes = (2 * M * N + 2 * N) * elem_bytes  # read input + write output + (gamma+beta)
     bandwidth_gbs = total_bytes / (avg_us / 1e6) / 1e9
     print(f"Kernel avg time: {avg_ms:.4f} ms via run_perftest (warmup={WARMUP_ITERS}, iters={BENCH_ITERS})")
     print(f"Bandwidth: {bandwidth_gbs:.2f} GB/s")
-    if flir_gpu_us is not None:
-        print(f"[Perf] FLIR layernorm gpu: {flir_gpu_us:.1f} us")
+    if flydsl_gpu_us is not None:
+        print(f"[Perf] FlyDSL layernorm gpu: {flydsl_gpu_us:.1f} us")
 
     # Verification (pure torch style; compute max error in torch)
     output_ref = output_dev.to(DTYPE_FP32)
@@ -152,7 +134,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
         print(output_ref[0, :5])
         ok = False
 
-    return ok, flir_gpu_us
+    return ok, flydsl_gpu_us
 
 def test_all():
     print("="*80)
@@ -184,7 +166,7 @@ def test_all():
 
     failures = 0
     for M, N, dtype in configs:
-        ok, flir_gpu_us = run_test(M, N, dtype)
+        ok, flydsl_gpu_us = run_test(M, N, dtype)
         if not ok:
             failures += 1
 
@@ -206,7 +188,7 @@ def test_all():
                 except Exception as e:
                     print(f"[Perf] AIter layernorm skipped: {type(e).__name__}: {e!r}")
 
-            perf_rows.append(PerfRow(op="layernorm", shape=f"{M}x{N}", dtype=dtype, flir_gpu_us=flir_gpu_us, aiter_gpu_us=aiter_us))
+            perf_rows.append(PerfRow(op="layernorm", shape=f"{M}x{N}", dtype=dtype, flydsl_gpu_us=flydsl_gpu_us, aiter_gpu_us=aiter_us))
 
     print("\n" + "="*80)
     if failures == 0:

@@ -16,11 +16,16 @@ import torch
 # on `sys.path`, which can miss newer ROCDL wrappers (notably atomic fadd / MFMA).
 # -----------------------------------------------------------------------------
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+_PYTHON_CANDIDATES = [
+    os.path.join(_REPO_ROOT, "build", "python_packages"),
+    _REPO_ROOT,
+]
+for _p in reversed(_PYTHON_CANDIDATES):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2
-from tests.utils import pertoken_quant, shuffle_weight
+from tests.utils import pertoken_quant, shuffle_weight, shuffle_scale_for_int4
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
 from tests.kernels.utils import fp4_utils
@@ -66,15 +71,14 @@ from kernels.moe_gemm_2stage import (
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
-    compile_moe_reduction,
     MoeGemm2Mode,
 )
 
 logging.basicConfig(level=logging.INFO)
 
 # Reduce noisy aiter log spam (e.g. "type hints mismatch, override to --> ...") so test output
-# stays readable. You can override via env: FLIR_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
-_aiter_level = os.environ.get("FLIR_AITER_LOG_LEVEL", "ERROR").upper().strip()
+# stays readable. You can override via env: FLYDSL_AITER_LOG_LEVEL=INFO/WARNING/ERROR.
+_aiter_level = os.environ.get("FLYDSL_AITER_LOG_LEVEL", "ERROR").upper().strip()
 try:
     logging.getLogger("aiter").setLevel(getattr(logging, _aiter_level, logging.ERROR))
 except Exception:
@@ -156,7 +160,6 @@ def moe_sorting_torch_native(
     "tokens,model_dim,inter_dim,experts,topk,doweight_stage1",
     [
         (256, 1024, 256, 4, 2, False),
-        (10240, 1024, 256, 128, 8, False),
     ],
 )
 def _maybe_aiter_moe_sorting(
@@ -221,7 +224,7 @@ def build_routing_buffers(
     tile_m: int,
     moe_sort_mode: Optional[str] = None,
 ) -> RoutingBuffers:
-    """Build routing buffers once (CK format), reusable across stage1 + stage2.
+    """Build routing buffers once, reusable across stage1 + stage2.
 
     NOTE:
     - `moe_sort_mode="aiter"` aligns with `aiter/aiter/test_moe_flydsl.py` (swap path):
@@ -243,7 +246,7 @@ def build_routing_buffers(
             num_experts=int(experts),
             block_size=int(tile_m),
         )
-        # num_valid_ids[0] == total padded rows (CK-style); kernels use this for early-exit.
+        # num_valid_ids[0] == total padded rows; kernels use this for early-exit.
         num_valid_ids = num_tokens_post_pad[:1].contiguous()
         sorted_size = int(sorted_token_ids.numel())
         blocks = int(sorted_expert_ids.numel())
@@ -300,6 +303,7 @@ def run_moe_stage1(
     doweight_stage1: bool,
     *,
     in_dtype: str = "fp8",
+    group_size: int = -1,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -316,6 +320,8 @@ def run_moe_stage1(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
     test_graph: bool = False,
+    # Optional override for pre-built groupwise scale tensor [E, K//group_size, 2*inter_dim] (Opt 0 layout).
+    scale_w1_groups_in: Optional[torch.Tensor] = None,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -335,7 +341,7 @@ def run_moe_stage1(
         if w1_fp32_in is not None
         else torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32)
     )
-    # w2 is required by aiter CK API even for stage1; keep it allocated to avoid null ptr.
+    # w2 is required by aiter API even for stage1; keep it allocated to avoid null ptr.
     # Stage1 kernels should not touch it, but we allocate a correct-shape tensor for safety.
     w2_fp32 = (
         w2_fp32_in
@@ -373,11 +379,12 @@ def run_moe_stage1(
         blocks,
     ) = routing
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
@@ -385,12 +392,18 @@ def run_moe_stage1(
     if in_dtype == "fp8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)  # [tokens,K], [tokens,1]
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=DTYPE_FP8)  # [E,2*inter,K], [E,2*inter,1]
-    # w2 is not used by our kernel, but required by CK stage1 API
+    # w2 is not used by our kernel, but required by aiter stage1 API
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=DTYPE_FP8)
     elif in_dtype == "fp16":
         x_q = x_fp32.to(torch.float16)
         w1_q = w1_fp32.to(torch.float16)
         w2_q = w2_fp32.to(torch.float16)
+        scale_x = None
+        scale_w1 = None
+    elif in_dtype == "bf16":
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q = w1_fp32.to(torch.bfloat16)
+        w2_q = w2_fp32.to(torch.bfloat16)
         scale_x = None
         scale_w1 = None
     elif in_dtype == "int8":
@@ -412,24 +425,49 @@ def run_moe_stage1(
         scale_x = amax / 127.0
         scale_x[scale_x == 0] = 1.0
         x_q = (x_route / scale_x).to(torch.int8)
-        # Match CK moe_smoothquant layout: slot-major [topk*tokens, K].
+        # Match moe_smoothquant layout: slot-major [topk*tokens, K].
         x_q = x_q.permute(1, 0, 2).contiguous()
         scale_x = scale_x.permute(1, 0, 2).contiguous()
         # W quantization is unchanged for this harness (same as aiter perf tests: smooth scales
         # exercise the API rather than implementing the exact SQ calibration workflow).
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int4_bf16":
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
+    # --- Groupwise scale for W4A16 ---
+    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
+    if use_groupwise_scale:
+        N_total = 2 * inter_dim
+        num_groups_s1 = model_dim // group_size
+        if scale_w1_groups_in is not None:
+            scale_w1_groups = scale_w1_groups_in
+        else:
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            scale_w1_groups = (
+                torch.rand(experts, num_groups_s1, N_total, device=device, dtype=torch.float32)
+                * 0.05 + 0.005
+            )
+        # Prepare scale for kernel (no-op shuffle, returns contiguous).
+        scale_w1_prepared = shuffle_scale_for_int4(scale_w1_groups, group_size=group_size)
+        # Override per-row scale (kernel uses groupwise scale instead).
+        scale_w1 = None
+
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q) if in_dtype == "fp8" else None
 
-    # Flatten W1 for our flir kernel (treat expert dim as part of N).
+    # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
     w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
     w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
     scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
@@ -440,10 +478,13 @@ def run_moe_stage1(
         if is_int8smooth
         else x_q.contiguous().view(tokens, model_dim)
     )
+    # Pack weights for int4 variants (W4A8 and W4A16).
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = is_int4 or is_int4_bf16
     w_kernel = (
-        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if is_int4 else w1_shuffled_flat
+        _pack_shuffled_int8_to_packed_int4_no_perm(w1_shuffled_flat) if use_packed_int4 else w1_shuffled_flat
     ).contiguous()
-    if not is_int4:
+    if not use_packed_int4:
         w_kernel = w_kernel.view(experts * (2 * inter_dim), model_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -451,7 +492,10 @@ def run_moe_stage1(
         scale_x_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_x_1d = scale_x.view(-1).contiguous()  # [tokens] or [tokens*topk] for int8smooth
-    if scale_w1_flat is None:
+    if use_groupwise_scale:
+        # Groupwise scale: flatten [E, num_groups, N] -> 1D for kernel memref.
+        scale_w1_1d = scale_w1_prepared.view(-1).contiguous()
+    elif scale_w1_flat is None:
         scale_w1_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         scale_w1_1d = scale_w1_flat.view(-1).contiguous()  # [rows]
@@ -467,6 +511,7 @@ def run_moe_stage1(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -475,7 +520,7 @@ def run_moe_stage1(
     )
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        stream = torch.cuda.current_stream()
         exe(
             o,
             x,
@@ -490,7 +535,7 @@ def run_moe_stage1(
             inter_dim,
             model_dim,
             int(blocks),
-            stream_ptr,
+            stream,
         )
 
     _, us = run_perftest(
@@ -526,10 +571,12 @@ def run_moe_stage1(
             topk_weights,
             inter_dim=inter_dim,
             doweight_stage1=doweight_stage1,
+            group_size=group_size,
+            scale_w1_groups=scale_w1_groups,
         )
 
-        rtol = 0.5 if is_int4 else 0.25
-        atol = 0.5 if is_int4 else 0.25
+        rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+        atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
         assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -538,8 +585,9 @@ def run_moe_stage1(
 
     # Rough bytes-moved accounting (same spirit as GEMM tests: count each tensor once).
     bytes_moved = 0
-    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * 1  # x int8/fp8
-    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if is_int4 else 1)  # w (packed for int4)
+    x_elem_bytes = 2 if (is_int4_bf16 or in_dtype in ("bf16", "fp16")) else 1  # bf16/fp16 activations
+    bytes_moved += (tokens * topk if is_int8smooth else tokens) * model_dim * x_elem_bytes  # x (bf16 for W4A16, else fp8/int8)
+    bytes_moved += (experts * (2 * inter_dim) * model_dim) // (2 if use_packed_int4 else 1)  # w (packed for int4)
     bytes_moved += tokens * topk * inter_dim * 2  # out fp16 (logical)
     bytes_moved += (tokens * topk if is_int8smooth else tokens) * 4  # scale_x f32 (1D)
     bytes_moved += experts * (2 * inter_dim) * 4  # scale_w f32 (1D)
@@ -549,28 +597,28 @@ def run_moe_stage1(
     tbps = bytes_moved / 1e12 / (us / 1e6)
 
     print(
-        f"FLIR MoE stage1[{in_dtype}]: "
+        f"FlyDSL MoE stage1[{in_dtype}]: "
         f"{us:.1f} us, "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
-    # Compare + benchmark vs aiter CK stage1 (optional; enabled by default when aiter is runnable).
+    # Compare + benchmark vs aiter stage1 (optional; enabled by default when aiter is runnable).
     if compare_aiter_ck is None:
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
     else:
         compare_ck = bool(compare_aiter_ck)
-    # aiter CK paths are fp8-only in our setup.
+    # aiter paths are fp8-only in our setup.
     compare_ck = compare_ck and (in_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
-            pytest.skip("aiter not available; cannot compare to CK moe stage1.", allow_module_level=False)
+            pytest.skip("aiter not available; cannot compare to aiter moe stage1.", allow_module_level=False)
         try:
             from aiter.ops.moe_op import ck_moe_stage1_fwd
             from aiter.ops.enum import QuantType, ActivationType
 
             out_ck = torch.empty((tokens, topk, inter_dim), device=device, dtype=torch.float16)
 
-            # aiter CK expects w1/w2 with expert dimension preserved.
+            # aiter expects w1/w2 with expert dimension preserved.
             w1_ck = w1_shuffled
             w2_ck = w2_shuffled
             w1_scale_ck = scale_w1.contiguous()
@@ -595,9 +643,9 @@ def run_moe_stage1(
                     dst_type=o.dtype,
                 )
 
-            # Benchmark CK stage1
+            # Benchmark aiter stage1
             # Align with aiter swap rules:
-            # - CK takes quantized activations (fp8) + per-token scale
+            # - aiter takes quantized activations (fp8) + per-token scale
             # - routing buffers are used as-is (no host trim/pad); launch range is sorted_eids.numel()
             _, us_ck = run_perftest(
                 launch_ck,
@@ -616,17 +664,17 @@ def run_moe_stage1(
                 testGraph=test_graph,
             )
 
-            # Correctness: flir vs CK
-            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="flir vs aiter:")
+            # Correctness: FlyDSL vs aiter
+            assert verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.25, atol=0.25, msg="FlyDSL vs aiter:")
 
             # Perf print: use the same flop model for both
             flops = 2 * tokens * topk * (2 * inter_dim) * model_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
-            print(f"[aiter CK] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, flir vs aiter speedups: {tflops / tflops_ck:.2f}x")
+            print(f"[aiter] stage1: {us_ck:.1f} us, {tflops_ck:.2f} TFLOPS, FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x")
         except Exception as e:
-            # Treat CK compare as best-effort: many environments can import `aiter` but can't load
-            # the full JIT .so dependency chain. Don't fail the FLIR test suite for that.
-            logging.warning(f"Skipping aiter CK moe stage1 compare (not runnable here): {e}")
+            # Treat aiter compare as best-effort: many environments can import `aiter` but can't load
+            # the full JIT .so dependency chain. Don't fail the FlyDSL test suite for that.
+            logging.warning(f"Skipping aiter moe stage1 compare (not runnable here): {e}")
     if return_outputs:
         return out, us
     return None
@@ -645,6 +693,7 @@ def run_moe_stage2(
     *,
     in_dtype: str = "fp8",
     out_dtype: str = "f16",
+    group_size: int = -1,
     seed: int = 0,
     num_iters: int = 5,
     num_warmup: int = 2,
@@ -672,6 +721,8 @@ def run_moe_stage2(
     use_valid_mask: bool = False,
     # graph mode
     test_graph: bool = False,
+    # Optional override for pre-built groupwise scale tensor [E, inter_dim//group_size, model_dim] (Opt 0 layout).
+    scale_w2_groups_in: Optional[torch.Tensor] = None,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -764,11 +815,12 @@ def run_moe_stage2(
     # NOTE: routing uses `moe_sorting` output directly (no host trim/pad). Extra launched blocks
     # are gated by `num_valid_ids` inside the kernels.
 
-    if in_dtype not in ("fp8", "fp16", "int8", "int8smooth", "int4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','int8','int8smooth','int4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
+    is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
     is_int8 = in_dtype in ("int8", "int8smooth", "int4")
     is_int8smooth = in_dtype == "int8smooth"
 
@@ -784,6 +836,13 @@ def run_moe_stage2(
         scale_x = None
         scale_w1 = None
         scale_w2 = None
+    elif in_dtype == "bf16":
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q = w1_fp32.to(torch.bfloat16)
+        w2_q = w2_fp32.to(torch.bfloat16)
+        scale_x = None
+        scale_w1 = None
+        scale_w2 = None
     elif in_dtype == "int8":
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
@@ -794,18 +853,42 @@ def run_moe_stage2(
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8)
+    elif in_dtype == "int4_bf16":
+        # W4A16: X is bf16 (no quant), W is int4 packed (host packs from int8 values in [-8,7]).
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
+        scale_x = None
     else:
         # W4A8: A2 is int8, W2 is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # Preshuffle weights (aiter/CK layout) on the *unpacked* tensor.
+    # --- Groupwise scale for W4A16 (stage 2) ---
+    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
+    if use_groupwise_scale:
+        num_groups_s2 = inter_dim // group_size
+        if scale_w2_groups_in is not None:
+            scale_w2_groups = scale_w2_groups_in
+        else:
+            # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
+            scale_w2_groups = (
+                torch.rand(experts, num_groups_s2, model_dim, device=device, dtype=torch.float32)
+                * 0.05 + 0.005
+            )
+        scale_w2_prepared = shuffle_scale_for_int4(scale_w2_groups, group_size=group_size)
+        # Override per-row scale (kernel uses groupwise scale instead).
+        scale_w2 = None
+
+    # Preshuffle weights on the *unpacked* tensor.
     w1_shuffled = shuffle_weight(w1_q)
     w2_shuffled = shuffle_weight(w2_q)
 
     # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
-    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype == "fp16"):
+    # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
+    if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16")):
         a2_q = a2_fp8_in
         a2_scale = a2_scale_in
     else:
@@ -832,6 +915,13 @@ def run_moe_stage2(
         elif in_dtype == "fp16":
             a2_q = out1_ref.to(torch.float16)
             a2_scale = None
+        elif in_dtype == "bf16":
+            a2_q = out1_ref.to(torch.bfloat16)
+            a2_scale = None
+        elif in_dtype == "int4_bf16":
+            # W4A16: A2 is bf16 (no quant).
+            a2_q = out1_ref.to(torch.bfloat16)
+            a2_scale = None
         else:
             if is_int8smooth:
                 # Apply a per-expert smooth scale to A2 before W8A8 quantization.
@@ -843,14 +933,16 @@ def run_moe_stage2(
     w2_shuffled_flat = w2_shuffled.view(experts * model_dim, inter_dim)
     scale_w2_flat = None if scale_w2 is None else scale_w2.view(experts * model_dim, 1)
 
-    # For W4A8, pack preshuffled int8 weights into packed int4 bytes.
+    # For W4A8 and W4A16, pack preshuffled int8 weights into packed int4 bytes.
+    # Both use the same interleaved packing: [ (v4<<4)|v0, (v5<<4)|v1, (v6<<4)|v2, (v7<<4)|v3 ]
+    use_packed_int4 = is_int4 or is_int4_bf16
     w2_kernel = w2_shuffled_flat
-    if is_int4:
+    if use_packed_int4:
         w2_kernel = _pack_shuffled_int8_to_packed_int4_no_perm(w2_shuffled_flat)
 
     w2_flat = w2_kernel.contiguous().view(-1)
     w2_kernel = w2_flat
-    if not is_int4:
+    if not use_packed_int4:
         w2_kernel = w2_kernel.view(experts * model_dim, inter_dim)
 
     # Flatten scales to 1D memrefs (fp16 path uses 0-sized scale tensors; kernel ignores them).
@@ -858,7 +950,9 @@ def run_moe_stage2(
         a2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         a2_scale_1d = a2_scale.view(-1).contiguous()  # [tokens*topk]
-    if scale_w2_flat is None:
+    if use_groupwise_scale:
+        w2_scale_1d = scale_w2_prepared.view(-1).contiguous()
+    elif scale_w2_flat is None:
         w2_scale_1d = torch.empty((0,), device=device, dtype=torch.float32)
     else:
         w2_scale_1d = scale_w2_flat.view(-1).contiguous()  # [experts*model_dim]
@@ -883,6 +977,7 @@ def run_moe_stage2(
         topk=topk,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n,
         tile_k=tile_k,
@@ -891,7 +986,7 @@ def run_moe_stage2(
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
     def launch(o, x, w, sx, sw, st, eids, sw_sorted):
-        stream_ptr = torch.cuda.current_stream().cuda_stream
+        stream = torch.cuda.current_stream()
         valid_mask = None
         if is_reduce_exe and bool(use_valid_mask):
             # Default: non-EP (all ones). EP mode can be emulated by passing expert_mask.
@@ -912,7 +1007,7 @@ def run_moe_stage2(
                 inter_dim,
                 int(blocks),
                 valid_mask,
-                stream_ptr,
+                stream,
             )
         else:
             # Atomic mode does not take valid_mask.
@@ -930,7 +1025,7 @@ def run_moe_stage2(
                 model_dim,
                 inter_dim,
                 int(blocks),
-                stream_ptr,
+                stream,
             )
  
     # NOTE: stage2 uses atomic-add into `out`, so we cannot reuse the same output buffer
@@ -976,6 +1071,8 @@ def run_moe_stage2(
             topk_weights,
             model_dim=model_dim,
             doweight_stage2=doweight_stage2,
+            group_size=group_size,
+            scale_w2_groups=scale_w2_groups,
         )
         assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
@@ -984,7 +1081,8 @@ def run_moe_stage2(
     tflops = flops / (us / 1e6) / 1e12
 
     bytes_moved = 0
-    bytes_moved += tokens * topk * inter_dim * 1  # a2 fp8 (logical)
+    a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16") else 1  # bf16/fp16 activations
+    bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
     bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
@@ -994,25 +1092,25 @@ def run_moe_stage2(
     bytes_moved += int(sorted_expert_ids.numel()) * 4
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(
-        f"FLIR MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
+        f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
-    # Optional compare vs aiter CK stage2.
+    # Optional compare vs aiter stage2.
     if compare_aiter_ck is None:
         compare_ck = os.environ.get("COMPARE_AITER_CK", "1" if HAS_AITER else "0") == "1"
     else:
         compare_ck = bool(compare_aiter_ck)
-    # aiter CK paths are fp8-only in our setup.
+    # aiter paths are fp8-only in our setup.
     compare_ck = compare_ck and (in_dtype == "fp8")
     if compare_ck:
         if not HAS_AITER:
-            pytest.skip("aiter not available; cannot compare to CK moe stage2.", allow_module_level=False)
+            pytest.skip("aiter not available; cannot compare to aiter moe stage2.", allow_module_level=False)
         try:
             from aiter.ops.moe_op import ck_moe_stage2_fwd
             from aiter.ops.enum import QuantType, ActivationType
 
-            # CK stage2 output type is fp16 in many builds; keep fp16 for compatibility.
+            # aiter stage2 output type is fp16 in many builds; keep fp16 for compatibility.
             # (Some environments don't accept fp32 output tensors here.)
             out_ck = torch.zeros((tokens, model_dim), device=device, dtype=torch.float16)
             out_ck_perf = torch.zeros_like(out_ck)
@@ -1053,15 +1151,15 @@ def run_moe_stage2(
                 testGraph=test_graph,
             )
 
-            # Perf print (report both executed vs logical FLOPs, same convention as FLIR).
+            # Perf print (report both executed vs logical FLOPs, same convention as FlyDSL).
             flops = 2 * tokens * topk * model_dim * inter_dim
             tflops_ck = flops / (us_ck / 1e6) / 1e12
             print(
-                f"[aiter CK] stage2: {us_ck:.1f} us, "
-                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), flir vs aiter speedups: {tflops / tflops_ck:.2f}x"
+                f"[aiter] stage2: {us_ck:.1f} us, "
+                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x"
             )
 
-            # Correctness run (best-effort; do not fail perf comparison if CK diverges).
+            # Correctness run (best-effort; do not fail perf comparison if aiter diverges).
             out_ck.zero_()
             launch_ck(
                 out_ck,
@@ -1076,10 +1174,10 @@ def run_moe_stage2(
                 sorted_weights,
             )
             torch.cuda.synchronize()
-            if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter CK] stage2:"):
-                    logging.warning("[aiter CK] stage2 correctness mismatch vs FLIR (continuing; perf numbers still printed).")
+            if not verify_output(out.to(torch.float32), out_ck.to(torch.float32), rtol=0.5, atol=0.5, msg="[aiter] stage2:"):
+                    logging.warning("[aiter] stage2 correctness mismatch vs FlyDSL (continuing; perf numbers still printed).")
         except Exception as e:
-            logging.warning(f"Skipping aiter CK moe stage2 compare (not runnable here): {e}")
+            logging.warning(f"Skipping aiter moe stage2 compare (not runnable here): {e}")
 
     # Print profile breakdown if the executor supports it
     if hasattr(exe, 'print_profile_stats'):
@@ -1101,14 +1199,15 @@ def run_moe_stage2(
         pytest.param(333, 4096, 2048, 17, 9, 64, 128, 128, 256, 128, False, id="L", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "int8", "int8smooth", "int4"])
+@pytest.mark.parametrize("in_dtype", ["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16"])
 @pytest.mark.parametrize("out_dtype", ["f16", "f32"], ids=["out_f16", "out_f32"])
 @pytest.mark.parametrize("use_reduce", [False, True], ids=["atomic", "reduce"])
 @pytest.mark.parametrize("use_valid_mask", [False, True], ids=["nomask", "mask"])
 @pytest.mark.parametrize("test_graph", [
-    pytest.param(False, id="graph"),
-    pytest.param(True, id="eager", marks=pytest.mark.large_shape),
+    pytest.param(False, id="eager"),
+    pytest.param(True, id="graph"),
 ])
+@pytest.mark.parametrize("group_size", [-1, 32], ids=["perrow", "g32"])
 def test_moe_gemm_2stage(
     tokens: int,
     model_dim: int,
@@ -1126,6 +1225,7 @@ def test_moe_gemm_2stage(
     use_reduce: bool,
     use_valid_mask: bool,
     test_graph: bool,
+    group_size: int,
     *,
     seed: int = 0,
     num_iters: int = 5,
@@ -1136,12 +1236,17 @@ def test_moe_gemm_2stage(
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
 ):
-    """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once."""
+    """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
+
+    When in_dtype='int4_bf16' and group_size>0, uses groupwise scale (W4A16 with per-group dequant).
+    """
     if (not bool(use_reduce)) and bool(use_valid_mask):
         pytest.skip("valid_mask is only used in reduce mode (atomic mode ignores it).")
     out_s = str(out_dtype).strip().lower()
     if bool(use_reduce) and out_s in ("f32", "fp32", "float"):
         pytest.skip("reduce mode does not support out_dtype='f32' (compile_moe_gemm2(accumulate=False) forbids it).")
+    if group_size > 0 and in_dtype != "int4_bf16":
+        pytest.skip("groupwise scale only applies to int4_bf16")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1173,8 +1278,8 @@ def test_moe_gemm_2stage(
     )
 
     # Default routing + comparison knobs for test stability:
-    # - Use torch routing (no CK dependency for sorting).
-    # - Only compare CK for fp8, and only when explicitly requested.
+    # - Use torch routing (no aiter dependency for sorting).
+    # - Only compare aiter for fp8, and only when explicitly requested.
     if moe_sort_mode is None:
         moe_sort_mode = "torch"
     if compare_aiter_ck is None:
@@ -1187,6 +1292,7 @@ def test_moe_gemm_2stage(
         experts=experts,
         topk=topk,
         in_dtype=in_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n1,
         tile_k=tile_k1,
@@ -1219,6 +1325,13 @@ def test_moe_gemm_2stage(
     elif in_dtype == "fp16":
         a2_q = out1_fp16
         a2_scale = None
+    elif in_dtype == "bf16":
+        a2_q = out1_fp16.to(torch.bfloat16)
+        a2_scale = None
+    elif in_dtype == "int4_bf16":
+        # W4A16: A2 is bf16 (no quant)
+        a2_q = out1_fp16.to(torch.bfloat16)
+        a2_scale = None
     else:
         out1_fp32 = out1_fp16.to(torch.float32)
         if in_dtype == "int8smooth":
@@ -1238,6 +1351,7 @@ def test_moe_gemm_2stage(
         topk=topk,
         in_dtype=in_dtype,
         out_dtype=out_dtype,
+        group_size=group_size,
         tile_m=tile_m,
         tile_n=tile_n2,
         tile_k=tile_k2,
@@ -1282,10 +1396,10 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
         tile_k: int,
         doweight_stage2: bool,
         in_dtype: str = "fp8",
+        group_size: int = -1,
         out_dtype: str = "f16",
     ):
         if use_flydsl_reduce:
-            # Use unified implementation with FlyDSL reduce kernel
             return compile_moe_gemm2_ex(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1296,14 +1410,13 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
+                group_size=group_size,
                 out_dtype=out_dtype,
-                # `compile_moe_gemm2_ex` uses `valid_mask is not None` as a compile-time sentinel
-                # to enable masked reduction (different reduce kernel signature).
                 valid_mask=(True if bool(use_valid_mask) else None),
                 mode=MoeGemm2Mode.REDUCE,
+                zero_intermediate=False, # test non-zeroed performance
             )
         else:
-            # Use torch.sum for reduction (baseline comparison)
             gemm2_exe = compile_moe_gemm2(
                 model_dim=model_dim,
                 inter_dim=inter_dim,
@@ -1314,6 +1427,7 @@ def _make_reduce_mode_compile_fn(use_flydsl_reduce: bool = True, use_valid_mask:
                 tile_k=tile_k,
                 doweight_stage2=doweight_stage2,
                 in_dtype=in_dtype,
+                group_size=group_size,
                 out_dtype=out_dtype,
                 accumulate=False,
             )
@@ -1350,7 +1464,7 @@ class _TorchReduceWrapper:
         k_in,
         size_expert_ids_in,
         valid_mask,
-        stream_ptr,
+        stream,
     ):
         # Lazy allocate intermediate buffer
         needed = tokens_in * self._topk * self._model_dim
@@ -1366,7 +1480,7 @@ class _TorchReduceWrapper:
             arg_x, arg_w, arg_scale_x, arg_scale_w,
             arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
             arg_num_valid_ids, tokens_in, n_in, k_in, size_expert_ids_in,
-            stream_ptr,
+            stream,
         )
         X = intermediate.view(tokens_in, self._topk, self._model_dim)
         if valid_mask is not None:
@@ -1378,147 +1492,16 @@ class _TorchReduceWrapper:
         return self._mode
 
 
-# Reduce Kernel Performance Profiling
-def profile_reduce_kernel(
-    tokens: int,
-    topk: int,
-    model_dim: int,
-    dtype: torch.dtype = torch.float16,
-    num_iters: int = 20,
-    num_warmup: int = 5,
-    compare_torch: bool = True,
-):
-    """Profile reduce kernel bandwidth and latency.
-
-    Args:
-        tokens: Number of tokens
-        topk: Top-k value
-        model_dim: Model dimension
-        dtype: Data type (torch.float16 or torch.bfloat16)
-        num_iters: Number of benchmark iterations
-        num_warmup: Number of warmup iterations
-        compare_torch: If True, also benchmark torch.sum for comparison
-
-    Returns:
-        Dict with profiling results
-    """
-    import torch.profiler as tpf
-
-    dtype_str = {torch.float16: "f16", torch.bfloat16: "bf16", torch.float32: "f32"}[dtype]
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-    # Create test tensors
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    # Calculate theoretical bandwidth
-    elem_bytes = X.element_size()
-    read_bytes = tokens * topk * model_dim * elem_bytes
-    write_bytes = tokens * model_dim * elem_bytes
-    total_bytes = read_bytes + write_bytes
-
-    def _get_kernel_time_us(prof):
-        """Extract CUDA kernel time from profiler (microseconds)."""
-        total = 0.0
-        for evt in prof.events():
-            if str(getattr(evt, 'device_type', '')).endswith('CUDA'):
-                total += getattr(evt, 'self_device_time_total', 0)
-        return total
-
-    results = {"shape": (tokens, topk, model_dim), "dtype": dtype_str}
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-
-    # Benchmark FlyDSL reduce
-    for _ in range(num_warmup):
-        reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
-    torch.cuda.synchronize()
-
-    with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
-        for _ in range(num_iters):
-            reduce_exe(X, Y, valid_mask, tokens, stream_ptr)
-        torch.cuda.synchronize()
-
-    flydsl_us = _get_kernel_time_us(prof) / num_iters
-    flydsl_bw = (total_bytes / 2**40) / (flydsl_us / 1e6)  # TB/s
-    results["flydsl"] = {"latency_us": flydsl_us, "bandwidth_tb_s": flydsl_bw}
-
-    # Benchmark torch.sum if requested
-    if compare_torch:
-        for _ in range(num_warmup):
-            torch.sum(X, dim=1, out=Y)
-        torch.cuda.synchronize()
-
-        with tpf.profile(activities=[tpf.ProfilerActivity.CUDA]) as prof:
-            for _ in range(num_iters):
-                torch.sum(X, dim=1, out=Y)
-            torch.cuda.synchronize()
-
-        torch_us = _get_kernel_time_us(prof) / num_iters
-        torch_bw = (total_bytes / 2**40) / (torch_us / 1e6)
-        results["torch"] = {"latency_us": torch_us, "bandwidth_tb_s": torch_bw}
-        results["speedup"] = torch_us / flydsl_us if flydsl_us > 0 else 0
-
-    return results
-
-
-def print_reduce_profile(results: dict):
-    """Pretty print reduce profiling results."""
-    tokens, topk, model_dim = results["shape"]
-    print(f"\n[Reduce Kernel Profile] shape=({tokens}, {topk}, {model_dim}), dtype={results['dtype']}")
-    print(f"  FlyDSL:  {results['flydsl']['latency_us']:.1f} us, {results['flydsl']['bandwidth_tb_s']:.2f} TB/s")
-    if "torch" in results:
-        print(f"  torch:   {results['torch']['latency_us']:.1f} us, {results['torch']['bandwidth_tb_s']:.2f} TB/s")
-        print(f"  speedup: {results['speedup']:.2f}x")
-
-
-@pytest.mark.parametrize(
-    "tokens, topk, model_dim",
-    [
-        pytest.param(32769, 8, 7168, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
-        pytest.param(64, 8, 7168, id="DS-TP8-decode-S"),
-        pytest.param(256, 8, 7168, id="DS-TP8-decode-L"),
-        pytest.param(16384, 6, 5120, id="EP-K6-prefill", marks=pytest.mark.large_shape),
-        pytest.param(64, 6, 5120, id="EP-K6-decode-S"),
-        pytest.param(256, 6, 5120, id="EP-K6-decode-L"),
-    ],
-)
-def test_moe_reduce_kernel(tokens: int, topk: int, model_dim: int):
-    """Test reduce kernel correctness and performance vs torch.sum."""
-    dtype = torch.float16
-    dtype_str = "f16"
-
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str)
-
-    # Create test data
-    X = torch.randn(tokens, topk, model_dim, device="cuda", dtype=dtype)
-    Y_flydsl = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-    Y_ref = torch.empty(tokens, model_dim, device="cuda", dtype=dtype)
-
-    # Run kernels
-    stream_ptr = torch.cuda.current_stream().cuda_stream
-    valid_mask = torch.empty((0, topk), device="cuda", dtype=torch.uint8)
-    reduce_exe(X, Y_flydsl, valid_mask, tokens, stream_ptr)
-    torch.sum(X, dim=1, out=Y_ref)
-    torch.cuda.synchronize()
-
-    # Correctness check using verify_output
-    assert verify_output(Y_flydsl.float(), Y_ref.float(), rtol=1e-2, atol=1e-2, msg="[reduce kernel]")
-
-    # Performance profiling
-    results = profile_reduce_kernel(
-        tokens=tokens, topk=topk, model_dim=model_dim,
-        num_iters=20, num_warmup=5, compare_torch=True,
-    )
-    print_reduce_profile(results)
-
-
-
 @pytest.mark.parametrize(
     "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
     [
         pytest.param(8192, 7168, 256, 128, 8, 64, 256, 128, id="DS-TP8-prefill-S", marks=pytest.mark.large_shape),
+        pytest.param(16384, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-M", marks=pytest.mark.large_shape),
+        pytest.param(32768, 7168, 256, 256, 8, 64, 256, 128, id="DS-TP8-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 7168, 256, 256, 8, 16, 256, 128, id="DS-TP8-decode-bs1"),
         pytest.param(8, 7168, 256, 256, 8, 32, 256, 128, id="DS-TP8-decode-bs8"),
         pytest.param(1666, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill", marks=pytest.mark.large_shape),
+        pytest.param(32768, 5120, 1536, 64, 6, 64, 256, 128, id="EP-K6-prefill-L", marks=pytest.mark.large_shape),
         pytest.param(1, 5120, 1536, 16, 6, 16, 128, 256, id="EP-K6-decode-bs1"),
         pytest.param(8, 5120, 1536, 16, 6, 64, 128, 128, id="EP-K6-decode-bs8"),
     ],
@@ -1579,14 +1562,14 @@ def test_moe_stage2_standalone(
     # Run reduce mode with FlyDSL kernel (production path)
     run_moe_stage2(
         **common_args,
-        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True),
+        use_reduce=True,
         kernel_name="moe_gemm2_reduce_flydsl",
     )
 
     # Run reduce mode and use valid mask with FlyDSL kernel
     run_moe_stage2(
         **common_args,
-        compile_fn=_make_reduce_mode_compile_fn(use_flydsl_reduce=True, use_valid_mask=True),
+        use_reduce=True,
         use_valid_mask=True,
         kernel_name="moe_gemm2_reduce_flydsl_valid_mask",
     )
@@ -1617,16 +1600,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter,
-        description="MoE 2-stage (FLIR MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
+        description="MoE 2-stage (FlyDSL MFMA FP8) test/benchmark (argparse subset aligned with aiter test_moe_2stage.py)",
     )
     parser.add_argument(
         "--in_dtype",
         type=str,
         default="fp8",
-        choices=["fp8", "fp16", "int8", "int8smooth", "int4", "all"],
-        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / all (default: all). "
+        choices=["fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "all"],
+        help="Kernel input dtype: fp8 / fp16 / int8 / int8smooth / int4 / int4_bf16 / all (default: all). "
         "int8smooth expands X to [tokens*topk, K] with per-(token,slot) scales. "
-        "int4 means W4A8: A int8, W packed int4.",
+        "int4 means W4A8: A int8, W packed int4. "
+        "int4_bf16 means W4A16: A bf16, W packed int4.",
     )
     parser.add_argument("-d", "--dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"], help="Input init dtype (currently data is quantized to FP8 per-token; init dtype mainly affects RNG range).")
     parser.add_argument("-dim", type=_str2tuple_dim, default=(6144, 4096), help="Model dimension: model_dim,inter_dim (e.g. -dim 6144,4096)")
@@ -1684,6 +1668,14 @@ if __name__ == "__main__":
         help="Use weight fp4 gemm.",
     )
 
+    # Groupwise scale for W4A16
+    parser.add_argument(
+        "--group_size",
+        type=int,
+        default=-1,
+        help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
+    )
+
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
@@ -1721,6 +1713,7 @@ if __name__ == "__main__":
             doweight_stage1=bool(args.doweight_stage1),
             in_dtype=dt,
             out_dtype=str(args.out_dtype),
+            group_size=int(args.group_size),
             seed=int(args.seed),
             num_iters=int(args.num_iters),
             num_warmup=int(args.num_warmup),
@@ -1734,6 +1727,10 @@ if __name__ == "__main__":
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
-    for dt in args.in_dtype.split(","):
+    # Expand "all" to all supported dtypes.
+    in_dtypes = args.in_dtype.split(",")
+    if "all" in in_dtypes:
+        in_dtypes = ["fp8", "fp16", "bf16", "int8", "int4", "int4_bf16"]
+    for dt in in_dtypes:
         for use_reduce in reduce_flags:
             run_one(dt, use_reduce)

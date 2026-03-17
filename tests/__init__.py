@@ -1,2 +1,2 @@
-"""FLIR tests package"""
+"""FlyDSL tests package"""
 
