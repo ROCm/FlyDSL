@@ -41,7 +41,6 @@ UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": 2,
-    "flat_work_group_size": 512,
     "daz": True,
 }
 
@@ -183,7 +182,7 @@ def run_config(
             causal=causal,
             dtype_str="f16",
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
-            flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG["flat_work_group_size"],
+            flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("flat_work_group_size"),
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
         )
     except Exception as e:
