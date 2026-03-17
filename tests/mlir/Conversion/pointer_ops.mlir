@@ -82,14 +82,14 @@ func.func @test_make_view(%ptr: !fly.ptr<f32, global>) -> f32 {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // make_view wraps ptr + layout into a memref; after lowering it's identity.
   // CHECK-NOT: fly.make_view
   %view = fly.make_view(%ptr, %layout) : (!fly.ptr<f32, global>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.memref<f32, global, (4, 8) : (1, 4)>
-  // The memref.load uses the same base pointer %PTR (make_view was eliminated).
-  %idx = fly.make_int_tuple() : () -> !fly.int_tuple<7>
+  %iter = fly.get_iter(%view) : (!fly.memref<f32, global, (4, 8) : (1, 4)>) -> !fly.ptr<f32, global>
+  %offset = fly.make_int_tuple() : () -> !fly.int_tuple<7>
   // CHECK: llvm.getelementptr %[[PTR]][{{.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f32
+  %gep = fly.add_offset(%iter, %offset) : (!fly.ptr<f32, global>, !fly.int_tuple<7>) -> !fly.ptr<f32, global>
   // CHECK: %[[VAL:.*]] = llvm.load
-  %val = fly.memref.load(%view, %idx) : (!fly.memref<f32, global, (4, 8) : (1, 4)>, !fly.int_tuple<7>) -> f32
+  %val = fly.ptr.load(%gep) : (!fly.ptr<f32, global>) -> f32
   // CHECK: return %[[VAL]]
   return %val : f32
 }

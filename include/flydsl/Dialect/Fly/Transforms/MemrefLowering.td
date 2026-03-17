@@ -4,6 +4,8 @@
 include "mlir/IR/PatternBase.td"
 include "flydsl/Dialect/Fly/IR/FlyOps.td"
 
+def : Pat<(Fly_PtrLoadOp Fly_IntTuple:$int_tuple),
+          (replaceWithValue $int_tuple)>;
 def : Pat<(Fly_AddOffsetOp Fly_IntTuple:$int_tuple, Fly_IntTuple:$offset),
           (Fly_IntTupleAddOp $int_tuple, $offset)>;
 
@@ -15,7 +17,7 @@ def : Pat<(Fly_MemRefStoreOp $value, Fly_MemRef:$memref, $indices),
                                                    (Fly_Crd2IdxOp $indices, (Fly_GetLayoutOp $memref))))>;
 
 def : Pat<(Fly_MemRefLoadOp Fly_CoordTensor:$tensor, $indices),
-          (Fly_PtrLoadOp (Fly_AddOffsetOp (Fly_GetIterOp $tensor),
-                                          (Fly_Crd2IdxOp $indices, (Fly_GetLayoutOp $tensor))))>;
+          (Fly_AddOffsetOp (Fly_GetIterOp $tensor),
+                           (Fly_Crd2IdxOp $indices, (Fly_GetLayoutOp $tensor)))>;
 
 #endif // FLY_TRANSFORMS_MEMREF_LOWERING

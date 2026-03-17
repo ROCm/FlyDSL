@@ -53,7 +53,8 @@ def Fly_AlignAttr : Fly_Attr<"Align", "align", []> {
     AttrBuilderWithInferredContext<(ins "Type":$elemTy, "int32_t":$divisibility), [{
       int32_t bitWidth = elemTy.getIntOrFloatBitWidth();
       divisibility = divisibility > 0 ? divisibility : 1;
-      return $_get(elemTy.getContext(), bitWidth * divisibility / 8);
+      int32_t alignment = (bitWidth * divisibility + 7) / 8;
+      return $_get(elemTy.getContext(), alignment);
     }]>
   ];
 
