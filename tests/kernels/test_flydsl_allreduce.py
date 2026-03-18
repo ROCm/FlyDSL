@@ -452,15 +452,6 @@ def _dist_worker(
                     torch.cuda.synchronize()
                     dist.barrier(device_ids=[rank])
 
-                    # write_mode（大 tensor）通过 XGMI 将 allreduce 结果写入各 GPU 的
-                    # output_buffer（直达 HBM，绕过 L2 cache）。replay 后须执行本地 DMA
-                    # copy（output_buffer → out），DMA 直接读 HBM 并刷新 L2，确保 out
-                    # 中的数据正确可见（与 eager 模式 barrier 后 out.copy_(output_buffer)
-                    # 的原理一致）。
-                    if getattr(fa, '_graph_use_write_mode', False):
-                        _gbytes = fa._graph_bytes_n
-                        out.view(torch.uint8)[:_gbytes].copy_(fa.output_buffer[:_gbytes])
-
                     if not skip_check:
                         gathered = [torch.empty_like(x_flat) for _ in range(world_size)]
                         dist.all_gather(gathered, x_flat, group=group)
@@ -487,7 +478,7 @@ def _dist_worker(
                             graph.replay()
                         end_evt.record()
                         torch.cuda.synchronize()
-                    prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_cudagraph.json")
+                    # prof.export_chrome_trace(f"profiler_trace_{rank}_{allreduce_impl}_cudagraph.json")
 
                     total_ms = start_evt.elapsed_time(end_evt)
                     avg_time_us = (total_ms * 1000.0) / num_iters if num_iters else 0.0
