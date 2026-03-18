@@ -84,8 +84,19 @@ def _signal_start_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngp
     return flag_addr
 
 
-def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus: int):
-    """End-sync: write end flag to all peers, wait for all to finish."""
+def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
+                     ngpus: int, need_wbl2: bool = True):
+    """End-sync: write end flag to all peers, wait for all to finish.
+
+    Args:
+        need_wbl2: True  → use st_xgmi_u32 (buffer_wbl2 + signal store).
+                           Required after cached stores (st_global_16b) so
+                           that L2 dirty lines reach HBM before the signal.
+                   False → use st_signal_u32 (signal store only, no wbl2).
+                           For nt data stores (st_nt_16b) which already bypass
+                           L2; matches aiter's end_sync<ngpus,true> with
+                           ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
+    """
     from flydsl._mlir.dialects import arith, scf
 
     i32, i64 = T.i32, T.i64
@@ -107,7 +118,10 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64, ngpus
     if_op = scf.IfOp(is_lane, results_=[], has_else=False)
     with ir.InsertionPoint(if_op.then_block):
         peer_sg = signal_ops.select_by_lane(lane_i32, sgs_i64)
-        signal_ops.st_xgmi_u32(peer_sg + end_rank_off, flag)
+        if need_wbl2:
+            signal_ops.st_xgmi_u32(peer_sg + end_rank_off, flag)
+        else:
+            signal_ops.st_signal_u32(peer_sg + end_rank_off, flag)
         signal_ops.spin_wait_ge(end_wait_addr, flag)
         scf.YieldOp([])
 
@@ -604,7 +618,11 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             dst_out_off = rank_i32 * ea.constant(part_p, type=i32) + cur
             dst_byte_off = arith.ExtUIOp(i64, dst_out_off).result * ea.constant(16, type=i64)
 
-            # Each warp writes to its assigned output partition
+            # Each warp writes its reduced partition directly to the target
+            # output via flat_store_dwordx4 nt, matching aiter's
+            # is_broadcast_reg_outptr=true path (__builtin_nontemporal_store).
+            # The nt hint bypasses L1/L2 and works for all memory types
+            # (regular hipMalloc IPC-mapped addresses included).
             dst_ptr = out_ptrs_arr[0]
             for w in range_constexpr(1, world_size):
                 is_warp_w = arith.CmpIOp(arith.CmpIPredicate.eq, warp_id_local,

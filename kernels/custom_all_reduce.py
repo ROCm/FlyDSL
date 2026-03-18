@@ -321,15 +321,34 @@ class FlyDSLAllreduce:
             if self._graph_inp is not None:
                 self._register_graph_tensors()
 
+    @classmethod
+    def _get_alloc_base_ptr(cls, dev_ptr: int) -> int:
+        """Get the hipMalloc allocation base for a device pointer."""
+        import ctypes
+        hip = cls._load_hip()
+        base = ctypes.c_void_p()
+        _RANGE_START_ADDR = 11
+        if not hasattr(hip, '_pga_setup'):
+            hip.hipPointerGetAttribute.restype = ctypes.c_int
+            hip.hipPointerGetAttribute.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            hip._pga_setup = True
+        err = hip.hipPointerGetAttribute(
+            ctypes.byref(base),
+            ctypes.c_int(_RANGE_START_ADDR),
+            ctypes.c_void_p(int(dev_ptr)),
+        )
+        cls._hip_check(err, what="hipPointerGetAttribute(RANGE_START_ADDR)")
+        return int(base.value)
+
     def _register_graph_tensors(self):
         """Exchange IPC handles for captured tensors; update pointer arrays for replay."""
         ws, rk = self.world_size, self.rank
 
         inp = self._graph_inp
         if inp is not None:
-            base_ptr = int(inp.untyped_storage().data_ptr())
-            off = int(inp.data_ptr()) - base_ptr
-            my_handle = self._get_mem_handle_bytes(base_ptr)
+            alloc_base = self._get_alloc_base_ptr(int(inp.data_ptr()))
+            off = int(inp.data_ptr()) - alloc_base
+            my_handle = self._get_mem_handle_bytes(alloc_base)
             all_graph_in = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
 
             self._graph_in_bases = [None] * self.world_size
@@ -349,9 +368,9 @@ class FlyDSLAllreduce:
 
         out = self._graph_out
         if out is not None:
-            base_ptr = int(out.untyped_storage().data_ptr())
-            off = int(out.data_ptr()) - base_ptr
-            my_handle = self._get_mem_handle_bytes(base_ptr)
+            alloc_base = self._get_alloc_base_ptr(int(out.data_ptr()))
+            off = int(out.data_ptr()) - alloc_base
+            my_handle = self._get_mem_handle_bytes(alloc_base)
             all_graph_out = self._gather_object_list_via_broadcast(self.group, (my_handle, off))
 
             self._graph_out_bases = [None] * self.world_size
@@ -542,17 +561,10 @@ class FlyDSLAllreduce:
                 self._graph_bytes_n = bytes_n
 
                 if use_write_mode:
-                    # write_mode 把 allreduce 结果通过 XGMI 写入远端 GPU 的内存（直达 HBM，
-                    # 绕过目标 GPU 的 L2 cache）。若 graph replay 后直接读 out，会命中 L2
-                    # 中的 stale 数据。解决方案：仍写预分配的 output_buffer（地址固定），
-                    # replay + synchronize + barrier 后由调用方执行本地 DMA copy
-                    # (output_buffer → out)，DMA 直接读 HBM，同时刷新 L2，确保数据正确。
-                    # 调用方须在 barrier 后执行：
-                    #   out.view(torch.uint8)[:bytes_n].copy_(fa.output_buffer[:bytes_n])
                     self._graph_use_write_mode = True
                     self._run_kernel(
                         N, dtype_str,
-                        gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
+                        gpu_out_ptrs_array=self._gpu_graph_out_ptrs_array,
                         inp_ptr=int(inp.data_ptr()),
                         use_write_mode=True,
                         stream_ptr=stream_ptr,
@@ -597,7 +609,8 @@ class FlyDSLAllreduce:
                 use_write_mode=True,
                 stream_ptr=stream_ptr,
             )
-            # Host-side barrier replaces kernel-side end_sync (which hangs on ROCm).
+            # Host-side barrier: ensures all remote XGMI writes to local
+            # output_buffer are complete before the copy.
             torch.cuda.current_stream().synchronize()
             import torch.distributed as dist
             dist.barrier(group=self.group)
