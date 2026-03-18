@@ -257,6 +257,7 @@ def test_mfma_a8_flyc_preshuffle(
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
+        (64, 8192, 8192, 64, 128, 128),
         (32, 8192, 8192, 32, 128, 256),
         pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
         pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
