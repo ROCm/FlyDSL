@@ -375,7 +375,7 @@ def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
         scaleA: i32 (A scale VGPR)
         scaleB: i32 (B scale VGPR)
 
-    fmtA/fmtB: data type encoding (4=FP4/E2M1)
+    fmtA/fmtB: data type encoding (0=FP8/E4M3, 1=FP8/E5M2, 2=FP6/E2M3, 3=FP6/E3M2, 4=FP4/E2M1)
     scaleAType/scaleBType: opsel – selects lo/hi 16-bit half of scale VGPR (0=lo, 1=hi)
     fmtScaleA/fmtScaleB: scale format (0=E8M0, 1=E5M3, 2=E4M3)
     """
