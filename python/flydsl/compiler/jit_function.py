@@ -584,31 +584,60 @@ class JitFunction:
             self.cache_manager.load_all()
 
     @staticmethod
-    def _arg_cache_sig(arg):
-        """Cache signature for a single argument value."""
-        if hasattr(arg, "dtype") and hasattr(arg, "shape"):
+    def _arg_cache_sig(arg, *, runtime=False):
+        """Cache signature for a single argument value.
+
+        When runtime=True the parameter's annotation indicates a runtime
+        type (has __fly_ptrs__, e.g. Int32, Stream) — value is passed to
+        the kernel at launch time and does NOT affect compiled code, so
+        only the Python type is recorded.
+
+        Dispatch order:
+        1. __cache_signature__ — types that explicitly declare their cache
+           identity (e.g. TensorAdaptor includes assumed_align).
+        2. Python scalars — value in key when not runtime; type only when
+           runtime (annotated as Int32/Stream/etc.).
+        3. Tensor-like (dtype+shape) — fallback for bare torch.Tensor.
+        4. Everything else — type only.
+        """
+        if hasattr(arg, "__cache_signature__"):
+            return arg.__cache_signature__()
+        elif isinstance(arg, (int, float, bool, str)):
+            if runtime:
+                return type(arg)
+            return (type(arg), arg)
+        elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
             strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
             return (arg.dtype, tuple(arg.shape), strides)
-        elif isinstance(arg, (int, float, bool)):
-            return (type(arg), arg)
-        elif isinstance(arg, str):
-            return (str, arg)
-        elif hasattr(arg, "__cache_signature__"):
-            return arg.__cache_signature__()
         else:
-            # Value-independent types (e.g. Stream): only the type
-            # matters for compilation. Types whose values affect codegen
-            # should implement __cache_signature__.
             return type(arg)
 
     def _make_cache_key(self, bound_args):
-        """Build a tuple cache key from bound arguments."""
+        """Build a tuple cache key from bound arguments.
+
+        For parameters annotated with a runtime type (one that implements
+        __fly_ptrs__, e.g. Int32, Stream), the value is excluded from the
+        key — only the Python type matters.  This prevents unnecessary
+        recompilation when only runtime values change.
+        """
+        from .jit_argument import _is_constexpr_annotation
+        sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
+            param = sig.parameters.get(name)
+            ann = param.annotation if param else inspect.Parameter.empty
+
+            if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
+                key_parts.append((name, type(arg), arg))
+                continue
+
+            is_runtime = (ann is not inspect.Parameter.empty
+                          and hasattr(ann, '__fly_ptrs__'))
             if isinstance(arg, tuple):
-                key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
+                key_parts.append((name, tuple(
+                    self._arg_cache_sig(a) for a in arg)))
             else:
-                key_parts.append((name, self._arg_cache_sig(arg)))
+                key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
         return tuple(key_parts)
 
     @staticmethod
