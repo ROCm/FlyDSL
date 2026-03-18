@@ -48,6 +48,7 @@ def compile_mxfp4_gemm(
     l2_prefetch_distance: int = 2,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    scale_preshuffle: bool = True,
 ):
     """Compile an MXFP4 GEMM kernel with TDM async copy and multi-stage buffering.
 
@@ -116,6 +117,9 @@ def compile_mxfp4_gemm(
     lds_b_data_bytes = tile_n * lds_b_stride_bytes
     lds_a_scale_bytes = tile_m * scale_k_per_tile
     lds_b_scale_bytes = tile_n * scale_k_per_tile
+    # Interleaved scale layout: [WMMA_M * m_warp, wmma_m_rep * scale_k_per_tile]
+    interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
+    interleaved_scale_cols_b = wmma_n_rep * scale_k_per_tile
 
     stage_allocators = []
     stage_a_data_off = []
@@ -164,9 +168,12 @@ def compile_mxfp4_gemm(
     # Number of LDS loads per K-subtile (for s_wait_dscnt):
     # A frag: wmma_m_rep * 2 ds_load_b128
     # B frag: wmma_n_rep * 2 ds_load_b128
-    # A scale: wmma_m_rep ds_load_b32
-    # B scale: wmma_n_rep ds_load_b32
-    LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + wmma_m_rep + wmma_n_rep
+    # A scale: 1 ds_load_b128 (interleave) or wmma_m_rep ds_load_b32
+    # B scale: 1 ds_load_b128 (interleave) or wmma_n_rep ds_load_b32
+    if scale_preshuffle:
+        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + 1 + 1
+    else:
+        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + wmma_m_rep + wmma_n_rep
 
     @flyc.kernel
     def kernel_mxfp4_gemm(
@@ -251,30 +258,59 @@ def compile_mxfp4_gemm(
 
         def copy_a_scale_to_lds(k_base, lds_mem_ref):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            desc = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_a_scale, lds_memref=lds_mem_ref,
-                global_offset=(blk_m, k_scale_off),
-                tensor_shape=(tile_m, scale_k_per_tile),
-                strides=(K_scale, 1),
-                tile_shape=(tile_m, scale_k_per_tile),
-                elem_bytes=1,
-                pad_interval=0, pad_amount=0,
-                num_warps=num_warps,
-                workgroup_mask=a_mcast_mask)
+            if scale_preshuffle:
+                # Interleaved global: [M // wmma_m_rep, wmma_m_rep * K_scale]
+                outer_off = blk_m / arith.index(wmma_m_rep)
+                inner_off = k_scale_off * arith.index(wmma_m_rep)
+                desc = tdm_ops.make_tensor_descriptor_2d(
+                    global_ptr=arg_a_scale, lds_memref=lds_mem_ref,
+                    global_offset=(outer_off, inner_off),
+                    tensor_shape=(WMMA_M * m_warp, interleaved_scale_cols_a),
+                    strides=(wmma_m_rep * K_scale, 1),
+                    tile_shape=(WMMA_M * m_warp, interleaved_scale_cols_a),
+                    elem_bytes=1,
+                    pad_interval=0, pad_amount=0,
+                    num_warps=num_warps,
+                    workgroup_mask=a_mcast_mask)
+            else:
+                desc = tdm_ops.make_tensor_descriptor_2d(
+                    global_ptr=arg_a_scale, lds_memref=lds_mem_ref,
+                    global_offset=(blk_m, k_scale_off),
+                    tensor_shape=(tile_m, scale_k_per_tile),
+                    strides=(K_scale, 1),
+                    tile_shape=(tile_m, scale_k_per_tile),
+                    elem_bytes=1,
+                    pad_interval=0, pad_amount=0,
+                    num_warps=num_warps,
+                    workgroup_mask=a_mcast_mask)
             tdm_ops.tensor_load_2d(desc)
 
         def copy_b_scale_to_lds(k_base, lds_mem_ref):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
-            desc = tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_b_scale, lds_memref=lds_mem_ref,
-                global_offset=(blk_n, k_scale_off),
-                tensor_shape=(tile_n, scale_k_per_tile),
-                strides=(K_scale, 1),
-                tile_shape=(tile_n, scale_k_per_tile),
-                elem_bytes=1,
-                pad_interval=0, pad_amount=0,
-                num_warps=num_warps,
-                workgroup_mask=b_mcast_mask)
+            if scale_preshuffle:
+                outer_off = blk_n / arith.index(wmma_n_rep)
+                inner_off = k_scale_off * arith.index(wmma_n_rep)
+                desc = tdm_ops.make_tensor_descriptor_2d(
+                    global_ptr=arg_b_scale, lds_memref=lds_mem_ref,
+                    global_offset=(outer_off, inner_off),
+                    tensor_shape=(WMMA_N * n_warp, interleaved_scale_cols_b),
+                    strides=(wmma_n_rep * K_scale, 1),
+                    tile_shape=(WMMA_N * n_warp, interleaved_scale_cols_b),
+                    elem_bytes=1,
+                    pad_interval=0, pad_amount=0,
+                    num_warps=num_warps,
+                    workgroup_mask=b_mcast_mask)
+            else:
+                desc = tdm_ops.make_tensor_descriptor_2d(
+                    global_ptr=arg_b_scale, lds_memref=lds_mem_ref,
+                    global_offset=(blk_n, k_scale_off),
+                    tensor_shape=(tile_n, scale_k_per_tile),
+                    strides=(K_scale, 1),
+                    tile_shape=(tile_n, scale_k_per_tile),
+                    elem_bytes=1,
+                    pad_interval=0, pad_amount=0,
+                    num_warps=num_warps,
+                    workgroup_mask=b_mcast_mask)
             tdm_ops.tensor_load_2d(desc)
 
         def issue_all_tdm_loads(k_base, a_mem, b_mem, as_mem, bs_mem):
@@ -348,19 +384,25 @@ def compile_mxfp4_gemm(
             v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(16))
             return vector.shuffle(v0, v1, list(range(8)))
 
-        def _precompute_scale_lane_bases(lds_ptr, warp_base, reps):
+        def _precompute_scale_lane_bases(lds_ptr, warp_base, reps, interleaved_cols=0):
             """Precompute scale lane bases (in BYTES).
 
-            Scale LDS layout: [tile_m_or_n, scale_k_per_tile] bytes.
-            lane16 → M/N row.
+            Original layout: [tile_m_or_n, scale_k_per_tile] bytes.
+            Interleaved layout: [WMMA_M * m_or_n_warp, wmma_rep * scale_k_per_tile] bytes.
             """
             lds_buffer = _get_lds_memref(lds_ptr)
-            row_base = (warp_base + lane16) * arith.index(scale_k_per_tile)
-            bases = []
-            for w in range_constexpr(reps):
-                base = row_base + arith.index(w * WMMA_M * scale_k_per_tile)
-                bases.append(base)
-            return lds_buffer, bases
+            if scale_preshuffle and interleaved_cols > 0:
+                # Interleaved: row = (warp_base / reps) + lane16, stride = interleaved_cols
+                warp_lds_row = warp_base / arith.index(reps) + lane16
+                base = warp_lds_row * arith.index(interleaved_cols)
+                return lds_buffer, [base]  # single base for b128 load
+            else:
+                row_base = (warp_base + lane16) * arith.index(scale_k_per_tile)
+                bases = []
+                for w in range_constexpr(reps):
+                    base = row_base + arith.index(w * WMMA_M * scale_k_per_tile)
+                    bases.append(base)
+                return lds_buffer, bases
 
         def _shuffle_scale_i32(val):
             """Swap bytes 1 and 2 of an i32 scale value via v_perm_b32.
@@ -401,7 +443,24 @@ def compile_mxfp4_gemm(
             ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
             i32_ty = ir.IntegerType.get_signless(32)
             raw_scale = llvm_dialect.load(i32_ty, ptr_val)
+            if scale_preshuffle:
+                return raw_scale
             return _shuffle_scale_i32(raw_scale)
+
+        def load_scale_b128(lds_buffer, scale_base, reps):
+            """Load all wmma_rep scales via 1 ds_load_b128.
+
+            Interleaved LDS layout places all reps i32 values contiguously.
+            Returns list of reps i32 values extracted from vec<4xi32>.
+            """
+            v = _lds_load_b128(lds_buffer, scale_base)
+            results = []
+            for i in range_constexpr(reps):
+                vi = vector.extract(v, static_position=[i], dynamic_position=[])
+                if not scale_preshuffle:
+                    vi = _shuffle_scale_i32(vi)
+                results.append(vi)
+            return results
 
         def load_k_subtile_frags(a_buf, a_bases, b_buf, b_bases,
                                   as_buf, as_bases, bs_buf, bs_bases, ks):
@@ -412,10 +471,14 @@ def compile_mxfp4_gemm(
             a_frags = [load_a_frag(a_buf, a_bases[wm], ks)
                        for wm in range_constexpr(wmma_m_rep)]
             # Load scales
-            b_scales = [load_scale(bs_buf, bs_bases[wn], ks)
-                        for wn in range_constexpr(wmma_n_rep)]
-            a_scales = [load_scale(as_buf, as_bases[wm], ks)
-                        for wm in range_constexpr(wmma_m_rep)]
+            if scale_preshuffle:
+                b_scales = load_scale_b128(bs_buf, bs_bases[0], wmma_n_rep)
+                a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep)
+            else:
+                b_scales = [load_scale(bs_buf, bs_bases[wn], ks)
+                            for wn in range_constexpr(wmma_n_rep)]
+                a_scales = [load_scale(as_buf, as_bases[wm], ks)
+                            for wm in range_constexpr(wmma_m_rep)]
             return a_frags, b_frags, a_scales, b_scales
 
         def do_k_subtile_wmma(a_frags, b_frags, a_scales, b_scales, accs):
@@ -448,8 +511,10 @@ def compile_mxfp4_gemm(
 
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep)
-            bs_buf, bs_bases = _precompute_scale_lane_bases(lds_bs, warp_n_base, wmma_n_rep)
+            as_buf, as_bases = _precompute_scale_lane_bases(
+                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+            bs_buf, bs_bases = _precompute_scale_lane_bases(
+                lds_bs, warp_n_base, wmma_n_rep, interleaved_scale_cols_b)
 
             if k_wmma_steps == 1:
                 frags = load_k_subtile_frags(
@@ -663,7 +728,7 @@ def compile_mxfp4_gemm(
 
     cache_tag = (K, tile_m, tile_n, tile_k, m_warp, n_warp,
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
-                 cluster_m, cluster_n)
+                 cluster_m, cluster_n, scale_preshuffle)
 
     @flyc.jit
     def launch_mxfp4_gemm(
