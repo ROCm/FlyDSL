@@ -26,8 +26,10 @@ from flydsl.expr import buffer_ops
 
 KERNEL_NAME = "softmax_kernel"
 
+from kernels.kernels_common import get_warp_size
+
 BLOCK_THREADS = 256
-WARP_SIZE = 64
+WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 
 
@@ -81,13 +83,15 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
         def wave_reduce(x, mode):
             width_i32 = fx.Int32(WARP_SIZE)
             w = x
-            for sh in [32, 16, 8, 4, 2, 1]:
+            sh = WARP_SIZE // 2
+            while sh >= 1:
                 off = fx.Int32(sh)
                 peer = w.shuffle_xor(off, width_i32)
                 if mode == "max":
                     w = w.maximumf(peer)
                 else:
                     w = w.addf(peer, fastmath=fm_fast)
+                sh //= 2
             return w
 
         def block_reduce(val, mode):
