@@ -1,0 +1,24 @@
+name: Network Speed Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  network-test:
+    runs-on: linux-flydsl-mi355-1
+    steps:
+      - name: Install speedtest-cli
+        run: pip install speedtest-cli
+
+      - name: Run speedtest
+        run: speedtest-cli --simple
+
+      - name: Git clone aiter (speed test)
+        run: |
+          start=$(date +%s%N)
+          git clone https://github.com/ROCm/aiter.git /tmp/aiter
+          end=$(date +%s%N)
+          elapsed=$(( (end - start) / 1000000 ))
+          repo_size=$(du -sh /tmp/aiter | cut -f1)
+          echo "Clone completed in ${elapsed}ms"
+          echo "Repository size: ${repo_size}"
