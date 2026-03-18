@@ -583,7 +583,7 @@ def compile_preshuffle_gemm_a8(
             _m_repeat_packed_outer = m_repeat // _fp4_pack_M_outer
             _num_acc_n_packed_outer = num_acc_n // _fp4_pack_N_outer
             _fp4_scale_k_stride = tile_k // (32 * 4 * _fp4_pack_K_outer)
-            _fp4_use_scheduler = (tile_m > 64)
+            _fp4_use_scheduler = (tile_m >= 64)
 
             _scale_lane_elem_off = lane_div_16 * fx.Index(16) + lane_mod_16
             _scale_row_stride_elems = _K1_outer * 64
