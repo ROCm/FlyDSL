@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared helpers for optional perf comparison in GPU operator tests.
 
-These tests are primarily correctness tests. Performance comparison (FLIR vs AIter)
+These tests are primarily correctness tests. Performance comparison (FlyDSL vs AIter)
 is opt-in via environment variables so CI remains fast/stable.
 """
 
@@ -23,7 +23,7 @@ _FLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if os.path.isdir(_FLYDSL_SRC) and _FLYDSL_SRC not in sys.path:
     sys.path.insert(0, _FLYDSL_SRC)
 
-_EMBEDDED_FLYDSL = os.path.join(_REPO_ROOT, ".flir", "build", "python_packages", "flydsl")
+_EMBEDDED_FLYDSL = os.path.join(_REPO_ROOT, ".flydsl", "build", "python_packages", "flydsl")
 if os.path.isdir(_EMBEDDED_FLYDSL) and _EMBEDDED_FLYDSL not in sys.path:
     sys.path.insert(0, _EMBEDDED_FLYDSL)
 
@@ -33,14 +33,14 @@ class PerfRow:
     op: str
     shape: str
     dtype: str
-    flir_gpu_us: Optional[float]
+    flydsl_gpu_us: Optional[float]
     aiter_gpu_us: Optional[float]
 
     @property
-    def speedup_aiter_vs_flir(self) -> Optional[float]:
-        if self.flir_gpu_us is None or self.aiter_gpu_us is None:
+    def speedup_aiter_vs_flydsl(self) -> Optional[float]:
+        if self.flydsl_gpu_us is None or self.aiter_gpu_us is None:
             return None
-        return self.flir_gpu_us / self.aiter_gpu_us
+        return self.flydsl_gpu_us / self.aiter_gpu_us
 
 
 def _fmt_us(x: Optional[float]) -> str:
@@ -49,13 +49,13 @@ def _fmt_us(x: Optional[float]) -> str:
 
 def print_perf_table(rows: List[PerfRow]) -> None:
     print("\n" + "=" * 100)
-    print("Perf Compare (gpu us): FLIR vs AIter")
+    print("Perf Compare (gpu us): FlyDSL vs AIter")
     print("=" * 100)
-    print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FLIR(gpu us)':>14s} {'AIter(gpu us)':>14s} {'speedup':>10s}")
+    print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'AIter(gpu us)':>14s} {'speedup':>10s}")
     for r in rows:
-        sp = r.speedup_aiter_vs_flir
+        sp = r.speedup_aiter_vs_flydsl
         sp_s = "-" if sp is None else f"{sp:,.2f}x"
-        print(f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flir_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}")
+        print(f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}")
     print("=" * 100 + "\n")
 
 
@@ -237,17 +237,17 @@ def run_compare_sweep(
     for (M, N, dt) in configs:
         shape = f"{M}x{N}"
         for op in ("softmax", "layernorm", "rmsnorm"):
-            flir_us = None
+            flydsl_us = None
             aiter_us = None
             try:
-                flir_us = _bench_flydsl_torch(op=op, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
+                flydsl_us = _bench_flydsl_torch(op=op, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
             except Exception:
-                flir_us = None
+                flydsl_us = None
             try:
                 aiter_us = _bench_aiter(op=op, impl=aiter_impl, M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
             except Exception:
                 aiter_us = None
-            rows.append(PerfRow(op=op, shape=shape, dtype=dt, flir_gpu_us=flir_us, aiter_gpu_us=aiter_us))
+            rows.append(PerfRow(op=op, shape=shape, dtype=dt, flydsl_gpu_us=flydsl_us, aiter_gpu_us=aiter_us))
     return rows
 
 

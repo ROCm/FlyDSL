@@ -14,11 +14,11 @@ import torch.nn.functional as F
 import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-_PYFLIR_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
+_PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-if _PYFLIR_SRC not in sys.path:
-    sys.path.insert(0, _PYFLIR_SRC)
+if _PYFLYDSL_SRC not in sys.path:
+    sys.path.insert(0, _PYFLYDSL_SRC)
 
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8
 from kernels.preshuffle_gemm import compile_preshuffle_gemm_w4
@@ -104,7 +104,7 @@ def test_mfma_a8_flyc_preshuffle(
     lds_stage = int(lds_stage)
     if lds_stage not in (1, 2):
         raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage!r}")
-    torch_out_dtype = torch.float16
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
@@ -112,6 +112,7 @@ def test_mfma_a8_flyc_preshuffle(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype=in_dtype,
+        out_dtype=out_dtype,
         lds_stage=lds_stage,
         use_cshuffle_epilog=bool(use_cshuffle_epilog),
         use_async_copy=bool(use_async_copy),
@@ -250,6 +251,7 @@ def test_mfma_a8_flyc_preshuffle(
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
+@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("a_dtype", ["fp8", "fp4"])
 @pytest.mark.parametrize("b_dtype", ["fp4"])
 @pytest.mark.parametrize(
@@ -264,6 +266,7 @@ def test_mfma_a8_flyc_preshuffle(
 )
 def test_mfma_w4_flyc_preshuffle(
     a_dtype, b_dtype,
+    out_dtype,
     M, N, K, tile_m, tile_n, tile_k,
     *,
     lds_stage: int = DEFAULT_LDS_STAGE,
@@ -288,7 +291,7 @@ def test_mfma_w4_flyc_preshuffle(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         a_dtype=a_dtype, b_dtype=b_dtype,
-        out_dtype="bf16", lds_stage=lds_stage,
+        out_dtype=out_dtype, lds_stage=lds_stage,
         waves_per_eu=waves_per_eu,
     )
     print(f"✓ Compiled (lds_stage={lds_stage})")
@@ -324,7 +327,8 @@ def test_mfma_w4_flyc_preshuffle(
     b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
     scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
 
-    c_out = torch.zeros((M, N), dtype=torch.bfloat16, device=device)
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
 
     def _to_bytes(t):
         if t.dtype == torch.uint8 or t.dtype == torch.int8:
@@ -412,6 +416,7 @@ if __name__ == "__main__":
             test_mfma_w4_flyc_preshuffle(
                 args.in_dtype if args.in_dtype == "fp8" else "fp4",
                 "fp4",
+                args.out_dtype,
                 M=args.M, N=args.N, K=args.K,
                 tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
                 lds_stage=args.lds_stage,

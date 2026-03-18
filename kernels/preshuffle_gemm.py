@@ -42,6 +42,7 @@ def compile_preshuffle_gemm_a8(
     tile_n: int,
     tile_k: int,
     in_dtype: str = "fp8",
+    out_dtype: str = "fp16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = None,
@@ -52,10 +53,11 @@ def compile_preshuffle_gemm_a8(
     Returns a JitFunction that auto-compiles and executes when called.
     Signature:  launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, M, N, stream)
 
-    Compile-time constants: K, tile_m/n/k, in_dtype (determine loop structure).
+    Compile-time constants: K, tile_m/n/k, in_dtype, out_dtype (determine loop structure).
     Runtime parameters: M, N (passed as i32 kernel args).
 
     Args:
+        out_dtype: Output element type, "fp16" or "bf16" (default: "fp16").
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         use_async_copy: Use async DMA for A tile global-to-LDS transfer.
     """
@@ -64,6 +66,11 @@ def compile_preshuffle_gemm_a8(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
             f"got {in_dtype!r}"
         )
+    if out_dtype not in ("fp16", "bf16"):
+        raise ValueError(
+            f"out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}"
+        )
+    _out_is_bf16 = out_dtype == "bf16"
     is_fp4 = in_dtype == "fp4"
     is_int4 = in_dtype == "int4"
     is_int8 = (in_dtype == "int8") or is_int4
@@ -164,8 +171,11 @@ def compile_preshuffle_gemm_a8(
             return T.i16x4
         return T.i64
 
+    def _out_elem():
+        return T.bf16 if _out_is_bf16 else T.f16
+
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}".replace("-", "_")
+    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{out_dtype}_{epilog_tag}".replace("-", "_")
 
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────────
     lds_tile_bytes = int(tile_m) * int(lds_stride_bytes) // a_elem_vec_pack
@@ -252,7 +262,7 @@ def compile_preshuffle_gemm_a8(
 
             if use_cshuffle_epilog:
                 lds_out = SmemPtr(
-                    base_ptr_pong, lds_pong_offset, T.f16, shape=(tile_m * tile_n,)
+                    base_ptr_pong, lds_pong_offset, _out_elem(), shape=(tile_m * tile_n,)
                 ).get()
             else:
                 lds_out = None
@@ -263,7 +273,7 @@ def compile_preshuffle_gemm_a8(
             lds_a_pong = lds_a_ptr.get()
             lds_a_ping = lds_a_pong
             lds_out = (
-                SmemPtr(base_ptr_pong, lds_alloc_offset, T.f16, shape=(tile_m * tile_n,)).get()
+                SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(tile_m * tile_n,)).get()
                 if use_cshuffle_epilog
                 else None
             )
@@ -778,8 +788,8 @@ def compile_preshuffle_gemm_a8(
             return current_accs_list, scales_pf
 
         # ── Epilogue (store output) ───────────────────────────────────────
-        vec1_f16 = T.vec(1, T.f16)
-        vec2_f16 = T.f16x2
+        vec1_f16 = T.vec(1, _out_elem())
+        vec2_f16 = T.vec(2, _out_elem())
         vec1_i16 = T.vec(1, T.i16)
         vec2_i16 = T.i16x2
         vec1_i32 = T.vec(1, T.i32)
@@ -815,7 +825,7 @@ def compile_preshuffle_gemm_a8(
                             val_s = (val * s_a) * s_b_vals[ni]
                         else:
                             val_s = val
-                        v16 = arith.trunc_f(T.bf16 if is_fp4 else T.f16, val_s)
+                        v16 = arith.trunc_f(_out_elem(), val_s)
 
                         lds_idx = row_base_lds + col_local
                         v1 = vector.from_elements(vec1_f16, [v16])
@@ -841,6 +851,7 @@ def compile_preshuffle_gemm_a8(
                     lane_div_16=lane_div_16, lane_mod_16=lane_mod_16,
                     bx_m=bx_m, by_n=by_n, n_tile_base=n_tile_base, lds_out=lds_out,
                     write_row_to_lds=write_row_to_lds, store_pair=store_pair,
+                    frag_elem_type=_out_elem(),
                 )
                 return
 
@@ -862,7 +873,7 @@ def compile_preshuffle_gemm_a8(
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
-                    val_f16 = arith.trunc_f(T.bf16 if is_fp4 else T.f16, val_s)
+                    val_f16 = arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
                     buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
 
@@ -1244,7 +1255,7 @@ def compile_preshuffle_gemm_a8(
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (in_dtype, K, lds_stage, use_cshuffle_epilog)
+    _cache_tag = (in_dtype, out_dtype, K, lds_stage, use_cshuffle_epilog)
 
     @flyc.jit
     def launch_gemm(
@@ -1310,6 +1321,7 @@ def compile_preshuffle_gemm_w4(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype="fp4",
         lds_stage=lds_stage,
+        out_dtype=out_dtype,
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
     )

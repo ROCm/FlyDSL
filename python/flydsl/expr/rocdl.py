@@ -72,7 +72,8 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
     i64 = ir.IntegerType.get_signless(64)
     stride = _arith.ConstantOp(i16, ir.IntegerAttr.get(i16, 0)).result
     num_records = _arith.ConstantOp(i64, ir.IntegerAttr.get(i64, 0xFFFFFFFF)).result
-    flags = _arith.ConstantOp(i32, ir.IntegerAttr.get(i32, (7 << 12) | (4 << 15))).result
+    from .buffer_ops import _get_buffer_flags
+    flags = _arith.ConstantOp(i32, ir.IntegerAttr.get(i32, _get_buffer_flags())).result
 
     bd_ptr_type = fly.PointerType.get(
         elem_type,
@@ -91,6 +92,19 @@ _ods_mfma_scale_f32_16x16x128_f8f6f4 = (
     globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
     or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
 )
+
+# Keep ODS references for WMMA ops so we can wrap them.
+_ods_wmma_f32_16x16x16_f16 = wmma_f32_16x16x16_f16
+_ods_wmma_f32_16x16x16_bf16 = wmma_f32_16x16x16_bf16
+_ods_wmma_f16_16x16x16_f16 = wmma_f16_16x16x16_f16
+_ods_wmma_bf16_16x16x16_bf16 = wmma_bf16_16x16x16_bf16
+_ods_wmma_i32_16x16x16_iu8 = wmma_i32_16x16x16_iu8
+_ods_wmma_i32_16x16x16_iu4 = wmma_i32_16x16x16_iu4
+_ods_wmma_f32_16x16x16_fp8_fp8 = globals().get("wmma_f32_16x16x16_fp8_fp8", None)
+_ods_wmma_f32_16x16x16_fp8_bf8 = globals().get("wmma_f32_16x16x16_fp8_bf8", None)
+_ods_wmma_f32_16x16x16_bf8_fp8 = globals().get("wmma_f32_16x16x16_bf8_fp8", None)
+_ods_wmma_f32_16x16x16_bf8_bf8 = globals().get("wmma_f32_16x16x16_bf8_bf8", None)
+_ods_wmma_i32_16x16x32_iu4 = globals().get("wmma_i32_16x16x32_iu4", None)
 mask_mfma = 0x008
 mask_vmem_rd = 0x020
 mask_dsrd = 0x100
@@ -174,6 +188,111 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     ).result
 
 
+# ---------------------------------------------------------------------------
+# WMMA wrappers  (Wave Matrix Multiply-Accumulate -- RDNA3/RDNA4)
+#
+# WMMA operands are [A, B, C] -- all MLIR Values, no integer flags.
+# For IU variants the operand list is [A_sign, A, B_sign, B, C, clamp].
+# For OPSEL variants (f16->f16, bf16->bf16) the list is [A, B, C, op_sel].
+# ---------------------------------------------------------------------------
+
+
+def _unwrap_wmma_operand(v, *, loc=None):
+    """Accept Python ints (for flags like op_sel/clamp/signed) and ArithValue wrappers."""
+    from flydsl._mlir.ir import IntegerType
+    from . import arith as _arith_ext
+
+    if isinstance(v, bool):
+        return _arith_ext.unwrap(_arith_ext.constant(int(v), type=IntegerType.get_signless(1), loc=loc), loc=loc)
+    if isinstance(v, int):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc), loc=loc)
+    return _arith_ext.unwrap(v, loc=loc)
+
+
+# --- f32 output variants ---
+
+def wmma_f32_16x16x16_f16(result_type, operands, *, loc=None, ip=None):
+    """WMMA f16->f32, 16x16x16. Operands: [A, B, C]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_f16(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf16(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf16->f32, 16x16x16. Operands: [A, B, C]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf16(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- fp8 variants (gfx12 / RDNA4 only) ---
+
+def wmma_f32_16x16x16_fp8_fp8(result_type, operands, *, loc=None, ip=None):
+    """WMMA fp8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_fp8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_fp8_fp8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_fp8_fp8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_fp8_bf8(result_type, operands, *, loc=None, ip=None):
+    """WMMA fp8+bf8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_fp8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_fp8_bf8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_fp8_bf8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf8_fp8(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf8+fp8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_bf8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_bf8_fp8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf8_fp8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf8_bf8(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_bf8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_bf8_bf8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf8_bf8(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- f16/bf16 output variants (OPSEL: operands include op_sel flag) ---
+
+def wmma_f16_16x16x16_f16(result_type, operands, *, loc=None, ip=None):
+    """WMMA f16->f16, 16x16x16. Operands: [A, B, C, op_sel]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f16_16x16x16_f16(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_bf16_16x16x16_bf16(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf16->bf16, 16x16x16. Operands: [A, B, C, op_sel]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_bf16_16x16x16_bf16(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- Integer variants (IU: operands include sign flags and clamp) ---
+
+def wmma_i32_16x16x16_iu8(result_type, operands, *, loc=None, ip=None):
+    """WMMA int8->i32, 16x16x16. Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x16_iu8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_i32_16x16x16_iu4(result_type, operands, *, loc=None, ip=None):
+    """WMMA int4->i32, 16x16x16. Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x16_iu4(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_i32_16x16x32_iu4(result_type, operands, *, loc=None, ip=None):
+    """WMMA int4->i32, 16x16x32 (gfx12). Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    if _ods_wmma_i32_16x16x32_iu4 is None:
+        raise AttributeError("ROCDL op not found: wmma_i32_16x16x32_iu4")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x32_iu4(result_type, ops, loc=loc, ip=ip).result
+
+
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
     'workitem_id_x', 'workitem_id_y', 'workitem_id_z',
@@ -202,7 +321,11 @@ __all__ = [
     
     # Matrix operations - WMMA (Wave Matrix Multiply-Accumulate)
     'wmma_f32_16x16x16_f16', 'wmma_f32_16x16x16_bf16',
-    'wmma_i32_16x16x16_iu8',
+    'wmma_f16_16x16x16_f16', 'wmma_bf16_16x16x16_bf16',
+    'wmma_i32_16x16x16_iu8', 'wmma_i32_16x16x16_iu4',
+    'wmma_f32_16x16x16_fp8_fp8', 'wmma_f32_16x16x16_fp8_bf8',
+    'wmma_f32_16x16x16_bf8_fp8', 'wmma_f32_16x16x16_bf8_bf8',
+    'wmma_i32_16x16x32_iu4',
     
     # Matrix operations - SMFMAC (Sparse Matrix FMA)
     'smfmac_f32_32x32x16_f16', 'smfmac_f32_32x32x16_bf16',

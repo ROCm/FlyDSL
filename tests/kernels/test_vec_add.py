@@ -162,13 +162,13 @@ def benchmark_vector_add(vec_width: int = 4):
         "total_bytes": total_bytes,
     }
 
-    print(f"\n  FLIR kernel: {avg_ms:.4f} ms, Bandwidth: {bandwidth_gbs:.2f} GB/s")
+    print(f"\n  FlyDSL kernel: {avg_ms:.4f} ms, Bandwidth: {bandwidth_gbs:.2f} GB/s")
 
     torch_results = benchmark_pytorch_add(SIZE)
     if torch_results:
         bw_ratio = results["bandwidth_gbs"] / torch_results["bandwidth_gbs"]
         print(f"  PyTorch BW: {torch_results['bandwidth_gbs']:.2f} GB/s")
-        print(f"  Bandwidth ratio (FLIR / PyTorch): {bw_ratio:.2f}x")
+        print(f"  Bandwidth ratio (FlyDSL / PyTorch): {bw_ratio:.2f}x")
 
     return error < 1e-5
 

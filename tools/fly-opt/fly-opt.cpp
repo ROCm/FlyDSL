@@ -17,7 +17,6 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
-  mlir::registerFlyGpuToLLVMPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);
