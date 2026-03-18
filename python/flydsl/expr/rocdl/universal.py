@@ -51,8 +51,8 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
     elem_ty = memref_ty.element_type
     layout_ty = LayoutType(memref_ty.layout)
 
-    ptr = get_iter(tensor)
-    layout = get_layout(tensor)
+    ptr = get_iter(memref_val)
+    layout = get_layout(memref_val)
 
     elem_bits = _elem_bit_width(elem_ty)
     elem_bytes = elem_bits // 8 if elem_bits > 0 else 1

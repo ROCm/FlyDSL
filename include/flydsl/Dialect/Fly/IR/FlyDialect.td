@@ -29,10 +29,7 @@ class Fly_Attr<string attrName, string attrMnemonic, list<Trait> traits = []>
 }
 
 class Fly_Op<string mnemonic, list<Trait> traits = []> 
-    : Op<Fly_Dialect, mnemonic, traits> {
-  // set default assembly format
-  let assemblyFormat = "`(` operands `)` attr-dict `:` functional-type(operands, results)";
-}
+    : Op<Fly_Dialect, mnemonic, traits>;
 
 
 #endif // FLY_DIALECT

@@ -1,6 +1,7 @@
 #include "flydsl-c/FlyROCDLDialect.h"
 
-#include "flydsl/Conversion/Passes.h"
+#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
+#include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
@@ -129,4 +130,8 @@ int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type) {
 // Pass Registration
 //===----------------------------------------------------------------------===//
 
-void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
+void mlirRegisterFlyToROCDLConversionPass(void) {
+  mlir::registerFlyToROCDLConversionPass();
+}
+
+void mlirRegisterFlyGpuToLLVMPass(void) { mlir::registerFlyGpuToLLVMPass(); }

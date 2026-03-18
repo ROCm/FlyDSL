@@ -12,7 +12,6 @@ add_mlir_dialect_library(MLIRFlyDialect
   DEPENDS
   MLIRFlyIncGen
   FlyTransformPassIncGen
-  FlyRewritePatternsIncGen
   
   LINK_LIBS
   MLIRIR

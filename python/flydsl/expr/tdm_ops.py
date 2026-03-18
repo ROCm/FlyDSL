@@ -385,7 +385,7 @@ def tensor_load_2d(
     (as built by make_tensor_descriptor_2d). All waves together
     cover the full tile.
 
-    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
+    Uses the 4-group intrinsic with dgroup2/dgroup3
     zero-initialized for 2D tensors.
 
     Args:
@@ -394,9 +394,8 @@ def tensor_load_2d(
     """
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
-    dg4 = _raw(_zero_dgroup_v8i32())
     rocdl.tensor_load_to_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
+        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, cache_policy
     )
 
 
@@ -406,7 +405,7 @@ def tensor_store_2d(
 ) -> None:
     """Issue a TDM 2D async store (LDS -> Global).
 
-    Uses the unified 5-group intrinsic with dgroup2/dgroup3/dgroup4
+    Uses the 4-group intrinsic with dgroup2/dgroup3
     zero-initialized for 2D tensors.
 
     Args:
@@ -415,9 +414,8 @@ def tensor_store_2d(
     """
     dg2 = _raw(_zero_dgroup_v4i32())
     dg3 = _raw(_zero_dgroup_v4i32())
-    dg4 = _raw(_zero_dgroup_v8i32())
     rocdl.tensor_store_from_lds(
-        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy
+        _raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, cache_policy
     )
 
 

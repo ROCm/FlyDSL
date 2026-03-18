@@ -67,7 +67,6 @@ private:
   };
 
   struct MemRefDescriptor {
-    MLIRContext *bindingCtx = nullptr;
     Type memrefType = nullptr;
     void *dataPtr = nullptr;
     std::vector<char> layoutBuffer;
@@ -205,10 +204,11 @@ public:
   }
 
   void buildMemRefDesc() {
-    MLIRContext *ctx = getCurrentContext();
-    if (!isMemrefStale_ && memrefDesc_.bindingCtx == ctx) {
+    if (!isMemrefStale_) {
       return;
     }
+
+    MLIRContext *ctx = getCurrentContext();
     SmallVector<Attribute> shapeLeaves, strideLeaves;
     shapeLeaves.resize(ndim_);
     strideLeaves.resize(ndim_);
@@ -287,7 +287,6 @@ public:
       }
     }
 
-    memrefDesc_.bindingCtx = ctx;
     isMemrefStale_ = false;
   }
 

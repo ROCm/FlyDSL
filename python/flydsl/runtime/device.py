@@ -22,22 +22,32 @@ def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
     return None
 
 
-@functools.lru_cache(maxsize=None)
-def get_rocm_arch() -> str:
+_cached_rocm_arch: Optional[str] = None
+
+
+def get_rocm_arch(timeout_s: int = 5) -> str:
     """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
+    global _cached_rocm_arch
+    if _cached_rocm_arch is not None:
+        return _cached_rocm_arch
+
     env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         if env.startswith("gfx"):
-            return env
+            _cached_rocm_arch = env
+            return _cached_rocm_arch
         if env.count(".") == 2:
             parts = env.split(".")
-            return f"gfx{parts[0]}{parts[1]}{parts[2]}"
+            _cached_rocm_arch = f"gfx{parts[0]}{parts[1]}{parts[2]}"
+            return _cached_rocm_arch
 
     arch = _arch_from_rocm_agent_enumerator(timeout_s=timeout_s)
     if arch:
-        return arch.split(":", 1)[0]
+        _cached_rocm_arch = arch.split(":", 1)[0]
+        return _cached_rocm_arch
 
-    return "gfx942"
+    _cached_rocm_arch = "gfx942"
+    return _cached_rocm_arch
 
 
 def is_rdna_arch(arch: Optional[str] = None) -> bool:

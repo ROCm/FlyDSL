@@ -114,35 +114,6 @@ add_mlir_python_common_capi_library(FlyPythonCAPI
   DECLARED_SOURCES ${MLIRFlyDSLSources}
 )
 
-# ---------------------------------------------------------------------------
-# Symbol visibility: prevent LLVM/MLIR internals from leaking out of
-# FlyPythonCAPI.so, which would conflict with ROCm's own LLVM
-# (libamd_comgr.so).
-#
-# Strategy:
-#   1. -fvisibility=hidden  — hide symbols compiled by FlyDSL itself
-#   2. Version script       — controls the FINAL exported symbol set:
-#                             exports mlir C API + mlir:: C++ symbols
-#                             (needed by _fly.so, _mlir.so, etc.),
-#                             hides everything else (llvm::, LLVM C API).
-#
-# NOTE: Triton uses --exclude-libs,ALL because it ships a single
-# libtriton.so with no downstream consumers.  FlyDSL cannot use
-# --exclude-libs,ALL because GNU ld's --exclude-libs forces symbols
-# to LOCAL *before* the version script is evaluated — wildcard patterns
-# in the version script cannot re-export them.  The version script
-# alone is sufficient: its `local: *;` catch-all hides LLVM internals.
-# ---------------------------------------------------------------------------
-if(UNIX AND NOT APPLE)
-  target_compile_options(FlyPythonCAPI PRIVATE -fvisibility=hidden)
-
-  set(FLYDSL_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/flydsl_exports.ld")
-  target_link_options(FlyPythonCAPI PRIVATE
-    -Wl,--version-script=${FLYDSL_VERSION_SCRIPT})
-  set_property(TARGET FlyPythonCAPI APPEND PROPERTY
-    LINK_DEPENDS "${FLYDSL_VERSION_SCRIPT}")
-endif()
-
 
 set(FlyPythonModules_ROOT_PREFIX "${MLIR_BINARY_DIR}/${MLIR_BINDINGS_PYTHON_INSTALL_PREFIX}")
 
@@ -226,23 +197,25 @@ add_dependencies(CopyFlyPythonSources FlyPythonModules)
 # FlyJitRuntime — thin ROCm runtime with GPU module caching
 ################################################################################
 
-file(GLOB _ROCM_SEARCH_PATHS LIST_DIRECTORIES true "/opt/rocm*")
-list(SORT _ROCM_SEARCH_PATHS ORDER DESCENDING)
-find_package(hip REQUIRED CONFIG PATHS ${_ROCM_SEARCH_PATHS})
-
-add_library(FlyJitRuntime SHARED
-  ${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp
-)
-target_include_directories(FlyJitRuntime PRIVATE
-  ${LLVM_INCLUDE_DIRS}
-  ${MLIR_INCLUDE_DIRS}
-)
-target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
-target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
-set_target_properties(FlyJitRuntime PROPERTIES
-  OUTPUT_NAME "fly_jit_runtime"
-  LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
-)
-add_dependencies(FlyPythonCAPI FlyJitRuntime)
-
-
+find_package(hip QUIET CONFIG PATHS /opt/rocm)
+if(hip_FOUND)
+  add_library(FlyJitRuntime SHARED
+    "${PROJECT_SOURCE_DIR}/lib/Runtime/FlyRocmRuntimeWrappers.cpp"
+  )
+  target_include_directories(FlyJitRuntime PRIVATE
+    ${LLVM_INCLUDE_DIRS}
+    ${MLIR_INCLUDE_DIRS}
+  )
+  target_compile_features(FlyJitRuntime PRIVATE cxx_std_17)
+  target_link_libraries(FlyJitRuntime PRIVATE hip::host hip::amdhip64)
+  set_target_properties(FlyJitRuntime PROPERTIES
+    OUTPUT_NAME "fly_jit_runtime"
+    LIBRARY_OUTPUT_DIRECTORY "${_MLIR_LIBS_DIR}"
+  )
+  add_dependencies(FlyPythonCAPI FlyJitRuntime)
+else()
+  message(WARNING
+    "hip not found; skipping FlyJitRuntime build. "
+    "GPU execution will fall back to libmlir_rocm_runtime.so."
+  )
+endif()

@@ -34,7 +34,17 @@ bool isNormalForm(TypedValue<LayoutType> value) {
     return false;
   }
   if (auto makeLayoutOp = dyn_cast<MakeLayoutOp>(defOp)) {
-    return isNormalForm(makeLayoutOp.getShape()) && isNormalForm(makeLayoutOp.getStride());
+    auto shape = makeLayoutOp.getShape();
+    if (!isNormalForm(shape)) {
+      return false;
+    }
+    // Stride is optional
+    if (auto stride = makeLayoutOp.getStride()) {
+      if (!isNormalForm(stride)) {
+        return false;
+      }
+    }
+    return true;
   }
   return false;
 }
@@ -73,13 +83,16 @@ bool isNormalForm(TypedValue<ComposedLayoutType> value) {
 
 bool isNormalForm(TypedValue<CoordTensorType> value) {
   Operation *defOp = value.getDefiningOp();
-  // TODO: support coord_tensor lowering pattern
   if (!defOp) {
     return false;
   }
   // Static CoordTensor
   if (isa<StaticOp>(defOp)) {
     return true;
+  }
+  // NormalCoordTensor via MakeIdentityTensorOp
+  if (auto makeIdentityTensorOp = dyn_cast<MakeIdentityTensorOp>(defOp)) {
+    return isNormalForm(makeIdentityTensorOp.getShape());
   }
   return false;
 }

@@ -167,11 +167,7 @@ MlirType mlirFlyMemRefTypeGetElementType(MlirType type) {
 
 MlirType mlirFlyMemRefTypeGetLayout(MlirType type) {
   auto memrefType = cast<fly::MemRefType>(unwrap(type));
-  Attribute layout = memrefType.getLayout();
-  if (auto la = dyn_cast<fly::LayoutAttr>(layout))
-    return wrap(fly::LayoutType::get(la));
-  else
-    return wrap(fly::ComposedLayoutType::get(cast<fly::ComposedLayoutAttr>(layout)));
+  return wrap(LayoutType::get(memrefType.getLayout()));
 }
 
 int32_t mlirFlyMemRefTypeGetAddressSpace(MlirType type) {
@@ -210,9 +206,13 @@ int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type) {
 // CopyAtomType
 //===----------------------------------------------------------------------===//
 
-bool mlirTypeIsAFlyCopyAtomType(MlirType type) { return isa<CopyAtomType>(unwrap(type)); }
+bool mlirTypeIsAFlyCopyAtomType(MlirType type) {
+  return isa<CopyAtomType>(unwrap(type));
+}
 
-MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) { return wrap(CopyAtomType::getTypeID()); }
+MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) {
+  return wrap(CopyAtomType::getTypeID());
+}
 
 MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits) {
   return wrap(CopyAtomType::get(unwrap(copyOp), valBits));
@@ -313,7 +313,7 @@ static MlirType tiledCopyGetTiledTVLayout(MlirType type, bool isSrc) {
     if (auto intVal = dyn_cast<IntAttr>(tileElem))
       tileSize = intVal.getValue();
     else if (auto layoutVal = dyn_cast<LayoutAttr>(tileElem))
-      tileSize = intTupleProduct(attrBuilder, layoutVal.getShape()).getLeafAsInt().getValue();
+      tileSize = attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, layoutVal.getShape()));
     else
       llvm_unreachable("unsupported tile element type");
     tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, tileSize));
@@ -382,13 +382,15 @@ MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type) {
   SmallVector<Attribute> tileSizeElems;
   for (int i = 0; i < 3; ++i) {
     if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
-      auto atomShapeI = intTupleProduct(attrBuilder, shapeMNK.at(i)).getLeafAsInt().getValue();
-      auto thrSizeI =
-          intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt().getValue();
+      auto atomShapeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
+      auto thrSizeI = attrBuilder.getStaticValue(
+          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
     } else {
       auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt().getValue();
+      auto sizeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
     }
   }
@@ -439,13 +441,15 @@ static MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
   SmallVector<Attribute> tileSizeElems;
   for (int i : {idx0, idx1}) {
     if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
-      auto atomShapeI = intTupleProduct(attrBuilder, shapeMNK.at(i)).getLeafAsInt().getValue();
-      auto thrSizeI =
-          intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt().getValue();
+      auto atomShapeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
+      auto thrSizeI = attrBuilder.getStaticValue(
+          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
     } else {
       auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt().getValue();
+      auto sizeI =
+          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
     }
   }

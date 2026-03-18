@@ -520,7 +520,6 @@ public:
 
     Value src = adaptor.getSrc();
     Value dst = adaptor.getDst();
-    Value pred = adaptor.getPred();
 
     auto srcFlyTy = dyn_cast<fly::MemRefType>(op.getSrc().getType());
     auto dstFlyTy = dyn_cast<fly::MemRefType>(op.getDst().getType());
@@ -533,29 +532,14 @@ public:
     Location loc = op.getLoc();
     Type copyOpType = copyAtom.getCopyOp();
 
-    auto emitCopyBody = [&](ConversionPatternRewriter &rewriter) -> LogicalResult {
-      if (isa<CopyOpUniversalCopyType>(copyOpType)) {
-        if (!isa<LLVM::LLVMPointerType>(src.getType()) ||
-            !isa<LLVM::LLVMPointerType>(dst.getType()))
-          return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
-        return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
-      } else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
-        return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
-      return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
-    };
+    if (isa<CopyOpUniversalCopyType>(copyOpType)) {
+      if (!isa<LLVM::LLVMPointerType>(src.getType()) || !isa<LLVM::LLVMPointerType>(dst.getType()))
+        return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
+      return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
+    } else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
+      return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
 
-    if (pred) {
-      auto predFlyTy = dyn_cast<fly::MemRefType>(op.getPred().getType());
-      if (!predFlyTy)
-        return rewriter.notifyMatchFailure(op, "pred is not a Fly memref type");
-      Type predElemTy = predFlyTy.getElemTy();
-      Value predVal = LLVM::LoadOp::create(rewriter, loc, predElemTy, pred);
-      auto ifOp = scf::IfOp::create(rewriter, loc, TypeRange{}, predVal, false);
-      rewriter.setInsertionPointToStart(&ifOp.getThenRegion().front());
-      return emitCopyBody(rewriter);
-    } else {
-      return emitCopyBody(rewriter);
-    }
+    return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
   }
 
 private:
@@ -567,8 +551,7 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
-    IntAttr numValSrcAttr =
-        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
+    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
@@ -609,8 +592,7 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null");
-    IntAttr numValSrcAttr =
-        intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
+    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
@@ -1090,6 +1072,7 @@ public:
   }
 };
 
+
 class ExtractAlignedPointerAsIndexLowering
     : public OpConversionPattern<ExtractAlignedPointerAsIndexOp> {
 public:
@@ -1126,8 +1109,7 @@ public:
                            ROCDL::ROCDLDialect, fly_rocdl::FlyROCDLDialect>();
     target.addIllegalDialect<fly::FlyDialect>();
 
-    // Constructors
-    target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeTileOp, MakeComposedLayoutOp>();
+    target.addLegalOp<MakeIntTupleOp, MakeLayoutOp, MakeTileOp>();
     target.addLegalOp<MakeMmaAtomOp, MakeCopyAtomOp>();
 
     FlyTypeConverter typeConverter;

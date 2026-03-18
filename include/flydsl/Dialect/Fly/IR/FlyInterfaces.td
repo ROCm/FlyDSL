@@ -22,20 +22,16 @@ def Fly_MayStaticInterface {
 }
 
 def Fly_NestedAttrInterface : AttrInterface<"NestedAttrInterface"> {
-  let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
 }
 def Fly_NestedTypeInterface : TypeInterface<"NestedTypeInterface"> {
-  let cppNamespace = "::mlir::fly";
   let methods = Fly_NestedInterfaceMethods.methods;
 }
 
 def Fly_MayStaticAttrInterface : AttrInterface<"MayStaticAttrInterface"> {
-  let cppNamespace = "::mlir::fly";
   let methods = Fly_MayStaticInterface.methods;
 }
 def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
-  let cppNamespace = "::mlir::fly";
   let methods = Fly_MayStaticInterface.methods;
 }
 
@@ -55,10 +51,6 @@ def Fly_MmaAtomTypeInterface : TypeInterface<"MmaAtomTypeInterface", [Fly_MaySta
   let methods = [
     InterfaceMethod<"", "::mlir::Attribute", "getThrLayout", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getShapeMNK", (ins)>,
-    InterfaceMethod<"", "::mlir::Type", "getValTypeA", (ins)>,
-    InterfaceMethod<"", "::mlir::Type", "getValTypeB", (ins)>,
-    InterfaceMethod<"", "::mlir::Type", "getValTypeC", (ins)>,
-    InterfaceMethod<"", "::mlir::Type", "getValTypeD", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutA", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutB", (ins)>,
     InterfaceMethod<"", "::mlir::Attribute", "getThrValLayoutC", (ins)>
