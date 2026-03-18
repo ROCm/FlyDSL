@@ -672,68 +672,45 @@ def compile_preshuffle_gemm_a8(
 
                 if is_fp4:
                     _fp4_a_sc, _fp4_b_sc = fp4_scales if fp4_scales else ([], [])
-                    if _fp4_tilek128:
-                        b_packs0, b_packs1 = b_tile_in[0]
+                    ku128_iters = 1 if _fp4_tilek128 else _k_unroll_packed
+                    ikxdl_iters = 1 if _fp4_tilek128 else _fp4_pack_K
+                    for ku128 in range_constexpr(ku128_iters):
+                        a_scale_base = 0 if _fp4_tilek128 else ku128 * _m_repeat_packed
+                        b_scale_base = 0 if _fp4_tilek128 else ku128 * _num_acc_n_packed
                         for mi_p in range_constexpr(_m_repeat_packed):
-                            a_scale_val = _fp4_a_sc[mi_p]
+                            a_scale_val = _fp4_a_sc[a_scale_base + mi_p]
                             for ni_p in range_constexpr(_num_acc_n_packed):
-                                b_scale_val = _fp4_b_sc[ni_p]
-                                for imxdl in range_constexpr(_fp4_pack_M):
-                                    mi_idx = mi_p * _fp4_pack_M + imxdl
-                                    curr_row_a_lds = row_a_lds + (mi_idx * 16)
-                                    if (a0_prefetch is not None) and (mi_idx == 0):
-                                        a0, a1 = a0_prefetch
-                                    else:
-                                        a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_offset_base_bytes, lds_buffer)
-                                    a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
-                                    for inxdl in range_constexpr(_fp4_pack_N):
-                                        ni_idx = ni_p * _fp4_pack_N + inxdl
-                                        b0 = b_packs0[ni_idx]
-                                        b1 = b_packs1[ni_idx]
-                                        b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-                                        acc_idx = mi_idx * num_acc_n + ni_idx
-                                        if not _fp4_use_scheduler:
-                                            rocdl.sched_barrier(0)
-                                        current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                            mfma_res_ty,
-                                            [a128, b128, current_accs_list[acc_idx],
-                                             _fp4_cbsz, _fp4_blgp,
-                                             fp4_scale_half * _fp4_pack_M + imxdl, a_scale_val,
-                                             fp4_scale_half * _fp4_pack_N + inxdl, b_scale_val],
-                                        )
-                    else:
-                        for ku128 in range_constexpr(_k_unroll_packed):
-                            for mi_p in range_constexpr(_m_repeat_packed):
-                                a_scale_val = _fp4_a_sc[ku128 * _m_repeat_packed + mi_p]
-                                for ni_p in range_constexpr(_num_acc_n_packed):
-                                    b_scale_val = _fp4_b_sc[ku128 * _num_acc_n_packed + ni_p]
-                                    for ikxdl in range_constexpr(_fp4_pack_K):
-                                        k_idx = ku128 * _fp4_pack_K + ikxdl
-                                        b_packs0, b_packs1 = b_tile_in[k_idx]
-                                        col_base = col_offset_base_bytes + arith.index((k_idx * 128) // a_elem_vec_pack)
-                                        for imxdl in range_constexpr(_fp4_pack_M):
-                                            mi_idx = mi_p * _fp4_pack_M + imxdl
-                                            curr_row_a_lds = row_a_lds + (mi_idx * 16)
-                                            if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
-                                                a0, a1 = a0_prefetch
-                                            else:
-                                                a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer)
-                                            a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
-                                            for inxdl in range_constexpr(_fp4_pack_N):
-                                                ni_idx = ni_p * _fp4_pack_N + inxdl
-                                                b0 = b_packs0[ni_idx]
-                                                b1 = b_packs1[ni_idx]
-                                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-                                                acc_idx = mi_idx * num_acc_n + ni_idx
-                                                if not _fp4_use_scheduler:
-                                                    rocdl.sched_barrier(0)
-                                                current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                                    mfma_res_ty,
-                                                    [a128, b128, current_accs_list[acc_idx],
-                                                     _fp4_cbsz, _fp4_blgp,
-                                                     ikxdl * _fp4_pack_M + imxdl, a_scale_val,
-                                                     ikxdl * _fp4_pack_N + inxdl, b_scale_val],
-                                                )
+                                b_scale_val = _fp4_b_sc[b_scale_base + ni_p]
+                                for ikxdl in range_constexpr(ikxdl_iters):
+                                    k_idx = 0 if _fp4_tilek128 else ku128 * _fp4_pack_K + ikxdl
+                                    b_packs0, b_packs1 = b_tile_in[k_idx]
+                                    col_base = col_offset_base_bytes if _fp4_tilek128 else (
+                                        col_offset_base_bytes + arith.index((k_idx * 128) // a_elem_vec_pack)
+                                    )
+                                    scale_k_sel = fp4_scale_half if _fp4_tilek128 else ikxdl
+                                    for imxdl in range_constexpr(_fp4_pack_M):
+                                        mi_idx = mi_p * _fp4_pack_M + imxdl
+                                        curr_row_a_lds = row_a_lds + (mi_idx * 16)
+                                        if (a0_prefetch is not None) and (k_idx == 0) and (mi_idx == 0):
+                                            a0, a1 = a0_prefetch
+                                        else:
+                                            a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer)
+                                        a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
+                                        for inxdl in range_constexpr(_fp4_pack_N):
+                                            ni_idx = ni_p * _fp4_pack_N + inxdl
+                                            b0 = b_packs0[ni_idx]
+                                            b1 = b_packs1[ni_idx]
+                                            b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+                                            acc_idx = mi_idx * num_acc_n + ni_idx
+                                            if not _fp4_use_scheduler:
+                                                rocdl.sched_barrier(0)
+                                            current_accs_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                                mfma_res_ty,
+                                                [a128, b128, current_accs_list[acc_idx],
+                                                 _fp4_cbsz, _fp4_blgp,
+                                                 scale_k_sel * _fp4_pack_M + imxdl, a_scale_val,
+                                                 scale_k_sel * _fp4_pack_N + inxdl, b_scale_val],
+                                            )
                 else:
                     for ku128 in range_constexpr(k_unroll // 2):
                         ku0 = ku128 * 2
