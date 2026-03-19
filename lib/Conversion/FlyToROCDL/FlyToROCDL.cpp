@@ -200,49 +200,6 @@ public:
   }
 };
 
-class MemRefAllocOpLowering : public OpConversionPattern<MemRefAllocaOp> {
-public:
-  MemRefAllocOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
-      : OpConversionPattern<MemRefAllocaOp>(typeConverter, context) {}
-
-  LogicalResult matchAndRewrite(MemRefAllocaOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto flyMemRefTy = dyn_cast<fly::MemRefType>(op.getResult().getType());
-    if (!flyMemRefTy)
-      return failure();
-
-    LayoutAttr layoutAttr = cast<LayoutAttr>(flyMemRefTy.getLayout());
-    AddressSpace addrSpace = flyMemRefTy.getAddressSpace().getValue();
-    if (addrSpace != AddressSpace::Register) {
-      return rewriter.notifyMatchFailure(op, "memref.alloca only supports register address space");
-    }
-    auto elemTy = flyMemRefTy.getElemTy();
-
-    LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
-    IntTupleAttr totalSize = layoutCosize(builder, layoutAttr);
-
-    assert(totalSize.isStatic() && totalSize.isLeaf());
-
-    auto convertedPtrTy =
-        dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyMemRefTy));
-    if (!convertedPtrTy)
-      return failure();
-
-    auto loc = op.getLoc();
-
-    // Alloca array size is i64.
-    Value nElems = arith::ConstantIntOp::create(rewriter, loc, totalSize.getLeafAsInt().getValue(),
-                                                /*width=*/64)
-                       .getResult();
-
-    // `llvm.alloca` takes element type and array size. Keep alignment unspecified.
-    Value ptr = LLVM::AllocaOp::create(rewriter, loc, convertedPtrTy, elemTy, nElems,
-                                       /*alignment=*/0);
-    rewriter.replaceOp(op, ptr);
-    return success();
-  }
-};
-
 /// Materialize a scalar index from a non-array `!fly.int_tuple` value.
 /// This is used for pointer/memref offset computations.
 static FailureOr<Value> materializeScalarIndex(Value intTuple, Location loc,
@@ -1004,7 +961,6 @@ public:
 
     patterns.add<MakePtrOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
-    patterns.add<MemRefAllocOpLowering>(typeConverter, context);
     patterns.add<GetIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
