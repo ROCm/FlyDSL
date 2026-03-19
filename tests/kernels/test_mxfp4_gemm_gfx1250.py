@@ -43,11 +43,13 @@ def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
     shuffled = grouped[:, :, [0, 2, 1, 3]].contiguous()
     scale = shuffled.view(-1, K_scale)
 
+    SCALES_PER_WMMA = 4
     wmma_rep = warp_tile // WMMA_DIM
     k_groups = K_scale // scale_k_per_tile
-    g = scale.view(-1, wmma_rep, WMMA_DIM, k_groups, scale_k_per_tile)
-    g = g.permute(0, 2, 3, 1, 4).contiguous()
-    return g.reshape(-1, k_groups * wmma_rep * scale_k_per_tile)
+    k_wmma_steps = scale_k_per_tile // SCALES_PER_WMMA
+    g = scale.view(-1, wmma_rep, WMMA_DIM, k_groups, k_wmma_steps, SCALES_PER_WMMA)
+    g = g.permute(0, 2, 3, 4, 1, 5).contiguous()
+    return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
 
 
 def random_mxfp4_packed(rows: int, cols: int, *, device="cpu") -> torch.Tensor:

@@ -171,7 +171,9 @@ def compile_mxfp4_gemm(
     # A scale: 1 ds_load_b128 (interleave) or wmma_m_rep ds_load_b32
     # B scale: 1 ds_load_b128 (interleave) or wmma_n_rep ds_load_b32
     if scale_preshuffle:
-        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + 1 + 1
+        a_scale_b128_loads = (wmma_m_rep + 3) // 4
+        b_scale_b128_loads = (wmma_n_rep + 3) // 4
+        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + a_scale_b128_loads + b_scale_b128_loads
     else:
         LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + wmma_m_rep + wmma_n_rep
 
@@ -447,16 +449,18 @@ def compile_mxfp4_gemm(
                 return raw_scale
             return _shuffle_scale_i32(raw_scale)
 
-        def load_scale_b128(lds_buffer, scale_base, reps):
-            """Load all wmma_rep scales via 1 ds_load_b128.
-
-            Interleaved LDS layout places all reps i32 values contiguously.
-            Returns list of reps i32 values extracted from vec<4xi32>.
-            """
-            v = _lds_load_b128(lds_buffer, scale_base)
+        def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
+            """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*. """
+            ks_byte_off = ks * reps * SCALES_PER_WMMA
+            eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
+            num_loads = (reps + 3) // 4
+            vecs = []
+            for ld in range_constexpr(num_loads):
+                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
+                vecs.append(_lds_load_b128(lds_buffer, off))
             results = []
             for i in range_constexpr(reps):
-                vi = vector.extract(v, static_position=[i], dynamic_position=[])
+                vi = vector.extract(vecs[i // 4], static_position=[i % 4], dynamic_position=[])
                 if not scale_preshuffle:
                     vi = _shuffle_scale_i32(vi)
                 results.append(vi)
@@ -472,8 +476,8 @@ def compile_mxfp4_gemm(
                        for wm in range_constexpr(wmma_m_rep)]
             # Load scales
             if scale_preshuffle:
-                b_scales = load_scale_b128(bs_buf, bs_bases[0], wmma_n_rep)
-                a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep)
+                b_scales = load_scale_b128(bs_buf, bs_bases[0], wmma_n_rep, ks)
+                a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
             else:
                 b_scales = [load_scale(bs_buf, bs_bases[wn], ks)
                             for wn in range_constexpr(wmma_n_rep)]
