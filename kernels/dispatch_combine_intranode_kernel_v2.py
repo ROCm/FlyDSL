@@ -45,6 +45,9 @@ from flydsl.expr.lowlevel import (
     store_i32_at,
     store_i32_global,
     store_i32_system,
+    store_i64_system,
+    fence_one_as_release,
+    load_v4i32_global,
     zext_i32_to_i64,
     const_i32,
     const_i64,
@@ -330,7 +333,7 @@ def make_combine_kernel(
 
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
-        # ── Stage 1: inp_tok → shmem_comb_inp ────────────────────────────────
+        # ── Stage 1: inp_tok → shmem_comb_inp ────────────────────────────
         # NBI put 批量发送所有 token，循环结束后统一 quiet（单次 quiet 替代 per-token quiet）。
         # putmem_nbi_warp 使用 XGMI RDMA 路径，quiet_thread_pe 确保数据对远端 GPU 可见，
         # 这是保证 Stage 3 P2P read 正确性的必要条件，不能用普通 store_v4i32_global 替代。
@@ -351,6 +354,10 @@ def make_combine_kernel(
         if icmp_ult_i32(gwtid, const_i32(npes)):
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
             store_i32_at(addr_comb_bar, const_i32(0), const_i32(0))
+            # Stage 2 信令：保留 uint64_p（NIC put 路由，内部处理 P2P 寻址）。
+            # 注意：不预计算 rem_xdb 列表（节省 16 VGPR），直接用 local xdb_sym。
+            # 动态 ptr_p2p(addr_xdb_mem, rank, gwtid) 对某些 rank-pe 组合返回无效地址，
+            # 故不能替换为 store_i64_system(ptr_p2p(...), ...)。
             fence_one_as_seq_cst()
             xdb_sym = addr_xdb_mem + zext_i32_to_i64(const_i32(rank)) * 8
             mori_shmem.uint64_p(xdb_sym, cur_flag, gwtid, 0)

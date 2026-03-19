@@ -315,40 +315,69 @@ def run_benchmark(cfg, args, op_v2, op_ref, has_ref):
         print(f"{'='*65}")
 
     def measure(op):
-        """Warmup + timed dispatch+combine. Returns (d_ms, c_ms)."""
+        """Warmup + timed dispatch+combine. Returns (d_ms, c_ms).
+
+        改进的计时策略（解决卡间时序不同步导致 combine 计时偏差）：
+          - wc_buf: 预分配最大尺寸权重张量，避免计时窗口内执行 torch.ones GPU 核
+          - Barrier-1 (dispatch→combine 间): 等所有卡 dispatch 完成后再统一启动 combine，
+            消除 dispatch 时序偏差对 combine 计时的污染
+          - t1a: dispatch 后对齐 barrier 完成后再记录 combine 起点
+          - Barrier-2 (每轮末尾): 等所有卡 combine 完成，彻底隔离各轮次时序
+        """
+        max_recv = cfg.max_recv   # ws * max_tok_per_rank（上界）
+        # 预分配权重张量，避免 torch.ones 在计时窗口内产生额外 GPU 核
+        wc_buf = torch.full((max_recv, k), 1.0 / k, dtype=torch.float32, device=device)
+
         def one_round():
             op.reset()
             ret = op.dispatch(inp, wts, None, idx)
-            tok  = ret[0]    # dispatch output tokens
-            i    = ret[3]    # output indices
-            tr   = ret[4]    # total_recv
+            tok  = ret[0]
+            i    = ret[3]
+            tr   = ret[4]
             n_r  = int(tr[0].item())
-            wc   = torch.ones(n_r, k, dtype=torch.float32, device=device) / k
-            op.combine(tok, wc, i)
+            op.combine(tok, wc_buf[:n_r], i)
             torch.cuda.synchronize()
 
         # warmup
         for _ in range(args.warmup):
             one_round()
 
-        t0 = torch.cuda.Event(enable_timing=True)
-        t1 = torch.cuda.Event(enable_timing=True)
-        t2 = torch.cuda.Event(enable_timing=True)
+        t0  = torch.cuda.Event(enable_timing=True)
+        t1  = torch.cuda.Event(enable_timing=True)
+        t1a = torch.cuda.Event(enable_timing=True)  # combine 对齐起点
+        t2  = torch.cuda.Event(enable_timing=True)
         d_list, c_list = [], []
 
         for _ in range(args.iters):
+            # op.reset() 内部含 dist.barrier + shmem_barrier_all，保证各卡 t0 对齐
             op.reset()
+
+            # ── Dispatch 计时 ────────────────────────────────────
             t0.record()
-            ret  = op.dispatch(inp, wts, None, idx)
-            tok  = ret[0]; i = ret[3]; tr = ret[4]
+            ret = op.dispatch(inp, wts, None, idx)
+            tok = ret[0]; i_out = ret[3]; tr = ret[4]
             t1.record()
-            n_r = int(tr[0].item())
-            wc  = torch.ones(n_r, k, dtype=torch.float32, device=device) / k
-            op.combine(tok, wc, i)
+
+            # ── Barrier-1：等所有卡 dispatch 完成，统一 combine 起点 ──
+            # 消除 dispatch 各卡时序偏差对 combine 计时的污染：
+            # 若不加 barrier，先完成 dispatch 的卡会在 combine 的
+            # CrossDeviceBarrier 内等待慢卡，这段等待被错误地计入 combine 时间。
+            dist.barrier()
+
+            # ── Combine 计时（对齐后起点）──────────────────────────
+            t1a.record()
+            n_r = int(tr[0].item())          # dispatch 已 sync，此处直接读取
+            op.combine(tok, wc_buf[:n_r], i_out)
             t2.record()
+
+            # ── Barrier-2：等所有卡 combine 完成，隔离轮次间时序 ──
+            # 防止快卡进入下一轮 reset 时慢卡还在 combine，
+            # 导致 shmem buffer 被 reset 覆盖或 barrier 配对错误。
             torch.cuda.synchronize()
+            dist.barrier()
+
             d_list.append(t0.elapsed_time(t1))
-            c_list.append(t1.elapsed_time(t2))
+            c_list.append(t1a.elapsed_time(t2))
 
         return sum(d_list) / len(d_list), sum(c_list) / len(c_list)
 
