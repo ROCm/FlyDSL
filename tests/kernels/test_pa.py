@@ -1,8 +1,12 @@
 """PA Decode FP8 — FlyDSL vs Gluon, with Gluon reduce + one-shot + PS modes."""
 import sys, os, torch, math, logging, random, gc
+import pytest
+
 sys.path.insert(0, 'build-fly/python_packages'); sys.path.insert(1, '.')
 os.environ['FLYDSL_RUNTIME_ENABLE_CACHE'] = '1'
 logging.basicConfig(level=logging.INFO, format='%(message)s')
+
+aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping PA tests")
 
 from tests.test_common import run_perftest, verify_output, checkAllclose
 from kernels.pa_decode_fp8 import build_pa_decode_module, BLOCK_THREADS, QUERY_GROUP_SIZE, HEAD_SIZE, KV_COMPUTE_BLOCK
