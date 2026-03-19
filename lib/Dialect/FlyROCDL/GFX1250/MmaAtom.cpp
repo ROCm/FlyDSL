@@ -94,6 +94,11 @@ namespace mlir::fly_rocdl {
 
 bool MmaAtomGFX1250_WMMAType::isStatic() const { return true; }
 
+Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
+
 Attribute MmaAtomGFX1250_WMMAType::getThrLayout() const {
   return FxLayout(FxC(32), FxC(1));
 }
