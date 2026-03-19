@@ -103,6 +103,11 @@ Attribute MmaAtomGFX1250_WMMAType::getShapeMNK() const {
       ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
+Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaAtomGFX1250_WMMAType::getValTypeD() const { return getElemTyAcc(); }
+
 Attribute MmaAtomGFX1250_WMMAType::getThrValLayoutA() const {
   return gfx1250::getThrValLayoutAB(getContext(), getK(), getElemTyA());
 }

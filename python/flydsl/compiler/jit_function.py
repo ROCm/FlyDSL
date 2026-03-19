@@ -17,7 +17,6 @@ from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
-from ..expr.typing import Stream
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -103,45 +102,6 @@ def _flydsl_key() -> str:
     key = f"flydsl:{flydsl.__version__}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
-
-
-def _get_underlying_func(obj):
-    if isinstance(obj, KernelFunction):
-        return obj._func
-    if isinstance(obj, JitFunction):
-        return obj.func
-    if isinstance(obj, types.FunctionType):
-        return obj
-    return None
-
-
-def _is_user_function(func, rootFile):
-    try:
-        funcFile = inspect.getfile(func)
-    except (TypeError, OSError):
-        return False
-    return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
-
-
-def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
-    if visited is None:
-        visited = set()
-    sources = []
-    for name in func.__code__.co_names:
-        obj = func.__globals__.get(name)
-        underlying = _get_underlying_func(obj)
-        if underlying is None or id(underlying) in visited:
-            continue
-        if not _is_user_function(underlying, rootFile):
-            continue
-        visited.add(id(underlying))
-        try:
-            src = inspect.getsource(underlying)
-        except OSError:
-            src = underlying.__code__.co_code.hex()
-        sources.append(f"{name}:{src}")
-        sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
-    return sources
 
 
 def _get_underlying_func(obj):
@@ -331,43 +291,6 @@ def _sanitize_path_component(s: str) -> str:
 
     s = str(s).strip()
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
-
-
-def _stage_label_from_fragment(fragment: str) -> str:
-    """Extract pass name from a pipeline fragment for use as a filename."""
-    base = fragment.strip()
-    if base.startswith("gpu.module(") and base.endswith(")"):
-        base = base[len("gpu.module(") : -1].strip()
-    return base.split("{", 1)[0].strip()
-
-
-def _dump_ir_to_file(stage: str, *, dump_dir: Path, asm: str) -> Path:
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    out = dump_dir / f"{stage}.mlir"
-    out.write_text(asm, encoding="utf-8")
-    return out
-
-
-def _dump_isa(*, dump_dir: Path, asm: str, verify: bool) -> Optional[Path]:
-    """Best-effort dump of final ISA assembly (.s) from the post-reconcile IR."""
-    try:
-        from .._mlir.dialects import gpu
-        mod = ir.Module.parse(asm)
-        pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})"
-        )
-        pm.enable_verifier(verify)
-        pm.run(mod.operation)
-        for op in mod.body:
-            if isinstance(op, gpu.BinaryOp):
-                objects = list(map(gpu.ObjectAttr, op.objects))
-                isa_bytes = objects[-1].object
-                out = dump_dir / "final_isa.s"
-                out.write_bytes(isa_bytes)
-                return out
-    except Exception:
-        pass
-    return None
 
 
 class MlirCompiler:

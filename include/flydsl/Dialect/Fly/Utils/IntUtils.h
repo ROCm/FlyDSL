@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_INTUTILS_H
-#define FLYDSL_DIALECT_UTILS_INTUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_INTUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_INTUTILS_H
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/Support/LogicalResult.h"
@@ -21,6 +21,10 @@ inline int32_t divisibilityCeilDiv(int32_t lhs, int32_t rhs) { return 1; }
 inline int32_t divisibilityModulo(int32_t lhs, int32_t rhs) { return std::gcd(lhs, rhs); }
 inline int32_t divisibilityMin(int32_t lhs, int32_t rhs) { return std::gcd(lhs, rhs); }
 inline int32_t divisibilityMax(int32_t lhs, int32_t rhs) { return std::gcd(lhs, rhs); }
+inline int32_t divisibilityApplySwizzle(int32_t lhs, SwizzleAttr swizzle) {
+  return std::gcd(lhs, 1 << swizzle.getBase());
+}
+inline bool isPowerOf2(int32_t value) { return value > 0 && (value & (value - 1)) == 0; }
 
 inline int32_t divisibilityBitwiseXor(int32_t lhs, int32_t rhs) {
   return std::min(pow2Factor(lhs), pow2Factor(rhs));
@@ -66,4 +70,4 @@ IntAttr intShapeDiv(IntAttr lhs, IntAttr rhs);
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_INTUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_INTUTILS_H

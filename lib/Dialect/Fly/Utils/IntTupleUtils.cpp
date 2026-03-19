@@ -418,7 +418,7 @@ IntTupleAttr intTupleExpandBasis(BasisAttr attr) {
 
 namespace {
 
-IntTupleAttr intTupleMakeBasisLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
+IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
                                        SmallVector<int32_t, 4> &modes) {
   if (profile.isLeaf()) {
     auto one = IntAttr::getStatic(ctx, 1);
@@ -428,7 +428,7 @@ IntTupleAttr intTupleMakeBasisLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
   SmallVector<Attribute> elements;
   for (int32_t i = 0; i < profile.rank(); ++i) {
     modes.push_back(i);
-    elements.push_back(intTupleMakeBasisLikeImpl(ctx, profile.at(i), modes));
+    elements.push_back(intTupleMakeBasisTupleLikeImpl(ctx, profile.at(i), modes));
     modes.pop_back();
   }
   return IntTupleAttr::get(ArrayAttr::get(ctx, elements));
@@ -436,11 +436,11 @@ IntTupleAttr intTupleMakeBasisLikeImpl(MLIRContext *ctx, IntTupleAttr profile,
 
 } // namespace
 
-IntTupleAttr intTupleMakeBasisLike(IntTupleAttr profile) {
+IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile) {
   auto *ctx = profile.getContext();
   SmallVector<int32_t, 4> modes;
-  assert(!profile.isLeaf() && "intTupleMakeBasisLike expects a non-leaf IntTupleAttr");
-  return intTupleMakeBasisLikeImpl(ctx, profile, modes);
+  assert(!profile.isLeaf() && "intTupleMakeBasisTupleLike expects a non-leaf IntTupleAttr");
+  return intTupleMakeBasisTupleLikeImpl(ctx, profile, modes);
 }
 
 IntTupleAttr operator+(BasisAttr lhs, BasisAttr rhs) {

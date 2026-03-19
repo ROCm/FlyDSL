@@ -145,6 +145,10 @@ IntTupleAttr IntTupleAttr::at(ArrayRef<int32_t> idxs) const {
   return result;
 }
 
+//===----------------------------------------------------------------------===//
+// LayoutAttr
+//===----------------------------------------------------------------------===//
+
 bool LayoutAttr::isStatic() const { return getShape().isStatic() && getStride().isStatic(); }
 
 bool LayoutAttr::isStaticShape() const { return getShape().isStatic(); }
@@ -167,6 +171,10 @@ LayoutAttr LayoutAttr::at(int32_t idx) const {
 LayoutAttr LayoutAttr::at(ArrayRef<int32_t> idxs) const {
   return LayoutAttr::get(getContext(), getShape().at(idxs), getStride().at(idxs));
 }
+
+//===----------------------------------------------------------------------===//
+// ComposedLayoutAttr
+//===----------------------------------------------------------------------===//
 
 bool ComposedLayoutAttr::isStatic() const {
   return isStaticOuter() && isStaticOffset() && isStaticInner();
@@ -202,6 +210,10 @@ ComposedLayoutAttr ComposedLayoutAttr::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutAttr::get(getContext(), getInner(), getOffset(), getOuter().at(idxs));
 }
 
+//===----------------------------------------------------------------------===//
+// TileAttr
+//===----------------------------------------------------------------------===//
+
 int32_t TileAttr::rank() const {
   if (auto arrayAttr = dyn_cast<ArrayAttr>(this->getValue())) {
     return arrayAttr.size();
@@ -229,7 +241,7 @@ bool TileAttr::isNoneMode(int32_t idx) const {
 // Parser and Printer
 //===----------------------------------------------------------------------===//
 
-void prettyPrintIntAttr(::mlir::AsmPrinter &odsPrinter, IntAttr attr) {
+static void prettyPrintIntAttr(::mlir::AsmPrinter &odsPrinter, IntAttr attr) {
   if (attr.isStatic()) {
     odsPrinter << attr.getValue();
   } else {

@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
-#define FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_LAYOUTUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_LAYOUTUTILS_H
 
 #include <algorithm>
 #include <numeric>
@@ -372,21 +372,17 @@ void buildRefShapeProducts(
 } // namespace detail
 
 template <class Layout>
-Layout layoutMakeOrderedLayout(LayoutBuilder<Layout> &builder, Layout layout, IntTupleAttr order) {
+Layout layoutMakeOrderedLayout(LayoutBuilder<Layout> &builder,
+                               typename LayoutBuilder<Layout>::IntTuple shape, IntTupleAttr order) {
   using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
   using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
-
-  auto shape = builder.getShape(layout);
-  LayoutAttr layoutAttr = builder.getLayoutAttr(layout);
-  IntTupleAttr shapeAttr = layoutAttr.getShape();
 
   if (order.isLeaf()) {
     IntTuple compactStride = intTupleCompactColMajor(builder, shape);
     return builder.makeLayout(shape, compactStride);
   }
 
-  auto *ctx = shapeAttr.getContext();
-  IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+  IntTupleBuilder<IntTupleAttr> attrBuilder(order.getContext());
   IntTupleAttr flatOrder = intTupleFlatten(attrBuilder, order);
 
   if (flatOrder.isLeaf()) {
@@ -439,7 +435,7 @@ Layout layoutMakeFragmentLayout(LayoutBuilder<Layout> &builder, Layout layout) {
 
     Layout restLayout = builder.makeLayout(restShape, restStride);
     IntTupleAttr restOrderAttr = builder.getLayoutAttr(restLayout).getStride();
-    Layout orderedRest = layoutMakeOrderedLayout(builder, restLayout, restOrderAttr);
+    Layout orderedRest = layoutMakeOrderedLayout(builder, restShape, restOrderAttr);
 
     return layoutTiledProduct(builder, mode0Layout, orderedRest);
   }
@@ -448,9 +444,47 @@ Layout layoutMakeFragmentLayout(LayoutBuilder<Layout> &builder, Layout layout) {
   return builder.makeLayout(shape, compactStride);
 }
 
+template <class Layout> Layout layoutMakeLayoutLike(LayoutBuilder<Layout> &builder, Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  auto shape = builder.getShape(layout);
+  LayoutAttr layoutAttr = builder.getLayoutAttr(layout);
+  IntTupleAttr strideAttr = layoutAttr.getStride();
+
+  IntTuple filteredShape = intTupleFilterZero(builder, strideAttr, shape);
+  Layout orderedLayout = layoutMakeOrderedLayout(builder, filteredShape, strideAttr);
+  return builder.makeLayout(shape, builder.getStride(orderedLayout));
+}
+
 //===----------------------------------------------------------------------===//
 // Layout operations
 //===----------------------------------------------------------------------===//
+
+template <class Layout>
+typename LayoutBuilder<Layout>::IntTuple layoutCoprofile(LayoutBuilder<Layout> &builder,
+                                                         Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  IntTuple stride = builder.getStride(layout);
+  IntTuple strideSum = intTupleSum(builder, stride);
+  return intTupleTransformLeaf(
+      builder, [&](IntTuple) { return builder.materializeConstantLeaf(0); }, strideSum);
+}
+
+template <class Layout>
+typename LayoutBuilder<Layout>::IntTuple layoutCoshape(LayoutBuilder<Layout> &builder,
+                                                       Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+  IntTuple shape = builder.getShape(layout);
+  IntTuple stride = builder.getStride(layout);
+  ArithValue one = builder.materializeConstantArith(1);
+
+  IntTuple m1Shapes = intTupleTransformLeaf(
+      builder, [&](IntTuple s) { return builder.makeInt(builder.sub(builder.getArithValue(s), one)); }, shape);
+  IntTuple coCoord = intTupleInnerProduct(builder, m1Shapes, stride);
+  return intTupleTransformLeaf(
+      builder, [&](IntTuple c) { return builder.makeInt(builder.add(builder.getArithValue(c), one)); }, coCoord);
+}
 
 template <class Layout>
 typename LayoutBuilder<Layout>::IntTuple layoutSize(LayoutBuilder<Layout> &builder, Layout layout) {
@@ -906,7 +940,70 @@ template <class Layout> Layout layoutRightInverse(LayoutBuilder<Layout> &builder
   return layoutCoalesce(builder, resultLayout);
 }
 
-template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout);
+template <class Layout> Layout layoutLeftInverse(LayoutBuilder<Layout> &builder, Layout layout) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+  using ArithValue = typename LayoutBuilder<Layout>::ArithValue;
+
+  auto coalesced = layoutCoalesce(builder, layout);
+  auto shape = builder.getShape(coalesced);
+  auto stride = builder.getStride(coalesced);
+
+  SmallVector<IntTuple> flatShapeLeaves;
+  SmallVector<IntTuple> flatStrideLeaves;
+  intTupleFlattenToVector(builder, shape, flatShapeLeaves);
+  intTupleFlattenToVector(builder, stride, flatStrideLeaves);
+
+  SmallVector<IntTuple> prefixProducts;
+  prefixProducts.reserve(flatShapeLeaves.size() + 1);
+  IntTuple one = builder.materializeConstantLeaf(1);
+  prefixProducts.push_back(one);
+  for (size_t i = 0; i < flatShapeLeaves.size(); ++i) {
+    ArithValue next = builder.mul(builder.getArithValue(prefixProducts.back()),
+                                  builder.getArithValue(flatShapeLeaves[i]));
+    prefixProducts.push_back(builder.makeInt(next));
+  }
+
+  SmallVector<int32_t> sortedIdx;
+  sortedIdx.reserve(flatStrideLeaves.size());
+  for (size_t i = 0; i < flatStrideLeaves.size(); ++i) {
+    if (!builder.getAttr(flatStrideLeaves[i]).isStatic())
+      continue;
+    sortedIdx.push_back(static_cast<int32_t>(i));
+  }
+  std::sort(sortedIdx.begin(), sortedIdx.end(), [&](int32_t a, int32_t b) {
+    return builder.getStaticValue(builder.getArithValue(flatStrideLeaves[a])) <
+           builder.getStaticValue(builder.getArithValue(flatStrideLeaves[b]));
+  });
+
+  typename LayoutBuilder<Layout>::ElemCollector resultShape;
+  typename LayoutBuilder<Layout>::ElemCollector resultStride;
+  resultStride.push_back(builder.materializeConstantLeaf(0));
+
+  IntTuple resultShapeProduct = one;
+  int32_t lastSortedIdx = -1;
+  for (int32_t idx : sortedIdx) {
+    if (builder.getAttr(flatStrideLeaves[idx]).isLeafStaticValue(0))
+      continue;
+
+    ArithValue gapShapeVal = builder.div(builder.getArithValue(flatStrideLeaves[idx]),
+                                         builder.getArithValue(resultShapeProduct));
+    IntTuple gapShape = builder.makeInt(gapShapeVal);
+    resultShape.push_back(gapShape);
+    resultStride.push_back(prefixProducts[idx]);
+    resultShapeProduct = builder.makeInt(
+        builder.mul(builder.getArithValue(resultShapeProduct), gapShapeVal));
+    lastSortedIdx = idx;
+  }
+
+  if (lastSortedIdx >= 0) {
+    resultShape.push_back(flatShapeLeaves[lastSortedIdx]);
+  } else {
+    resultShape.push_back(one);
+  }
+  Layout resultLayout =
+      builder.makeLayout(builder.makeTuple(resultShape), builder.makeTuple(resultStride));
+  return layoutCoalesce(builder, resultLayout);
+}
 
 namespace detail {
 
@@ -1298,6 +1395,24 @@ Layout layoutRakedProduct(LayoutBuilder<Layout> &builder, Layout blockLayout, La
   return builder.makeLayout(outShape, outStride);
 }
 
+template <class Layout>
+Layout layoutTileToShape(LayoutBuilder<Layout> &builder, Layout blockLayout,
+                         typename LayoutBuilder<Layout>::IntTuple targetShape, IntTupleAttr order) {
+  using IntTuple = typename LayoutBuilder<Layout>::IntTuple;
+
+  IntTupleAttr targetShapeAttr = builder.getAttr(targetShape);
+  int32_t targetRank = targetShapeAttr.isLeaf() ? 1 : targetShapeAttr.rank();
+
+  Layout paddedBlock = layoutAppendToRank(builder, blockLayout, targetRank);
+
+  IntTuple blockShape = intTupleProductEach(builder, builder.getShape(paddedBlock));
+  IntTuple targetShapeFlat = intTupleProductEach(builder, targetShape);
+  IntTuple productShape = intTupleCeilDiv(builder, targetShapeFlat, blockShape);
+
+  Layout orderedTiler = layoutMakeOrderedLayout(builder, productShape, order);
+  return layoutBlockedProduct(builder, paddedBlock, orderedTiler);
+}
+
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_LAYOUTUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_LAYOUTUTILS_H

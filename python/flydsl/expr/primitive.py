@@ -113,93 +113,6 @@ def const_expr(x):
 def range_constexpr(*args):
     return range(*args)
 
-# __all__ = [
-#     # Maybe remove it in the future
-#     "T",
-#     "arith",
-#     # Enum Attributes
-#     "AddressSpace",
-#     "CachePolicy",
-#     # Types
-#     "CopyOpUniversalCopyType",
-#     "IntTupleType",
-#     "LayoutType",
-#     "MemRefType",
-#     "MmaAtomUniversalFMAType",
-#     "PointerType",
-#     "SwizzleType",
-#     # DSL functions
-#     "const_expr",
-#     "range_constexpr",
-#     "rank",
-#     "depth",
-#     "static",
-#     "int_tuple_add",
-#     "int_tuple_sub",
-#     "int_tuple_mul",
-#     "int_tuple_div",
-#     "int_tuple_product",
-#     "int_tuple_product_each",
-#     "make_identity_tensor",
-#     "make_identity_layout",
-#     "make_shape",
-#     "make_stride",
-#     "make_coord",
-#     "make_int_tuple",
-#     "make_layout",
-#     "size",
-#     "get_scalar",
-#     "get_shape",
-#     "get_stride",
-#     "slice",
-#     "crd2idx",
-#     "composition",
-#     "complement",
-#     "right_inverse",
-#     "coalesce",
-#     "zip",
-#     "select",
-#     "group",
-#     "append",
-#     "prepend",
-#     "logical_divide",
-#     "zipped_divide",
-#     "tiled_divide",
-#     "flat_divide",
-#     "logical_product",
-#     "zipped_product",
-#     "tiled_product",
-#     "flat_product",
-#     "block_product",
-#     "raked_product",
-#     "make_copy_atom",
-#     "make_mma_atom",
-#     "make_tile",
-#     "mma_atom_call",
-#     "copy_atom_call",
-#     "make_tiled_copy",
-#     "memref_alloca",
-#     "memref_load",
-#     "memref_store",
-#     "memref_load_vec",
-#     "memref_store_vec",
-#     "get_layout",
-#     "get_iter",
-#     "make_view",
-#     "add_offset",
-#     "gemm",
-#     "copy",
-#     "printf",
-# ]
-
-
-def const_expr(x):
-    return x
-
-
-def range_constexpr(*args):
-    return range(*args)
-
 
 def make_int32(value):
     return fly.make_int32(value)
@@ -368,25 +281,6 @@ def get_flat_coord(index, layout, loc=None, ip=None):
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
-
-
-@traced_op
-def idx2crd(idx, layout, loc=None, ip=None):
-    if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
-        idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
-    return fly.idx2crd(idx, layout, loc=loc, ip=ip)
-
-
-@traced_op
-def get(int_tuple, mode, loc=None, ip=None):
-    if isinstance(int_tuple, (list, tuple)):
-        return int_tuple[mode]
-    selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
-    result = fly.get_scalar(selected, loc=loc, ip=ip)
-    if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
-        result = _arith.IndexCastOp(ir.IndexType.get(), result).result
-    return result
 
 
 @traced_op

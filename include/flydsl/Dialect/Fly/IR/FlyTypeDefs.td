@@ -166,13 +166,7 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
     DefaultValuedParameter<"AlignAttr","AlignAttr::getTrivialAlignment($_ctxt)">:$alignment,
     DefaultValuedParameter<"SwizzleAttr","SwizzleAttr::getTrivialSwizzle($_ctxt)">:$swizzle
   );
-  let hasCustomAssemblyFormat = 1;
-
-  let extraClassDeclaration = [{
-    MemRefType at(int32_t idx) const;
-    MemRefType at(ArrayRef<int32_t> idxs) const;
-    int32_t getValueDivisibility() const;
-  }];
+  let assemblyFormat = "`<` $elemTy `,` `` $addressSpace `,` $layout (`,` $alignment^)? (`,` $swizzle^)? `>`";
 
   let builders = [
     TypeBuilderWithInferredContext<(ins "Type":$elemTy, "LayoutAttr":$layout), [{
@@ -194,6 +188,9 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment, swizzle);
     }]>
   ];
+  let extraClassDeclaration = [{
+    int32_t getValueDivisibility() const;
+  }];
 }
 
 def IteratorLikeType : AnyTypeOf<[Fly_IntTuple, Fly_Pointer]>;

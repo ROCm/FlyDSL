@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
-#define FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H
 
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -323,4 +323,4 @@ Layout layoutTiledMmaThrValOperandView(LayoutBuilder<Layout> &builder, MmaAtomTy
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_TILEDOPUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_TILEDOPUTILS_H

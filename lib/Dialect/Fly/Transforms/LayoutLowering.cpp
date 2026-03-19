@@ -937,6 +937,19 @@ struct IntTupleElemLessFn {
   }
 };
 
+struct IntTupleEqualFn {
+  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
+                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
+    return intTupleEqual(builder, lhs, rhs);
+  }
+};
+struct IntTupleProductLikeFn {
+  IntTupleValueAdaptor operator()(IntTupleBuilder<IntTupleValueAdaptor> &builder,
+                                  IntTupleValueAdaptor lhs, IntTupleValueAdaptor rhs) const {
+    return intTupleProductLike(builder, lhs, rhs);
+  }
+};
+
 using IntTupleAddOpLowering = IntTupleBinaryOpLowering<IntTupleAddOp, IntTupleAddFn>;
 using IntTupleSubOpLowering = IntTupleBinaryOpLowering<IntTupleSubOp, IntTupleSubFn>;
 using IntTupleMulOpLowering = IntTupleBinaryOpLowering<IntTupleMulOp, IntTupleMulFn>;
@@ -945,6 +958,7 @@ using IntTupleModOpLowering = IntTupleBinaryOpLowering<IntTupleModOp, IntTupleMo
 using ShapeDivOpLowering = IntTupleBinaryOpLowering<ShapeDivOp, IntTupleShapeDivFn>;
 using CeilDivOpLowering = IntTupleBinaryOpLowering<CeilDivOp, IntTupleCeilDivFn>;
 using ElemLessOpLowering = IntTupleBinaryOpLowering<ElemLessOp, IntTupleElemLessFn>;
+using EqualOpLowering = IntTupleBinaryOpLowering<EqualOp, IntTupleEqualFn>;
 
 template <typename OpTy, typename UnaryOpFn>
 class IntTupleUnaryOpLowering : public OpRewritePattern<OpTy> {
@@ -989,6 +1003,8 @@ struct IntTupleProductFn {
 using IntTupleProductEachOpLowering =
     IntTupleUnaryOpLowering<IntTupleProductEachOp, IntTupleProductEachFn>;
 using IntTupleProductOpLowering = IntTupleUnaryOpLowering<IntTupleProductOp, IntTupleProductFn>;
+using IntTupleProductLikeOpLowering =
+    IntTupleBinaryOpLowering<IntTupleProductLikeOp, IntTupleProductLikeFn>;
 
 class SelectOpLowering : public OpRewritePattern<SelectOp> {
 public:
@@ -1038,6 +1054,33 @@ public:
         IntTupleValueAdaptor::create(builder, tuple, intTupleTy.getAttr());
 
     IntTupleValueAdaptor result = intTupleGroup(builder, adaptor, begin, end);
+    rewriter.replaceOp(op, builder.finalize(result));
+    return success();
+  }
+};
+
+class TakeOpLowering : public OpRewritePattern<TakeOp> {
+public:
+  using OpRewritePattern<TakeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TakeOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value tuple = op.getTuple();
+    int32_t begin = op.getBegin();
+    int32_t end = op.getEnd();
+
+    auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType());
+    if (!intTupleTy)
+      return failure();
+
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
+      return failure();
+
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor adaptor =
+        IntTupleValueAdaptor::create(builder, tuple, intTupleTy.getAttr());
+
+    IntTupleValueAdaptor result = intTupleTake(builder, adaptor, begin, end);
     rewriter.replaceOp(op, builder.finalize(result));
     return success();
   }
@@ -1408,6 +1451,117 @@ public:
   }
 };
 
+class Idx2CrdLowering : public OpRewritePattern<Idx2CrdOp> {
+public:
+  using OpRewritePattern<Idx2CrdOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(Idx2CrdOp op, PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto index = op.getIndex();
+    auto layout = op.getLayout();
+
+    auto indexTy = dyn_cast<IntTupleType>(index.getType());
+    auto layoutTy = dyn_cast<LayoutType>(layout.getType());
+    if (!indexTy || !layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(index)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layout)))
+      return failure();
+
+    LayoutAttr layoutAttr = layoutTy.getAttr();
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor indexAdaptor =
+        IntTupleValueAdaptor::create(builder, index, indexTy.getAttr());
+    IntTupleValueAdaptor shapeAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(0), layoutAttr.getShape());
+    IntTupleValueAdaptor strideAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(1), layoutAttr.getStride());
+
+    IntTupleValueAdaptor result =
+        layoutIdx2Crd(builder, indexAdaptor, shapeAdaptor, strideAdaptor);
+    rewriter.replaceOp(op, builder.finalize(result));
+    return success();
+  }
+};
+
+class GetFlatCoordOpLowering : public OpRewritePattern<GetFlatCoordOp> {
+public:
+  using OpRewritePattern<GetFlatCoordOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(GetFlatCoordOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value index = op.getIndex();
+    Value layout = op.getLayout();
+
+    auto indexTy = dyn_cast<IntTupleType>(index.getType());
+    auto layoutTy = dyn_cast<LayoutType>(layout.getType());
+    if (!indexTy || !layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(index)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layout)))
+      return failure();
+
+    LayoutAttr layoutAttr = layoutTy.getAttr();
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor indexAdaptor =
+        IntTupleValueAdaptor::create(builder, index, indexTy.getAttr());
+    IntTupleValueAdaptor shapeAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(0), layoutAttr.getShape());
+    IntTupleValueAdaptor strideAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(1), layoutAttr.getStride());
+
+    IntTupleValueAdaptor hierCoord =
+        layoutIdx2Crd(builder, indexAdaptor, shapeAdaptor, strideAdaptor);
+    IntTupleAttr flatShapeAttr = intTupleTransform(
+        builder.getAttrBuilder(),
+        [&](IntTupleAttr mode) { return builder.getAttrBuilder().materializeConstantLeaf(1); },
+        layoutAttr.getShape());
+    IntTupleValueAdaptor flatShapeAdaptor = builder.materializeConstantTuple(flatShapeAttr);
+    IntTupleValueAdaptor result = layoutCrd2Crd(builder, hierCoord, shapeAdaptor, flatShapeAdaptor);
+    rewriter.replaceOp(op, builder.finalize(result));
+    return success();
+  }
+};
+
+class Get1DCoordOpLowering : public OpRewritePattern<Get1DCoordOp> {
+public:
+  using OpRewritePattern<Get1DCoordOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(Get1DCoordOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value index = op.getIndex();
+    Value layout = op.getLayout();
+
+    auto indexTy = dyn_cast<IntTupleType>(index.getType());
+    auto layoutTy = dyn_cast<LayoutType>(layout.getType());
+    if (!indexTy || !layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(index)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layout)))
+      return failure();
+
+    LayoutAttr layoutAttr = layoutTy.getAttr();
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleValueAdaptor indexAdaptor =
+        IntTupleValueAdaptor::create(builder, index, indexTy.getAttr());
+    IntTupleValueAdaptor shapeAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(0), layoutAttr.getShape());
+    IntTupleValueAdaptor strideAdaptor = IntTupleValueAdaptor::create(
+        builder, layout.getDefiningOp()->getOperand(1), layoutAttr.getStride());
+
+    IntTupleValueAdaptor hierCoord =
+        layoutIdx2Crd(builder, indexAdaptor, shapeAdaptor, strideAdaptor);
+    auto colMajorIdx =
+        mlir::fly::detail::layoutCrd2IdxColMajor(builder, hierCoord, shapeAdaptor);
+    IntTupleValueAdaptor result = builder.makeInt(colMajorIdx);
+    rewriter.replaceOp(op, builder.finalize(result));
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Layout Divide Operations Lowering
 //===----------------------------------------------------------------------===//
@@ -1738,6 +1892,27 @@ public:
   }
 };
 
+class LeftInverseOpLowering : public OpRewritePattern<LeftInverseOp> {
+public:
+  using OpRewritePattern<LeftInverseOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(LeftInverseOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value layoutValue = op.getLayout();
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
+    LayoutValueAdaptor result = layoutLeftInverse(layoutBuilder, layoutAdaptor);
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
 class RecastLayoutOpLowering : public OpRewritePattern<RecastLayoutOp> {
 public:
   using OpRewritePattern<RecastLayoutOp>::OpRewritePattern;
@@ -1784,10 +1959,29 @@ public:
     LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
     IntTupleValueAdaptor shapeAdaptor =
         IntTupleValueAdaptor::create(layoutBuilder, shapeValue, shapeTy.getAttr());
-    IntTupleValueAdaptor dummyStride = intTupleCompactColMajor(layoutBuilder, shapeAdaptor);
-    LayoutValueAdaptor inputLayout = layoutBuilder.makeLayout(shapeAdaptor, dummyStride);
 
-    LayoutValueAdaptor result = layoutMakeOrderedLayout(layoutBuilder, inputLayout, orderAttr);
+    LayoutValueAdaptor result = layoutMakeOrderedLayout(layoutBuilder, shapeAdaptor, orderAttr);
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
+    return success();
+  }
+};
+
+class MakeLayoutLikeOpLowering : public OpRewritePattern<MakeLayoutLikeOp> {
+public:
+  using OpRewritePattern<MakeLayoutLikeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(MakeLayoutLikeOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value layoutValue = op.getRef();
+    auto layoutTy = dyn_cast<LayoutType>(layoutValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(layoutValue)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor layoutAdaptor(layoutValue, layoutTy.getAttr());
+    LayoutValueAdaptor result = layoutMakeLayoutLike(layoutBuilder, layoutAdaptor);
     rewriter.replaceOp(op, layoutBuilder.getValue(result));
     return success();
   }
@@ -1810,6 +2004,45 @@ public:
         rewriter, loc, LayoutType::get(op.getContext(), fragmentLayoutAttr), shape, stride);
 
     rewriter.replaceOpWithNewOp<MemRefAllocaOp>(op, resultTy, layout);
+    return success();
+  }
+};
+
+class TileToShapeOpLowering : public OpRewritePattern<TileToShapeOp> {
+public:
+  using OpRewritePattern<TileToShapeOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(TileToShapeOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Value blockValue = op.getBlock();
+    Value trgShapeValue = op.getTrgShape();
+    Value ordShapeValue = op.getOrdShape();
+
+    auto layoutTy = dyn_cast<LayoutType>(blockValue.getType());
+    if (!layoutTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<LayoutType>>(blockValue)))
+      return failure();
+
+    auto trgShapeTy = dyn_cast<IntTupleType>(trgShapeValue.getType());
+    auto ordShapeTy = dyn_cast<IntTupleType>(ordShapeValue.getType());
+    if (!trgShapeTy || !ordShapeTy)
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(trgShapeValue)))
+      return failure();
+    if (!isNormalForm(cast<TypedValue<IntTupleType>>(ordShapeValue)))
+      return failure();
+
+    LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+    LayoutValueAdaptor blockAdaptor(blockValue, layoutTy.getAttr());
+    IntTupleValueAdaptor trgShapeAdaptor =
+        IntTupleValueAdaptor::create(layoutBuilder, trgShapeValue, trgShapeTy.getAttr());
+    IntTupleValueAdaptor ordShapeAdaptor =
+        IntTupleValueAdaptor::create(layoutBuilder, ordShapeValue, ordShapeTy.getAttr());
+
+    LayoutValueAdaptor result =
+        layoutTileToShape(layoutBuilder, blockAdaptor, trgShapeAdaptor, ordShapeTy.getAttr());
+    rewriter.replaceOp(op, layoutBuilder.getValue(result));
     return success();
   }
 };
@@ -2243,7 +2476,7 @@ public:
     LayoutBuilder<LayoutAttr> attrBuilder(ctx);
 
     auto thrValLayoutSrc = cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
-    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    IntAttr numValSrcAttr = intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     int64_t numValSrc = numValSrcAttr.getValue();
 
     IntTupleAttr valSrcSizeAttr =
@@ -2254,7 +2487,7 @@ public:
     Value dstView = MakeViewOp::create(rewriter, loc, dstPtr, layoutBuilder.getValue(valDstLayout));
 
     if (valSize == numValSrc) {
-      CopyAtomCall::create(rewriter, loc, copyAtomVal, srcView, dstView);
+      CopyAtomCall::create(rewriter, loc, copyAtomVal, srcView, dstView, /*pred=*/nullptr);
     } else {
       CopyOp::create(rewriter, loc, copyAtomVal, srcView, dstView, /*pred=*/nullptr);
     }
@@ -2329,7 +2562,7 @@ public:
 
     LayoutBuilder<LayoutAttr> attrBuilder(ctx);
     IntTupleAttr restDstShapeAttr = layoutBuilder.getAttr(restDstShape);
-    IntAttr restSize = intTupleProductImpl(attrBuilder, restDstShapeAttr);
+    IntAttr restSize = intTupleProduct(attrBuilder, restDstShapeAttr).getLeafAsInt();
     if (!restSize.isStatic())
       return failure();
     int32_t numIter = restSize.getValue();
@@ -2343,7 +2576,7 @@ public:
     LayoutValueAdaptor valDstLayoutAdaptor = layoutBuilder.makeLayout(valDstShape, valDstStride);
 
     for (int32_t i = 0; i < numIter; ++i) {
-      auto coordAdaptor = layoutBuilder.makeInt(layoutBuilder.materializeConstantArith(i));
+      auto coordAdaptor = layoutBuilder.materializeConstantLeaf(i);
 
       auto srcOffsetAdaptor =
           layoutCrd2Idx(layoutBuilder, coordAdaptor, restSrcShape, restSrcStride);
@@ -2457,8 +2690,8 @@ public:
 
     IntTupleAttr mShapeAttr = layoutBuilder.getAttr(layoutBuilder.at(dShape, 1));
     IntTupleAttr nShapeAttr = layoutBuilder.getAttr(layoutBuilder.at(dShape, 2));
-    IntAttr mSizeAttr = intTupleProductImpl(attrBuilder, mShapeAttr);
-    IntAttr nSizeAttr = intTupleProductImpl(attrBuilder, nShapeAttr);
+    IntAttr mSizeAttr = intTupleProduct(attrBuilder, mShapeAttr).getLeafAsInt();
+    IntAttr nSizeAttr = intTupleProduct(attrBuilder, nShapeAttr).getLeafAsInt();
     if (!mSizeAttr.isStatic() || !nSizeAttr.isStatic())
       return failure();
     int32_t M = mSizeAttr.getValue();
@@ -2467,7 +2700,7 @@ public:
     int32_t K = 1;
     if (aRank == 3 && bRank == 3) {
       IntTupleAttr kShapeAttr = layoutBuilder.getAttr(layoutBuilder.at(aShape, 2));
-      IntAttr kSizeAttr = intTupleProductImpl(attrBuilder, kShapeAttr);
+      IntAttr kSizeAttr = intTupleProduct(attrBuilder, kShapeAttr).getLeafAsInt();
       if (!kSizeAttr.isStatic())
         return failure();
       K = kSizeAttr.getValue();
@@ -2499,7 +2732,7 @@ public:
         auto kBShape = layoutBuilder.at(bShape, 2);
         auto kBStride = layoutBuilder.at(bStride, 2);
 
-        auto kCoord = layoutBuilder.makeInt(layoutBuilder.materializeConstantArith(k));
+        auto kCoord = layoutBuilder.materializeConstantLeaf(k);
         Value aKOffsetValue =
             layoutBuilder.finalize(layoutCrd2Idx(layoutBuilder, kCoord, kAShape, kAStride));
         Value bKOffsetValue =
@@ -2509,14 +2742,14 @@ public:
       }
 
       for (int32_t m = 0; m < M; ++m) {
-        auto mCoord = layoutBuilder.makeInt(layoutBuilder.materializeConstantArith(m));
+        auto mCoord = layoutBuilder.materializeConstantLeaf(m);
         Value dMOffsetValue =
             layoutBuilder.finalize(layoutCrd2Idx(layoutBuilder, mCoord, mDShape, mDStride));
         Value aMOffsetValue =
             layoutBuilder.finalize(layoutCrd2Idx(layoutBuilder, mCoord, mAShape, mAStride));
 
         for (int32_t n = 0; n < N; ++n) {
-          auto nCoord = layoutBuilder.makeInt(layoutBuilder.materializeConstantArith(n));
+          auto nCoord = layoutBuilder.materializeConstantLeaf(n);
           Value dNOffsetValue =
               layoutBuilder.finalize(layoutCrd2Idx(layoutBuilder, nCoord, nDShape, nDStride));
           Value bNOffsetValue =
@@ -2592,25 +2825,27 @@ public:
                  GetLayoutLowering, GetIterLowering>(context);
 
     patterns.add<SizeOpLowering, CosizeOpLowering>(context);
-    patterns.add<SliceLowering, DiceOpLowering, Crd2IdxLowering>(context);
+    patterns.add<SliceLowering, DiceOpLowering, Crd2IdxLowering, Idx2CrdLowering>(context);
+    patterns.add<GetFlatCoordOpLowering, Get1DCoordOpLowering>(context);
 
-    patterns
-        .add<IntTupleAddOpLowering, IntTupleSubOpLowering, IntTupleMulOpLowering,
-             IntTupleDivOpLowering, IntTupleModOpLowering, IntTupleProductEachOpLowering,
-             IntTupleProductOpLowering, ShapeDivOpLowering, CeilDivOpLowering, ElemLessOpLowering>(
-            context);
+    patterns.add<IntTupleAddOpLowering, IntTupleSubOpLowering, IntTupleMulOpLowering,
+                 IntTupleDivOpLowering, IntTupleModOpLowering, IntTupleProductEachOpLowering,
+                 IntTupleProductOpLowering, IntTupleProductLikeOpLowering, ShapeDivOpLowering,
+                 CeilDivOpLowering, ElemLessOpLowering, EqualOpLowering>(context);
 
-    patterns.add<SelectOpLowering, GroupOpLowering>(context);
+    patterns.add<SelectOpLowering, GroupOpLowering, TakeOpLowering>(context);
     patterns.add<AppendOpLowering, PrependOpLowering>(context);
 
-    // Layout algebra lowerings
     patterns.add<CoalesceOpLowering, CompositionOpLowering, ComplementOpLowering>(context);
     patterns.add<LogicalDivideOpLowering, ZippedDivideOpLowering, TiledDivideOpLowering,
-                 FlatDivideOpLowering, RightInverseOpLowering, RecastLayoutOpLowering>(context);
+                 FlatDivideOpLowering, RightInverseOpLowering, LeftInverseOpLowering,
+                 RecastLayoutOpLowering>(context);
 
     patterns.add<LogicalProductOpLowering, ZippedProductOpLowering, TiledProductOpLowering,
                  FlatProductOpLowering, BlockedProductOpLowering, RakedProductOpLowering>(context);
-    patterns.add<MakeOrderedLayoutOpLowering, MakeFragmentLikeOpLowering>(context);
+    patterns.add<MakeOrderedLayoutOpLowering, MakeLayoutLikeOpLowering,
+                 MakeFragmentLikeOpLowering>(context);
+    patterns.add<TileToShapeOpLowering>(context);
 
     patterns.add<TiledCopyPartitionSrcOpLowering, TiledCopyPartitionDstOpLowering,
                  TiledMmaPartitionOpLowering>(context);
@@ -2619,8 +2854,7 @@ public:
 
     patterns.add<PrintOpLowering>(context);
 
-    int_tuple_rewrite::populateWithGenerated(patterns);
-    layout_rewrite::populateWithGenerated(patterns);
+    populateWithGenerated(patterns);
     memref_rewrite::populateWithGenerated(patterns);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))

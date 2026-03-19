@@ -24,47 +24,32 @@ using namespace mlir::fly;
 namespace {
 
 LayoutAttr GetLayoutAttrFromLayoutLikeType(Type type) {
-  Attribute layoutAttr;
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
-    layoutAttr = memrefTy.getLayout();
+    return memrefTy.getLayout();
   } else if (auto coordTensorTy = dyn_cast<CoordTensorType>(type)) {
-    layoutAttr = coordTensorTy.getLayout();
+    // Branch's CoordTensorType always has LayoutAttr
+    return coordTensorTy.getLayout();
   } else if (auto layoutTy = dyn_cast<LayoutType>(type)) {
-    layoutAttr = layoutTy.getAttr();
+    return layoutTy.getAttr();
   } else if (auto composedTy = dyn_cast<ComposedLayoutType>(type)) {
-    layoutAttr = composedTy.getAttr();
-  } else {
-    return nullptr;
+    return composedTy.getAttr().getOuter();
   }
-
-  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr)) {
-    return layout;
-  } else if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr)) {
-    return composed.getOuter();
-  } else {
-    return nullptr;
-  }
+  return nullptr;
 }
 
 Type RebuildLayoutLikeType(Type type, LayoutAttr newLayoutAttr) {
-  auto replaceOuter = [&](Attribute oldLayout) -> Attribute {
-    if (isa<LayoutAttr>(oldLayout))
-      return newLayoutAttr;
-    auto composed = cast<ComposedLayoutAttr>(oldLayout);
-    return ComposedLayoutAttr::get(composed.getInner(), composed.getOffset(), newLayoutAttr);
-  };
-
   if (auto memrefTy = dyn_cast<fly::MemRefType>(type)) {
-    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(),
-                                replaceOuter(memrefTy.getLayout()), memrefTy.getAlignment(),
-                                memrefTy.getSwizzle());
+    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayoutAttr,
+                                memrefTy.getAlignment(), memrefTy.getSwizzle());
   } else if (auto coordTensorTy = dyn_cast<fly::CoordTensorType>(type)) {
-    return CoordTensorType::get(coordTensorTy.getBase(), replaceOuter(coordTensorTy.getLayout()));
+    // Branch's CoordTensorType always has LayoutAttr
+    return CoordTensorType::get(coordTensorTy.getBase(), newLayoutAttr);
   } else if (auto layoutTy = dyn_cast<fly::LayoutType>(type)) {
     return LayoutType::get(layoutTy.getContext(), newLayoutAttr);
   } else if (auto composedTy = dyn_cast<fly::ComposedLayoutType>(type)) {
-    return ComposedLayoutType::get(composedTy.getAttr().getInner(),
-                                   composedTy.getAttr().getOffset(), newLayoutAttr);
+    return ComposedLayoutType::get(
+        ComposedLayoutAttr::get(composedTy.getAttr().getInner(),
+                                composedTy.getAttr().getOffset(), newLayoutAttr));
   } else {
     llvm_unreachable("Unsupported LayoutLike type");
   }
@@ -83,21 +68,14 @@ Type applyIntTupleTransform(Type inputTy, function_ref<IntTupleAttr(IntTupleAttr
 
 Type applyOffsetOnMemRef(LayoutBuilder<LayoutAttr> &builder, fly::MemRefType memrefTy,
                          IntTupleAttr offset, LayoutAttr layoutAttr) {
-  if (auto composed = dyn_cast<ComposedLayoutAttr>(memrefTy.getLayout())) {
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
-    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
-                                memrefTy.getAlignment(), memrefTy.getSwizzle());
-  } else {
-    int32_t valDiv = memrefTy.getValueDivisibility();
-    IntAttr offsetInt = offset.extractIntFromLeaf();
-    int32_t offsetDiv =
-        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
-    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
-    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), layoutAttr,
-                                AlignAttr::get(memrefTy.getElemTy(), newValDiv),
-                                memrefTy.getSwizzle());
-  }
+  int32_t valDiv = memrefTy.getValueDivisibility();
+  IntAttr offsetInt = offset.getLeafAsInt();
+  int32_t offsetDiv =
+      offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+  int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
+  return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), layoutAttr,
+                              AlignAttr::get(memrefTy.getElemTy(), newValDiv),
+                              memrefTy.getSwizzle());
 }
 
 } // namespace
@@ -212,15 +190,34 @@ FLY_INFER_RETURN_TYPES(MakeIdentityLayoutOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(MakeIdentityTensorOp) {
+  auto shapeTy = dyn_cast<IntTupleType>(operands[0].getType());
+  if (!shapeTy)
+    return emitOptionalError(location,
+                             "MakeIdentityTensorOp: expected IntTupleType for shape, got ",
+                             operands[0].getType());
+
+  IntTupleAttr shapeAttr = shapeTy.getAttr();
+  IntTupleAttr strideAttr = intTupleMakeBasisTupleLike(shapeAttr);
+  LayoutAttr layoutAttr = LayoutAttr::get(context, shapeAttr, strideAttr);
+
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  IntTupleAttr zeroBaseAttr = intTupleTransformLeaf(
+      builder, [](IntTupleAttr attr) { return IntTupleAttr::getLeafStatic(attr.getContext(), 0); },
+      shapeAttr);
+  inferredReturnTypes.assign({CoordTensorType::get(context, zeroBaseAttr, layoutAttr)});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(MakeViewOp) {
   Type iterTy = operands[0].getType();
   Type layoutArgTy = operands[1].getType();
 
-  Attribute layoutAttr;
+  LayoutAttr layoutAttr;
   if (auto layoutTy = dyn_cast<LayoutType>(layoutArgTy)) {
     layoutAttr = layoutTy.getAttr();
   } else if (auto composedTy = dyn_cast<ComposedLayoutType>(layoutArgTy)) {
-    layoutAttr = composedTy.getAttr();
+    layoutAttr = composedTy.getAttr().getOuter();
   } else {
     return emitOptionalError(
         location, "MakeViewOp: expected LayoutType or ComposedLayoutType for operand #1, got ",
@@ -232,8 +229,8 @@ FLY_INFER_RETURN_TYPES(MakeViewOp) {
     return success();
   } else if (auto ptrTy = dyn_cast<PointerType>(iterTy)) {
     inferredReturnTypes.assign(
-        {MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(), layoutAttr,
-                         ptrTy.getAlignment(), ptrTy.getSwizzle())});
+        {fly::MemRefType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(), layoutAttr,
+                              ptrTy.getAlignment(), ptrTy.getSwizzle())});
     return success();
   } else {
     return emitOptionalError(
@@ -252,7 +249,7 @@ FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
                              operands[0].getType());
 
   Type elemTy;
-  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(operands[0].getType())) {
     elemTy = dtypeAttr ? dtypeAttr.getValue() : memrefTy.getElemTy();
   } else {
     if (!dtypeAttr)
@@ -267,7 +264,7 @@ FLY_INFER_RETURN_TYPES(MakeFragmentLikeOp) {
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   LayoutAttr fragmentLayout = layoutMakeFragmentLayout(layoutBuilder, srcLayout);
-  inferredReturnTypes.assign({MemRefType::get(
+  inferredReturnTypes.assign({fly::MemRefType::get(
       elemTy, AddressSpaceAttr::get(context, AddressSpace::Register), fragmentLayout)});
   return success();
 }
@@ -283,18 +280,27 @@ FLY_INFER_RETURN_TYPES(GetScalarOp) {
                              operands[0].getType());
   if (!intTupleType.getAttr().isLeaf())
     return emitOptionalError(location, "GetScalarOp: expected a leaf IntTuple, got ", intTupleType);
-  auto intAttr = intTupleType.getAttr().extractIntFromLeaf();
-  inferredReturnTypes.assign({IntegerType::get(context, intAttr.getWidth())});
+  inferredReturnTypes.assign({IntegerType::get(context, 32)});
   return success();
 }
 
 FLY_INFER_RETURN_TYPES(GetLeavesOp) {
-  auto intTupleType = dyn_cast<IntTupleType>(operands[0].getType());
-  if (!intTupleType)
-    return emitOptionalError(location, "GetLeavesOp: expected IntTupleType, got ",
+  auto inputTupleTy = dyn_cast<IntTupleType>(operands[0].getType());
+  if (inputTupleTy) {
+    IntTupleBuilder<IntTupleAttr> builder(context);
+    IntTupleAttr flat = intTupleFlatten(builder, inputTupleTy.getAttr());
+    inferredReturnTypes.assign({IntTupleType::get(flat)});
+    return success();
+  }
+  auto inputLayoutTy = dyn_cast<LayoutType>(operands[0].getType());
+  if (!inputLayoutTy)
+    return emitOptionalError(location,
+                             "GetLeavesOp: expected IntTupleType or LayoutType, got ",
                              operands[0].getType());
-  // transform_leaf on intTupleAttr,
-  return failure();
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  IntTupleAttr flat = intTupleFlatten(builder, inputLayoutTy.getAttr().getShape());
+  inferredReturnTypes.assign({IntTupleType::get(flat)});
+  return success();
 }
 
 FLY_INFER_RETURN_TYPES(GetShapeOp) {
@@ -311,13 +317,6 @@ FLY_INFER_RETURN_TYPES(GetStrideOp) {
 
   if (isa<ComposedLayoutType>(inputTy))
     return emitOptionalError(location, "GetStrideOp: unsupported ComposedLayoutType");
-  if (auto memrefTy = dyn_cast<fly::MemRefType>(inputTy);
-      memrefTy && isa<ComposedLayoutAttr>(memrefTy.getLayout()))
-    return emitOptionalError(location, "GetStrideOp: unsupported MemRefType with ComposedLayout");
-  if (auto coordTensorTy = dyn_cast<CoordTensorType>(inputTy);
-      coordTensorTy && isa<ComposedLayoutAttr>(coordTensorTy.getLayout()))
-    return emitOptionalError(location,
-                             "GetStrideOp: unsupported CoordTensorType with ComposedLayout");
 
   auto layout = GetLayoutAttrFromLayoutLikeType(inputTy);
   if (!layout)
@@ -328,27 +327,27 @@ FLY_INFER_RETURN_TYPES(GetStrideOp) {
 }
 
 FLY_INFER_RETURN_TYPES(GetLayoutOp) {
-  Attribute layoutAttr;
-  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
-    layoutAttr = memrefTy.getLayout();
-  } else if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
-    layoutAttr = coordTensorTy.getLayout();
-  } else {
-    return emitOptionalError(location, "GetLayoutOp: expected TensorLikeType, got ",
-                             operands[0].getType());
-  }
-  if (auto layout = dyn_cast<LayoutAttr>(layoutAttr)) {
-    inferredReturnTypes.assign({LayoutType::get(context, layout)});
-    return success();
-  } else if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr)) {
-    inferredReturnTypes.assign({ComposedLayoutType::get(context, composed)});
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(operands[0].getType())) {
+    inferredReturnTypes.assign({LayoutType::get(context, memrefTy.getLayout())});
     return success();
   }
-  return emitOptionalError(location, "GetLayoutOp: unsupported layout attribute type ", layoutAttr);
+  if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
+    auto layoutAttr = coordTensorTy.getLayout();
+    if (auto layout = dyn_cast<LayoutAttr>(layoutAttr)) {
+      inferredReturnTypes.assign({LayoutType::get(context, layout)});
+      return success();
+    } else if (auto composed = dyn_cast<ComposedLayoutAttr>(layoutAttr)) {
+      inferredReturnTypes.assign({ComposedLayoutType::get(context, composed)});
+      return success();
+    }
+    return emitOptionalError(location, "GetLayoutOp: unsupported layout attribute type");
+  }
+  return emitOptionalError(location, "GetLayoutOp: expected TensorLikeType, got ",
+                           operands[0].getType());
 }
 
 FLY_INFER_RETURN_TYPES(GetIterOp) {
-  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(operands[0].getType())) {
     inferredReturnTypes.assign({PointerType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(),
                                                  memrefTy.getAlignment(), memrefTy.getSwizzle())});
     return success();
@@ -358,6 +357,28 @@ FLY_INFER_RETURN_TYPES(GetIterOp) {
     return success();
   }
   return emitOptionalError(location, "GetIterOp: expected TensorLikeType, got ",
+                           operands[0].getType());
+}
+
+FLY_INFER_RETURN_TYPES(GetLeafOp) {
+  int32_t leafIdx = properties.as<Properties *>()->leaf_idx.getInt();
+
+  if (auto layoutType = dyn_cast<LayoutType>(operands[0].getType())) {
+    LayoutAttr profile = layoutType.getAttr();
+    LayoutAttr leafProfile = profile.at(leafIdx);
+    inferredReturnTypes.assign({LayoutType::get(context, leafProfile)});
+    return success();
+  }
+
+  if (auto intTupleType = dyn_cast<IntTupleType>(operands[0].getType())) {
+    IntTupleAttr profile = intTupleType.getAttr();
+    IntTupleAttr leafProfile = profile.at(leafIdx);
+    inferredReturnTypes.assign({IntTupleType::get(leafProfile)});
+    return success();
+  }
+
+  return emitOptionalError(location,
+                           "GetLeafOp: expected LayoutType or IntTupleType, got ",
                            operands[0].getType());
 }
 
@@ -583,10 +604,8 @@ FLY_INFER_RETURN_TYPES(GetOp) {
   int32_t depth = -1;
   if (auto nested = dyn_cast<NestedTypeInterface>(inputTy))
     depth = nested.depth();
-  else if (auto memrefTy = dyn_cast<MemRefType>(inputTy))
+  else if (auto memrefTy = dyn_cast<fly::MemRefType>(inputTy))
     depth = cast<NestedAttrInterface>(memrefTy.getLayout()).depth();
-  else if (auto coordTensorTy = dyn_cast<CoordTensorType>(inputTy))
-    depth = cast<NestedAttrInterface>(coordTensorTy.getLayout()).depth();
   else
     return emitOptionalError(location, "GetOp: unsupported input type ", inputTy);
 
@@ -601,11 +620,15 @@ FLY_INFER_RETURN_TYPES(GetOp) {
     resultTy = layoutTy.at(mode);
   else if (auto composedTy = dyn_cast<ComposedLayoutType>(inputTy))
     resultTy = composedTy.at(mode);
-  else if (auto memrefTy = dyn_cast<MemRefType>(inputTy))
-    resultTy = memrefTy.at(mode);
-  else if (auto coordTensorTy = dyn_cast<CoordTensorType>(inputTy))
-    resultTy = coordTensorTy.at(mode);
-  else
+  else if (auto memrefTy = dyn_cast<fly::MemRefType>(inputTy)) {
+    // Branch MemRefType doesn't have .at(mode), compute via layout
+    LayoutAttr layout = memrefTy.getLayout();
+    LayoutType layoutTy = LayoutType::get(context, layout);
+    LayoutType resultLayoutTy = layoutTy.at(mode);
+    resultTy = fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(),
+                               resultLayoutTy.getAttr(), memrefTy.getAlignment(),
+                               memrefTy.getSwizzle());
+  } else
     return emitOptionalError(location, "GetOp: unsupported input type ", inputTy);
 
   inferredReturnTypes.assign({resultTy});
@@ -739,7 +762,8 @@ FLY_INFER_RETURN_TYPES(PrependOp) {
     LayoutAttr eAttr = elemLayout.getAttr();
     IntTupleAttr newShape = intTuplePrepend(builder, baseAttr.getShape(), eAttr.getShape(), n);
     IntTupleAttr newStride = intTuplePrepend(builder, baseAttr.getStride(), eAttr.getStride(), n);
-    inferredReturnTypes.assign({LayoutType::get(LayoutAttr::get(newShape, newStride))});
+    inferredReturnTypes.assign(
+        {LayoutType::get(context, LayoutAttr::get(context, newShape, newStride))});
     return success();
   }
 
@@ -753,8 +777,9 @@ FLY_INFER_RETURN_TYPES(PrependOp) {
     LayoutAttr eAttr = elemLayout.getAttr();
     IntTupleAttr newShape = intTuplePrepend(builder, outer.getShape(), eAttr.getShape(), n);
     IntTupleAttr newStride = intTuplePrepend(builder, outer.getStride(), eAttr.getStride(), n);
-    LayoutAttr newOuter = LayoutAttr::get(newShape, newStride);
-    inferredReturnTypes.assign({ComposedLayoutType::get(ca.getInner(), ca.getOffset(), newOuter)});
+    LayoutAttr newOuter = LayoutAttr::get(context, newShape, newStride);
+    inferredReturnTypes.assign({ComposedLayoutType::get(
+        context, ComposedLayoutAttr::get(context, ca.getInner(), ca.getOffset(), newOuter))});
     return success();
   }
 
@@ -776,12 +801,6 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
     IntTupleAttr newStride = intTupleSlice(builder, layout.getStride(), coordAttr);
     return LayoutAttr::get(context, newShape, newStride);
   };
-  auto sliceComposed = [&](ComposedLayoutAttr composed) -> ComposedLayoutAttr {
-    LayoutAttr outer = composed.getOuter();
-    IntTupleAttr offset = layoutCrd2Idx(builder, coordAttr, outer.getShape(), outer.getStride());
-    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
-    return ComposedLayoutAttr::get(composed.getInner(), newOffset, sliceLayout(outer));
-  };
 
   if (auto srcTupleTy = dyn_cast<IntTupleType>(srcTy)) {
     IntTupleAttr result = intTupleSlice(builder, srcTupleTy.getAttr(), coordAttr);
@@ -793,26 +812,24 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
     return success();
   }
   if (auto srcComposedTy = dyn_cast<ComposedLayoutType>(srcTy)) {
-    inferredReturnTypes.assign({ComposedLayoutType::get(sliceComposed(srcComposedTy.getAttr()))});
+    ComposedLayoutAttr composed = srcComposedTy.getAttr();
+    LayoutAttr outer = composed.getOuter();
+    IntTupleAttr offset = layoutCrd2Idx(builder, coordAttr, outer.getShape(), outer.getStride());
+    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
+    auto slicedComposed =
+        ComposedLayoutAttr::get(composed.getInner(), newOffset, sliceLayout(outer));
+    inferredReturnTypes.assign({ComposedLayoutType::get(slicedComposed)});
     return success();
   }
   if (auto srcMemRefTy = dyn_cast<fly::MemRefType>(srcTy)) {
-    Attribute layout = srcMemRefTy.getLayout();
-    Attribute newLayout;
+    LayoutAttr layout = srcMemRefTy.getLayout();
+    LayoutAttr newLayout = sliceLayout(layout);
+    IntTupleAttr offsetAttr = layoutCrd2Idx(builder, coordAttr, layout.getShape(), layout.getStride());
+    IntAttr offsetInt = offsetAttr.getLeafAsInt();
     int32_t valDiv = srcMemRefTy.getValueDivisibility();
-    int32_t newValDiv;
-    if (auto la = dyn_cast<LayoutAttr>(layout)) {
-      newLayout = sliceLayout(la);
-      IntTupleAttr offsetAttr = layoutCrd2Idx(builder, coordAttr, la.getShape(), la.getStride());
-      IntAttr offsetInt = offsetAttr.extractIntFromLeaf();
-      int32_t offsetDiv =
-          offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
-      newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
-    } else {
-      newLayout = sliceComposed(cast<ComposedLayoutAttr>(layout));
-      newValDiv = valDiv;
-    }
-
+    int32_t offsetDiv =
+        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
     inferredReturnTypes.assign({fly::MemRefType::get(
         srcMemRefTy.getElemTy(), srcMemRefTy.getAddressSpace(), newLayout,
         AlignAttr::get(srcMemRefTy.getElemTy(), newValDiv), srcMemRefTy.getSwizzle())});
@@ -820,12 +837,8 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
   }
   if (auto srcCoordTensorTy = dyn_cast<CoordTensorType>(srcTy)) {
     IntTupleAttr newBase = intTupleSlice(builder, srcCoordTensorTy.getBase(), coordAttr);
-    Attribute layout = srcCoordTensorTy.getLayout();
-    Attribute newLayout;
-    if (auto la = dyn_cast<LayoutAttr>(layout))
-      newLayout = sliceLayout(la);
-    else
-      newLayout = sliceComposed(cast<ComposedLayoutAttr>(layout));
+    LayoutAttr layout = srcCoordTensorTy.getLayout();
+    LayoutAttr newLayout = sliceLayout(layout);
     inferredReturnTypes.assign({CoordTensorType::get(newBase, newLayout)});
     return success();
   }
@@ -925,12 +938,11 @@ FLY_INFER_RETURN_TYPES(Crd2IdxOp) {
         layoutCrd2Idx(builder, coordAttr, layoutAttr.getShape(), layoutAttr.getStride());
     inferredReturnTypes.assign({IntTupleType::get(result)});
     return success();
-  } else if (auto composedTy = dyn_cast<ComposedLayoutType>(operands[1].getType())) {
-    LayoutBuilder<LayoutAttr> layoutBuilder(context);
-    IntTupleAttr result =
-        layoutCrd2Idx(layoutBuilder, coordAttr, static_cast<Attribute>(composedTy.getAttr()));
-    inferredReturnTypes.assign({IntTupleType::get(result)});
-    return success();
+  }
+
+  if (auto composedTy = dyn_cast<ComposedLayoutType>(operands[1].getType())) {
+    return emitOptionalError(location,
+                             "Crd2IdxOp: ComposedLayoutType not yet implemented");
   }
 
   return emitOptionalError(location,
@@ -977,6 +989,21 @@ FLY_INFER_RETURN_TYPES(GetFlatCoordOp) {
   return success();
 }
 
+FLY_INFER_RETURN_TYPES(GetHierCoordOp) {
+  auto inputTupleTy = dyn_cast<IntTupleType>(operands[1].getType());
+  if (inputTupleTy) {
+    inferredReturnTypes.assign({inputTupleTy});
+    return success();
+  }
+  auto inputLayoutTy = dyn_cast<LayoutType>(operands[1].getType());
+  if (!inputLayoutTy)
+    return emitOptionalError(location,
+                             "GetHierCoordOp: expected IntTupleType or LayoutType for operand #1, got ",
+                             operands[1].getType());
+  inferredReturnTypes.assign({IntTupleType::get(inputLayoutTy.getAttr().getShape())});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(Get1DCoordOp) {
   auto indexTy = dyn_cast<IntTupleType>(operands[0].getType());
   if (!indexTy)
@@ -989,10 +1016,11 @@ FLY_INFER_RETURN_TYPES(Get1DCoordOp) {
 
   LayoutAttr layoutAttr = layoutTy.getAttr();
   IntTupleBuilder<IntTupleAttr> builder(context);
-  IntTupleAttr result =
+  IntTupleAttr hierCoord =
       layoutIdx2Crd(builder, indexTy.getAttr(), layoutAttr.getShape(), layoutAttr.getStride());
-  result = layoutCrd2IdxColMajor(builder, result, layoutAttr.getShape());
-  inferredReturnTypes.assign({IntTupleType::get(result)});
+  IntAttr colMajorIdx =
+      detail::layoutCrd2IdxColMajor(builder, hierCoord, layoutAttr.getShape());
+  inferredReturnTypes.assign({IntTupleType::get(IntTupleAttr::get(colMajorIdx))});
   return success();
 }
 
@@ -1284,21 +1312,22 @@ FLY_INFER_RETURN_TYPES(RakedProductOp) {
 }
 
 FLY_INFER_RETURN_TYPES(RecastLayoutOp) {
-  int32_t newTypeBits = properties.as<Properties *>()->new_type_bits.getInt();
-  int32_t oldTypeBits = properties.as<Properties *>()->old_type_bits.getInt();
+  RecastLayoutOp::Adaptor adaptor(operands, attributes, properties, regions);
+  int32_t newTypeBits = adaptor.getNewTypeBits();
+  int32_t oldTypeBits = adaptor.getOldTypeBits();
 
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto layoutTy = dyn_cast<LayoutType>(operands[0].getType())) {
     LayoutAttr layoutAttr = layoutTy.getAttr();
     LayoutAttr result = layoutRecast(layoutBuilder, layoutAttr, oldTypeBits, newTypeBits);
-    inferredReturnTypes.assign({LayoutType::get(result)});
+    inferredReturnTypes.assign({LayoutType::get(context, result)});
     return success();
   } else if (auto composedTy = dyn_cast<ComposedLayoutType>(operands[0].getType())) {
+    // Recast only the outer layout
     ComposedLayoutAttr composedAttr = composedTy.getAttr();
-    Attribute result =
-        layoutRecast(layoutBuilder, static_cast<Attribute>(composedAttr), oldTypeBits, newTypeBits);
-    assert(isa<ComposedLayoutAttr>(result));
-    inferredReturnTypes.assign({ComposedLayoutType::get(cast<ComposedLayoutAttr>(result))});
+    LayoutAttr result = layoutRecast(layoutBuilder, composedAttr.getOuter(), oldTypeBits, newTypeBits);
+    inferredReturnTypes.assign({ComposedLayoutType::get(
+        context, ComposedLayoutAttr::get(context, composedAttr.getInner(), composedAttr.getOffset(), result))});
     return success();
   } else {
     return emitOptionalError(
@@ -1342,10 +1371,6 @@ FLY_INFER_RETURN_TYPES(MakeTiledCopyOp) {
   if (!layoutTy)
     return emitOptionalError(location, "MakeTiledCopyOp: expected LayoutType for operand #1, got ",
                              operands[1].getType());
-  if (!layoutTy.isStatic()) {
-    return emitOptionalError(location, "MakeTiledCopyOp: LayoutType is not static, got ",
-                             operands[1].getType());
-  }
   if (!tileTy)
     return emitOptionalError(location, "MakeTiledCopyOp: expected TileType for operand #2, got ",
                              operands[2].getType());
@@ -1361,17 +1386,17 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
   if (!layoutTy)
     return emitOptionalError(location, "MakeTiledMmaOp: expected LayoutType for operand #1, got ",
                              operands[1].getType());
-  if (!layoutTy.isStatic()) {
-    return emitOptionalError(location, "MakeTiledMmaOp: LayoutType is not static, got ",
-                             operands[1].getType());
-  }
 
-  TileType tileTy = TiledMmaType::getDefaultPermutationMNK(context);
+  TileType tileTy;
   if (operands.size() > 2 && operands[2]) {
     tileTy = dyn_cast<TileType>(operands[2].getType());
     if (!tileTy)
       return emitOptionalError(location, "MakeTiledMmaOp: expected TileType for operand #2, got ",
                                operands[2].getType());
+  } else {
+    Attribute noneVal = IntAttr::getNone(context);
+    SmallVector<Attribute> elems(3, noneVal);
+    tileTy = TileType::get(context, TileAttr::get(ArrayAttr::get(context, elems)));
   }
 
   auto tiledMmaTy = TiledMmaType::get(context, mmaAtomTy, layoutTy, tileTy);
@@ -1381,7 +1406,7 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[1].getType());
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledCopyTy)
     return emitOptionalError(location,
@@ -1404,11 +1429,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
-
-  LayoutAttr srcLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
-  if (!srcLayout)
-    return emitOptionalError(location,
-                             "TiledCopyPartitionSrcOp: unsupported layout type for operand #1");
+  LayoutAttr srcLayout = memrefTy.getLayout();
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView =
@@ -1436,7 +1457,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[1].getType());
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledCopyTy)
     return emitOptionalError(location,
@@ -1459,11 +1480,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
-
-  LayoutAttr dstLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
-  if (!dstLayout)
-    return emitOptionalError(location,
-                             "TiledCopyPartitionDstOp: unsupported layout type for operand #1");
+  LayoutAttr dstLayout = memrefTy.getLayout();
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView =
@@ -1491,7 +1508,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
 
 FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[1].getType());
   if (!tiledCopyTy)
     return emitOptionalError(location,
                              "TiledCopyRetileOp: expected TiledCopyType for operand #0, got ",
@@ -1500,10 +1517,6 @@ FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
     return emitOptionalError(location,
                              "TiledCopyRetileOp: expected MemRefType for operand #1, got ",
                              operands[1].getType());
-  if (memrefTy.getAddressSpace().getValue() != AddressSpace::Register)
-    return emitOptionalError(
-        location, "TiledCopyRetileOp: expected Register address space for operand #1, got ",
-        memrefTy.getAddressSpace());
 
   auto copyAtom = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
   if (!copyAtom)
@@ -1512,22 +1525,22 @@ FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
 
   LayoutAttr tiledLayoutThrVal = tiledCopyTy.getLayoutThrVal().getAttr();
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
-  auto inputLayout = dyn_cast<LayoutAttr>(memrefTy.getLayout());
-  if (!inputLayout)
-    return emitOptionalError(location,
-                             "TiledCopyRetileOp: MemRefType with ComposedLayout is not supported");
+  LayoutAttr inputLayout = memrefTy.getLayout();
+
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr retiled =
       layoutTiledCopyRetile(builder, copyAtom, tiledLayoutThrVal, tileMN, inputLayout);
 
-  inferredReturnTypes.assign({RebuildLayoutLikeType(memrefTy, retiled)});
+  inferredReturnTypes.assign(
+      {fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), retiled,
+                       memrefTy.getAlignment(), memrefTy.getSwizzle())});
   return success();
 }
 
 FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   auto operandId = properties.as<Properties *>()->operand_id.getValue();
   auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[1].getType());
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledMmaTy)
     return emitOptionalError(location,
@@ -1550,10 +1563,7 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
-  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
-  if (!inputLayout)
-    return emitOptionalError(location,
-                             "TiledMmaPartitionOp: unsupported layout type for operand #1");
+  LayoutAttr inputLayout = memrefTy.getLayout();
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
@@ -1619,7 +1629,7 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionShapeOp) {
 FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
   auto operandId = properties.as<Properties *>()->operand_id.getValue();
   auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[1].getType());
   if (!tiledMmaTy)
     return emitOptionalError(location,
                              "MmaMakeFragmentOp: expected TiledMmaType for operand #0, got ",
@@ -1651,10 +1661,7 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
     break;
   }
 
-  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
-  if (!inputLayout)
-    return emitOptionalError(location, "MmaMakeFragmentOp: unsupported layout type for operand #1");
-
+  LayoutAttr inputLayout = memrefTy.getLayout();
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
 
@@ -1674,7 +1681,7 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
 
   LayoutAttr fragmentLayout = layoutMakeFragmentLayout(builder, partitioned);
 
-  inferredReturnTypes.assign({MemRefType::get(
+  inferredReturnTypes.assign({fly::MemRefType::get(
       elemTy, AddressSpaceAttr::get(context, AddressSpace::Register), fragmentLayout)});
   return success();
 }
@@ -1714,12 +1721,12 @@ FLY_INFER_RETURN_TYPES(AddOffsetOp) {
                              operands[1].getType());
 
   if (auto ptrTy = dyn_cast<PointerType>(operands[0].getType())) {
-    if (!offsetTy.getAttr().isLeafInt())
+    if (!offsetTy.getAttr().isLeaf())
       return emitOptionalError(
-          location, "AddOffsetOp: offset must be a scalar (leaf int) IntTuple, got ", offsetTy);
+          location, "AddOffsetOp: offset must be a scalar (leaf) IntTuple, got ", offsetTy);
 
     int32_t valDiv = ptrTy.getValueDivisibility();
-    IntAttr offsetInt = offsetTy.getAttr().extractIntFromLeaf();
+    IntAttr offsetInt = offsetTy.getAttr().getLeafAsInt();
     int32_t offsetDiv =
         offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
     int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
@@ -1773,7 +1780,7 @@ FLY_INFER_RETURN_TYPES(PtrLoadOp) {
 }
 
 FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
-  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(operands[0].getType())) {
     inferredReturnTypes.push_back(memrefTy.getElemTy());
     return success();
   }
@@ -1786,26 +1793,20 @@ FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
 }
 
 FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
+  auto memrefTy = dyn_cast<fly::MemRefType>(operands[0].getType());
   if (!memrefTy)
     return emitOptionalError(location, "MemRefLoadVecOp: expected MemRefType, got ",
                              operands[0].getType());
-  if (memrefTy.getAddressSpace().getValue() != AddressSpace::Register)
-    return emitOptionalError(location, "MemRefLoadVecOp: expected Register address space, got ",
-                             memrefTy.getAddressSpace());
-  auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
-  if (!layoutAttr)
-    return emitOptionalError(location,
-                             "MemRefLoadVecOp: MemRefType with ComposedLayout is not supported");
+
+  LayoutAttr layoutAttr = memrefTy.getLayout();
   IntTupleBuilder<IntTupleAttr> builder(context);
-  IntTupleAttr size = intTupleProduct(builder, layoutAttr.getShape());
+  IntAttr size = cast<IntAttr>(intTupleProduct(builder, layoutAttr.getShape()).getValue());
 
-  if (!size.isLeafInt() || !size.isStatic())
-    return emitOptionalError(
-        location, "MemRefLoadVecOp: layout size must be static and leaf int, got ", size);
+  if (!size.isStatic())
+    return emitOptionalError(location,
+                             "MemRefLoadVecOp: layout size must be static, got ", size);
 
-  inferredReturnTypes.push_back(
-      VectorType::get({size.getLeafAsInt().getValue()}, memrefTy.getElemTy()));
+  inferredReturnTypes.push_back(VectorType::get({size.getValue()}, memrefTy.getElemTy()));
   return success();
 }
 

@@ -206,13 +206,9 @@ int32_t mlirFlyCopyOpUniversalCopyTypeGetBitSize(MlirType type) {
 // CopyAtomType
 //===----------------------------------------------------------------------===//
 
-bool mlirTypeIsAFlyCopyAtomType(MlirType type) {
-  return isa<CopyAtomType>(unwrap(type));
-}
+bool mlirTypeIsAFlyCopyAtomType(MlirType type) { return isa<CopyAtomType>(unwrap(type)); }
 
-MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) {
-  return wrap(CopyAtomType::getTypeID());
-}
+MlirTypeID mlirFlyCopyAtomTypeGetTypeID(void) { return wrap(CopyAtomType::getTypeID()); }
 
 MlirType mlirFlyCopyAtomTypeGet(MlirType copyOp, int32_t valBits) {
   return wrap(CopyAtomType::get(unwrap(copyOp), valBits));
@@ -313,7 +309,7 @@ static MlirType tiledCopyGetTiledTVLayout(MlirType type, bool isSrc) {
     if (auto intVal = dyn_cast<IntAttr>(tileElem))
       tileSize = intVal.getValue();
     else if (auto layoutVal = dyn_cast<LayoutAttr>(tileElem))
-      tileSize = attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, layoutVal.getShape()));
+      tileSize = intTupleProduct(attrBuilder, layoutVal.getShape()).getLeafAsInt().getValue();
     else
       llvm_unreachable("unsupported tile element type");
     tilerShapeElems.push_back(IntTupleAttr::getLeafStatic(ctx, tileSize));
@@ -382,15 +378,13 @@ MlirType mlirFlyTiledMmaTypeGetTileSizeMNK(MlirType type) {
   SmallVector<Attribute> tileSizeElems;
   for (int i = 0; i < 3; ++i) {
     if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
-      auto atomShapeI =
-          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
-      auto thrSizeI = attrBuilder.getStaticValue(
-          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
+      auto atomShapeI = intTupleProduct(attrBuilder, shapeMNK.at(i)).getLeafAsInt().getValue();
+      auto thrSizeI =
+          intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt().getValue();
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
     } else {
       auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI =
-          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
+      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt().getValue();
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
     }
   }
@@ -441,15 +435,13 @@ static MlirType tiledMmaGetTiledTVLayout(MlirType type, MmaOperand operandId) {
   SmallVector<Attribute> tileSizeElems;
   for (int i : {idx0, idx1}) {
     if (i >= permutationMNK.rank() || permutationMNK.isNoneMode(i)) {
-      auto atomShapeI =
-          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, shapeMNK.at(i)));
-      auto thrSizeI = attrBuilder.getStaticValue(
-          intTupleProductImpl(attrBuilder, atomLayoutMNK.getShape().at(i)));
+      auto atomShapeI = intTupleProduct(attrBuilder, shapeMNK.at(i)).getLeafAsInt().getValue();
+      auto thrSizeI =
+          intTupleProduct(attrBuilder, atomLayoutMNK.getShape().at(i)).getLeafAsInt().getValue();
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, atomShapeI * thrSizeI));
     } else {
       auto permLayout = cast<LayoutAttr>(permutationMNK.at(i));
-      auto sizeI =
-          attrBuilder.getStaticValue(intTupleProductImpl(attrBuilder, permLayout.getShape()));
+      auto sizeI = intTupleProduct(attrBuilder, permLayout.getShape()).getLeafAsInt().getValue();
       tileSizeElems.push_back(IntTupleAttr::getLeafStatic(ctx, sizeI));
     }
   }

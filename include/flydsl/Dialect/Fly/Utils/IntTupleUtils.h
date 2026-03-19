@@ -1,5 +1,5 @@
-#ifndef FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
-#define FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
+#ifndef FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
+#define FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Attributes.h"
@@ -131,6 +131,26 @@ public:
     return value;
   }
 
+  IntTupleAttr materializeConstantLeaf(int32_t value, ArrayRef<int32_t> modes = {}) const {
+    if (modes.empty()) {
+      return IntTupleAttr::get(IntAttr::getStatic(ctx, value));
+    } else {
+      return IntTupleAttr::get(BasisAttr::get(ctx, IntAttr::getStatic(ctx, value), modes));
+    }
+  }
+  IntTupleAttr materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
+    assert(value.isStatic() && "Value must be static");
+    if (modes.empty()) {
+      return IntTupleAttr::get(value);
+    } else {
+      return IntTupleAttr::get(BasisAttr::get(ctx, value, modes));
+    }
+  }
+  IntTupleAttr materializeConstantLeaf(BasisAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    return IntTupleAttr::get(value);
+  }
+
   IntTupleAttr materializeConstantTuple(IntTupleAttr attr) const {
     assert(attr.isStatic() && "Tuple must be static");
     return attr;
@@ -253,6 +273,21 @@ public:
     return ArithValue{
         arith::ConstantIntOp::create(builder, loc, value.getValue(), value.getWidth()).getResult(),
         value};
+  }
+
+  IntTupleValueAdaptor materializeConstantLeaf(int32_t value, ArrayRef<int32_t> modes = {}) const {
+    auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    return materializeConstantTuple(attr);
+  }
+  IntTupleValueAdaptor materializeConstantLeaf(IntAttr value, ArrayRef<int32_t> modes = {}) const {
+    assert(value.isStatic() && "Value must be static");
+    auto attr = attrBuilder.materializeConstantLeaf(value, modes);
+    return materializeConstantTuple(attr);
+  }
+  IntTupleValueAdaptor materializeConstantLeaf(BasisAttr value) const {
+    assert(value.isStatic() && "Value must be static");
+    auto attr = attrBuilder.materializeConstantLeaf(value);
+    return materializeConstantTuple(attr);
   }
 
   IntTupleValueAdaptor materializeConstantTuple(IntTupleAttr attr) const {
@@ -441,6 +476,18 @@ intTupleProductImpl(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
 
 template <class IntTuple> IntTuple intTupleProduct(IntTupleBuilder<IntTuple> &builder, IntTuple t) {
   return builder.makeInt(intTupleProductImpl(builder, t));
+}
+
+template <class IntTuple>
+IntTuple intTupleProductLike(IntTupleBuilder<IntTuple> &builder, IntTuple tuple, IntTuple guide) {
+  if (guide.isLeaf()) {
+    return intTupleProduct(builder, tuple);
+  }
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  for (int i = 0; i < guide.rank(); ++i) {
+    collector.push_back(intTupleProductLike(builder, builder.at(tuple, i), builder.at(guide, i)));
+  }
+  return builder.makeTuple(collector);
 }
 
 template <class IntTuple>
@@ -713,6 +760,21 @@ IntTuple intTupleTransformLeaf(const IntTupleBuilder<IntTuple> &builder, F &&fn,
     collector.push_back(intTupleTransformLeaf(builder, fn, builder.at(t0, i), builder.at(t1, i),
                                               builder.at(t2, i)));
   }
+  return builder.makeTuple(collector);
+}
+
+template <class IntTuple>
+IntTuple intTupleTake(const IntTupleBuilder<IntTuple> &builder, IntTuple val, int32_t begin,
+                      int32_t end) {
+  assert(!val.isLeaf() && "intTupleTake expects a non-leaf tuple");
+  if (end == -1)
+    end = val.rank();
+  assert(begin >= 0 && end <= val.rank() && begin <= end);
+  if (end - begin == 1)
+    return builder.at(val, begin);
+  typename IntTupleBuilder<IntTuple>::ElemCollector collector;
+  for (int32_t i = begin; i < end; ++i)
+    collector.push_back(builder.at(val, i));
   return builder.makeTuple(collector);
 }
 
@@ -1016,6 +1078,22 @@ IntTuple intTupleElemGreaterEqual(const IntTupleBuilder<IntTuple> &builder, IntT
   return builder.makeInt(builder.logicalNot(detail::intTupleElemLessImpl(builder, lhs, rhs)));
 }
 
+template <class IntTuple>
+IntTuple intTupleEqual(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
+  if (lhs.isLeaf() && rhs.isLeaf()) {
+    return builder.makeInt(builder.eq(builder.getArithValue(lhs), builder.getArithValue(rhs)));
+  }
+  if (lhs.isLeaf() != rhs.isLeaf() || lhs.rank() != rhs.rank()) {
+    return builder.materializeConstantLeaf(0);
+  }
+  auto resultVal = builder.getArithValue(intTupleEqual(builder, builder.at(lhs, 0), builder.at(rhs, 0)));
+  for (int i = 1; i < lhs.rank(); ++i) {
+    resultVal =
+        builder.logicalAnd(resultVal, builder.getArithValue(intTupleEqual(builder, builder.at(lhs, i), builder.at(rhs, i))));
+  }
+  return builder.makeInt(resultVal);
+}
+
 //===----------------------------------------------------------------------===//
 // Compact stride generation
 //===----------------------------------------------------------------------===//
@@ -1061,7 +1139,7 @@ IntTuple intTupleCompactColMajor(IntTupleBuilder<IntTuple> &builder, IntTuple sh
 //===----------------------------------------------------------------------===//
 
 IntTupleAttr intTupleExpandBasis(BasisAttr attr);
-IntTupleAttr intTupleMakeBasisLike(IntTupleAttr profile);
+IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile);
 
 IntTupleAttr operator+(BasisAttr lhs, BasisAttr rhs);
 IntTupleAttr operator+(BasisAttr lhs, IntTupleAttr rhs);
@@ -1075,4 +1153,4 @@ BasisAttr basisCeilDiv(BasisAttr lhs, IntAttr rhs);
 
 } // namespace mlir::fly
 
-#endif // FLYDSL_DIALECT_UTILS_INTTUPLEUTILS_H
+#endif // FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H

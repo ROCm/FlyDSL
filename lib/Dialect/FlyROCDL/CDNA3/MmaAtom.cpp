@@ -37,6 +37,11 @@ Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
 
+Type MmaAtomCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
+
 Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
@@ -45,6 +50,7 @@ Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutB() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),
                                   getElemTyAcc());
 }
+
 Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutC() const {
   int M = getM();
   int N = getN();

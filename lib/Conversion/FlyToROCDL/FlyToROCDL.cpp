@@ -551,7 +551,7 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null or non-LayoutAttr");
-    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    IntAttr numValSrcAttr = intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
@@ -592,7 +592,7 @@ private:
     auto thrValLayoutSrc = dyn_cast<LayoutAttr>(copyAtomTy.getThrValLayoutSrc());
     if (!thrValLayoutSrc)
       return rewriter.notifyMatchFailure(op, "getThrValLayoutSrc returned null");
-    IntAttr numValSrcAttr = intTupleProductImpl(attrBuilder, thrValLayoutSrc.getShape().at(1));
+    IntAttr numValSrcAttr = intTupleProduct(attrBuilder, thrValLayoutSrc.getShape().at(1)).getLeafAsInt();
     if (!numValSrcAttr.isStatic())
       return rewriter.notifyMatchFailure(op, "NumValSrc is not static");
     int64_t numValSrc = numValSrcAttr.getValue();
