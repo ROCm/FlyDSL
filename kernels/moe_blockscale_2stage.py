@@ -97,6 +97,7 @@ def compile_moe_blockscale_gemm1(
     """
 
     gpu_arch = get_hip_arch()
+    _is_gfx950 = str(gpu_arch).startswith("gfx95")
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -735,50 +736,9 @@ def compile_moe_blockscale_gemm1(
                                        lds_base, pre_scales, *, a0_prefetch=None):
                     current_gate = list(acc_gate_in)
                     current_up = list(acc_up_in)
-                    mfma_res_ty = vec4_i32 if is_int8 else vec4_f32
-                    mfma_fn = (
-                        mfma_i32_k32
-                        if is_int8
-                        else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
-                    )
+                    mfma_res_ty = vec4_f32
 
-                    def _i64_to_v4f16(x_i64):
-                        v1 = vector.from_elements(vec1_i64, [x_i64])
-                        return vector.bitcast(vec4_f16, v1)
-
-                    def mfma_k64(acc_in, a0, a1, b0, b1):
-                        if is_f16:
-                            a0v = _i64_to_v4f16(a0)
-                            a1v = _i64_to_v4f16(a1)
-                            b0v = _i64_to_v4f16(b0)
-                            b1v = _i64_to_v4f16(b1)
-                            acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
-                        acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
-                        return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
-
-                    for sb in range_constexpr(sb_per_tile_s1):
-                        combined_gate, combined_up = pre_scales[sb]
-                        block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
-                        block_up_accs = [acc_init] * (num_acc_n * m_repeat)
-                        for ku_local in range_constexpr(ku_per_sb_s1):
-                            ku = sb * ku_per_sb_s1 + ku_local
-                            b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
-                            b_up_packs0, b_up_packs1 = b_up_tile_in[ku]
-                            ki64 = arith.index(ku * 64)
-                            col_base = col_offset_base_bytes + ki64
-                            for mi in range_constexpr(m_repeat):
-                                mi_val = arith.index(mi * 16)
-                                curr_row_a_lds = row_a_lds + mi_val
-                                if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
-                                else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
-                                for ni in range_constexpr(num_acc_n):
-                                    acc_idx = mi * num_acc_n + ni
-                                    block_gate_accs[acc_idx] = mfma_k64(block_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
-                                    block_up_accs[acc_idx] = mfma_k64(block_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                        # Element-wise FMA: generates v_fma_f32 instead of v_pk_fma_f32
+                    def _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up):
                         for mi in range_constexpr(m_repeat):
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -793,6 +753,92 @@ def compile_moe_blockscale_gemm1(
                                     new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
                                 current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
                                 current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
+
+                    if _is_gfx950:
+                        vec4_i64 = T.vec(4, T.i64)
+                        vec8_i32 = T.vec(8, T.i32)
+
+                        def _pack128(x0, x1, x2, x3):
+                            v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+                            return vector.bitcast(vec8_i32, v4)
+
+                        for sb in range_constexpr(sb_per_tile_s1):
+                            combined_gate, combined_up = pre_scales[sb]
+                            block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
+                            block_up_accs = [acc_init] * (num_acc_n * m_repeat)
+                            ku0 = sb * ku_per_sb_s1
+                            ku1 = ku0 + 1
+                            bg0_p0, bg0_p1 = b_gate_tile_in[ku0]
+                            bg1_p0, bg1_p1 = b_gate_tile_in[ku1]
+                            bu0_p0, bu0_p1 = b_up_tile_in[ku0]
+                            bu1_p0, bu1_p1 = b_up_tile_in[ku1]
+                            col0 = col_offset_base_bytes + arith.index(ku0 * 64)
+                            col1 = col_offset_base_bytes + arith.index(ku1 * 64)
+                            for mi in range_constexpr(m_repeat):
+                                curr_row = row_a_lds + arith.index(mi * 16)
+                                if a0_prefetch is not None and sb == 0 and mi == 0:
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row, col0, lds_base)
+                                a2, a3 = lds_load_packs_k64(curr_row, col1, lds_base)
+                                a128 = _pack128(a0, a1, a2, a3)
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    bg128 = _pack128(bg0_p0[ni], bg0_p1[ni], bg1_p0[ni], bg1_p1[ni])
+                                    bu128 = _pack128(bu0_p0[ni], bu0_p1[ni], bu1_p0[ni], bu1_p1[ni])
+                                    block_gate_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                        mfma_res_ty,
+                                        [a128, bg128, block_gate_accs[acc_idx],
+                                         0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
+                                    block_up_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                        mfma_res_ty,
+                                        [a128, bu128, block_up_accs[acc_idx],
+                                         0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
+                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
+                    else:
+                        mfma_fn = (
+                            mfma_i32_k32
+                            if is_int8
+                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                        )
+
+                        def _i64_to_v4f16(x_i64):
+                            v1 = vector.from_elements(vec1_i64, [x_i64])
+                            return vector.bitcast(vec4_f16, v1)
+
+                        def mfma_k64(acc_in, a0, a1, b0, b1):
+                            if is_f16:
+                                a0v = _i64_to_v4f16(a0)
+                                a1v = _i64_to_v4f16(a1)
+                                b0v = _i64_to_v4f16(b0)
+                                b1v = _i64_to_v4f16(b1)
+                                acc_mid = mfma_fn(mfma_res_ty, [a0v, b0v, acc_in, 0, 0, 0])
+                                return mfma_fn(mfma_res_ty, [a1v, b1v, acc_mid, 0, 0, 0])
+                            acc_mid = mfma_fn(mfma_res_ty, [a0, b0, acc_in, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
+
+                        for sb in range_constexpr(sb_per_tile_s1):
+                            combined_gate, combined_up = pre_scales[sb]
+                            block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
+                            block_up_accs = [acc_init] * (num_acc_n * m_repeat)
+                            for ku_local in range_constexpr(ku_per_sb_s1):
+                                ku = sb * ku_per_sb_s1 + ku_local
+                                b_gate_packs0, b_gate_packs1 = b_gate_tile_in[ku]
+                                b_up_packs0, b_up_packs1 = b_up_tile_in[ku]
+                                ki64 = arith.index(ku * 64)
+                                col_base = col_offset_base_bytes + ki64
+                                for mi in range_constexpr(m_repeat):
+                                    mi_val = arith.index(mi * 16)
+                                    curr_row_a_lds = row_a_lds + mi_val
+                                    if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
+                                        a0, a1 = a0_prefetch
+                                    else:
+                                        a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    for ni in range_constexpr(num_acc_n):
+                                        acc_idx = mi * num_acc_n + ni
+                                        block_gate_accs[acc_idx] = mfma_k64(block_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
+                                        block_up_accs[acc_idx] = mfma_k64(block_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
+                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
                     return current_gate, current_up
 
                 def compute_tile(
@@ -1313,6 +1359,7 @@ def compile_moe_blockscale_gemm2(
     global atomics (recommended for performance).
     """
     gpu_arch = get_hip_arch()
+    _is_gfx950 = str(gpu_arch).startswith("gfx95")
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -1957,47 +2004,9 @@ def compile_moe_blockscale_gemm2(
 
                 def compute_tile_bs_s2(acc_in, b_tile_in, lds_base, pre_scales, *, a0_prefetch=None):
                     current_acc = list(acc_in)
-                    mfma_res_ty = vec4_i32 if is_int8 else vec4_f32
-                    mfma_fn = (
-                        mfma_i32_k32
-                        if is_int8
-                        else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
-                    )
+                    mfma_res_ty = vec4_f32
 
-                    def _i64_to_v4f16(x_i64):
-                        v1 = vector.from_elements(vec1_i64, [x_i64])
-                        return vector.bitcast(vec4_f16, v1)
-
-                    def mfma_k64(acc0, a0, a1, b0, b1):
-                        if is_f16:
-                            a0v = _i64_to_v4f16(a0)
-                            a1v = _i64_to_v4f16(a1)
-                            b0v = _i64_to_v4f16(b0)
-                            b1v = _i64_to_v4f16(b1)
-                            acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
-                            return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
-                        acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
-                        return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
-
-                    for sb in range_constexpr(sb_per_tile_s2):
-                        combined = pre_scales[sb]
-                        block_accs = [acc_init] * (num_acc_n * m_repeat)
-                        for ku_local in range_constexpr(ku_per_sb_s2):
-                            ku = sb * ku_per_sb_s2 + ku_local
-                            b_packs0, b_packs1 = b_tile_in[ku]
-                            ki64 = arith.index(ku * 64)
-                            col_base = col_offset_base_bytes + ki64
-                            for mi in range_constexpr(m_repeat):
-                                mi_val = arith.index(mi * 16)
-                                curr_row_a_lds = row_a_lds + mi_val
-                                if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
-                                    a0, a1 = a0_prefetch
-                                else:
-                                    a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
-                                for ni in range_constexpr(num_acc_n):
-                                    acc_idx = mi * num_acc_n + ni
-                                    block_accs[acc_idx] = mfma_k64(block_accs[acc_idx], a0, a1, b_packs0[ni], b_packs1[ni])
-                        # Element-wise FMA
+                    def _do_scale_fma_s2(block_accs, combined):
                         for mi in range_constexpr(m_repeat):
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -2007,6 +2016,81 @@ def compile_moe_blockscale_gemm2(
                                     a_cur = vector.extract(current_acc[acc_idx], static_position=[ii], dynamic_position=[])
                                     new_elems.append(math_dialect.fma(b_i, combined[mi][ni][ii], a_cur))
                                 current_acc[acc_idx] = vector.from_elements(vec4_f32, new_elems)
+
+                    if _is_gfx950:
+                        vec4_i64 = T.vec(4, T.i64)
+                        vec8_i32 = T.vec(8, T.i32)
+
+                        def _pack128(x0, x1, x2, x3):
+                            v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
+                            return vector.bitcast(vec8_i32, v4)
+
+                        for sb in range_constexpr(sb_per_tile_s2):
+                            combined = pre_scales[sb]
+                            block_accs = [acc_init] * (num_acc_n * m_repeat)
+                            ku0 = sb * ku_per_sb_s2
+                            ku1 = ku0 + 1
+                            b0_p0, b0_p1 = b_tile_in[ku0]
+                            b1_p0, b1_p1 = b_tile_in[ku1]
+                            col0 = col_offset_base_bytes + arith.index(ku0 * 64)
+                            col1 = col_offset_base_bytes + arith.index(ku1 * 64)
+                            for mi in range_constexpr(m_repeat):
+                                curr_row = row_a_lds + arith.index(mi * 16)
+                                if a0_prefetch is not None and sb == 0 and mi == 0:
+                                    a0, a1 = a0_prefetch
+                                else:
+                                    a0, a1 = lds_load_packs_k64(curr_row, col0, lds_base)
+                                a2, a3 = lds_load_packs_k64(curr_row, col1, lds_base)
+                                a128 = _pack128(a0, a1, a2, a3)
+                                for ni in range_constexpr(num_acc_n):
+                                    acc_idx = mi * num_acc_n + ni
+                                    b128 = _pack128(b0_p0[ni], b0_p1[ni], b1_p0[ni], b1_p1[ni])
+                                    block_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                        mfma_res_ty,
+                                        [a128, b128, block_accs[acc_idx],
+                                         0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
+                            _do_scale_fma_s2(block_accs, combined)
+                    else:
+                        mfma_fn = (
+                            mfma_i32_k32
+                            if is_int8
+                            else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
+                        )
+
+                        def _i64_to_v4f16(x_i64):
+                            v1 = vector.from_elements(vec1_i64, [x_i64])
+                            return vector.bitcast(vec4_f16, v1)
+
+                        def mfma_k64(acc0, a0, a1, b0, b1):
+                            if is_f16:
+                                a0v = _i64_to_v4f16(a0)
+                                a1v = _i64_to_v4f16(a1)
+                                b0v = _i64_to_v4f16(b0)
+                                b1v = _i64_to_v4f16(b1)
+                                acc1 = mfma_fn(mfma_res_ty, [a0v, b0v, acc0, 0, 0, 0])
+                                return mfma_fn(mfma_res_ty, [a1v, b1v, acc1, 0, 0, 0])
+                            acc1 = mfma_fn(mfma_res_ty, [a0, b0, acc0, 0, 0, 0])
+                            return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
+
+                        for sb in range_constexpr(sb_per_tile_s2):
+                            combined = pre_scales[sb]
+                            block_accs = [acc_init] * (num_acc_n * m_repeat)
+                            for ku_local in range_constexpr(ku_per_sb_s2):
+                                ku = sb * ku_per_sb_s2 + ku_local
+                                b_packs0, b_packs1 = b_tile_in[ku]
+                                ki64 = arith.index(ku * 64)
+                                col_base = col_offset_base_bytes + ki64
+                                for mi in range_constexpr(m_repeat):
+                                    mi_val = arith.index(mi * 16)
+                                    curr_row_a_lds = row_a_lds + mi_val
+                                    if (a0_prefetch is not None) and (sb == 0) and (ku_local == 0) and (mi == 0):
+                                        a0, a1 = a0_prefetch
+                                    else:
+                                        a0, a1 = lds_load_packs_k64(curr_row_a_lds, col_base, lds_base)
+                                    for ni in range_constexpr(num_acc_n):
+                                        acc_idx = mi * num_acc_n + ni
+                                        block_accs[acc_idx] = mfma_k64(block_accs[acc_idx], a0, a1, b_packs0[ni], b_packs1[ni])
+                            _do_scale_fma_s2(block_accs, combined)
                     return current_acc
 
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
