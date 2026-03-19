@@ -375,6 +375,10 @@ class ReplaceIfWithDispatch(Transformer):
         Calls to RewriteBoolOps helpers (dsl_not_, dsl_and_, dsl_or_) and
         Python builtins are NOT considered dynamic — they just wrap Python-level
         boolean logic. Only calls to user/MLIR functions can produce Values.
+
+        Compare expressions (==, !=, <, >, etc.) involving non-constant, non-literal
+        operands are also considered potentially dynamic, since dunder methods like
+        __eq__ may return MLIR Values.
         """
         for child in ast.walk(test_node):
             if isinstance(child, ast.Call):
@@ -382,6 +386,13 @@ class ReplaceIfWithDispatch(Transformer):
                 if isinstance(func, ast.Name) and func.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
                     continue
                 return True
+            if isinstance(child, ast.Compare):
+                # If any operand is a Name (variable), the comparison could
+                # produce a dynamic MLIR Value via __eq__/__lt__/etc.
+                operands = [child.left] + child.comparators
+                for op in operands:
+                    if isinstance(op, ast.Name):
+                        return True
         return False
 
     def visit_If(self, node: ast.If) -> List[ast.AST]:
