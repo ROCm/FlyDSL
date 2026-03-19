@@ -387,11 +387,16 @@ class ReplaceIfWithDispatch(Transformer):
                     continue
                 return True
             if isinstance(child, ast.Compare):
-                # If any operand is a Name (variable), the comparison could
-                # produce a dynamic MLIR Value via __eq__/__lt__/etc.
-                operands = [child.left] + child.comparators
-                for op in operands:
-                    if isinstance(op, ast.Name):
+                # `in` / `not in` use __contains__, which never produces
+                # MLIR Values in FlyDSL, so skip them entirely.
+                if any(isinstance(o, (ast.In, ast.NotIn)) for o in child.ops):
+                    continue
+                # For relational ops (==, !=, <, >, etc.), only consider
+                # dynamic if an operand is a function call (which may return
+                # an MLIR Value).  Plain variable names are overwhelmingly
+                # Python-level values (constexpr params, loop vars, strings).
+                for operand in [child.left] + child.comparators:
+                    if isinstance(operand, ast.Call):
                         return True
         return False
 
