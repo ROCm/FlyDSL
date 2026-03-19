@@ -252,7 +252,7 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     try:
         mod = ir.Module.parse(asm, context=ctx)
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            "builtin.module(gpu-module-to-binary{format=isa opts=-g section= toolkit=})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -297,7 +297,9 @@ class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
         wave64 = "false" if is_rdna_arch(chip) else "true"
-        return [
+        debug_info = env.debug.enable_debug_info
+        gpu_binary_opts = "opts=-g" if debug_info else ""
+        fragments = [
             "gpu-kernel-outlining{data-layout-str=}",
             "fly-canonicalize",
             "fly-layout-lowering",
@@ -313,8 +315,13 @@ class MlirCompiler:
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
         ]
+        if debug_info:
+            fragments.append(
+                "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"
+            )
+        fragments.append(f"gpu-module-to-binary{{format=fatbin {gpu_binary_opts}}}")
+        return fragments
 
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
@@ -355,7 +362,9 @@ class MlirCompiler:
                 out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
                 print(f"[flydsl.compile] dump {stage_name} -> {out}")
 
-                if frag.strip() == "reconcile-unrealized-casts":
+                if "ensure-debug-info-scope" in frag.strip():
+                    asm_for_isa = stage_asm
+                elif frag.strip() == "reconcile-unrealized-casts" and asm_for_isa is None:
                     asm_for_isa = stage_asm
 
             if asm_for_isa is not None:
