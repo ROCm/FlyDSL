@@ -280,6 +280,34 @@ def compile_pa_decode_sw(
                         T.f32x4, [k_ops_all[td][k_step], q_frags[k_step], acc, 0, 0, 0])
                 d_out.append(acc * vector.broadcast(T.f32x4, _scale))
 
+            # ── V data prefetch (issue loads to overlap with softmax) ──
+            v_data_prefetched = []
+            for vhe in range_constexpr(VHELOOP):
+                vhe_data = []
+                vhead_elem = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
+                              + warp_id * arith.constant(MFMA_N, type=T.i32) + lane16id)
+                for vt in range_constexpr(VTLOOP):
+                    vtoken_base = (partition_start
+                                   + arith.constant(vt * TOKENS_PER_WARP, type=T.i32)
+                                   + rowid * arith.constant(MFMA_N, type=T.i32))
+                    vblock_idx = vtoken_base // arith.constant(_bs, type=T.i32)
+                    vblock_off = vtoken_base % arith.constant(_bs, type=T.i32)
+                    vphys = buffer_ops.buffer_load(bt_rsrc,
+                        seq * c_bt + vblock_idx, vec_width=1, dtype=T.i32)
+                    if trans_v:
+                        _vb = (vphys * c_vb + _v_head_off
+                               + (vblock_off // arith.constant(FP8_ELEMS_16B, type=T.i32))
+                                 * arith.constant(HEAD_SIZE * FP8_ELEMS_16B, type=T.i32)
+                               + vhead_elem * arith.constant(FP8_ELEMS_16B, type=T.i32))
+                    else:
+                        _vb = (vphys * c_vb + _v_head_off
+                               + vhead_elem * arith.constant(_bs, type=T.i32) + vblock_off)
+                    v_4xi32 = buffer_ops.buffer_load(
+                        v_rsrc, _vb // arith.constant(4, type=T.i32),
+                        vec_width=4, dtype=T.i32)
+                    vhe_data.append(v_4xi32)
+                v_data_prefetched.append(vhe_data)
+
             # ── Intra-warp softmax ──
             qk_max = NEG_INF
             for td in range_constexpr(TLOOP):
@@ -388,32 +416,13 @@ def compile_pa_decode_sw(
                 vector.store(pk_vec, logits_lds_i32, [arith.index_cast(T.index, i32_off)])
             gpu.barrier()
 
-            # ── V load + PV MFMA ──
+            # ── PV MFMA (V data already prefetched above) ──
             pv_results = [arith.constant_vector(0.0, T.f32x4)
                           for _ in range_constexpr(VHELOOP)]
             for vhe in range_constexpr(VHELOOP):
-                vhead_elem = (arith.constant(vhe * NUM_WARPS * MFMA_N, type=T.i32)
-                              + warp_id * arith.constant(MFMA_N, type=T.i32) + lane16id)
                 tmp_out = arith.constant_vector(0.0, T.f32x4)
                 for vt in range_constexpr(VTLOOP):
-                    vtoken_base = (partition_start
-                                   + arith.constant(vt * TOKENS_PER_WARP, type=T.i32)
-                                   + rowid * arith.constant(MFMA_N, type=T.i32))
-                    vblock_idx = vtoken_base // arith.constant(_bs, type=T.i32)
-                    vblock_off = vtoken_base % arith.constant(_bs, type=T.i32)
-                    vphys = buffer_ops.buffer_load(bt_rsrc,
-                        seq * c_bt + vblock_idx, vec_width=1, dtype=T.i32)
-                    if trans_v:
-                        _vb = (vphys * c_vb + _v_head_off
-                               + (vblock_off // arith.constant(FP8_ELEMS_16B, type=T.i32))
-                                 * arith.constant(HEAD_SIZE * FP8_ELEMS_16B, type=T.i32)
-                               + vhead_elem * arith.constant(FP8_ELEMS_16B, type=T.i32))
-                    else:
-                        _vb = (vphys * c_vb + _v_head_off
-                               + vhead_elem * arith.constant(_bs, type=T.i32) + vblock_off)
-                    v_4xi32 = buffer_ops.buffer_load(
-                        v_rsrc, _vb // arith.constant(4, type=T.i32),
-                        vec_width=4, dtype=T.i32)
+                    v_4xi32 = v_data_prefetched[vhe][vt]
                     for j in range_constexpr(2):
                         v_i64 = _pack_i32_pair_to_i64(
                             vector.extract(v_4xi32, static_position=[j * 2]),
