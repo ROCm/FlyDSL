@@ -177,6 +177,8 @@ def make_tensor_descriptor_2d(
     cache_policy: int = 0,
     pred: int = 1,
     workgroup_mask: Union[int, "ir.Value"] = 0,
+    lds_byte_offset=None,
+    for_store: bool = False,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -268,7 +270,10 @@ def make_tensor_descriptor_2d(
         warp_off_outer * arith.index(lds_inner_stride) + warp_off_inner
     )
     lds_warp_byte_off = lds_warp_elem_off * arith.index(elem_bytes)
-    lds_addr_i32 = arith.index_cast(T.i32, lds_base_idx + lds_warp_byte_off)
+    lds_total_off = lds_base_idx + lds_warp_byte_off
+    if lds_byte_offset is not None:
+        lds_total_off = lds_total_off + lds_byte_offset
+    lds_addr_i32 = arith.index_cast(T.i32, lds_total_off)
 
     # ================================================================
     # GROUP0 (vector<4xi32>): pred, lds_addr, global_addr_lo/hi
@@ -294,6 +299,15 @@ def make_tensor_descriptor_2d(
     tdim1 = bpw_outer    # outermost extent per warp
     tile_d0 = bpw_inner  # block dim0 per warp
     tile_d1 = bpw_outer  # block dim1 per warp
+
+    # Padding can be applied to the LDS address when copying from memory to LDS,
+    #  but not when copying from LDS to memory 
+    #  (there is no "de-padding" operation; padding is ignored).
+    if for_store and pad_interval > 0 and pad_amount > 0:
+        tile_d0 += pad_amount
+        pad_interval = 0
+        pad_amount = 0
+
     # stride_dim0 in descriptor = outermost stride in elements
     stride0 = outer_stride
 

@@ -100,8 +100,11 @@ def reference_mxfp4_gemm(a_packed, b_packed, a_scale, b_scale, M, N, K):
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                     num_buffers, l2_prefetch_distance=0,
+                     num_buffers, use_tdm_store, out_dtype,
+                     l2_prefetch_distance=0,
                      cluster_m=1, cluster_n=1, scale_preshuffle=True):
     """MXFP4 GEMM correctness unit test."""
     arch = str(get_rocm_arch(timeout_s=300))
@@ -112,11 +115,16 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     if num_buffers > 1 and num_k_tiles < num_buffers:
         pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
 
+    _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+    torch_out_dtype = _dtype_map[out_dtype]
+
     torch.manual_seed(0)
 
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
+    tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
     print(f"\nRunning MXFP4 GEMM: M={M}, N={N}, K={K}, "
-          f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}{mcast_str}")
+          f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
+          f"{mcast_str}{tdm_str}, out={out_dtype}")
 
     a_packed = random_mxfp4_packed(M, K)
     b_packed = random_mxfp4_packed(N, K)
@@ -136,7 +144,7 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     b_gpu = b_packed.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(M, N, dtype=torch.float32, device="cpu").cuda()
+    c_gpu = torch.zeros(M, N, dtype=torch_out_dtype, device="cpu").cuda()
 
     launch_fn = compile_mxfp4_gemm(
         M=M, N=N, K=K,
@@ -146,6 +154,8 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         l2_prefetch_distance=l2_prefetch_distance,
         cluster_m=cluster_m, cluster_n=cluster_n,
         scale_preshuffle=scale_preshuffle,
+        use_tdm_store=use_tdm_store,
+        out_dtype=out_dtype,
     )
     launch_fn(
         c_gpu.contiguous().view(-1),
@@ -159,20 +169,31 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
 
     c_out = c_gpu.cpu()
 
-    print(f"Out stats: min={c_out.min():.2f}, max={c_out.max():.2f}, "
-          f"mean={c_out.mean():.2f}, std={c_out.std():.2f}")
+    print(f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
+          f"mean={c_out.float().mean():.2f}, std={c_out.float().std():.2f}")
 
-    if c_out.abs().max() < 1e-10:
+    if c_out.float().abs().max() < 1e-10:
         print("WARNING: kernel output is all zeros!")
 
-    diff = (c_out - ref).abs()
+    if out_dtype in ("bf16", "f16"):
+        ref_cmp = ref.to(torch_out_dtype)
+        c_out_f = c_out.float()
+        ref_f = ref_cmp.float()
+    else:
+        c_out_f = c_out.float()
+        ref_f = ref.float()
+
+    diff = (c_out_f - ref_f).abs()
     print(f"Abs diff: max={diff.max():.4f}, mean={diff.mean():.4f}")
 
     cos_sim = torch.nn.functional.cosine_similarity(
-        c_out.flatten().unsqueeze(0), ref.flatten().unsqueeze(0)).item()
+        c_out_f.flatten().unsqueeze(0), ref_f.flatten().unsqueeze(0)).item()
     print(f"Cosine similarity: {cos_sim:.6f}")
 
-    torch.testing.assert_close(c_out, ref, rtol=1e-5, atol=1e-8)
+    if out_dtype in ("bf16", "f16"):
+        torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=1e-2)
+    else:
+        torch.testing.assert_close(c_out_f, ref_f, rtol=1e-5, atol=1e-8)
     print("PASSED")
 
 
@@ -189,12 +210,17 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                            cluster_m, cluster_n, num_buffers):
+                            cluster_m, cluster_n, num_buffers, use_tdm_store,
+                            out_dtype):
     """MXFP4 GEMM correctness test with cluster MCAST."""
     test_mxfp4_gemm(
         M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         num_buffers=num_buffers,
+        use_tdm_store=use_tdm_store,
+        out_dtype=out_dtype,
         l2_prefetch_distance=2,
         cluster_m=cluster_m, cluster_n=cluster_n,
         scale_preshuffle=True,
@@ -218,12 +244,17 @@ if __name__ == "__main__":
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
     parser.add_argument("--no-scale-preshuffle", action="store_true", default=False)
+    parser.add_argument("--no-tdm-store", action="store_true", default=False)
+    parser.add_argument("--out-dtype", type=str, default="bf16",
+                        choices=["f32", "bf16", "f16"])
     args = parser.parse_args()
 
     test_mxfp4_gemm(
         args.M, args.N, args.K,
         args.tile_m, args.tile_n, args.tile_k,
         num_buffers=args.num_buffers,
+        use_tdm_store=not args.no_tdm_store,
+        out_dtype=args.out_dtype,
         m_warp=args.m_warp,
         n_warp=args.n_warp,
         l2_prefetch_distance=args.l2_prefetch_distance,

@@ -10,7 +10,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops, vector
-from flydsl._mlir.dialects import llvm as llvm_dialect, memref as memref_dialect
+from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -29,6 +29,7 @@ SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 # LDS padding in bytes (4 DWORDs = 16 bytes, matches SP3)
 LDS_PAD_A_BYTES = 16
 LDS_PAD_B_BYTES = 16
+LDS_PAD_D_BYTES = 16  # output D padding for TDM store epilogue
 
 _STAGE_NAMES = ("ping", "pong", "pang", "pung")
 
@@ -49,12 +50,18 @@ def compile_mxfp4_gemm(
     cluster_m: int = 1,
     cluster_n: int = 1,
     scale_preshuffle: bool = True,
+    use_tdm_store: bool = True,
+    out_dtype: str = "f32",
 ):
     """Compile an MXFP4 GEMM kernel with TDM async copy and multi-stage buffering.
 
     Returns a JitFunction: launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, stream)
     """
     _ = (M, N)
+    if out_dtype not in ("f32", "bf16", "f16"):
+        raise ValueError(f"out_dtype must be 'f32', 'bf16', or 'f16', got {out_dtype!r}")
+    elem_bytes_d = 2 if out_dtype in ("bf16", "f16") else 4
+
     if num_buffers not in (2, 3, 4):
         raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
 
@@ -155,6 +162,16 @@ def compile_mxfp4_gemm(
     extra = num_k_tiles - _tail_start - pre_loaded
     _raw_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra)
 
+    if use_tdm_store:
+        lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
+        warp_d_bytes = warp_tile_m * lds_d_row_stride
+        total_d_bytes = num_warps * warp_d_bytes
+        d_output_off = 0
+        _last_compute_stage = _raw_tail_plan[-1][1]
+        d_reuse_stage = 1 if _last_compute_stage == 0 else 0
+        if total_d_bytes > stage_allocators[d_reuse_stage].ptr:
+            stage_allocators[d_reuse_stage].ptr = total_d_bytes
+
     # Number of TDM loads per step: A_data + B_data + A_scale + B_scale = 4
     TDM_LOADS_PER_STEP = 4
 
@@ -222,7 +239,7 @@ def compile_mxfp4_gemm(
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
         n_idx = arith.index_cast(T.index, i32_n.ir_value())
         n_stride = arith.index(N)
-        c_nrec = m_idx * n_stride * arith.index(4)
+        c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
         def _get_lds_memref(lds_ptr):
@@ -350,6 +367,18 @@ def compile_mxfp4_gemm(
             ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
             vec4_i32_ty = ir.VectorType.get([4], ir.IntegerType.get_signless(32))
             return llvm_dialect.load(vec4_i32_ty, ptr_val)
+
+        def _lds_store_b128(lds_buffer, byte_offset, data):
+            """Store 16 bytes to LDS at given byte offset via ds_store_b128."""
+            from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
+            lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+            raw_memref = arith.unwrap(lds_buffer)
+            lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
+            from flydsl.expr.arith import ArithValue as _AV
+            total_byte = _AV(lds_base) + byte_offset
+            addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
+            ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+            llvm_dialect.store(data, ptr_val)
 
         def load_a_frag(lds_buffer, a_lane_base, ks):
             """Load one 16x128 FP4 A-fragment from LDS.
@@ -565,31 +594,75 @@ def compile_mxfp4_gemm(
         #   lane16 → M row, lane_kgrp*8 + ele → N column group.
         def epilogue_prepare_addrs():
             addrs = []
+            _bf16_out = out_dtype in ("bf16", "f16")
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
                     col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
                                 + lane_kgrp * arith.index(8))
-                    for half in range_constexpr(2):
-                        col = col_base + arith.index(half * 4)
-                        c_off = row * n_stride + col
-                        addrs.append(c_off)
+                    if _bf16_out:
+                        c_off_bytes = (row * n_stride + col_base) * arith.index(elem_bytes_d)
+                        addrs.append(c_off_bytes)
+                    else:
+                        for half in range_constexpr(2):
+                            col = col_base + arith.index(half * 4)
+                            c_off = row * n_stride + col
+                            addrs.append(c_off)
             return addrs
 
         def epilogue_stores(final_accs, addrs):
+            _bf16_out = out_dtype in ("bf16", "f16")
+            _out_elem = T.bf16 if out_dtype == "bf16" else (T.f16 if out_dtype == "f16" else None)
             addr_idx = 0
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
-                    for half in range_constexpr(2):
-                        vals = [vector.extract(
-                            final_accs[idx],
-                            static_position=[half * 4 + vi],
-                            dynamic_position=[])
-                            for vi in range_constexpr(4)]
-                        vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                        buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
+                    if _bf16_out:
+                        bf16_vec = arith.trunc_f(
+                            T.vec(8, _out_elem), final_accs[idx])
+                        i32_vec = vector.bitcast(T.vec(4, T.i32), bf16_vec)
+                        buffer_ops.buffer_store(
+                            i32_vec, c_rsrc, addrs[addr_idx],
+                            offset_is_bytes=True)
                         addr_idx += 1
+                    else:
+                        for half in range_constexpr(2):
+                            vals = [vector.extract(
+                                final_accs[idx],
+                                static_position=[half * 4 + vi],
+                                dynamic_position=[])
+                                for vi in range_constexpr(4)]
+                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+                            buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
+                            addr_idx += 1
+
+        def epilogue_lds_stores(final_accs, d_buf, d_base):
+            """Write accumulators to D output LDS via ds_store_b128."""
+            _out_is_f16 = out_dtype in ("bf16", "f16")
+            _out_elem = T.bf16 if out_dtype == "bf16" else (T.f16 if out_dtype == "f16" else None)
+            for wm in range_constexpr(wmma_m_rep):
+                for wn in range_constexpr(wmma_n_rep):
+                    idx = wm * wmma_n_rep + wn
+                    if _out_is_f16:
+                        bf16_vec = arith.trunc_f(
+                            T.vec(8, _out_elem), final_accs[idx])
+                        i32_vec = vector.bitcast(T.vec(4, T.i32), bf16_vec)
+                        imm_off = (wm * WMMA_M * lds_d_row_stride
+                                   + wn * WMMA_N * elem_bytes_d)
+                        _lds_store_b128(
+                            d_buf, d_base + arith.index(imm_off), _raw(i32_vec))
+                    else:
+                        for half in range_constexpr(2):
+                            vals = [vector.extract(
+                                final_accs[idx],
+                                static_position=[half * 4 + vi],
+                                dynamic_position=[])
+                                for vi in range_constexpr(4)]
+                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+                            imm_off = (wm * WMMA_M * lds_d_row_stride
+                                       + wn * WMMA_N * 4 + half * 16)
+                            _lds_store_b128(
+                                d_buf, d_base + arith.index(imm_off), _raw(vec4))
 
         def wait_and_barrier(outstanding=0):
             tdm_ops.tensor_wait(outstanding)
@@ -661,6 +734,48 @@ def compile_mxfp4_gemm(
         stages_as_mem = [stages_as[i].get() for i in range_constexpr(num_buffers)]
         stages_bs_mem = [stages_bs[i].get() for i in range_constexpr(num_buffers)]
 
+        # D output LDS setup for TDM store epilogue
+        if use_tdm_store:
+            d_lds_base_ptr = base_ptrs[d_reuse_stage]
+            d_lds_f16_count = total_d_bytes // 2
+            d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds,
+                             shape=(d_lds_f16_count,))
+            d_lds_buffer = _get_lds_memref(d_smem)
+
+            # Per-lane LDS base address (VGPR): warp_offset + row_offset + kgrp_offset
+            # ~3 VALU: 1 mul (lane16 * stride) + 1 shl (lane_kgrp << 5) + 1 add
+            warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) \
+                * arith.index(warp_d_bytes)
+            d_lane_base = (warp_lds_off
+                           + lane16 * arith.index(lds_d_row_stride)
+                           + lane_kgrp * arith.index(8 * elem_bytes_d))
+
+            # Per-warp TDM descriptor for D store (all addresses SGPR via wave_id)
+            wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
+            d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) \
+                + arith.index(d_output_off)
+
+            # Decompose wave_id into (m, n) coords in SGPR pipeline
+            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) \
+                * arith.index(warp_tile_m)
+            warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) \
+                * arith.index(warp_tile_n)
+
+            d_desc = tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_c,
+                lds_memref=d_lds_base_ptr,
+                global_offset=(blk_m + warp_m_off_sgpr,
+                               blk_n + warp_n_off_sgpr),
+                tensor_shape=(warp_tile_m, warp_tile_n),
+                strides=(N, 1),
+                tile_shape=(warp_tile_m, warp_tile_n),
+                elem_bytes=elem_bytes_d,
+                pad_interval=warp_tile_n, pad_amount=LDS_PAD_D_BYTES // elem_bytes_d,
+                num_warps=1,
+                lds_byte_offset=d_warp_off_sgpr,
+                for_store=True,
+            )
+
         # Prologue: load first (num_buffers - 1) tiles
         for i in range_constexpr(pre_loaded):
             issue_all_tdm_loads(
@@ -699,6 +814,7 @@ def compile_mxfp4_gemm(
         if loop_iters == 0 and use_cluster:
             gpu.cluster_barrier()
         _extra_j = 0
+        epi_addrs_box = [None]
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             if _load_stage is not None:
                 _k_off = (_tail_start + pre_loaded + _extra_j) * tile_k
@@ -708,16 +824,20 @@ def compile_mxfp4_gemm(
                     stages_as_mem[_load_stage], stages_bs_mem[_load_stage])
                 _extra_j += 1
             if _outstanding == -1:
-                epi_addrs_box = [None]
+                if use_tdm_store:
+                    accs = compute_tile(
+                        accs,
+                        stages_a[_compute_stage], stages_b[_compute_stage],
+                        stages_as[_compute_stage], stages_bs[_compute_stage])
+                else:
+                    def _emit_epi_addrs():
+                        epi_addrs_box[0] = epilogue_prepare_addrs()
 
-                def _emit_epi_addrs():
-                    epi_addrs_box[0] = epilogue_prepare_addrs()
-
-                accs = compute_tile(
-                    accs,
-                    stages_a[_compute_stage], stages_b[_compute_stage],
-                    stages_as[_compute_stage], stages_bs[_compute_stage],
-                    emit_filler=_emit_epi_addrs)
+                    accs = compute_tile(
+                        accs,
+                        stages_a[_compute_stage], stages_b[_compute_stage],
+                        stages_as[_compute_stage], stages_bs[_compute_stage],
+                        emit_filler=_emit_epi_addrs)
             else:
                 accs = _compute_and_schedule(
                     accs,
@@ -728,11 +848,18 @@ def compile_mxfp4_gemm(
                 else:
                     wait_and_barrier(outstanding=_outstanding)
 
-        epilogue_stores(accs, epi_addrs_box[0])
+        if use_tdm_store:
+            epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
+            rocdl.s_wait_dscnt(0)
+            tdm_ops.tensor_store_2d(d_desc)
+            tdm_ops.tensor_wait(0)
+        else:
+            epilogue_stores(accs, epi_addrs_box[0])
 
     cache_tag = (K, tile_m, tile_n, tile_k, m_warp, n_warp,
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
-                 cluster_m, cluster_n, scale_preshuffle)
+                 cluster_m, cluster_n, scale_preshuffle, use_tdm_store,
+                 out_dtype)
 
     @flyc.jit
     def launch_mxfp4_gemm(
