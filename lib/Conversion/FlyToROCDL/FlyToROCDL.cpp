@@ -162,6 +162,42 @@ public:
   }
 };
 
+class IntToPtrOpLowering : public OpConversionPattern<IntToPtrOp> {
+public:
+  IntToPtrOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
+      : OpConversionPattern<IntToPtrOp>(typeConverter, context) {}
+
+  LogicalResult matchAndRewrite(IntToPtrOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto flyPtrTy = dyn_cast<fly::PointerType>(op.getResult().getType());
+    if (!flyPtrTy)
+      return failure();
+
+    auto resultTy = dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyPtrTy));
+    if (!resultTy)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, resultTy, adaptor.getSrc());
+    return success();
+  }
+};
+
+class PtrToIntOpLowering : public OpConversionPattern<PtrToIntOp> {
+public:
+  PtrToIntOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
+      : OpConversionPattern<PtrToIntOp>(typeConverter, context) {}
+
+  LogicalResult matchAndRewrite(PtrToIntOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Type resultTy = getTypeConverter()->convertType(op.getResult().getType());
+    if (!resultTy)
+      return failure();
+
+    rewriter.replaceOpWithNewOp<LLVM::PtrToIntOp>(op, resultTy, adaptor.getPtr());
+    return success();
+  }
+};
+
 class MemRefAllocOpLowering : public OpConversionPattern<MemRefAllocaOp> {
 public:
   MemRefAllocOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
@@ -174,6 +210,10 @@ public:
       return failure();
 
     LayoutAttr layoutAttr = cast<LayoutAttr>(flyMemRefTy.getLayout());
+    AddressSpace addrSpace = flyMemRefTy.getAddressSpace().getValue();
+    if (addrSpace != AddressSpace::Register) {
+      return rewriter.notifyMatchFailure(op, "memref.alloca only supports register address space");
+    }
     auto elemTy = flyMemRefTy.getElemTy();
 
     LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
@@ -392,59 +432,76 @@ public:
   }
 };
 
-class MemRefLoadOpLowering : public OpConversionPattern<MemRefLoadOp> {
+class PtrLoadOpLowering : public OpConversionPattern<PtrLoadOp> {
 public:
-  using OpConversionPattern<MemRefLoadOp>::OpConversionPattern;
+  using OpConversionPattern<PtrLoadOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(MemRefLoadOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(PtrLoadOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Value mem = adaptor.getMemref();
-    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(mem.getType());
+    Location loc = op.getLoc();
+    Value ptr = adaptor.getPtr();
+
+    auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
+    if (!flyPtrTy)
+      return failure();
+
+    Type elemTy = flyPtrTy.getElemTy();
+
+    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+      if (!isBufferFatPtr(ptr.getType()))
+        return failure();
+      Value rsrc = extractBufferRsrc(rewriter, loc, ptr);
+      Value offset = extractBufferOffset(rewriter, loc, ptr);
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32).getResult();
+      ArrayAttr noAttrs;
+      Value loaded = ROCDL::RawPtrBufferLoadOp::create(rewriter, loc, elemTy, rsrc, offset, zero,
+                                                       zero, noAttrs, noAttrs, noAttrs);
+      rewriter.replaceOp(op, loaded);
+      return success();
+    }
+
+    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(ptr.getType());
     if (!ptrTy)
       return failure();
 
-    // `fly.memref.load` takes a scalar int_tuple offset.
-    auto idxVal = materializeScalarIndex(op.getIndices(), op.getLoc(), rewriter);
-    if (failed(idxVal))
-      return failure();
-    FailureOr<Value> idxI64 = toI64(*idxVal, op.getLoc(), rewriter);
-    if (failed(idxI64))
-      return failure();
-
-    auto flyMemRefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
-    if (!flyMemRefTy)
-      return failure();
-    Type elemTy = flyMemRefTy.getElemTy();
-    Value gep = LLVM::GEPOp::create(rewriter, op.getLoc(), ptrTy, elemTy, mem, ValueRange{*idxI64});
-    Value loaded = LLVM::LoadOp::create(rewriter, op.getLoc(), op.getResult().getType(), gep);
+    Value loaded = LLVM::LoadOp::create(rewriter, loc, elemTy, ptr);
     rewriter.replaceOp(op, loaded);
     return success();
   }
 };
 
-class MemRefStoreOpLowering : public OpConversionPattern<MemRefStoreOp> {
+class PtrStoreOpLowering : public OpConversionPattern<PtrStoreOp> {
 public:
-  using OpConversionPattern<MemRefStoreOp>::OpConversionPattern;
+  using OpConversionPattern<PtrStoreOp>::OpConversionPattern;
 
-  LogicalResult matchAndRewrite(MemRefStoreOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(PtrStoreOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
-    Value mem = adaptor.getMemref();
-    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(mem.getType());
+    Location loc = op.getLoc();
+    Value ptr = adaptor.getPtr();
+    Value value = adaptor.getValue();
+
+    auto flyPtrTy = dyn_cast<fly::PointerType>(op.getPtr().getType());
+    if (!flyPtrTy)
+      return failure();
+
+    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+      if (!isBufferFatPtr(ptr.getType()))
+        return failure();
+      Value rsrc = extractBufferRsrc(rewriter, loc, ptr);
+      Value offset = extractBufferOffset(rewriter, loc, ptr);
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32).getResult();
+      ArrayAttr noAttrs;
+      ROCDL::RawPtrBufferStoreOp::create(rewriter, loc, value, rsrc, offset, zero, zero, noAttrs,
+                                         noAttrs, noAttrs);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    auto ptrTy = dyn_cast<LLVM::LLVMPointerType>(ptr.getType());
     if (!ptrTy)
       return failure();
 
-    auto idxVal = materializeScalarIndex(op.getIndices(), op.getLoc(), rewriter);
-    if (failed(idxVal))
-      return failure();
-    FailureOr<Value> idxI64 = toI64(*idxVal, op.getLoc(), rewriter);
-    if (failed(idxI64))
-      return failure();
-    auto flyMemRefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
-    if (!flyMemRefTy)
-      return failure();
-    Type elemTy = flyMemRefTy.getElemTy();
-    Value gep = LLVM::GEPOp::create(rewriter, op.getLoc(), ptrTy, elemTy, mem, ValueRange{*idxI64});
-    LLVM::StoreOp::create(rewriter, op.getLoc(), adaptor.getValue(), gep);
+    LLVM::StoreOp::create(rewriter, loc, value, ptr);
     rewriter.eraseOp(op);
     return success();
   }
@@ -535,7 +592,7 @@ private:
     return success();
   }
 
-  static int64_t getElemBitWidth(Type elemTy) {
+  static int64_t getElemTypeBitWidth(Type elemTy) {
     if (auto ft = dyn_cast<FloatType>(elemTy))
       return ft.getWidth();
     if (auto it = dyn_cast<IntegerType>(elemTy))
@@ -559,7 +616,7 @@ private:
     int64_t numValSrc = numValSrcAttr.getValue();
 
     Type elemTy = srcFlyTy.getElemTy();
-    int64_t elemBits = getElemBitWidth(elemTy);
+    int64_t elemBits = getElemTypeBitWidth(elemTy);
     if (elemBits <= 0)
       return rewriter.notifyMatchFailure(op, "unsupported element type");
 
@@ -944,14 +1001,15 @@ public:
     });
 
     patterns.add<MakePtrOpLowering>(typeConverter, context);
+    patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
     patterns.add<MemRefAllocOpLowering>(typeConverter, context);
     patterns.add<GetIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);
     patterns.add<MemRefLoadVecOpLowering>(typeConverter, context);
     patterns.add<MemRefStoreVecOpLowering>(typeConverter, context);
-    patterns.add<MemRefLoadOpLowering>(typeConverter, context);
-    patterns.add<MemRefStoreOpLowering>(typeConverter, context);
+    patterns.add<PtrLoadOpLowering>(typeConverter, context);
+    patterns.add<PtrStoreOpLowering>(typeConverter, context);
     patterns.add<CopyAtomCallLowering>(typeConverter, context);
     patterns.add<MmaAtomCallLowering>(typeConverter, context);
     patterns.add<GpuLaunchFuncOpLowering>(typeConverter, context);

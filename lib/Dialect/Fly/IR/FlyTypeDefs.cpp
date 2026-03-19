@@ -81,6 +81,20 @@ ComposedLayoutType ComposedLayoutType::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutType::get(getContext(), getAttr().at(idxs));
 }
 
+int32_t PointerType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  int32_t alignmentBytes = getAlignment().getAlignment();
+  assert(alignmentBytes * 8 % bitWidth == 0);
+  return alignmentBytes * 8 / bitWidth;
+}
+
+int32_t MemRefType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  int32_t alignmentBytes = getAlignment().getAlignment();
+  assert(alignmentBytes * 8 % bitWidth == 0);
+  return alignmentBytes * 8 / bitWidth;
+}
+
 MemRefType MemRefType::at(int32_t idx) const {
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
@@ -143,8 +157,7 @@ void CoordTensorType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
-static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
-                                          AlignAttr &alignment,
+static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy, AlignAttr &alignment,
                                           SwizzleAttr &swizzle) {
   alignment = AlignAttr::getTrivialAlignment(elemTy);
   swizzle = SwizzleAttr::getTrivialSwizzle(elemTy.getContext());
@@ -157,7 +170,8 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
       if (val <= 0 || val % elemByte != 0)
         return parser.emitError(parser.getCurrentLocation(),
                                 "alignment must be a positive multiple of "
-                                "element byte size (") << elemByte << "), got " << val;
+                                "element byte size (")
+               << elemByte << "), got " << val;
       alignment = AlignAttr::get(elemTy.getContext(), val);
       if (succeeded(parser.parseOptionalComma())) {
         auto sw = FieldParser<SwizzleAttr>::parse(parser);
@@ -175,9 +189,8 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
   return success();
 }
 
-static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy,
-                                 AlignAttr alignment, SwizzleAttr swizzle,
-                                 MLIRContext *ctx) {
+static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr alignment,
+                                 SwizzleAttr swizzle, MLIRContext *ctx) {
   if (alignment != AlignAttr::getTrivialAlignment(elemTy)) {
     printer << ",";
     printer.printStrippedAttrOrType(alignment);
@@ -199,8 +212,7 @@ Type PointerType::parse(AsmParser &parser) {
     return {};
   AlignAttr alignment;
   SwizzleAttr swizzle;
-  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) ||
-      parser.parseGreater())
+  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) || parser.parseGreater())
     return {};
   return get(elemTy.getContext(), elemTy, *addressSpace, alignment, swizzle);
 }
@@ -208,8 +220,7 @@ Type PointerType::parse(AsmParser &parser) {
 void PointerType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ",";
   printer.printStrippedAttrOrType(getAddressSpace());
-  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(),
-                       getContext());
+  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
 
@@ -229,8 +240,7 @@ Type MemRefType::parse(AsmParser &parser) {
     return {};
   AlignAttr alignment;
   SwizzleAttr swizzle;
-  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) ||
-      parser.parseGreater())
+  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) || parser.parseGreater())
     return {};
   return get(elemTy.getContext(), elemTy, *addressSpace, layout, alignment, swizzle);
 }
@@ -244,8 +254,7 @@ void MemRefType::print(AsmPrinter &printer) const {
     printer.printStrippedAttrOrType(layout);
   else
     printer.printStrippedAttrOrType(cast<ComposedLayoutAttr>(layoutAttr));
-  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(),
-                       getContext());
+  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
 

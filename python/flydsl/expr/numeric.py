@@ -71,6 +71,12 @@ class NumericMeta(type):
         }
         if signed is not None:
             new_attrs["__fly_ptrs__"] = _c_pointers
+            def _reusable_slot_spec(cls, arg):
+                ctype = getattr(cls, '_reusable_ctype', None)
+                if ctype is None:
+                    return None
+                return ctype, lambda a: a.value if hasattr(a, 'value') else a
+            new_attrs["_reusable_slot_spec"] = classmethod(_reusable_slot_spec)
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -79,6 +85,11 @@ class NumericMeta(type):
         new_cls._np_dtype = inferred_np
         new_cls.signed = signed
         new_cls._zero = zero
+        if signed is not None:
+            prefix = "c_int" if signed else "c_uint"
+            ctype = getattr(ctypes, f"{prefix}{width}", None)
+            if ctype is not None:
+                new_cls._reusable_ctype = ctype
         return new_cls
 
     def __str__(cls):

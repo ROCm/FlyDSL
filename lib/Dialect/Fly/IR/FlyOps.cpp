@@ -81,6 +81,25 @@ Type applyIntTupleTransform(Type inputTy, function_ref<IntTupleAttr(IntTupleAttr
   return RebuildLayoutLikeType(inputTy, transformed);
 }
 
+Type applyOffsetOnMemRef(LayoutBuilder<LayoutAttr> &builder, fly::MemRefType memrefTy,
+                         IntTupleAttr offset, LayoutAttr layoutAttr) {
+  if (auto composed = dyn_cast<ComposedLayoutAttr>(memrefTy.getLayout())) {
+    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
+    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
+    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), newLayout,
+                                memrefTy.getAlignment(), memrefTy.getSwizzle());
+  } else {
+    int32_t valDiv = memrefTy.getValueDivisibility();
+    IntAttr offsetInt = offset.extractIntFromLeaf();
+    int32_t offsetDiv =
+        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
+    return fly::MemRefType::get(memrefTy.getElemTy(), memrefTy.getAddressSpace(), layoutAttr,
+                                AlignAttr::get(memrefTy.getElemTy(), newValDiv),
+                                memrefTy.getSwizzle());
+  }
+}
+
 } // namespace
 
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
@@ -780,13 +799,23 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
   if (auto srcMemRefTy = dyn_cast<fly::MemRefType>(srcTy)) {
     Attribute layout = srcMemRefTy.getLayout();
     Attribute newLayout;
-    if (auto la = dyn_cast<LayoutAttr>(layout))
+    int32_t valDiv = srcMemRefTy.getValueDivisibility();
+    int32_t newValDiv;
+    if (auto la = dyn_cast<LayoutAttr>(layout)) {
       newLayout = sliceLayout(la);
-    else
+      IntTupleAttr offsetAttr = layoutCrd2Idx(builder, coordAttr, la.getShape(), la.getStride());
+      IntAttr offsetInt = offsetAttr.extractIntFromLeaf();
+      int32_t offsetDiv =
+          offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+      newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
+    } else {
       newLayout = sliceComposed(cast<ComposedLayoutAttr>(layout));
-    inferredReturnTypes.assign(
-        {fly::MemRefType::get(srcMemRefTy.getElemTy(), srcMemRefTy.getAddressSpace(), newLayout,
-                              srcMemRefTy.getAlignment(), srcMemRefTy.getSwizzle())});
+      newValDiv = valDiv;
+    }
+
+    inferredReturnTypes.assign({fly::MemRefType::get(
+        srcMemRefTy.getElemTy(), srcMemRefTy.getAddressSpace(), newLayout,
+        AlignAttr::get(srcMemRefTy.getElemTy(), newValDiv), srcMemRefTy.getSwizzle())});
     return success();
   }
   if (auto srcCoordTensorTy = dyn_cast<CoordTensorType>(srcTy)) {
@@ -1398,7 +1427,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
       intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
   LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
 
-  inferredReturnTypes.assign({RebuildLayoutLikeType(memrefTy, partitioned)});
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
@@ -1450,7 +1482,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
       intTupleSlice(builder, intTupleExpand(builder, thrValView.getStride(), {2}), sliceCoord);
   LayoutAttr partitioned = LayoutAttr::get(resultShape, resultStride);
 
-  inferredReturnTypes.assign({RebuildLayoutLikeType(memrefTy, partitioned)});
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
@@ -1524,8 +1559,9 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   LayoutAttr thrValView = layoutTiledMmaThrValOperandView(builder, mmaAtom, atomLayout,
                                                           permutationMNK, operandId, inputLayout);
 
+  IntTupleAttr thrIdx = thrIdxTy.getAttr();
   SmallVector<Attribute> coordElems;
-  coordElems.push_back(IntTupleAttr::getLeafStatic(context, 0));
+  coordElems.push_back(thrIdx);
   coordElems.push_back(IntTupleAttr::getLeafNone(context));
   IntTupleAttr sliceCoord = IntTupleAttr::get(ArrayAttr::get(context, coordElems));
 
@@ -1534,7 +1570,10 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   LayoutAttr partitioned = LayoutAttr::get(intTupleExpand(builder, resultShape, {1}),
                                            intTupleExpand(builder, resultStride, {1}));
 
-  inferredReturnTypes.assign({RebuildLayoutLikeType(memrefTy, partitioned)});
+  IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
+  IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
+  IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
+  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
   return success();
 }
 
@@ -1610,10 +1649,6 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
   case MmaOperand::D:
     elemTy = mmaAtom.getValTypeD();
     break;
-  default:
-    return emitOptionalError(location,
-                             "MmaMakeFragmentOp: invalid operand_id value: ",
-                             operandId);
   }
 
   LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
@@ -1648,33 +1683,63 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
-FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
-  if (!memrefTy)
-    return emitOptionalError(location, "MemRefLoadOp: expected MemRefType, got ",
+FLY_INFER_RETURN_TYPES(PtrToIntOp) {
+  auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
+  if (!ptrTy)
+    return emitOptionalError(location, "PtrToIntOp: expected PointerType, got ",
                              operands[0].getType());
-  inferredReturnTypes.push_back(memrefTy.getElemTy());
+  AddressSpace addrSpace = ptrTy.getAddressSpace().getValue();
+  unsigned width;
+
+  switch (addrSpace) {
+  case AddressSpace::Shared:
+    width = 32;
+    break;
+  case AddressSpace::Global:
+    width = 64;
+    break;
+  default:
+    return emitOptionalError(location, "PtrToIntOp: expected Shared or Global address space, got ",
+                             addrSpace);
+  }
+
+  inferredReturnTypes.assign({IntegerType::get(context, width)});
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
-  auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
-  if (!memrefTy)
-    return emitOptionalError(location, "MemRefLoadVecOp: expected MemRefType, got ",
-                             operands[0].getType());
+FLY_INFER_RETURN_TYPES(AddOffsetOp) {
+  auto offsetTy = dyn_cast<IntTupleType>(operands[1].getType());
+  if (!offsetTy)
+    return emitOptionalError(location, "AddOffsetOp: expected IntTupleType for offset, got ",
+                             operands[1].getType());
 
-  auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
-  if (!layoutAttr)
-    return emitOptionalError(location,
-                             "MemRefLoadVecOp: MemRefType with ComposedLayout is not supported");
-  IntTupleBuilder<IntTupleAttr> builder(context);
-  IntAttr size = cast<IntAttr>(intTupleProduct(builder, layoutAttr.getShape()).getValue());
+  if (auto ptrTy = dyn_cast<PointerType>(operands[0].getType())) {
+    if (!offsetTy.getAttr().isLeafInt())
+      return emitOptionalError(
+          location, "AddOffsetOp: offset must be a scalar (leaf int) IntTuple, got ", offsetTy);
 
-  if (!size.isStatic())
-    return emitOptionalError(location, "MemRefLoadVecOp: layout size must be static, got ", size);
+    int32_t valDiv = ptrTy.getValueDivisibility();
+    IntAttr offsetInt = offsetTy.getAttr().extractIntFromLeaf();
+    int32_t offsetDiv =
+        offsetInt.isStatic() ? std::abs(offsetInt.getValue()) : offsetInt.getDivisibility();
+    int32_t newValDiv = (offsetDiv == 0) ? valDiv : utils::divisibilityAdd(valDiv, offsetDiv);
 
-  inferredReturnTypes.push_back(VectorType::get({size.getValue()}, memrefTy.getElemTy()));
-  return success();
+    inferredReturnTypes.assign(
+        {PointerType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(),
+                          AlignAttr::get(ptrTy.getElemTy(), newValDiv), ptrTy.getSwizzle())});
+    return success();
+  }
+
+  if (auto intTupleTy = dyn_cast<IntTupleType>(operands[0].getType())) {
+    IntTupleBuilder<IntTupleAttr> builder(context);
+    inferredReturnTypes.assign(
+        {IntTupleType::get(intTupleAdd(builder, intTupleTy.getAttr(), offsetTy.getAttr()))});
+    return success();
+  }
+
+  return emitOptionalError(location,
+                           "AddOffsetOp: expected PointerType or IntTupleType for ptr, got ",
+                           operands[0].getType());
 }
 
 FLY_INFER_RETURN_TYPES(ApplySwizzleOp) {
@@ -1686,34 +1751,61 @@ FLY_INFER_RETURN_TYPES(ApplySwizzleOp) {
   if (!swizzleTy)
     return emitOptionalError(location, "ApplySwizzleOp: expected SwizzleType, got ",
                              operands[1].getType());
-  inferredReturnTypes.assign({PointerType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(),
-                                               ptrTy.getAlignment(), swizzleTy.getAttr())});
+  int32_t valDiv = ptrTy.getValueDivisibility();
+  int32_t newValDiv = utils::divisibilityApplySwizzle(valDiv, swizzleTy.getAttr());
+  inferredReturnTypes.assign(
+      {PointerType::get(ptrTy.getElemTy(), ptrTy.getAddressSpace(),
+                        AlignAttr::get(ptrTy.getElemTy(), newValDiv), swizzleTy.getAttr())});
   return success();
 }
 
-FLY_INFER_RETURN_TYPES(RecastIterOp) {
-  auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
-  if (!ptrTy)
-    return emitOptionalError(location, "RecastIterOp: expected PointerType, got ",
-                             operands[0].getType());
-  inferredReturnTypes.assign({ptrTy});
-  return success();
+FLY_INFER_RETURN_TYPES(PtrLoadOp) {
+  if (auto ptrTy = dyn_cast<PointerType>(operands[0].getType())) {
+    inferredReturnTypes.assign({ptrTy.getElemTy()});
+    return success();
+  }
+  if (auto intTupleTy = dyn_cast<IntTupleType>(operands[0].getType())) {
+    inferredReturnTypes.assign({intTupleTy});
+    return success();
+  }
+  return emitOptionalError(location, "PtrLoadOp: expected PointerType or IntTupleType, got ",
+                           operands[0].getType());
 }
 
-FLY_INFER_RETURN_TYPES(AddOffsetOp) {
-  auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
-  auto offsetTy = dyn_cast<IntTupleType>(operands[1].getType());
-  if (!ptrTy)
-    return emitOptionalError(location, "AddOffsetOp: expected PointerType for ptr, got ",
+FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
+  if (auto memrefTy = dyn_cast<MemRefType>(operands[0].getType())) {
+    inferredReturnTypes.push_back(memrefTy.getElemTy());
+    return success();
+  }
+  if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
+    inferredReturnTypes.push_back(IntTupleType::get(coordTensorTy.getBase()));
+    return success();
+  }
+  return emitOptionalError(location, "MemRefLoadOp: expected MemRefType or CoordTensorType, got ",
+                           operands[0].getType());
+}
+
+FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
+  auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
+  if (!memrefTy)
+    return emitOptionalError(location, "MemRefLoadVecOp: expected MemRefType, got ",
                              operands[0].getType());
-  if (!offsetTy)
-    return emitOptionalError(location, "AddOffsetOp: expected IntTupleType for offset, got ",
-                             operands[1].getType());
-  if (!offsetTy.getAttr().isLeaf())
-    return emitOptionalError(location, "AddOffsetOp: offset must be a scalar (leaf) IntTuple, got ",
-                             offsetTy);
-  // todo: alignment of the return pointer should be the gcd(offset, original alignment)
-  inferredReturnTypes.assign({ptrTy});
+  if (memrefTy.getAddressSpace().getValue() != AddressSpace::Register)
+    return emitOptionalError(location, "MemRefLoadVecOp: expected Register address space, got ",
+                             memrefTy.getAddressSpace());
+  auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
+  if (!layoutAttr)
+    return emitOptionalError(location,
+                             "MemRefLoadVecOp: MemRefType with ComposedLayout is not supported");
+  IntTupleBuilder<IntTupleAttr> builder(context);
+  IntTupleAttr size = intTupleProduct(builder, layoutAttr.getShape());
+
+  if (!size.isLeafInt() || !size.isStatic())
+    return emitOptionalError(
+        location, "MemRefLoadVecOp: layout size must be static and leaf int, got ", size);
+
+  inferredReturnTypes.push_back(
+      VectorType::get({size.getLeafAsInt().getValue()}, memrefTy.getElemTy()));
   return success();
 }
 

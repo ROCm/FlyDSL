@@ -1,3 +1,4 @@
+import ctypes
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
@@ -100,10 +101,12 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        if isinstance(value, JitArgument) and isinstance(value, DslType):
+        is_jit_arg = hasattr(value, '__fly_types__') and hasattr(value, '__fly_ptrs__')
+        is_dsl_type = hasattr(value, '__fly_construct__') and hasattr(value, '__fly_values__')
+        if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
-        elif isinstance(value, JitArgument):
+        elif is_jit_arg:
             jit_arg = value
             dsl_type = JitArgumentRegistry.get_dsl_type(type(value))
             if dsl_type is None:
@@ -149,6 +152,24 @@ class TensorAdaptor:
         self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
+        self._orig_dtype = tensor.dtype
+        self._orig_shape = tensor.shape
+        self._orig_strides = tensor.stride()
+
+    @staticmethod
+    def _extract_data_ptr(arg):
+        return arg.data_ptr()
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        """Reusable slot for tensor arguments.
+
+        For bare-pointer calling convention, only the data pointer changes
+        between calls with the same shape/dtype/strides.
+        """
+        if not hasattr(arg, 'data_ptr'):
+            return None
+        return ctypes.c_void_p, cls._extract_data_ptr
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):
@@ -164,6 +185,15 @@ class TensorAdaptor:
     @requires_memref_desc
     def __fly_ptrs__(self):
         return self.tensor_adaptor.get_c_pointers()
+
+    def __cache_signature__(self):
+        return (
+            self._orig_dtype,
+            tuple(self._orig_shape),
+            tuple(self._orig_strides),
+            self.assumed_align,
+            self.use_32bit_stride,
+        )
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:

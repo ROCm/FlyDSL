@@ -257,6 +257,7 @@ def test_mfma_a8_flyc_preshuffle(
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
+        (64, 8192, 8192, 64, 128, 128),
         (32, 8192, 8192, 32, 128, 256),
         pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
         pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
@@ -271,6 +272,10 @@ def test_mfma_w4_flyc_preshuffle(
     lds_stage: int = DEFAULT_LDS_STAGE,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
+    use_cshuffle_epilog: bool = False,
+    waves_per_eu: int = 0,
+
 ):
     """FP4 (MXFP4) preshuffle GEMM — gfx950 only."""
     if get_rocm_arch() != "gfx950":
@@ -287,6 +292,7 @@ def test_mfma_w4_flyc_preshuffle(
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         a_dtype=a_dtype, b_dtype=b_dtype,
         out_dtype=out_dtype, lds_stage=lds_stage,
+        waves_per_eu=waves_per_eu,
     )
     print(f"✓ Compiled (lds_stage={lds_stage})")
 
@@ -416,6 +422,7 @@ if __name__ == "__main__":
                 lds_stage=args.lds_stage,
                 bench_iters=args.num_iters,
                 bench_warmup=args.num_warmup,
+                waves_per_eu=int(args.waves_per_eu),
             )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")

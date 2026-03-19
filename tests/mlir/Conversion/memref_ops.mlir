@@ -1,4 +1,4 @@
-// RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // MemRef load/store lowering tests:
 //   - Scalar: fly.memref.load/store -> llvm.getelementptr + llvm.load/store

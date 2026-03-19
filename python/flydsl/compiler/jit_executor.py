@@ -56,6 +56,7 @@ class CompiledArtifact:
         self._source_ir = source_ir
         self._module = None
         self._engine = None
+        self._func_exe = None
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
 
@@ -72,6 +73,7 @@ class CompiledArtifact:
         self._source_ir = state["source_ir"]
         self._module = None
         self._engine = None
+        self._func_exe = None
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
 
@@ -90,19 +92,22 @@ class CompiledArtifact:
                 )
                 self._engine.initialize()
 
+    def _get_func_exe(self):
+        if self._func_exe is None:
+            if self._engine is None:
+                self._ensure_engine()
+            func_ptr = self._engine.raw_lookup(self._entry)
+            self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
+        return self._func_exe
+
     def __call__(self, *args, **kwargs):
-        if self._engine is None:
-            self._ensure_engine()
+        func_exe = self._get_func_exe()
 
         all_c_ptrs: List[ctypes.c_void_p] = []
         for arg in args:
             all_c_ptrs.extend(fly_pointers(arg))
 
-        func_ptr = self._engine.raw_lookup(self._entry)
-        func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
-
         packed_args = self._packer.pack(all_c_ptrs)
-
         return func_exe(packed_args)
 
     def dump(self, compiled: bool = True):

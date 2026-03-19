@@ -1,8 +1,10 @@
+import ctypes
 import hashlib
 import inspect
 import os
 import pickle
 import pkgutil
+import threading
 import types
 from functools import lru_cache
 from pathlib import Path
@@ -24,7 +26,8 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_construct, fly_types
+from .protocol import fly_types, fly_pointers, fly_construct
+
 
 
 @lru_cache(maxsize=1)
@@ -439,11 +442,134 @@ class JitCacheManager:
         return cache_key in self.memory_cache or self._cache_file(cache_key).exists()
 
 
+def _resolve_jit_arg_type(arg, annotation):
+    """Resolve the JitArgument type for an argument, using the same dispatch
+    logic as convert_to_jit_arguments.  Returns the type (not an instance)."""
+    from .jit_argument import JitArgumentRegistry
+
+    if isinstance(arg, int) and annotation is Stream:
+        return Stream
+    if hasattr(arg, '__fly_ptrs__'):
+        return type(arg)
+    constructor, _ = JitArgumentRegistry.get(type(arg))
+    return constructor
+
+
+def _build_call_state(sig, args_tuple, func_exe):
+    """Build a CallState for fast repeated dispatch.
+
+    Resolves each parameter's JitArgument type using the same registry as
+    convert_to_jit_arguments, then asks it for a reusable slot specification.
+    This ensures a single source of truth for argument packing.
+
+    Returns a CallState, or None if any parameter can't be fast-pathed.
+    """
+    from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
+
+    slot_specs = []
+    has_user_stream = False
+
+    for i, (param_name, param) in enumerate(sig.parameters.items()):
+        annotation = param.annotation
+
+        if annotation is not inspect.Parameter.empty and _is_constexpr_annotation(annotation):
+            continue
+
+        if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
+            continue
+
+        if getattr(annotation, '_is_stream_param', False):
+            has_user_stream = True
+
+        arg = args_tuple[i]
+
+        jit_arg_type = _resolve_jit_arg_type(arg, annotation)
+        if jit_arg_type is None or not hasattr(jit_arg_type, '_reusable_slot_spec'):
+            return None
+
+        spec = jit_arg_type._reusable_slot_spec(arg)
+        if spec is None:
+            return None
+
+        ctype, extract = spec
+
+        try:
+            extract(arg)
+        except (AttributeError, TypeError):
+            return None
+
+        slot_specs.append((i, ctype, extract))
+
+    # Auto-stream: append a zero-valued slot for the default (NULL) stream.
+    # When no user-declared stream parameter exists, the compiled kernel
+    # still expects a stream pointer as the last argument.  A NULL pointer
+    # (value 0) selects the HIP default stream.
+    if not has_user_stream:
+        slot_specs.append((-1, ctypes.c_void_p, None))
+
+    return CallState(slot_specs, func_exe)
+
+
+class CallState:
+    """Pre-allocated state for fast kernel dispatch.
+
+    Built from JitArgument types' _reusable_slot_spec protocol — the same
+    types used by convert_to_jit_arguments for the full DLPack path.
+
+    Pre-allocates typed ctypes storage and a packed pointer array at init
+    time.  On each call, only updates .value on existing storage objects —
+    no ctypes object allocation, no pointer()/cast() calls.  Uses
+    thread-local storage for thread safety.
+    """
+
+    __slots__ = ('_func_exe', '_spec', '_tls')
+
+    def __init__(self, slot_specs, func_exe):
+        self._func_exe = func_exe
+        self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
+        self._tls = threading.local()
+
+    def _init_buffers(self):
+        n_ptrs = len(self._spec)
+        packed = (ctypes.c_void_p * n_ptrs)()
+        storages = []
+        updaters = []
+
+        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
+            s = ctype(0)
+            packed[packed_idx] = ctypes.addressof(s)
+            storages.append(s)
+            if extract is not None:
+                updaters.append((arg_idx, s, extract))
+
+        self._tls.packed = packed
+        self._tls.updaters = updaters
+        self._tls._storages = storages
+
+    def __call__(self, args_tuple):
+        if not hasattr(self._tls, 'packed'):
+            self._init_buffers()
+
+        for arg_idx, storage, extract in self._tls.updaters:
+            storage.value = extract(args_tuple[arg_idx])
+
+        return self._func_exe(self._tls.packed)
+
+
 class JitFunction:
     def __init__(self, func: Callable):
         self.func = ASTRewriter.transform(func)
         self.manager_key = None
         self.cache_manager = None
+        self._call_state_cache = {}  # cache_key -> CallState
+        self._sig = None  # lazy: set on first call
+        self._mem_cache = {}
+
+    def _ensure_sig(self):
+        """Initialize signature + param metadata on first call (not at decoration time)."""
+        if self._sig is not None:
+            return
+        self._sig = inspect.signature(self.func)
 
     def _ensure_cache_manager(self):
         if self.manager_key is not None:
@@ -457,48 +583,113 @@ class JitFunction:
             self.cache_manager = JitCacheManager(cache_dir)
             self.cache_manager.load_all()
 
-    def _make_cache_key(self, bound_args: Dict) -> str:
+    @staticmethod
+    def _arg_cache_sig(arg, *, runtime=False):
+        """Cache signature for a single argument value.
+
+        When runtime=True the parameter's annotation indicates a runtime
+        type (has __fly_ptrs__, e.g. Int32, Stream) — value is passed to
+        the kernel at launch time and does NOT affect compiled code, so
+        only the Python type is recorded.
+
+        Dispatch order:
+        1. __cache_signature__ — types that explicitly declare their cache
+           identity (e.g. TensorAdaptor includes assumed_align).
+        2. Python scalars — value in key when not runtime; type only when
+           runtime (annotated as Int32/Stream/etc.).
+        3. Tensor-like (dtype+shape) — fallback for bare torch.Tensor.
+        4. Everything else — type only.
+        """
+        if hasattr(arg, "__cache_signature__"):
+            return arg.__cache_signature__()
+        elif isinstance(arg, (int, float, bool, str)):
+            if runtime:
+                return type(arg)
+            return (type(arg), arg)
+        elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
+            strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
+            return (arg.dtype, tuple(arg.shape), strides)
+        else:
+            return type(arg)
+
+    def _make_cache_key(self, bound_args):
+        """Build a tuple cache key from bound arguments.
+
+        For parameters annotated with a runtime type (one that implements
+        __fly_ptrs__, e.g. Int32, Stream), the value is excluded from the
+        key — only the Python type matters.  This prevents unnecessary
+        recompilation when only runtime values change.
+        """
+        from .jit_argument import _is_constexpr_annotation
+        sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
-            key_parts.append(f"{name}:{self._get_type_signature(arg)}")
-        return "|".join(key_parts)
+            param = sig.parameters.get(name)
+            ann = param.annotation if param else inspect.Parameter.empty
 
-    def _get_type_signature(self, obj) -> str:
-        if hasattr(obj, "__cache_signature__"):
-            return obj.__cache_signature__()
-        elif hasattr(obj, "dtype") and hasattr(obj, "shape"):
-            return f"tensor[{obj.dtype},{obj.shape}]"
-        elif isinstance(obj, (int, float, bool, str)):
-            return f"{type(obj).__name__}:{obj}"
-        return type(obj).__name__
+            if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
+                key_parts.append((name, type(arg), arg))
+                continue
+
+            is_runtime = (ann is not inspect.Parameter.empty
+                          and hasattr(ann, '__fly_ptrs__'))
+            if isinstance(arg, tuple):
+                key_parts.append((name, tuple(
+                    self._arg_cache_sig(a) for a in arg)))
+            else:
+                key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
+        return tuple(key_parts)
+
+    @staticmethod
+    def _cache_key_to_str(cache_key) -> str:
+        """Convert tuple cache key to string for disk cache."""
+        return str(cache_key)
 
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
 
+        self._ensure_sig()
         self._ensure_cache_manager()
 
-        if not hasattr(self, "_sig"):
-            self._sig = inspect.signature(self.func)
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
         cache_key = self._make_cache_key(bound.arguments)
 
+        args_tuple = tuple(bound.arguments.values())
+
+        # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
+        call_state = self._call_state_cache.get(cache_key)
+        if call_state is not None:
+            return call_state(args_tuple)
+
+        # Normal path: check caches
         cached_func = None
-        dump_ir = env.debug.dump_ir
         use_cache = env.runtime.enable_cache
-        if not hasattr(self, "_mem_cache"):
-            self._mem_cache = {}
         if use_cache:
-            compiled_func = self._mem_cache.get(cache_key)
-            if compiled_func is not None:
-                cached_func = compiled_func
-            elif not dump_ir:
-                cached_func = self.cache_manager.get(cache_key) if self.cache_manager else None
+            cached_func = self._mem_cache.get(cache_key)
+            if cached_func is None and not env.debug.dump_ir:
+                str_key = self._cache_key_to_str(cache_key)
+                cached_func = self.cache_manager.get(str_key) if self.cache_manager else None
+                if cached_func is not None:
+                    self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            # Build CallState via JitArgument registry (same dispatch as compile path)
+            try:
+                state = _build_call_state(
+                    sig, args_tuple, cached_func._get_func_exe(),
+                )
+            except Exception:
+                state = None
+            if state is not None:
+                self._call_state_cache[cache_key] = state
+                return state(args_tuple)
+
+            # Fallback: run through DLPack (should not happen for static layout)
+            log().warning("CallState build failed on cache hit, falling back to DLPack path")
             if not hasattr(self, "_cached_ctx"):
                 self._cached_ctx = ir.Context()
                 self._cached_ctx.load_all_available_dialects()
@@ -561,10 +752,24 @@ class JitFunction:
 
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func
-                if self.cache_manager and not dump_ir:
-                    self.cache_manager.set(cache_key, compiled_func)
+                if self.cache_manager and not env.debug.dump_ir:
+                    str_key = self._cache_key_to_str(cache_key)
+                    self.cache_manager.set(str_key, compiled_func)
 
-            return compiled_func(*jit_args)
+            result = compiled_func(*jit_args)
+
+            # Build CallState so subsequent calls skip DLPack
+            try:
+                state = _build_call_state(
+                    sig, args_tuple,
+                    compiled_func._get_func_exe(),
+                )
+                if state is not None:
+                    self._call_state_cache[cache_key] = state
+            except Exception:
+                pass
+
+            return result
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:

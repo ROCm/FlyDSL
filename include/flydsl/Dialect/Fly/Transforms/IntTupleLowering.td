@@ -84,17 +84,37 @@ def : Pat<(Fly_PrependOp Fly_ComposedLayout:$layout, Fly_Layout:$elem, $n),
 def : Pat<(Fly_SliceOp Fly_Layout:$layout, $coord), 
           (Fly_MakeLayoutOp (Fly_SliceOp (Fly_GetShapeOp $layout), $coord),
                             (Fly_SliceOp (Fly_GetStrideOp $layout), $coord))>;
+def : Pat<(Fly_SliceOp Fly_ComposedLayout:$layout, $coord),
+          (Fly_MakeComposedLayoutOp
+            (Fly_ComposedGetInnerOp $layout),
+            (Fly_IntTupleAddOp (Fly_Crd2IdxOp $coord, (Fly_ComposedGetOuterOp $layout)), 
+                               (Fly_ComposedGetOffsetOp $layout)),
+            (Fly_SliceOp (Fly_ComposedGetOuterOp $layout), $coord))>;
+
 def : Pat<(Fly_SliceOp Fly_MemRef:$memref, $coord), 
           (Fly_MakeViewOp  
             (Fly_AddOffsetOp (Fly_GetIterOp $memref),
                              (Fly_Crd2IdxOp $coord, (Fly_GetLayoutOp $memref))),
-            (Fly_SliceOp (Fly_GetLayoutOp $memref), $coord))>;
+            (Fly_SliceOp (Fly_GetLayoutOp $memref), $coord)),
+          [(Fly_SimpleLayoutMemRef $memref)]>;
 def : Pat<(Fly_SliceOp Fly_CoordTensor:$tensor, $coord), 
           (Fly_MakeViewOp  
-            (Fly_IntTupleAddOp (Fly_GetIterOp $tensor),
-                               (Fly_Crd2IdxOp $coord, (Fly_GetLayoutOp $tensor))),
-            (Fly_SliceOp (Fly_GetLayoutOp $tensor), $coord))>;
+            (Fly_AddOffsetOp (Fly_GetIterOp $tensor),
+                             (Fly_Crd2IdxOp $coord, (Fly_GetLayoutOp $tensor))),
+            (Fly_SliceOp (Fly_GetLayoutOp $tensor), $coord)),
+          [(Fly_SimpleLayoutCoordTensor $tensor)]>;
 
+def : Pat<(Fly_SliceOp Fly_MemRef:$memref, $coord), 
+          (Fly_MakeViewOp  
+            (Fly_GetIterOp $memref),
+            (Fly_SliceOp (Fly_GetLayoutOp $memref), $coord)),
+          [(Fly_ComposedLayoutMemRef $memref)]>;
+def : Pat<(Fly_SliceOp Fly_CoordTensor:$tensor, $coord), 
+          (Fly_MakeViewOp  
+            (Fly_GetIterOp $tensor),
+            (Fly_SliceOp (Fly_GetLayoutOp $tensor), $coord)),
+          [(Fly_ComposedLayoutCoordTensor $tensor)]>;
+          
 // DiceOp patterns
 def : Pat<(Fly_DiceOp Fly_Layout:$layout, $coord), 
           (Fly_MakeLayoutOp (Fly_DiceOp (Fly_GetShapeOp $layout), $coord),
