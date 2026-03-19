@@ -579,6 +579,8 @@ public:
       return lowerUniversalFMA(op, rewriter, loc, universalFma, dPtr, aPtr, bPtr, cPtr);
     else if (auto cdna3Mfma = dyn_cast<fly_rocdl::MmaAtomCDNA3_MFMAType>(mmaAtomType))
       return lowerCDNA3MFMA(op, rewriter, loc, cdna3Mfma, dPtr, aPtr, bPtr, cPtr);
+    else if (auto gfx1250Wmma = dyn_cast<fly_rocdl::MmaAtomGFX1250_WMMAType>(mmaAtomType))
+      return lowerGFX1250WMMA(op, rewriter, loc, gfx1250Wmma, dPtr, aPtr, bPtr, cPtr);
 
     return rewriter.notifyMatchFailure(op, "unsupported MmaAtom type");
   }
@@ -733,6 +735,172 @@ private:
 #undef DISPATCH_MFMA
 
     return rewriter.notifyMatchFailure(op, "no matching ROCDL MFMA intrinsic");
+  }
+
+  static Type getWmmaABType(MLIRContext *ctx, int32_t m, int32_t k, Type elemTy) {
+    if (m <= 0 || k <= 0)
+      return nullptr;
+
+    Type i32Ty = IntegerType::get(ctx, 32);
+
+    // fp8/bf8 WMMA operands are packed into i32 vectors.
+    if (isF8(elemTy)) {
+      if (k == 16)
+        return VectorType::get({2}, i32Ty);
+      if (k == 64)
+        return VectorType::get({8}, i32Ty);
+      if (k == 128)
+        return VectorType::get({16}, i32Ty);
+      return nullptr;
+    }
+
+    // Integer WMMA operands are packed into i32 vectors.
+    if (elemTy.isInteger(8)) {
+      if (k == 16 || k == 32)
+        return VectorType::get({4}, i32Ty);
+      if (k == 64)
+        return VectorType::get({8}, i32Ty);
+      return nullptr;
+    }
+
+    int64_t abElemsPerLane = static_cast<int64_t>(m) * static_cast<int64_t>(k) / 32;
+    if (abElemsPerLane <= 0 || (static_cast<int64_t>(m) * static_cast<int64_t>(k)) % 32 != 0)
+      return nullptr;
+    return VectorType::get({abElemsPerLane}, elemTy);
+  }
+
+  static int64_t getWmmaAccVecSize(int32_t m, int32_t k, Type elemTyA, Type elemTyB,
+                                   Type elemTyAcc) {
+    // Current backend wiring only dispatches ROCDL ops that exist in this
+    // MLIR version; keep sizing generic per supported WMMA shape/type family.
+    if (m != 16)
+      return 0;
+
+    // NOTE: rocdl.wmma.f64.16x16x4.f64 is not exposed in the current MLIR
+    // ROCDL dialect build, so f64 is intentionally not dispatched here.
+    if (k == 4 && elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32())
+      return 8;
+
+    if (k == 32 && elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32())
+      return 8;
+    if (k == 32 && elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16())
+      return 8;
+    if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32())
+      return 8;
+    if (k == 32 && elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16())
+      return 8;
+
+    if (k == 64 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF32())
+      return 8;
+    if (k == 64 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF16())
+      return 8;
+    if (k == 128 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF32())
+      return 8;
+    if (k == 128 && isF8(elemTyA) && isF8(elemTyB) && elemTyAcc.isF16())
+      return 8;
+
+    if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
+      return 8;
+
+    return 0;
+  }
+
+  enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp };
+
+  template <typename WmmaOp, WmmaVariant Variant>
+  LogicalResult emitWmma(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                         Type abTyA, Type abTyB, VectorType accTy, Value aPtr, Value bPtr,
+                         Value cPtr, Value dPtr) const {
+    Value a = LLVM::LoadOp::create(rewriter, loc, abTyA, aPtr);
+    Value b = LLVM::LoadOp::create(rewriter, loc, abTyB, bPtr);
+    Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
+    Value res;
+    if constexpr (Variant == WmmaVariant::ModsAllReuse) {
+      res = WmmaOp::create(rewriter, loc, accTy,
+                            /*signA=*/false, a, /*signB=*/false, b,
+                            /*modC=*/(uint16_t)0, c)
+                .getResult();
+    } else if constexpr (Variant == WmmaVariant::ModsC) {
+      res = WmmaOp::create(rewriter, loc, accTy, a, b,
+                            /*modC=*/(uint16_t)0, c,
+                            /*reuseA=*/false, /*reuseB=*/false)
+                .getResult();
+    } else {
+      static_assert(Variant == WmmaVariant::ModsABClamp);
+      res = WmmaOp::create(rewriter, loc, accTy,
+                            /*signA=*/false, a, /*signB=*/false, b, c,
+                            /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
+                .getResult();
+    }
+    LLVM::StoreOp::create(rewriter, loc, res, dPtr);
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+  LogicalResult lowerGFX1250WMMA(MmaAtomCall op, ConversionPatternRewriter &rewriter, Location loc,
+                                 fly_rocdl::MmaAtomGFX1250_WMMAType atomTy, Value dPtr, Value aPtr,
+                                 Value bPtr, Value cPtr) const {
+    int32_t m = atomTy.getM();
+    int32_t n = atomTy.getN();
+    int32_t k = atomTy.getK();
+    Type elemTyA = atomTy.getElemTyA();
+    Type elemTyB = atomTy.getElemTyB();
+    Type elemTyAcc = atomTy.getElemTyAcc();
+    MLIRContext *ctx = rewriter.getContext();
+
+    Type abTyA = getWmmaABType(ctx, m, k, elemTyA);
+    Type abTyB = getWmmaABType(ctx, m, k, elemTyB);
+    if (!abTyA || !abTyB)
+      return rewriter.notifyMatchFailure(op, "unsupported A/B element packing for WMMA");
+
+    int64_t accVecSize = getWmmaAccVecSize(m, k, elemTyA, elemTyB, elemTyAcc);
+    if (accVecSize == 0)
+      return rewriter.notifyMatchFailure(op, "unsupported MNK/type combination for WMMA");
+
+    VectorType accTy = VectorType::get({accVecSize}, elemTyAcc);
+
+#define DISPATCH_WMMA(M_, K_, PRED, OP, VARIANT)                                                   \
+  if (m == M_ && n == M_ && k == K_ && (PRED))                                                     \
+    return emitWmma<ROCDL::OP, WmmaVariant::VARIANT>(op, rewriter, loc, abTyA, abTyB, accTy,       \
+                                                     aPtr, bPtr, cPtr, dPtr);
+
+#define DISPATCH_WMMA_FP8(K_, ACC_PRED, ACC_PREFIX)                                                \
+  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
+                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_fp8, ModsC)                                   \
+  DISPATCH_WMMA(16, K_, isFP8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
+                wmma_##ACC_PREFIX##_16x16x##K_##_fp8_bf8, ModsC)                                   \
+  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isFP8(elemTyB) && ACC_PRED,                              \
+                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_fp8, ModsC)                                   \
+  DISPATCH_WMMA(16, K_, isBF8(elemTyA) && isBF8(elemTyB) && ACC_PRED,                              \
+                wmma_##ACC_PREFIX##_16x16x##K_##_bf8_bf8, ModsC)
+
+    DISPATCH_WMMA(16, 4, elemTyA.isF32() && elemTyB.isF32() && elemTyAcc.isF32(),
+                  wmma_f32_16x16x4_f32, ModsAllReuse)
+
+    DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32(),
+                  wmma_f32_16x16x32_f16, ModsAllReuse)
+    DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32(),
+                  wmma_f32_16x16x32_bf16, ModsAllReuse)
+    DISPATCH_WMMA(16, 32, elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF16(),
+                  wmma_f16_16x16x32_f16, ModsAllReuse)
+    DISPATCH_WMMA(16, 32, elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isBF16(),
+                  wmma_bf16_16x16x32_bf16, ModsAllReuse)
+
+    // bf16f32 WMMA requires C:f32 and D:bf16. Current MmaAtom interface carries
+    // one accumulator type, so mixed C/D typing is not representable yet.
+
+    DISPATCH_WMMA_FP8(64, elemTyAcc.isF32(), f32)
+    DISPATCH_WMMA_FP8(64, elemTyAcc.isF16(), f16)
+    DISPATCH_WMMA_FP8(128, elemTyAcc.isF32(), f32)
+    DISPATCH_WMMA_FP8(128, elemTyAcc.isF16(), f16)
+
+    DISPATCH_WMMA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32),
+                  wmma_i32_16x16x64_iu8, ModsABClamp)
+
+#undef DISPATCH_WMMA_FP8
+#undef DISPATCH_WMMA
+
+    return rewriter.notifyMatchFailure(op, "no matching ROCDL WMMA intrinsic");
   }
 };
 
