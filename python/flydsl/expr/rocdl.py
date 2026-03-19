@@ -18,6 +18,7 @@ from .._mlir.dialects.rocdl import *  # noqa: F401,F403
 from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferLDSTType
 
 from .._mlir._mlir_libs._fly_rocdl import MmaAtomCDNA3_MFMAType
+from .._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
 
 BufferLDST = lambda bit_size: CopyOpCDNA3BufferLDSTType.get(bit_size)  # noqa: E731
 BufferLDST32b = lambda: CopyOpCDNA3BufferLDSTType.get(32)  # noqa: E731
@@ -47,6 +48,29 @@ def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
     ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
     ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
     return MmaAtomCDNA3_MFMAType.get(m, n, k, ty, ty_b, ty_acc)
+
+
+def WMMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
+    """Create a WMMA MMA atom type for GFX1250 (wave32).
+
+    Args:
+        m, n, k: WMMA tile dimensions.
+        elem_type: Element type for A operand.
+        elem_type_b: Element type for B operand (defaults to elem_type).
+        elem_type_acc: Element type for accumulator (defaults to elem_type).
+    """
+    from .._mlir import ir
+
+    if isinstance(elem_type, type) and hasattr(elem_type, 'ir_type'):
+        ty = elem_type.ir_type
+    elif isinstance(elem_type, ir.Type):
+        ty = elem_type
+    else:
+        raise TypeError(f"WMMA: unsupported elem_type {elem_type}")
+
+    ty_b = ty if elem_type_b is None else (elem_type_b.ir_type if hasattr(elem_type_b, 'ir_type') else elem_type_b)
+    ty_acc = ty if elem_type_acc is None else (elem_type_acc.ir_type if hasattr(elem_type_acc, 'ir_type') else elem_type_acc)
+    return MmaAtomGFX1250_WMMAType.get(m, n, k, ty, ty_b, ty_acc)
 
 
 def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
@@ -84,6 +108,7 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
     return _prim.make_view(bd_ptr, layout, loc=loc, ip=ip)
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
+_ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -292,6 +317,20 @@ def wmma_i32_16x16x32_iu4(result_type, operands, *, loc=None, ip=None):
     ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
     return _ods_wmma_i32_16x16x32_iu4(result_type, ops, loc=loc, ip=ip).result
 
+def wave_id():
+    """Get wave-id-in-workgroup as SGPR (via TTMP8[29:25]).
+
+    On gfx1250 this reads an architected SGPR, so the result stays in
+    the SGPR pipeline and all derived computations are automatically
+    scalarized by LLVM uniformity analysis.
+
+    Returns:
+        i32 value (SGPR) with the wave ID within the workgroup.
+    """
+    from .._mlir import ir
+    i32 = ir.IntegerType.get_signless(32)
+    return _ods_wave_id(i32)
+
 
 __all__ = [
     # Thread/Block/Grid IDs and dimensions
@@ -300,6 +339,7 @@ __all__ = [
     'workgroup_dim_x', 'workgroup_dim_y', 'workgroup_dim_z',
     'grid_dim_x', 'grid_dim_y', 'grid_dim_z',
     'wavefrontsize',
+    'wave_id',
     
     # Synchronization
     'barrier', 's_barrier', 's_barrier_signal', 's_barrier_wait',
@@ -367,9 +407,20 @@ __all__ = [
 
     # MMA atom types
     'MmaAtomCDNA3_MFMAType', 'MFMA',
+    'MmaAtomGFX1250_WMMAType', 'WMMA',
 
     # Convenience wrappers
     'make_buffer_tensor',
+
+    # gfx1250 TDM - descriptor-driven tile copy (preferred over per-lane)
+    'tensor_load_to_lds',       # 4-group, up to 5D tensor
+    'tensor_load_to_lds_d2',    # 2-group, up to 2D tensor
+    'tensor_store_from_lds',    # 4-group store
+    'tensor_store_from_lds_d2', # 2-group store
+    's_wait_tensorcnt',
+
+    # gfx1250 L2 prefetch
+    'global_prefetch',          # per-lane 1-byte prefetch hint
 ]
 
 

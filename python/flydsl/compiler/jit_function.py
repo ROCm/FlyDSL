@@ -316,6 +316,13 @@ class MlirCompiler:
             "gpu-module-to-binary{format=fatbin}",
         ]
 
+    @staticmethod
+    def _use_wave64(chip: str) -> bool:
+        chip = str(chip)
+        if chip.startswith("gfx12"):
+            return False
+        return True
+
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
