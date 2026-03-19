@@ -256,11 +256,101 @@ class ReplaceIfWithDispatch(Transformer):
                 else_fn()
                 scf.YieldOp([])
 
+    @staticmethod
+    def _collect_assigned_vars(stmts):
+        """Find all variable names assigned (Name targets) in a statement list."""
+        assigned = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and target.id not in assigned:
+                        assigned.append(target.id)
+            elif isinstance(stmt, ast.AugAssign):
+                if isinstance(stmt.target, ast.Name) and stmt.target.id not in assigned:
+                    assigned.append(stmt.target.id)
+        return assigned
+
+    @staticmethod
+    def _unwrap_value(v):
+        """Unwrap an ir.Value from FlyDSL wrappers."""
+        if isinstance(v, ir.Value):
+            return v
+        if hasattr(v, "ir_value"):
+            return v.ir_value()
+        return v
+
+    @staticmethod
+    def scf_if_dispatch_v(cond, then_fn, else_fn, var_names):
+        """Dispatch if/else that produces values.
+
+        For static (compile-time) conditions, evaluates the chosen branch and
+        returns the value(s) from the returned dict.
+
+        For dynamic (MLIR ir.Value) conditions, builds an scf.IfOp with result
+        types inferred from the then-branch, moves the then-branch ops into the
+        then-region, and executes the else-branch in the else-region.
+
+        Args:
+            cond: Condition (bool for static, ir.Value for dynamic).
+            then_fn: Callable returning dict {var_name: value}.
+            else_fn: Callable returning dict {var_name: value}.
+            var_names: Tuple of variable names to extract from the dicts.
+
+        Returns:
+            Single value if len(var_names) == 1, else tuple of values.
+        """
+        if not ReplaceIfWithDispatch._is_dynamic(cond):
+            # Static: evaluate at compile time
+            result = then_fn() if cond else else_fn()
+            values = [result[k] for k in var_names]
+            return values[0] if len(values) == 1 else tuple(values)
+
+        # Dynamic: build scf.IfOp with results
+        loc = ir.Location.unknown()
+        i1_cond = ReplaceIfWithDispatch._to_i1(cond)
+
+        # Record ops before then-branch execution
+        current_block = ir.InsertionPoint.current.block
+        ops_before = list(current_block.operations)
+
+        # Execute then_fn() to get ops + return values
+        then_result = then_fn()
+        then_values = [ReplaceIfWithDispatch._unwrap_value(then_result[k]) for k in var_names]
+        result_types = [v.type for v in then_values]
+
+        # Collect ops emitted by then_fn (new ops not in ops_before)
+        ops_before_set = set(id(op) for op in ops_before)
+        then_ops = [op for op in current_block.operations if id(op) not in ops_before_set]
+
+        # Create IfOp with known result types
+        if_op = scf.IfOp(i1_cond, result_types, has_else=True, loc=loc)
+
+        # Move then-branch ops into the then-region
+        then_block = if_op.regions[0].blocks[0]
+        with ir.InsertionPoint(then_block):
+            yield_op = scf.YieldOp(then_values)
+        for op in then_ops:
+            op.move_before(yield_op)
+
+        # Execute else_fn() inside else-region
+        if len(if_op.regions[1].blocks) == 0:
+            if_op.regions[1].blocks.append(*[])
+        else_block = if_op.regions[1].blocks[0]
+        with ir.InsertionPoint(else_block):
+            else_result = else_fn()
+            else_values = [ReplaceIfWithDispatch._unwrap_value(else_result[k]) for k in var_names]
+            scf.YieldOp(else_values)
+
+        # Return IfOp results
+        results = list(if_op.results)
+        return results[0] if len(results) == 1 else tuple(results)
+
     @classmethod
     def rewrite_globals(cls):
         return {
             "const_expr": const_expr,
             "scf_if_dispatch": cls.scf_if_dispatch,
+            "scf_if_dispatch_v": cls.scf_if_dispatch_v,
         }
 
     _REWRITE_HELPER_NAMES = {"dsl_not_", "dsl_and_", "dsl_or_",
@@ -295,11 +385,27 @@ class ReplaceIfWithDispatch(Transformer):
         uid = ReplaceIfWithDispatch._counter
         ReplaceIfWithDispatch._counter += 1
 
+        # Detect variables assigned in both branches (value-producing if/else)
+        common_vars = []
+        if node.orelse:
+            then_vars = ReplaceIfWithDispatch._collect_assigned_vars(node.body)
+            else_vars = ReplaceIfWithDispatch._collect_assigned_vars(node.orelse)
+            common_vars = [v for v in then_vars if v in else_vars]
+
         then_name = f"__then_{uid}"
+        then_body = list(node.body)
+        if common_vars:
+            # Add return statement: return {"a": a, "b": b, ...}
+            ret_dict = ast.Dict(
+                keys=[ast.Constant(v) for v in common_vars],
+                values=[ast.Name(v, ctx=ast.Load()) for v in common_vars],
+            )
+            then_body.append(ast.Return(value=ret_dict))
+
         then_func = ast.FunctionDef(
             name=then_name,
             args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-            body=node.body,
+            body=then_body,
             decorator_list=[],
             type_params=[],
         )
@@ -307,30 +413,83 @@ class ReplaceIfWithDispatch(Transformer):
         then_func = ast.copy_location(then_func, node)
         then_func = ast.fix_missing_locations(then_func)
 
-        dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
         result = [then_func]
 
-        if node.orelse:
+        if common_vars and node.orelse:
+            # Value-producing if/else: use scf_if_dispatch_v
             else_name = f"__else_{uid}"
+            else_body = list(node.orelse)
+            ret_dict = ast.Dict(
+                keys=[ast.Constant(v) for v in common_vars],
+                values=[ast.Name(v, ctx=ast.Load()) for v in common_vars],
+            )
+            else_body.append(ast.Return(value=ret_dict))
+
             else_func = ast.FunctionDef(
                 name=else_name,
                 args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
-                body=node.orelse,
+                body=else_body,
                 decorator_list=[],
                 type_params=[],
             )
             setattr(else_func, _ASTREWRITE_MARKER, True)
             else_func = ast.copy_location(else_func, node)
             else_func = ast.fix_missing_locations(else_func)
-            dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
             result.append(else_func)
 
-        dispatch_call = ast.Expr(
-            value=ast.Call(func=ast.Name("scf_if_dispatch", ctx=ast.Load()), args=dispatch_args, keywords=[])
-        )
-        dispatch_call = ast.copy_location(dispatch_call, node)
-        dispatch_call = ast.fix_missing_locations(dispatch_call)
-        result.append(dispatch_call)
+            # var_names tuple
+            var_names_tuple = ast.Tuple(
+                elts=[ast.Constant(v) for v in common_vars],
+                ctx=ast.Load(),
+            )
+            dispatch_call_expr = ast.Call(
+                func=ast.Name("scf_if_dispatch_v", ctx=ast.Load()),
+                args=[node.test, ast.Name(then_name, ctx=ast.Load()),
+                      ast.Name(else_name, ctx=ast.Load()), var_names_tuple],
+                keywords=[],
+            )
+            if len(common_vars) == 1:
+                # Single var: var = scf_if_dispatch_v(...)
+                assign = ast.Assign(
+                    targets=[ast.Name(common_vars[0], ctx=ast.Store())],
+                    value=dispatch_call_expr,
+                )
+            else:
+                # Multiple vars: var1, var2 = scf_if_dispatch_v(...)
+                assign = ast.Assign(
+                    targets=[ast.Tuple(
+                        elts=[ast.Name(v, ctx=ast.Store()) for v in common_vars],
+                        ctx=ast.Store(),
+                    )],
+                    value=dispatch_call_expr,
+                )
+            assign = ast.copy_location(assign, node)
+            assign = ast.fix_missing_locations(assign)
+            result.append(assign)
+        else:
+            # Void if/else: use existing scf_if_dispatch
+            dispatch_args = [node.test, ast.Name(then_name, ctx=ast.Load())]
+            if node.orelse:
+                else_name = f"__else_{uid}"
+                else_func = ast.FunctionDef(
+                    name=else_name,
+                    args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                    body=node.orelse,
+                    decorator_list=[],
+                    type_params=[],
+                )
+                setattr(else_func, _ASTREWRITE_MARKER, True)
+                else_func = ast.copy_location(else_func, node)
+                else_func = ast.fix_missing_locations(else_func)
+                dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
+                result.append(else_func)
+
+            dispatch_call = ast.Expr(
+                value=ast.Call(func=ast.Name("scf_if_dispatch", ctx=ast.Load()), args=dispatch_args, keywords=[])
+            )
+            dispatch_call = ast.copy_location(dispatch_call, node)
+            dispatch_call = ast.fix_missing_locations(dispatch_call)
+            result.append(dispatch_call)
 
         return result
 
