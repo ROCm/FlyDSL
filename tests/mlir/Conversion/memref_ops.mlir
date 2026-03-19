@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
-// RUN: %fly-opt %s --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
+// RUN: %fly-opt %s --fly-rewrite-func-signature --fly-canonicalize --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // MemRef load/store lowering tests:
 //   - Scalar: fly.memref.load/store -> llvm.getelementptr + llvm.load/store
@@ -11,9 +11,10 @@
 // === Scalar Load/Store ===
 
 // CHECK-LABEL: @test_memref_load
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<1>)
+// CHECK-SAME: (%[[ARG:.*]]: !llvm.struct<packed (ptr<1>)>)
 func.func @test_memref_load(%mem: !fly.memref<f32, global, 32:1>) -> f32 {
   %idx = fly.make_int_tuple() : () -> !fly.int_tuple<5>
+  // CHECK: %[[MEM:.*]] = llvm.extractvalue %[[ARG]][0]
   // CHECK: %[[C5:.*]] = arith.constant 5 : index
   // CHECK: %[[I64:.*]] = arith.index_cast %[[C5]] : index to i64
   // CHECK: %[[GEP:.*]] = llvm.getelementptr %[[MEM]][%[[I64]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f32
@@ -24,9 +25,10 @@ func.func @test_memref_load(%mem: !fly.memref<f32, global, 32:1>) -> f32 {
 }
 
 // CHECK-LABEL: @test_memref_store
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<1>, %[[VAL:.*]]: f32)
+// CHECK-SAME: (%[[ARG:.*]]: !llvm.struct<packed (ptr<1>)>, %[[VAL:.*]]: f32)
 func.func @test_memref_store(%mem: !fly.memref<f32, global, 32:1>, %val: f32) {
   %idx = fly.make_int_tuple() : () -> !fly.int_tuple<3>
+  // CHECK: %[[MEM:.*]] = llvm.extractvalue %[[ARG]][0]
   // CHECK: %[[C3:.*]] = arith.constant 3 : index
   // CHECK: %[[I64:.*]] = arith.index_cast %[[C3]] : index to i64
   // CHECK: %[[GEP:.*]] = llvm.getelementptr %[[MEM]][%[[I64]]] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f32
@@ -36,9 +38,10 @@ func.func @test_memref_store(%mem: !fly.memref<f32, global, 32:1>, %val: f32) {
 }
 
 // CHECK-LABEL: @test_memref_load_f16_shared
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<3>)
+// CHECK-SAME: (%[[ARG:.*]]: !llvm.struct<packed (ptr<3>)>)
 func.func @test_memref_load_f16_shared(%mem: !fly.memref<f16, shared, (16,32):(1,16)>) -> f16 {
   %idx = fly.make_int_tuple() : () -> !fly.int_tuple<10>
+  // CHECK: %[[MEM:.*]] = llvm.extractvalue %[[ARG]][0]
   // CHECK: %[[C10:.*]] = arith.constant 10 : index
   // CHECK: %[[I64:.*]] = arith.index_cast %[[C10]] : index to i64
   // CHECK: %[[GEP:.*]] = llvm.getelementptr %[[MEM]][%[[I64]]] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, f16
@@ -53,8 +56,9 @@ func.func @test_memref_load_f16_shared(%mem: !fly.memref<f16, shared, (16,32):(1
 // === Vector Load/Store ===
 
 // CHECK-LABEL: @test_load_vec
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<5>)
+// CHECK-SAME: (%[[ARG:.*]]: !llvm.struct<packed (ptr<5>)>)
 func.func @test_load_vec(%mem: !fly.memref<f32, register, 4:1>) -> vector<4xf32> {
+  // CHECK: %[[MEM:.*]] = llvm.extractvalue %[[ARG]][0]
   // CHECK: %[[VEC:.*]] = llvm.load %[[MEM]] : !llvm.ptr<5> -> vector<4xf32>
   %vec = fly.memref.load_vec(%mem) : (!fly.memref<f32, register, 4:1>) -> vector<4xf32>
   // CHECK: return %[[VEC]]
@@ -62,8 +66,9 @@ func.func @test_load_vec(%mem: !fly.memref<f32, register, 4:1>) -> vector<4xf32>
 }
 
 // CHECK-LABEL: @test_store_vec
-// CHECK-SAME: (%[[MEM:.*]]: !llvm.ptr<5>, %[[VEC:.*]]: vector<4xf32>)
+// CHECK-SAME: (%[[ARG:.*]]: !llvm.struct<packed (ptr<5>)>, %[[VEC:.*]]: vector<4xf32>)
 func.func @test_store_vec(%mem: !fly.memref<f32, register, 4:1>, %vec: vector<4xf32>) {
+  // CHECK: %[[MEM:.*]] = llvm.extractvalue %[[ARG]][0]
   // CHECK: llvm.store %[[VEC]], %[[MEM]] : vector<4xf32>, !llvm.ptr<5>
   fly.memref.store_vec(%vec, %mem) : (vector<4xf32>, !fly.memref<f32, register, 4:1>) -> ()
   return
