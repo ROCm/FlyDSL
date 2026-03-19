@@ -82,6 +82,7 @@ class CompiledArtifact:
         self._needs_shmem = needs_shmem
         self._module = None
         self._engine = None
+        self._func_exe = None   # cached ctypes function object (~30 μs/call saving)
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
 
@@ -100,6 +101,7 @@ class CompiledArtifact:
         self._needs_shmem = state.get("needs_shmem", False)
         self._module = None
         self._engine = None
+        self._func_exe = None
         self._lock = threading.Lock()
         self._packer = _ArgPacker()
 
@@ -121,6 +123,13 @@ class CompiledArtifact:
                 )
                 self._engine.initialize()
 
+            # Cache the ctypes function object once (inside the lock to avoid
+            # races). Avoids two expensive operations per __call__:
+            # raw_lookup (~10 μs) and CFUNCTYPE(...)(func_ptr) (~20 μs),
+            # saving ~30 μs per dispatch.
+            func_ptr = self._engine.raw_lookup(self._entry)
+            self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
+
     def __call__(self, *args, **kwargs):
         if self._engine is None:
             self._ensure_engine()
@@ -129,12 +138,9 @@ class CompiledArtifact:
         for arg in args:
             all_c_ptrs.extend(fly_pointers(arg))
 
-        func_ptr = self._engine.raw_lookup(self._entry)
-        func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
-
         packed_args = self._packer.pack(all_c_ptrs)
 
-        return func_exe(packed_args)
+        return self._func_exe(packed_args)
 
     def dump(self, compiled: bool = True):
         if compiled:

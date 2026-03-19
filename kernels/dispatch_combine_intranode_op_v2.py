@@ -93,6 +93,25 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         # combine 用的单调递增 barrier flag
         self._xdev_flag = torch.zeros(1, dtype=torch.int64, device=self._dev)
 
+        # Fix3: 预缓存固定 shmem buffer 地址的 fx.Int64 包装（地址在 _alloc_buffers 后不变）。
+        # 每次 dispatch/combine 调用避免重复创建，节省约 5×3μs ≈ 15μs/call。
+        self._fx_out_tok   = fx.Int64(self.shmem_disp_out_tok.data_ptr())
+        self._fx_out_wts   = fx.Int64(self.shmem_disp_out_wts.data_ptr())
+        self._fx_out_idx   = fx.Int64(self.shmem_disp_out_idx.data_ptr())
+        self._fx_tok_off   = fx.Int64(self.shmem_tok_off.data_ptr())
+        self._fx_recv_num  = fx.Int64(self.shmem_recv_tok_num.data_ptr())
+        self._fx_dest_ctr  = fx.Int64(self.dest_pe_ctr.data_ptr())
+        self._fx_disp_bar  = fx.Int64(self.disp_bar.data_ptr())
+        self._fx_tok_map   = fx.Int64(self.dest_tok_map.data_ptr())
+        self._fx_tis       = fx.Int64(self.shmem_tok_id_to_src.data_ptr())
+        self._fx_total_rv  = fx.Int64(self.total_recv.data_ptr())
+        # combine 固定地址
+        self._fx_comb_inp  = fx.Int64(self.shmem_comb_inp_tok.data_ptr())
+        self._fx_comb_out  = fx.Int64(self.shmem_comb_out_tok.data_ptr())
+        self._fx_xdb_mem   = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
+        self._fx_comb_bar  = fx.Int64(self.comb_bar.data_ptr())
+        self._fx_trecv     = fx.Int64(self.total_recv.data_ptr())
+
     def _alloc_buffers(self):
         cfg  = self.cfg
         npes = cfg.world_size
@@ -151,37 +170,35 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
 
     def dispatch(self, input, weights, scales, indices,
                  block_num=-1, rdma_block_num=-1, warp_per_block=-1):
-        """Dispatch tokens → remote experts via shmem P2P。"""
+        """Dispatch tokens → remote experts via shmem P2P。
+
+        Fix1: 移除 5 个冗余 fill_()，前提是调用方已调用 reset()。
+          reset() 已清零：shmem_tok_off, dest_pe_ctr, disp_bar, total_recv, dest_tok_map。
+          dispatch kernel Phase2/3 末尾会自行重置；stale dest_tok_map 条目不被读取。
+
+        Fix3: 固定 shmem 地址使用预缓存的 fx.Int64 对象，避免每次重建（省 ~5×3μs）。
+        """
         cfg     = self.cfg
         cur_tok = input.shape[0]
-
-        # 初始化 per-round 计数器
-        self.shmem_tok_off.fill_(0)
-        self.dest_pe_ctr.fill_(0)
-        self.disp_bar.fill_(0)
-        self.total_recv.fill_(0)
-        sentinel = cfg.world_size * cfg.max_recv
-        self.dest_tok_map.fill_(sentinel)
-
         inp_c = input.contiguous()
         wts_c = weights.contiguous()
         idx_c = indices.to(torch.int32).contiguous()
 
-        # 通过 @flyc.jit 调用 kernel
+        # 通过 @flyc.jit 调用 kernel（Fix3：固定地址使用预缓存对象）
         self._disp_fn(
             fx.Int64(inp_c.data_ptr()),
             fx.Int64(idx_c.data_ptr()),
             fx.Int64(wts_c.data_ptr()),
-            fx.Int64(self.shmem_disp_out_tok.data_ptr()),
-            fx.Int64(self.shmem_disp_out_wts.data_ptr()),
-            fx.Int64(self.shmem_disp_out_idx.data_ptr()),
-            fx.Int64(self.shmem_tok_off.data_ptr()),
-            fx.Int64(self.shmem_recv_tok_num.data_ptr()),
-            fx.Int64(self.dest_pe_ctr.data_ptr()),
-            fx.Int64(self.disp_bar.data_ptr()),
-            fx.Int64(self.dest_tok_map.data_ptr()),
-            fx.Int64(self.shmem_tok_id_to_src.data_ptr()),
-            fx.Int64(self.total_recv.data_ptr()),
+            self._fx_out_tok,
+            self._fx_out_wts,
+            self._fx_out_idx,
+            self._fx_tok_off,
+            self._fx_recv_num,
+            self._fx_dest_ctr,
+            self._fx_disp_bar,
+            self._fx_tok_map,
+            self._fx_tis,
+            self._fx_total_rv,
             cur_tok,
         )
         torch.cuda.synchronize()
@@ -210,15 +227,16 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
 
         inp_c = input.to(cfg.data_type).contiguous()
 
+        # Fix3：固定地址使用预缓存的 fx.Int64 对象
         self._comb_fn(
             fx.Int64(inp_c.data_ptr()),
-            fx.Int64(self.shmem_comb_inp_tok.data_ptr()),
-            fx.Int64(self.shmem_comb_out_tok.data_ptr()),
-            fx.Int64(self.shmem_xdev_bar_mem.data_ptr()),
+            self._fx_comb_inp,
+            self._fx_comb_out,
+            self._fx_xdb_mem,
             fx.Int64(self._xdev_flag.data_ptr()),
-            fx.Int64(self.dest_tok_map.data_ptr()),
-            fx.Int64(self.comb_bar.data_ptr()),
-            fx.Int64(self.total_recv.data_ptr()),
+            self._fx_tok_map,
+            self._fx_comb_bar,
+            self._fx_trecv,
             cur_tok,
             total_recv_val,
         )
