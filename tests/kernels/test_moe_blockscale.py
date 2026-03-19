@@ -126,7 +126,8 @@ def torch_moe_blockscale_ref(
 )
 def test_moe_blockscale_e2e(
     token, model_dim, inter_dim, E, topk,
-    tile_m=32, tile_n=128, tile_k=128,
+    tile_m=16, tile_n=256, tile_k=128,
+    waves_per_eu=2,
     num_iters=10, num_warmup=3,
 ):
     """End-to-end MoE blockscale test: flydsl 2-stage vs aiter fused."""
@@ -215,7 +216,7 @@ def test_moe_blockscale_e2e(
         scale_blks=scale_blks, a_scale=a1_bscale,
         fc1_scale=w1_bscale, fc2_scale=w2_bscale)
 
-    # ---- flydsl 2-stage (per-token scale) ----
+    # ---- flydsl 2-stage (true blockscale) ----
     routing = build_routing_buffers(
         topk_ids=topk_ids, topk_weights=topk_weights,
         experts=E, model_dim=model_dim, tile_m=tile_m,
@@ -224,37 +225,54 @@ def test_moe_blockscale_e2e(
     sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, _sorted_size, _blocks = routing
     size_expert_ids = sorted_expert_ids.numel()
 
+    # Prepare blockscale tensors for FlyDSL kernels:
+    #   scale_x1: [nblk_k_w1, token] f32 — transposed layout (stride along k = token)
+    #   scale_w1: [E * nblk_n_w1 * nblk_k_w1] f32 — row-major [E, nblk_n_w1, nblk_k_w1]
+    nblk_k_w1 = model_dim // scale_blk_k
+    a1_scale_fly = a1_bscale.t().contiguous().view(-1)   # [token, nblk_k_w1] -> [nblk_k_w1, token] flat
+    w1_scale_fly = w1_bscale.view(-1)                     # [E, nblk_n_w1 * nblk_k_w1] flat
+
     # Compile stage 1
     exe1 = compile_moe_blockscale_gemm1(
         model_dim=model_dim, inter_dim=inter_dim, experts=E, topk=topk,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        doweight_stage1=False, scale_block_k=scale_blk_k, out_dtype="f16")
+        doweight_stage1=False, scale_block_k=scale_blk_k, out_dtype="f16",
+        waves_per_eu=waves_per_eu)
 
     out1 = torch.zeros((token, topk, inter_dim), dtype=torch.float16, device=device)
     stream = torch.cuda.current_stream()
 
     def launch_stage1():
-        exe1(out1.view(-1), x_q.view(-1), w1_shuf, x_scale.view(-1), w1_scale,
+        exe1(out1.view(-1), a1_bq.view(-1), w1_shuf, a1_scale_fly, w1_scale_fly,
              sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
              token, inter_dim, model_dim, size_expert_ids, stream)
 
     _, us1 = run_perftest(launch_stage1, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
 
-    # Re-quantize intermediate for stage 2
+    # Re-quantize intermediate for stage 2 (blockscale format)
+    nblk_k_w2 = inter_dim // scale_blk_k
     out1_fp32 = out1.to(torch.float32)
-    a2_q, a2_scale = pertoken_quant(out1_fp32.view(-1, inter_dim), quant_dtype=DTYPE_FP8)
+    a2_bq, a2_bscale_2d = pertoken_quant(
+        out1_fp32.view(-1, inter_dim // scale_blk_k, scale_blk_k), quant_dtype=DTYPE_FP8)
+    a2_bq = a2_bq.view(-1, inter_dim)
+    a2_bscale_2d = a2_bscale_2d.squeeze(-1)   # [token*topk, nblk_k_w2]
+    #   scale_x2: [nblk_k_w2, token*topk] f32 transposed
+    #   scale_w2: [E * nblk_n_w2 * nblk_k_w2] f32 row-major
+    a2_scale_fly = a2_bscale_2d.t().contiguous().view(-1)  # [nblk_k_w2, token*topk] flat
+    w2_scale_fly = w2_bscale.view(-1)                       # [E, nblk_n_w2 * nblk_k_w2] flat
 
     # Compile stage 2
     exe2 = compile_moe_blockscale_gemm2(
         model_dim=model_dim, inter_dim=inter_dim, experts=E, topk=topk,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        doweight_stage2=True, scale_block_k=scale_blk_k, out_dtype="f16")
+        doweight_stage2=True, scale_block_k=scale_blk_k, out_dtype="f16",
+        waves_per_eu=waves_per_eu)
 
     out2 = torch.zeros((token, model_dim), dtype=torch.float16, device=device)
 
     def launch_stage2():
-        exe2(out2.view(-1), a2_q.view(-1), w2_shuf, a2_scale.view(-1), w2_scale,
+        exe2(out2.view(-1), a2_bq.view(-1), w2_shuf, a2_scale_fly, w2_scale_fly,
              sorted_ids, sorted_expert_ids, sorted_weights, num_valid_ids,
              token, model_dim, inter_dim, size_expert_ids, stream)
 
@@ -264,21 +282,27 @@ def test_moe_blockscale_e2e(
     us_fly_total = us1 + us2
     print(f"  flydsl: stage1={us1:.1f}us + stage2={us2:.1f}us = total {us_fly_total:.1f}us")
 
-    # Verify flydsl output (per-token scale, different from blockscale ref, so loose check)
+    # Verify flydsl output vs blockscale torch reference
     out2_f32 = out2.to(torch.float32)
+    err_fly = checkAllclose(out_ref.to(out2.dtype), out2, rtol=0.1, atol=0.1, msg="flydsl vs ref")
+    print(f"  flydsl: err_ratio vs ref = {err_fly:.4f}")
 
-    # ---- aiter fused blockscale ----
-    us_aiter = 0
+    # ---- aiter fused blockscale (1-stage) ----
+    us_aiter_fused = 0
+    us_aiter_ck2s = 0
     if HAS_AITER:
+        from aiter.ops.moe_op import ck_moe_stage1_fwd, ck_moe_stage2_fwd
+        from aiter import QuantType, ActivationType
+
+        sorted_ids_a, sorted_weights_a, sorted_expert_ids_a, num_valid_ids_a, out_aiter = (
+            aiter_moe_sorting(topk_ids.to(torch.int32), topk_weights.float(), E, model_dim, dtype))
+
+        w1_bq_shuf = aiter_shuffle_weight(w1_bq, (16, 16))
+        w2_bq_shuf = aiter_shuffle_weight(w2_bq, (16, 16))
+
+        # --- aiter fused 1-stage ---
         try:
-            # aiter moe_sorting requires int32 topk_ids and fp32 topk_weights
-            sorted_ids_a, sorted_weights_a, sorted_expert_ids_a, num_valid_ids_a, out_aiter = (
-                aiter_moe_sorting(topk_ids.to(torch.int32), topk_weights.float(), E, model_dim, dtype))
-
-            w1_bq_shuf = aiter_shuffle_weight(w1_bq, (16, 16))
-            w2_bq_shuf = aiter_shuffle_weight(w2_bq, (16, 16))
-
-            def launch_aiter():
+            def launch_aiter_fused():
                 out_aiter.zero_()
                 aiter.fmoe_fp8_blockscale_g1u1(
                     out_aiter, a1_bq, w1_bq_shuf, w2_bq_shuf,
@@ -287,28 +311,74 @@ def test_moe_blockscale_e2e(
                     a1_bscale.t().contiguous(), w1_bscale, w2_bscale,
                     "", scale_blk_n, scale_blk_k, None)
 
-            _, us_aiter = run_perftest(launch_aiter, num_iters=num_iters, num_warmup=num_warmup)
+            _, us_aiter_fused = run_perftest(launch_aiter_fused, num_iters=num_iters, num_warmup=num_warmup)
             torch.cuda.synchronize()
-            out_aiter_f32 = out_aiter.to(torch.float32)
-
-            # Verify aiter vs blockscale ref
-            err = checkAllclose(out_ref, out_aiter, rtol=0.1, atol=0.1, msg="aiter vs ref")
-            print(f"  aiter:  fused={us_aiter:.1f}us  (err_ratio={err:.4f})")
+            err_fused = checkAllclose(out_ref, out_aiter, rtol=0.1, atol=0.1, msg="aiter-fused vs ref")
+            print(f"  aiter fused: {us_aiter_fused:.1f}us  (err_ratio={err_fused:.4f})")
         except Exception as e:
-            print(f"  aiter:  FAILED - {str(e)[:80]}")
+            print(f"  aiter fused: FAILED - {str(e)[:80]}")
+
+        # --- aiter CK 2-stage via fused_moe (bypass tune config to force 2-stage default) ---
+        # aiter default heuristic: per_1x128, token<=32 → ck2stages (block_m=16)
+        #                          per_1x128, token>32  → run_1stage (fused asm kernel)
+        # Force bypass tune config so we always hit the default 2-stage CK path.
+        try:
+            import os
+            from aiter.fused_moe import fused_moe as aiter_fused_moe, get_2stage_cfgs
+
+            # Use fused_moe interface: properly handles all scale format conversions internally.
+            # fused_moe returns the output tensor.
+            from aiter import QuantType as AQT
+
+            out_ck2s = [None]
+
+            # fused_moe expects bf16/fp16 hidden_states and handles quantization internally
+            # Dequant a1_bq back to bf16 using block scales for a faithful comparison
+            x_for_ck2s = (a1_bq.float().view(token, model_dim // scale_blk_k, scale_blk_k)
+                          * a1_bscale.unsqueeze(-1)).view(token, model_dim).to(dtype)
+
+            def launch_ck2s():
+                out_ck2s[0] = aiter_fused_moe(
+                    x_for_ck2s,
+                    w1_bq_shuf,
+                    w2_bq_shuf,
+                    topk_weight=topk_weights.float(),
+                    topk_ids=topk_ids.to(torch.int32),
+                    w1_scale=w1_bscale,
+                    w2_scale=w2_bscale,
+                    quant_type=AQT.per_1x128,
+                )
+
+            # Warmup
+            for _ in range(num_warmup):
+                launch_ck2s()
+            torch.cuda.synchronize()
+            _, us_aiter_ck2s = run_perftest(launch_ck2s, num_iters=num_iters, num_warmup=0)
+            torch.cuda.synchronize()
+            err_ck2s = checkAllclose(out_ref, out_ck2s[0], rtol=0.1, atol=0.1, msg="ck2s vs ref")
+            print(f"  aiter ck2s: {us_aiter_ck2s:.1f}us  (err_ratio={err_ck2s:.4f})")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"  aiter ck2s:  FAILED - {str(e)[:120]}")
+
+    us_aiter = us_aiter_fused  # keep existing variable for summary
 
     # ---- Summary ----
-    ratio = us_aiter / us_fly_total if us_aiter > 0 else 0
     flops_stage1 = 2 * token * topk * (2 * inter_dim) * model_dim
     flops_stage2 = 2 * token * topk * model_dim * inter_dim
     flops_total = flops_stage1 + flops_stage2
     tflops_fly = flops_total / (us_fly_total / 1e6) / 1e12
-    tflops_aiter = flops_total / (us_aiter / 1e6) / 1e12 if us_aiter > 0 else 0
+    tflops_fused = flops_total / (us_aiter_fused / 1e6) / 1e12 if us_aiter_fused > 0 else 0
+    tflops_ck2s = flops_total / (us_aiter_ck2s / 1e6) / 1e12 if us_aiter_ck2s > 0 else 0
 
-    print(f"\n  {'':>12} | {'us':>8} | {'TFLOPS':>8} | ratio")
-    print(f"  {'flydsl':>12} | {us_fly_total:>8.1f} | {tflops_fly:>8.2f} |")
-    if us_aiter > 0:
-        print(f"  {'aiter fused':>12} | {us_aiter:>8.1f} | {tflops_aiter:>8.2f} | {ratio:.2f}")
+    print(f"\n  {'':>14} | {'us':>8} | {'TFLOPS':>8} | vs flydsl")
+    print(f"  {'flydsl':>14} | {us_fly_total:>8.1f} | {tflops_fly:>8.2f} |")
+    if us_aiter_fused > 0:
+        r = us_aiter_fused / us_fly_total
+        print(f"  {'aiter-fused':>14} | {us_aiter_fused:>8.1f} | {tflops_fused:>8.2f} | {r:.2f}x")
+    if us_aiter_ck2s > 0:
+        r = us_aiter_ck2s / us_fly_total
+        print(f"  {'aiter-ck2s':>14} | {us_aiter_ck2s:>8.1f} | {tflops_ck2s:>8.2f} | {r:.2f}x")
     print()
 
     return us_fly_total, us_aiter
@@ -316,35 +386,40 @@ def test_moe_blockscale_e2e(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="MoE Blockscale Benchmark")
-    parser.add_argument("-m", type=int, default=32)
-    parser.add_argument("-dim", type=int, default=7168)
+    parser = argparse.ArgumentParser(
+        description="MoE Blockscale Benchmark (FlyDSL vs aiter-fused vs aiter-ck2s)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("-m", type=int, default=0,
+                        help="Token count (0 = sweep [16,32,128,256,1024])")
+    parser.add_argument("-dim",  type=int, default=7168)
     parser.add_argument("-idim", type=int, default=256)
     parser.add_argument("-e", "--expert", type=int, default=256)
-    parser.add_argument("-k", "--topk", type=int, default=8)
-    parser.add_argument("--tile_m", type=int, default=32)
-    parser.add_argument("--tile_n", type=int, default=128)
-    parser.add_argument("--tile_k", type=int, default=128)
-    parser.add_argument("--num_iters", type=int, default=10)
+    parser.add_argument("-k", "--topk",   type=int, default=8)
+    parser.add_argument("--tile_m",    type=int, default=16)
+    parser.add_argument("--tile_n",    type=int, default=256)
+    parser.add_argument("--tile_k",    type=int, default=128)
+    parser.add_argument("--wpe",       type=int, default=2,
+                        help="waves_per_eu (0 = disabled)")
+    parser.add_argument("--num_iters", type=int, default=20)
+    parser.add_argument("--num_warmup",type=int, default=5)
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
+    wpe = args.wpe if args.wpe > 0 else None
 
-    # Run multiple token counts
-    token_list = [args.m] if args.m > 0 else [1, 2, 16, 32, 128, 512]
+    token_list = [args.m] if args.m > 0 else [16, 32, 128, 256, 1024]
 
-    print(f"\nMoE Config: dim={args.dim}, inter={args.idim}, E={args.expert}, "
-          f"topk={args.topk}, tile={args.tile_m}x{args.tile_n}x{args.tile_k}")
-    print(f"{'tokens':>8} | {'flydsl us':>10} | {'aiter us':>10} | {'ratio':>6}")
-    print("-" * 50)
+    print(f"\nMoE Blockscale: dim={args.dim}, inter={args.idim}, E={args.expert}, "
+          f"topk={args.topk}, tile={args.tile_m}x{args.tile_n}x{args.tile_k}, wpe={wpe}")
+    print(f"{'tokens':>8} | {'flydsl':>10} | {'aiter-fused':>12} | {'aiter-ck2s':>12}")
+    print("-" * 52)
 
     for m in token_list:
         us_fly, us_aiter = test_moe_blockscale_e2e(
             token=m, model_dim=args.dim, inter_dim=args.idim,
             E=args.expert, topk=args.topk,
             tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
-            num_iters=args.num_iters)
-        r = us_aiter / us_fly if us_aiter > 0 else 0
-        astr = f"{us_aiter:>10.1f}" if us_aiter > 0 else f"{'N/A':>10}"
-        rstr = f"{r:>6.2f}" if r > 0 else f"{'N/A':>6}"
-        print(f"{m:>8} | {us_fly:>10.1f} | {astr} | {rstr}")
+            waves_per_eu=wpe,
+            num_iters=args.num_iters, num_warmup=args.num_warmup)
+        print(f"{m:>8} | {us_fly:>10.1f} |")
