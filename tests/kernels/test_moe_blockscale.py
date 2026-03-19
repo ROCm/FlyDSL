@@ -42,7 +42,6 @@ DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz
 try:
     import aiter
     from aiter.fused_moe import moe_sorting as aiter_moe_sorting, fused_topk
-    from aiter.ops.shuffle import shuffle_weight as aiter_shuffle_weight
     from aiter import pertoken_quant as aiter_pertoken_quant
 
     HAS_AITER = True
@@ -54,6 +53,78 @@ from tests.kernels.test_moe_gemm import (
     build_routing_buffers,
     RoutingBuffers,
 )
+
+
+def _expand_blockscale(scale_flat, E, nblk_n, nblk_k, blk_n, blk_k):
+    """Expand [E, nblk_n*nblk_k] flat block scales to [E, N, K] element-wise."""
+    return (
+        scale_flat.view(-1, 1).repeat(1, blk_n * blk_k)
+        .view(E, nblk_n, nblk_k, blk_n, blk_k)
+        .permute(0, 1, 3, 2, 4)
+        .reshape(E, nblk_n * blk_n, nblk_k * blk_k)
+    )
+
+
+def torch_stage1_blockscale_ref(
+    hidden_states, w1, topk_ids, a_scale, w1_scale, scale_blks, inter_dim,
+):
+    """Torch reference for stage 1 only: returns [B, topk, inter_dim] (SiLU(gate)*up)."""
+    computeType = torch.float32
+    hidden_states = hidden_states.to(computeType)
+    w1 = w1.to(computeType)
+    B, D = hidden_states.shape
+    topk = topk_ids.shape[1]
+    E = w1.shape[0]
+    blk_n, blk_k = scale_blks
+
+    if a_scale is not None:
+        hidden_states = hidden_states.view(B, -1, blk_k) * a_scale.unsqueeze(-1)
+        hidden_states = hidden_states.view(B, -1)
+
+    nblk_n_w1 = (2 * inter_dim) // blk_n
+    nblk_k_w1 = D // blk_k
+    if w1_scale is not None:
+        w1 = w1 * _expand_blockscale(w1_scale, E, nblk_n_w1, nblk_k_w1, blk_n, blk_k)
+
+    hidden_states = hidden_states.view(B, 1, D).expand(-1, topk, -1)
+    out = torch.zeros((B, topk, inter_dim), dtype=computeType, device=hidden_states.device)
+    for e in range(E):
+        mask = topk_ids == e
+        if mask.sum():
+            sub = hidden_states[mask]
+            act = sub @ w1[e].T
+            gate, up = act.split([inter_dim, inter_dim], dim=-1)
+            out[mask] = F.silu(gate) * up
+    return out
+
+
+def torch_stage2_blockscale_ref(
+    act_q, w2, topk_ids, topk_weights, a_scale, w2_scale,
+    scale_blks, tokens, model_dim, inter_dim, topk,
+):
+    """Torch reference for stage 2 only: takes re-quantized intermediate, returns [B, model_dim]."""
+    computeType = torch.float32
+    blk_n, blk_k = scale_blks
+    E = w2.shape[0]
+
+    act = act_q.to(computeType)
+    nblk_k_w2 = inter_dim // blk_k
+    if a_scale is not None:
+        act = act.view(-1, nblk_k_w2, blk_k) * a_scale.unsqueeze(-1)
+        act = act.view(-1, inter_dim)
+
+    w2f = w2.to(computeType)
+    nblk_n_w2 = model_dim // blk_n
+    if w2_scale is not None:
+        w2f = w2f * _expand_blockscale(w2_scale, E, nblk_n_w2, nblk_k_w2, blk_n, blk_k)
+
+    act_3d = act.view(tokens, topk, inter_dim)
+    out = torch.zeros((tokens, topk, model_dim), dtype=computeType, device=act.device)
+    for e in range(E):
+        mask = topk_ids == e
+        if mask.sum():
+            out[mask] = act_3d[mask] @ w2f[e].T
+    return (out * topk_weights.view(tokens, -1, 1)).sum(dim=1)
 
 
 def torch_moe_blockscale_ref(
@@ -93,12 +164,12 @@ def torch_moe_blockscale_ref(
             .permute(0, 1, 3, 2, 4)
             .reshape(expert, 2 * inter_dim, model_dim)
         )
-        # fc2_scale: [E, nblk_k_w2 * nblk_n_w2] -> expand to [E, model_dim, inter_dim]
-        # "e k n bk bn -> e (n bn) (k bk)" = permute(0,2,4,1,3).reshape
+        # fc2_scale: [E, nblk_n_w2 * nblk_k_w2] -> expand to [E, model_dim, inter_dim]
+        # "e n k bn bk -> e (n bn) (k bk)" = permute(0,1,3,2,4).reshape
         fc2_s = (
             fc2_scale.view(-1, 1).repeat(1, blk_n * blk_k)
-            .view(expert, nblk_k_w2, nblk_n_w2, blk_k, blk_n)
-            .permute(0, 2, 4, 1, 3)
+            .view(expert, nblk_n_w2, nblk_k_w2, blk_n, blk_k)
+            .permute(0, 1, 3, 2, 4)
             .reshape(expert, model_dim, inter_dim)
         )
         w1 = w1 * fc1_s
@@ -142,7 +213,6 @@ def test_moe_blockscale_e2e(
     print("=" * 80)
 
     # ---- Generate data ----
-    # Generate fp8 weights directly per-expert to avoid fp32 OOM at large E.
     s = 0.2
     x_fp32 = torch.randn((token, model_dim), device=device, dtype=torch.float32) * s
     x_q, x_scale = pertoken_quant(x_fp32, quant_dtype=DTYPE_FP8)
@@ -152,54 +222,43 @@ def test_moe_blockscale_e2e(
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
 
-    # Per-expert quantize: generate fp32 one expert at a time, quantize, discard fp32.
-    w1_q_list, w1_scale_list = [], []
-    w2_q_list, w2_scale_list = [], []
+    # Per-expert block-quantize: generate fp32 one expert at a time, block-quantize, discard fp32.
+    def block_quant_expert(w_fp32, blk_n, blk_k):
+        """Block-quantize single expert weight [N, K] -> (w_q fp8 [N,K], scale [flat])."""
+        N_w, K_w = w_fp32.shape
+        nbn, nbk = N_w // blk_n, K_w // blk_k
+        tmp = w_fp32.float().view(nbn, blk_n, nbk, blk_k).permute(0, 2, 1, 3).reshape(nbn * nbk, blk_n * blk_k)
+        q, sc = pertoken_quant(tmp, quant_dtype=DTYPE_FP8)
+        q = q.view(nbn, nbk, blk_n, blk_k).permute(0, 2, 1, 3).reshape(N_w, K_w)
+        return q, sc.view(-1)
+
+    w1_bq_list, w1_bscale_list = [], []
+    w2_bq_list, w2_bscale_list = [], []
     for e_i in range(E):
         w1e = torch.randn((2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
-        q, sc = pertoken_quant(w1e, quant_dtype=DTYPE_FP8)
-        w1_q_list.append(q)
-        w1_scale_list.append(sc.view(-1))
+        q, sc = block_quant_expert(w1e, scale_blk_n, scale_blk_k)
+        w1_bq_list.append(q)
+        w1_bscale_list.append(sc)
         del w1e
 
         w2e = torch.randn((model_dim, inter_dim), device=device, dtype=torch.float32) * (s / math.sqrt(inter_dim))
-        q2, sc2 = pertoken_quant(w2e, quant_dtype=DTYPE_FP8)
-        w2_q_list.append(q2)
-        w2_scale_list.append(sc2.view(-1))
+        q2, sc2 = block_quant_expert(w2e, scale_blk_n, scale_blk_k)
+        w2_bq_list.append(q2)
+        w2_bscale_list.append(sc2)
         del w2e
 
-    w1_q = torch.stack(w1_q_list)
-    w1_scale = torch.cat(w1_scale_list)
-    w2_q = torch.stack(w2_q_list)
-    w2_scale = torch.cat(w2_scale_list)
-    del w1_q_list, w1_scale_list, w2_q_list, w2_scale_list
-
-    # Preshuffle weights
-    w1_shuf = shuffle_weight(w1_q.view(-1, model_dim), layout=(16, 16)).view(-1)
-    w2_shuf = shuffle_weight(w2_q.view(-1, inter_dim), layout=(16, 16)).view(-1)
-
-    # ---- Block quantize for aiter (memory-efficient: process per-expert) ----
-    def block_quant_weight(w, blk_n, blk_k):
-        """Block-quantize weight tensor [E, N, K] -> (w_q fp8 [E,N,K], scale [E, flat])."""
-        E_w, N_w, K_w = w.shape
-        nbn, nbk = N_w // blk_n, K_w // blk_k
-        w_q_list, s_list = [], []
-        for e in range(E_w):
-            we = w[e].float()  # [N, K]
-            tmp = we.view(nbn, blk_n, nbk, blk_k).permute(0, 2, 1, 3).reshape(nbn * nbk, blk_n * blk_k)
-            q, s = pertoken_quant(tmp, quant_dtype=DTYPE_FP8)
-            q = q.view(nbn, nbk, blk_n, blk_k).permute(0, 2, 1, 3).reshape(N_w, K_w)
-            w_q_list.append(q)
-            s_list.append(s.view(-1))
-        return torch.stack(w_q_list), torch.stack(s_list)
-
-    # Block-quantize weights from the already-quantized fp8 tensors (re-block from per-row to per-block).
-    # Use the fp8 w1_q/w2_q directly — block_quant_weight calls .float() internally per expert.
+    w1_bq = torch.stack(w1_bq_list)
+    w1_bscale = torch.stack(w1_bscale_list)
+    w2_bq = torch.stack(w2_bq_list)
+    w2_bscale = torch.stack(w2_bscale_list)
+    del w1_bq_list, w1_bscale_list, w2_bq_list, w2_bscale_list
     torch.cuda.empty_cache()
-    w1_bq, w1_bscale = block_quant_weight(w1_q, scale_blk_n, scale_blk_k)
-    torch.cuda.empty_cache()
-    w2_bq, w2_bscale = block_quant_weight(w2_q, scale_blk_n, scale_blk_k)
-    torch.cuda.empty_cache()
+
+    # Preshuffle block-quantized weights (shared by FlyDSL and aiter)
+    w1_bq_shuf = shuffle_weight(w1_bq, layout=(16, 16))
+    w2_bq_shuf = shuffle_weight(w2_bq, layout=(16, 16))
+    w1_shuf = w1_bq_shuf.view(-1)
+    w2_shuf = w2_bq_shuf.view(-1)
 
     # Input block quantize (from x_q fp8 -> re-block)
     x_f32_for_blk = x_q.float()
@@ -210,11 +269,18 @@ def test_moe_blockscale_e2e(
     a1_bscale = a1_bscale.squeeze(-1)
     del x_f32_for_blk
 
-    # ---- Torch reference (blockscale) ----
-    out_ref = torch_moe_blockscale_ref(
-        a1_bq, w1_bq, w2_bq, topk_weights, topk_ids, dtype,
-        scale_blks=scale_blks, a_scale=a1_bscale,
-        fc1_scale=w1_bscale, fc2_scale=w2_bscale)
+    # ---- Torch reference (2-stage with intermediate re-quant, matching FlyDSL pipeline) ----
+    out1_torch_ref = torch_stage1_blockscale_ref(
+        a1_bq, w1_bq, topk_ids, a1_bscale, w1_bscale, scale_blks, inter_dim)
+    out1_torch_fp16 = out1_torch_ref.to(torch.float16)
+    a2_ref_bq, a2_ref_bscale = pertoken_quant(
+        out1_torch_fp16.float().view(-1, inter_dim // scale_blk_k, scale_blk_k),
+        quant_dtype=DTYPE_FP8)
+    a2_ref_bq = a2_ref_bq.view(-1, inter_dim)
+    a2_ref_bscale = a2_ref_bscale.squeeze(-1)
+    out_ref = torch_stage2_blockscale_ref(
+        a2_ref_bq, w2_bq, topk_ids, topk_weights, a2_ref_bscale, w2_bscale,
+        scale_blks, token, model_dim, inter_dim, topk)
 
     # ---- flydsl 2-stage (true blockscale) ----
     routing = build_routing_buffers(
@@ -250,6 +316,13 @@ def test_moe_blockscale_e2e(
     _, us1 = run_perftest(launch_stage1, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
 
+    # Verify stage 1 independently
+    out1_ref = torch_stage1_blockscale_ref(
+        a1_bq, w1_bq, topk_ids, a1_bscale, w1_bscale, scale_blks, inter_dim)
+    err_s1 = checkAllclose(out1_ref.to(out1.dtype), out1, rtol=0.1, atol=0.1,
+                           msg="flydsl-stage1 vs ref", printLog=False)
+    print(f"  stage1 err_ratio = {err_s1:.4f}")
+
     # Re-quantize intermediate for stage 2 (blockscale format)
     nblk_k_w2 = inter_dim // scale_blk_k
     out1_fp32 = out1.to(torch.float32)
@@ -279,13 +352,26 @@ def test_moe_blockscale_e2e(
     _, us2 = run_perftest(launch_stage2, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
 
+    # Re-run once with clean output for verification (atomic accumulation requires pre-zeroed buffer)
+    out2.zero_()
+    launch_stage2()
+    torch.cuda.synchronize()
+
+    # Verify stage 2 independently (using the actual re-quantized intermediate)
+    out2_ref_s2 = torch_stage2_blockscale_ref(
+        a2_bq, w2_bq, topk_ids, topk_weights, a2_bscale_2d, w2_bscale,
+        scale_blks, token, model_dim, inter_dim, topk)
+    err_s2 = checkAllclose(out2_ref_s2.to(out2.dtype), out2, rtol=0.1, atol=0.1,
+                           msg="flydsl-stage2 vs ref", printLog=False)
+    print(f"  stage2 err_ratio = {err_s2:.4f}")
+
     us_fly_total = us1 + us2
     print(f"  flydsl: stage1={us1:.1f}us + stage2={us2:.1f}us = total {us_fly_total:.1f}us")
 
-    # Verify flydsl output vs blockscale torch reference
-    out2_f32 = out2.to(torch.float32)
-    err_fly = checkAllclose(out_ref.to(out2.dtype), out2, rtol=0.1, atol=0.1, msg="flydsl vs ref")
-    print(f"  flydsl: err_ratio vs ref = {err_fly:.4f}")
+    # Verify flydsl full pipeline vs blockscale torch reference
+    err_fly = checkAllclose(out_ref.to(out2.dtype), out2, rtol=0.1, atol=0.1,
+                            msg="flydsl vs ref", printLog=False)
+    print(f"  flydsl: pipeline err_ratio vs ref = {err_fly:.4f}")
 
     # ---- aiter fused blockscale (1-stage) ----
     us_aiter_fused = 0
@@ -294,11 +380,16 @@ def test_moe_blockscale_e2e(
         from aiter.ops.moe_op import ck_moe_stage1_fwd, ck_moe_stage2_fwd
         from aiter import QuantType, ActivationType
 
+        # 1-stage torch reference for aiter (no intermediate re-quant)
+        out_ref_aiter = torch_moe_blockscale_ref(
+            a1_bq, w1_bq, w2_bq, topk_weights, topk_ids, dtype,
+            scale_blks=scale_blks, a_scale=a1_bscale,
+            fc1_scale=w1_bscale, fc2_scale=w2_bscale)
+
         sorted_ids_a, sorted_weights_a, sorted_expert_ids_a, num_valid_ids_a, out_aiter = (
             aiter_moe_sorting(topk_ids.to(torch.int32), topk_weights.float(), E, model_dim, dtype))
 
-        w1_bq_shuf = aiter_shuffle_weight(w1_bq, (16, 16))
-        w2_bq_shuf = aiter_shuffle_weight(w2_bq, (16, 16))
+        # Use the same shuffled weights as FlyDSL (w1_bq_shuf / w2_bq_shuf from above)
 
         # --- aiter fused 1-stage ---
         try:
@@ -313,7 +404,7 @@ def test_moe_blockscale_e2e(
 
             _, us_aiter_fused = run_perftest(launch_aiter_fused, num_iters=num_iters, num_warmup=num_warmup)
             torch.cuda.synchronize()
-            err_fused = checkAllclose(out_ref, out_aiter, rtol=0.1, atol=0.1, msg="aiter-fused vs ref")
+            err_fused = checkAllclose(out_ref_aiter, out_aiter, rtol=0.1, atol=0.1, msg="aiter-fused vs ref")
             print(f"  aiter fused: {us_aiter_fused:.1f}us  (err_ratio={err_fused:.4f})")
         except Exception as e:
             print(f"  aiter fused: FAILED - {str(e)[:80]}")
@@ -355,7 +446,7 @@ def test_moe_blockscale_e2e(
             torch.cuda.synchronize()
             _, us_aiter_ck2s = run_perftest(launch_ck2s, num_iters=num_iters, num_warmup=0)
             torch.cuda.synchronize()
-            err_ck2s = checkAllclose(out_ref, out_ck2s[0], rtol=0.1, atol=0.1, msg="ck2s vs ref")
+            err_ck2s = checkAllclose(out_ref_aiter, out_ck2s[0], rtol=0.1, atol=0.1, msg="ck2s vs ref")
             print(f"  aiter ck2s: {us_aiter_ck2s:.1f}us  (err_ratio={err_ck2s:.4f})")
         except Exception as e:
             import traceback; traceback.print_exc()
