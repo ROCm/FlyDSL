@@ -253,7 +253,7 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         mod = ir.Module.parse(asm, context=ctx)
         di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         pm = PassManager.parse(
-            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts={'-g' if env.debug.enable_debug_info else ''} section= toolkit=}})",
+            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -326,7 +326,7 @@ class MlirCompiler:
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
             *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
-            f"gpu-module-to-binary{{format=fatbin opts={all_opts}}}",
+            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
         ]
 
     @classmethod

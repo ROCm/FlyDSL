@@ -164,11 +164,8 @@ class Autotuner:
 
     def _bench_one(self, config, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
-        from .compiler.kernel_function import CompilationContext
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
-
-        # Set compiler options (waves_per_eu, maxnreg) via context var
         compiler_opts = config.compiler_opts()
 
         def kernel_call():
@@ -177,37 +174,28 @@ class Autotuner:
             self._reset_tensors(args, merged_kwargs)
             if self.pre_hook:
                 self.pre_hook(merged_kwargs)
-
-            # Set compiler opts for this compilation
-            if compiler_opts:
-                CompilationContext.set_compile_hints(compiler_opts)
-            try:
-                self.fn(*args, **merged_kwargs)
-            finally:
-                if compiler_opts:
-                    CompilationContext.clear_compile_hints()
-
+            self._run_with_hints(compiler_opts, args, merged_kwargs)
             if self.post_hook:
                 self.post_hook(merged_kwargs)
 
         return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
 
+    def _run_with_hints(self, compiler_opts, args, kwargs):
+        """Run the kernel function with optional compiler hints."""
+        from .compiler.kernel_function import CompilationContext
+        if compiler_opts:
+            with CompilationContext.compile_hints(compiler_opts):
+                self.fn(*args, **kwargs)
+        else:
+            self.fn(*args, **kwargs)
+
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)
         if key in self.cache:
             best = self.cache[key]
-            # Apply compiler opts and run
-            from .compiler.kernel_function import CompilationContext
             merged = dict(kwargs)
             merged.update(best.all_kwargs())
-            copts = best.compiler_opts()
-            if copts:
-                CompilationContext.set_compile_hints(copts)
-            try:
-                return self.fn(*args, **merged)
-            finally:
-                if copts:
-                    CompilationContext.clear_compile_hints()
+            return self._run_with_hints(best.compiler_opts(), args, merged)
 
         # Benchmark all configs
         configs = self._prune(self.configs, args, kwargs)
@@ -231,17 +219,9 @@ class Autotuner:
         self._save_disk_cache()
 
         # Final run with best config
-        from .compiler.kernel_function import CompilationContext
         merged = dict(kwargs)
         merged.update(best_config.all_kwargs())
-        copts = best_config.compiler_opts()
-        if copts:
-            CompilationContext.set_compile_hints(copts)
-        try:
-            return self.fn(*args, **merged)
-        finally:
-            if copts:
-                CompilationContext.clear_compile_hints()
+        return self._run_with_hints(best_config.compiler_opts(), args, merged)
 
     # --- Disk cache ---
     def _load_disk_cache(self):

@@ -176,14 +176,20 @@ class CompilationContext:
     _compile_hints = threading.local()
 
     @classmethod
-    def set_compile_hints(cls, hints: dict):
-        """Set compiler hints for the current thread (used by autotune)."""
-        cls._compile_hints.data = hints
+    @contextmanager
+    def compile_hints(cls, hints: dict):
+        """Context manager for setting compiler hints (thread-safe).
 
-    @classmethod
-    def clear_compile_hints(cls):
-        """Clear compiler hints for the current thread."""
-        cls._compile_hints.data = None
+        Usage:
+            with CompilationContext.compile_hints({"waves_per_eu": 2}):
+                fn(*args, **kwargs)
+        """
+        prev = getattr(cls._compile_hints, 'data', None)
+        cls._compile_hints.data = hints
+        try:
+            yield
+        finally:
+            cls._compile_hints.data = prev
 
     @classmethod
     def get_compile_hints(cls):
