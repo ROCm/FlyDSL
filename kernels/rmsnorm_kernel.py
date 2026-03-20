@@ -24,6 +24,7 @@ KERNEL_NAME = "rmsnorm"
 
 EPS = 1e-5
 
+import math
 from kernels.kernels_common import get_warp_size
 
 BLOCK_THREADS = 256
@@ -82,12 +83,10 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
         def wave_reduce_add(x):
             width_i32 = fx.Int32(WARP_SIZE)
             w = x
-            sh = WARP_SIZE // 2
-            while sh >= 1:
-                off = fx.Int32(sh)
+            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                off = fx.Int32(WARP_SIZE // (2 << _sh_exp))
                 peer = w.shuffle_xor(off, width_i32)
                 w = w.addf(peer, fastmath=fm_fast)
-                sh //= 2
             return w
 
         def block_reduce_add(val):
