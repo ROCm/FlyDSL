@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s | FileCheck %s
 
 // PyIR-aligned coalesce tests from tests/pyir/test_layout_algebra.py

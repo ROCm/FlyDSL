@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Shared helpers for optional perf comparison in GPU operator tests.
 
 These tests are primarily correctness tests. Performance comparison (FlyDSL vs AIter)

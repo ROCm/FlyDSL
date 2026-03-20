@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 from .._mlir import ir
 from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """MFMA FP8/INT8/BF16 GEMM Test with B preshuffle — @flyc.kernel API.
 
 Kernel implementation lives in `kernels/preshuffle_gemm.py`.

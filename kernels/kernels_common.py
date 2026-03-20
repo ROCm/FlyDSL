@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Common helpers shared by kernel modules.
 
 Keep helper naming consistent with other kernel helpers (e.g. `mfma_preshuffle_pipeline.py`),

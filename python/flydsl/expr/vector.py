@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Vector dialect helpers.
 
 This module exists so tests can import vector ops through `flydsl._mlir_helpers`

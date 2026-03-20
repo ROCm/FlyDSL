@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """AMD Buffer Load/Store Operations - High-level Python API
 
 This module provides high-level Python wrappers for AMD CDNA3/CDNA4 buffer operations.

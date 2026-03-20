@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Pytest configuration for Fly DSL tests.
 
 Supports both the new Fly dialect (build-fly/) and legacy build paths.

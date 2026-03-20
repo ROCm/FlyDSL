@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import inspect
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin

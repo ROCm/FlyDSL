@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 from .._mlir.dialects.arith import *  # noqa: F401,F403
 """Arith dialect API — operator overloading + function-level builders.
 

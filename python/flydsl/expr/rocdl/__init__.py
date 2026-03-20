@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """ROCDL dialect extension for ROCm/AMD GPU programming.
 
 This module provides access to ROCm-specific GPU operations including:

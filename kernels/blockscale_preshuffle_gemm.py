@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Blockscale Preshuffle GEMM kernel (Fly dialect, MFMA FP8).
 
 Per-block scaling (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128).

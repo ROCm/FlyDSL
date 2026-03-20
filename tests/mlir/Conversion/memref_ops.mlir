@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s --fly-layout-lowering --convert-fly-to-rocdl | FileCheck %s
 
 // MemRef load/store lowering tests:
