@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -18,7 +17,6 @@
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
@@ -32,6 +30,20 @@ using namespace mlir;
 using namespace mlir::fly;
 
 namespace {
+
+inline unsigned mapToLLVMAddressSpace(AddressSpace space) {
+  switch (space) {
+  case AddressSpace::Global:
+    return 1;
+  case AddressSpace::Shared:
+    return 3;
+  case AddressSpace::Register:
+    return 5;
+  case AddressSpace::BufferDesc:
+    return 8;
+  }
+  return 0;
+}
 
 static LLVM::LLVMStructType getBufferFatPtrType(MLIRContext *ctx) {
   return LLVM::LLVMStructType::getLiteral(

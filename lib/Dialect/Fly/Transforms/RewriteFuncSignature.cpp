@@ -7,10 +7,10 @@
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/SmallPtrSet.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include <functional>
@@ -111,17 +111,12 @@ LLVM::LLVMStructType getCoordTensorStructType(MLIRContext *ctx, CoordTensorType 
   return LLVM::LLVMStructType::getLiteral(ctx, fields, true);
 }
 
-LLVM::LLVMStructType getMemRefStructType(MLIRContext *ctx, fly::MemRefType ty) {
-  SmallVector<Type> fields;
-  fields.push_back(
-      LLVM::LLVMPointerType::get(ctx, mapToLLVMAddressSpace(ty.getAddressSpace().getValue())));
-  if (!isStaticNarrowLayout(ty.getLayout()))
-    fields.push_back(getNarrowLayoutStructType(ctx, ty.getLayout()));
-  return LLVM::LLVMStructType::getLiteral(ctx, fields, true);
-}
+bool memrefHasDynamicLayout(fly::MemRefType ty) { return !isStaticNarrowLayout(ty.getLayout()); }
 
 //===----------------------------------------------------------------------===//
 // Arg expansion: DSL type -> single struct type (or passthrough)
+//
+// MemRef is expanded to separate arguments: fly.ptr + layout-struct (if dynamic)
 //===----------------------------------------------------------------------===//
 
 enum class ArgKind {
@@ -130,27 +125,34 @@ enum class ArgKind {
   Layout,
   ComposedLayout,
   CoordTensor,
-  MemRef,
+  MemRefStatic,
+  MemRefDynamic,
 };
 
 struct ExpandedArg {
   ArgKind kind;
-  Type structType;
+  SmallVector<Type, 2> types;
 };
 
 ExpandedArg expandArgType(Type ty) {
   auto *ctx = ty.getContext();
   if (auto intTupleTy = dyn_cast<IntTupleType>(ty))
-    return {ArgKind::IntTuple, getIntTupleStructType(ctx, intTupleTy.getAttr())};
+    return {ArgKind::IntTuple, {getIntTupleStructType(ctx, intTupleTy.getAttr())}};
   if (auto layoutTy = dyn_cast<LayoutType>(ty))
-    return {ArgKind::Layout, getLayoutStructType(ctx, layoutTy.getAttr())};
+    return {ArgKind::Layout, {getLayoutStructType(ctx, layoutTy.getAttr())}};
   if (auto composedTy = dyn_cast<ComposedLayoutType>(ty))
-    return {ArgKind::ComposedLayout, getComposedLayoutStructType(ctx, composedTy.getAttr())};
+    return {ArgKind::ComposedLayout, {getComposedLayoutStructType(ctx, composedTy.getAttr())}};
   if (auto coordTy = dyn_cast<CoordTensorType>(ty))
-    return {ArgKind::CoordTensor, getCoordTensorStructType(ctx, coordTy)};
-  if (auto memrefTy = dyn_cast<fly::MemRefType>(ty))
-    return {ArgKind::MemRef, getMemRefStructType(ctx, memrefTy)};
-  return {ArgKind::PassThrough, ty};
+    return {ArgKind::CoordTensor, {getCoordTensorStructType(ctx, coordTy)}};
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(ty)) {
+    auto ptrTy = memrefTy.getPointerType();
+    if (memrefHasDynamicLayout(memrefTy)) {
+      auto layoutStructTy = getNarrowLayoutStructType(ctx, memrefTy.getLayout());
+      return {ArgKind::MemRefDynamic, {ptrTy, layoutStructTy}};
+    }
+    return {ArgKind::MemRefStatic, {ptrTy}};
+  }
+  return {ArgKind::PassThrough, {ty}};
 }
 
 //===----------------------------------------------------------------------===//
@@ -283,25 +285,18 @@ Value packCoordTensorToStruct(OpBuilder &builder, Location loc, Value operand, C
   return result;
 }
 
-Value packMemRefToStruct(OpBuilder &builder, Location loc, Value operand, fly::MemRefType ty,
-                         LLVM::LLVMStructType structTy) {
-  auto outerStructTy = cast<LLVM::LLVMStructType>(structTy);
-  Value result = LLVM::UndefOp::create(builder, loc, outerStructTy);
-  int64_t idx = 0;
-  Type llvmPtrTy = outerStructTy.getBody()[idx];
-  Value flyPtr = GetIterOp::create(builder, loc, operand);
-  Value llvmPtr = UnrealizedConversionCastOp::create(builder, loc, llvmPtrTy, flyPtr).getResult(0);
-  result = LLVM::InsertValueOp::create(builder, loc, outerStructTy, result, llvmPtr,
-                                       ArrayRef<int64_t>{idx});
-  idx++;
-  if (!isStaticNarrowLayout(ty.getLayout())) {
-    auto fieldTy = cast<LLVM::LLVMStructType>(outerStructTy.getBody()[idx]);
-    Value layout = GetLayoutOp::create(builder, loc, operand);
-    Value layoutStruct = packNarrowLayoutToStruct(builder, loc, layout, ty.getLayout(), fieldTy);
-    result = LLVM::InsertValueOp::create(builder, loc, outerStructTy, result, layoutStruct,
-                                         ArrayRef<int64_t>{idx});
-  }
-  return result;
+std::pair<Value, Value> packMemRefToPtrAndLayout(OpBuilder &builder, Location loc, Value operand,
+                                                 fly::MemRefType memrefTy) {
+  Value ptrValue = GetIterOp::create(builder, loc, operand);
+  Value layoutValue = GetLayoutOp::create(builder, loc, operand);
+
+  if (!memrefHasDynamicLayout(memrefTy))
+    return {ptrValue, Value()};
+
+  auto layoutStructTy = getNarrowLayoutStructType(memrefTy.getContext(), memrefTy.getLayout());
+  Value layoutStruct =
+      packNarrowLayoutToStruct(builder, loc, layoutValue, memrefTy.getLayout(), layoutStructTy);
+  return {ptrValue, layoutStruct};
 }
 
 Value packDSLValueToStruct(OpBuilder &builder, Location loc, Value operand, Type ty,
@@ -314,8 +309,6 @@ Value packDSLValueToStruct(OpBuilder &builder, Location loc, Value operand, Type
     return packComposedLayoutToStruct(builder, loc, operand, composedTy.getAttr(), structTy);
   if (auto coordTy = dyn_cast<CoordTensorType>(ty))
     return packCoordTensorToStruct(builder, loc, operand, coordTy, structTy);
-  if (auto memrefTy = dyn_cast<fly::MemRefType>(ty))
-    return packMemRefToStruct(builder, loc, operand, memrefTy, structTy);
   llvm_unreachable("unexpected DSL type");
 }
 
@@ -470,31 +463,6 @@ Value unpackCoordTensorFromStruct(OpBuilder &builder, Location loc, Value struct
   return MakeViewOp::create(builder, loc, iter, layout);
 }
 
-Value unpackMemRefFromStruct(OpBuilder &builder, Location loc, Value structVal,
-                             fly::MemRefType memrefTy, LLVM::LLVMStructType structTy) {
-  auto outerStructTy = cast<LLVM::LLVMStructType>(structVal.getType());
-  int64_t idx = 0;
-
-  Value llvmPtr = LLVM::ExtractValueOp::create(builder, loc, outerStructTy.getBody()[idx],
-                                               structVal, ArrayRef<int64_t>{idx});
-  Value flyPtr =
-      UnrealizedConversionCastOp::create(builder, loc, memrefTy.getPointerType(), llvmPtr)
-          .getResult(0);
-  idx++;
-
-  Value layout;
-  if (!isStaticNarrowLayout(memrefTy.getLayout())) {
-    Type fieldTy = outerStructTy.getBody()[idx];
-    Value fieldVal =
-        LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
-    layout = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, memrefTy.getLayout(), fieldTy);
-  } else {
-    layout = StaticOp::create(builder, loc, getNarrowLayoutType(memrefTy.getLayout()));
-  }
-
-  return MakeViewOp::create(builder, loc, flyPtr, layout);
-}
-
 Value unpackDSLValueFromStruct(OpBuilder &builder, Location loc, Value structVal, Type oldType) {
   auto structTy = cast<LLVM::LLVMStructType>(structVal.getType());
   if (auto intTupleTy = dyn_cast<IntTupleType>(oldType))
@@ -505,8 +473,6 @@ Value unpackDSLValueFromStruct(OpBuilder &builder, Location loc, Value structVal
     return unpackComposedLayoutFromStruct(builder, loc, structVal, composedTy.getAttr(), structTy);
   if (auto coordTy = dyn_cast<CoordTensorType>(oldType))
     return unpackCoordTensorFromStruct(builder, loc, structVal, coordTy, structTy);
-  if (auto memrefTy = dyn_cast<fly::MemRefType>(oldType))
-    return unpackMemRefFromStruct(builder, loc, structVal, memrefTy, structTy);
   llvm_unreachable("unexpected DSL type");
 }
 
@@ -570,8 +536,6 @@ void removeStaticOperandsFromLaunchFunc(gpu::LaunchFuncOp launchOp) {
     launchOp.getKernelOperandsMutable().assign(newOperands);
 }
 
-// Rewrite function arguments: DSL types -> single struct arguments
-// Then reconstruct normal-form DSL values in the entry block
 bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
   ArrayRef<Type> argTypes = op.getArgumentTypes();
   SmallVector<Type> oldInputs(argTypes.begin(), argTypes.end());
@@ -583,7 +547,8 @@ bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
   for (Type oldType : oldInputs) {
     auto expanded = expandArgType(oldType);
     expandedArgs.push_back(expanded);
-    newInputs.push_back(expanded.structType);
+    for (Type t : expanded.types)
+      newInputs.push_back(t);
     if (expanded.kind != ArgKind::PassThrough)
       changed = true;
   }
@@ -599,14 +564,64 @@ bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
   Block &entry = op.getFunctionBody().front();
   Location loc = op.getLoc();
 
+  for (int i = static_cast<int>(oldInputs.size()) - 1; i >= 0; --i) {
+    if (expandedArgs[i].kind == ArgKind::MemRefDynamic) {
+      BlockArgument oldArg = entry.getArgument(i);
+      oldArg.setType(expandedArgs[i].types[0]);
+      entry.insertArgument(i + 1, expandedArgs[i].types[1], loc);
+    } else if (expandedArgs[i].kind == ArgKind::MemRefStatic) {
+      BlockArgument oldArg = entry.getArgument(i);
+      oldArg.setType(expandedArgs[i].types[0]);
+    } else if (expandedArgs[i].kind != ArgKind::PassThrough) {
+      BlockArgument oldArg = entry.getArgument(i);
+      oldArg.setType(expandedArgs[i].types[0]);
+    }
+  }
+
   OpBuilder builder(&entry, entry.begin());
 
+  size_t newArgIdx = 0;
   for (size_t i = 0; i < oldInputs.size(); ++i) {
-    if (expandedArgs[i].kind == ArgKind::PassThrough)
+    if (expandedArgs[i].kind == ArgKind::PassThrough) {
+      newArgIdx++;
       continue;
+    }
 
-    BlockArgument structArg = entry.getArgument(i);
-    structArg.setType(expandedArgs[i].structType);
+    if (expandedArgs[i].kind == ArgKind::MemRefStatic) {
+      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
+      BlockArgument ptrArg = entry.getArgument(newArgIdx);
+
+      Value layout = StaticOp::create(builder, loc, getNarrowLayoutType(memrefTy.getLayout()));
+      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
+
+      llvm::SmallPtrSet<Operation *, 8> except;
+      except.insert(view.getDefiningOp());
+      ptrArg.replaceAllUsesExcept(view, except);
+
+      newArgIdx++;
+      continue;
+    }
+
+    if (expandedArgs[i].kind == ArgKind::MemRefDynamic) {
+      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
+      BlockArgument ptrArg = entry.getArgument(newArgIdx);
+      BlockArgument layoutStructArg = entry.getArgument(newArgIdx + 1);
+
+      Value layout = unpackNarrowLayoutFromStruct(builder, loc, layoutStructArg,
+                                                  memrefTy.getLayout(), layoutStructArg.getType());
+      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
+
+      llvm::SmallPtrSet<Operation *, 8> except;
+      except.insert(view.getDefiningOp());
+      for (Operation *user : layoutStructArg.getUsers())
+        except.insert(user);
+      ptrArg.replaceAllUsesExcept(view, except);
+
+      newArgIdx += 2;
+      continue;
+    }
+
+    BlockArgument structArg = entry.getArgument(newArgIdx);
 
     SmallVector<OpOperand *, 16> usesToReplace;
     for (OpOperand &use : structArg.getUses())
@@ -616,12 +631,13 @@ bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
 
     for (OpOperand *use : usesToReplace)
       use->set(reconstructed);
+
+    newArgIdx++;
   }
 
   return true;
 }
 
-// Pack DSL operands into structs for gpu.launch_func
 void packDSLOperandsFromLaunchFunc(gpu::LaunchFuncOp op) {
   OpBuilder builder(op);
   Location loc = op.getLoc();
@@ -641,8 +657,17 @@ void packDSLOperandsFromLaunchFunc(gpu::LaunchFuncOp op) {
     }
 
     changed = true;
-    newKernelOperands.push_back(packDSLValueToStruct(
-        builder, loc, operand, ty, cast<LLVM::LLVMStructType>(expanded.structType)));
+
+    if (expanded.kind == ArgKind::MemRefStatic || expanded.kind == ArgKind::MemRefDynamic) {
+      auto memrefTy = cast<fly::MemRefType>(ty);
+      auto [ptr, layoutStruct] = packMemRefToPtrAndLayout(builder, loc, operand, memrefTy);
+      newKernelOperands.push_back(ptr);
+      if (layoutStruct)
+        newKernelOperands.push_back(layoutStruct);
+    } else {
+      newKernelOperands.push_back(packDSLValueToStruct(
+          builder, loc, operand, ty, cast<LLVM::LLVMStructType>(expanded.types[0])));
+    }
   }
 
   if (changed)
