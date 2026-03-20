@@ -202,6 +202,7 @@ def torch_moe_blockscale_ref(
 def test_moe_blockscale_e2e(
     token, model_dim, inter_dim, E, topk,
     tile_m=16, tile_n=256, tile_k=128,
+    tile_n2=None,
     waves_per_eu=2,
     num_iters=10, num_warmup=3,
 ):
@@ -339,10 +340,11 @@ def test_moe_blockscale_e2e(
     a2_scale_fly = a2_bscale_2d.t().contiguous().view(-1)  # [nblk_k_w2, token*topk] flat
     w2_scale_fly = w2_bscale.view(-1)                       # [E, nblk_n_w2 * nblk_k_w2] flat
 
-    # Compile stage 2
+    # Compile stage 2 (optionally with different tile_n)
+    tile_n_s2 = tile_n2 if tile_n2 is not None else tile_n
     exe2 = compile_moe_blockscale_gemm2(
         model_dim=model_dim, inter_dim=inter_dim, experts=E, topk=topk,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        tile_m=tile_m, tile_n=tile_n_s2, tile_k=tile_k,
         doweight_stage2=True, scale_block_k=scale_blk_k, out_dtype="f16",
         waves_per_eu=waves_per_eu)
 
@@ -531,6 +533,8 @@ if __name__ == "__main__":
     parser.add_argument("-k", "--topk",   type=int, default=8)
     parser.add_argument("--tile_m",    type=int, default=64)
     parser.add_argument("--tile_n",    type=int, default=128)
+    parser.add_argument("--tile_n2",   type=int, default=0,
+                        help="tile_n for stage2 (0 = same as tile_n)")
     parser.add_argument("--tile_k",    type=int, default=128)
     parser.add_argument("--wpe",       type=int, default=2,
                         help="waves_per_eu (0 = disabled)")
@@ -548,11 +552,13 @@ if __name__ == "__main__":
     print(f"{'tokens':>8} | {'flydsl':>10} | {'aiter-fused':>12} | {'aiter-ck2s':>12}")
     print("-" * 52)
 
+    tn2 = args.tile_n2 if args.tile_n2 > 0 else None
     for m in token_list:
         us_fly, us_aiter = test_moe_blockscale_e2e(
             token=m, model_dim=args.dim, inter_dim=args.idim,
             E=args.expert, topk=args.topk,
             tile_m=args.tile_m, tile_n=args.tile_n, tile_k=args.tile_k,
+            tile_n2=tn2,
             waves_per_eu=wpe,
             num_iters=args.num_iters, num_warmup=args.num_warmup)
         print(f"{m:>8} | {us_fly:>10.1f} |")

@@ -1871,15 +1871,10 @@ def compile_moe_blockscale_gemm2(
                             s_w = buffer_ops.buffer_load(sw_rsrc, sw_idx, vec_width=1, dtype=f32)
                             s_w_vals.append(s_w)
 
-                        combined = []
+                        s_a_vec4_list = []
                         for mi in range_constexpr(m_repeat):
-                            s_a_vec4 = vector.from_elements(vec4_f32, s_a_vecs[mi])
-                            mi_combined = []
-                            for ni in range_constexpr(num_acc_n):
-                                s_w_bc = vector.broadcast(vec4_f32, s_w_vals[ni])
-                                mi_combined.append(ArithValue(s_a_vec4) * ArithValue(s_w_bc))
-                            combined.append(mi_combined)
-                        all_combined.append(combined)
+                            s_a_vec4_list.append(vector.from_elements(vec4_f32, s_a_vecs[mi]))
+                        all_combined.append((s_a_vec4_list, s_w_vals))
                     return all_combined
 
                 def compute_tile_bs_s2(acc_in, b_tile_in, lds_base, pre_scales, *, a0_prefetch=None):
@@ -1895,7 +1890,7 @@ def compile_moe_blockscale_gemm2(
                             return vector.bitcast(vec8_i32, v4)
 
                         for sb in range_constexpr(sb_per_tile_s2):
-                            combined = pre_scales[sb]
+                            s_a_vec4_list, s_w_vals = pre_scales[sb]
                             ku0 = sb * ku_per_sb_s2
                             ku1 = ku0 + 1
                             b0_p0, b0_p1 = b_tile_in[ku0]
@@ -1910,6 +1905,7 @@ def compile_moe_blockscale_gemm2(
                                     a0, a1 = lds_load_packs_k64(curr_row, col0, lds_base)
                                 a2, a3 = lds_load_packs_k64(curr_row, col1, lds_base)
                                 a128 = _pack128(a0, a1, a2, a3)
+                                s_a_v4 = s_a_vec4_list[mi]
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
                                     b128 = _pack128(b0_p0[ni], b0_p1[ni], b1_p0[ni], b1_p1[ni])
@@ -1917,8 +1913,10 @@ def compile_moe_blockscale_gemm2(
                                         mfma_res_ty,
                                         [a128, b128, acc_init,
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
+                                    tmp = ArithValue(blk) * ArithValue(s_a_v4)
+                                    s_w_bc = vector.broadcast(vec4_f32, s_w_vals[ni])
                                     current_acc[acc_idx] = math_dialect.fma(
-                                        blk, combined[mi][ni], current_acc[acc_idx])
+                                        tmp, s_w_bc, current_acc[acc_idx])
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -1942,7 +1940,7 @@ def compile_moe_blockscale_gemm2(
                             return mfma_fn(mfma_res_ty, [a1, b1, acc1, 0, 0, 0])
 
                         for sb in range_constexpr(sb_per_tile_s2):
-                            combined = pre_scales[sb]
+                            s_a_vec4_list, s_w_vals = pre_scales[sb]
                             for mi in range_constexpr(m_repeat):
                                 for ni in range_constexpr(num_acc_n):
                                     acc_idx = mi * num_acc_n + ni
@@ -1957,8 +1955,10 @@ def compile_moe_blockscale_gemm2(
                                         else:
                                             a0, a1 = lds_load_packs_k64(row_a_lds + arith.index(mi * 16), col_base, lds_base)
                                         blk = mfma_k64(blk, a0, a1, b_packs0[ni], b_packs1[ni])
+                                    tmp = ArithValue(blk) * ArithValue(s_a_vec4_list[mi])
+                                    s_w_bc = vector.broadcast(vec4_f32, s_w_vals[ni])
                                     current_acc[acc_idx] = math_dialect.fma(
-                                        blk, combined[mi][ni], current_acc[acc_idx])
+                                        tmp, s_w_bc, current_acc[acc_idx])
                     return current_acc
 
                 def compute_tile(acc_in, b_tile_in, lds_base, *, prefetch_epilogue: bool = False, a0_prefetch=None):
