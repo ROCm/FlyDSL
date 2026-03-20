@@ -976,13 +976,18 @@ def compile_preshuffle_gemm_a8(
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 dsrd_preload = 2
+                dvmem_preload = 2
                 if dsrd_preload > num_ds_load:
                     dsrd_preload = num_ds_load
+                if dvmem_preload > num_gmem_loads:
+                    dvmem_preload = num_gmem_loads
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload, mfma_total)
                 dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
-                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
 
                 idx_ds_read = dsrd_preload
-                idx_gmem_load = 0
+                idx_gmem_load = dvmem_preload
+                if dvmem_preload:
+                    rocdl.sched_vmem(dvmem_preload)
                 if dsrd_preload:
                     rocdl.sched_dsrd(dsrd_preload)
                 for mfma_idx in range_constexpr(mfma_total):
