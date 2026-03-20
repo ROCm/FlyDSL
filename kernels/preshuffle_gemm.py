@@ -518,7 +518,12 @@ def compile_preshuffle_gemm_a8(
             from flydsl._mlir.dialects import memref as memref_dialect
 
             dma_bytes = a_async_load_bytes
-            wave_offset = wave_id * arith.constant(wave_size * dma_bytes, index=True)
+            wave_offset = rocdl.readfirstlane(
+                T.i64,
+                arith.index_cast(
+                    T.i64, wave_id * arith.constant(wave_size * dma_bytes, index=True)
+                ),
+            )
 
             for i in range_constexpr(num_a_async_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
