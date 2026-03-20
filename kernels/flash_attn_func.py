@@ -41,15 +41,7 @@ def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16
         return "fallback_n32"
     if override in ("fastpath", "ck_n128_fastpath", "n128"):
         return "ck_n128_fastpath"
-    # Keep N128 path feature-gated by default due current occupancy/perf risk.
-    enable_n128 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_N128", "0") == "1"
-    if (
-        enable_n128
-        and dtype_str == "f16"
-        and causal
-        and num_heads == 64
-        and head_dim == 128
-    ):
+    if dtype_str == "f16" and causal and head_dim == 128:
         return "ck_n128_fastpath"
     return "fallback_n32"
 
@@ -86,7 +78,7 @@ def build_flash_attn_func_module_primary(
     ENABLE_PREFETCH_3BUF = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_PREFETCH3", "0") == "1"
     )
-    ENABLE_DMA = (
+    ENABLE_DMA = PATH_TAG == "ck_n128_fastpath" or (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
     )
     if flat_work_group_size is None:
@@ -97,7 +89,7 @@ def build_flash_attn_func_module_primary(
     REDUCE_MODE = os.getenv("FLYDSL_FLASH_ATTN_FUNC_REDUCE_MODE", "xor").strip().lower()
     if REDUCE_MODE not in ("xor", "ds_bpermute"):
         REDUCE_MODE = "xor"
-    NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else 1
+    NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else (2 if ENABLE_DMA else 1)
     NUM_PREFETCH_V = 3 if ENABLE_PREFETCH_3BUF else 1
     CK_LDS_SEQ = (1, 2, 0, 1, 0, 1, 2, 0) if ENABLE_PREFETCH_3BUF else (0,)
 
@@ -129,7 +121,7 @@ def build_flash_attn_func_module_primary(
     # K uses XOR swizzle (col ^ ((row & 7) << 4)) at 16-element granularity
     # instead of padding. This enables ds_read_b128 (stride is 256B-aligned).
     K_STRIDE = HEAD_DIM
-    V_STRIDE = HEAD_DIM + 4  # row-major V with padding for bank-conflict avoidance
+    V_STRIDE = HEAD_DIM if ENABLE_DMA else HEAD_DIM + 4
 
     # Vectorized cooperative load constants.
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
@@ -306,7 +298,9 @@ def build_flash_attn_func_module_primary(
             return _gep_load(base_ptr, base_idx, vxf16_type)
 
         def k_buf_base(buf_id):
-            return arith.index(buf_id * LDS_K_TILE_SIZE)
+            if isinstance(buf_id, int):
+                return arith.index(buf_id * LDS_K_TILE_SIZE)
+            return buf_id * arith.index(LDS_K_TILE_SIZE)
 
         def v_buf_base(buf_id):
             return arith.index(LDS_V_BASE + buf_id * LDS_V_TILE_SIZE)
@@ -423,7 +417,10 @@ def build_flash_attn_func_module_primary(
 
             def coop_dma_k(tile_start, buf_id=0):
                 """Load K tile via DMA with XOR-swizzled global fetch."""
-                k_lds_byte_base = lds_kv_base_idx + arith.index(buf_id * LDS_K_TILE_SIZE * 2)
+                if isinstance(buf_id, int):
+                    k_lds_byte_base = lds_kv_base_idx + arith.index(buf_id * LDS_K_TILE_SIZE * 2)
+                else:
+                    k_lds_byte_base = lds_kv_base_idx + buf_id * arith.index(LDS_K_TILE_SIZE * 2)
                 for d in range_constexpr(NUM_DMA_K):
                     lds_addr = (k_lds_byte_base
                                 + wave_id * arith.index(WARP_SIZE * DMA_BYTES)
@@ -447,6 +444,49 @@ def build_flash_attn_func_module_primary(
 
                     rocdl.raw_ptr_buffer_load_lds(
                         k_rsrc, lds_ptr, _dma_size, voffset,
+                        _dma_soff, _dma_off, _dma_aux,
+                    )
+
+        # ---- V XOR swizzle: col ^ ((row & 3) << 4) at 16-element granularity ----
+        def _v_swizzle(row_idx, col_idx):
+            mask = (row_idx & arith.index(0x3)) << arith.index(4)
+            return col_idx ^ mask
+
+        # ---- DMA loading for V (buffer_load_dwordx4 ... lds) ----
+        if ENABLE_DMA:
+            v_rsrc = buffer_ops.create_buffer_resource(V.value, max_size=True)
+            V_TILE_BYTES = BLOCK_N * V_STRIDE * 2
+            NUM_DMA_V = V_TILE_BYTES // DMA_BATCH_BYTES
+            LANES_PER_V_ROW = HEAD_DIM * 2 // DMA_BYTES
+            ROWS_PER_DMA_BATCH_V = DMA_BATCH_BYTES // (HEAD_DIM * 2)
+
+            def coop_dma_v(tile_start, buf_id=0):
+                """Load V tile via DMA with XOR-swizzled global fetch."""
+                v_lds_byte_base = (lds_kv_base_idx
+                                   + arith.index((LDS_V_BASE + buf_id * LDS_V_TILE_SIZE) * 2))
+                for d in range_constexpr(NUM_DMA_V):
+                    lds_addr = (v_lds_byte_base
+                                + wave_id * arith.index(WARP_SIZE * DMA_BYTES)
+                                + arith.index(d * DMA_BATCH_BYTES))
+                    lds_i64 = arith.index_cast(T.i64, lds_addr)
+                    lds_lane0 = rocdl.readfirstlane(T.i64, lds_i64)
+                    lds_ptr = llvm.IntToPtrOp(_lds_ptr_ty, lds_lane0).result
+
+                    row_in_tile = (tid // LANES_PER_V_ROW
+                                   + arith.index(d * ROWS_PER_DMA_BATCH_V))
+                    swiz_col_f16 = (tid % LANES_PER_V_ROW) * (DMA_BYTES // 2)
+                    xor_mask = (row_in_tile & arith.index(0x3)) << arith.index(4)
+                    unsw_col_f16 = swiz_col_f16 ^ xor_mask
+                    col_byte = unsw_col_f16 * 2
+                    global_row = (batch_idx * seq_len_v + tile_start
+                                  + row_in_tile)
+                    global_byte = (global_row * arith.index(STRIDE_TOKEN * 2)
+                                   + head_idx * arith.index(HEAD_DIM * 2)
+                                   + col_byte)
+                    voffset = arith.index_cast(T.i32, global_byte)
+
+                    rocdl.raw_ptr_buffer_load_lds(
+                        v_rsrc, lds_ptr, _dma_size, voffset,
                         _dma_soff, _dma_off, _dma_aux,
                     )
 
@@ -483,10 +523,14 @@ def build_flash_attn_func_module_primary(
         # ---- KV loop upper bound ----
         kv_upper = q_start + BLOCK_M if CAUSAL else seq_len_v
 
-        # Loop-carried: [m_old, l_old, o_acc_chunks...]
+        # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
+        _use_dma_dbuf = ENABLE_DMA and not ENABLE_PREFETCH_3BUF
         init_args = [c_neg_inf, c_zero_f]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v16f32)
+        if _use_dma_dbuf:
+            init_args.append(arith.index(0))
+            coop_dma_k(arith.index(0), buf_id=0)
 
         for kv_block_start, inner_iter_args, loop_results in scf.for_(
             arith.index(0),
@@ -499,6 +543,7 @@ def build_flash_attn_func_module_primary(
             o_accs = [
                 inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)
             ]
+            _cur_buf_id = inner_iter_args[2 + D_CHUNKS] if _use_dma_dbuf else None
             preload_k_count = (
                 NUM_PREFETCH_K if NUM_PREFETCH_K < N_SUBTILES else N_SUBTILES
             )
@@ -522,16 +567,35 @@ def build_flash_attn_func_module_primary(
 
                 if ENABLE_PREFETCH_3BUF:
                     k_slot = CK_LDS_SEQ[kv_sub % len(CK_LDS_SEQ)] % NUM_PREFETCH_K
-                elif ENABLE_DMA:
-                    k_slot = 0
-                    coop_dma_k(kv_start, k_slot)
+                elif _use_dma_dbuf:
+                    if kv_sub % 2 == 0:
+                        _k_buf_id = _cur_buf_id
+                    else:
+                        _k_buf_id = arith.index(1) - _cur_buf_id
                     rocdl.s_waitcnt(0)
                     gpu.barrier()
+                    _next_k_buf_id = arith.index(1) - _k_buf_id
+                    if kv_sub + 1 < N_SUBTILES:
+                        coop_dma_k(
+                            kv_block_start + (kv_sub + 1) * BLOCK_N,
+                            _next_k_buf_id,
+                        )
+                    else:
+                        _next_kv = kv_block_start + arith.index(BLOCK_N_OUT)
+                        _has_next = arith.cmpi(
+                            arith.CmpIPredicate.slt, _next_kv, kv_upper)
+                        _if_dma = scf.IfOp(_has_next)
+                        with ir.InsertionPoint(_if_dma.then_block):
+                            coop_dma_k(_next_kv, _next_k_buf_id)
+                            scf.YieldOp([])
+                    rocdl.sched_barrier(0)
+                    k_base = k_buf_base(_k_buf_id)
                 else:
                     k_slot = 0
                     coop_load_k(kv_start, k_slot)
                     gpu.barrier()
-                k_base = k_buf_base(k_slot)
+                if not _use_dma_dbuf:
+                    k_base = k_buf_base(k_slot)
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
                 k_hi_offset = K_SUB_N * K_STRIDE
@@ -554,6 +618,10 @@ def build_flash_attn_func_module_primary(
                         mfma_pack_type, lds_kv, [_k_idx_lo(p)])
                     k_packs_hi[p] = vector.load_op(
                         mfma_pack_type, lds_kv, [_k_idx_hi(p)])
+
+                if ENABLE_DMA and not ENABLE_PREFETCH_3BUF:
+                    coop_dma_v(kv_start, 0)
+                    rocdl.sched_barrier(0)
 
                 s_acc_lo = c_zero_v16f32
                 s_acc_hi = c_zero_v16f32
@@ -655,6 +723,11 @@ def build_flash_attn_func_module_primary(
                     coop_load_v(kv_start, v_slot)
                     rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
                     gpu.barrier()
+                elif ENABLE_DMA:
+                    v_base = v_buf_base(0)
+                    rocdl.s_waitcnt(0)
+                    gpu.barrier()
+                    rocdl.sched_barrier(0)
                 else:
                     v_slot = 0
                     v_base = v_buf_base(v_slot)
@@ -708,7 +781,8 @@ def build_flash_attn_func_module_primary(
                              + tr_col_half * 16 + tr_col_sub * 4)
                     k_row = (arith.index(pks * PV_K_STEP)
                              + lane_div_32 * 4 + tr_k_group)
-                    lds_lo = v_base + k_row * V_STRIDE + d_col
+                    _d_col_eff = _v_swizzle(k_row, d_col) if ENABLE_DMA else d_col
+                    lds_lo = v_base + k_row * V_STRIDE + _d_col_eff
                     lds_hi = lds_lo + arith.index(K_SUB_N * V_STRIDE)
                     if USE_K16:
                         vl_a = ds_read_tr_v4f16(lds_lo)
@@ -745,7 +819,13 @@ def build_flash_attn_func_module_primary(
                 m_running = m_new_raw
                 l_running = l_new
 
-            yield [m_running, l_running] + o_accs
+            _yield_args = [m_running, l_running] + o_accs
+            if _use_dma_dbuf:
+                if N_SUBTILES % 2 == 1:
+                    _yield_args.append(arith.index(1) - _cur_buf_id)
+                else:
+                    _yield_args.append(_cur_buf_id)
+            yield _yield_args
 
         # ---- Normalize and store O ----
         l_final = loop_results[1]
