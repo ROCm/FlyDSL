@@ -193,9 +193,10 @@ add_custom_target(FlyPythonStubs ALL
 )
 
 add_custom_target(CopyFlyPythonSources ALL
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${PROJECT_SOURCE_DIR}/python/flydsl"
-    "${MLIR_BINARY_DIR}/python_packages/flydsl"
+  COMMAND ${CMAKE_COMMAND}
+    -DSRC="${PROJECT_SOURCE_DIR}/python/flydsl"
+    -DDST="${MLIR_BINARY_DIR}/python_packages"
+    -P "${PROJECT_SOURCE_DIR}/cmake/copy_flydsl_sources.cmake"
   # Copy auto-generated Python bindings from mlir-tblgen to the correct location
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${MLIR_BINARY_DIR}/python/mlir_flydsl/dialects/_fly_ops_gen.py"
