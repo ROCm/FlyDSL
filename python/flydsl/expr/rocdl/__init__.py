@@ -16,6 +16,8 @@ from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_mfma_f32_32x32x8f16 = mfma_f32_32x32x8f16
 _ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
+_ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
+_ods_mfma_f32_32x32x16_bf16 = globals().get("mfma_f32_32x32x16_bf16", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -75,6 +77,24 @@ def mfma_f32_32x32x16f16(result_type, operands, *, loc=None, ip=None):
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_f16 (requires gfx950+)")
     a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
     return _ods_mfma_f32_32x32x16_f16(
+        result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+    ).result
+
+
+def mfma_f32_32x32x8bf16_1k(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x8bf16_1k is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x8bf16_1k")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x8bf16_1k(
+        result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+    ).result
+
+
+def mfma_f32_32x32x16_bf16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x16_bf16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_bf16 (requires gfx950+)")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x16_bf16(
         result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
     ).result
 

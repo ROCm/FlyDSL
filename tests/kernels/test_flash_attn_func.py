@@ -159,12 +159,13 @@ def compare_arrays(
 
 
 def run_config(
-    batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters, seed=DEFAULT_SEED
+    batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters,
+    seed=DEFAULT_SEED, dtype_str="f16",
 ):
     device = "cuda"
     results = {}
     active_path = select_flash_attn_func_path(
-        num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str="f16"
+        num_heads=num_heads, head_dim=head_dim, causal=causal, dtype_str=dtype_str
     )
     results["active_path"] = active_path
 
@@ -180,7 +181,7 @@ def run_config(
             num_heads=num_heads,
             head_dim=head_dim,
             causal=causal,
-            dtype_str="f16",
+            dtype_str=dtype_str,
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             flat_work_group_size=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("flat_work_group_size"),
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
@@ -271,15 +272,20 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
+        "--dtype", type=str, default="fp16", choices=["fp16", "bf16"],
+        help="Data type: fp16 or bf16 (default: fp16)",
+    )
+    parser.add_argument(
         "--seed", type=int, default=DEFAULT_SEED, help=f"Random seed for reproducibility (default: {DEFAULT_SEED})"
     )
     args = parser.parse_args()
 
     causal = not args.no_causal
-    dtype = torch.float16
+    dtype_map = {"fp16": (torch.float16, "f16"), "bf16": (torch.bfloat16, "bf16")}
+    dtype, dtype_str = dtype_map[args.dtype]
 
     print("=" * 130)
-    print(f"FlyDSL flash_attn_func ({'causal' if causal else 'non-causal'}, fp16)")
+    print(f"FlyDSL flash_attn_func ({'causal' if causal else 'non-causal'}, {args.dtype})")
     print("  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)")
     print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -319,6 +325,7 @@ def main():
                 warmup=args.warmup,
                 iters=args.iters,
                 seed=args.seed,
+                dtype_str=dtype_str,
             )
             if "err" in r:
                 cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"

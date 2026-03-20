@@ -41,7 +41,7 @@ def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16
         return "fallback_n32"
     if override in ("fastpath", "ck_n128_fastpath", "n128"):
         return "ck_n128_fastpath"
-    if dtype_str == "f16" and causal and head_dim == 128:
+    if dtype_str in ("f16", "bf16") and causal and head_dim == 128:
         return "ck_n128_fastpath"
     return "fallback_n32"
 
@@ -105,7 +105,7 @@ def build_flash_attn_func_module_primary(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert dtype_str == "f16", "flash_attn_func currently only supports f16"
+    assert dtype_str in ("f16", "bf16"), "flash_attn_func supports f16 and bf16"
     assert BLOCK_N % 32 == 0
     assert BLOCK_N_OUT % BLOCK_N == 0
 
@@ -159,6 +159,7 @@ def build_flash_attn_func_module_primary(
         NUM_HEADS,
         HEAD_DIM,
         CAUSAL,
+        dtype_str,
         ENABLE_PREFETCH_3BUF,
         ENABLE_DMA,
         ENABLE_LDS_VEC16,
@@ -180,7 +181,7 @@ def build_flash_attn_func_module_primary(
         O: fx.Tensor,
         seq_len: fx.Int32,
     ):
-        elem_type = T.f16
+        elem_type = T.bf16 if dtype_str == "bf16" else T.f16
         compute_type = T.f32
         llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
         q_ptr = _fly.extract_aligned_pointer_as_index(llvm_ptr_ty, Q.value)
@@ -196,6 +197,12 @@ def build_flash_attn_func_module_primary(
         mfma_pack_type = v8f16_type if USE_K16 else v4f16_type
         MFMA_LANE_K = 8 if USE_K16 else 4
         def do_mfma(a, b, c):
+            if dtype_str == "bf16":
+                if USE_K16:
+                    return rocdl.mfma_f32_32x32x16_bf16(
+                        v16f32_type, [a, b, c, 0, 0, 0])
+                return rocdl.mfma_f32_32x32x8bf16_1k(
+                    v16f32_type, [a, b, c, 0, 0, 0])
             if USE_K16:
                 return rocdl.mfma_f32_32x32x16f16(
                     v16f32_type, [a, b, c, 0, 0, 0])
