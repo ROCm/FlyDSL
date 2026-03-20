@@ -2,15 +2,15 @@
 
 ## 概述
 
-对 `kernels/moe_blockscale_2stage.py` 的 MoE blockscale FP8 GEMM stage1/stage2 kernel 进行了系统性优化，在保持 `waves_per_eu=2` 的前提下，从 **0.18x CK** 优化到 **1.33x 超越 CK**。
+对 `kernels/moe_blockscale_2stage.py` 的 MoE blockscale FP8 GEMM stage1/stage2 kernel 进行了系统性优化，在保持 `waves_per_eu=2` 的前提下，从 **0.18x CK** 优化到 **1.37x 超越 CK**。
 
 **测试配置**: M=16384, dim=7168, inter_dim=2048, E=32, topk=8, tile=64×128×128 (gfx950/MI350)
 
 | 阶段 | stage1 (us) | stage2 (us) | total (us) | vs CK |
 |---|---|---|---|---|
 | 优化前 | 38646 | 4495 | 43141 | 0.27x |
-| 最终 | 5703 | 3526 | 9229 | **1.33x** |
-| CK | 7042 | 5232 | 12274 | 1.0x |
+| 最终 | 5421 | 3568 | 8996 | **1.37x** |
+| CK | 7042 | 5234 | 12274 | 1.0x |
 
 ---
 
@@ -115,16 +115,43 @@ acc = fma(tmp, broadcast(s_w), acc)  # s_w做broadcast FMA
 
 ---
 
-## ISA 指标演进
+## 优化6: scale_w 去重 (ScaleBlockN 内共享)
 
-| 指标 | 优化前 | 优化1 | 优化2 | 优化3 | 优化4 | 最终 |
+**问题**: 同一 wave 内 `num_acc_n` 个 ni 的 scale_w 地址在 `ScaleBlockN=128` 下指向同一 N-block，导致重复 buffer_load。Stage1 有 gate+up 翻倍，更浪费。
+
+**修复**: 编译期判断 `n_per_wave <= 128`，若成立则 ni>0 复用 ni=0 的 scale_w，不再重复加载。
+
+```python
+_sw_shared_n = (n_per_wave <= 128)
+for ni in range_constexpr(num_acc_n):
+    if ni == 0 or not _sw_shared_n:
+        s_w_gate = buffer_ops.buffer_load(sw_rsrc, sw_gate_idx, ...)
+    s_w_gate_vals.append(s_w_gate)  # ni>0 复用 ni=0 的值
+```
+
+**效果**: stage1 热循环 scale_w buffer_load 8 → 4，stage1 5682 → 5421 us (**超越 CK 30%**)
+
+---
+
+## ISA 指标演进 (Stage1)
+
+| 指标 | 优化前 | 优化1 | 优化2 | 优化3 | 优化4 | 优化6 |
 |---|---|---|---|---|---|---|
-| VGPR spill | 177 | 63 | 15 | 14 | 14 | 14 |
-| scratch (bytes) | 596 | 256 | 64 | 60 | 0 | 0 |
+| VGPR spill | 177 | 63 | 15 | 14 | 0 | 14 |
+| scratch (bytes) | 596 | 256 | 64 | 60 | 0 | 60 |
 | 热循环 scratch | 229 | ~50 | 0 | 0 | 0 | 0 |
 | 热循环 cndmask | 32 | 32 | 32 | 0 | 0 | 0 |
 | 热循环 s_nop | ~49 | ~49 | ~49 | ~49 | 23 | 23 |
-| 热循环行数 | ~480 | ~450 | ~423 | ~423 | 397 | 397 |
+| 热循环 buf_load_dword | 40 | 40 | 40 | 40 | 40 | 36 |
+| 热循环行数 | ~480 | ~450 | ~423 | ~423 | 397 | 399 |
+
+## 尝试过但未采纳的方案
+
+1. **per-group scale_a** (每 MRepeat 组只加载1个 scale_a，broadcast 给4元素): err=0.0875，精度不可接受。CK 的 `Scale_Block_M=1` 确认需要 per-element。
+
+2. **ds_bpermute 共享 scale_a**: 16个lane重复加载同一 scale_a，用 ds_bpermute 从 lane 0-3 广播。但 ds_bpermute 延迟 (~20cy) 在关键路径上，stage1 5421 → 6061 us 反而更慢。
+
+3. **Async LDS DMA (raw_ptr_buffer_load_lds)**: 替代 buffer_load_dwordx4 → ds_write 的 X tile 路径。MoE 的 gather 访问模式（每thread不同 token row）下，DMA 比 texture-cached buffer_load 更慢，stage1 5421 → 6093 us。该优化仅适用于线性/stride 访问（如 preshuffle_gemm 的 A tile）。
 
 ## 关键设计原则
 
@@ -137,3 +164,5 @@ acc = fma(tmp, broadcast(s_w), acc)  # s_w做broadcast FMA
 4. **分离 s_a 和 s_w 乘法**: `blk × s_a` + `fma(tmp, broadcast(s_w), acc)` 比预计算 `combined = s_a × s_w` 更利于编译器 pack 和 MFMA 延迟隐藏。
 
 5. **Stage-specific tile 配置**: Stage1（gate+up 双 side）用 tile_n=128，Stage2（单 side）用 tile_n=256。
+
+6. **scale_w 去重**: 同一 ScaleBlockN 内的 ni 共享 weight scale，编译期判断避免重复 buffer_load。
