@@ -83,28 +83,25 @@ func.func @test_partially_dynamic_layout(%arg0: !fly.layout<4:?>) {
 
 // -----
 
-// MemRef with static layout: struct contains only the LLVM pointer.
+// MemRef with static layout: lowered to a single fly.ptr argument.
 // CHECK-LABEL: @test_static_memref
-// CHECK-SAME: (%[[S:.*]]: !llvm.struct<packed (ptr<1>)>)
+// CHECK-SAME: (%[[P:.*]]: !fly.ptr<f32, global>)
 func.func @test_static_memref(%arg0: !fly.memref<f32, global, 32:1>) {
-  // CHECK: llvm.extractvalue %[[S]][0]
-  // CHECK: builtin.unrealized_conversion_cast {{.*}} : !llvm.ptr<1> to !fly.ptr<f32, global>
   // CHECK: fly.static : !fly.layout<32:1>
-  // CHECK: fly.make_view
+  // CHECK: fly.make_view(%[[P]]
   return
 }
 
 // -----
 
-// MemRef with dynamic layout: struct has ptr + layout sub-struct.
+// MemRef with dynamic layout: lowered to ptr arg + layout struct arg.
 // CHECK-LABEL: @test_dynamic_memref
-// CHECK-SAME: (%[[S:.*]]: !llvm.struct<packed (ptr<3>, struct<packed (struct<packed (i32)>, struct<packed (i32)>)>)>)
+// CHECK-SAME: (%[[P:.*]]: !fly.ptr<f16, shared>, %[[L:.*]]: !llvm.struct<packed (struct<packed (i32)>, struct<packed (i32)>)>)
 func.func @test_dynamic_memref(%arg0: !fly.memref<f16, shared, (16,?):(1,?)>) {
-  // CHECK: llvm.extractvalue %[[S]][0]
-  // CHECK: builtin.unrealized_conversion_cast {{.*}} : !llvm.ptr<3> to !fly.ptr<f16, shared>
-  // CHECK: llvm.extractvalue %[[S]][1]
+  // CHECK: llvm.extractvalue %[[L]][0]
+  // CHECK: llvm.extractvalue %[[L]][1]
   // CHECK: fly.make_layout
-  // CHECK: fly.make_view
+  // CHECK: fly.make_view(%[[P]]
   return
 }
 
