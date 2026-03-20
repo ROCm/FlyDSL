@@ -191,9 +191,10 @@ def make_stride(*stride, loc=None, ip=None):
 
 
 @traced_op
-def make_coord(coord, loc=None, ip=None):
-    if not isinstance(coord, tuple):
-        raise TypeError(f"make_coord expects a tuple, e.g. make_coord((r, c)), got {type(coord).__name__}")
+def make_coord(*coord, loc=None, ip=None):
+    # Support both make_coord(r, c) and make_coord((r, c))
+    if len(coord) == 1 and isinstance(coord[0], tuple):
+        coord = coord[0]
     IntTupleTy, dyncElems = fly.infer_int_tuple_type(coord)
     return fly.make_coord(IntTupleTy, dyncElems, loc=loc, ip=ip)
 
