@@ -1867,10 +1867,12 @@ def compile_moe_blockscale_gemm2(
                                 s_a_row.append(s_a_val)
                             s_a_vecs.append(s_a_row)
 
+                        _sw_shared_n_s2 = (n_per_wave <= 128)
                         s_w_vals = []
                         for ni in range_constexpr(num_acc_n):
-                            sw_idx = _pre_n_block_s2[ni] * c_nblk_k_w2 + kb
-                            s_w = buffer_ops.buffer_load(sw_rsrc, sw_idx, vec_width=1, dtype=f32)
+                            if ni == 0 or not _sw_shared_n_s2:
+                                sw_idx = _pre_n_block_s2[ni] * c_nblk_k_w2 + kb
+                                s_w = buffer_ops.buffer_load(sw_rsrc, sw_idx, vec_width=1, dtype=f32)
                             s_w_vals.append(s_w)
 
                         s_a_vec4_list = []
