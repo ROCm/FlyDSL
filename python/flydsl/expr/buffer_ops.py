@@ -26,6 +26,7 @@ from .._mlir.dialects import llvm, rocdl, arith as std_arith
 from .._mlir.extras import types as T
 from typing import Optional, Union
 from ..runtime.device import is_rdna_arch
+from .meta import traced_op
 
 
 def _get_buffer_flags(arch=None):
@@ -63,7 +64,6 @@ def _get_buffer_flags(arch=None):
         flags |= (1 << 24)   # reserved bit, must be 1 on RDNA
         flags |= (2 << 28)   # OOB_SELECT = 2 (no bounds checking)
     return flags
-from .meta import traced_op
 
 __all__ = [
     'create_buffer_resource',

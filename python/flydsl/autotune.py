@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
 import hashlib, json, os, time, inspect, threading
@@ -81,7 +84,7 @@ def do_bench(fn, warmup=5, rep=25, quantiles=None):
         times.append(start.elapsed_time(end))
     times.sort()
     if quantiles:
-        return [times[int(q * len(times))] for q in quantiles]
+        return [times[min(int(q * len(times)), len(times) - 1)] for q in quantiles]
     return times[len(times) // 2]
 
 
