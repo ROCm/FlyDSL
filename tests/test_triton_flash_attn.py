@@ -23,6 +23,7 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 
 os.environ.setdefault("FLIR_LOG_MORE", "1")
+os.environ.setdefault("TRITON_HIP_USE_ASYNC_COPY", "0")
 
 _repo = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_repo))
