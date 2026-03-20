@@ -455,7 +455,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       echo "gemm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "gemm"
     fi
-    shape_tag="${M}x${N}x${K}_t${tile_m}x${tile_n}x${tile_k}"
+    shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -485,11 +485,11 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       --tile_k "$tile_k" >"${log}" 2>&1; then
       # Check if test was skipped due to architecture
       if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        gemm_shape_tag="${M}x${N}x${K}_t${tile_m}x${tile_n}x${tile_k}"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
         _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        gemm_shape_tag="${M}x${N}x${K}_t${tile_m}x${tile_n}x${tile_k}"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
         row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -497,7 +497,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
     else
       # Skip gracefully on unsupported architectures or missing features
       if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        gemm_shape_tag="${M}x${N}x${K}_t${tile_m}x${tile_n}x${tile_k}"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
         _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
