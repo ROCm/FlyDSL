@@ -703,14 +703,16 @@ def compile_moe_blockscale_gemm1(
                                 s_a_row.append(s_a_val)
                             s_a_vecs.append(s_a_row)
 
+                        _sw_shared_n = (n_per_wave <= 128)
                         s_w_gate_vals = []
                         s_w_up_vals = []
                         for ni in range_constexpr(num_acc_n):
-                            sw_gate_idx = _pre_n_block_gate[ni] * c_nblk_k_w1 + kb
-                            s_w_gate = buffer_ops.buffer_load(sw_rsrc, sw_gate_idx, vec_width=1, dtype=f32)
+                            if ni == 0 or not _sw_shared_n:
+                                sw_gate_idx = _pre_n_block_gate[ni] * c_nblk_k_w1 + kb
+                                s_w_gate = buffer_ops.buffer_load(sw_rsrc, sw_gate_idx, vec_width=1, dtype=f32)
+                                sw_up_idx = _pre_n_block_up[ni] * c_nblk_k_w1 + kb
+                                s_w_up = buffer_ops.buffer_load(sw_rsrc, sw_up_idx, vec_width=1, dtype=f32)
                             s_w_gate_vals.append(s_w_gate)
-                            sw_up_idx = _pre_n_block_up[ni] * c_nblk_k_w1 + kb
-                            s_w_up = buffer_ops.buffer_load(sw_rsrc, sw_up_idx, vec_width=1, dtype=f32)
                             s_w_up_vals.append(s_w_up)
 
                         s_a_vec4_list = []
