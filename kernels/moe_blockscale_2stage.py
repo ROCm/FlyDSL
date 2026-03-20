@@ -659,24 +659,6 @@ def compile_moe_blockscale_gemm1(
                 c_nblk_k_w1 = fx.Index(nblk_k_w1)
                 row_off_base = lane_div_16 * fx.Index(4)
 
-                # Pre-decode sorted token IDs (constant across all K-tiles)
-                _pre_t_safe_idx = []
-                _pre_t_valid    = []
-                for _mi in range_constexpr(m_repeat):
-                    _mi_safe, _mi_valid = [], []
-                    for _ii in range_constexpr(4):
-                        _row_in_tile = arith.index(_mi * 16) + row_off_base + fx.Index(_ii)
-                        _sorted_row  = bx_m + _row_in_tile
-                        _fused_pre   = buffer_ops.buffer_load(sorted_rsrc, _sorted_row, vec_width=1, dtype=i32)
-                        _t_id_pre    = _fused_pre & mask24
-                        _t_valid_pre = arith.cmpi(arith.CmpIPredicate.ult, _t_id_pre, tokens_i32)
-                        _t_safe_pre  = _t_valid_pre.select(_t_id_pre, fx.Int32(0))
-                        _t_safe_idx_pre = arith.index_cast(T.index, _t_safe_pre)
-                        _mi_safe.append(_t_safe_idx_pre)
-                        _mi_valid.append(_t_valid_pre)
-                    _pre_t_safe_idx.append(_mi_safe)
-                    _pre_t_valid.append(_mi_valid)
-
                 # Pre-compute N-block indices for scale_w (constant per CTA)
                 _pre_n_block_gate = []
                 _pre_n_block_up   = []
@@ -695,8 +677,13 @@ def compile_moe_blockscale_gemm1(
                         for mi in range_constexpr(m_repeat):
                             s_a_row = []
                             for ii in range_constexpr(4):
-                                t_safe_idx = _pre_t_safe_idx[mi][ii]
-                                t_valid    = _pre_t_valid[mi][ii]
+                                _row_in_tile = arith.index(mi * 16) + row_off_base + fx.Index(ii)
+                                _sorted_row = bx_m + _row_in_tile
+                                _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_row, vec_width=1, dtype=i32)
+                                _t_id = _fused & mask24
+                                t_valid = arith.cmpi(arith.CmpIPredicate.ult, _t_id, tokens_i32)
+                                _t_safe = t_valid.select(_t_id, fx.Int32(0))
+                                t_safe_idx = arith.index_cast(T.index, _t_safe)
                                 sa_idx = sa_base_offset + t_safe_idx
                                 s_a_val = buffer_ops.buffer_load(sx_rsrc, sa_idx, vec_width=1, dtype=f32)
                                 s_a_val = arith.select(t_valid, s_a_val, fx.Float32(0.0))

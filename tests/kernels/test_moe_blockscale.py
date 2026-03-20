@@ -522,11 +522,11 @@ if __name__ == "__main__":
     parser.add_argument("-m", type=int, default=0,
                         help="Token count (0 = sweep [16,32,128,256,1024])")
     parser.add_argument("-dim",  type=int, default=7168)
-    parser.add_argument("-idim", type=int, default=256)
-    parser.add_argument("-e", "--expert", type=int, default=256)
+    parser.add_argument("-idim", type=int, default=2048)
+    parser.add_argument("-e", "--expert", type=int, default=32)
     parser.add_argument("-k", "--topk",   type=int, default=8)
-    parser.add_argument("--tile_m",    type=int, default=16)
-    parser.add_argument("--tile_n",    type=int, default=256)
+    parser.add_argument("--tile_m",    type=int, default=64)
+    parser.add_argument("--tile_n",    type=int, default=128)
     parser.add_argument("--tile_k",    type=int, default=128)
     parser.add_argument("--wpe",       type=int, default=2,
                         help="waves_per_eu (0 = disabled)")
