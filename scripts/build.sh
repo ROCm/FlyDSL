@@ -67,6 +67,16 @@ if [ ! -f "${REPO_ROOT}/thirdparty/dlpack/include/dlpack/dlpack.h" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Remove editable-install symlink that would cause CopyFlyPythonSources to
+# overwrite the freshly built _mlir_libs with files from a different build.
+# ---------------------------------------------------------------------------
+_EDITABLE_MLIR_LINK="${REPO_ROOT}/python/flydsl/_mlir"
+if [ -L "${_EDITABLE_MLIR_LINK}" ]; then
+  echo "Removing editable-install symlink: ${_EDITABLE_MLIR_LINK}"
+  rm -f "${_EDITABLE_MLIR_LINK}"
+fi
+
+# ---------------------------------------------------------------------------
 # CMake configure
 # ---------------------------------------------------------------------------
 NANOBIND_DIR=$(python3 -c "import nanobind; import os; print(os.path.dirname(nanobind.__file__) + '/cmake')" 2>/dev/null || true)
@@ -93,29 +103,17 @@ echo "Building with -j${PARALLEL_JOBS}..."
 cmake --build . -j"${PARALLEL_JOBS}"
 
 # ---------------------------------------------------------------------------
-# Ensure python/flydsl/_mlir symlink points to build output so that
-# `import flydsl` works without PYTHONPATH or `pip install -e .`.
-# The CMake copy step (CopyFlyPythonSources) now skips _mlir via
-# cmake/copy_flydsl_sources.cmake, so this symlink is safe to keep.
-# ---------------------------------------------------------------------------
-_EDITABLE_MLIR_LINK="${REPO_ROOT}/python/flydsl/_mlir"
-_MLIR_BUILD_TARGET="${BUILD_DIR}/python_packages/flydsl/_mlir"
-_RELATIVE_TARGET="../../${BUILD_DIR##${REPO_ROOT}/}/python_packages/flydsl/_mlir"
-
-if [ -d "${_MLIR_BUILD_TARGET}" ]; then
-  if [ -L "${_EDITABLE_MLIR_LINK}" ]; then
-    rm -f "${_EDITABLE_MLIR_LINK}"
-  fi
-  if [ ! -e "${_EDITABLE_MLIR_LINK}" ]; then
-    ln -s "${_RELATIVE_TARGET}" "${_EDITABLE_MLIR_LINK}"
-    echo "Created symlink: ${_EDITABLE_MLIR_LINK} -> ${_RELATIVE_TARGET}"
-  fi
-fi
-
-# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
+PYTHON_PKG_DIR="${BUILD_DIR}/python_packages"
+
 echo ""
 echo "=============================================="
 echo "Build complete!"
+echo ""
+echo "Usage (no install):"
+echo "  export PYTHONPATH=${PYTHON_PKG_DIR}:\${PYTHONPATH}"
+echo ""
+echo "Or install as editable package:"
+echo "  cd ${REPO_ROOT} && pip install -e ."
 echo "=============================================="
