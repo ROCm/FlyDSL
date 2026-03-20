@@ -1,4 +1,4 @@
-_BASE_VERSION = "0.1.0"
+_BASE_VERSION = "0.1.1"
 
 try:
     from ._version import __version__
