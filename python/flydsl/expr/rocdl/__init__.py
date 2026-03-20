@@ -34,7 +34,6 @@ _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_mfma_f32_32x32x8f16 = mfma_f32_32x32x8f16
-_ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -90,9 +89,7 @@ def mfma_f32_32x32x8f16(result_type, operands, *, loc=None, ip=None):
     ).result
 
 
-<<<<<<< HEAD
 @traced_op
-=======
 def mfma_f32_32x32x16f16(result_type, operands, *, loc=None, ip=None):
     if _ods_mfma_f32_32x32x16_f16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_f16 (requires gfx950+)")
@@ -102,7 +99,27 @@ def mfma_f32_32x32x16f16(result_type, operands, *, loc=None, ip=None):
     ).result
 
 
->>>>>>> e087936 (flash_attn: CK-aligned architecture with BLOCK_M=256, BLOCK_N=64, K=16 MFMA)
+@traced_op
+def mfma_f32_32x32x8bf16_1k(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x8bf16_1k is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x8bf16_1k")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x8bf16_1k(
+        result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+    ).result
+
+
+@traced_op
+def mfma_f32_32x32x16_bf16(result_type, operands, *, loc=None, ip=None):
+    if _ods_mfma_f32_32x32x16_bf16 is None:
+        raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_bf16 (requires gfx950+)")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
+    return _ods_mfma_f32_32x32x16_bf16(
+        result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip
+    ).result
+
+
+@traced_op
 def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
     a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
     return _ods_mfma_f32_16x16x16f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
