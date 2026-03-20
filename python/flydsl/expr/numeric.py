@@ -64,7 +64,9 @@ class NumericMeta(type):
                 c_value = getattr(ctypes, f"c_int{width}")(self.value)
             else:
                 c_value = getattr(ctypes, f"c_uint{width}")(self.value)
-            return [ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)]
+            ptr = ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)
+            ptr._prevent_gc = c_value
+            return [ptr]
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
 
