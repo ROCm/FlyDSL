@@ -109,7 +109,7 @@ def crd2idx(crd, layout):
             if isinstance(cv, ir.Value) and isinstance(cv.type, ir.IndexType):
                 cv = arith.index_cast(T.i32, cv)
             crd_i32.append(cv)
-        coord_val = fx.make_coord(*crd_i32)
+        coord_val = fx.make_coord(tuple(crd_i32))
         result = fx.crd2idx(coord_val, layout)
         scalar = fx.get_scalar(result)
         if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
