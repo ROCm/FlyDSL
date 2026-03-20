@@ -48,6 +48,8 @@ def compile_preshuffle_gemm_a8(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -61,7 +63,13 @@ def compile_preshuffle_gemm_a8(
         out_dtype: Output element type, "fp16" or "bf16" (default: "fp16").
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         use_async_copy: Use async DMA for A tile global-to-LDS transfer.
+        dsrd_preload: Initial LDS-read preload count for the async-copy scheduler.
+        dvmem_preload: Initial global-load preload count for the async-copy scheduler.
     """
+    if dsrd_preload < 0:
+        raise ValueError(f"dsrd_preload must be >= 0, got {dsrd_preload!r}")
+    if dvmem_preload < 0:
+        raise ValueError(f"dvmem_preload must be >= 0, got {dvmem_preload!r}")
     if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16", "fp4"):
         raise ValueError(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
@@ -980,21 +988,17 @@ def compile_preshuffle_gemm_a8(
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
-                dsrd_preload = 2
-                dvmem_preload = 2
-                if dsrd_preload > num_ds_load:
-                    dsrd_preload = num_ds_load
-                if dvmem_preload > num_gmem_loads:
-                    dvmem_preload = num_gmem_loads
-                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload, mfma_total)
-                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
+                dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
+                dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload_eff, mfma_total)
+                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload_eff, mfma_total)
 
-                idx_ds_read = dsrd_preload
-                idx_gmem_load = dvmem_preload
-                if dvmem_preload:
-                    rocdl.sched_vmem(dvmem_preload)
-                if dsrd_preload:
-                    rocdl.sched_dsrd(dsrd_preload)
+                idx_ds_read = dsrd_preload_eff
+                idx_gmem_load = dvmem_preload_eff
+                if dvmem_preload_eff:
+                    rocdl.sched_vmem(dvmem_preload_eff)
+                if dsrd_preload_eff:
+                    rocdl.sched_dsrd(dsrd_preload_eff)
                 for mfma_idx in range_constexpr(mfma_total):
                     rocdl.sched_mfma(1)
                     n_dsrd = dsrd_schedule[mfma_idx]
@@ -1269,7 +1273,15 @@ def compile_preshuffle_gemm_a8(
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (in_dtype, out_dtype, K, lds_stage, use_cshuffle_epilog)
+    _cache_tag = (
+        in_dtype,
+        out_dtype,
+        K,
+        lds_stage,
+        use_cshuffle_epilog,
+        dsrd_preload,
+        dvmem_preload,
+    )
 
     @flyc.jit
     def launch_gemm(
@@ -1325,6 +1337,8 @@ def compile_preshuffle_gemm_w4(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1340,6 +1354,8 @@ def compile_preshuffle_gemm_w4(
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
         use_async_copy=use_async_copy,
+        dsrd_preload=dsrd_preload,
+        dvmem_preload=dvmem_preload,
     )
     return inner
 
