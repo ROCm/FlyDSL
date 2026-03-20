@@ -639,32 +639,56 @@ def build_flash_attn_func_module_primary(
                             [_k_idx_hi(ks + PREFETCH_K)])
 
                 # ==== Online softmax over 64 KV positions ====
-                if CAUSAL:
-                    kv_start_i32 = arith.index_cast(T.i32, kv_start)
-                    lane_div_32_i32 = arith.index_cast(T.i32, lane_div_32)
-
                 s_raw_lo = []
                 s_raw_hi = []
                 for r in range_constexpr(16):
-                    s_val_lo = vector.extract(s_acc_lo, static_position=[r], dynamic_position=[])
-                    s_val_hi = vector.extract(s_acc_hi, static_position=[r], dynamic_position=[])
-                    if CAUSAL:
-                        r_off_i32 = arith.constant((r % 4) + (r // 4) * 8, type=T.i32)
-                        lane_off_i32 = arith.MulIOp(
-                            lane_div_32_i32, arith.constant(4, type=T.i32)).result
-                        kv_col_lo = arith.AddIOp(
-                            arith.AddIOp(kv_start_i32, lane_off_i32).result,
-                            r_off_i32).result
-                        is_masked_lo = arith.cmpi(
-                            arith.CmpIPredicate.ugt, kv_col_lo, q_row_i32)
-                        s_val_lo = arith.select(is_masked_lo, c_neg_inf, s_val_lo)
-                        kv_col_hi = arith.AddIOp(
-                            kv_col_lo, arith.constant(K_SUB_N, type=T.i32)).result
-                        is_masked_hi = arith.cmpi(
-                            arith.CmpIPredicate.ugt, kv_col_hi, q_row_i32)
-                        s_val_hi = arith.select(is_masked_hi, c_neg_inf, s_val_hi)
-                    s_raw_lo.append(s_val_lo)
-                    s_raw_hi.append(s_val_hi)
+                    s_raw_lo.append(vector.extract(
+                        s_acc_lo, static_position=[r], dynamic_position=[]))
+                    s_raw_hi.append(vector.extract(
+                        s_acc_hi, static_position=[r], dynamic_position=[]))
+
+                if CAUSAL:
+                    kv_start_i32 = arith.index_cast(T.i32, kv_start)
+                    lane_div_32_i32 = arith.index_cast(T.i32, lane_div_32)
+                    q_start_i32 = arith.index_cast(T.i32, q_start)
+                    max_kv_col_i32 = arith.AddIOp(
+                        kv_start_i32,
+                        arith.constant(BLOCK_N - 1, type=T.i32)).result
+                    tile_needs_mask = arith.cmpi(
+                        arith.CmpIPredicate.ugt, max_kv_col_i32, q_start_i32)
+                    _mask_if = scf.IfOp(
+                        tile_needs_mask, [T.f32] * 32, has_else=True)
+                    with ir.InsertionPoint(_mask_if.then_block):
+                        _m_lo = []
+                        _m_hi = []
+                        for r in range_constexpr(16):
+                            r_off_i32 = arith.constant(
+                                (r % 4) + (r // 4) * 8, type=T.i32)
+                            lane_off_i32 = arith.MulIOp(
+                                lane_div_32_i32,
+                                arith.constant(4, type=T.i32)).result
+                            kv_col_lo = arith.AddIOp(
+                                arith.AddIOp(
+                                    kv_start_i32, lane_off_i32).result,
+                                r_off_i32).result
+                            is_masked_lo = arith.cmpi(
+                                arith.CmpIPredicate.ugt,
+                                kv_col_lo, q_row_i32)
+                            _m_lo.append(arith.select(
+                                is_masked_lo, c_neg_inf, s_raw_lo[r]))
+                            kv_col_hi = arith.AddIOp(
+                                kv_col_lo,
+                                arith.constant(K_SUB_N, type=T.i32)).result
+                            is_masked_hi = arith.cmpi(
+                                arith.CmpIPredicate.ugt,
+                                kv_col_hi, q_row_i32)
+                            _m_hi.append(arith.select(
+                                is_masked_hi, c_neg_inf, s_raw_hi[r]))
+                        scf.YieldOp(_m_lo + _m_hi)
+                    with ir.InsertionPoint(_mask_if.else_block):
+                        scf.YieldOp(s_raw_lo + s_raw_hi)
+                    s_raw_lo = [_mask_if.results[i] for i in range(16)]
+                    s_raw_hi = [_mask_if.results[16 + i] for i in range(16)]
 
                 local_max = s_raw_lo[0]
                 for r in range_constexpr(15):
@@ -727,7 +751,6 @@ def build_flash_attn_func_module_primary(
                     v_base = v_buf_base(0)
                     rocdl.s_waitcnt(0)
                     gpu.barrier()
-                    rocdl.sched_barrier(0)
                 else:
                     v_slot = 0
                     v_base = v_buf_base(v_slot)
