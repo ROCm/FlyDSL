@@ -599,10 +599,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             lane_id_local = arith.SubIOp(
                 lane_i32, warp_id_local * ea.constant(tnum_gpu, type=i32)).result
 
-            acc = None
+            raw_vals = []
             for wi in range_constexpr(world_size):
                 sm_i_idx = ea.index_cast(idx, ea.constant(wi * tnum_gpu, type=i32) + lane_id_local)
-                raw_i = memref.LoadOp(smem, [sm_i_idx]).result
+                raw_vals.append(memref.LoadOp(smem, [sm_i_idx]).result)
+
+            acc = None
+            for wi in range_constexpr(world_size):
+                raw_i = raw_vals[wi]
                 if is_f32:
                     vf = vector.BitCastOp(v4f32, raw_i).result
                     acc = vf if acc is None else acc + vf
