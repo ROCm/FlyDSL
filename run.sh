@@ -49,11 +49,21 @@ function run_flydsl_op {
     # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
     # python tests/kernels/test_flash_attn_func.py --iters 100 --compare-v43
 
-    python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_attn_func.py --iters 100
+
+    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
 
-    # python tests/kernels/test_flash_attn_func.py --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+
+    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
 
     # python test_mfma_16x16x16_bf16_accvgpr_load.py
     # python test_mfma_16x16x16_bf16_d_vgpr.py
