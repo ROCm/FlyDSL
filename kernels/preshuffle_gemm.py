@@ -49,7 +49,7 @@ def compile_preshuffle_gemm_a8(
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
     dsrd_preload: int = 2,
-    dvmem_preload: int = 2,
+    dvmem_preload: int = 2
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -512,7 +512,7 @@ def compile_preshuffle_gemm_a8(
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
         tx_i32_async_base = tx * a_async_load_dword
-        k_bytes_factor = K * elem_bytes
+        k_bytes_factor = K * elem_bytes // a_elem_vec_pack
         layout_a_bytes = fx.make_layout((tile_m, k_bytes_factor), (k_bytes_factor, 1))
 
         def a_tile_chunk_coord_i32_async(i: int):
@@ -566,7 +566,7 @@ def compile_preshuffle_gemm_a8(
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
-            base_k_div4 = base_k // 4
+            base_k_div4 = base_k // 4 // a_elem_vec_pack
             dma_a_tile_to_lds(base_k_div4, lds_buffer)
 
         def prefetch_a_tile(base_k):
@@ -903,29 +903,6 @@ def compile_preshuffle_gemm_a8(
         rocdl.sched_barrier(0)
 
         def hot_loop_scheduler():
-            if is_fp4:
-                if not _fp4_use_scheduler:
-                    return
-                mfma_group = _fp4_pack_N_outer
-                mfma_total = _k_unroll_packed_outer * _m_repeat_packed_outer * _num_acc_n_packed_outer * _fp4_pack_K_outer * _fp4_pack_M_outer * _fp4_pack_N_outer
-                mfma_per_iter = 2 * mfma_group
-                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                rocdl.sched_dsrd(2)
-                rocdl.sched_mfma(1)
-                rocdl.sched_mfma(1)
-                dswr_tail = num_a_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
-                for sche_i in range_constexpr(sche_iters):
-                    rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(mfma_group)
-                    if not use_async_copy and sche_i >= dswr_start - 1:
-                        rocdl.sched_dswr(1)
-                rocdl.sched_barrier(0)
-                return
 
             import math as _math
 
@@ -978,8 +955,8 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                bytes_k_per_mfma = 128 if _is_gfx950 else 32
-                num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
+                element_k_per_mfma = 128 if _is_gfx950 else 32
+                num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 num_ds_load = num_a_lds_load
                 dswr_tail = num_a_loads
