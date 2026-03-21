@@ -313,7 +313,7 @@ def main():
 
     all_passed = True
     for batch, seq_len, nh, hd in configs:
-        tag = f"B={batch} S={seq_len} H={nh} D={hd}"
+        tag = f"B={batch} S={seq_len} H={nh} D={hd} {args.dtype}"
         try:
             r = run_config(
                 batch,
