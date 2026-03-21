@@ -11,3 +11,13 @@ __all__ = [
     "jit",
     "kernel",
 ]
+
+
+def from_jax(array, *, assumed_align=None, use_32bit_stride=False):
+    """Convenience re-export of :func:`flydsl.jax.from_jax`.
+
+    Available only when JAX is installed.
+    """
+    from ..jax.adapter import from_jax as _from_jax
+
+    return _from_jax(array, assumed_align=assumed_align, use_32bit_stride=use_32bit_stride)
