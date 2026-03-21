@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
-
 import builtins
 from functools import partialmethod
 
@@ -402,7 +399,15 @@ class ArithValue(ir.Value):
         return super().__hash__()
 
     def __str__(self):
-        return "?"
+        try:
+            ty = str(self.type)
+            owner = self.owner
+            if isinstance(owner, ir.Block):
+                return f"ArithValue(type={ty}, block_arg)"
+            op_name = owner.name
+            return f"ArithValue(type={ty}, op={op_name})"
+        except Exception:
+            return f"ArithValue(type=?)"
 
     def __repr__(self):
         return self.__str__()

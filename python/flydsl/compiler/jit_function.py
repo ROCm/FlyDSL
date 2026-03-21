@@ -1,6 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
-
 import ctypes
 import hashlib
 import inspect
@@ -129,6 +126,8 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
     if visited is None:
         visited = set()
     sources = []
+
+    # 1) Scan global name references (co_names → __globals__)
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -143,6 +142,27 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # 2) Scan closure variables (co_freevars → __closure__) for callable
+    #    dependencies.  This catches @flyc.kernel functions defined in an
+    #    enclosing scope and captured by the @flyc.jit launcher via closure.
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
 
 
