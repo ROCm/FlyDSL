@@ -3,26 +3,11 @@
 
 import ctypes
 import inspect
-from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
-
-import torch
 
 from .._mlir._mlir_libs._fly import DLTensorAdaptor
 from ..expr.typing import Constexpr, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
-
-
-_FLOAT8_DTYPES = tuple(
-    dt
-    for dt in (
-        getattr(torch, "float8_e4m3fn", None),
-        getattr(torch, "float8_e5m2", None),
-        getattr(torch, "float8_e4m3fnuz", None),
-        getattr(torch, "float8_e5m2fnuz", None),
-    )
-    if dt is not None
-)
 
 
 class JitArgumentRegistry:
@@ -135,81 +120,108 @@ def convert_to_jit_arguments(
     return param_names, jit_args, dsl_types, constexpr_values
 
 
-# ================================ Common useful JitArguments ================================
-
-
-@JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
-class TensorAdaptor:
-    def __init__(
-        self,
-        tensor: torch.Tensor,
-        assumed_align: Optional[int] = None,
-        use_32bit_stride: bool = False,
-    ):
-        self._tensor_keepalive = tensor
-        dlpack_tensor = tensor
-        if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
-            dlpack_tensor = tensor.view(torch.uint8)
-            self._tensor_keepalive = dlpack_tensor
-
-        self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
-        self.assumed_align = assumed_align
-        self.use_32bit_stride = use_32bit_stride
-        self._orig_dtype = tensor.dtype
-        self._orig_shape = tensor.shape
-        self._orig_strides = tensor.stride()
-
-    @staticmethod
-    def _extract_data_ptr(arg):
-        return arg.data_ptr()
-
-    @classmethod
-    def _reusable_slot_spec(cls, arg):
-        """Reusable slot for tensor arguments.
-
-        For bare-pointer calling convention, only the data pointer changes
-        between calls with the same shape/dtype/strides.
-        """
-        if not hasattr(arg, 'data_ptr'):
-            return None
-        return ctypes.c_void_p, cls._extract_data_ptr
-
-    def requires_memref_desc(func):
-        def wrapper(self, *args, **kwargs):
-            self.tensor_adaptor.build_memref_desc()
-            return func(self, *args, **kwargs)
-
-        return wrapper
-
-    @requires_memref_desc
-    def __fly_types__(self):
-        return [self.tensor_adaptor.get_memref_type()]
-
-    @requires_memref_desc
-    def __fly_ptrs__(self):
-        return self.tensor_adaptor.get_c_pointers()
-
-    def __cache_signature__(self):
-        return (
-            self._orig_dtype,
-            tuple(self._orig_shape),
-            tuple(self._orig_strides),
-            self.assumed_align,
-            self.use_32bit_stride,
-        )
-
-    def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
-        if leading_dim is None:
-            leading_dim = -1
-        self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
-        return self
-
-
-def from_dlpack(
-    tensor: torch.Tensor, *, assumed_align: Optional[int] = None, use_32bit_stride: bool = False
-) -> TensorAdaptor:
-    return TensorAdaptor(tensor, assumed_align, use_32bit_stride)
-
+# ================================ Framework-agnostic registrations ================================
 
 JitArgumentRegistry.register(int)(Int32)
-JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
+
+
+# ================================ PyTorch support (optional) ================================
+
+try:
+    import torch
+
+    _FLOAT8_DTYPES = tuple(
+        dt
+        for dt in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e5m2", None),
+            getattr(torch, "float8_e4m3fnuz", None),
+            getattr(torch, "float8_e5m2fnuz", None),
+        )
+        if dt is not None
+    )
+
+    @JitArgumentRegistry.register(torch.Tensor, dsl_type=Tensor)
+    class TensorAdaptor:
+        def __init__(
+            self,
+            tensor: torch.Tensor,
+            assumed_align: Optional[int] = None,
+            use_32bit_stride: bool = False,
+        ):
+            self._tensor_keepalive = tensor
+            dlpack_tensor = tensor
+            if _FLOAT8_DTYPES and tensor.dtype in _FLOAT8_DTYPES:
+                dlpack_tensor = tensor.view(torch.uint8)
+                self._tensor_keepalive = dlpack_tensor
+
+            self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
+            self.assumed_align = assumed_align
+            self.use_32bit_stride = use_32bit_stride
+            self._orig_dtype = tensor.dtype
+            self._orig_shape = tensor.shape
+            self._orig_strides = tensor.stride()
+
+        @staticmethod
+        def _extract_data_ptr(arg):
+            return arg.data_ptr()
+
+        @classmethod
+        def _reusable_slot_spec(cls, arg):
+            """Reusable slot for tensor arguments.
+
+            For bare-pointer calling convention, only the data pointer changes
+            between calls with the same shape/dtype/strides.
+            """
+            if not hasattr(arg, 'data_ptr'):
+                return None
+            return ctypes.c_void_p, cls._extract_data_ptr
+
+        def requires_memref_desc(func):
+            def wrapper(self, *args, **kwargs):
+                self.tensor_adaptor.build_memref_desc()
+                return func(self, *args, **kwargs)
+
+            return wrapper
+
+        @requires_memref_desc
+        def __fly_types__(self):
+            return [self.tensor_adaptor.get_memref_type()]
+
+        @requires_memref_desc
+        def __fly_ptrs__(self):
+            return self.tensor_adaptor.get_c_pointers()
+
+        def __cache_signature__(self):
+            return (
+                self._orig_dtype,
+                tuple(self._orig_shape),
+                tuple(self._orig_strides),
+                self.assumed_align,
+                self.use_32bit_stride,
+            )
+
+        def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
+            if leading_dim is None:
+                leading_dim = -1
+            self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
+            return self
+
+    def from_dlpack(
+        tensor: torch.Tensor, *, assumed_align: Optional[int] = None, use_32bit_stride: bool = False
+    ) -> TensorAdaptor:
+        return TensorAdaptor(tensor, assumed_align, use_32bit_stride)
+
+    JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
+
+except ImportError:
+    # torch is not installed — PyTorch tensor support is unavailable.
+    # JAX arrays can still be used via flydsl.jax.
+    TensorAdaptor = None
+
+    def from_dlpack(tensor, *, assumed_align=None, use_32bit_stride=False):
+        raise ImportError(
+            "from_dlpack requires PyTorch.  Install it with:\n"
+            "  pip install torch\n"
+            "For JAX arrays, use flydsl.jax.from_jax instead."
+        )
