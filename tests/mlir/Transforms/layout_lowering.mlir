@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s --fly-layout-lowering | FileCheck %s
 
 // Tests for fly-layout-lowering pass:
@@ -251,4 +253,3 @@ func.func @test_right_inverse() -> !fly.layout<(4,2):(2,1)> {
   %result = fly.right_inverse(%layout) : (!fly.layout<(2,4):(4,1)>) -> !fly.layout<(4,2):(2,1)>
   return %result : !fly.layout<(4,2):(2,1)>
 }
-

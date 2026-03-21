@@ -128,7 +128,7 @@ jobs:
         
       - name: Install aiter
         run: |
-          docker exec flydsl_test bash -c "git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
+          docker exec flydsl_test bash -c "git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
 
       - name: Run tests
         run: |

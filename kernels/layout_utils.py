@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Layout helpers for GEMM kernels.
 
 Parses fly layout type strings (e.g. '(4,64):(64,1)') and computes

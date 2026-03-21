@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """AOT pre-compilation example for preshuffle GEMM kernels.
 
 Pre-compiles preshuffle GEMM kernels for specified configurations and stores

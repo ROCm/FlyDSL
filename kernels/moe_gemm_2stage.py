@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """MoE GEMM stage1/stage2 kernel implementations (FlyDSL MFMA FP8).
 
 This module intentionally contains the **kernel builder code** for:

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 from .._mlir import ir
 from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
@@ -542,7 +545,10 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 @traced_op
 def copy_atom_call(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
-    return fly.copy_atom_call(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
+    kwargs = dict(loc=loc, ip=ip)
+    if pred is not None:
+        kwargs["pred"] = pred
+    return fly.copy_atom_call(copy_atom, src, dst, **kwargs)
 
 
 @traced_op

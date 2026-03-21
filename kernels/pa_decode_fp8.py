@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 Supports kv_block_size=16 (original) and kv_block_size=1024 (trans_v required).
 

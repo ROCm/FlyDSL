@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/IR/BuiltinTypes.h"

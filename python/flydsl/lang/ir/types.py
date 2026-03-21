@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Backward-compat shim — canonical location is now flydsl.expr.typing."""
 
 from flydsl.expr.typing import Types, T, default_f8_type  # noqa: F401

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 # POSIX sh compatible (also works in bash).
 set -eu
 # Enable pipefail when supported (bash/ksh/zsh); ignore if unavailable (dash/posix sh).

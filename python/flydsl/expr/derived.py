@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Derived tiled operations for GPU kernel partitioning.
 
 This module provides high-level abstractions for tiled copy and MMA (Matrix

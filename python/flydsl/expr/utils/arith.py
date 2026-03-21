@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import builtins
 from functools import partialmethod
 
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
+from ..meta import traced_op
 
 
 def element_type(ty) -> ir.Type:
@@ -417,6 +421,7 @@ def _to_raw(v):
     return ir.Value._CAPICreate(v._CAPIPtr)
 
 
+@traced_op
 def constant(value, *, type=None, index=False, loc=None, ip=None):
     """Create a constant value.
 
@@ -442,11 +447,13 @@ def constant(value, *, type=None, index=False, loc=None, ip=None):
     return arith.constant(mlir_type, value, loc=loc, ip=ip)
 
 
+@traced_op
 def index(value, *, loc=None, ip=None):
     """Create an index constant."""
     return constant(value, index=True, loc=loc, ip=ip)
 
 
+@traced_op
 def constant_vector(element_value, vector_type, *, loc=None):
     """Create a splat constant vector."""
     elem_ty = element_type(vector_type)
@@ -458,38 +465,45 @@ def constant_vector(element_value, vector_type, *, loc=None):
     return arith.constant(vector_type, dense, loc=loc)
 
 
+@traced_op
 def index_cast(target_type, value, *, loc=None):
     """Cast between index and integer types."""
     v = _to_raw(value)
     return arith.IndexCastOp(target_type, v, loc=loc).result
 
 
+@traced_op
 def select(condition, true_value, false_value, *, loc=None):
     """Select between two values based on a boolean condition."""
     return arith.SelectOp(_to_raw(condition), _to_raw(true_value),
                           _to_raw(false_value), loc=loc).result
 
 
+@traced_op
 def sitofp(target_type, value, *, loc=None):
     """Convert signed integer to floating point."""
     return arith.SIToFPOp(target_type, _to_raw(value), loc=loc).result
 
 
+@traced_op
 def trunc_f(target_type, value, *, loc=None):
     """Truncate floating point to narrower type (e.g. f32 -> f16)."""
     return arith.TruncFOp(target_type, _to_raw(value), loc=loc).result
 
 
+@traced_op
 def andi(lhs, rhs, *, loc=None):
     """Bitwise AND."""
     return arith.AndIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
 
 
+@traced_op
 def xori(lhs, rhs, *, loc=None):
     """Bitwise XOR."""
     return arith.XOrIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
 
 
+@traced_op
 def shli(lhs, rhs, *, loc=None):
     """Left shift."""
     return arith.ShLIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result

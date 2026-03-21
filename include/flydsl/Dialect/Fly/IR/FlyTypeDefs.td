@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLY_TYPEDEFS
 #define FLY_TYPEDEFS
 
@@ -143,7 +146,9 @@ def Fly_Pointer : Fly_Type<"Pointer", "ptr", []> {
       return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, swizzle);
     }]>
   ];
-  let extraClassDeclaration = [{}];
+  let extraClassDeclaration = [{
+    int32_t getValueDivisibility() const;
+  }];
 }
 
 def Fly_CoordTensor : Fly_Type<"CoordTensor", "coord_tensor", [
@@ -178,6 +183,7 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let extraClassDeclaration = [{
     MemRefType at(int32_t idx) const;
     MemRefType at(ArrayRef<int32_t> idxs) const;
+    int32_t getValueDivisibility() const;
   }];
 
   let builders = [

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Preshuffle GEMM kernel using the @flyc.kernel API."""
 
 import flydsl.compiler as flyc
@@ -903,6 +906,29 @@ def compile_preshuffle_gemm_a8(
         rocdl.sched_barrier(0)
 
         def hot_loop_scheduler():
+            if is_fp4:
+                if not _fp4_use_scheduler:
+                    return
+                mfma_group = _fp4_pack_N_outer
+                mfma_total = _k_unroll_packed_outer * _m_repeat_packed_outer * _num_acc_n_packed_outer * _fp4_pack_K_outer * _fp4_pack_M_outer * _fp4_pack_N_outer
+                mfma_per_iter = 2 * mfma_group
+                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
+                rocdl.sched_dsrd(2)
+                rocdl.sched_mfma(1)
+                rocdl.sched_mfma(1)
+                dswr_tail = num_a_loads
+                if dswr_tail > sche_iters:
+                    dswr_tail = sche_iters
+                dswr_start = sche_iters - dswr_tail
+                for sche_i in range_constexpr(sche_iters):
+                    rocdl.sched_vmem(1)
+                    rocdl.sched_mfma(mfma_group)
+                    rocdl.sched_dsrd(1)
+                    rocdl.sched_mfma(mfma_group)
+                    if sche_i >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
+                rocdl.sched_barrier(0)
+                return
 
             import math as _math
 
@@ -965,17 +991,16 @@ def compile_preshuffle_gemm_a8(
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
-                dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
-                dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
-                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload_eff, mfma_total)
-                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload_eff, mfma_total)
+                dsrd_preload = 2
+                if dsrd_preload > num_ds_load:
+                    dsrd_preload = num_ds_load
+                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
+                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
 
-                idx_ds_read = dsrd_preload_eff
-                idx_gmem_load = dvmem_preload_eff
-                if dvmem_preload_eff:
-                    rocdl.sched_vmem(dvmem_preload_eff)
-                if dsrd_preload_eff:
-                    rocdl.sched_dsrd(dsrd_preload_eff)
+                idx_ds_read = dsrd_preload
+                idx_gmem_load = 0
+                if dsrd_preload:
+                    rocdl.sched_dsrd(dsrd_preload)
                 for mfma_idx in range_constexpr(mfma_total):
                     rocdl.sched_mfma(1)
                     n_dsrd = dsrd_schedule[mfma_idx]
@@ -1312,10 +1337,7 @@ def compile_preshuffle_gemm_w4(
     out_dtype: str = "bf16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: Optional[int] = None,
-    use_async_copy: bool = False,
-    dsrd_preload: int = 2,
-    dvmem_preload: int = 2,
+    waves_per_eu: int = None,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1330,9 +1352,6 @@ def compile_preshuffle_gemm_w4(
         out_dtype=out_dtype,
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
-        use_async_copy=use_async_copy,
-        dsrd_preload=dsrd_preload,
-        dvmem_preload=dvmem_preload,
     )
     return inner
 

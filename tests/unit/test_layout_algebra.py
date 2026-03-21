@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 Layout algebra tests using the Fly dialect API with static types.
 
