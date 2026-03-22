@@ -108,8 +108,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         # 跳过跨 GPU 屏障。与 mori 的 crossDeviceBarrierFlag[0]=1 对齐。
         self._xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
 
-        # Fix3: 预缓存固定 shmem buffer 地址的 fx.Int64 包装（地址在 _alloc_buffers 后不变）。
-        # 每次 dispatch/combine 调用避免重复创建，节省约 5×3μs ≈ 15μs/call。
+        # 预缓存固定 shmem buffer 地址（地址在 _alloc_buffers 后不变，避免每次重建）
         self._fx_out_tok   = fx.Int64(self.shmem_disp_out_tok.data_ptr())
         self._fx_out_wts   = fx.Int64(self.shmem_disp_out_wts.data_ptr())
         self._fx_out_idx   = fx.Int64(self.shmem_disp_out_idx.data_ptr())
@@ -125,7 +124,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_comb_out  = fx.Int64(self.shmem_comb_out_tok.data_ptr())
         self._fx_xdb_mem   = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
         self._fx_comb_bar  = fx.Int64(self.comb_bar.data_ptr())
-        self._fx_trecv     = fx.Int64(self.total_recv.data_ptr())
+        self._fx_trecv     = fx.Int64(self.total_recv.data_ptr())  # alias of _fx_total_rv
 
     def _alloc_buffers(self):
         cfg  = self.cfg
@@ -187,11 +186,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
                  block_num=-1, rdma_block_num=-1, warp_per_block=-1):
         """Dispatch tokens → remote experts via shmem P2P。
 
-        Fix1: 移除 5 个冗余 fill_()，前提是调用方已调用 reset()。
-          reset() 已清零：shmem_tok_off, dest_pe_ctr, disp_bar, total_recv, dest_tok_map。
-          dispatch kernel Phase2/3 末尾会自行重置；stale dest_tok_map 条目不被读取。
-
-        Fix3: 固定 shmem 地址使用预缓存的 fx.Int64 对象，避免每次重建（省 ~5×3μs）。
+        调用前须先调用 reset() 清零计数器。shmem 地址使用预缓存的 fx.Int64 对象。
         """
         cfg     = self.cfg
         cur_tok = input.shape[0]
@@ -199,7 +194,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         wts_c = weights.contiguous()
         idx_c = indices.to(torch.int32).contiguous()
 
-        # 通过 @flyc.jit 调用 kernel（Fix3：固定地址使用预缓存对象）
+        # 通过 @flyc.jit 调用 kernel
         self._disp_fn(
             fx.Int64(inp_c.data_ptr()),
             fx.Int64(idx_c.data_ptr()),
@@ -238,14 +233,9 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         total_recv_val = int(self.total_recv[0].item())
 
         self.comb_bar.fill_(0)
-        # flag 递增已移至 GPU kernel 内（gwtid==0 的线程在 barrier 完成后 atomic_add_i64_at）
-
         inp_c = input.to(cfg.data_type).contiguous()
 
-        # Fix3：固定地址使用预缓存的 fx.Int64 对象
-        # 注意：cur_tok/total_recv_val 保持裸 Python int（不要包装成 fx.Int32！）
-        # fly_pointers(fx.Int32(n)) 传递的是指针地址而非整数值，会导致 kernel 收到错误的
-        # cur_tok（约为 0x7f... 的大地址），使 Stage 3 循环次数异常 → combine 无限等待。
+        # cur_tok/total_recv_val 必须为裸 Python int，不要用 fx.Int32 包装
         self._comb_fn(
             fx.Int64(inp_c.data_ptr()),
             self._fx_comb_inp,
