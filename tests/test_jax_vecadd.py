@@ -9,9 +9,14 @@ Demonstrates the eager (Level 1) integration: JAX arrays are wrapped
 via ``from_jax`` and passed directly to a ``@flyc.jit`` function.
 """
 
-import jax
-import jax.numpy as jnp
 import numpy as np
+import pytest
+
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    pytest.skip("JAX not installed", allow_module_level=True)
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
