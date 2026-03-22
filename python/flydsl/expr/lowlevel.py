@@ -434,6 +434,34 @@ def store_v4i32(vec: Any, ptr: Any) -> None:
     llvm.StoreOp(vec_val, ptr_val, alignment=4)
 
 
+def store_v4i32_shmem(vec: Any, addr_i64: Any) -> None:
+    """Store 128-bit (4 × i32 vector) to fine-grained shmem with system scope.
+
+    Extracts each element from ``vector<4xi32>`` and issues 4 × system-scope
+    i32 stores to flat addrspace, generating 4 × ``flat_store_dword sc0``.
+    Provides a vectorised call interface (cleaner than 4 separate calls to
+    :func:`store_i32_shmem`) while preserving the same hardware instruction
+    semantics.
+
+    Args:
+        vec:      ``vector<4xi32>`` value (from :func:`load_v4i32`).
+        addr_i64: i64 base address (flat, 16-byte aligned).
+    """
+    vec_val  = _unwrap(vec)
+    addr_val = _unwrap(addr_i64)
+    ptr_flat = llvm.PointerType.get(address_space=0)
+
+    for i in range(4):
+        idx  = llvm.ConstantOp(_i32(), ir.IntegerAttr.get(_i32(), i)).result
+        elem = llvm.ExtractElementOp(vec_val, idx).res
+        off  = _const_i64(i * 4)
+        ea   = llvm.AddOp(addr_val, off,
+                          ir.Attribute.parse("#llvm.overflow<none>")).result
+        gptr = llvm.IntToPtrOp(ptr_flat, ea).result
+        llvm.StoreOp(elem, gptr, alignment=4,
+                     ordering=llvm.AtomicOrdering.monotonic, syncscope="one-as")
+
+
 def load_v4i32_global(addr_i64: Any) -> ir.Value:
     """Load 128-bit (4 × i32) vector from a global (addrspace 1) P2P address.
 

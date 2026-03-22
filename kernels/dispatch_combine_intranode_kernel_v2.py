@@ -37,6 +37,7 @@ from flydsl.expr.lowlevel import (
     fence_one_as_seq_cst,
     load_v4i32,
     store_v4i32_global,
+    store_v4i32_shmem,
     sync_threads,
     load_i32_at,
     load_f32_at,
@@ -330,18 +331,17 @@ def make_combine_kernel(
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
         # ── Stage 1: WarpCopy inp_tok → shmem_comb_inp ───────────────────────────
-        # 每个 global warp 负责一个 token，每条 lane 负责每 64 个 128-bit chunk。
-        # store_i32_shmem → flat_store sc0，绕过 L2，对远端 GPU 立即可见。
+        # load_v4i32 → flat_load_dwordx4（单条 128-bit load）
+        # store_v4i32_shmem → 4×flat_store_dword sc0（向量接口，消除调用侧显式 k 循环）
         n_chunks = nbytes // 16  # 每 token 的 128-bit chunk 数（编译期常量）
         for tok_i in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
             tok_i   = idx_to_i32(tok_i)
             tok_off = zext_i32_to_i64(tok_i) * nbytes
             for cj in range(as_index(lane), as_index(n_chunks), as_index(64)):
-                cj  = idx_to_i32(cj)
-                cj4 = cj * 4   # i32 element base offset for this 128-bit chunk
-                for k in range_constexpr(4):   # Python-level unroll: 4 i32 per chunk
-                    elem = load_i32_at(addr_inp_tok  + tok_off, cj4 + const_i32(k))
-                    store_i32_shmem(addr_comb_inp + tok_off, cj4 + const_i32(k), elem)
+                cj     = idx_to_i32(cj)
+                cj_off = zext_i32_to_i64(cj) * 16      # 16 bytes per 128-bit chunk
+                vec4   = load_v4i32(addr_inp_tok  + tok_off + cj_off)
+                store_v4i32_shmem(vec4, addr_comb_inp + tok_off + cj_off)
 
         # ── Stage 2: CrossDeviceBarrier ───────────────────────────────────────
         sync_threads()
