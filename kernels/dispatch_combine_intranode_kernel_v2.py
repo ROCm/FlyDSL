@@ -371,26 +371,25 @@ def make_combine_kernel(
         if icmp_eq_i32(gwtid, const_i32(0)):
             atomic_add_i64_at(addr_xdb_flag, const_i64(1))
 
-        # ── Stage 3: 向量化 P2P 读 + 累积 ──────────────────────────────────────
-        # 优化：
-        #   1. load_v4i32_global → global_load_dwordx4（128-bit P2P读，4× 带宽）
-        #   2. scf.if 替代 gate 乘法（条件跳过无效 expert，消除乘零开销）
-        #   3. 每次读 4 个 i32（8 bf16），配套 4 个 v2f32 累加器
+        # ── Stage 3: 无 scf.if 的向量化 P2P 读 + 门控累积 ─────────────────────
+        # 关键优化：移除 scf.if 控制流依赖链，GPU 可并行发射 8 次 P2P 读取。
+        # 门控改为 gate_v2 ∈ {[0,0], [1,1]}（f32 乘法），消除读取串行化。
         rem_sci = [mori_shmem.ptr_p2p(addr_comb_inp, rank, pe) for pe in range(npes)]
 
-        n_chunks = n_i32 // 4   # 128-bit chunk 数（编译期常量）
+        n_chunks = n_i32 // 4
         wpt_v    = (gw_num + cur_tok - 1) // cur_tok
         hpw_v    = (n_chunks + wpt_v - 1) // wpt_v
         s3_lim   = cur_tok * wpt_v
 
-        from flydsl._mlir.dialects import llvm as _llvm_d, arith as _arith_d, scf as _scf_d
+        from flydsl._mlir.dialects import llvm as _llvm_d, arith as _arith_d
         from flydsl._mlir.ir import (VectorType, BF16Type, F32Type,
                                      IntegerType as _IT, IntegerAttr as _IA,
-                                     InsertionPoint as _IP)
+                                     FloatAttr as _FA)
         _v2bf16 = VectorType.get([2], BF16Type.get())
         _v2f32  = VectorType.get([2], F32Type.get())
         _i32t   = _IT.get_signless(32)
         _i1t    = _IT.get_signless(1)
+        _f32t   = F32Type.get()
 
         for si in range(as_index(gw_id), as_index(s3_lim), as_index(gw_num)):
             si      = idx_to_i32(si)
@@ -400,7 +399,7 @@ def make_combine_kernel(
 
             # 预计算各 expert 的 P2P 基地址和有效性（提升到 ec 循环外）
             src_base_j = []
-            valid_j    = []   # i1 values (from icmp_ult_i32)
+            valid_j    = []
             for j_py in range_constexpr(experts_per_token):
                 enc_j       = load_i32_at(addr_tok_map, tok_id * experts_per_token + j_py)
                 dest_pe_j   = divui(enc_j, max_recv)
@@ -411,41 +410,42 @@ def make_combine_kernel(
                 src_base_j.append(tok_base)
                 valid_j.append(vld)
 
-            # 内层：每 lane 步长 64 处理一个 128-bit chunk
-            for ec in range(as_index(lane), as_index(hpw_v), 64):
-                ec      = idx_to_i32(ec)
-                glob_ec = h_chunk + ec
-                in_b    = icmp_ult_i32(glob_ec, const_i32(n_chunks))
-                # in_b 转 i32（供 select_i32 使用）
-                in_b_i32 = select_i32(in_b, const_i32(1), const_i32(0))
-                ec_byt   = zext_i32_to_i64(glob_ec) * 16   # 16 bytes per chunk
+            # 公共常量（提升到 ec 循环外，LLVM 可 CSE）
+            c0       = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, 0)).result
+            c1       = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, 1)).result
+            one_f32  = _arith_d.ConstantOp(_f32t, _FA.get(_f32t, 1.0)).result
+            zero_f32 = _arith_d.ConstantOp(_f32t, _FA.get(_f32t, 0.0)).result
 
-                # 4 个 v2f32 累加器（chunk 内 4 个 i32，每个含 2 bf16）
+            for ec in range(as_index(lane), as_index(hpw_v), 64):
+                ec       = idx_to_i32(ec)
+                glob_ec  = h_chunk + ec
+                in_b     = icmp_ult_i32(glob_ec, const_i32(n_chunks))
+                in_b_i32 = select_i32(in_b, const_i32(1), const_i32(0))
+                ec_byt   = zext_i32_to_i64(glob_ec) * 16
+
                 acc = [_llvm_d.ZeroOp(_v2f32).res for _ in range_constexpr(4)]
 
                 for j_py in range_constexpr(experts_per_token):
-                    # 联合门控：expert 有效 AND chunk 在界内
+                    # 有效性 → i1 → 门控 f32（0.0 or 1.0）→ v2f32
                     cond_i32 = select_i32(valid_j[j_py], in_b_i32, const_i32(0))
                     cond_i1  = _arith_d.TruncIOp(_i1t, _lv_unwrap(cond_i32)).result
+                    gate_f32 = _arith_d.SelectOp(cond_i1, one_f32, zero_f32).result
+                    gate_v2  = _llvm_d.ZeroOp(_v2f32).res
+                    gate_v2  = _llvm_d.InsertElementOp(gate_v2, gate_f32, c0).res
+                    gate_v2  = _llvm_d.InsertElementOp(gate_v2, gate_f32, c1).res
 
-                    # scf.if：有效时读并累积，无效时原样传递
-                    if_j = _scf_d.IfOp(cond_i1, [_v2f32] * 4, has_else=True)
-                    with _IP(if_j.then_block):
-                        # 单条 128-bit P2P 读（global_load_dwordx4）
-                        vec4 = load_v4i32_global(src_base_j[j_py] + ec_byt)
-                        na   = []
-                        for e_py in range_constexpr(4):
-                            eidx  = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, e_py)).result
-                            e32   = _llvm_d.ExtractElementOp(_lv_unwrap(vec4), eidx).res
-                            e_bf  = _llvm_d.BitcastOp(_v2bf16, e32).res
-                            e_f32 = _arith_d.ExtFOp(_v2f32, e_bf).result
-                            na.append(_arith_d.AddFOp(acc[e_py], e_f32).result)
-                        _scf_d.YieldOp(na)
-                    with _IP(if_j.else_block):
-                        _scf_d.YieldOp(list(acc))   # 原样传递
-                    acc = list(if_j.results)
+                    # 无条件 128-bit P2P 读（移除 scf.if，8 次读可由 GPU 并行发射）
+                    vec4 = load_v4i32_global(src_base_j[j_py] + ec_byt)
 
-                # 写回 4 个 i32（8 bf16），仅 chunk 在界内时执行
+                    for e_py in range_constexpr(4):
+                        eidx  = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, e_py)).result
+                        e32   = _llvm_d.ExtractElementOp(_lv_unwrap(vec4), eidx).res
+                        e_bf  = _llvm_d.BitcastOp(_v2bf16, e32).res
+                        e_f32 = _arith_d.ExtFOp(_v2f32, e_bf).result
+                        # gate=0 时贡献为 0，不影响累加器
+                        gated = _arith_d.MulFOp(e_f32, gate_v2).result
+                        acc[e_py] = _arith_d.AddFOp(acc[e_py], gated).result
+
                 if icmp_ult_i32(glob_ec, const_i32(n_chunks)):
                     base = tok_id * n_i32 + glob_ec * 4
                     for e_py in range_constexpr(4):
