@@ -966,6 +966,11 @@ def compile_preshuffle_gemm_a8(
                 if dswr_tail > mfma_total:
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
+                # if is_fp4:
+                #     num_fp4_scale_k_groups = 1 if int(tile_k) == 128 else (k_unroll // 2)
+                #     num_a_scale_loads = num_fp4_scale_k_groups * (m_repeat // 2)
+                #     num_b_scale_loads = num_fp4_scale_k_groups * (num_acc_n // 2)
+                #     num_gmem_loads += num_a_scale_loads + num_b_scale_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
@@ -995,7 +1000,7 @@ def compile_preshuffle_gemm_a8(
                         if n_vmem:
                             rocdl.sched_vmem(n_vmem)
                             idx_gmem_load += n_vmem
-                    if mfma_idx >= dswr_start - 1:
+                    if not use_async_copy and (mfma_idx >= dswr_start - 1):
                         rocdl.sched_dswr(1)
 
             rocdl.sched_barrier(0)
@@ -1087,11 +1092,11 @@ def compile_preshuffle_gemm_a8(
                                    a0_prefetch_pong_new, _sc_ping)
 
             next_k1 = k_iv + tile_k
-            _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k1, lds_a_ping)
             else:
                 store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
+            _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_a_pong,
                                       a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in)
@@ -1101,11 +1106,11 @@ def compile_preshuffle_gemm_a8(
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
             next_k2 = k_iv + (tile_k * 2)
-            _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k2, lds_a_pong)
             else:
                 store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
+            _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             b_tile_pong_new = prefetch_b_tile(next_k2)
             accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_a_ping,
                                       a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_ping)
