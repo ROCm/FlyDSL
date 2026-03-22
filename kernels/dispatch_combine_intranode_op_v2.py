@@ -62,6 +62,18 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._dev = torch.device("cuda", config.rank)
         r = config.rank
 
+        # 已知 BUG：dispatch kernel 在 warp_num_per_block >= 5 时出现 XGMI P2P 死锁。
+        # 根本原因：Phase 2 的 store_i32_system(ptr_p2p_addr) 对某些 rank-PE 组合
+        # 返回无效地址（p2pPeerPtrs 为 0），写操作访问非法地址或信号不可见。
+        # 安全配置：warp_num_per_block <= 4。使用大 block_num（如 bn=80）时保持 wpb=4。
+        if config.warp_num_per_block > 4 and r == 0:
+            import warnings
+            warnings.warn(
+                f"[FlyDSL] warp_num_per_block={config.warp_num_per_block} > 4 会导致 "
+                f"dispatch kernel 死锁（已知 XGMI P2P bug）。请使用 warp_num_per_block=4。",
+                stacklevel=2
+            )
+
         # 先分配 symmetric buffer（顺序：alloc → barrier → compile）
         self._alloc_buffers()
         ms.shmem_barrier_all()
@@ -90,8 +102,11 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             data_type=config.data_type,
         )
 
-        # combine 用的单调递增 barrier flag
-        self._xdev_flag = torch.zeros(1, dtype=torch.int64, device=self._dev)
+        # combine 用的单调递增 barrier flag。
+        # 初始值必须为 1（而非 0）：reset() 会把 shmem_xdev_bar_mem 清零，
+        # 若 flag=0 则第一次 combine 的 wait_until_equals(slot, 0) 立即满足，
+        # 跳过跨 GPU 屏障。与 mori 的 crossDeviceBarrierFlag[0]=1 对齐。
+        self._xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
 
         # Fix3: 预缓存固定 shmem buffer 地址的 fx.Int64 包装（地址在 _alloc_buffers 后不变）。
         # 每次 dispatch/combine 调用避免重复创建，节省约 5×3μs ≈ 15μs/call。
@@ -199,7 +214,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._fx_tok_map,
             self._fx_tis,
             self._fx_total_rv,
-            cur_tok,
+            cur_tok,  # 裸 Python int，不要用 fx.Int32（会传指针而非值）
         )
         torch.cuda.synchronize()
 
@@ -223,11 +238,14 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         total_recv_val = int(self.total_recv[0].item())
 
         self.comb_bar.fill_(0)
-        self._xdev_flag += 1
+        # flag 递增已移至 GPU kernel 内（gwtid==0 的线程在 barrier 完成后 atomic_add_i64_at）
 
         inp_c = input.to(cfg.data_type).contiguous()
 
         # Fix3：固定地址使用预缓存的 fx.Int64 对象
+        # 注意：cur_tok/total_recv_val 保持裸 Python int（不要包装成 fx.Int32！）
+        # fly_pointers(fx.Int32(n)) 传递的是指针地址而非整数值，会导致 kernel 收到错误的
+        # cur_tok（约为 0x7f... 的大地址），使 Stage 3 循环次数异常 → combine 无限等待。
         self._comb_fn(
             fx.Int64(inp_c.data_ptr()),
             self._fx_comb_inp,
