@@ -348,9 +348,9 @@ def build_flash_attn_func_module_primary(
             _c16 = arith.constant(16, type=T.i32)
             _cmask = arith.constant(0xFFFF0000, type=T.i32)
             pairs = []
-            for i in range(0, 8, 2):
-                a = arith.ArithValue(f32_vals[i]).bitcast(T.i32)
-                b = arith.ArithValue(f32_vals[i + 1]).bitcast(T.i32)
+            for j in range_constexpr(4):
+                a = arith.ArithValue(f32_vals[j * 2]).bitcast(T.i32)
+                b = arith.ArithValue(f32_vals[j * 2 + 1]).bitcast(T.i32)
                 p = arith.OrIOp(arith.AndIOp(b, _cmask).result,
                                 arith.ShRUIOp(a, _c16).result).result
                 pairs.append(p)
