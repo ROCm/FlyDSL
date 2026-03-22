@@ -4,6 +4,7 @@
 Tests flash_attn_func against PyTorch SDPA.
 """
 
+import os
 import sys
 import argparse
 import hashlib
@@ -40,7 +41,7 @@ from tests.test_common import run_perftest
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
-    "waves_per_eu": 2,
+    "waves_per_eu": int(os.getenv("FLYDSL_WAVES_PER_EU", "2")),
     "daz": True,
 }
 
