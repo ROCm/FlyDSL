@@ -1338,6 +1338,9 @@ def compile_preshuffle_gemm_w4(
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = None,
+    use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1352,6 +1355,9 @@ def compile_preshuffle_gemm_w4(
         out_dtype=out_dtype,
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
+        use_async_copy=use_async_copy,
+        dsrd_preload=dsrd_preload,
+        dvmem_preload=dvmem_preload,
     )
     return inner
 

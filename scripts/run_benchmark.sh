@@ -72,7 +72,15 @@ int8,9728,8192,8320,128,128,128
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
 8192,8192,8192,64,256,256
+8192,8192,8192,128,256,256
 8192,8192,8192,128,256,128
+'
+
+GEMM_FP4_SHAPES_ASYNC='
+8192,8192,8192,64,128,256
+8192,8192,8192,64,256,256
+8192,8192,8192,128,256,128
+8192,8192,8192,128,256,256
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -511,6 +519,63 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
         _show_fail_log "${log}" "gemm_fp4"
       fi
 
+    fi
+  done
+
+  # FP4 GEMM async problem sizes (gfx950 only)
+  GEMM_FP4_USE_ASYNC_COPY="${GEMM_FP4_USE_ASYNC_COPY:-1}"
+  GEMM_FP4_WAVES_PER_EU="${GEMM_FP4_WAVES_PER_EU:-2}"
+
+  for shape in $GEMM_FP4_SHAPES_ASYNC; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    dtype="fp4"
+
+    async_copy_flag=""
+    async_copy_tag="async_copy"
+    if [ "${GEMM_FP4_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_FP4_USE_ASYNC_COPY}" = "true" ]; then
+      async_copy_flag="--use_async_copy"
+    fi
+    waves_per_eu_tag="${GEMM_FP4_WAVES_PER_EU}"
+
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --wfp4 \
+      --in_dtype fp4 \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" \
+      ${async_copy_flag} \
+      --waves_per_eu "${GEMM_FP4_WAVES_PER_EU}" >"${log}" 2>&1; then
+      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        row="$(_py_parse_and_emit gemm_fp4_async "${gemm_shape_tag}" "${dtype}" "${log}")"
+        set -- $row
+        _emit_row "$1" "$2" "$3" "$4" "$5"
+      fi
+    else
+      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "gemm fp4 async failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "gemm_fp4_async"
+      fi
     fi
   done
 fi
