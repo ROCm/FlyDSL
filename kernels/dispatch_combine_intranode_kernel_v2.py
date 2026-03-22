@@ -45,9 +45,7 @@ from flydsl.expr.lowlevel import (
     store_i32_at,
     store_i32_global,
     store_i32_system,
-    store_i64_system,
-    fence_one_as_release,
-    load_v4i32_global,
+    store_i32_shmem,
     zext_i32_to_i64,
     const_i32,
     const_i64,
@@ -60,7 +58,6 @@ from flydsl.expr.lowlevel import (
     atomic_add_i32_at,
     atomic_add_i64_at,
     atomic_fetch_add_i32_global,
-    store_i32_shmem,
     divui,
     remui,
 )
@@ -259,8 +256,6 @@ def make_dispatch_kernel(
                 rtn_remote = mori_shmem.ptr_p2p(addr_recv_num, rank, dest_pe) + rtn_local_off
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
                 fence_one_as_seq_cst()
-                # AtomicStoreRelaxedSystem（与 mori 一致）：
-                # global addrspace(1) + monotonic + one-as syncscope
                 store_i32_system(rtn_remote, const_i32(0), nsig)
 
         # ── Phase 3: 接收信号，累计 total_recv ───────────────────────────────
@@ -270,7 +265,6 @@ def make_dispatch_kernel(
                 rtn_src  = addr_recv_num + zext_i32_to_i64(src_pe) * 4
                 sig_val  = mori_shmem.int32_wait_until_greater_than(rtn_src, 0)
                 recv_cnt = sig_val - 1
-                # AtomicStoreRelaxedSystem 重置信号（本地地址，P2P 可见）
                 store_i32_system(rtn_src, const_i32(0), const_i32(0))
                 atomic_add_i32_at(addr_total_rv, recv_cnt)
                 store_i32_at(addr_dest_ctr, src_pe, const_i32(0))
@@ -336,11 +330,9 @@ def make_combine_kernel(
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
         # ── Stage 1: WarpCopy inp_tok → shmem_comb_inp ───────────────────────────
-        # 方案 A：4× scalar system-scope stores 替代 NIC put，消除 NIC 往返延迟。
-        # store_i32_shmem → flat_store sc0（绕过 L2，XGMI 级别可见）。
-        # 经验证：与 putmem_nbi_warp 精度完全一致（同 seed 结果相同）。
-        # n_chunks = nbytes // 16：每 token 的 128-bit chunk 数（编译期常量）。
-        n_chunks = nbytes // 16
+        # 每个 global warp 负责一个 token，每条 lane 负责每 64 个 128-bit chunk。
+        # store_i32_shmem → flat_store sc0，绕过 L2，对远端 GPU 立即可见。
+        n_chunks = nbytes // 16  # 每 token 的 128-bit chunk 数（编译期常量）
         for tok_i in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
             tok_i   = idx_to_i32(tok_i)
             tok_off = zext_i32_to_i64(tok_i) * nbytes
@@ -389,11 +381,11 @@ def make_combine_kernel(
         from flydsl._mlir.dialects import llvm as _llvm_d, arith as _arith_d
         from flydsl._mlir.ir import (VectorType, BF16Type, F32Type,
                                      IntegerType as _IT, IntegerAttr as _IA,
-                                     FloatAttr as _FA, IntegerType as _IT2)
+                                     FloatAttr as _FA)
         _v2bf16 = VectorType.get([2], BF16Type.get())
         _v2f32  = VectorType.get([2], F32Type.get())
         _i32t   = _IT.get_signless(32)
-        _i1t    = _IT2.get_signless(1)
+        _i1t    = _IT.get_signless(1)
         _f32t   = F32Type.get()
 
         for si in range(as_index(gw_id), as_index(s3_lim), as_index(gw_num)):
@@ -402,11 +394,7 @@ def make_combine_kernel(
             part_id = remui(si, wpt)
             h_i32   = part_id * hpw
 
-            # ── 关键优化：将 tok_map 查找、div/rem、_sel_pe 地址计算提升到 ec4 外 ──
-            # 这些值只依赖 tok_id 和 j，与 ec4（element 维度）无关。
-            # 原实现：每次 ec4 迭代（共 hpw/64 次）都重复执行一遍 k 个 expert 的全部计算。
-            # 新实现：在 for si 体内、for ec4 前执行一次，存入 Python list 供内层引用。
-            # MLIR SSA 合法：for si 体 dominates for ec4 体，外层 Value 可被内层直接引用。
+            # tok_map 查找和 _sel_pe 地址计算提升到 ec4 循环外（只依赖 tok_id/j，与 ec4 无关）
             src_base_j = []   # rem_sci[dest_pe_j] + local_tok_j * tok_stride（i64 地址）
             valid_j    = []   # icmp_ult(dest_pe_j, npes)（i1-equivalent i32）
             for j_py in range_constexpr(experts_per_token):
@@ -415,33 +403,25 @@ def make_combine_kernel(
                 dest_pe_j   = divui(enc_j, max_recv)
                 local_tok_j = remui(enc_j, max_recv)
                 valid_pe_j  = icmp_ult_i32(dest_pe_j, const_i32(npes))
-                # 远端 token 基地址：rem_sci[dest_pe_j][local_tok_j * n_i32]（字节偏移）
                 tok_base    = (_sel_pe(rem_sci, dest_pe_j)
                                + zext_i32_to_i64(local_tok_j) * tok_stride)
                 src_base_j.append(tok_base)
                 valid_j.append(valid_pe_j)
 
-            # 每个 lane 处理 1 个 i32（= 2 bf16），步长 64
             for ec4 in range(as_index(lane), as_index(hpw), 64):
                 ec4        = idx_to_i32(ec4)
                 global_ec4 = h_i32 + ec4
                 in_bounds  = icmp_ult_i32(global_ec4, const_i32(n_i32))
                 out_base   = zext_i32_to_i64(tok_id * n_i32 + global_ec4) * 4
 
-                # ec4 字节偏移（加到各 expert 的 tok_base 上得到元素地址）
                 ec4_byt = zext_i32_to_i64(global_ec4) * 4
                 acc = _llvm_d.ZeroOp(_v2f32).res
 
-                # j-loop Python-level unroll（range_constexpr）：
-                # 内层 j 循环仅执行 P2P read + bf16→f32 转换 + 累加，
-                # tok_map 查找和 _sel_pe 已在外层完成。
                 for j_py in range_constexpr(experts_per_token):
                     src_addr  = src_base_j[j_py] + ec4_byt
                     raw_i32   = load_i32_global(src_addr)
-                    # i32 → <2xbf16> → <2xf32>
                     as_bf16   = _llvm_d.BitcastOp(_v2bf16, raw_i32).res
                     as_v2f32  = _arith_d.ExtFOp(_v2f32, as_bf16).result
-                    # gate：in_bounds AND valid_pe
                     gate_i32  = select_i32(in_bounds,
                                     select_i32(valid_j[j_py], const_i32(1), const_i32(0)),
                                     const_i32(0))
@@ -449,7 +429,6 @@ def make_combine_kernel(
                     one_f32   = _arith_d.ConstantOp(_f32t, _FA.get(_f32t, 1.0)).result
                     zero_f32  = _arith_d.ConstantOp(_f32t, _FA.get(_f32t, 0.0)).result
                     gate_f32  = _arith_d.SelectOp(gate_i1b, one_f32, zero_f32).result
-                    # gate_f32 broadcast to <2xf32>
                     c0 = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, 0)).result
                     c1 = _llvm_d.ConstantOp(_i32t, _IA.get(_i32t, 1)).result
                     gv = _llvm_d.ZeroOp(_v2f32).res
