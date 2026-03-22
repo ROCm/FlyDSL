@@ -14,6 +14,13 @@ namespace mlir::fly_rocdl {
 
 bool CopyOpCDNA3BufferLDSTType::isStatic() const { return true; }
 
+Value CopyOpCDNA3BufferLDSTType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                    Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
+}
+
 Attribute CopyOpCDNA3BufferLDSTType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutSrc() const {
