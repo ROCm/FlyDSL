@@ -331,8 +331,9 @@ def make_combine_kernel(
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
         # ── Stage 1: WarpCopy inp_tok → shmem_comb_inp ───────────────────────────
-        # load_v4i32 → flat_load_dwordx4（单条 128-bit load）
-        # store_v4i32_shmem → 4×flat_store_dword sc0（向量接口，消除调用侧显式 k 循环）
+        # load_v4i32       → flat_load_dwordx4（单条 128-bit load）
+        # store_v4i32_shmem → flat_store_dwordx4 sc0 sc1（内联汇编，单条 128-bit store）
+        # 对齐 mori WarpCopy：4×i32 → 1×128bit，store 指令数从 4 降为 1。
         n_chunks = nbytes // 16  # 每 token 的 128-bit chunk 数（编译期常量）
         for tok_i in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
             tok_i   = idx_to_i32(tok_i)
