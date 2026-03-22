@@ -127,7 +127,21 @@ public:
     AddressSpace addrSpace = flyPtrTy.getAddressSpace().getValue();
     auto args = adaptor.getArgs();
 
-    if (addrSpace == AddressSpace::BufferDesc) {
+    if (addrSpace == AddressSpace::Register) {
+      auto dictAttrs = op.getDictAttrs();
+      if (!dictAttrs)
+        return rewriter.notifyMatchFailure(op, "register make_ptr requires dictAttrs");
+      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocaSize");
+      if (!allocSize)
+        return rewriter.notifyMatchFailure(op, "register make_ptr requires allocSize in ptrAttrs");
+      unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
+      auto llvmPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
+      Value nElems =
+          arith::ConstantIntOp::create(rewriter, loc, allocSize.getInt(), 64).getResult();
+      Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, flyPtrTy.getElemTy(), nElems, 0);
+      rewriter.replaceOp(op, ptr);
+      return success();
+    } else if (addrSpace == AddressSpace::BufferDesc) {
       if (args.size() != 4)
         return rewriter.notifyMatchFailure(
             op, "buffer_rsrc make_ptr expects 4 args: base, stride, numRecords, flags");

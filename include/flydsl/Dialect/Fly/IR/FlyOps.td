@@ -397,7 +397,7 @@ def Fly_GemmOp : Fly_Op<"gemm"> {
 //===----------------------------------------------------------------------===//
 
 def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
-  let arguments = (ins Variadic<AnyType>:$args);
+  let arguments = (ins Variadic<AnyType>:$args, OptionalAttr<DictionaryAttr>:$dictAttrs);
   let results = (outs Fly_Pointer:$result);
 }
 def Fly_IntToPtrOp : Fly_Op<"inttoptr", [Pure]> {

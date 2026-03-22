@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/Attributes.h"
@@ -23,7 +21,6 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
 #include "flydsl/Dialect/Fly/Utils/NormalForm.h"
@@ -2000,23 +1997,16 @@ public:
     assert(isa<LayoutAttr>(memrefTy.getLayout()) &&
            "MemRefAllocaOp: doesn't support ComposedLayout");
     LayoutAttr layoutAttr = cast<LayoutAttr>(memrefTy.getLayout());
-    Type elemTy = memrefTy.getElemTy();
 
     LayoutBuilder<LayoutAttr> attrBuilder(rewriter.getContext());
     IntTupleAttr totalSize = layoutCosize(attrBuilder, layoutAttr);
 
     assert(totalSize.isStatic() && totalSize.isLeaf());
 
-    unsigned llvmAS = mapToLLVMAddressSpace(memrefTy.getAddressSpace().getValue());
-    auto llvmPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
-
-    Value nElems =
-        arith::ConstantIntOp::create(rewriter, loc, totalSize.getLeafAsInt().getValue(), 64)
-            .getResult();
-    Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
-
-    auto flyPtrTy = PointerType::get(elemTy, memrefTy.getAddressSpace());
-    Value flyPtr = UnrealizedConversionCastOp::create(rewriter, loc, flyPtrTy, ptr).getResult(0);
+    auto ptrAttrs = rewriter.getDictionaryAttr({rewriter.getNamedAttr(
+        "allocaSize", rewriter.getI64IntegerAttr(totalSize.getLeafAsInt().getValue()))});
+    Value flyPtr =
+        MakePtrOp::create(rewriter, loc, memrefTy.getPointerType(), ValueRange{}, ptrAttrs);
 
     rewriter.replaceOpWithNewOp<MakeViewOp>(op, flyPtr, op.getLayout());
     return success();
