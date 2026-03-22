@@ -223,6 +223,24 @@ def atomic_add_i32_at(addr_i64: Any, val: Any) -> ir.Value:
     ).res
 
 
+def atomic_add_i64_at(addr_i64: Any, val: Any) -> ir.Value:
+    """GPU atomic add to i64 located at i64 address (local device memory).
+
+    Equivalent to ``atomicrmw add i64* ptr, val monotonic`` in LLVM IR.
+    Use for generation counters that need i64 range (e.g. barrier flag).
+    AMDGPU generates: ``flat_atomic_add_u64``.
+    """
+    addr = _unwrap(addr_i64)
+    val_ = _unwrap(val)
+    ptr  = _to_ptr(addr)
+    return llvm.AtomicRMWOp(
+        llvm.AtomicBinOp.add,
+        ptr,
+        val_,
+        llvm.AtomicOrdering.monotonic,
+    ).res
+
+
 def atomic_add_monotonic(ptr: Any, val: Any) -> ir.Value:
     """``llvm.atomicrmw add ptr, val monotonic`` — atomic fetch-and-add.
 
@@ -328,6 +346,38 @@ def store_i32_system(addr_i64: Any, offset: Any, val: Any) -> None:
     addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
     ptr_global_ty = llvm.PointerType.get(address_space=1)
     gptr = llvm.IntToPtrOp(ptr_global_ty, addr).result
+    llvm.StoreOp(
+        val_, gptr,
+        alignment=4,
+        ordering=llvm.AtomicOrdering.monotonic,
+        syncscope="one-as",
+    )
+
+
+def store_i32_shmem(addr_i64: Any, offset: Any, val: Any) -> None:
+    """System-scope i32 store to fine-grained shmem via flat (addrspace 0) pointer.
+
+    Generates ``flat_store_dword sc0`` on AMDGPU.  The sc0 bit bypasses the L2
+    cache, making writes immediately visible to remote GPUs via XGMI — identical
+    in effect to mori's ``WarpCopy`` to ``hipDeviceMallocUncached`` memory.
+
+    Use this (rather than ``store_i32_system`` which uses addrspace(1)) when the
+    destination is a local shmem buffer obtained via ``data_ptr()`` / ShmemMalloc,
+    whose pointer lives in the flat address space (addrspace 0).
+
+    Args:
+        addr_i64: i64 base address (flat, from shmem ``data_ptr()``).
+        offset:   i32 element offset; byte address = ``addr_i64 + offset * 4``.
+        val:      i32 value to store.
+    """
+    base = _unwrap(addr_i64)
+    off  = _unwrap(offset)
+    val_ = _unwrap(val)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr_flat_ty = llvm.PointerType.get(address_space=0)
+    gptr = llvm.IntToPtrOp(ptr_flat_ty, addr).result
     llvm.StoreOp(
         val_, gptr,
         alignment=4,

@@ -58,7 +58,9 @@ from flydsl.expr.lowlevel import (
     as_index,
     idx_to_i32,
     atomic_add_i32_at,
+    atomic_add_i64_at,
     atomic_fetch_add_i32_global,
+    store_i32_shmem,
     divui,
     remui,
 )
@@ -333,18 +335,21 @@ def make_combine_kernel(
 
         cur_flag = load_i64_at(addr_xdb_flag, const_i32(0))
 
-        # ── Stage 1: inp_tok → shmem_comb_inp ────────────────────────────
-        # NBI put 批量发送所有 token，循环结束后统一 quiet（单次 quiet 替代 per-token quiet）。
-        # putmem_nbi_warp 使用 XGMI RDMA 路径，quiet_thread_pe 确保数据对远端 GPU 可见，
-        # 这是保证 Stage 3 P2P read 正确性的必要条件，不能用普通 store_v4i32_global 替代。
-        for ci in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
-            ci     = idx_to_i32(ci)
-            ci_off = zext_i32_to_i64(ci) * nbytes
-            mori_shmem.putmem_nbi_warp(
-                addr_comb_inp + ci_off, addr_inp_tok + ci_off,
-                const_i64(nbytes), rank, 0)
-        # 所有 token 的 NBI put 批量提交后，统一 quiet（原来每 token 一次 quiet，现在只一次）
-        mori_shmem.quiet_thread_pe(rank)
+        # ── Stage 1: WarpCopy inp_tok → shmem_comb_inp ───────────────────────────
+        # 方案 A：4× scalar system-scope stores 替代 NIC put，消除 NIC 往返延迟。
+        # store_i32_shmem → flat_store sc0（绕过 L2，XGMI 级别可见）。
+        # 经验证：与 putmem_nbi_warp 精度完全一致（同 seed 结果相同）。
+        # n_chunks = nbytes // 16：每 token 的 128-bit chunk 数（编译期常量）。
+        n_chunks = nbytes // 16
+        for tok_i in range(as_index(gw_id), as_index(total_recv_val), as_index(gw_num)):
+            tok_i   = idx_to_i32(tok_i)
+            tok_off = zext_i32_to_i64(tok_i) * nbytes
+            for cj in range(as_index(lane), as_index(n_chunks), as_index(64)):
+                cj  = idx_to_i32(cj)
+                cj4 = cj * 4   # i32 element base offset for this 128-bit chunk
+                for k in range_constexpr(4):   # Python-level unroll: 4 i32 per chunk
+                    elem = load_i32_at(addr_inp_tok  + tok_off, cj4 + const_i32(k))
+                    store_i32_shmem(addr_comb_inp + tok_off, cj4 + const_i32(k), elem)
 
         # ── Stage 2: CrossDeviceBarrier ───────────────────────────────────────
         sync_threads()
@@ -369,6 +374,9 @@ def make_combine_kernel(
         sync_threads()
         if icmp_eq_i32(tid, const_i32(0)):
             store_i32_at(addr_trecv, const_i32(0), const_i32(0))
+        # 与 mori 一致：barrier 完成后 gwtid==0 的线程递增 flag，供下次调用使用。
+        if icmp_eq_i32(gwtid, const_i32(0)):
+            atomic_add_i64_at(addr_xdb_flag, const_i64(1))
 
         # ── Stage 3: P2P 读 + 累计 ───────────────────────────────────────────
         rem_sci = [mori_shmem.ptr_p2p(addr_comb_inp, rank, pe) for pe in range(npes)]
