@@ -342,6 +342,20 @@ def build_flash_attn_func_module_primary(
                              arith.ShRUIOp(a1, _c16).result).result
             return vector.bitcast(v4f16_type, vector.from_elements(_v2i32, [p0, p1]))
 
+        def bf16_trunc_pack_v8(f32_vals):
+            """Pack 8 f32 values into v8bf16 via bitwise truncation (upper 16 bits)."""
+            _v4i32 = T.vec(4, T.i32)
+            _c16 = arith.constant(16, type=T.i32)
+            _cmask = arith.constant(0xFFFF0000, type=T.i32)
+            pairs = []
+            for i in range(0, 8, 2):
+                a = arith.ArithValue(f32_vals[i]).bitcast(T.i32)
+                b = arith.ArithValue(f32_vals[i + 1]).bitcast(T.i32)
+                p = arith.OrIOp(arith.AndIOp(b, _cmask).result,
+                                arith.ShRUIOp(a, _c16).result).result
+                pairs.append(p)
+            return vector.bitcast(v8f16_type, vector.from_elements(_v4i32, pairs))
+
         def k_buf_base(buf_id):
             if isinstance(buf_id, int):
                 return arith.index(buf_id * LDS_K_TILE_SIZE)
@@ -750,7 +764,7 @@ def build_flash_attn_func_module_primary(
                     s_raw_lo = [_mask_if.results[i] for i in range(16)]
                     s_raw_hi = [_mask_if.results[16 + i] for i in range(16)]
 
-                _max_fm = {"fastmath": fm_fast} if not USE_HW_TR else {}
+                _max_fm = {"fastmath": fm_fast}
                 local_max = s_raw_lo[0]
                 for r in range_constexpr(15):
                     local_max = arith.MaxNumFOp(local_max, s_raw_lo[r + 1], **_max_fm).result
@@ -833,6 +847,15 @@ def build_flash_attn_func_module_primary(
                             p_vals_lo[p_base:p_base+4]))
                         p_packs_hi.append(bf16_trunc_pack_v4(
                             p_vals_hi[p_base:p_base+4]))
+                elif dtype_str == "bf16" and USE_K16:
+                    p_packs_lo = []
+                    p_packs_hi = []
+                    for pks in range_constexpr(PV_K_STEPS):
+                        p_base = pks * 8
+                        p_packs_lo.append(bf16_trunc_pack_v8(
+                            p_vals_lo[p_base:p_base+8]))
+                        p_packs_hi.append(bf16_trunc_pack_v8(
+                            p_vals_hi[p_base:p_base+8]))
                 else:
                     p_f16_lo = []
                     p_f16_hi = []
