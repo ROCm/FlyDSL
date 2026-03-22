@@ -78,8 +78,12 @@ def build_flash_attn_func_module_primary(
     ENABLE_PREFETCH_3BUF = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_PREFETCH3", "0") == "1"
     )
-    ENABLE_DMA = PATH_TAG == "ck_n128_fastpath" or (
-        os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
+    # buffer_load_dwordx4_lds (16B DMA-to-LDS) requires gfx950+; gfx94x only has dword (4B).
+    _has_lds_load_b128 = not gpu_arch.startswith("gfx942")
+    ENABLE_DMA = _has_lds_load_b128 and (
+        PATH_TAG == "ck_n128_fastpath" or (
+            os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
+        )
     )
     if flat_work_group_size is None:
         flat_work_group_size = BLOCK_SIZE
@@ -93,8 +97,11 @@ def build_flash_attn_func_module_primary(
     NUM_PREFETCH_V = 3 if ENABLE_PREFETCH_3BUF else 1
     CK_LDS_SEQ = (1, 2, 0, 1, 0, 1, 2, 0) if ENABLE_PREFETCH_3BUF else (0,)
 
+    # gfx950+ has ds_read_tr16_b64 (HW transpose LDS read); gfx942 needs V^T stored in LDS.
+    USE_HW_TR = gpu_arch.startswith("gfx950")
+
     # MFMA32 K-dimension: 16 on gfx950+ (CDNA4) for both GEMMs.
-    USE_K16 = gpu_arch.startswith("gfx95")
+    USE_K16 = gpu_arch.startswith("gfx950")
     K_STEP_QK = 16 if USE_K16 else 8
     K_STEPS_QK = head_dim // K_STEP_QK
     D_CHUNK = 32
@@ -121,7 +128,11 @@ def build_flash_attn_func_module_primary(
     # K uses XOR swizzle (col ^ ((row & 7) << 4)) at 16-element granularity
     # instead of padding. This enables ds_read_b128 (stride is 256B-aligned).
     K_STRIDE = HEAD_DIM
-    V_STRIDE = HEAD_DIM if ENABLE_DMA else HEAD_DIM + 4
+    if USE_HW_TR:
+        V_STRIDE = HEAD_DIM if ENABLE_DMA else HEAD_DIM + 4
+    else:
+        VT_STRIDE = BLOCK_N + 2
+        V_STRIDE = VT_STRIDE
 
     # Vectorized cooperative load constants.
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
@@ -140,7 +151,10 @@ def build_flash_attn_func_module_primary(
 
     # K/V circular buffers; defaults to 1/1, optional 3/3 with CK-like LDS sequence.
     LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
-    LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE  # row-major V: BLOCK_N rows × V_STRIDE columns
+    if USE_HW_TR:
+        LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE
+    else:
+        LDS_V_TILE_SIZE = HEAD_DIM * VT_STRIDE
     LDS_K_TOTAL_SIZE = NUM_PREFETCH_K * LDS_K_TILE_SIZE
     LDS_V_BASE = LDS_K_TOTAL_SIZE
     LDS_V_TOTAL_SIZE = NUM_PREFETCH_V * LDS_V_TILE_SIZE
@@ -201,6 +215,8 @@ def build_flash_attn_func_module_primary(
                 if USE_K16:
                     return rocdl.mfma_f32_32x32x16_bf16(
                         v16f32_type, [a, b, c, 0, 0, 0])
+                a = vector.bitcast(T.i16x4, a)
+                b = vector.bitcast(T.i16x4, b)
                 return rocdl.mfma_f32_32x32x8bf16_1k(
                     v16f32_type, [a, b, c, 0, 0, 0])
             if USE_K16:
@@ -346,7 +362,23 @@ def build_flash_attn_func_module_primary(
                     vec = load_global_f16xN(k_ptr, g_idx)
                     vector.store(vec, lds_kv, [lds_idx])
 
-        # ---- Cooperative V load (row-major, padded stride) ----
+        # ---- Cooperative V load ----
+        def _v_store_row_major(v_base, lds_row, vec):
+            lds_idx = v_base + lds_row * V_STRIDE + load_col_base
+            vector.store(vec, lds_kv, [lds_idx])
+
+        _v1_type = T.vec(1, elem_type) if not USE_HW_TR else None
+
+        def _v_store_transposed(v_base, lds_row, vec):
+            for _e in range_constexpr(VEC_WIDTH):
+                elem = vector.extract(vec, static_position=[_e], dynamic_position=[])
+                vt_d = load_col_base + _e
+                vt_idx = v_base + vt_d * VT_STRIDE + lds_row
+                v1 = vector.from_elements(_v1_type, [elem])
+                vector.store(v1, lds_kv, [vt_idx])
+
+        _v_store_to_lds = _v_store_row_major if USE_HW_TR else _v_store_transposed
+
         def coop_load_v(tile_start, buf_id=0):
             v_base = v_buf_base(buf_id)
             for batch in range_constexpr(NUM_BATCHES_KV):
@@ -362,16 +394,14 @@ def build_flash_attn_func_module_primary(
                     with ir.InsertionPoint(_if_v.then_block):
                         g_idx = global_idx(row_idx, load_col_base)
                         lds_row = load_row_in_batch + row_offset
-                        lds_idx = v_base + lds_row * V_STRIDE + load_col_base
                         vec = load_global_f16xN(v_ptr, g_idx)
-                        vector.store(vec, lds_kv, [lds_idx])
+                        _v_store_to_lds(v_base, lds_row, vec)
                         scf.YieldOp([])
                 else:
                     g_idx = global_idx(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
-                    lds_idx = v_base + lds_row * V_STRIDE + load_col_base
                     vec = load_global_f16xN(v_ptr, g_idx)
-                    vector.store(vec, lds_kv, [lds_idx])
+                    _v_store_to_lds(v_base, lds_row, vec)
 
         def coop_load_v_global(tile_start):
             """Issue global loads for V, return vectors (non-blocking)."""
@@ -397,13 +427,11 @@ def build_flash_attn_func_module_primary(
                     _if_v = scf.IfOp(row_valid)
                     with ir.InsertionPoint(_if_v.then_block):
                         lds_row = load_row_in_batch + row_offset
-                        lds_idx = v_base + lds_row * V_STRIDE + load_col_base
-                        vector.store(vecs[batch], lds_kv, [lds_idx])
+                        _v_store_to_lds(v_base, lds_row, vecs[batch])
                         scf.YieldOp([])
                 else:
                     lds_row = load_row_in_batch + row_offset
-                    lds_idx = v_base + lds_row * V_STRIDE + load_col_base
-                    vector.store(vecs[batch], lds_kv, [lds_idx])
+                    _v_store_to_lds(v_base, lds_row, vecs[batch])
 
         # ---- DMA loading for K (buffer_load_dwordx4 ... lds) ----
         if ENABLE_DMA:
@@ -807,27 +835,35 @@ def build_flash_attn_func_module_primary(
 
                 def _read_v_pack(step_idx):
                     dc, pks = _steps[step_idx]
-                    d_col = (arith.index(dc * D_CHUNK)
-                             + tr_col_half * 16 + tr_col_sub * 4)
-                    k_row = (arith.index(pks * PV_K_STEP)
-                             + lane_div_32 * 4 + tr_k_group)
-                    _d_col_eff = _v_swizzle(k_row, d_col) if ENABLE_DMA else d_col
-                    lds_lo = v_base + k_row * V_STRIDE + _d_col_eff
-                    lds_hi = lds_lo + arith.index(K_SUB_N * V_STRIDE)
-                    if USE_K16:
-                        vl_a = ds_read_tr_v4f16(lds_lo)
-                        vl_b = ds_read_tr_v4f16(
-                            lds_lo + arith.index(8 * V_STRIDE))
-                        vl = vector.shuffle(
-                            vl_a, vl_b, [0, 1, 2, 3, 4, 5, 6, 7])
-                        vh_a = ds_read_tr_v4f16(lds_hi)
-                        vh_b = ds_read_tr_v4f16(
-                            lds_hi + arith.index(8 * V_STRIDE))
-                        vh = vector.shuffle(
-                            vh_a, vh_b, [0, 1, 2, 3, 4, 5, 6, 7])
+                    if USE_HW_TR:
+                        d_col = (arith.index(dc * D_CHUNK)
+                                 + tr_col_half * 16 + tr_col_sub * 4)
+                        k_row = (arith.index(pks * PV_K_STEP)
+                                 + lane_div_32 * 4 + tr_k_group)
+                        _d_col_eff = _v_swizzle(k_row, d_col) if ENABLE_DMA else d_col
+                        lds_lo = v_base + k_row * V_STRIDE + _d_col_eff
+                        lds_hi = lds_lo + arith.index(K_SUB_N * V_STRIDE)
+                        if USE_K16:
+                            vl_a = ds_read_tr_v4f16(lds_lo)
+                            vl_b = ds_read_tr_v4f16(
+                                lds_lo + arith.index(8 * V_STRIDE))
+                            vl = vector.shuffle(
+                                vl_a, vl_b, [0, 1, 2, 3, 4, 5, 6, 7])
+                            vh_a = ds_read_tr_v4f16(lds_hi)
+                            vh_b = ds_read_tr_v4f16(
+                                lds_hi + arith.index(8 * V_STRIDE))
+                            vh = vector.shuffle(
+                                vh_a, vh_b, [0, 1, 2, 3, 4, 5, 6, 7])
+                        else:
+                            vl = ds_read_tr_v4f16(lds_lo)
+                            vh = ds_read_tr_v4f16(lds_hi)
                     else:
-                        vl = ds_read_tr_v4f16(lds_lo)
-                        vh = ds_read_tr_v4f16(lds_hi)
+                        d_pos = arith.index(dc * D_CHUNK) + lane_mod_32
+                        k_base = arith.index(pks * PV_K_STEP) + lane_div_32 * 4
+                        v_lo_idx = v_base + d_pos * VT_STRIDE + k_base
+                        v_hi_idx = v_lo_idx + arith.index(K_SUB_N)
+                        vl = vector.load(v4f16_type, lds_kv, [v_lo_idx])
+                        vh = vector.load(v4f16_type, lds_kv, [v_hi_idx])
                     return vl, vh
 
                 # Pre-read V for the first step.
