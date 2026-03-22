@@ -2483,7 +2483,6 @@ def compile_moe_reduction(
                                 buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (topk, model_dim, dtype_str, use_mask)
     tile_size = BLOCK_SIZE * VEC_WIDTH
     gy_static = (model_dim + tile_size - 1) // tile_size
 
@@ -2495,7 +2494,6 @@ def compile_moe_reduction(
         i32_m_tokens: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         gx = arith.index_cast(T.index, i32_m_tokens)
         moe_reduction_kernel(X, Y, valid_mask, i32_m_tokens).launch(
             grid=(gx, gy_static, 1),

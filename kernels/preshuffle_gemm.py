@@ -1272,8 +1272,6 @@ def compile_preshuffle_gemm_a8(
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (in_dtype, out_dtype, K, lds_stage, use_cshuffle_epilog)
-
     @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
@@ -1285,7 +1283,6 @@ def compile_preshuffle_gemm_a8(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()

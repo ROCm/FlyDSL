@@ -125,6 +125,41 @@ def _is_user_function(func, rootFile):
     return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
 
 
+def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -> List[str]:
+    """Recursively collect scalar closure values from func and all callable deps in its closure.
+
+    This ensures that compile-time parameters captured by nested @kernel functions
+    (e.g. tile_m, tile_n, waves_per_eu inside a KernelFunction._func) are included
+    in the cache key even when the outer @jit launcher does not reference them directly.
+    """
+    if visited_ids is None:
+        visited_ids = set()
+    if id(func) in visited_ids:
+        return []
+    visited_ids.add(id(func))
+
+    vals = []
+    if not (func.__code__.co_freevars and getattr(func, "__closure__", None)):
+        return vals
+
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(val, (int, float, bool, str, type(None), tuple)):
+            vals.append(f"{name}={val!r}")
+        else:
+            # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
+            underlying = _get_underlying_func(val)
+            if underlying is not None and id(underlying) not in visited_ids:
+                nested = _collect_closure_scalar_vals(underlying, visited_ids)
+                # Prefix with the closure var name to avoid collisions across nesting levels
+                vals.extend(f"via:{name}:{v}" for v in nested)
+
+    return vals
+
+
 def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
     if visited is None:
         visited = set()
@@ -185,17 +220,13 @@ def _jit_function_cache_key(func: Callable) -> str:
     depSources.sort()
     parts.extend(depSources)
 
-    if func.__code__.co_freevars and getattr(func, "__closure__", None):
-        closure_vals = []
-        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            try:
-                val = cell.cell_contents
-                if isinstance(val, (int, float, bool, str, type(None), tuple)):
-                    closure_vals.append(f"{name}={val!r}")
-            except ValueError:
-                pass
-        if closure_vals:
-            parts.append("closure:" + ",".join(closure_vals))
+    # Collect scalar closure values recursively — this covers compile-time parameters
+    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+    # indirectly via nested @kernel / helper functions, without requiring an explicit
+    # _cache_tag tuple in every kernel factory function.
+    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+    if all_closure_vals:
+        parts.append("closure_vals:" + ",".join(all_closure_vals))
 
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]

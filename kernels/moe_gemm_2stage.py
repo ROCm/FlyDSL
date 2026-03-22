@@ -1225,19 +1225,6 @@ def compile_moe_gemm1(
                 )
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (
-        module_name,
-        in_dtype,
-        out_dtype,
-        tile_m,
-        tile_n,
-        tile_k,
-        doweight_stage1,
-        x_is_token_slot,
-        use_cshuffle_epilog,
-        group_size,
-    )
-
     @flyc.jit
     def launch_moe_gemm1(
         arg_out: fx.Tensor,
@@ -1255,7 +1242,6 @@ def compile_moe_gemm1(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -2470,19 +2456,6 @@ def compile_moe_gemm2(
                 _moe_gemm2_then_body()
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (
-        module_name,
-        in_dtype,
-        out_dtype,
-        tile_m,
-        tile_n,
-        tile_k,
-        doweight_stage2,
-        accumulate,
-        use_cshuffle_epilog,
-        group_size,
-    )
-
     @flyc.jit
     def launch_moe_gemm2(
         arg_out: fx.Tensor,
@@ -2500,7 +2473,6 @@ def compile_moe_gemm2(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -2715,7 +2687,6 @@ def compile_moe_reduction(
                                 buffer_ops.buffer_store(out, y_rsrc, y_idx_i32)
 
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
-    _cache_tag = (topk, model_dim, dtype_str, use_mask)
     tile_size = BLOCK_SIZE * VEC_WIDTH
     gy_static = (model_dim + tile_size - 1) // tile_size
 
@@ -2727,7 +2698,6 @@ def compile_moe_reduction(
         i32_m_tokens: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         gx = arith.index_cast(T.index, i32_m_tokens)
         moe_reduction_kernel(X, Y, valid_mask, i32_m_tokens).launch(
             grid=(gx, gy_static, 1),

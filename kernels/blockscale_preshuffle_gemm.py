@@ -837,9 +837,6 @@ def compile_blockscale_preshuffle_gemm(
         store_output(final_accs)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (out_dtype, K, scale_block_k, use_cshuffle_epilog,
-                  tile_m, tile_n, tile_k, use_async_copy)
-
     @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
@@ -851,7 +848,6 @@ def compile_blockscale_preshuffle_gemm(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()
