@@ -906,30 +906,6 @@ def compile_preshuffle_gemm_a8(
         rocdl.sched_barrier(0)
 
         def hot_loop_scheduler():
-            if is_fp4:
-                if not _fp4_use_scheduler:
-                    return
-                mfma_group = _fp4_pack_N_outer
-                mfma_total = _k_unroll_packed_outer * _m_repeat_packed_outer * _num_acc_n_packed_outer * _fp4_pack_K_outer * _fp4_pack_M_outer * _fp4_pack_N_outer
-                mfma_per_iter = 2 * mfma_group
-                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                rocdl.sched_dsrd(2)
-                rocdl.sched_mfma(1)
-                rocdl.sched_mfma(1)
-                dswr_tail = num_a_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
-                for sche_i in range_constexpr(sche_iters):
-                    rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
-                        rocdl.sched_dswr(1)
-                rocdl.sched_barrier(0)
-                return
-
             import math as _math
 
             def _build_scheduler(numer: int, denom: int):
@@ -945,7 +921,7 @@ def compile_preshuffle_gemm_a8(
                     prev = cur
                 return out
 
-            if _is_gfx942 or (not use_async_copy):
+            if _is_gfx942:
                 mfma_group = num_acc_n
                 mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
@@ -991,16 +967,17 @@ def compile_preshuffle_gemm_a8(
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
-                dsrd_preload = 2
-                if dsrd_preload > num_ds_load:
-                    dsrd_preload = num_ds_load
-                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
-                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
+                dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
+                dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload_eff, mfma_total)
+                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload_eff, mfma_total)
 
-                idx_ds_read = dsrd_preload
-                idx_gmem_load = 0
-                if dsrd_preload:
-                    rocdl.sched_dsrd(dsrd_preload)
+                idx_ds_read = dsrd_preload_eff
+                idx_gmem_load = dvmem_preload_eff
+                if dvmem_preload_eff:
+                    rocdl.sched_vmem(dvmem_preload_eff)
+                if dsrd_preload_eff:
+                    rocdl.sched_dsrd(dsrd_preload_eff)
                 for mfma_idx in range_constexpr(mfma_total):
                     rocdl.sched_mfma(1)
                     n_dsrd = dsrd_schedule[mfma_idx]
@@ -1018,6 +995,8 @@ def compile_preshuffle_gemm_a8(
                         if n_vmem:
                             rocdl.sched_vmem(n_vmem)
                             idx_gmem_load += n_vmem
+                    if mfma_idx >= dswr_start - 1:
+                        rocdl.sched_dswr(1)
 
             rocdl.sched_barrier(0)
 
