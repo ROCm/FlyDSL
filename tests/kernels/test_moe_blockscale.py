@@ -47,6 +47,7 @@ try:
     import aiter
     from aiter.fused_moe import moe_sorting as aiter_moe_sorting, fused_topk
     from aiter import pertoken_quant as aiter_pertoken_quant
+    from aiter.ops.quant import per_group_quant_hip
 
     HAS_AITER = True
 except ImportError:
@@ -296,12 +297,21 @@ def test_moe_blockscale_e2e(
     sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, _sorted_size, _blocks = routing
     size_expert_ids = sorted_expert_ids.numel()
 
-    # Prepare blockscale tensors for FlyDSL kernels:
-    #   scale_x1: [nblk_k_w1, token] f32 — transposed layout (stride along k = token)
-    #   scale_w1: [E * nblk_n_w1 * nblk_k_w1] f32 — row-major [E, nblk_n_w1, nblk_k_w1]
+    # Prepare blockscale tensors for FlyDSL kernels.
+    # Use per_group_quant_hip(transpose_scale=True) so the quant kernel writes scale
+    # directly in [nblk_k, token] memory layout — no separate .t().contiguous() needed.
+    # Fallback to pertoken_quant + manual transpose when aiter is unavailable.
     nblk_k_w1 = model_dim // scale_blk_k
-    a1_scale_fly = a1_bscale.t().contiguous().view(-1)   # [token, nblk_k_w1] -> [nblk_k_w1, token] flat
-    w1_scale_fly = w1_bscale.view(-1)                     # [E, nblk_n_w1 * nblk_k_w1] flat
+    w1_scale_fly = w1_bscale.view(-1)   # [E, nblk_n_w1 * nblk_k_w1] flat
+
+    if HAS_AITER:
+        # quant kernel writes transposed scale layout directly
+        a1_bq, a1_scale_fly = per_group_quant_hip(
+            x_q.to(torch.bfloat16), quant_dtype=DTYPE_FP8,
+            group_size=scale_blk_k, transpose_scale=True)
+        a1_scale_fly = a1_scale_fly.view(-1)   # [nblk_k_w1 * token] flat
+    else:
+        a1_scale_fly = a1_bscale.t().contiguous().view(-1)
 
     # Compile stage 1
     exe1 = compile_moe_blockscale_gemm1(
@@ -321,24 +331,29 @@ def test_moe_blockscale_e2e(
     _, us1 = run_perftest(launch_stage1, num_iters=num_iters, num_warmup=num_warmup)
     torch.cuda.synchronize()
 
-    # Verify stage 1 independently
+    # Verify stage 1 independently (ref uses a1_bscale in original [token, nblk_k] layout)
     out1_ref = torch_stage1_blockscale_ref(
         a1_bq, w1_bq, topk_ids, a1_bscale, w1_bscale, scale_blks, inter_dim)
     err_s1 = checkAllclose(out1_ref.to(out1.dtype), out1, rtol=0.1, atol=0.1,
                            msg="flydsl-stage1 vs ref", printLog=False)
     print(f"  stage1 err_ratio = {err_s1:.4f}")
 
-    # Re-quantize intermediate for stage 2 (blockscale format)
+    # Re-quantize stage1 output for stage 2
     nblk_k_w2 = inter_dim // scale_blk_k
-    out1_fp32 = out1.to(torch.float32)
-    a2_bq, a2_bscale_2d = pertoken_quant(
-        out1_fp32.view(-1, inter_dim // scale_blk_k, scale_blk_k), quant_dtype=DTYPE_FP8)
-    a2_bq = a2_bq.view(-1, inter_dim)
-    a2_bscale_2d = a2_bscale_2d.squeeze(-1)   # [token*topk, nblk_k_w2]
-    #   scale_x2: [nblk_k_w2, token*topk] f32 transposed
-    #   scale_w2: [E * nblk_n_w2 * nblk_k_w2] f32 row-major
-    a2_scale_fly = a2_bscale_2d.t().contiguous().view(-1)  # [nblk_k_w2, token*topk] flat
-    w2_scale_fly = w2_bscale.view(-1)                       # [E, nblk_n_w2 * nblk_k_w2] flat
+    w2_scale_fly = w2_bscale.view(-1)   # [E, nblk_n_w2 * nblk_k_w2] flat
+
+    if HAS_AITER:
+        a2_bq, a2_scale_fly = per_group_quant_hip(
+            out1.to(torch.bfloat16).view(-1, inter_dim), quant_dtype=DTYPE_FP8,
+            group_size=scale_blk_k, transpose_scale=True)
+        a2_scale_fly = a2_scale_fly.view(-1)   # [nblk_k_w2 * token*topk] flat
+        a2_bscale_2d = a2_scale_fly.view(nblk_k_w2, -1).t().contiguous()  # [token*topk, nblk_k_w2] for ref
+    else:
+        a2_bq, a2_bscale_2d = pertoken_quant(
+            out1.float().view(-1, inter_dim // scale_blk_k, scale_blk_k), quant_dtype=DTYPE_FP8)
+        a2_bq = a2_bq.view(-1, inter_dim)
+        a2_bscale_2d = a2_bscale_2d.squeeze(-1)   # [token*topk, nblk_k_w2]
+        a2_scale_fly = a2_bscale_2d.t().contiguous().view(-1)
 
     # Compile stage 2 (optionally with different tile_n)
     tile_n_s2 = tile_n2 if tile_n2 is not None else tile_n
@@ -363,7 +378,7 @@ def test_moe_blockscale_e2e(
     launch_stage2()
     torch.cuda.synchronize()
 
-    # Verify stage 2 independently (using the actual re-quantized intermediate)
+    # Verify stage 2 independently
     out2_ref_s2 = torch_stage2_blockscale_ref(
         a2_bq, w2_bq, topk_ids, topk_weights, a2_bscale_2d, w2_bscale,
         scale_blks, token, model_dim, inter_dim, topk)
@@ -400,13 +415,16 @@ def test_moe_blockscale_e2e(
             scale_blks=scale_blks, a_scale=a1_bscale,
             fc1_scale=w1_bscale, fc2_scale=w2_bscale)
         try:
+            # a1_scale_fly is [nblk_k_w1, token] contiguous — exactly what fmoe_fp8_blockscale_g1u1 expects
+            a1_scale_aiter = a1_scale_fly.view(nblk_k_w1, token)
+
             def launch_aiter_fused():
                 out_aiter.zero_()
                 aiter.fmoe_fp8_blockscale_g1u1(
                     out_aiter, a1_bq, w1_bq_shuf, w2_bq_shuf,
                     sorted_ids_a, sorted_weights_a, sorted_expert_ids_a,
                     num_valid_ids_a, topk,
-                    a1_bscale.t().contiguous(), w1_bscale, w2_bscale,
+                    a1_scale_aiter, w1_bscale, w2_bscale,
                     "", scale_blk_n, scale_blk_k, None)
 
             _, us_aiter_fused = run_perftest(launch_aiter_fused, num_iters=num_iters, num_warmup=num_warmup)
