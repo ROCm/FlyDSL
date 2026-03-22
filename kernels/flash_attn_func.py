@@ -34,6 +34,12 @@ from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _
 KERNEL_NAME = "flash_attn_func_kernel"
 
 
+def _waitcnt_vm_n(n):
+    """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
+    val = (n & 0xF) | 0x3F70 | (((n >> 4) & 0x3) << 14)
+    rocdl.s_waitcnt(val)
+
+
 def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16"):
     """Select active flash_attn_func path tag for build-time specialization."""
     override = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PATH", "auto").strip().lower()
@@ -319,6 +325,22 @@ def build_flash_attn_func_module_primary(
 
         def load_global_f16xN(base_ptr, base_idx):
             return _gep_load(base_ptr, base_idx, vxf16_type)
+
+        def bf16_trunc_pack_v4(f32_vals):
+            """Pack 4 f32 values into v4bf16 via bitwise truncation (upper 16 bits).
+            ~2 fewer instructions/element vs arith.TruncFOp round-to-nearest."""
+            _v2i32 = T.vec(2, T.i32)
+            _c16 = arith.constant(16, type=T.i32)
+            _cmask = arith.constant(0xFFFF0000, type=T.i32)
+            a0 = arith.ArithValue(f32_vals[0]).bitcast(T.i32)
+            b0 = arith.ArithValue(f32_vals[1]).bitcast(T.i32)
+            p0 = arith.OrIOp(arith.AndIOp(b0, _cmask).result,
+                             arith.ShRUIOp(a0, _c16).result).result
+            a1 = arith.ArithValue(f32_vals[2]).bitcast(T.i32)
+            b1 = arith.ArithValue(f32_vals[3]).bitcast(T.i32)
+            p1 = arith.OrIOp(arith.AndIOp(b1, _cmask).result,
+                             arith.ShRUIOp(a1, _c16).result).result
+            return vector.bitcast(v4f16_type, vector.from_elements(_v2i32, [p0, p1]))
 
         def k_buf_base(buf_id):
             if isinstance(buf_id, int):
@@ -632,6 +654,9 @@ def build_flash_attn_func_module_primary(
                 if not _use_dma_dbuf:
                     k_base = k_buf_base(k_slot)
 
+                if not USE_HW_TR:
+                    _v_vecs_prefetch = coop_load_v_global(kv_start)
+
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
                 k_hi_offset = K_SUB_N * K_STRIDE
                 k_swz_mask = (lane_mod_32 & arith.index(0x7)) << arith.index(4)
@@ -725,14 +750,15 @@ def build_flash_attn_func_module_primary(
                     s_raw_lo = [_mask_if.results[i] for i in range(16)]
                     s_raw_hi = [_mask_if.results[16 + i] for i in range(16)]
 
+                _max_fm = {"fastmath": fm_fast} if not USE_HW_TR else {}
                 local_max = s_raw_lo[0]
                 for r in range_constexpr(15):
-                    local_max = arith.MaxNumFOp(local_max, s_raw_lo[r + 1]).result
+                    local_max = arith.MaxNumFOp(local_max, s_raw_lo[r + 1], **_max_fm).result
                 for r in range_constexpr(16):
-                    local_max = arith.MaxNumFOp(local_max, s_raw_hi[r]).result
+                    local_max = arith.MaxNumFOp(local_max, s_raw_hi[r], **_max_fm).result
                 peer_max = reduction_peer(local_max)
-                row_max = arith.MaxNumFOp(local_max, peer_max).result
-                m_new_raw = arith.MaxNumFOp(m_running, row_max).result
+                row_max = arith.MaxNumFOp(local_max, peer_max, **_max_fm).result
+                m_new_raw = arith.MaxNumFOp(m_running, row_max, **_max_fm).result
 
                 diff_m_raw = arith.SubFOp(m_running, m_new_raw, fastmath=fm_fast).result
                 diff_m_scaled = arith.MulFOp(diff_m_raw, c_sm_scale_log2e, fastmath=fm_fast).result
@@ -762,8 +788,11 @@ def build_flash_attn_func_module_primary(
 
                 # ==== Rescale O accumulators ====
                 corr_vec = vector.broadcast(v16f32_type, corr)
-                for dc in range_constexpr(D_CHUNKS):
-                    o_accs[dc] = arith.MulFOp(o_accs[dc], corr_vec, fastmath=fm_fast).result
+                if not USE_HW_TR:
+                    o_accs[0] = arith.MulFOp(o_accs[0], corr_vec, fastmath=fm_fast).result
+                else:
+                    for dc in range_constexpr(D_CHUNKS):
+                        o_accs[dc] = arith.MulFOp(o_accs[dc], corr_vec, fastmath=fm_fast).result
 
                 if ENABLE_PREFETCH_3BUF and (kv_sub + preload_k_count) < N_SUBTILES:
                     next_k_sub = kv_sub + preload_k_count
@@ -789,43 +818,54 @@ def build_flash_attn_func_module_primary(
                 else:
                     v_slot = 0
                     v_base = v_buf_base(v_slot)
-                    coop_load_v(kv_start, v_slot)
+                    _waitcnt_vm_n(0)
+                    coop_store_v_lds(_v_vecs_prefetch, v_slot)
                     rocdl.sched_group_barrier(rocdl.mask_dswr, 1, 0)
                     gpu.barrier()
 
                 # ==== Build P packs for lo and hi halves ====
-                p_f16_lo = []
-                p_f16_hi = []
-                for r in range_constexpr(16):
-                    p_f16_lo.append(arith.trunc_f(elem_type, p_vals_lo[r]))
-                    p_f16_hi.append(arith.trunc_f(elem_type, p_vals_hi[r]))
-
-                if USE_K16:
-                    p_packs_lo = []
-                    p_packs_hi = []
-                    for pks in range_constexpr(PV_K_STEPS):
-                        p_base = pks * 8
-                        p_packs_lo.append(vector.from_elements(v8f16_type, [
-                            p_f16_lo[p_base+0], p_f16_lo[p_base+1],
-                            p_f16_lo[p_base+2], p_f16_lo[p_base+3],
-                            p_f16_lo[p_base+4], p_f16_lo[p_base+5],
-                            p_f16_lo[p_base+6], p_f16_lo[p_base+7]]))
-                        p_packs_hi.append(vector.from_elements(v8f16_type, [
-                            p_f16_hi[p_base+0], p_f16_hi[p_base+1],
-                            p_f16_hi[p_base+2], p_f16_hi[p_base+3],
-                            p_f16_hi[p_base+4], p_f16_hi[p_base+5],
-                            p_f16_hi[p_base+6], p_f16_hi[p_base+7]]))
-                else:
+                if dtype_str == "bf16" and not USE_K16:
                     p_packs_lo = []
                     p_packs_hi = []
                     for pks in range_constexpr(PV_K_STEPS):
                         p_base = pks * 4
-                        p_packs_lo.append(vector.from_elements(v4f16_type, [
-                            p_f16_lo[p_base], p_f16_lo[p_base+1],
-                            p_f16_lo[p_base+2], p_f16_lo[p_base+3]]))
-                        p_packs_hi.append(vector.from_elements(v4f16_type, [
-                            p_f16_hi[p_base], p_f16_hi[p_base+1],
-                            p_f16_hi[p_base+2], p_f16_hi[p_base+3]]))
+                        p_packs_lo.append(bf16_trunc_pack_v4(
+                            p_vals_lo[p_base:p_base+4]))
+                        p_packs_hi.append(bf16_trunc_pack_v4(
+                            p_vals_hi[p_base:p_base+4]))
+                else:
+                    p_f16_lo = []
+                    p_f16_hi = []
+                    for r in range_constexpr(16):
+                        p_f16_lo.append(arith.trunc_f(elem_type, p_vals_lo[r]))
+                        p_f16_hi.append(arith.trunc_f(elem_type, p_vals_hi[r]))
+
+                    if USE_K16:
+                        p_packs_lo = []
+                        p_packs_hi = []
+                        for pks in range_constexpr(PV_K_STEPS):
+                            p_base = pks * 8
+                            p_packs_lo.append(vector.from_elements(v8f16_type, [
+                                p_f16_lo[p_base+0], p_f16_lo[p_base+1],
+                                p_f16_lo[p_base+2], p_f16_lo[p_base+3],
+                                p_f16_lo[p_base+4], p_f16_lo[p_base+5],
+                                p_f16_lo[p_base+6], p_f16_lo[p_base+7]]))
+                            p_packs_hi.append(vector.from_elements(v8f16_type, [
+                                p_f16_hi[p_base+0], p_f16_hi[p_base+1],
+                                p_f16_hi[p_base+2], p_f16_hi[p_base+3],
+                                p_f16_hi[p_base+4], p_f16_hi[p_base+5],
+                                p_f16_hi[p_base+6], p_f16_hi[p_base+7]]))
+                    else:
+                        p_packs_lo = []
+                        p_packs_hi = []
+                        for pks in range_constexpr(PV_K_STEPS):
+                            p_base = pks * 4
+                            p_packs_lo.append(vector.from_elements(v4f16_type, [
+                                p_f16_lo[p_base], p_f16_lo[p_base+1],
+                                p_f16_lo[p_base+2], p_f16_lo[p_base+3]]))
+                            p_packs_hi.append(vector.from_elements(v4f16_type, [
+                                p_f16_hi[p_base], p_f16_hi[p_base+1],
+                                p_f16_hi[p_base+2], p_f16_hi[p_base+3]]))
 
                 # Build flat (dc, pks) schedule for interleaved GEMM2.
                 _steps = [(dc, pks)
@@ -878,6 +918,10 @@ def build_flash_attn_func_module_primary(
                         v_lo_cur, p_packs_lo[pks], o_accs[dc])
                     o_accs[dc] = do_mfma(
                         v_hi_cur, p_packs_hi[pks], o_accs[dc])
+                    if not USE_HW_TR and dc == 0 and pks < D_CHUNKS - 1:
+                        o_accs[pks + 1] = arith.MulFOp(
+                            o_accs[pks + 1], corr_vec, fastmath=fm_fast,
+                        ).result
                     if si + 1 < TOTAL_PV:
                         v_lo_cur = v_lo_nxt
                         v_hi_cur = v_hi_nxt
