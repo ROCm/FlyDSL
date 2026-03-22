@@ -12,9 +12,14 @@ Architecture
 A compiled C trampoline (``_xla_bridge.so``) translates between XLA's
 GPU custom-call convention and FlyDSL's bare-pointer convention:
 
-XLA GPU custom call (``api_version=1`` / ``API_VERSION_STATUS_RETURNING``)::
+XLA GPU custom call (``API_VERSION_STATUS_RETURNING_UNIFIED``)::
 
     void fn(hipStream_t stream, void** buffers, const char* opaque, size_t opaque_len)
+
+Note: the api_version numbering differs between the XLA registration API
+(``xla_client.register_custom_call_target``, where 0 = untyped custom call)
+and StableHLO (``CustomCallOp``, where 2 = STATUS_RETURNING_UNIFIED for GPU).
+Both refer to the same calling convention.
 
 FlyDSL bare-pointer convention::
 
@@ -65,7 +70,8 @@ def _ensure_bridge_lib() -> ctypes.CDLL:
                 f"Please rebuild or reinstall flydsl."
             )
         subprocess.check_call(
-            ["gcc", "-shared", "-fPIC", "-O2", "-o", str(_BRIDGE_SO), str(_BRIDGE_C)],
+            ["cc", "-shared", "-fPIC", "-O2", "-lpthread",
+             "-o", str(_BRIDGE_SO), str(_BRIDGE_C)],
             cwd=str(_THIS_DIR),
         )
     lib = ctypes.CDLL(str(_BRIDGE_SO))
@@ -169,67 +175,68 @@ def compile_and_register(
     name_hash = hashlib.sha256("|".join(sig_parts).encode()).hexdigest()[:16]
     target_name = f"flydsl_{name_hash}"
 
+    # Hold the lock through the full compile+register path to prevent
+    # concurrent threads from compiling and registering the same target.
     with _lock:
         if target_name in _registered_targets:
             return target_name
 
-    # Create concrete JAX arrays for each tensor argument.
-    from .adapter import from_jax
+        # Create concrete JAX arrays for each tensor argument.
+        from .adapter import from_jax
 
-    all_arrays = []
-    for shape, dtype in list(input_shapes) + list(output_shapes):
-        all_arrays.append(jnp.zeros(shape, dtype=dtype))
+        all_arrays = []
+        for shape, dtype in list(input_shapes) + list(output_shapes):
+            all_arrays.append(jnp.zeros(shape, dtype=dtype))
 
-    jit_args = [from_jax(a) for a in all_arrays]
+        jit_args = [from_jax(a) for a in all_arrays]
 
-    # Build the full argument list for the @flyc.jit function.
-    call_args = list(jit_args)
-    for _name, val in sorted(runtime_scalars.items()):
-        call_args.append(val)
+        # Build the full argument list for the @flyc.jit function.
+        call_args = list(jit_args)
+        for _name, val in sorted(runtime_scalars.items()):
+            call_args.append(val)
 
-    # Trigger compilation by calling the JitFunction.
-    flyc_func(*call_args, **constexpr_kwargs)
+        # Trigger compilation by calling the JitFunction.
+        flyc_func(*call_args, **constexpr_kwargs)
 
-    # Retrieve the compiled artifact via the public API.
-    artifact = flyc_func.get_last_artifact()
-    if artifact is None:
-        raise RuntimeError(
-            "FlyDSL compilation did not produce a cached artifact.  "
-            "Ensure the function is a @flyc.jit-decorated function."
-        )
+        # Retrieve the compiled artifact via the public API.
+        artifact = flyc_func.get_last_artifact()
+        if artifact is None:
+            raise RuntimeError(
+                "FlyDSL compilation did not produce a cached artifact.  "
+                "Ensure the function is a @flyc.jit-decorated function."
+            )
 
-    # Get the native function pointer from the compiled artifact.
-    func_exe = artifact._get_func_exe()
-    fly_func_ptr = ctypes.cast(func_exe, ctypes.c_void_p).value
+        # Get the native function pointer from the compiled artifact.
+        func_exe = artifact._get_func_exe()
+        fly_func_ptr = ctypes.cast(func_exe, ctypes.c_void_p).value
 
-    # Register with the C trampoline.
-    # Scalar values are baked into the trampoline slot so they're inserted
-    # between the tensor buffers and the stream at dispatch time.
-    n_buffers = len(input_shapes) + len(output_shapes)
-    scalar_values = [v for _name, v in sorted(runtime_scalars.items())]
-    n_scalars = len(scalar_values)
+        # Register with the C trampoline.
+        # Scalar values are baked into the trampoline slot so they're inserted
+        # between the tensor buffers and the stream at dispatch time.
+        n_buffers = len(input_shapes) + len(output_shapes)
+        scalar_values = [v for _name, v in sorted(runtime_scalars.items())]
+        n_scalars = len(scalar_values)
 
-    # Pack scalar values as int64 array for the C bridge.
-    if n_scalars > 0:
-        ScalarArray = ctypes.c_int64 * n_scalars
-        scalar_arr = ScalarArray(*scalar_values)
-        scalar_ptr = ctypes.cast(scalar_arr, ctypes.c_void_p)
-    else:
-        scalar_ptr = None
+        # Pack scalar values as int64 array for the C bridge.
+        if n_scalars > 0:
+            ScalarArray = ctypes.c_int64 * n_scalars
+            scalar_arr = ScalarArray(*scalar_values)
+            scalar_ptr = ctypes.cast(scalar_arr, ctypes.c_void_p)
+        else:
+            scalar_ptr = None
 
-    lib = _get_bridge_lib()
-    slot_idx = lib.flydsl_xla_register(fly_func_ptr, n_buffers, n_scalars, scalar_ptr)
-    if slot_idx < 0:
-        raise RuntimeError("Failed to register FlyDSL kernel in XLA bridge (too many targets?)")
+        lib = _get_bridge_lib()
+        slot_idx = lib.flydsl_xla_register(fly_func_ptr, n_buffers, n_scalars, scalar_ptr)
+        if slot_idx < 0:
+            raise RuntimeError("Failed to register FlyDSL kernel in XLA bridge (too many targets?)")
 
-    bridge_ptr = lib.flydsl_xla_get_bridge(slot_idx)
+        bridge_ptr = lib.flydsl_xla_get_bridge(slot_idx)
 
-    target = _RegisteredTarget(target_name, artifact, n_buffers, slot_idx, bridge_ptr)
+        target = _RegisteredTarget(target_name, artifact, n_buffers, slot_idx, bridge_ptr)
 
-    # Register with JAX's XLA custom-call mechanism.
-    _register_with_xla(target)
+        # Register with JAX's XLA custom-call mechanism.
+        _register_with_xla(target)
 
-    with _lock:
         _registered_targets[target_name] = target
 
     return target_name
@@ -259,8 +266,10 @@ def _register_with_xla(target: _RegisteredTarget) -> None:
         # Fallback: try both
         xla_platform_name = "ROCM"
 
-    # api_version=0: old custom-call convention
+    # Registration api_version=0 selects the untyped custom-call convention:
     #   void fn(stream, void** buffers, const char* opaque, size_t opaque_len)
+    # This corresponds to StableHLO api_version=2 (STATUS_RETURNING_UNIFIED)
+    # used in the CustomCallOp emitted by primitive.py.
     _xla_client.register_custom_call_target(
         target.name, capsule, xla_platform_name, api_version=0,
     )
