@@ -1,0 +1,579 @@
+++ shopt -s expand_aliases
+++ alias 'l.=ls -d .* --color=auto'
+++ alias 'll=ls -l --color=auto'
+++ alias 'ls=ls --color=auto'
+++ alias python=python3
+++ export HIP_VISIBLE_DEVICES=6
+++ HIP_VISIBLE_DEVICES=6
+++++ dirname ./run.sh
++++ cd .
++++ pwd
+++ MLIR_LIBS_DIR=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/build-fly/python_packages/flydsl/_mlir/_mlir_libs
+++ [[ :/opt/rocm/lib: != *\:\/\m\n\t\/\y\a\n\g\u\a\h\e\/\c\o\d\e\/\m\y\_\a\s\m\_\c\o\d\e\_\w\k\2\/\F\l\y\D\S\L\/\b\u\i\l\d\-\f\l\y\/\p\y\t\h\o\n\_\p\a\c\k\a\g\e\s\/\f\l\y\d\s\l\/\_\m\l\i\r\/\_\m\l\i\r\_\l\i\b\s\:* ]]
+++ export LD_LIBRARY_PATH=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/build-fly/python_packages/flydsl/_mlir/_mlir_libs:/opt/rocm/lib
+++ LD_LIBRARY_PATH=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/build-fly/python_packages/flydsl/_mlir/_mlir_libs:/opt/rocm/lib
+++ rocm-smi
+++ egrep '6    |Device'
+WARNING: AMD GPU device(s) is/are in a low-power state. Check power control/runtime_status
+
+Device  Node  IDs              Temp        Power     Partitions          SCLK    MCLK    Fan  Perf  PwrCap   VRAM%  GPU%  
+6       8     0x74a5,   20463  31.0°C      129.0W    NPS1, SPX, 0        132Mhz  900Mhz  0%   auto  1000.0W  0%     0%    
+7       6     0x74a5,   33762  25.0°C      122.0W    NPS1, SPX, 0        131Mhz  900Mhz  0%   auto  1000.0W  0%     0%    
+++ pip show triton
+Name: triton
+Version: 3.4.0+rocm7.1.0.gitf9e5bf54
+Summary: A language and compiler for custom Deep Learning operations
+Home-page: https://github.com/triton-lang/triton/
+Author: Philippe Tillet
+Author-email: phil@openai.com
+License: 
+Location: /opt/venv/lib/python3.12/site-packages
+Requires: setuptools
+Required-by: torch
+++ rocprofv3 --version
+             version: 1.0.0
+        git_revision: 
+        library_arch: x86_64-linux-gnu
+         system_name: Linux
+    system_processor: x86_64
+      system_version: 6.8.0-71-generic
+         compiler_id: GNU
+    compiler_version: 11.4.0
+        rocm_version: 7.1.0
+++ run_flydsl_op
+++ export FLIR_LOG_MORE=1
+++ FLIR_LOG_MORE=1
+++ export FLYDSL_DUMP_IR=1
+++ FLYDSL_DUMP_IR=1
+++ export FLYDSL_RUNTIME_ENABLE_CACHE=1
+++ FLYDSL_RUNTIME_ENABLE_CACHE=1
+++ export FLYDSL_DUMP_DIR=./flydsl_dump
+++ FLYDSL_DUMP_DIR=./flydsl_dump
+++ python3 tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+INFO:flir:avg: 278.2802602648735 us/iter from cuda.Event
+[W322 12:59:00.677279105 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {554, 5, 549}
+INFO:flir:abnormal data: 322.91699999999946
+INFO:flir:abnormal data: 228.03700000000003
+INFO:flir:abnormal data: 358.47700000000077
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 97.0            0.0         22,174.8        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0            228.6         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, bf16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=8 S=512 H=64 D=128] active_path = ck_n128_fastpath
+  [B=8 S=512 H=64 D=128] result_md5 = 7978d8bc646d1cfbd36d733c31e8cd5c
+  [B=8 S=512 H=64 D=128] ref_md5    = 36671c650309f99e4dd3699809456b40
+  [B=8 S=512 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=8 S=512 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.003906
+  diff.abs.mean = 0.000126
+  max_diff_thr (rel) = 3.115265e-03
+  Top-5 differences:
+    [(np.int64(4217685),)] result=-0.605469, ref=-0.609375, diff=0.003906
+    [(np.int64(4217682),)] result=0.703125, ref=0.707031, diff=0.003906
+    [(np.int64(4217705),)] result=0.503906, ref=0.507812, diff=0.003906
+    [(np.int64(4217714),)] result=-0.539062, ref=-0.542969, diff=0.003906
+    [(np.int64(20980643),)] result=-0.839844, ref=-0.843750, diff=0.003906
+  Threshold distribution (33554432 elements):
+    [0e+00, 1e-06): 13581084 ( 40.47%)
+    [1e-06, 1e-05):   126972 (  0.38%)
+    [1e-05, 1e-04):  5811214 ( 17.32%)
+    [1e-04, 1e-03): 13923090 ( 41.49%)
+    [1e-03, 1e-02):   112072 (  0.33%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=8 S=512 H=64 D=128 bf16 / ck_n128_fastpath |   PASS | 3.91e-03  0.99999 |      228.6   150.301
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+INFO:flir:avg: 278.14905881881714 us/iter from cuda.Event
+[W322 12:59:04.054483139 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {555, 5, 559}
+INFO:flir:abnormal data: 336.7960000000003
+INFO:flir:abnormal data: 227.7969999999999
+INFO:flir:abnormal data: 322.3160000000007
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 97.0            0.0         22,404.1        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0            231.0         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, fp16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=8 S=512 H=64 D=128] active_path = ck_n128_fastpath
+  [B=8 S=512 H=64 D=128] result_md5 = 0685018abf6759890c76009d64e134c5
+  [B=8 S=512 H=64 D=128] ref_md5    = 20d88d207b3a4fc19eae05ac75476934
+  [B=8 S=512 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=8 S=512 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.000488
+  diff.abs.mean = 0.000008
+  max_diff_thr (rel) = 3.255208e-04
+  Top-5 differences:
+    [(np.int64(8430182),)] result=0.673340, ref=0.673828, diff=0.000488
+    [(np.int64(38546),)] result=0.756348, ref=0.756836, diff=0.000488
+    [(np.int64(4212241),)] result=0.771973, ref=0.772461, diff=0.000488
+    [(np.int64(38511),)] result=0.500977, ref=0.501465, diff=0.000488
+    [(np.int64(29412822),)] result=0.705078, ref=0.705566, diff=0.000488
+  Threshold distribution (33554432 elements):
+    [0e+00, 1e-06): 19789404 ( 58.98%)
+    [1e-06, 1e-05):  5486471 ( 16.35%)
+    [1e-05, 1e-04):  8070093 ( 24.05%)
+    [1e-04, 1e-03):   208464 (  0.62%)
+    [1e-03, 1e-02):        0 (  0.00%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=8 S=512 H=64 D=128 fp16 / ck_n128_fastpath |   PASS | 4.88e-04  1.00000 |      231.0   148.763
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
+INFO:flir:avg: 111.29338011145592 us/iter from cuda.Event
+[W322 12:59:08.776064065 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {353, 425, 5}
+INFO:flir:abnormal data: 46.55799999999999
+INFO:flir:abnormal data: 131.79799999999977
+INFO:flir:abnormal data: 40.678
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 97.0            0.0          3,895.9        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0             40.2         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, bf16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=256 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=256 H=64 D=128] result_md5 = b3bbc9e78bda8017dadfe366ff041f3e
+  [B=1 S=256 H=64 D=128] ref_md5    = 38c91a4ad0fa5bc73afe49a93ba9e741
+  [B=1 S=256 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=256 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.003906
+  diff.abs.mean = 0.000169
+  max_diff_thr (rel) = 2.998501e-03
+  Top-5 differences:
+    [(np.int64(26550),)] result=-0.632812, ref=-0.636719, diff=0.003906
+    [(np.int64(12123),)] result=0.820312, ref=0.824219, diff=0.003906
+    [(np.int64(85282),)] result=-0.507812, ref=-0.511719, diff=0.003906
+    [(np.int64(44439),)] result=-0.644531, ref=-0.648438, diff=0.003906
+    [(np.int64(37746),)] result=0.515625, ref=0.519531, diff=0.003906
+  Threshold distribution (2097152 elements):
+    [0e+00, 1e-06):   860697 ( 41.04%)
+    [1e-06, 1e-05):     3973 (  0.19%)
+    [1e-05, 1e-04):   231047 ( 11.02%)
+    [1e-04, 1e-03):   987509 ( 47.09%)
+    [1e-03, 1e-02):    13926 (  0.66%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=1 S=256 H=64 D=128 bf16 / ck_n128_fastpath |   PASS | 3.91e-03  0.99999 |       40.2    26.734
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
+INFO:flir:avg: 109.92822989821434 us/iter from cuda.Event
+[W322 12:59:11.450159378 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {431, 5, 359}
+INFO:flir:abnormal data: 43.51799999999912
+INFO:flir:abnormal data: 41.238000000000056
+INFO:flir:abnormal data: 111.31800000000021
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 97.0            0.0          3,906.3        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0             40.3         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, fp16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=256 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=256 H=64 D=128] result_md5 = 5896b0e97067f2b06b42eb57694c7dd7
+  [B=1 S=256 H=64 D=128] ref_md5    = 52bb34f4c93d92a57595bdf35b551513
+  [B=1 S=256 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=256 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.000488
+  diff.abs.mean = 0.000011
+  max_diff_thr (rel) = 3.255208e-04
+  Top-5 differences:
+    [(np.int64(11434),)] result=0.695801, ref=0.695312, diff=0.000488
+    [(np.int64(58144),)] result=0.562012, ref=0.561523, diff=0.000488
+    [(np.int64(21791),)] result=-0.538574, ref=-0.538086, diff=0.000488
+    [(np.int64(44873),)] result=-0.565918, ref=-0.566406, diff=0.000488
+    [(np.int64(28320),)] result=-0.541016, ref=-0.540527, diff=0.000488
+  Threshold distribution (2097152 elements):
+    [0e+00, 1e-06):  1237499 ( 59.01%)
+    [1e-06, 1e-05):   220767 ( 10.53%)
+    [1e-05, 1e-04):   612837 ( 29.22%)
+    [1e-04, 1e-03):    26049 (  1.24%)
+    [1e-03, 1e-02):        0 (  0.00%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=1 S=256 H=64 D=128 fp16 / ck_n128_fastpath |   PASS | 4.88e-04  1.00000 |       40.3    26.663
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+INFO:flir:avg: 128.08644987642765 us/iter from cuda.Event
+[W322 12:59:15.213288103 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {443, 5}
+INFO:flir:abnormal data: 176.317
+INFO:flir:abnormal data: 58.599000000000046
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 98.0            0.0          5,651.9        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0             57.7         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, bf16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=512 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=512 H=64 D=128] result_md5 = 6f285f8cb02789ceea71f7ace9c7f07d
+  [B=1 S=512 H=64 D=128] ref_md5    = 68ed8e04c69f0803198393ecdae08391
+  [B=1 S=512 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=512 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.003906
+  diff.abs.mean = 0.000126
+  max_diff_thr (rel) = 2.898551e-03
+  Top-5 differences:
+    [(np.int64(27473),)] result=0.546875, ref=0.550781, diff=0.003906
+    [(np.int64(80368),)] result=0.535156, ref=0.539062, diff=0.003906
+    [(np.int64(66307),)] result=0.550781, ref=0.554688, diff=0.003906
+    [(np.int64(21865),)] result=0.542969, ref=0.546875, diff=0.003906
+    [(np.int64(10495),)] result=-0.621094, ref=-0.625000, diff=0.003906
+  Threshold distribution (4194304 elements):
+    [0e+00, 1e-06):  1702487 ( 40.59%)
+    [1e-06, 1e-05):    15950 (  0.38%)
+    [1e-05, 1e-04):   719645 ( 17.16%)
+    [1e-04, 1e-03):  1742556 ( 41.55%)
+    [1e-03, 1e-02):    13666 (  0.33%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=1 S=512 H=64 D=128 bf16 / ck_n128_fastpath |   PASS | 3.91e-03  0.99999 |       57.7    74.471
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
+INFO:flir:avg: 129.00164030492306 us/iter from cuda.Event
+[W322 12:59:19.914297845 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {401, 371, 449, 5}
+INFO:flir:abnormal data: 56.23899999999958
+INFO:flir:abnormal data: 185.23700000000008
+INFO:flir:abnormal data: 165.07800000000043
+INFO:flir:abnormal data: 59.55799999999999
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 96.0            0.0          5,581.3        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0             58.1         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, fp16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=512 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=512 H=64 D=128] result_md5 = 67b97f09fd5b6dd28bbeb4810cc4648f
+  [B=1 S=512 H=64 D=128] ref_md5    = 22054d0e0615b2d26a208ac68324ab34
+  [B=1 S=512 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=512 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.000488
+  diff.abs.mean = 0.000008
+  max_diff_thr (rel) = 3.255208e-04
+  Top-5 differences:
+    [(np.int64(19087),)] result=0.816406, ref=0.816895, diff=0.000488
+    [(np.int64(19093),)] result=0.511230, ref=0.511719, diff=0.000488
+    [(np.int64(20188),)] result=-0.534668, ref=-0.534180, diff=0.000488
+    [(np.int64(14920),)] result=0.724609, ref=0.724121, diff=0.000488
+    [(np.int64(38832),)] result=-0.757812, ref=-0.757324, diff=0.000488
+  Threshold distribution (4194304 elements):
+    [0e+00, 1e-06):  2485052 ( 59.25%)
+    [1e-06, 1e-05):   678688 ( 16.18%)
+    [1e-05, 1e-04):  1004242 ( 23.94%)
+    [1e-04, 1e-03):    26322 (  0.63%)
+    [1e-03, 1e-02):        0 (  0.00%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+            B=1 S=512 H=64 D=128 fp16 / ck_n128_fastpath |   PASS | 4.88e-04  1.00000 |       58.1    73.875
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+INFO:flir:avg: 2854.6346473693848 us/iter from cuda.Event
+[W322 12:59:24.361557679 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {196, 5, 504, 505, 442, 574}
+INFO:flir:abnormal data: 3449.0930000000003
+INFO:flir:abnormal data: 2845.617
+INFO:flir:abnormal data: 2957.2569999999996
+INFO:flir:abnormal data: 2885.617
+INFO:flir:abnormal data: 3030.416
+INFO:flir:abnormal data: 3037.3759999999893
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 94.0            0.0        260,600.0        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0          2,772.3         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, bf16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=8192 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=8192 H=64 D=128] result_md5 = 306036824881e2f23b2662eebc17183b
+  [B=1 S=8192 H=64 D=128] ref_md5    = 852edd6a8bed42551d1cf7796d9c4ed3
+  [B=1 S=8192 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=8192 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.003906
+  diff.abs.mean = 0.000035
+  max_diff_thr (rel) = 3.058104e-03
+  Top-5 differences:
+    [(np.int64(21426),)] result=-0.785156, ref=-0.789062, diff=0.003906
+    [(np.int64(60671),)] result=0.500000, ref=0.503906, diff=0.003906
+    [(np.int64(9617),)] result=-0.925781, ref=-0.929688, diff=0.003906
+    [(np.int64(50164),)] result=-0.503906, ref=-0.507812, diff=0.003906
+    [(np.int64(26348),)] result=0.578125, ref=0.582031, diff=0.003906
+  Threshold distribution (67108864 elements):
+    [0e+00, 1e-06): 26473546 ( 39.45%)
+    [1e-06, 1e-05):  3574944 (  5.33%)
+    [1e-05, 1e-04): 30634975 ( 45.65%)
+    [1e-04, 1e-03):  6411712 (  9.55%)
+    [1e-03, 1e-02):    13687 (  0.02%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+           B=1 S=8192 H=64 D=128 bf16 / ck_n128_fastpath |   PASS | 3.91e-03  0.99999 |     2772.3   396.601
+==================================================================================================================================
+All tests PASSED
+++ python3 tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+INFO:flir:avg: 2971.8259358406067 us/iter from cuda.Event
+[W322 12:59:33.605163534 collection.cpp:1116] Warning: ROCTracer produced duplicate flow start: 1 (function operator())
+INFO:flir:abnormal data indices: {567, 5, 519, 551, 587, 575, 527, 559, 466, 210, 595, 535, 504, 505, 543}
+INFO:flir:abnormal data: 3006.7729999999865
+INFO:flir:abnormal data: 2968.3329999999996
+INFO:flir:abnormal data: 3001.053
+INFO:flir:abnormal data: 2985.853000000003
+INFO:flir:abnormal data: 3011.972999999998
+INFO:flir:abnormal data: 2982.3739999999816
+INFO:flir:abnormal data: 3010.2530000000115
+INFO:flir:abnormal data: 2994.652999999991
+INFO:flir:abnormal data: 3148.9320000000007
+INFO:flir:abnormal data: 3561.2479999999996
+INFO:flir:abnormal data: 3005.4929999999586
+INFO:flir:abnormal data: 2981.053
+INFO:flir:abnormal data: 3057.0519999999997
+INFO:flir:abnormal data: 2973.5329999999994
+INFO:flir:abnormal data: 3013.7320000000036
+INFO:flir:                                   name  cnt  host_time_sum  device_time_sum device_type device_index
+0              flash_attn_func_kernel_0 85.0            0.0        243,509.8        CUDA            8
+[avg us/iter]                       NaN  NaN            0.0          2,864.8         NaN          NaN
+==================================================================================================================================
+FlyDSL flash_attn_func (causal, fp16)
+  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)
+  Strategy: K@Q^T + register S/P ping-pong + V^T@P
+GPU: AMD Instinct MI325X
+  Kernel opts: {'waves_per_eu': 2, 'daz': True}
+==================================================================================================================================
+
+                                             Config/Path | Status |   MaxErr   MinCos |   Time(us)   TFLOPS
+-----------------------------------------------------------------------------------------------------------
+[flydsl.compile] FLYDSL_DUMP_IR=1 dir=/mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0
+[flydsl.compile] dump 00_origin -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/00_origin.mlir
+[flydsl.compile] dump 01_gpu_kernel_outlining -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/01_gpu_kernel_outlining.mlir
+[flydsl.compile] dump 02_fly_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/02_fly_canonicalize.mlir
+[flydsl.compile] dump 03_fly_layout_lowering -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/03_fly_layout_lowering.mlir
+[flydsl.compile] dump 04_convert_fly_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/04_convert_fly_to_rocdl.mlir
+[flydsl.compile] dump 05_canonicalize -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/05_canonicalize.mlir
+[flydsl.compile] dump 06_convert_scf_to_cf_cse_convert_gpu_to_rocdl -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/06_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+[flydsl.compile] dump 07_rocdl_attach_target -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/07_rocdl_attach_target.mlir
+[flydsl.compile] dump 08_convert_scf_to_cf -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/08_convert_scf_to_cf.mlir
+[flydsl.compile] dump 09_convert_cf_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/09_convert_cf_to_llvm.mlir
+[flydsl.compile] dump 10_fly_gpu_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/10_fly_gpu_to_llvm.mlir
+[flydsl.compile] dump 11_convert_arith_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/11_convert_arith_to_llvm.mlir
+[flydsl.compile] dump 12_convert_func_to_llvm -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/12_convert_func_to_llvm.mlir
+[flydsl.compile] dump 13_reconcile_unrealized_casts -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/13_reconcile_unrealized_casts.mlir
+[flydsl.compile] dump 14_gpu_module_to_binary -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/14_gpu_module_to_binary.mlir
+[flydsl.compile] dump 15_final_isa -> /mnt/yanguahe/code/my_asm_code_wk2/FlyDSL/flydsl_dump/flash_attn_func_kernel_0/15_final_isa.s
+  [B=1 S=8192 H=64 D=128] active_path = ck_n128_fastpath
+  [B=1 S=8192 H=64 D=128] result_md5 = ed5e3163373ec37c20da2667751a8c98
+  [B=1 S=8192 H=64 D=128] ref_md5    = cbd9c0c3544027bcdd555333698b604e
+  [B=1 S=8192 H=64 D=128] MD5 match: DIFFER (not bit-identical)
+  [B=1 S=8192 H=64 D=128] --- compare_arrays ---
+  diff.abs.max = 0.000488
+  diff.abs.mean = 0.000002
+  max_diff_thr (rel) = 3.254149e-04
+  Top-5 differences:
+    [(np.int64(74512),)] result=0.618164, ref=0.618652, diff=0.000488
+    [(np.int64(12605),)] result=0.542969, ref=0.542480, diff=0.000488
+    [(np.int64(22928),)] result=0.635254, ref=0.635742, diff=0.000488
+    [(np.int64(24490),)] result=0.767578, ref=0.767090, diff=0.000488
+    [(np.int64(12021),)] result=-0.533203, ref=-0.533691, diff=0.000488
+  Threshold distribution (67108864 elements):
+    [0e+00, 1e-06): 42369478 ( 63.14%)
+    [1e-06, 1e-05): 22322082 ( 33.26%)
+    [1e-05, 1e-04):  2391273 (  3.56%)
+    [1e-04, 1e-03):    26031 (  0.04%)
+    [1e-03, 1e-02):        0 (  0.00%)
+    [1e-02, 1e-01):        0 (  0.00%)
+    [1e-01, 1e+00):        0 (  0.00%)
+    [1e+00, 1e+01):        0 (  0.00%)
+    >=1e+01       :        0 (  0.00%)
+           B=1 S=8192 H=64 D=128 fp16 / ck_n128_fastpath |   PASS | 4.88e-04  1.00000 |     2864.8   383.798
+==================================================================================================================================
+All tests PASSED
+++ set +x
