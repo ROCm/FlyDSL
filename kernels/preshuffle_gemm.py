@@ -51,6 +51,8 @@ def compile_preshuffle_gemm_a8(
     use_cshuffle_epilog: bool = False,
     waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -64,7 +66,13 @@ def compile_preshuffle_gemm_a8(
         out_dtype: Output element type, "fp16" or "bf16" (default: "fp16").
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         use_async_copy: Use async DMA for A tile global-to-LDS transfer.
+        dsrd_preload: Initial LDS-read preload count for the async-copy scheduler.
+        dvmem_preload: Initial global-load preload count for the async-copy scheduler.
     """
+    if dsrd_preload < 0:
+        raise ValueError(f"dsrd_preload must be >= 0, got {dsrd_preload!r}")
+    if dvmem_preload < 0:
+        raise ValueError(f"dvmem_preload must be >= 0, got {dvmem_preload!r}")
     if in_dtype not in ("fp8", "int8", "int4", "fp16", "bf16", "fp4"):
         raise ValueError(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
@@ -507,7 +515,7 @@ def compile_preshuffle_gemm_a8(
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
         tx_i32_async_base = tx * a_async_load_dword
-        k_bytes_factor = K * elem_bytes
+        k_bytes_factor = K * elem_bytes // a_elem_vec_pack
         layout_a_bytes = fx.make_layout((tile_m, k_bytes_factor), (k_bytes_factor, 1))
 
         def a_tile_chunk_coord_i32_async(i: int):
@@ -561,7 +569,7 @@ def compile_preshuffle_gemm_a8(
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer):
-            base_k_div4 = base_k // 4
+            base_k_div4 = base_k // 4 // a_elem_vec_pack
             dma_a_tile_to_lds(base_k_div4, lds_buffer)
 
         def prefetch_a_tile(base_k):
@@ -898,30 +906,6 @@ def compile_preshuffle_gemm_a8(
         rocdl.sched_barrier(0)
 
         def hot_loop_scheduler():
-            if is_fp4:
-                if not _fp4_use_scheduler:
-                    return
-                mfma_group = _fp4_pack_N_outer
-                mfma_total = _k_unroll_packed_outer * _m_repeat_packed_outer * _num_acc_n_packed_outer * _fp4_pack_K_outer * _fp4_pack_M_outer * _fp4_pack_N_outer
-                mfma_per_iter = 2 * mfma_group
-                sche_iters = 0 if mfma_per_iter == 0 else (mfma_total // mfma_per_iter)
-                rocdl.sched_dsrd(2)
-                rocdl.sched_mfma(1)
-                rocdl.sched_mfma(1)
-                dswr_tail = num_a_loads
-                if dswr_tail > sche_iters:
-                    dswr_tail = sche_iters
-                dswr_start = sche_iters - dswr_tail
-                for sche_i in range_constexpr(sche_iters):
-                    rocdl.sched_vmem(1)
-                    rocdl.sched_mfma(mfma_group)
-                    rocdl.sched_dsrd(1)
-                    rocdl.sched_mfma(mfma_group)
-                    if not use_async_copy and sche_i >= dswr_start - 1:
-                        rocdl.sched_dswr(1)
-                rocdl.sched_barrier(0)
-                return
-
             import math as _math
 
             def _build_scheduler(numer: int, denom: int):
@@ -937,7 +921,7 @@ def compile_preshuffle_gemm_a8(
                     prev = cur
                 return out
 
-            if _is_gfx942 or (not use_async_copy):
+            if _is_gfx942:
                 mfma_group = num_acc_n
                 mfma_total = (k_unroll * 2) * m_repeat * mfma_group
                 mfma_per_iter = 2 * mfma_group
@@ -973,8 +957,8 @@ def compile_preshuffle_gemm_a8(
                         rocdl.sched_dswr(1)
             else:
                 mfma_group = num_acc_n
-                bytes_k_per_mfma = 128 if _is_gfx950 else 32
-                num_mfma_per_tile_k = tile_k * elem_bytes // bytes_k_per_mfma
+                element_k_per_mfma = 128 if _is_gfx950 else 32
+                num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 num_ds_load = num_a_lds_load
                 dswr_tail = num_a_loads
@@ -982,22 +966,23 @@ def compile_preshuffle_gemm_a8(
                 if dswr_tail > mfma_total:
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
+                # if is_fp4:
+                #     num_fp4_scale_k_groups = 1 if int(tile_k) == 128 else (k_unroll // 2)
+                #     num_a_scale_loads = num_fp4_scale_k_groups * (m_repeat // 2)
+                #     num_b_scale_loads = num_fp4_scale_k_groups * (num_acc_n // 2)
+                #     num_gmem_loads += num_a_scale_loads + num_b_scale_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
-                dsrd_preload = 2
-                dvmem_preload = 2
-                if dsrd_preload > num_ds_load:
-                    dsrd_preload = num_ds_load
-                if dvmem_preload > num_gmem_loads:
-                    dvmem_preload = num_gmem_loads
-                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload, mfma_total)
-                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
+                dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
+                dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload_eff, mfma_total)
+                dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload_eff, mfma_total)
 
-                idx_ds_read = dsrd_preload
-                idx_gmem_load = dvmem_preload
-                if dvmem_preload:
-                    rocdl.sched_vmem(dvmem_preload)
-                if dsrd_preload:
-                    rocdl.sched_dsrd(dsrd_preload)
+                idx_ds_read = dsrd_preload_eff
+                idx_gmem_load = dvmem_preload_eff
+                if dvmem_preload_eff:
+                    rocdl.sched_vmem(dvmem_preload_eff)
+                if dsrd_preload_eff:
+                    rocdl.sched_dsrd(dsrd_preload_eff)
                 for mfma_idx in range_constexpr(mfma_total):
                     rocdl.sched_mfma(1)
                     n_dsrd = dsrd_schedule[mfma_idx]
@@ -1015,6 +1000,8 @@ def compile_preshuffle_gemm_a8(
                         if n_vmem:
                             rocdl.sched_vmem(n_vmem)
                             idx_gmem_load += n_vmem
+                    if not use_async_copy and (mfma_idx >= dswr_start - 1):
+                        rocdl.sched_dswr(1)
 
             rocdl.sched_barrier(0)
 
@@ -1105,11 +1092,11 @@ def compile_preshuffle_gemm_a8(
                                    a0_prefetch_pong_new, _sc_ping)
 
             next_k1 = k_iv + tile_k
-            _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k1, lds_a_ping)
             else:
                 store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
+            _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_a_pong,
                                       a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in)
@@ -1119,11 +1106,11 @@ def compile_preshuffle_gemm_a8(
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
             next_k2 = k_iv + (tile_k * 2)
-            _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k2, lds_a_pong)
             else:
                 store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
+            _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             b_tile_pong_new = prefetch_b_tile(next_k2)
             accs_in, _ = compute_tile(accs_in, b_tile_ping, lds_a_ping,
                                       a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_ping)
@@ -1272,7 +1259,15 @@ def compile_preshuffle_gemm_a8(
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (in_dtype, out_dtype, K, lds_stage, use_cshuffle_epilog)
+    _cache_tag = (
+        in_dtype,
+        out_dtype,
+        K,
+        lds_stage,
+        use_cshuffle_epilog,
+        dsrd_preload,
+        dvmem_preload,
+    )
 
     @flyc.jit
     def launch_gemm(
@@ -1326,8 +1321,10 @@ def compile_preshuffle_gemm_w4(
     out_dtype: str = "bf16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: Optional[int] = None,
+    waves_per_eu: int = None,
     use_async_copy: bool = False,
+    dsrd_preload: int = 2,
+    dvmem_preload: int = 2,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1343,6 +1340,8 @@ def compile_preshuffle_gemm_w4(
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
         use_async_copy=use_async_copy,
+        dsrd_preload=dsrd_preload,
+        dvmem_preload=dvmem_preload,
     )
     return inner
 
