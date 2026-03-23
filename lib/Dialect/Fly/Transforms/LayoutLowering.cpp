@@ -836,6 +836,13 @@ public:
       if (!isNormalForm(cast<TypedValue<ComposedLayoutType>>(layout)))
         return failure();
       layoutAdaptor = LayoutValueAdaptor(layout, composedLayoutTy.getAttr());
+    } else if (auto swizzleTy = dyn_cast<SwizzleType>(layout.getType())) {
+      LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+      IntTupleValueAdaptor coordAdaptor =
+          IntTupleValueAdaptor::create(layoutBuilder, coord, coordTy.getAttr());
+      IntTupleValueAdaptor result = layoutBuilder.applySwizzle(coordAdaptor, swizzleTy.getAttr());
+      rewriter.replaceOp(op, layoutBuilder.finalize(result));
+      return success();
     } else {
       return failure();
     }
@@ -1838,7 +1845,9 @@ public:
 
     if (srcRank == 1) {
       if (srcLayoutAttr.getShape().isLeaf()) {
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
+        Value dstDecomposition = DecompositionOp::create(rewriter, loc, dst);
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred);
         rewriter.eraseOp(op);
         return success();
       }
