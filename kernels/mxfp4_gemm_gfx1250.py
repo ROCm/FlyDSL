@@ -504,13 +504,20 @@ def compile_mxfp4_gemm(
             return b_frags, b_scales, a_scales
 
         def _a_streaming_compute(accs, a_buf, a_bases, b_frags, b_scales,
-                                 a_scales, ks, emit_filler=None):
+                                 a_scales, ks, emit_filler=None,
+                                 next_bs_info=None):
             """Stream A fragments per-wm group, interleaved with WMMA_SCALE.
 
             B frags, B scales, and A scales are pre-loaded and reused.
             A frags are loaded 1 ahead to hide ds_load latency behind WMMA.
             Operands passed as (B, A) to match C^T layout convention.
+
+            next_bs_info: optional (b_buf, b_bases, bs_buf, bs_bases,
+                          as_buf, as_bases, next_ks) — issues B+scale loads
+                          during last wm's WMMAs for K-subtile overlap.
+                          When set, returns (accs, next_b, next_bs, next_as).
             """
+            next_result = None
             a_frag = load_a_frag(a_buf, a_bases[0], ks)
             for wm in range_constexpr(wmma_m_rep):
                 is_last = (wm == wmma_m_rep - 1)
@@ -521,6 +528,12 @@ def compile_mxfp4_gemm(
                     if emit_filler is not None:
                         rocdl.sched_barrier(0)
                         emit_filler()
+                    if next_bs_info is not None:
+                        nb_buf, nb_bases, nbs_buf, nbs_bases, \
+                            nas_buf, nas_bases, n_ks = next_bs_info
+                        next_result = _load_b_and_scales(
+                            nb_buf, nb_bases, nbs_buf, nbs_bases,
+                            nas_buf, nas_bases, n_ks)
                 else:
                     rocdl.s_wait_dscnt(2)
                 for wn in range_constexpr(wmma_n_rep):
@@ -534,6 +547,8 @@ def compile_mxfp4_gemm(
                     )
                 if not is_last:
                     a_frag = a_next
+            if next_bs_info is not None:
+                return accs, next_result
             return accs
 
         # --- Compute on one LDS buffer (A-streaming K-subtile pipeline) ---
@@ -557,12 +572,12 @@ def compile_mxfp4_gemm(
                 prev_b, prev_bs, prev_as = _load_b_and_scales(
                     b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
-                    current_accs = _a_streaming_compute(
-                        current_accs, a_buf, a_bases, prev_b, prev_bs,
-                        prev_as, ks)
-                    prev_b, prev_bs, prev_as = _load_b_and_scales(
-                        b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases,
-                        ks + 1)
+                    current_accs, (prev_b, prev_bs, prev_as) = \
+                        _a_streaming_compute(
+                            current_accs, a_buf, a_bases, prev_b, prev_bs,
+                            prev_as, ks,
+                            next_bs_info=(b_buf, b_bases, bs_buf, bs_bases,
+                                          as_buf, as_bases, ks + 1))
                 current_accs = _a_streaming_compute(
                     current_accs, a_buf, a_bases, prev_b, prev_bs, prev_as,
                     k_wmma_steps - 1, emit_filler=emit_filler)

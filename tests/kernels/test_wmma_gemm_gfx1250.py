@@ -51,6 +51,7 @@ if not torch.cuda.is_available():
 def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
                         num_buffers,
                         m_warp=2, n_warp=4, l2_prefetch_distance=2,
+                        out_dtype=None, use_tdm_store=True,
                         cluster_m=1, cluster_n=1):
     """Non-cluster GEMM correctness test."""
     arch = str(get_rocm_arch(timeout_s=300))
@@ -69,6 +70,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     if total_lds > 327680:
         pytest.skip(f"LDS budget exceeded: {total_lds} > 327680")
 
+    _eff_out = out_dtype or ("f16" if in_dtype == "fp16" else "bf16")
+    _out_torch = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}[_eff_out]
     torch_dtype = torch.float16 if in_dtype == "fp16" else torch.bfloat16
     torch.manual_seed(0)
 
@@ -93,8 +96,8 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
 
     print(
         f"Running WMMA GEMM TDM: M={M}, N={N}, K={K}, "
-        f"dtype={in_dtype}, bufs={num_buffers}, "
-        f"cluster=({cluster_m},{cluster_n})"
+        f"dtype={in_dtype}, out={_eff_out}, bufs={num_buffers}, "
+        f"tdm_store={use_tdm_store}, cluster=({cluster_m},{cluster_n})"
     )
 
     a = torch.randn((M, K), dtype=torch_dtype, device='cpu').cuda()
@@ -105,14 +108,16 @@ def test_wmma_gemm_tdm(in_dtype, M, N, K, tile_m, tile_n, tile_k,
     a_pad[:M, :] = a
     b_pad[:, :N] = b
 
-    c_pad = torch.zeros((mpad, npad), dtype=torch.float32, device='cpu').cuda()
+    c_pad = torch.zeros((mpad, npad), dtype=_out_torch, device='cpu').cuda()
 
     launch_fn = compile_wmma_gemm_tdm(
         M=mpad, N=npad, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         m_warp=m_warp, n_warp=n_warp, in_dtype=in_dtype,
+        out_dtype=out_dtype,
         num_buffers=num_buffers,
         l2_prefetch_distance=l2_prefetch_distance,
+        use_tdm_store=use_tdm_store,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
     )
@@ -165,11 +170,12 @@ if __name__ == "__main__":
     parser.add_argument("--tile-k", type=int, default=128)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=4)
-    parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
+    parser.add_argument("--dtype", type=str, default="bf16", choices=["fp16", "bf16"])
     parser.add_argument("--num-buffers", type=int, default=2, choices=[2, 3])
     parser.add_argument("--l2-prefetch-distance", type=int, default=0)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
+    parser.add_argument("--no-tdm-store", action="store_true", default=False)
     args = parser.parse_args()
 
     test_wmma_gemm_tdm(
@@ -179,6 +185,7 @@ if __name__ == "__main__":
         m_warp=args.m_warp,
         n_warp=args.n_warp,
         l2_prefetch_distance=args.l2_prefetch_distance,
+        use_tdm_store=not args.no_tdm_store,
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
     )
