@@ -17,6 +17,10 @@ on:
         description: 'Docker base image for build and test'
         type: string
         default: "rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0"
+      python_versions:
+        description: 'Space-separated Python versions to build wheels for'
+        type: string
+        default: "3.10 3.12"
 concurrency:
   group: ${{ github.workflow }}-${{ github.sha }}
   cancel-in-progress: true
@@ -27,6 +31,7 @@ jobs:
     with:
       release_type: ${{ github.event_name == 'schedule' && 'nightlies' || 'devreleases' }}
       docker_image: ${{ inputs.docker_image || 'rocm/pytorch:rocm7.2_ubuntu22.04_py3.10_pytorch_release_2.8.0' }}
+      python_versions: ${{ inputs.python_versions || '3.10 3.12' }}
     permissions:
       id-token: write
       contents: read

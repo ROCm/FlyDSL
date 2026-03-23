@@ -11,6 +11,11 @@ on:
         description: 'Docker base image for build'
         type: string
         required: true
+      python_versions:
+        description: 'Space-separated Python versions to build wheels for (e.g., "3.12 3.13")'
+        type: string
+        required: false
+        default: '3.10 3.12'
     outputs:
       wheel_names:
         description: 'Space-separated list of built wheel filenames'
@@ -42,7 +47,11 @@ jobs:
       - name: Install build dependencies
         run: |
           docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
-          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && apt-get install -y python3.12 python3.12-dev python3.12-venv"
+          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update"
+          # Install Python versions that are not already in the Docker image
+          for ver in ${{ inputs.python_versions }}; do
+            docker exec flydsl_build bash -c "command -v python${ver} || apt-get install -y python${ver} python${ver}-dev python${ver}-venv || true"
+          done
           docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
           docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
@@ -69,9 +78,11 @@ jobs:
 
       - name: Build wheels
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.35 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.35 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
-          docker cp flydsl_build:/flydsl/build-fly/build_py312/bin/fly-opt ./dist/fly-opt
+          # Copy fly-opt from the first built Python version's build dir
+          FIRST_VER=$(echo "${{ inputs.python_versions }}" | awk '{print $1}' | tr -d '.')
+          docker cp flydsl_build:/flydsl/build-fly/build_py${FIRST_VER}/bin/fly-opt ./dist/fly-opt
 
       - name: Collect wheel names
         id: collect-wheels
