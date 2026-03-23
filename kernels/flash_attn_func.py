@@ -1046,10 +1046,10 @@ def build_flash_attn_func_module_primary(
                 ir.StringAttr.get("unsafe-fp-math"),
                 ir.StringAttr.get("true"),
             ]))
-        #passthrough_entries.append(ir.ArrayAttr.get([
+        # passthrough_entries.append(ir.ArrayAttr.get([
         #    ir.StringAttr.get("amdgpu-gemm-schedule-opt"),
         #    ir.StringAttr.get("true"),
-        #]))
+        # ]))
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
                 op.attributes["passthrough"] = ir.ArrayAttr.get(passthrough_entries)
