@@ -12,24 +12,24 @@ using namespace mlir::fly;
 
 namespace mlir::fly_rocdl {
 
-bool CopyOpCDNA3BufferCopyType::isStatic() const { return true; }
+bool CopyOpCDNA3BufferLDSTType::isStatic() const { return true; }
 
-Value CopyOpCDNA3BufferCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+Value CopyOpCDNA3BufferLDSTType::rebuildStaticValue(OpBuilder &builder, Location loc,
                                                     Value currentValue) const {
   if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
     return nullptr;
   return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
 }
 
-Attribute CopyOpCDNA3BufferCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+Attribute CopyOpCDNA3BufferLDSTType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
-Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutSrc() const {
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutSrc() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutDst() const {
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutDst() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutRef() const {
+Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutRef() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 
