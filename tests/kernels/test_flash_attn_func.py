@@ -491,6 +491,7 @@ def main():
         print("-" * len(hdr))
 
         all_passed = True
+        rows = []
         for dtype_key in dtypes_to_test:
             dtype, dtype_str = dtype_map[dtype_key]
             for causal in causals_to_test:
@@ -507,6 +508,7 @@ def main():
                             cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
                             print(f"{cfg_path:>66s} | {'ERROR':>6s} | {r['err'][:60]}")
                             all_passed = False
+                            rows.append((cfg_path, "ERROR", r))
                             continue
 
                         status = "PASS" if r["passed"] else "FAIL"
@@ -521,11 +523,27 @@ def main():
                             f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
                             f"{us_s} {tf_s}"
                         )
+                        rows.append((cfg_path, status, r))
                     except Exception as e:
                         print(f"{tag:>66s} | {'ERROR':>6s} | {str(e)[:60]}")
                         all_passed = False
+                        rows.append((tag, "ERROR", {"err": str(e)}))
 
-        print("=" * 130)
+        # ---- Summary table ----
+        print(f"\n{hdr}")
+        print("-" * len(hdr))
+        for cfg_path, status, r in rows:
+            if "err" in r:
+                print(f"{cfg_path:>66s} | {'ERROR':>6s} | {r['err'][:60]}")
+            else:
+                us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
+                tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
+                print(
+                    f"{cfg_path:>66s} | {status:>6s} | "
+                    f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
+                    f"{us_s} {tf_s}"
+                )
+        print("=" * len(hdr))
         if all_passed:
             print("All tests PASSED")
         else:
