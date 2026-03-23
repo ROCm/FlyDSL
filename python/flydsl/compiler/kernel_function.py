@@ -46,10 +46,18 @@ def create_gpu_func(
     sym_name: str,
     function_type: ir.TypeAttr,
     *,
+    known_block_size=None,
     loc=None,
     ip=None,
 ) -> gpu.GPUFuncOp:
-    return gpu.GPUFuncOp(function_type, sym_name=sym_name, kernel=True, loc=loc, ip=ip)
+    return gpu.GPUFuncOp(
+        function_type,
+        sym_name=sym_name,
+        kernel=True,
+        known_block_size=known_block_size,
+        loc=loc,
+        ip=ip,
+    )
 
 
 # =============================================================================
@@ -336,10 +344,11 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
-    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None):
+    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._name = name
+        self._known_block_size = known_block_size
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
@@ -389,7 +398,11 @@ class KernelFunction:
         with ir.InsertionPoint(ctx.gpu_module_body):
             func_type = ir.FunctionType.get(kernel_arg_types, [])
             with kernel_loc:
-                gpu_func = create_gpu_func(self._kernel_name, ir.TypeAttr.get(func_type))
+                gpu_func = create_gpu_func(
+                    self._kernel_name,
+                    ir.TypeAttr.get(func_type),
+                    known_block_size=self._known_block_size,
+                )
             gpu_func.regions[0].blocks.append(*kernel_arg_types)
             entry_block = gpu_func.regions[0].blocks[0]
 
@@ -425,7 +438,13 @@ class KernelFunction:
 # =============================================================================
 
 
-def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[str] = None) -> KernelFunction:
+def kernel(
+    func: Optional[Callable] = None,
+    *,
+    some_args=None,
+    name: Optional[str] = None,
+    known_block_size=None,
+) -> KernelFunction:
     """Decorator for GPU kernel functions.
 
     Usage:
@@ -439,6 +458,11 @@ def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[st
         def my_kernel(a: Tensor):
             ...
 
+        # With known block size (required when block > 256 on AMDGPU):
+        @kernel(known_block_size=[512, 1, 1])
+        def my_kernel(a: Tensor):
+            ...
+
     The decorated function can be called inside a @jit function to
     define the kernel, then .launch(config) is called to emit the launch op.
 
@@ -447,10 +471,14 @@ def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[st
         some_args: Optional kernel-specific arguments
         name: Optional kernel name override; shown in profiler instead of the
               Python function name. Tile/dtype info can be embedded here.
+        known_block_size: Optional list of [x, y, z] block dimensions. Sets
+              the ``known_block_size`` attribute on the GPU function, which the
+              AMDGPU backend uses to derive ``max_flat_workgroup_size``.
+              Required when block size exceeds 256 threads.
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args, name=name)
-    return KernelFunction(func, some_args=some_args, name=name)
+        return lambda f: KernelFunction(f, some_args=some_args, name=name, known_block_size=known_block_size)
+    return KernelFunction(func, some_args=some_args, name=name, known_block_size=known_block_size)
