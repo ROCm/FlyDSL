@@ -21,10 +21,10 @@ from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_store_16b_xor16,
     lds_store_8b_xor16,
     make_preshuffle_b_layout,
@@ -234,14 +234,14 @@ def compile_blockscale_preshuffle_gemm(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         col_offset_base = lane_div_16 * kpack_elems

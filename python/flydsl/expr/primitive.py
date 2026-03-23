@@ -283,6 +283,14 @@ def get_flat_coord(index, layout, loc=None, ip=None):
 
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
+    if isinstance(crd, (list, tuple)):
+        crd_i32 = []
+        for c in crd:
+            if isinstance(c, ir.Value) and isinstance(c.type, ir.IndexType):
+                c = _arith.IndexCastOp(ir.IntegerType.get_signless(32), c).result
+            crd_i32.append(c)
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type(tuple(crd_i32))
+        crd = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
 

@@ -47,6 +47,7 @@ from flydsl.expr.typing import T
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_load_pack_k32,
     lds_store_4b_xor16,
     lds_store_8b_xor16,
@@ -59,7 +60,6 @@ from kernels.mfma_preshuffle_pipeline import (
     swizzle_xor16,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 
 @contextmanager
@@ -532,12 +532,12 @@ def compile_moe_gemm1(
                     return parts
     
                 # tx -> wave/lane (GEMM-style decomposition).
-                coord_wl = idx2crd(tx, layout_tx_wave_lane)
-                wave_id = layout_get(coord_wl, 0)
-                lane_id = layout_get(coord_wl, 1)
-                coord_l16 = idx2crd(lane_id, layout_lane16)
-                lane_div_16 = layout_get(coord_l16, 0)
-                lane_mod_16 = layout_get(coord_l16, 1)
+                coord_wl = fx.idx2crd(tx, layout_tx_wave_lane)
+                wave_id = fx.get(coord_wl, 0)
+                lane_id = fx.get(coord_wl, 1)
+                coord_l16 = fx.idx2crd(lane_id, layout_lane16)
+                lane_div_16 = fx.get(coord_l16, 0)
+                lane_mod_16 = fx.get(coord_l16, 1)
     
                 # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16 * a_kpack_elems.
                 # A-side kpack is always 16 bytes (activation elements); B-side kpack_bytes
@@ -580,13 +580,13 @@ def compile_moe_gemm1(
                     row_gate = expert_off_idx + col_g
                     row_up = row_gate + inter_idx
     
-                    coord_gate = idx2crd(row_gate, layout_n_blk_intra)
-                    n_blk_gate.append(layout_get(coord_gate, 0))
-                    n_intra_gate.append(layout_get(coord_gate, 1))
+                    coord_gate = fx.idx2crd(row_gate, layout_n_blk_intra)
+                    n_blk_gate.append(fx.get(coord_gate, 0))
+                    n_intra_gate.append(fx.get(coord_gate, 1))
     
-                    coord_up = idx2crd(row_up, layout_n_blk_intra)
-                    n_blk_up.append(layout_get(coord_up, 0))
-                    n_intra_up.append(layout_get(coord_up, 1))
+                    coord_up = fx.idx2crd(row_up, layout_n_blk_intra)
+                    n_blk_up.append(fx.get(coord_up, 0))
+                    n_intra_up.append(fx.get(coord_up, 1))
     
     
                 m_repeat = tile_m // 16
@@ -1748,12 +1748,12 @@ def compile_moe_gemm2(
                     return parts
     
                 # tx -> wave/lane (GEMM-style decomposition).
-                coord_wl = idx2crd(tx, layout_tx_wave_lane)
-                wave_id = layout_get(coord_wl, 0)
-                lane_id = layout_get(coord_wl, 1)
-                coord_l16 = idx2crd(lane_id, layout_lane16)
-                lane_div_16 = layout_get(coord_l16, 0)
-                lane_mod_16 = layout_get(coord_l16, 1)
+                coord_wl = fx.idx2crd(tx, layout_tx_wave_lane)
+                wave_id = fx.get(coord_wl, 0)
+                lane_id = fx.get(coord_wl, 1)
+                coord_l16 = fx.idx2crd(lane_id, layout_lane16)
+                lane_div_16 = fx.get(coord_l16, 0)
+                lane_mod_16 = fx.get(coord_l16, 1)
     
                 row_a_lds = lane_mod_16
                 # A-side kpack is always 16 bytes; kpack_bytes is B-side (may be 8 for int4).
@@ -1787,9 +1787,9 @@ def compile_moe_gemm2(
                     col_g_list.append(col_g)
     
                     row_w = expert_off_idx + col_g
-                    coord_w = idx2crd(row_w, layout_n_blk_intra)
-                    n_blk_list.append(layout_get(coord_w, 0))
-                    n_intra_list.append(layout_get(coord_w, 1))
+                    coord_w = fx.idx2crd(row_w, layout_n_blk_intra)
+                    n_blk_list.append(fx.get(coord_w, 0))
+                    n_intra_list.append(fx.get(coord_w, 1))
     
                 m_repeat = tile_m // 16
                 k_unroll = tile_k_bytes // 64  # K64-byte micro-step (2x MFMA)
