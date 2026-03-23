@@ -175,24 +175,12 @@ def compile_mxfp4_gemm(
     # Number of TDM loads per step: A_data + B_data + A_scale + B_scale = 4
     TDM_LOADS_PER_STEP = 4
 
-    # Scale tail plan outstanding values: make_tail_plan uses 2 (for fp16's A+B),
-    # but MXFP4 has 4 loads per step (A_data + B_data + A_scale + B_scale).
+    # Scale tail plan outstanding values: make_tail_plan returns (num_buffers-2)*2,
+    # MXFP4 scales by TDM_LOADS_PER_STEP/2 for 4 loads per step.
     tail_plan = [
         (ls, cs, o * TDM_LOADS_PER_STEP // 2 if o > 0 else o)
         for ls, cs, o in _raw_tail_plan
     ]
-
-    # Number of LDS loads per K-subtile (for s_wait_dscnt):
-    # A frag: wmma_m_rep * 2 ds_load_b128
-    # B frag: wmma_n_rep * 2 ds_load_b128
-    # A scale: 1 ds_load_b128 (interleave) or wmma_m_rep ds_load_b32
-    # B scale: 1 ds_load_b128 (interleave) or wmma_n_rep ds_load_b32
-    if scale_preshuffle:
-        a_scale_b128_loads = (wmma_m_rep + 3) // 4
-        b_scale_b128_loads = (wmma_n_rep + 3) // 4
-        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + a_scale_b128_loads + b_scale_b128_loads
-    else:
-        LOADS_PER_SUBTILE = wmma_m_rep * 2 + wmma_n_rep * 2 + wmma_m_rep + wmma_n_rep
 
     @flyc.kernel
     def kernel_mxfp4_gemm(
@@ -495,15 +483,16 @@ def compile_mxfp4_gemm(
                 results.append(vi)
             return results
 
-        def load_k_subtile_frags(a_buf, a_bases, b_buf, b_bases,
-                                  as_buf, as_bases, bs_buf, bs_bases, ks):
-            """Batch-load all A/B fragments and scales for one K-subtile."""
-            # Load B frags first (gives more time for A frags to arrive)
+        # --- K-subtile compute (A-streaming pipeline) ---
+        def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases,
+                               as_buf, as_bases, ks):
+            """Load B frags + all scales for one K-subtile (no wait).
+
+            B frags and ALL scales (both A and B) are loaded upfront because
+            they are reused across all wm groups or batch-loaded via b128.
+            """
             b_frags = [load_b_frag(b_buf, b_bases[wn], ks)
                        for wn in range_constexpr(wmma_n_rep)]
-            a_frags = [load_a_frag(a_buf, a_bases[wm], ks)
-                       for wm in range_constexpr(wmma_m_rep)]
-            # Load scales
             if scale_preshuffle:
                 b_scales = load_scale_b128(bs_buf, bs_bases[0], wmma_n_rep, ks)
                 a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
@@ -512,33 +501,42 @@ def compile_mxfp4_gemm(
                             for wn in range_constexpr(wmma_n_rep)]
                 a_scales = [load_scale(as_buf, as_bases[wm], ks)
                             for wm in range_constexpr(wmma_m_rep)]
-            return a_frags, b_frags, a_scales, b_scales
+            return b_frags, b_scales, a_scales
 
-        def do_k_subtile_wmma(a_frags, b_frags, a_scales, b_scales, accs):
-            """Execute all WMMAs for one K-subtile with scales.
+        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, b_scales,
+                                 a_scales, ks, emit_filler=None):
+            """Stream A fragments per-wm group, interleaved with WMMA_SCALE.
 
-            Uses wmma_scale_f32_16x16x128_f8f6f4 (gfx1250 wave32) with:
-              fmtA=4 (FP4/E2M1), fmtB=4 (FP4/E2M1),
-              scaleAType=0 (opsel lo), scaleBType=0 (opsel lo).
-              fmtScaleA/B defaults to 0 (E8M0).
-
-            Operands are passed as (B, A) instead of (A, B) to compensate
-            for the WMMA output VGPR layout where lane16→col and
-            lane_kgrp→row_group.  Swapping computes C^T, making the output
-            match the epilogue's row-major store pattern.
+            B frags, B scales, and A scales are pre-loaded and reused.
+            A frags are loaded 1 ahead to hide ds_load latency behind WMMA.
+            Operands passed as (B, A) to match C^T layout convention.
             """
+            a_frag = load_a_frag(a_buf, a_bases[0], ks)
             for wm in range_constexpr(wmma_m_rep):
+                is_last = (wm == wmma_m_rep - 1)
+                if not is_last:
+                    a_next = load_a_frag(a_buf, a_bases[wm + 1], ks)
+                if is_last:
+                    rocdl.s_wait_dscnt(0)
+                    if emit_filler is not None:
+                        rocdl.sched_barrier(0)
+                        emit_filler()
+                else:
+                    rocdl.s_wait_dscnt(2)
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
                     accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
                         T.vec(8, T.f32),
-                        b_frags[wn], a_frags[wm], accs[idx],
+                        b_frags[wn], a_frag, accs[idx],
                         b_scales[wn], a_scales[wm],
                         fmtA=4, fmtB=4,
                         scaleAType=0, scaleBType=0,
                     )
+                if not is_last:
+                    a_frag = a_next
             return accs
 
+        # --- Compute on one LDS buffer (A-streaming K-subtile pipeline) ---
         def compute_tile(accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None):
             current_accs = list(accs_in)
 
@@ -550,33 +548,24 @@ def compile_mxfp4_gemm(
                 lds_bs, warp_n_base, wmma_n_rep, interleaved_scale_cols_b)
 
             if k_wmma_steps == 1:
-                frags = load_k_subtile_frags(
-                    a_buf, a_bases, b_buf, b_bases,
-                    as_buf, as_bases, bs_buf, bs_bases, 0)
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(*frags, current_accs)
+                b_frags, b_scales, a_scales = _load_b_and_scales(
+                    b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, b_frags, b_scales,
+                    a_scales, 0, emit_filler=emit_filler)
             else:
-                prev = load_k_subtile_frags(
-                    a_buf, a_bases, b_buf, b_bases,
-                    as_buf, as_bases, bs_buf, bs_bases, 0)
-
-                # Main K-loop: overlap load[ks+1] with compute[ks]
+                prev_b, prev_bs, prev_as = _load_b_and_scales(
+                    b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
-                    next_frags = load_k_subtile_frags(
-                        a_buf, a_bases, b_buf, b_bases,
-                        as_buf, as_bases, bs_buf, bs_bases, ks + 1)
-                    rocdl.s_wait_dscnt(LOADS_PER_SUBTILE)
-                    current_accs = do_k_subtile_wmma(*prev, current_accs)
-                    prev = next_frags
-
-                # Epilogue
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    rocdl.sched_barrier(0)
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(*prev, current_accs)
+                    current_accs = _a_streaming_compute(
+                        current_accs, a_buf, a_bases, prev_b, prev_bs,
+                        prev_as, ks)
+                    prev_b, prev_bs, prev_as = _load_b_and_scales(
+                        b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases,
+                        ks + 1)
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, prev_b, prev_bs, prev_as,
+                    k_wmma_steps - 1, emit_filler=emit_filler)
 
             return current_accs
 
@@ -664,22 +653,14 @@ def compile_mxfp4_gemm(
                             _lds_store_b128(
                                 d_buf, d_base + arith.index(imm_off), _raw(vec4))
 
-        def wait_and_barrier(outstanding=0):
-            tdm_ops.tensor_wait(outstanding)
-            gpu.barrier()
-
-        def wait_and_cluster_barrier(outstanding=0):
+        # --- Pipeline fence ---
+        def pipeline_fence(outstanding=0):
+            """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline. """
             tdm_ops.tensor_wait(outstanding)
             if use_cluster:
                 gpu.cluster_barrier()
             else:
                 gpu.barrier()
-
-        def _compute_and_schedule(accs_in, a, b, a_s, b_s):
-            rocdl.sched_barrier(0)
-            accs_out = compute_tile(accs_in, a, b, a_s, b_s)
-            hot_loop_scheduler()
-            return accs_out
 
         _effective_l2_pf = l2_prefetch_distance
         if use_cluster and l2_prefetch_distance > 0:
@@ -782,8 +763,7 @@ def compile_mxfp4_gemm(
                 arith.index(i * tile_k),
                 stages_a_mem[i], stages_b_mem[i],
                 stages_as_mem[i], stages_bs_mem[i])
-        # Wait for all but the last batch of TDM loads
-        wait_and_barrier(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
+        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
         # Main loop
         main_end = loop_iters * num_buffers * tile_k
@@ -799,14 +779,14 @@ def compile_mxfp4_gemm(
                         stages_a_mem[_load_stage], stages_b_mem[_load_stage],
                         stages_as_mem[_load_stage], stages_bs_mem[_load_stage])
                     _l2_prefetch(iv + arith.index(s * tile_k))
-                    accs_in = _compute_and_schedule(
+                    rocdl.sched_barrier(0)
+                    accs_in = compute_tile(
                         accs_in,
                         stages_a[s], stages_b[s],
                         stages_as[s], stages_bs[s])
-                    if s == num_buffers - 1:
-                        wait_and_cluster_barrier(outstanding=TDM_LOADS_PER_STEP)
-                    else:
-                        wait_and_barrier(outstanding=TDM_LOADS_PER_STEP)
+                    hot_loop_scheduler()
+                    pipeline_fence(
+                        outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
                 results = yield list(accs_in)
             accs = list(results)
 
@@ -839,14 +819,13 @@ def compile_mxfp4_gemm(
                         stages_as[_compute_stage], stages_bs[_compute_stage],
                         emit_filler=_emit_epi_addrs)
             else:
-                accs = _compute_and_schedule(
+                rocdl.sched_barrier(0)
+                accs = compute_tile(
                     accs,
                     stages_a[_compute_stage], stages_b[_compute_stage],
                     stages_as[_compute_stage], stages_bs[_compute_stage])
-                if use_cluster and _load_stage is not None:
-                    wait_and_cluster_barrier(outstanding=_outstanding)
-                else:
-                    wait_and_barrier(outstanding=_outstanding)
+                hot_loop_scheduler()
+                pipeline_fence(outstanding=_outstanding)
 
         if use_tdm_store:
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)

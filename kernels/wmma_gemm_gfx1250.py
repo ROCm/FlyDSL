@@ -301,72 +301,64 @@ def compile_wmma_gemm_tdm(
                 results.append(v)
             return vector.shuffle(results[0], results[1], list(range(16)))
 
-        # --- K-subtile load/compute helpers ---
-        # Number of LDS loads per K-subtile:
-        # B frags: wmma_n_rep * 2 (ds_load_tr16_b128), A frags: wmma_m_rep * 2
-        LOADS_PER_SUBTILE = (wmma_m_rep + wmma_n_rep) * 2
+        # --- K-subtile compute (A-streaming pipeline) ---
+        def _load_b_frags(b_lds_buffer, b_bases, ks):
+            """Load all B fragments for one K-subtile (no wait)."""
+            return [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
+                    for wn in range_constexpr(wmma_n_rep)]
 
-        def load_k_subtile_frags(a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks):
-            """Batch-load all A and B fragments for one K-subtile (no wait).
+        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, ks,
+                                 emit_filler=None):
+            """Stream A fragments per-wm group, interleaved with WMMA.
 
-            All base addresses are precomputed by _precompute_{a,b}_lane_bases.
-            ks is the K-subtile index (compile-time constant).
+            B frags are pre-loaded and reused across all wm groups.
+            Next A frag is pre-loaded during current wm's WMMA to hide
+            ds_load latency behind WMMA execution.
             """
-            b_frags = [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
-                for wn in range_constexpr(wmma_n_rep)]
-
-            a_frags = [load_wmma_frag(a_lds_buffer, a_bases[wm], ks)
-                for wm in range_constexpr(wmma_m_rep)]
-
-            return a_frags, b_frags
-
-        def do_k_subtile_wmma(a_frags, b_frags, accs):
-            """Execute all WMMAs for one K-subtile using pre-loaded fragments."""
+            a_frag = load_wmma_frag(a_buf, a_bases[0], ks)
             for wm in range_constexpr(wmma_m_rep):
+                is_last = (wm == wmma_m_rep - 1)
+                if not is_last:
+                    a_next = load_wmma_frag(a_buf, a_bases[wm + 1], ks)
+                if is_last:
+                    rocdl.s_wait_dscnt(0)
+                    if emit_filler is not None:
+                        rocdl.sched_barrier(0)
+                        emit_filler()
+                else:
+                    rocdl.s_wait_dscnt(2)
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
                     accs[idx] = wmma_op(
                         T.vec(8, T.f32),
-                        b_frags[wn], a_frags[wm],
-                        accs[idx],
+                        b_frags[wn], a_frag, accs[idx],
                         signA=False, signB=False, modC=0,
                         reuseA=False, reuseB=False,
                     ).result
+                if not is_last:
+                    a_frag = a_next
             return accs
 
-        # --- Compute on one LDS buffer (K-subtile pipelined) ---
+        # --- Compute on one LDS buffer (A-streaming K-subtile pipeline) ---
         def compute_tile(accs_in, lds_a_ptr, lds_b_ptr, emit_filler=None):
             current_accs = list(accs_in)
-
-            # Precompute all lane bases once per tile
-            a_lds_buffer, a_bases = _precompute_a_lane_bases(lds_a_ptr)
-            b_lds_buffer, b_bases = _precompute_b_lane_bases(lds_b_ptr)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a_ptr)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b_ptr)
 
             if k_wmma_steps == 1:
-                a_frags, b_frags = load_k_subtile_frags(
-                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(a_frags, b_frags, current_accs)
+                b_frags = _load_b_frags(b_buf, b_bases, 0)
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, b_frags, 0,
+                    emit_filler=emit_filler)
             else:
-                # Prologue: batch-load K-subtile 0
-                prev_a, prev_b = load_k_subtile_frags(
-                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
-
-                # Main K-loop: overlap load[ks+1] with compute[ks]
+                prev_b = _load_b_frags(b_buf, b_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
-                    next_a, next_b = load_k_subtile_frags(
-                        a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks + 1)
-                    rocdl.s_wait_dscnt(LOADS_PER_SUBTILE)
-                    current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
-                    prev_a, prev_b = next_a, next_b
-
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    rocdl.sched_barrier(0)
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
+                    current_accs = _a_streaming_compute(
+                        current_accs, a_buf, a_bases, prev_b, ks)
+                    prev_b = _load_b_frags(b_buf, b_bases, ks + 1)
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, prev_b,
+                    k_wmma_steps - 1, emit_filler=emit_filler)
 
             return current_accs
 
@@ -405,26 +397,14 @@ def compile_wmma_gemm_tdm(
                         buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
                         addr_idx += 1
 
-        # --- Pipeline helpers ---
-        def wait_and_barrier(outstanding=0):
-            tdm_ops.tensor_wait(outstanding)
-            gpu.barrier()
-
-        def wait_and_cluster_barrier(outstanding=0):
-            """Fused WG barrier + cluster sync: reduces instruction overhead
-            by issuing the cluster signal while tensor_wait is still draining,
-            then waiting for both to complete."""
+        # --- Pipeline fence ---
+        def pipeline_fence(outstanding=0):
+            """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline. """
             tdm_ops.tensor_wait(outstanding)
             if use_cluster:
                 gpu.cluster_barrier()
             else:
                 gpu.barrier()
-
-        def _compute_and_schedule(accs_in, lds_a, lds_b):
-            rocdl.sched_barrier(0)
-            accs_out = compute_tile(accs_in, lds_a, lds_b)
-            hot_loop_scheduler()
-            return accs_out
 
         _effective_l2_pf = l2_prefetch_distance
         if use_cluster and l2_prefetch_distance > 0:
@@ -462,12 +442,9 @@ def compile_wmma_gemm_tdm(
         for i in range_constexpr(pre_loaded):
             copy_a_to_lds(arith.index(i * tile_k), stages_a_mem[i])
             copy_b_to_lds(arith.index(i * tile_k), stages_b_mem[i])
-        wait_and_barrier(outstanding=2 * (num_buffers - 2))
+        pipeline_fence(outstanding=2 * (num_buffers - 2))
 
-        # Main loop: each iteration covers (num_buffers) K-tiles
-        # Sub-phase s: load next tile (MCAST), compute current tile, then barrier
-        # The last sub-phase uses wait_and_cluster_barrier to fuse the WG
-        # barrier with cluster sync for the NEXT iteration's MCAST loads.
+        # Main loop: each iteration covers num_buffers K-tiles
         main_end = loop_iters * num_buffers * tile_k
 
         if loop_iters > 0:
@@ -479,16 +456,14 @@ def compile_wmma_gemm_tdm(
                     copy_a_to_lds(iv + arith.index(_load_k_off), stages_a_mem[_load_stage])
                     copy_b_to_lds(iv + arith.index(_load_k_off), stages_b_mem[_load_stage])
                     _l2_prefetch(iv + arith.index(s * tile_k))
-                    accs_in = _compute_and_schedule(accs_in, stages_a[s], stages_b[s])
-                    if s == num_buffers - 1:
-                        wait_and_cluster_barrier(outstanding=2)
-                    else:
-                        wait_and_barrier(outstanding=2)
+                    rocdl.sched_barrier(0)
+                    accs_in = compute_tile(accs_in, stages_a[s], stages_b[s])
+                    hot_loop_scheduler()
+                    pipeline_fence(outstanding=2 * (num_buffers - 2))
                 results = yield list(accs_in)
             accs = list(results)
 
         # Tail: handle remaining tiles using the compile-time plan
-        # outstanding=-1 → last step: use compute_tile (no barrier).
         if loop_iters == 0 and use_cluster:
             gpu.cluster_barrier()
         _extra_j = 0
@@ -508,12 +483,11 @@ def compile_wmma_gemm_tdm(
                     accs, stages_a[_compute_stage], stages_b[_compute_stage],
                     emit_filler=_emit_epi_addrs)
             else:
-                accs = _compute_and_schedule(
+                rocdl.sched_barrier(0)
+                accs = compute_tile(
                     accs, stages_a[_compute_stage], stages_b[_compute_stage])
-                if use_cluster and _load_stage is not None:
-                    wait_and_cluster_barrier(outstanding=_outstanding)
-                else:
-                    wait_and_barrier(outstanding=_outstanding)
+                hot_loop_scheduler()
+                pipeline_fence(outstanding=_outstanding)
 
         epilogue_stores(accs, epi_addrs_box[0])
 
