@@ -226,10 +226,12 @@ class KernelLauncher:
         kernel_name: str,
         kernel_args: Tuple,
         call_location: Optional[ir.Location] = None,
+        gpu_func_op=None,
     ):
         self._kernel_name = kernel_name
         self._kernel_args = kernel_args
         self._call_location = call_location
+        self._gpu_func_op = gpu_func_op
 
     def launch(
         self,
@@ -255,6 +257,18 @@ class KernelLauncher:
 
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
+
+        # Set gpu.known_block_size on the kernel function so that
+        # convert-gpu-to-rocdl derives the correct max_flat_workgroup_size
+        # in the HSACO metadata (default is 256 which blocks launches > 256 threads).
+        if self._gpu_func_op is not None:
+            const_block = []
+            for d in block_dims:
+                if isinstance(d, int):
+                    const_block.append(d)
+            if len(const_block) == 3:
+                self._gpu_func_op.attributes["known_block_size"] = \
+                    ir.DenseI32ArrayAttr.get(const_block)
 
         with launch_loc:
             grid_x = _to_index_value(grid_dims[0])
@@ -312,11 +326,12 @@ class KernelFunction:
             return True
         return get_origin(annotation) is Constexpr
 
-    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict) -> Tuple[Any, ...]:
+    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict):
         """Emit gpu.func for this kernel into the GPU module.
 
         Returns:
-            Tuple of non-constexpr argument values for use in launch.
+            (kernel_args, gpu_func_op) — kernel_args is a tuple of non-constexpr
+            argument values for use in launch; gpu_func_op is the gpu.func operation.
         """
         sig = inspect.signature(self._func)
         bound = sig.bind(*args, **kwargs)
@@ -366,7 +381,7 @@ class KernelFunction:
                 self._func(**dsl_args)
                 gpu.ReturnOp([])
 
-        return tuple(param_values)
+        return tuple(param_values), gpu_func
 
     def __call__(self, *args, **kwargs) -> KernelLauncher:
         ctx = CompilationContext.get_current()
@@ -375,9 +390,9 @@ class KernelFunction:
 
         call_loc = create_caller_location(depth=2)
 
-        kernel_args = self._emit_kernel(ctx, args, kwargs)
+        kernel_args, gpu_func_op = self._emit_kernel(ctx, args, kwargs)
 
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc)
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, gpu_func_op=gpu_func_op)
 
 
 # =============================================================================
