@@ -14,6 +14,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/StringSet.h"
 
 #include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
@@ -175,6 +176,69 @@ public:
     }
 
     return rewriter.notifyMatchFailure(op, "unsupported make_ptr operand count");
+  }
+};
+
+class GetDynSharedOpLowering : public OpConversionPattern<GetDynSharedOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(GetDynSharedOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto flyPtrTy = cast<fly::PointerType>(op.getResult().getType());
+    unsigned addrSpace = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
+
+    auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
+    if (!moduleOp)
+      return op->emitError("get_dyn_shared must be inside a gpu.module");
+
+    LLVM::GlobalOp sharedGlobal = getOrCreateDynSharedGlobal(rewriter, moduleOp, loc, addrSpace);
+
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(op);
+
+    auto basePtr = LLVM::AddressOfOp::create(rewriter, loc, sharedGlobal);
+    Type ptrType = basePtr->getResultTypes()[0];
+
+    auto i8Ty = IntegerType::get(rewriter.getContext(), 8);
+    Value sharedPtr =
+        LLVM::GEPOp::create(rewriter, loc, ptrType, i8Ty, basePtr, ArrayRef<LLVM::GEPArg>{0});
+
+    rewriter.replaceOp(op, sharedPtr);
+    return success();
+  }
+
+private:
+  static LLVM::GlobalOp getOrCreateDynSharedGlobal(ConversionPatternRewriter &rewriter,
+                                                   gpu::GPUModuleOp moduleOp, Location loc,
+                                                   unsigned addrSpace) {
+    llvm::StringSet<> existingNames;
+    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
+      existingNames.insert(globalOp.getSymName());
+      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
+        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
+            globalOp.getAlignment().value_or(0) == 1024)
+          return globalOp;
+      }
+    }
+
+    unsigned counter = 0;
+    SmallString<128> symName = SymbolTable::generateSymbolName<128>(
+        "__dynamic_shared_", [&](StringRef candidate) { return existingNames.contains(candidate); },
+        counter);
+
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+    auto zeroArrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), 0);
+
+    auto globalOp = LLVM::GlobalOp::create(rewriter, loc, zeroArrayTy,
+                                           /*isConstant=*/false, LLVM::Linkage::External, symName,
+                                           /*value=*/Attribute(),
+                                           /*alignment=*/1024, addrSpace);
+    globalOp.setDsoLocal(true);
+    return globalOp;
   }
 };
 
@@ -973,7 +1037,7 @@ public:
       return true;
     });
 
-    patterns.add<MakePtrOpLowering>(typeConverter, context);
+    patterns.add<MakePtrOpLowering, GetDynSharedOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
     patterns.add<GetIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);

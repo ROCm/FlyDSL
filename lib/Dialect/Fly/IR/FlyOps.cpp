@@ -1691,6 +1691,14 @@ FLY_INFER_RETURN_TYPES(MmaMakeFragmentOp) {
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
+FLY_INFER_RETURN_TYPES(GetDynSharedOp) {
+  auto i8Ty = IntegerType::get(context, 8);
+  auto addrSpaceAttr = AddressSpaceAttr::get(context, AddressSpace::Shared);
+  auto alignAttr = AlignAttr::get(context, 1024);
+  inferredReturnTypes.assign({PointerType::get(i8Ty, addrSpaceAttr, alignAttr)});
+  return success();
+}
+
 FLY_INFER_RETURN_TYPES(PtrToIntOp) {
   auto ptrTy = dyn_cast<PointerType>(operands[0].getType());
   if (!ptrTy)
