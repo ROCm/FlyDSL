@@ -681,7 +681,7 @@ def build_flash_attn_func_module_primary(
                 if not _use_dma_dbuf:
                     k_base = k_buf_base(k_slot)
 
-                if not USE_HW_TR:
+                if not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF):
                     _v_vecs_prefetch = coop_load_v_global(kv_start)
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
