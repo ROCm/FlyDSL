@@ -490,6 +490,11 @@ def make_ptr(result_type, args, loc=None, ip=None):
 
 
 @traced_op
+def get_dyn_shared(loc=None, ip=None):
+    return fly.get_dyn_shared(loc=loc, ip=ip)
+
+
+@traced_op
 def add_offset(ptr, offset, loc=None, ip=None):
     if not isinstance(offset, ir.Value):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
