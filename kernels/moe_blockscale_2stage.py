@@ -203,7 +203,7 @@ def compile_moe_blockscale_gemm1(
     lds_alloc_offset = allocator._align(allocator.ptr, 16)
     allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
-    @flyc.kernel
+    @flyc.kernel(name=module_name)
     def moe_blockscale_gemm1(
             arg_out: fx.Tensor,
             arg_x: fx.Tensor,
@@ -1158,7 +1158,7 @@ def compile_moe_blockscale_gemm1(
                     bx_m=bx_m,
                     body_row=_stage1_store_row,
                 )
-    
+
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
     @flyc.jit
     def launch_moe_blockscale_gemm1(
@@ -1382,7 +1382,7 @@ def compile_moe_blockscale_gemm2(
             )
 
     if True:
-        @flyc.kernel
+        @flyc.kernel(name=module_name)
         def moe_blockscale_gemm2(
             arg_out: fx.Tensor,
             arg_x: fx.Tensor,
@@ -2388,6 +2388,7 @@ def compile_moe_blockscale_gemm2(
             _if_blk = scf.IfOp(blk_valid)
             with _if_then(_if_blk):
                 _moe_gemm2_then_body()
+
     # ── Host launcher (flyc.jit + .launch) ────────────────────────────────
     @flyc.jit
     def launch_moe_blockscale_gemm2(
@@ -2474,6 +2475,8 @@ def compile_moe_reduction(
 
     masked = "masked" if use_mask else ""
 
+    module_name = f"bs_moe_reduce_topk{topk}_{dtype_str}{masked}"
+
     if dtype_str == "f32":
         elem_type_tag = "f32"
     elif dtype_str == "f16":
@@ -2491,7 +2494,7 @@ def compile_moe_reduction(
         return ty() if callable(ty) else ty
 
     if True:
-        @flyc.kernel
+        @flyc.kernel(name=module_name)
         def moe_reduction_kernel(
             X: fx.Tensor,
             Y: fx.Tensor,

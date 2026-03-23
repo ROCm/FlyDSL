@@ -126,6 +126,11 @@ def compile_blockscale_preshuffle_gemm(
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
 
+    module_name = (
+        f"bs_gemm_{out_dtype}_{epilog_tag}"
+        f"_t{tile_m}x{tile_n}x{tile_k}"
+    ).replace("-", "_")
+
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────
     lds_tile_bytes = tile_m * lds_stride_bytes
     lds_out_bytes = 2 * tile_m * tile_n if use_cshuffle_epilog else 0
@@ -153,7 +158,7 @@ def compile_blockscale_preshuffle_gemm(
     num_acc_n = n_per_wave // 16
 
     # ── Kernel function ───────────────────────────────────────────────────
-    @flyc.kernel
+    @flyc.kernel(name=module_name)
     def kernel_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,

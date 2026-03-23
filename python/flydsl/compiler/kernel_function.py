@@ -336,9 +336,10 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
-    def __init__(self, func: Callable, some_args=None):
+    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None):
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
+        self._name = name
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
@@ -376,7 +377,10 @@ class KernelFunction:
             kernel_arg_types.extend(fly_types(value))
 
         kernel_id = ctx.next_kernel_id()
-        self._kernel_name = f"{self._func.__name__}_{kernel_id}"
+        if self._name is not None:
+            self._kernel_name = self._name
+        else:
+            self._kernel_name = f"{self._func.__name__}_{kernel_id}"
 
         ctx.register_kernel_tracker(self._kernel_name, self._location_tracker)
 
@@ -421,7 +425,7 @@ class KernelFunction:
 # =============================================================================
 
 
-def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction:
+def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[str] = None) -> KernelFunction:
     """Decorator for GPU kernel functions.
 
     Usage:
@@ -430,8 +434,8 @@ def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction
             # kernel body
             ...
 
-        # Or with arguments
-        @kernel(some_args=value)
+        # With explicit kernel name (visible in profiler):
+        @kernel(name="gemm_m16n128k128_bf16")
         def my_kernel(a: Tensor):
             ...
 
@@ -441,10 +445,12 @@ def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction
     Args:
         func: Function to decorate
         some_args: Optional kernel-specific arguments
+        name: Optional kernel name override; shown in profiler instead of the
+              Python function name. Tile/dtype info can be embedded here.
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args)
-    return KernelFunction(func, some_args=some_args)
+        return lambda f: KernelFunction(f, some_args=some_args, name=name)
+    return KernelFunction(func, some_args=some_args, name=name)
