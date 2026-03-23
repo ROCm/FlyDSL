@@ -668,7 +668,7 @@ def compile_moe_blockscale_gemm1(
                     _pre_n_block_up.append((expert_off_idx + inter_idx + _col_base_ni_pre) // c_128)
 
                 def load_scales_s1(k_base):
-                    all_combined = []
+                    all_scales = []
                     for sb in range_constexpr(sb_per_tile_s1):
                         kb = k_base // c_scale_block_k + fx.Index(sb)
                         sa_base_offset = kb * tokens_in
@@ -700,24 +700,8 @@ def compile_moe_blockscale_gemm1(
                             s_w_up = buffer_ops.buffer_load(sw_rsrc, sw_up_idx, vec_width=1, dtype=f32)
                             s_w_up_vals.append(s_w_up)
 
-                        # Combined: list of 4 f32 scalars per (mi, ni) — NOT vec4
-                        combined_gate = []
-                        combined_up = []
-                        for mi in range_constexpr(m_repeat):
-                            mi_gate = []
-                            mi_up = []
-                            for ni in range_constexpr(num_acc_n):
-                                cg_elems = []
-                                cu_elems = []
-                                for ii in range_constexpr(4):
-                                    cg_elems.append(ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_gate_vals[ni]))
-                                    cu_elems.append(ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_up_vals[ni]))
-                                mi_gate.append(cg_elems)  # list of 4 f32 scalars
-                                mi_up.append(cu_elems)    # list of 4 f32 scalars
-                            combined_gate.append(mi_gate)
-                            combined_up.append(mi_up)
-                        all_combined.append((combined_gate, combined_up))
-                    return all_combined
+                        all_scales.append((s_a_vecs, s_w_gate_vals, s_w_up_vals))
+                    return all_scales
 
                 def compute_tile_bs_s1(acc_gate_in, acc_up_in, b_gate_tile_in, b_up_tile_in,
                                        lds_base, pre_scales, *, a0_prefetch=None):
@@ -725,7 +709,7 @@ def compile_moe_blockscale_gemm1(
                     current_up = list(acc_up_in)
                     mfma_res_ty = vec4_f32
 
-                    def _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up):
+                    def _do_scale_fma_raw(block_gate_accs, block_up_accs, s_a_vecs, s_w_gate_vals, s_w_up_vals):
                         for mi in range_constexpr(m_repeat):
                             for ni in range_constexpr(num_acc_n):
                                 acc_idx = mi * num_acc_n + ni
@@ -736,8 +720,10 @@ def compile_moe_blockscale_gemm1(
                                     bu_i = vector.extract(block_up_accs[acc_idx],   static_position=[ii], dynamic_position=[])
                                     g_cur = vector.extract(current_gate[acc_idx], static_position=[ii], dynamic_position=[])
                                     u_cur = vector.extract(current_up[acc_idx],   static_position=[ii], dynamic_position=[])
-                                    new_g_elems.append(math_dialect.fma(bg_i, combined_gate[mi][ni][ii], g_cur))
-                                    new_u_elems.append(math_dialect.fma(bu_i, combined_up[mi][ni][ii],   u_cur))
+                                    sg = ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_gate_vals[ni])
+                                    su = ArithValue(s_a_vecs[mi][ii]) * ArithValue(s_w_up_vals[ni])
+                                    new_g_elems.append(math_dialect.fma(bg_i, sg, g_cur))
+                                    new_u_elems.append(math_dialect.fma(bu_i, su, u_cur))
                                 current_gate[acc_idx] = vector.from_elements(vec4_f32, new_g_elems)
                                 current_up[acc_idx]   = vector.from_elements(vec4_f32, new_u_elems)
 
@@ -750,7 +736,7 @@ def compile_moe_blockscale_gemm1(
                             return vector.bitcast(vec8_i32, v4)
 
                         for sb in range_constexpr(sb_per_tile_s1):
-                            combined_gate, combined_up = pre_scales[sb]
+                            s_a_vecs, s_w_gate_vals, s_w_up_vals = pre_scales[sb]
                             block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
                             block_up_accs = [acc_init] * (num_acc_n * m_repeat)
                             ku0 = sb * ku_per_sb_s1
@@ -781,7 +767,7 @@ def compile_moe_blockscale_gemm1(
                                         mfma_res_ty,
                                         [a128, bu128, block_up_accs[acc_idx],
                                          0, 0, 0, 0x7F7F7F7F, 0, 0x7F7F7F7F])
-                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
+                            _do_scale_fma_raw(block_gate_accs, block_up_accs, s_a_vecs, s_w_gate_vals, s_w_up_vals)
                     else:
                         mfma_fn = (
                             mfma_i32_k32
@@ -805,7 +791,7 @@ def compile_moe_blockscale_gemm1(
                             return mfma_fn(mfma_res_ty, [a1, b1, acc_mid, 0, 0, 0])
 
                         for sb in range_constexpr(sb_per_tile_s1):
-                            combined_gate, combined_up = pre_scales[sb]
+                            s_a_vecs, s_w_gate_vals, s_w_up_vals = pre_scales[sb]
                             block_gate_accs = [acc_init] * (num_acc_n * m_repeat)
                             block_up_accs = [acc_init] * (num_acc_n * m_repeat)
                             for ku_local in range_constexpr(ku_per_sb_s1):
@@ -825,7 +811,7 @@ def compile_moe_blockscale_gemm1(
                                         acc_idx = mi * num_acc_n + ni
                                         block_gate_accs[acc_idx] = mfma_k64(block_gate_accs[acc_idx], a0, a1, b_gate_packs0[ni], b_gate_packs1[ni])
                                         block_up_accs[acc_idx] = mfma_k64(block_up_accs[acc_idx], a0, a1, b_up_packs0[ni], b_up_packs1[ni])
-                            _do_scale_fma(block_gate_accs, block_up_accs, combined_gate, combined_up)
+                            _do_scale_fma_raw(block_gate_accs, block_up_accs, s_a_vecs, s_w_gate_vals, s_w_up_vals)
                     return current_gate, current_up
 
                 def compute_tile(
