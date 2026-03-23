@@ -21,7 +21,7 @@ def crd2idx(crd, layout):
     result = fx.crd2idx(crd, layout)
     scalar = fx.get_scalar(result)
     if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
-        scalar = _arith.IndexCastOp(ir.IndexType.get(), scalar).result
+        scalar = _arith.IndexCastOp(T.index, scalar).result
     return scalar
 
 

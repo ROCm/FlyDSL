@@ -281,14 +281,17 @@ def get_flat_coord(index, layout, loc=None, ip=None):
     return fly.get_flat_coord(index, layout, loc=loc, ip=ip)
 
 
+def _to_i32(v):
+    """Cast index-type ir.Value to i32 (required by fly.make_int_tuple)."""
+    if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):
+        return _arith.IndexCastOp(T.i32(), v).result
+    return v
+
+
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
     if isinstance(crd, (list, tuple)):
-        crd_i32 = []
-        for c in crd:
-            if isinstance(c, ir.Value) and isinstance(c.type, ir.IndexType):
-                c = _arith.IndexCastOp(ir.IntegerType.get_signless(32), c).result
-            crd_i32.append(c)
+        crd_i32 = [_to_i32(c) for c in crd]
         IntTupleTy, dyncElems = fly.infer_int_tuple_type(tuple(crd_i32))
         crd = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
@@ -297,8 +300,7 @@ def crd2idx(crd, layout, loc=None, ip=None):
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        if isinstance(idx.type, ir.IndexType):
-            idx = _arith.IndexCastOp(ir.IntegerType.get_signless(32), idx).result
+        idx = _to_i32(idx)
         IntTupleTy, dyncElems = fly.infer_int_tuple_type(idx)
         idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
@@ -311,7 +313,7 @@ def get(int_tuple, mode, loc=None, ip=None):
     selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
     result = fly.get_scalar(selected, loc=loc, ip=ip)
     if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
-        result = _arith.IndexCastOp(ir.IndexType.get(), result).result
+        result = _arith.IndexCastOp(T.index(), result).result
     return result
 
 
@@ -617,7 +619,7 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, _arith.constant(ir.IntegerType.get_signless(1), int(val)))
+            return (False, _arith.constant(T.bool(), int(val)))
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):

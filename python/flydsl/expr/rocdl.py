@@ -19,6 +19,7 @@ Example:
 
 from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
+from .._mlir.extras import types as T
 
 BufferCopy = lambda bit_size: CopyOpCDNA3BufferCopyType.get(bit_size)  # noqa: E731
 BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)  # noqa: E731
@@ -71,14 +72,11 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
 
     llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
     base = fly.extract_aligned_pointer_as_index(llvm_ptr_ty, raw_memref, loc=loc, ip=ip)
-    i16 = ir.IntegerType.get_signless(16)
-    i32 = ir.IntegerType.get_signless(32)
-    i64 = ir.IntegerType.get_signless(64)
-    stride = _arith.ConstantOp(i16, ir.IntegerAttr.get(i16, 0)).result
-    num_records = _arith.ConstantOp(i64, ir.IntegerAttr.get(i64, 0xFFFFFFFF)).result
+    stride = _arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
+    num_records = _arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), 0xFFFFFFFF)).result
     from .buffer_ops import _get_buffer_flags
 
-    flags = _arith.ConstantOp(i32, ir.IntegerAttr.get(i32, _get_buffer_flags())).result
+    flags = _arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), _get_buffer_flags())).result
 
     bd_ptr_type = fly.PointerType.get(
         elem_type,

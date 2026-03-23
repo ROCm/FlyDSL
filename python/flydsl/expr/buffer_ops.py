@@ -104,7 +104,7 @@ def _unwrap_value(value):
 
 def _create_i64_constant(value: int) -> ir.Value:
     """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = ir.IntegerType.get_signless(64)
+    i64_type = T.i64()
     attr = ir.IntegerAttr.get(i64_type, value)
     op = std_arith.ConstantOp(i64_type, attr)
     return op.result
@@ -112,7 +112,7 @@ def _create_i64_constant(value: int) -> ir.Value:
 
 def _create_i32_constant(value: int) -> ir.Value:
     """Create i32 constant using standard MLIR arith dialect."""
-    i32_type = ir.IntegerType.get_signless(32)
+    i32_type = T.i32()
     if value > 0x7FFFFFFF:
         value = int(value - 2**32)
     attr = ir.IntegerAttr.get(i32_type, value)
@@ -122,7 +122,7 @@ def _create_i32_constant(value: int) -> ir.Value:
 
 def _create_i16_constant(value: int) -> ir.Value:
     """Create i16 constant using standard MLIR arith dialect."""
-    i16_type = ir.IntegerType.get_signless(16)
+    i16_type = T.i16()
     attr = ir.IntegerAttr.get(i16_type, value)
     op = std_arith.ConstantOp(i16_type, attr)
     return _unwrap_value(op.result)
@@ -130,7 +130,7 @@ def _create_i16_constant(value: int) -> ir.Value:
 
 def _create_i64_constant(value: int) -> ir.Value:
     """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = ir.IntegerType.get_signless(64)
+    i64_type = T.i64()
     attr = ir.IntegerAttr.get(i64_type, value)
     op = std_arith.ConstantOp(i64_type, attr)
     return _unwrap_value(op.result)
@@ -140,7 +140,7 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     """Create an LLVM pointer from an integer or index value."""
     value = _unwrap_value(value)
     if isinstance(value.type, ir.IndexType):
-        i64_type = ir.IntegerType.get_signless(64)
+        i64_type = T.i64()
         value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
     ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
     return llvm.IntToPtrOp(ptr_type, value).result
@@ -162,7 +162,7 @@ def get_element_ptr(
             f"static_byte_offset must be int, got {type(static_byte_offset).__name__}"
         )
     if elem_type is None:
-        elem_type = ir.IntegerType.get_signless(8)
+        elem_type = T.i8()
     elif callable(elem_type):
         elem_type = elem_type()
 
@@ -175,7 +175,7 @@ def get_element_ptr(
     else:
         offset_val = _unwrap_value(byte_offset)
         if isinstance(offset_val.type, ir.IndexType):
-            i64_type = ir.IntegerType.get_signless(64)
+            i64_type = T.i64()
             offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
         elif not isinstance(offset_val.type, ir.IntegerType):
             raise TypeError(
@@ -285,7 +285,7 @@ class BufferResourceDescriptor:
                 num_records = _create_i64_constant(nbytes)
             else:
                 v = _unwrap_value(num_records_bytes)
-                i64_type = ir.IntegerType.get_signless(64)
+                i64_type = T.i64()
                 if not isinstance(v.type, ir.IntegerType) or v.type.width != 64:
                     if isinstance(v.type, ir.IndexType):
                         op = std_arith.IndexCastOp(i64_type, v)
@@ -380,7 +380,7 @@ def buffer_load(rsrc: ir.Value,
     """
     # Default dtype to f32
     if dtype is None:
-        dtype = ir.F32Type.get()
+        dtype = T.f32()
     # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
     elif hasattr(dtype, "ir_type"):
         dtype = dtype.ir_type
@@ -392,7 +392,7 @@ def buffer_load(rsrc: ir.Value,
     
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), offset)
+        op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
     
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
@@ -424,7 +424,7 @@ def buffer_load(rsrc: ir.Value,
         else:
             soffset = _unwrap_value(soffset_bytes)
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     
@@ -477,7 +477,7 @@ def buffer_store(data: ir.Value,
     
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), offset)
+        op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
     
     # IMPORTANT: RawPtrBufferStoreOp offset is in BYTES.
@@ -511,7 +511,7 @@ def buffer_store(data: ir.Value,
         else:
             soffset = _unwrap_value(soffset_bytes)
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     

@@ -442,13 +442,11 @@ def compile_blockscale_preshuffle_gemm(
         mfma_res_ty = T.f32x4
 
         if _is_gfx950:
-            vec4_i64 = T.vec(4, T.i64)
-            vec8_i32 = T.vec(8, T.i32)
             c0_i64 = arith.constant(0, type=T.i64)
 
             def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                return vector.bitcast(vec8_i32, v4)
+                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                return vector.bitcast(T.vec(8, T.i32), v4)
         else:
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -494,10 +492,9 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_b_vals.append(s_b_val)
 
-                vec4_f32 = T.f32x4
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
-                    s_b_vecs.append(vector.broadcast(vec4_f32, s_b_vals[ni]))
+                    s_b_vecs.append(vector.broadcast(T.f32x4, s_b_vals[ni]))
 
                 combined_scales = []
                 for mi in range_constexpr(m_repeat):
