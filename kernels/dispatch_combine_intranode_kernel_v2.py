@@ -47,6 +47,7 @@ from flydsl.expr.lowlevel import (
     store_i32_global,
     store_i32_system,
     store_i32_shmem,
+    store_i64_system,
     zext_i32_to_i64,
     const_i32,
     const_i64,
@@ -144,11 +145,12 @@ def make_dispatch_kernel(
         limit  = cur_tok * experts_per_token        # 外层循环总迭代数
 
         # 预计算各 PE 的 XGMI P2P 基地址（编译期展开，避免循环内重复调用 ptr_p2p）
-        rem_tok     = [mori_shmem.ptr_p2p(addr_out_tok, rank, pe) for pe in range(npes)]
-        rem_wts     = [mori_shmem.ptr_p2p(addr_out_wts, rank, pe) for pe in range(npes)]
-        rem_idx     = [mori_shmem.ptr_p2p(addr_out_idx, rank, pe) for pe in range(npes)]
-        rem_tis     = [mori_shmem.ptr_p2p(addr_tis,     rank, pe) for pe in range(npes)]
-        rem_tok_off = [mori_shmem.ptr_p2p(addr_tok_off, rank, pe) for pe in range(npes)]
+        rem_tok      = [mori_shmem.ptr_p2p(addr_out_tok,  rank, pe) for pe in range(npes)]
+        rem_wts      = [mori_shmem.ptr_p2p(addr_out_wts,  rank, pe) for pe in range(npes)]
+        rem_idx      = [mori_shmem.ptr_p2p(addr_out_idx,  rank, pe) for pe in range(npes)]
+        rem_tis      = [mori_shmem.ptr_p2p(addr_tis,      rank, pe) for pe in range(npes)]
+        rem_tok_off  = [mori_shmem.ptr_p2p(addr_tok_off,  rank, pe) for pe in range(npes)]
+        rem_recv_num = [mori_shmem.ptr_p2p(addr_recv_num, rank, pe) for pe in range(npes)]
 
         # ── Phase 1: 发送 token ───────────────────────────────────────────────
         for i in range(as_index(gw_id), as_index(limit), as_index(gw_num)):
@@ -254,7 +256,7 @@ def make_dispatch_kernel(
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
                 store_i32_at(addr_disp_bar, const_i32(0), const_i32(0))
                 nsig       = load_i32_at(addr_dest_ctr, dest_pe) + 1
-                rtn_remote = mori_shmem.ptr_p2p(addr_recv_num, rank, dest_pe) + rtn_local_off
+                rtn_remote = _sel_pe(rem_recv_num, dest_pe) + rtn_local_off
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
                 fence_one_as_seq_cst()
                 store_i32_system(rtn_remote, const_i32(0), nsig)
@@ -345,6 +347,9 @@ def make_combine_kernel(
                 store_v4i32_shmem(vec4, addr_comb_inp + tok_off + cj_off)
 
         # ── Stage 2: CrossDeviceBarrier ───────────────────────────────────────
+        # 预计算各 PE 的 xdev_bar_mem P2P 地址（编译期展开，与 mori AtomicStoreRelaxedSystem 对齐）
+        rem_xdb = [mori_shmem.ptr_p2p(addr_xdb_mem, rank, pe) for pe in range(npes)]
+
         sync_threads()
         if icmp_eq_i32(tid, const_i32(0)):
             atomic_add_i32_at(addr_comb_bar, const_i32(1))
@@ -352,13 +357,12 @@ def make_combine_kernel(
         if icmp_ult_i32(gwtid, const_i32(npes)):
             mori_shmem.int32_wait_until_equals(addr_comb_bar, block_num)
             store_i32_at(addr_comb_bar, const_i32(0), const_i32(0))
-            # Stage 2 信令：保留 uint64_p（NIC put 路由，内部处理 P2P 寻址）。
-            # 注意：不预计算 rem_xdb 列表（节省 16 VGPR），直接用 local xdb_sym。
-            # 动态 ptr_p2p(addr_xdb_mem, rank, gwtid) 对某些 rank-pe 组合返回无效地址，
-            # 故不能替换为 store_i64_system(ptr_p2p(...), ...)。
+            # 与 mori CrossDeviceBarrier 对齐：__threadfence_system() + AtomicStoreRelaxedSystem。
+            # 使用 store_i64_system（flat_store sc0 sc1 monotonic one-as）替代 uint64_p，
+            # 避免 uint64_p 链接 __assert_fail → amdhsa_uses_dynamic_stack=1 → launch failure。
             fence_one_as_seq_cst()
-            xdb_sym = addr_xdb_mem + zext_i32_to_i64(const_i32(rank)) * 8
-            mori_shmem.uint64_p(xdb_sym, cur_flag, gwtid, 0)
+            xdb_remote = _sel_pe(rem_xdb, gwtid) + zext_i32_to_i64(const_i32(rank)) * 8
+            store_i64_system(xdb_remote, cur_flag)
 
         if icmp_ult_i32(tid, const_i32(npes)):
             peer_slot = addr_xdb_mem + zext_i32_to_i64(tid) * 8

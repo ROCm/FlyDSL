@@ -476,7 +476,7 @@ def _parse_args():
     p.add_argument("--hidden-dim",           type=int, default=7168)
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k",                    type=int, default=8)
-    p.add_argument("--block-num",            type=int, default=16)
+    p.add_argument("--block-num",            type=int, default=80)
     p.add_argument("--warp-per-block",       type=int, default=4)
     p.add_argument("--combine-warp-per-block", type=int, default=0,
                    help="combine 内核专用 warp_per_block（0=与 --warp-per-block 相同）")

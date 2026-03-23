@@ -36,8 +36,7 @@ class FlyDSLDispatchCombineConfigV2:
     warp_num_per_block: int = 16
     block_num: int = 80
     chip: str = "gfx942"
-    # combine 内核可独立设置 warp_num_per_block（dispatch 因已知 P2P bug 限制为 ≤4）
-    # None 表示与 warp_num_per_block 相同；建议设为 8 以对齐 mori 默认配置
+    # combine 内核可独立设置 warp_num_per_block。None 表示与 warp_num_per_block 相同。
     combine_warp_num_per_block: int = None
 
     @property
@@ -65,24 +64,13 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._dev = torch.device("cuda", config.rank)
         r = config.rank
 
-        # 已知 BUG：dispatch kernel 在 warp_num_per_block >= 5 时出现 XGMI P2P 死锁。
-        # 根本原因：Phase 2 的 store_i32_system(ptr_p2p_addr) 对某些 rank-PE 组合
-        # 返回无效地址（p2pPeerPtrs 为 0），写操作访问非法地址或信号不可见。
-        # 安全配置：warp_num_per_block <= 4。使用大 block_num（如 bn=80）时保持 wpb=4。
-        if config.warp_num_per_block > 4 and r == 0:
-            import warnings
-            warnings.warn(
-                f"[FlyDSL] warp_num_per_block={config.warp_num_per_block} > 4 会导致 "
-                f"dispatch kernel 死锁（已知 XGMI P2P bug）。请使用 warp_num_per_block=4。",
-                stacklevel=2
-            )
-
         # 先分配 symmetric buffer（顺序：alloc → barrier → compile）
         self._alloc_buffers()
         ms.shmem_barrier_all()
 
         # 创建 @flyc.jit launcher（首次调用时自动编译 + shmem_module_init）
-        print(f"[v2] Rank {r}: creating v2 dispatch jit...")
+        _disp_wpb = config.warp_num_per_block
+        print(f"[v2] Rank {r}: creating v2 dispatch jit (warp_per_block={_disp_wpb})...")
         self._disp_fn = make_dispatch_jit(
             rank=r, npes=config.world_size,
             experts_per_rank=config.num_experts_per_rank,
@@ -90,11 +78,10 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             hidden_dim=config.hidden_dim,
             max_tok_per_rank=config.max_num_inp_token_per_rank,
             block_num=config.block_num,
-            warp_num_per_block=config.warp_num_per_block,
+            warp_num_per_block=_disp_wpb,
             data_type=config.data_type,
         )
 
-        # combine 可独立使用更大的 warp_num_per_block（不受 dispatch P2P bug 限制）
         _comb_wpb = (config.combine_warp_num_per_block
                      if config.combine_warp_num_per_block is not None
                      else config.warp_num_per_block)

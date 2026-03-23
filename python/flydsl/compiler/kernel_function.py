@@ -299,40 +299,12 @@ class KernelLauncher:
         kernel_name: str,
         kernel_args: Tuple,
         call_location: Optional[ir.Location] = None,
-        known_block_size: Optional[List[int]] = None,
+        gpu_func_op=None,
     ):
         self._kernel_name = kernel_name
         self._kernel_args = kernel_args
         self._call_location = call_location
-        self._known_block_size = known_block_size
-
-    def _check_block_vs_known(self, block_dims: Tuple) -> None:
-        """Raise when statically-known *block* dims are invalid for AMDGPU."""
-        if self._known_block_size is None:
-            # Without known_block_size the AMDGPU backend assumes
-            # max_flat_workgroup_size = 256.  Error if the launch exceeds that.
-            if all(isinstance(v, int) for v in block_dims):
-                total = block_dims[0] * block_dims[1] * block_dims[2]
-                if total > 256:
-                    raise ValueError(
-                        f"launch block size {block_dims[0]}x{block_dims[1]}x{block_dims[2]}"
-                        f" = {total} threads exceeds the AMDGPU default "
-                        f"max_flat_workgroup_size of 256. "
-                        f"Add known_block_size=[{block_dims[0]}, {block_dims[1]}, {block_dims[2]}] "
-                        f"to @kernel for kernel '{self._kernel_name}'."
-                    )
-            return
-
-        labels = ("x", "y", "z")
-        for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
-            if isinstance(launch_val, int) and launch_val != declared:
-                raise ValueError(
-                    f"launch block {labels[i]}={launch_val} differs from "
-                    f"known_block_size {labels[i]}={declared} declared on "
-                    f"kernel '{self._kernel_name}'. "
-                    f"This produces an internally-inconsistent IR and is "
-                    f"undefined behavior on AMDGPU."
-                )
+        self._gpu_func_op = gpu_func_op
 
     def launch(
         self,
@@ -362,7 +334,17 @@ class KernelLauncher:
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
 
-        self._check_block_vs_known(block_dims)
+        # Set gpu.known_block_size on the kernel function so that
+        # convert-gpu-to-rocdl derives the correct max_flat_workgroup_size
+        # in the HSACO metadata (default is 256 which blocks launches > 256 threads).
+        if self._gpu_func_op is not None:
+            const_block = []
+            for d in block_dims:
+                if isinstance(d, int):
+                    const_block.append(d)
+            if len(const_block) == 3:
+                self._gpu_func_op.attributes["known_block_size"] = \
+                    ir.DenseI32ArrayAttr.get(const_block)
 
         with launch_loc:
             grid_x = _to_index_value(grid_dims[0])
@@ -441,11 +423,12 @@ class KernelFunction:
             return True
         return get_origin(annotation) is Constexpr
 
-    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict) -> Tuple[Any, ...]:
+    def _emit_kernel(self, ctx: CompilationContext, args: Tuple, kwargs: Dict):
         """Emit gpu.func for this kernel into the GPU module.
 
         Returns:
-            Tuple of non-constexpr argument values for use in launch.
+            (kernel_args, gpu_func_op) — kernel_args is a tuple of non-constexpr
+            argument values for use in launch; gpu_func_op is the gpu.func operation.
         """
         sig = inspect.signature(self._func)
         bound = sig.bind(*args, **kwargs)
@@ -502,7 +485,7 @@ class KernelFunction:
                 self._func(**dsl_args)
                 gpu.ReturnOp([])
 
-        return tuple(param_values)
+        return tuple(param_values), gpu_func
 
     def __call__(self, *args, **kwargs) -> KernelLauncher:
         ctx = CompilationContext.get_current()
@@ -511,9 +494,9 @@ class KernelFunction:
 
         call_loc = create_caller_location(depth=2)
 
-        kernel_args = self._emit_kernel(ctx, args, kwargs)
+        kernel_args, gpu_func_op = self._emit_kernel(ctx, args, kwargs)
 
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, gpu_func_op=gpu_func_op)
 
 
 # =============================================================================
