@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
-
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -32,7 +31,7 @@ using namespace mlir::fly;
 
 namespace {
 
-static unsigned mapAddressSpace(AddressSpace space) {
+inline unsigned mapToLLVMAddressSpace(AddressSpace space) {
   switch (space) {
   case AddressSpace::Global:
     return 1;
@@ -128,7 +127,21 @@ public:
     AddressSpace addrSpace = flyPtrTy.getAddressSpace().getValue();
     auto args = adaptor.getArgs();
 
-    if (addrSpace == AddressSpace::BufferDesc) {
+    if (addrSpace == AddressSpace::Register) {
+      auto dictAttrs = op.getDictAttrs();
+      if (!dictAttrs)
+        return rewriter.notifyMatchFailure(op, "register make_ptr requires dictAttrs");
+      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocaSize");
+      if (!allocSize)
+        return rewriter.notifyMatchFailure(op, "register make_ptr requires allocSize in ptrAttrs");
+      unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
+      auto llvmPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
+      Value nElems =
+          arith::ConstantIntOp::create(rewriter, loc, allocSize.getInt(), 64).getResult();
+      Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, flyPtrTy.getElemTy(), nElems, 0);
+      rewriter.replaceOp(op, ptr);
+      return success();
+    } else if (addrSpace == AddressSpace::BufferDesc) {
       if (args.size() != 4)
         return rewriter.notifyMatchFailure(
             op, "buffer_rsrc make_ptr expects 4 args: base, stride, numRecords, flags");
@@ -197,49 +210,6 @@ public:
       return failure();
 
     rewriter.replaceOpWithNewOp<LLVM::PtrToIntOp>(op, resultTy, adaptor.getPtr());
-    return success();
-  }
-};
-
-class MemRefAllocOpLowering : public OpConversionPattern<MemRefAllocaOp> {
-public:
-  MemRefAllocOpLowering(const TypeConverter &typeConverter, MLIRContext *context)
-      : OpConversionPattern<MemRefAllocaOp>(typeConverter, context) {}
-
-  LogicalResult matchAndRewrite(MemRefAllocaOp op, OpAdaptor adaptor,
-                                ConversionPatternRewriter &rewriter) const override {
-    auto flyMemRefTy = dyn_cast<fly::MemRefType>(op.getResult().getType());
-    if (!flyMemRefTy)
-      return failure();
-
-    LayoutAttr layoutAttr = cast<LayoutAttr>(flyMemRefTy.getLayout());
-    AddressSpace addrSpace = flyMemRefTy.getAddressSpace().getValue();
-    if (addrSpace != AddressSpace::Register) {
-      return rewriter.notifyMatchFailure(op, "memref.alloca only supports register address space");
-    }
-    auto elemTy = flyMemRefTy.getElemTy();
-
-    LayoutBuilder<LayoutAttr> builder(rewriter.getContext());
-    IntTupleAttr totalSize = layoutCosize(builder, layoutAttr);
-
-    assert(totalSize.isStatic() && totalSize.isLeaf());
-
-    auto convertedPtrTy =
-        dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyMemRefTy));
-    if (!convertedPtrTy)
-      return failure();
-
-    auto loc = op.getLoc();
-
-    // Alloca array size is i64.
-    Value nElems = arith::ConstantIntOp::create(rewriter, loc, totalSize.getLeafAsInt().getValue(),
-                                                /*width=*/64)
-                       .getResult();
-
-    // `llvm.alloca` takes element type and array size. Keep alignment unspecified.
-    Value ptr = LLVM::AllocaOp::create(rewriter, loc, convertedPtrTy, elemTy, nElems,
-                                       /*alignment=*/0);
-    rewriter.replaceOp(op, ptr);
     return success();
   }
 };
@@ -913,13 +883,13 @@ public:
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (flyMemRefTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
         return getBufferFatPtrType(flyMemRefTy.getContext());
-      unsigned as = mapAddressSpace(flyMemRefTy.getAddressSpace().getValue());
+      unsigned as = mapToLLVMAddressSpace(flyMemRefTy.getAddressSpace().getValue());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
         return getBufferFatPtrType(flyPtrTy.getContext());
-      unsigned as = mapAddressSpace(flyPtrTy.getAddressSpace().getValue());
+      unsigned as = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
   }
@@ -958,8 +928,8 @@ public:
 
     target.addLegalDialect<arith::ArithDialect, scf::SCFDialect, vector::VectorDialect,
                            gpu::GPUDialect, func::FuncDialect, LLVM::LLVMDialect,
-                           ROCDL::ROCDLDialect, fly_rocdl::FlyROCDLDialect>();
-    target.addIllegalDialect<fly::FlyDialect>();
+                           ROCDL::ROCDLDialect>();
+    target.addIllegalDialect<fly::FlyDialect, fly_rocdl::FlyROCDLDialect>();
 
     // Constructors
     target.addLegalOp<StaticOp, MakeIntTupleOp, MakeLayoutOp, MakeTileOp, MakeComposedLayoutOp>();
@@ -1005,7 +975,6 @@ public:
 
     patterns.add<MakePtrOpLowering>(typeConverter, context);
     patterns.add<IntToPtrOpLowering, PtrToIntOpLowering>(typeConverter, context);
-    patterns.add<MemRefAllocOpLowering>(typeConverter, context);
     patterns.add<GetIterOpLowering>(typeConverter, context);
     patterns.add<AddOffsetOpLowering>(typeConverter, context);
     patterns.add<MakeViewOpLowering>(typeConverter, context);

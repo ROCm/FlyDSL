@@ -358,12 +358,12 @@ def Fly_MakeTiledMmaOp : Fly_Op<"make_tiled_mma", [Pure, DeclareOpInterfaceMetho
 }
 
 def Fly_TiledCopyPartitionSrcOp : Fly_Op<"tiled_copy.partition_src", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$src, Fly_IntTuple:$coord);
-  let results = (outs Fly_MemRef:$result);
+  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_TensorLikeType:$src, Fly_IntTuple:$coord);
+  let results = (outs Fly_TensorLikeType:$result);
 }
 def Fly_TiledCopyPartitionDstOp : Fly_Op<"tiled_copy.partition_dst", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$dst, Fly_IntTuple:$coord);
-  let results = (outs Fly_MemRef:$result);
+  let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_TensorLikeType:$dst, Fly_IntTuple:$coord);
+  let results = (outs Fly_TensorLikeType:$result);
 }
 def Fly_TiledCopyRetileOp : Fly_Op<"tiled_copy.retile", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_TiledCopy:$tiledCopy, Fly_MemRef:$input);
@@ -372,8 +372,8 @@ def Fly_TiledCopyRetileOp : Fly_Op<"tiled_copy.retile", [Pure, DeclareOpInterfac
 
 def Fly_TiledMmaPartitionOp : Fly_Op<"tiled_mma.partition", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma,
-                       Fly_MemRef:$input, Fly_IntTuple:$coord);
-  let results = (outs Fly_MemRef:$result);
+                       Fly_TensorLikeType:$input, Fly_IntTuple:$coord);
+  let results = (outs Fly_TensorLikeType:$result);
 }
 def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma.partition_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_IntTuple:$shape);
@@ -397,7 +397,7 @@ def Fly_GemmOp : Fly_Op<"gemm"> {
 //===----------------------------------------------------------------------===//
 
 def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
-  let arguments = (ins Variadic<AnyType>:$args);
+  let arguments = (ins Variadic<AnyType>:$args, OptionalAttr<DictionaryAttr>:$dictAttrs);
   let results = (outs Fly_Pointer:$result);
 }
 def Fly_IntToPtrOp : Fly_Op<"inttoptr", [Pure]> {

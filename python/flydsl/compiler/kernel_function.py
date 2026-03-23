@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import inspect
+import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
 
@@ -173,6 +174,30 @@ class CompilationContext:
     """
 
     _current: Optional["CompilationContext"] = None
+
+    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    _compile_hints = threading.local()
+
+    @classmethod
+    @contextmanager
+    def compile_hints(cls, hints: dict):
+        """Context manager for setting compiler hints (thread-safe).
+
+        Usage:
+            with CompilationContext.compile_hints({"waves_per_eu": 2}):
+                fn(*args, **kwargs)
+        """
+        prev = getattr(cls._compile_hints, 'data', None)
+        cls._compile_hints.data = hints
+        try:
+            yield
+        finally:
+            cls._compile_hints.data = prev
+
+    @classmethod
+    def get_compile_hints(cls):
+        """Get compiler hints for the current thread, or empty dict."""
+        return getattr(cls._compile_hints, 'data', None) or {}
 
     def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
         self.gpu_module_op = None

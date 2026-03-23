@@ -253,12 +253,9 @@ public:
     memrefDesc_.memrefType =
         fly::MemRefType::get(getElementType(), addrSpaceAttr, layoutAttr, alignAttr);
 
-    // Get data pointer (with byte offset applied)
     memrefDesc_.dataPtr =
         static_cast<void *>(static_cast<char *>(tensor_->data) + tensor_->byte_offset);
 
-    // Build packed layout struct for dynamic elements
-    // Layout: [shape_dync_elems (i32)...][stride_dync_elems (i32 or i64)...]
     size_t strideElemSize = use32BitStride_ ? sizeof(int32_t) : sizeof(int64_t);
     size_t layoutSize = shapeDyncCount * sizeof(int32_t) + strideDyncCount * strideElemSize;
 
@@ -266,7 +263,6 @@ public:
       memrefDesc_.layoutBuffer.resize(layoutSize);
       char *ptr = memrefDesc_.layoutBuffer.data();
 
-      // Pack dynamic shape elements (i32)
       for (int i = 0; i < ndim_; ++i) {
         if (shape_[i].isDynamic) {
           int32_t val = static_cast<int32_t>(shape_[i].dimSize);
@@ -274,7 +270,6 @@ public:
           ptr += sizeof(int32_t);
         }
       }
-      // Pack dynamic stride elements (i32 or i64)
       for (int i = 0; i < ndim_; ++i) {
         if (stride_[i].isDynamic) {
           if (use32BitStride_) {
@@ -306,9 +301,7 @@ public:
       throw std::runtime_error("Memref descriptor is stale");
     }
     nb::list result;
-    // Add data pointer as integer
     result.append(nb::int_(reinterpret_cast<intptr_t>(&memrefDesc_.dataPtr)));
-    // If layout has dynamic elements, add layout struct pointer
     if (!memrefDesc_.layoutBuffer.empty()) {
       result.append(nb::int_(reinterpret_cast<intptr_t>(memrefDesc_.layoutBuffer.data())));
     }

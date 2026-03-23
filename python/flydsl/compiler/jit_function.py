@@ -16,8 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
+from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
@@ -129,6 +129,8 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
     if visited is None:
         visited = set()
     sources = []
+
+    # 1) Scan global name references (co_names → __globals__)
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -143,6 +145,27 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # 2) Scan closure variables (co_freevars → __closure__) for callable
+    #    dependencies.  This catches @flyc.kernel functions defined in an
+    #    enclosing scope and captured by the @flyc.jit launcher via closure.
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
 
 
@@ -254,8 +277,9 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
+        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -299,9 +323,20 @@ def _sanitize_path_component(s: str) -> str:
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
+        from .kernel_function import CompilationContext
+        hints = CompilationContext.get_compile_hints()
+        waves_per_eu = hints.get('waves_per_eu')
+        maxnreg = hints.get('maxnreg')
+
+        # Build compiler option flags for gpu-module-to-binary
+        debug_opt = "-g" if env.debug.enable_debug_info else ""
+        wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
+        maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
+        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
+
         wave64 = "false" if is_rdna_arch(chip) else "true"
         return [
-            "gpu-kernel-outlining{data-layout-str=}",
+            "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
             "convert-fly-to-rocdl",
@@ -316,7 +351,8 @@ class MlirCompiler:
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
+            *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
+            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
         ]
 
     @classmethod

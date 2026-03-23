@@ -279,7 +279,7 @@ def test_mfma_w4_flyc_preshuffle(
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     use_cshuffle_epilog: bool = False,
     waves_per_eu: int = 0,
-
+    use_async_copy: bool = False,
 ):
     """FP4 (MXFP4) preshuffle GEMM — gfx950 only."""
     if get_rocm_arch() != "gfx950":
@@ -291,14 +291,18 @@ def test_mfma_w4_flyc_preshuffle(
     print(f"MFMA MXFP4 GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
 
+    _wpe = int(waves_per_eu) if waves_per_eu else 0
+    _wpe = None if _wpe <= 0 else _wpe
     launch_fn = compile_preshuffle_gemm_w4(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         a_dtype=a_dtype, b_dtype=b_dtype,
         out_dtype=out_dtype, lds_stage=lds_stage,
-        waves_per_eu=waves_per_eu,
+        use_cshuffle_epilog=bool(use_cshuffle_epilog),
+        waves_per_eu=_wpe,
+        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (lds_stage={lds_stage})")
+    print(f"✓ Compiled (lds_stage={lds_stage}, async_copy={use_async_copy}, waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
     M_align_32 = (M + 31) // 32 * 32
@@ -426,7 +430,10 @@ if __name__ == "__main__":
                 lds_stage=args.lds_stage,
                 bench_iters=args.num_iters,
                 bench_warmup=args.num_warmup,
+                run_aiter_bench=bool(args.run_aiter_bench),
+                use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
                 waves_per_eu=int(args.waves_per_eu),
+                use_async_copy=bool(args.use_async_copy),
             )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")

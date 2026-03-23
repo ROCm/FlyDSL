@@ -20,6 +20,7 @@ from flydsl.expr import buffer_ops, rocdl
 
 from flydsl.expr.typing import T
 from flydsl.compiler.protocol import fly_values
+from typing import Optional
 
 from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
@@ -48,7 +49,7 @@ def compile_preshuffle_gemm_a8(
     out_dtype: str = "fp16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: int = None,
+    waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
@@ -517,9 +518,15 @@ def compile_preshuffle_gemm_a8(
             )
 
         def dma_a_tile_to_lds(base_k_div4, lds_buffer):
-            from flydsl._mlir.dialects import llvm, memref as memref_dialect
+            from flydsl._mlir.dialects import memref as memref_dialect
 
             dma_bytes = a_async_load_bytes
+            wave_offset = rocdl.readfirstlane(
+                T.i64,
+                arith.index_cast(
+                    T.i64, wave_id * arith.constant(wave_size * dma_bytes, index=True)
+                ),
+            )
 
             for i in range_constexpr(num_a_async_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
@@ -529,12 +536,14 @@ def compile_preshuffle_gemm_a8(
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
 
                 if i == 0:
-                    lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * wave_size * dma_bytes
-                    lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
+                    lds_base = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
+                    lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
+                    lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, wave_offset)
                 else:
-                    lds_ptr_i64_lane0 += total_threads * dma_bytes
-                lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64_lane0)
+                    lds_ptr = buffer_ops.get_element_ptr(
+                        lds_ptr,
+                        static_byte_offset=total_threads * dma_bytes,
+                    )
 
                 size_i32 = arith.constant(dma_bytes, type=T.i32)
                 soffset = arith.constant(0, type=T.i32)
@@ -908,7 +917,7 @@ def compile_preshuffle_gemm_a8(
                     rocdl.sched_mfma(mfma_group)
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
+                    if not use_async_copy and sche_i >= dswr_start - 1:
                         rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
                 return
@@ -975,13 +984,18 @@ def compile_preshuffle_gemm_a8(
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 dsrd_preload = 2
+                dvmem_preload = 2
                 if dsrd_preload > num_ds_load:
                     dsrd_preload = num_ds_load
+                if dvmem_preload > num_gmem_loads:
+                    dvmem_preload = num_gmem_loads
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload, mfma_total)
                 dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
-                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
 
                 idx_ds_read = dsrd_preload
-                idx_gmem_load = 0
+                idx_gmem_load = dvmem_preload
+                if dvmem_preload:
+                    rocdl.sched_vmem(dvmem_preload)
                 if dsrd_preload:
                     rocdl.sched_dsrd(dsrd_preload)
                 for mfma_idx in range_constexpr(mfma_total):
@@ -1312,7 +1326,8 @@ def compile_preshuffle_gemm_w4(
     out_dtype: str = "bf16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: int = None,
+    waves_per_eu: Optional[int] = None,
+    use_async_copy: bool = False,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
@@ -1327,6 +1342,7 @@ def compile_preshuffle_gemm_w4(
         out_dtype=out_dtype,
         use_cshuffle_epilog=use_cshuffle_epilog,
         waves_per_eu=waves_per_eu,
+        use_async_copy=use_async_copy,
     )
     return inner
 

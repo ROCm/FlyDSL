@@ -12,6 +12,7 @@ Usage:
     r = arith.select(cond, a, b)
     # ArithValue operator overloading: c + 1, c * 2, c / 4, c % 16
 """
+from .meta import traced_op
 from .utils.arith import (  # noqa: F401
     ArithValue,
     constant,
@@ -33,6 +34,7 @@ from .utils.arith import (  # noqa: F401
 from .._mlir.dialects import arith as _mlir_arith  # noqa: E402
 
 
+@traced_op
 def cmpi(predicate, lhs, rhs, **kwargs):
     """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
 
@@ -47,6 +49,7 @@ def cmpi(predicate, lhs, rhs, **kwargs):
     return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 
 
+@traced_op
 def cmpf(predicate, lhs, rhs, **kwargs):
     """Floating-point comparison accepting DSL numeric types.
 

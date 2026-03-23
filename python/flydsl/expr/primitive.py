@@ -545,7 +545,10 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 @traced_op
 def copy_atom_call(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
-    return fly.copy_atom_call(copy_atom, src, dst, pred=pred, loc=loc, ip=ip)
+    kwargs = dict(loc=loc, ip=ip)
+    if pred is not None:
+        kwargs["pred"] = pred
+    return fly.copy_atom_call(copy_atom, src, dst, **kwargs)
 
 
 @traced_op

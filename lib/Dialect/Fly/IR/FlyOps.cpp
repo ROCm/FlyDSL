@@ -103,6 +103,28 @@ Type applyOffsetOnMemRef(LayoutBuilder<LayoutAttr> &builder, fly::MemRefType mem
   }
 }
 
+Type applyOffsetOnCoordTensor(LayoutBuilder<LayoutAttr> &builder, CoordTensorType coordTensorTy,
+                              IntTupleAttr offset, LayoutAttr layoutAttr) {
+  if (auto composed = dyn_cast<ComposedLayoutAttr>(coordTensorTy.getLayout())) {
+    IntTupleAttr newOffset = intTupleAdd(builder, composed.getOffset(), offset);
+    Attribute newLayout = ComposedLayoutAttr::get(composed.getInner(), newOffset, layoutAttr);
+    return CoordTensorType::get(coordTensorTy.getBase(), newLayout);
+  } else {
+    IntTupleAttr newBase = intTupleAdd(builder, coordTensorTy.getBase(), offset);
+    return CoordTensorType::get(newBase, layoutAttr);
+  }
+}
+
+Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLikeTy,
+                             IntTupleAttr offset, LayoutAttr layoutAttr) {
+  if (auto memrefTy = dyn_cast<fly::MemRefType>(tensorLikeTy))
+    return applyOffsetOnMemRef(builder, memrefTy, offset, layoutAttr);
+  if (auto coordTensorTy = dyn_cast<CoordTensorType>(tensorLikeTy)) {
+    return applyOffsetOnCoordTensor(builder, coordTensorTy, offset, layoutAttr);
+  }
+  llvm_unreachable("Unsupported tensor like type");
+}
+
 } // namespace
 
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
@@ -1384,16 +1406,12 @@ FLY_INFER_RETURN_TYPES(MakeTiledMmaOp) {
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  Type srcTy = operands[1].getType();
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledCopyTy)
     return emitOptionalError(location,
                              "TiledCopyPartitionSrcOp: expected TiledCopyType for operand #0, got ",
                              operands[0].getType());
-  if (!memrefTy)
-    return emitOptionalError(location,
-                             "TiledCopyPartitionSrcOp: expected MemRefType for operand #1, got ",
-                             operands[1].getType());
   if (!thrIdxTy)
     return emitOptionalError(location,
                              "TiledCopyPartitionSrcOp: expected IntTupleType for operand #2, got ",
@@ -1408,10 +1426,10 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
 
-  LayoutAttr srcLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
+  LayoutAttr srcLayout = GetLayoutAttrFromLayoutLikeType(srcTy);
   if (!srcLayout)
-    return emitOptionalError(location,
-                             "TiledCopyPartitionSrcOp: unsupported layout type for operand #1");
+    return emitOptionalError(
+        location, "TiledCopyPartitionSrcOp: expected TensorLikeType for operand #1, got ", srcTy);
 
   LayoutBuilder<LayoutAttr> builder(context);
   LayoutAttr thrValView =
@@ -1433,22 +1451,18 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionSrcOp) {
   IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
   IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
   IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
+  inferredReturnTypes.assign({applyOffsetOnTensorLike(builder, srcTy, offset, partitioned)});
   return success();
 }
 
 FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   auto tiledCopyTy = dyn_cast<TiledCopyType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  Type dstTy = operands[1].getType();
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledCopyTy)
     return emitOptionalError(location,
                              "TiledCopyPartitionDstOp: expected TiledCopyType for operand #0, got ",
                              operands[0].getType());
-  if (!memrefTy)
-    return emitOptionalError(location,
-                             "TiledCopyPartitionDstOp: expected MemRefType for operand #1, got ",
-                             operands[1].getType());
   if (!thrIdxTy)
     return emitOptionalError(location,
                              "TiledCopyPartitionDstOp: expected IntTupleType for operand #2, got ",
@@ -1463,7 +1477,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   TileAttr tileMN = tiledCopyTy.getTileMN().getAttr();
   IntTupleAttr thrIdx = thrIdxTy.getAttr();
 
-  LayoutAttr dstLayout = GetLayoutAttrFromLayoutLikeType(operands[1].getType());
+  LayoutAttr dstLayout = GetLayoutAttrFromLayoutLikeType(dstTy);
   if (!dstLayout)
     return emitOptionalError(location,
                              "TiledCopyPartitionDstOp: unsupported layout type for operand #1");
@@ -1488,7 +1502,7 @@ FLY_INFER_RETURN_TYPES(TiledCopyPartitionDstOp) {
   IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
   IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
   IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
+  inferredReturnTypes.assign({applyOffsetOnTensorLike(builder, dstTy, offset, partitioned)});
   return success();
 }
 
@@ -1503,11 +1517,6 @@ FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
     return emitOptionalError(location,
                              "TiledCopyRetileOp: expected MemRefType for operand #1, got ",
                              operands[1].getType());
-  if (memrefTy.getAddressSpace().getValue() != AddressSpace::Register)
-    return emitOptionalError(
-        location, "TiledCopyRetileOp: expected Register address space for operand #1, got ",
-        memrefTy.getAddressSpace());
-
   auto copyAtom = dyn_cast<CopyAtomType>(tiledCopyTy.getCopyAtom());
   if (!copyAtom)
     return emitOptionalError(location,
@@ -1530,16 +1539,12 @@ FLY_INFER_RETURN_TYPES(TiledCopyRetileOp) {
 FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   auto operandId = properties.as<Properties *>()->operand_id.getValue();
   auto tiledMmaTy = dyn_cast<TiledMmaType>(operands[0].getType());
-  auto memrefTy = dyn_cast<MemRefType>(operands[1].getType());
+  Type inputTy = operands[1].getType();
   auto thrIdxTy = dyn_cast<IntTupleType>(operands[2].getType());
   if (!tiledMmaTy)
     return emitOptionalError(location,
                              "TiledMmaPartitionOp: expected TiledMmaType for operand #0, got ",
                              operands[0].getType());
-  if (!memrefTy)
-    return emitOptionalError(location,
-                             "TiledMmaPartitionOp: expected MemRefType for operand #1, got ",
-                             operands[1].getType());
   if (!thrIdxTy)
     return emitOptionalError(location,
                              "TiledMmaPartitionOp: expected IntTupleType for operand #2, got ",
@@ -1553,7 +1558,7 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
 
   LayoutAttr atomLayout = tiledMmaTy.getAtomLayout().getAttr();
   TileAttr permutationMNK = tiledMmaTy.getPermutation().getAttr();
-  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(memrefTy);
+  LayoutAttr inputLayout = GetLayoutAttrFromLayoutLikeType(inputTy);
   if (!inputLayout)
     return emitOptionalError(location,
                              "TiledMmaPartitionOp: unsupported layout type for operand #1");
@@ -1576,7 +1581,7 @@ FLY_INFER_RETURN_TYPES(TiledMmaPartitionOp) {
   IntTupleAttr thrShape = builder.at(thrValView.getShape(), 0);
   IntTupleAttr thrStride = builder.at(thrValView.getStride(), 0);
   IntTupleAttr offset = layoutCrd2Idx(builder, thrIdx, thrShape, thrStride);
-  inferredReturnTypes.assign({applyOffsetOnMemRef(builder, memrefTy, offset, partitioned)});
+  inferredReturnTypes.assign({applyOffsetOnTensorLike(builder, inputTy, offset, partitioned)});
   return success();
 }
 
@@ -1754,6 +1759,10 @@ FLY_INFER_RETURN_TYPES(ApplySwizzleOp) {
   if (!swizzleTy)
     return emitOptionalError(location, "ApplySwizzleOp: expected SwizzleType, got ",
                              operands[1].getType());
+  if (ptrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc &&
+      !swizzleTy.getAttr().isTrivialSwizzle())
+    return emitOptionalError(location,
+                             "ApplySwizzleOp: BufferDesc pointer does not support swizzle");
   int32_t valDiv = ptrTy.getValueDivisibility();
   int32_t newValDiv = utils::divisibilityApplySwizzle(valDiv, swizzleTy.getAttr());
   inferredReturnTypes.assign(
