@@ -119,6 +119,9 @@ def build_flash_attn_func_module_primary(
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
     assert dtype_str in ("f16", "bf16"), "flash_attn_func supports f16 and bf16"
+    assert flat_work_group_size == 512, (
+        f"Only flat_work_group_size=512 is supported, got {flat_work_group_size}"
+    )
     assert BLOCK_N % 32 == 0
     assert BLOCK_N_OUT % BLOCK_N == 0
 
