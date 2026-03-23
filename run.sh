@@ -33,10 +33,13 @@ function run_flydsl_op {
     # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_v_interleave.sh
     # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_pipeline.sh
     # export FLYDSL_POSTPROCESS_ISA=./scripts/postprocess_vcc_to_sgpr.sh
-    export FLIR_LOG_MORE=1
-    export FLYDSL_DUMP_IR=1
-    export FLYDSL_RUNTIME_ENABLE_CACHE=1
-    export FLYDSL_DUMP_DIR=./flydsl_dump
+    # export FLYDSL_FLASH_ATTN_FUNC_PATH=fallback_n32
+    # export FLYDSL_WAVES_PER_EU=3
+
+    # export FLIR_LOG_MORE=1
+    # export FLYDSL_DUMP_IR=1
+    # export FLYDSL_RUNTIME_ENABLE_CACHE=1
+    # export FLYDSL_DUMP_DIR=./flydsl_dump
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
 
@@ -44,26 +47,16 @@ function run_flydsl_op {
     # python tests/kernels/test_simple_gemm.py --size NA4
     # python tests/kernels/test_simple_gemm.py --size all --dtype all
 
-    # python tests/kernels/test_flash_attention_v4_2.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_attention_v4_3.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v42
-    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare-v43
-    # python tests/kernels/test_flash_attn_func.py --iters 100 --compare-v43
+    # python tests/kernels/test_flash_attn_func.py --warmup 5 --iters 100
+    python tests/kernels/test_flash_attn_func.py --compare --warmup 5 --iters 100
+    # python tests/kernels/test_flash_attn_func.py --compare --causal --warmup 5 --iters 100
 
-    # python tests/kernels/test_flash_attn_func.py --iters 100
+    # python tests/kernels/test_flash_attn_func.py --compare --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
+    # python tests/kernels/test_flash_attn_func.py --compare --causal --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
+    # python tests/kernels/test_flash_attn_func.py --compare --causal --dtype bf16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
 
-    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
+    # python tests/test_triton_flash_attn.py --compare --warmup 5 --iters 100
 
-    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 8 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 256 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 512 --head_dim 128 --iters 100
-
-    python tests/kernels/test_flash_attn_func.py --dtype bf16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    python tests/kernels/test_flash_attn_func.py --dtype fp16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 100
 
     # python test_mfma_16x16x16_bf16_accvgpr_load.py
     # python test_mfma_16x16x16_bf16_d_vgpr.py
