@@ -171,6 +171,27 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type);
 /// Register all Fly dialect passes (fly-canonicalize, fly-layout-lowering).
 MLIR_CAPI_EXPORTED void mlirRegisterFlyPasses(void);
 
+//===----------------------------------------------------------------------===//
+// LLVM cl::opt runtime control
+//===----------------------------------------------------------------------===//
+
+/// Set an LLVM bool cl::opt by name; stores the previous value in *oldValue.
+/// Returns 0 on success, non-zero if the option was not found.
+MLIR_CAPI_EXPORTED int flydslSetLLVMOptionBool(const char *name, bool value,
+                                               bool *oldValue);
+
+/// Restore an LLVM bool cl::opt to a previously saved value.
+MLIR_CAPI_EXPORTED void flydslRestoreLLVMOptionBool(const char *name,
+                                                    bool value);
+
+/// Set an LLVM int cl::opt by name; stores the previous value in *oldValue.
+/// Returns 0 on success, non-zero if the option was not found.
+MLIR_CAPI_EXPORTED int flydslSetLLVMOptionInt(const char *name, int value,
+                                              int *oldValue);
+
+/// Restore an LLVM int cl::opt to a previously saved value.
+MLIR_CAPI_EXPORTED void flydslRestoreLLVMOptionInt(const char *name, int value);
+
 #ifdef __cplusplus
 }
 #endif

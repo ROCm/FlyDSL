@@ -19,6 +19,8 @@
 
 #include "DLTensorAdaptor.h"
 
+#include "flydsl-c/FlyDialect.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -579,4 +581,48 @@ NB_MODULE(_fly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMmaAtomUniversalFMAType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTiledMmaType::bind(m);
+
+  // -------------------------------------------------------------------------
+  // LLVM cl::opt runtime control (for per-kernel option scoping)
+  // Routes through CAPI (libFlyPythonCAPI.so) to access the correct registry.
+  // -------------------------------------------------------------------------
+  m.def(
+      "set_llvm_option_bool",
+      [](const std::string &name, bool value) -> bool {
+        bool oldValue = false;
+        int rc = flydslSetLLVMOptionBool(name.c_str(), value, &oldValue);
+        if (rc != 0)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        return oldValue;
+      },
+      "name"_a, "value"_a,
+      "Set an LLVM bool cl::opt at runtime; returns the previous value.");
+
+  m.def(
+      "restore_llvm_option_bool",
+      [](const std::string &name, bool value) {
+        flydslRestoreLLVMOptionBool(name.c_str(), value);
+      },
+      "name"_a, "value"_a,
+      "Restore an LLVM bool cl::opt to a previously saved value.");
+
+  m.def(
+      "set_llvm_option_int",
+      [](const std::string &name, int value) -> int {
+        int oldValue = 0;
+        int rc = flydslSetLLVMOptionInt(name.c_str(), value, &oldValue);
+        if (rc != 0)
+          throw std::runtime_error("Unknown LLVM option: " + name);
+        return oldValue;
+      },
+      "name"_a, "value"_a,
+      "Set an LLVM int cl::opt at runtime; returns the previous value.");
+
+  m.def(
+      "restore_llvm_option_int",
+      [](const std::string &name, int value) {
+        flydslRestoreLLVMOptionInt(name.c_str(), value);
+      },
+      "name"_a, "value"_a,
+      "Restore an LLVM int cl::opt to a previously saved value.");
 }

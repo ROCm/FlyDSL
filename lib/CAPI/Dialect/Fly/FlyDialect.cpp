@@ -535,3 +535,47 @@ MlirType mlirFlyTiledMmaTypeGetTiledTVLayoutC(MlirType type) {
 //===----------------------------------------------------------------------===//
 
 void mlirRegisterFlyPasses(void) { mlir::fly::registerFlyPasses(); }
+
+//===----------------------------------------------------------------------===//
+// LLVM cl::opt runtime control
+//===----------------------------------------------------------------------===//
+
+#include "llvm/Support/CommandLine.h"
+
+int flydslSetLLVMOptionBool(const char *name, bool value, bool *oldValue) {
+  auto options = llvm::cl::getRegisteredOptions();
+  auto it = options.find(name);
+  if (it == options.end())
+    return 1;
+  auto *opt = static_cast<llvm::cl::opt<bool> *>(it->second);
+  if (oldValue)
+    *oldValue = opt->getValue();
+  opt->addOccurrence(1, name, value ? "true" : "false");
+  return 0;
+}
+
+void flydslRestoreLLVMOptionBool(const char *name, bool value) {
+  auto options = llvm::cl::getRegisteredOptions();
+  auto it = options.find(name);
+  if (it != options.end())
+    static_cast<llvm::cl::opt<bool> *>(it->second)->setValue(value);
+}
+
+int flydslSetLLVMOptionInt(const char *name, int value, int *oldValue) {
+  auto options = llvm::cl::getRegisteredOptions();
+  auto it = options.find(name);
+  if (it == options.end())
+    return 1;
+  auto *opt = static_cast<llvm::cl::opt<int> *>(it->second);
+  if (oldValue)
+    *oldValue = opt->getValue();
+  opt->addOccurrence(1, name, std::to_string(value));
+  return 0;
+}
+
+void flydslRestoreLLVMOptionInt(const char *name, int value) {
+  auto options = llvm::cl::getRegisteredOptions();
+  auto it = options.find(name);
+  if (it != options.end())
+    static_cast<llvm::cl::opt<int> *>(it->second)->setValue(value);
+}

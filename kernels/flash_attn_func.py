@@ -16,6 +16,7 @@ Block:  (256,) -- 4 waves of 64 on AMD (wave64).
 Requires: head_dim % 32 == 0, head_dim >= 64, seq_len % 128 == 0.
 """
 
+import functools
 import math
 import os
 
@@ -27,6 +28,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.utils import env
+from flydsl.utils.llvm_options import llvm_options
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as _memref, scf, fly as _fly, llvm as _llvm, math as math_dialect
 
@@ -1060,7 +1062,18 @@ def build_flash_attn_func_module_primary(
             stream=stream,
         )
 
-    return launch_flash_attn_func
+    FMHA_LLVM_OPTS = {
+        "enable-post-misched": False,
+        "lsr-drop-solution": True,
+    }
+    _inner = launch_flash_attn_func
+
+    @functools.wraps(_inner)
+    def _with_llvm_opts(*args, **kwargs):
+        with llvm_options(FMHA_LLVM_OPTS):
+            return _inner(*args, **kwargs)
+
+    return _with_llvm_opts
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary
