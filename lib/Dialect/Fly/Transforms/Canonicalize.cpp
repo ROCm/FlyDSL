@@ -36,59 +36,26 @@ class RewriteToMakeIntTuple final : public OpRewritePattern<IntTupleLikeOp> {
   }
 };
 
-class StaticResultLowering : public RewritePattern {
+class RebuildStaticValue : public RewritePattern {
 public:
-  StaticResultLowering(MLIRContext *context, PatternBenefit benefit = 1)
+  RebuildStaticValue(MLIRContext *context, PatternBenefit benefit = 1)
       : RewritePattern(MatchAnyOpTypeTag(), benefit, context) {}
 
   LogicalResult matchAndRewrite(Operation *op, PatternRewriter &rewriter) const override {
-    // Skip ops that are already in normal form
-    if (isa<MakeIntTupleOp, MakeMmaAtomOp, MakeCopyAtomOp>(op))
-      return failure();
-    if (auto makeLayoutOp = dyn_cast<MakeLayoutOp>(op)) {
-      if (makeLayoutOp.getShape().getDefiningOp<MakeIntTupleOp>() &&
-          makeLayoutOp.getStride().getDefiningOp<MakeIntTupleOp>()) {
-        return failure();
-      }
-    }
-
     if (op->getNumResults() != 1)
       return failure();
     Type resultType = op->getResult(0).getType();
-    Location loc = op->getLoc();
 
-    if (auto intTupleTy = dyn_cast<IntTupleType>(resultType)) {
-      IntTupleAttr intTupleAttr = intTupleTy.getAttr();
-      if (!intTupleAttr.isStatic())
-        return failure();
-      rewriter.replaceOpWithNewOp<MakeIntTupleOp>(op, intTupleTy, ValueRange{});
-      return success();
-    } else if (auto layoutTy = dyn_cast<LayoutType>(resultType)) {
-      LayoutAttr layoutAttr = layoutTy.getAttr();
-      if (!layoutAttr.isStatic())
-        return failure();
+    auto mayStatic = dyn_cast<MayStaticTypeInterface>(resultType);
+    if (!mayStatic || !mayStatic.isStatic())
+      return failure();
 
-      Value shape =
-          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(layoutAttr.getShape()), {});
-      Value stride =
-          MakeIntTupleOp::create(rewriter, loc, IntTupleType::get(layoutAttr.getStride()), {});
-      rewriter.replaceOpWithNewOp<MakeLayoutOp>(op, layoutTy, shape, stride);
-      return success();
-    } else if (isa<MmaAtomTypeInterface>(resultType)) {
-      auto mayStatic = cast<MayStaticTypeInterface>(resultType);
-      if (!mayStatic.isStatic())
-        return failure();
-      rewriter.replaceOpWithNewOp<MakeMmaAtomOp>(op, resultType);
-      return success();
-    } else if (auto copyAtomTy = dyn_cast<CopyAtomType>(resultType)) {
-      auto mayStatic = cast<MayStaticTypeInterface>(resultType);
-      if (!mayStatic.isStatic())
-        return failure();
-      rewriter.replaceOpWithNewOp<MakeCopyAtomOp>(op, copyAtomTy, copyAtomTy.getValBits());
-      return success();
-    }
+    Value rebuild = mayStatic.rebuildStaticValue(rewriter, op->getLoc(), op->getResult(0));
+    if (!rebuild)
+      return failure();
 
-    return failure();
+    rewriter.replaceOp(op, rebuild);
+    return success();
   }
 };
 
@@ -102,7 +69,7 @@ public:
 
     patterns.add<RewriteToMakeIntTuple<MakeShapeOp>, RewriteToMakeIntTuple<MakeStrideOp>,
                  RewriteToMakeIntTuple<MakeCoordOp>>(context);
-    patterns.add<StaticResultLowering>(context);
+    patterns.add<RebuildStaticValue>(context);
 
     if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
       signalPassFailure();

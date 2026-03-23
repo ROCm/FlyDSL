@@ -45,7 +45,6 @@ def FlyLayoutLoweringPass : Pass<"fly-layout-lowering"> {
   let dependentDialects = [
     "arith::ArithDialect",
     "gpu::GPUDialect",
-    "LLVM::LLVMDialect",
     "vector::VectorDialect"
   ];
 }

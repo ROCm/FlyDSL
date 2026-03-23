@@ -5,15 +5,122 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
 namespace mlir::fly {
 
 bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
+bool SwizzleType::isStatic() const { return true; }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
+bool TileType::isStatic() const { return true; }
 bool CoordTensorType::isStatic() const {
   return getBase().isStatic() && cast<MayStaticAttrInterface>(getLayout()).isStatic();
+}
+
+bool TiledCopyType::isStatic() const {
+  return cast<MayStaticTypeInterface>(getCopyAtom()).isStatic();
+}
+bool TiledMmaType::isStatic() const {
+  return cast<MayStaticTypeInterface>(getMmaAtom()).isStatic();
+}
+
+Value BasisType::rebuildStaticValue(OpBuilder &, Location, Value) const { return nullptr; }
+
+Value IntTupleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<IntTupleType>>(currentValue)))
+    return nullptr;
+  return MakeIntTupleOp::create(builder, loc, *this, ValueRange{});
+}
+
+Value LayoutType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<LayoutType>>(currentValue)))
+    return nullptr;
+  Value shape = IntTupleType::get(getAttr().getShape()).rebuildStaticValue(builder, loc, nullptr);
+  Value stride = IntTupleType::get(getAttr().getStride()).rebuildStaticValue(builder, loc, nullptr);
+  return MakeLayoutOp::create(builder, loc, *this, shape, stride);
+}
+
+Value SwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
+Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                             Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<ComposedLayoutType>>(currentValue)))
+    return nullptr;
+  ComposedLayoutAttr attr = getAttr();
+  Attribute innerAttr = attr.getInner();
+  Value inner;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(innerAttr))
+    inner = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(innerAttr))
+    inner = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr))
+    inner = SwizzleType::get(swizzleAttr).rebuildStaticValue(builder, loc, nullptr);
+  if (!inner)
+    return nullptr;
+  Value offset = IntTupleType::get(attr.getOffset()).rebuildStaticValue(builder, loc, nullptr);
+  Value outer = LayoutType::get(attr.getOuter()).rebuildStaticValue(builder, loc, nullptr);
+  return MakeComposedLayoutOp::create(builder, loc, *this, inner, offset, outer);
+}
+
+Value TileType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
+Value CoordTensorType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                          Value currentValue) const {
+  if (currentValue && isWeaklyNormalForm(cast<TypedValue<CoordTensorType>>(currentValue)))
+    return nullptr;
+  Value base =
+      IntTupleType::get(cast<IntTupleAttr>(getBase())).rebuildStaticValue(builder, loc, nullptr);
+  Value layout;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(getLayout()))
+    layout = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(getLayout()))
+    layout = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  else
+    return nullptr;
+  return MakeViewOp::create(builder, loc, base, layout);
+}
+
+Value TiledCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                        Value currentValue) const {
+  if (currentValue && isa<MakeTiledCopyOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  Value copyAtom =
+      cast<MayStaticTypeInterface>(getCopyAtom()).rebuildStaticValue(builder, loc, nullptr);
+  if (!copyAtom)
+    return nullptr;
+  Value layoutThrVal = getLayoutThrVal().rebuildStaticValue(builder, loc, nullptr);
+  Value tileMN = TileType::get(getTileMN().getAttr()).rebuildStaticValue(builder, loc, nullptr);
+  if (!tileMN)
+    return nullptr;
+  return MakeTiledCopyOp::create(builder, loc, *this, copyAtom, layoutThrVal, tileMN);
+}
+
+Value TiledMmaType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isa<MakeTiledMmaOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  Value mmaAtom =
+      cast<MayStaticTypeInterface>(getMmaAtom()).rebuildStaticValue(builder, loc, nullptr);
+  if (!mmaAtom)
+    return nullptr;
+  Value atomLayout = getAtomLayout().rebuildStaticValue(builder, loc, nullptr);
+  Value permutation = getPermutation().rebuildStaticValue(builder, loc, nullptr);
+  return MakeTiledMmaOp::create(builder, loc, *this, mmaAtom, atomLayout, permutation);
+}
+
+Value CopyAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, *this, getValBits());
 }
 
 int32_t BasisType::depth() { return getAttr().depth(); }
@@ -275,6 +382,13 @@ TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
 
 bool CopyOpUniversalCopyType::isStatic() const { return true; }
 
+Value CopyOpUniversalCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                  Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
+}
+
 Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpUniversalCopyType::getThrBitLayoutSrc() const {
@@ -316,6 +430,13 @@ Attribute CopyAtomType::getThrValLayoutRef() {
 }
 
 bool MmaAtomUniversalFMAType::isStatic() const { return true; }
+
+Value MmaAtomUniversalFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                  Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+}
 
 Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));
