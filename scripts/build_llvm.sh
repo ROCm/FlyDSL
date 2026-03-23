@@ -60,32 +60,16 @@ if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
 fi
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 git fetch origin amd-staging
 >>>>>>> 56e7961 (flash_attn: add mfma_f32_32x32x8f16 wrapper and remove fp_math params)
 =======
 # git fetch origin amd-staging
 >>>>>>> e087936 (flash_attn: CK-aligned architecture with BLOCK_M=256, BLOCK_N=64, K=16 MFMA)
+=======
+git fetch origin amd-staging
+>>>>>>> d58407a (Remove useless file)
 git checkout "${LLVM_COMMIT}"
-
-# 1b. Apply FlyDSL patches (if any)
-PATCHES_DIR="${REPO_ROOT}/patches"
-if [[ -d "${PATCHES_DIR}" ]]; then
-    PATCH_FILES=("${PATCHES_DIR}"/*.patch)
-    if [[ -e "${PATCH_FILES[0]}" ]]; then
-        echo "Applying FlyDSL LLVM patches from ${PATCHES_DIR}..."
-        for pf in "${PATCH_FILES[@]}"; do
-            PATCH_SUBJECT=$(head -5 "$pf" | grep '^Subject:' | head -1 || true)
-            echo "  Applying: $(basename "$pf")"
-            if git apply --check "$pf" &>/dev/null; then
-                git am "$pf"
-            else
-                echo "  (already applied or not applicable, skipping)"
-            fi
-        done
-        echo "Patches applied. Current HEAD: $(git log --oneline -1)"
-    fi
-fi
-
 popd
 
 # 2. Create Build Directory
