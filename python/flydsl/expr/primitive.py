@@ -289,7 +289,9 @@ def crd2idx(crd, layout, loc=None, ip=None):
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
+        if isinstance(idx.type, ir.IndexType):
+            idx = _arith.IndexCastOp(ir.IntegerType.get_signless(32), idx).result
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type(idx)
         idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
 
