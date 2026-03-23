@@ -43,6 +43,30 @@ def get_rocm_arch() -> str:
     return "gfx942"
 
 
+@functools.lru_cache(maxsize=None)
+def get_rocm_device_count() -> int:
+    """Best-effort ROCm visible GPU count via ``rocm_agent_enumerator`` (standard ROCm tool).
+
+    Uses the same invocation as :func:`_arch_from_rocm_agent_enumerator`. Returns 0
+    when the tool is unavailable or no discrete GPU agents are reported.
+    """
+    try:
+        out = subprocess.check_output(
+            ["rocm_agent_enumerator", "-name"],
+            text=True,
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        )
+        n = 0
+        for line in out.splitlines():
+            name = line.strip()
+            if name.startswith("gfx") and name != "gfx000":
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 def is_rdna_arch(arch: Optional[str] = None) -> bool:
     """Check if architecture is RDNA-based (gfx10/11/12, wave32).
 
