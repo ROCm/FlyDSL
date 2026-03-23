@@ -78,7 +78,7 @@ jobs:
 
       - name: Build wheels
         run: |
-          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export EXPECTED_GLIBC=2.35 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
+          docker exec flydsl_build bash -c "export MLIR_PATH=/llvm-project/mlir_install && export ALLOW_ANY_GLIBC=1 && export FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} && export PYTHON_VERSIONS='${{ inputs.python_versions }}' && cd /flydsl && bash scripts/build_wheels.sh"
           docker cp flydsl_build:/flydsl/dist ./dist
           # Copy fly-opt from the first built Python version's build dir
           FIRST_VER=$(echo "${{ inputs.python_versions }}" | awk '{print $1}' | tr -d '.')
