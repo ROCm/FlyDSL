@@ -14,9 +14,12 @@ FlyDSL/
 ├── kernels/                # Production GPU kernels (importable as kernels.*)
 │   ├── pa_decode_fp8.py    # Paged attention decode (FP8)
 │   ├── preshuffle_gemm.py  # GEMM kernels
+│   ├── blockscale_preshuffle_gemm.py  # Blockscale GEMM
+│   ├── moe_gemm_2stage.py  # MoE GEMM (2-stage gate/up + reduce)
+│   ├── moe_blockscale_2stage.py  # MoE Blockscale GEMM
 │   ├── layernorm_kernel.py # LayerNorm
 │   ├── softmax_kernel.py   # Softmax
-│   └── layout_utils.py     # Layout coordinate helpers
+│   └── mfma_preshuffle_pipeline.py  # Shared MFMA/preshuffle helpers
 ├── include/flydsl/         # C++ Fly dialect headers
 ├── lib/                    # C++ dialect implementation
 ├── tests/                  # All tests
@@ -71,8 +74,9 @@ Kernels are written in Python using the FlyDSL expression API:
 - `arith` — arithmetic ops (constant, select, index_cast, trunci, extsi, etc.)
 - `vector` — vector ops (extract, insert, load_op, store, broadcast, from_elements, bitcast)
 - `gpu` — GPU indexing (thread_idx, block_idx, barrier)
-- `rocdl` — AMD-specific intrinsics (mfma, cvt_pk_fp8_f32, ds_bpermute)
+- `rocdl` — AMD-specific intrinsics (mfma, exp2, rcp, cvt_pk_fp8_f32, ds_bpermute)
 - `buffer_ops` — buffer resource ops (create_buffer_resource, buffer_load, buffer_store)
+- `typing` — Type system (`T` for MLIR types, `Int32`/`Float32`/`Index` numeric classes)
 
 ### Kernel Authoring Pattern
 
@@ -84,12 +88,18 @@ from flydsl.expr.typing import T, Int32
 
 @flyc.kernel
 def my_kernel(input_ptr: fx.Tensor, output_ptr: fx.Tensor, N: Int32):
-    tid = gpu.thread_idx.x + gpu.block_idx.x * arith.constant(256, type=T.i32)
+    tid = gpu.thread_idx.x + gpu.block_idx.x * fx.Int32(256)
     rsrc_in = buffer_ops.create_buffer_resource(input_ptr, max_size=True)
     val = buffer_ops.buffer_load(rsrc_in, tid, vec_width=1, dtype=T.f32)
     # ... compute ...
     rsrc_out = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
     buffer_ops.buffer_store(result, rsrc_out, tid)
+
+    # Layout decomposition (preferred over manual arith)
+    layout = fx.make_layout((4, 64), (64, 1))
+    coord = fx.idx2crd(tid, layout)
+    wave_id = fx.get(coord, 0)
+    lane_id = fx.get(coord, 1)
 ```
 
 ### SmemAllocator & SmemPtr
@@ -108,9 +118,9 @@ lds_view = SmemPtr(base, offset, T.f32, shape=(N,)).get()  # returns memref for 
 
 FlyDSL supports `scf.for` loops via Python `range()` with `init=` keyword:
 ```python
-loop_start = arith.index(0)
-loop_stop = arith.index(N)
-loop_step = arith.index(1)
+loop_start = fx.Index(0)
+loop_stop = fx.Index(N)
+loop_step = fx.Index(1)
 for iv, state in range(loop_start, loop_stop, loop_step, init=[init_val1, init_val2]):
     # Use state[0], state[1] ...
     # Yield updated values:
