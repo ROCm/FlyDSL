@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYDSL_LIB_CONVERSION_FLYTOROCDL_BUFFERFATPTR_H
 #define FLYDSL_LIB_CONVERSION_FLYTOROCDL_BUFFERFATPTR_H
 
@@ -51,12 +54,12 @@ public:
       return off;
     if (bits > 8 && bits % 8 == 0) {
       int64_t elemBytes = bits / 8;
-      Value scale = arith::ConstantIntOp::create(b, loc, elemBytes, kOffsetBitWidth).getResult();
+      Value scale = arith::ConstantIntOp::create(b, loc, elemBytes, kOffsetBitWidth);
       return arith::MulIOp::create(b, loc, off, scale);
     }
-    Value scale = arith::ConstantIntOp::create(b, loc, bits, kOffsetBitWidth).getResult();
+    Value scale = arith::ConstantIntOp::create(b, loc, bits, kOffsetBitWidth);
     off = arith::MulIOp::create(b, loc, off, scale);
-    Value const8 = arith::ConstantIntOp::create(b, loc, 8, kOffsetBitWidth).getResult();
+    Value const8 = arith::ConstantIntOp::create(b, loc, 8, kOffsetBitWidth);
     return arith::DivUIOp::create(b, loc, off, const8);
   }
 

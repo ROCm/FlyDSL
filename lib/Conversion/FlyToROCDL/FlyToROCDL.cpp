@@ -58,11 +58,11 @@ Value applySwizzleOnPtr(OpBuilder &b, Location loc, Value ptr, SwizzleAttr swizz
   Value ptrInt = LLVM::PtrToIntOp::create(b, loc, i64Ty, ptr);
   int64_t bitMaskValue = ((int64_t{1} << swizzle.getMask()) - 1)
                          << (swizzle.getBase() + swizzle.getShift());
-  Value bitMask = arith::ConstantIntOp::create(b, loc, i64Ty, bitMaskValue).getResult();
-  Value shiftAmt = arith::ConstantIntOp::create(b, loc, i64Ty, swizzle.getShift()).getResult();
-  Value masked = arith::AndIOp::create(b, loc, ptrInt, bitMask).getResult();
-  Value shifted = arith::ShRUIOp::create(b, loc, masked, shiftAmt).getResult();
-  Value swizzled = arith::XOrIOp::create(b, loc, ptrInt, shifted).getResult();
+  Value bitMask = arith::ConstantIntOp::create(b, loc, i64Ty, bitMaskValue);
+  Value shiftAmt = arith::ConstantIntOp::create(b, loc, i64Ty, swizzle.getShift());
+  Value masked = arith::AndIOp::create(b, loc, ptrInt, bitMask);
+  Value shifted = arith::ShRUIOp::create(b, loc, masked, shiftAmt);
+  Value swizzled = arith::XOrIOp::create(b, loc, ptrInt, shifted);
   return LLVM::IntToPtrOp::create(b, loc, ptrTy, swizzled);
 }
 
@@ -89,8 +89,7 @@ public:
         return rewriter.notifyMatchFailure(op, "register make_ptr requires allocSize in ptrAttrs");
       unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
       auto llvmPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
-      Value nElems =
-          arith::ConstantIntOp::create(rewriter, loc, allocSize.getInt(), 64).getResult();
+      Value nElems = arith::ConstantIntOp::create(rewriter, loc, allocSize.getInt(), 64);
       Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, flyPtrTy.getElemTy(), nElems, 0);
       rewriter.replaceOp(op, ptr);
       return success();
@@ -380,7 +379,7 @@ public:
 
     if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
       BufferFatPtr bp(flyPtrTy, ptr);
-      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32).getResult();
+      Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
       Value loaded = ROCDL::RawPtrBufferLoadOp::create(
           rewriter, loc, elemTy, bp.bufferRsrc(rewriter, loc), bp.swizzleByteOffset(rewriter, loc),
@@ -529,7 +528,7 @@ private:
       return rewriter.notifyMatchFailure(
           op, "CDNA3 buffer copy requires exactly one side to be BufferDesc");
 
-    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32).getResult();
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
     ArrayAttr noAttrs;
 
     auto unpackBuffer = [&](Value val, fly::MemRefType flyTy) -> std::pair<Value, Value> {
@@ -672,8 +671,7 @@ private:
     Value b = LLVM::LoadOp::create(rewriter, loc, abTyB, bPtr);
     Value c = LLVM::LoadOp::create(rewriter, loc, accTy, cPtr);
     auto zeroAttr = rewriter.getI32IntegerAttr(0);
-    Value res =
-        MfmaOp::create(rewriter, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr).getResult();
+    Value res = MfmaOp::create(rewriter, loc, accTy, a, b, c, zeroAttr, zeroAttr, zeroAttr);
     LLVM::StoreOp::create(rewriter, loc, res, dPtr);
     rewriter.eraseOp(op);
     return success();

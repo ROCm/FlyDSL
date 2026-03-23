@@ -817,11 +817,3 @@ def make_tile(*args, loc=None, ip=None):
         else:
             resolved.append(m)
     return fly.make_tile(resolved, loc=loc, ip=ip)
-
-
-@traced_op
-def make_identity_tensor(*shape, loc=None, ip=None):
-    base = make_int_tuple(tuple([0 for i in range(len(shape))]), loc=loc, ip=ip)
-    shapeTuple = make_int_tuple(shape, loc=loc, ip=ip)
-    layout = make_identity_layout(shapeTuple, loc=loc, ip=ip)
-    return fly.make_view(base, layout, loc=loc, ip=ip)
