@@ -828,16 +828,20 @@ class JitFunction:
 
             result = compiled_func(*jit_args)
 
-            # Build CallState so subsequent calls skip DLPack
-            try:
-                state = _build_call_state(
-                    sig, args_tuple,
-                    compiled_func._get_func_exe(),
-                )
-                if state is not None:
-                    self._call_state_cache[cache_key] = state
-            except Exception:
-                pass
+            # Build CallState so subsequent calls skip DLPack.
+            # Only when caching is enabled -- otherwise compiled_func will be
+            # GC'd and the function pointer inside CallState becomes dangling,
+            # causing a SIGSEGV on the next call with the same cache_key.
+            if use_cache:
+                try:
+                    state = _build_call_state(
+                        sig, args_tuple,
+                        compiled_func._get_func_exe(),
+                    )
+                    if state is not None:
+                        self._call_state_cache[cache_key] = state
+                except Exception:
+                    pass
 
             return result
 
