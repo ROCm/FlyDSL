@@ -42,6 +42,7 @@ UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": int(os.getenv("FLYDSL_WAVES_PER_EU", "2")),
+    "flat_work_group_size": 512,  # only flat_work_group_size=512 is supported
     "daz": True,
 }
 

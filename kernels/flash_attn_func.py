@@ -72,9 +72,11 @@ def build_flash_attn_func_module_primary(
     BLOCK_M = 256
     BLOCK_N = 64
     K_SUB_N = 32
-    NUM_WAVES = 8
     WARP_SIZE = 64
-    BLOCK_SIZE = NUM_WAVES * WARP_SIZE
+    if flat_work_group_size is None:
+        flat_work_group_size = 512  # only flat_work_group_size=512 is supported
+    NUM_WAVES = flat_work_group_size // WARP_SIZE
+    BLOCK_SIZE = flat_work_group_size
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES  # 32
     PATH_TAG = select_flash_attn_func_path(
         num_heads, head_dim, causal=causal, dtype_str=dtype_str
@@ -91,8 +93,6 @@ def build_flash_attn_func_module_primary(
             os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
         )
     )
-    if flat_work_group_size is None:
-        flat_work_group_size = BLOCK_SIZE
     ENABLE_LDS_VEC16 = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     )
