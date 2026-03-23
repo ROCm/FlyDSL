@@ -14,11 +14,11 @@ from .protocol import fly_pointers
 
 @lru_cache(maxsize=1)
 def _resolve_runtime_libs() -> List[str]:
+    from .backends import get_backend
+
+    backend = get_backend()
     mlir_libs_dir = Path(__file__).resolve().parent.parent / "_mlir" / "_mlir_libs"
-    libs = [
-        mlir_libs_dir / "libfly_jit_runtime.so",
-        mlir_libs_dir / "libmlir_c_runner_utils.so",
-    ]
+    libs = [mlir_libs_dir / name for name in backend.jit_runtime_lib_basenames()]
     for lib in libs:
         if not lib.exists():
             raise FileNotFoundError(
