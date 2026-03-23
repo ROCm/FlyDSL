@@ -512,8 +512,8 @@ public:
             !isa<LLVM::LLVMPointerType>(dst.getType()))
           return rewriter.notifyMatchFailure(op, "src/dst are not llvm.ptr for universal copy");
         return lowerUniversalCopy(op, rewriter, loc, copyAtom, srcFlyTy, src, dst);
-      } else if (isa<fly_rocdl::CopyOpCDNA3BufferLDSTType>(copyOpType))
-        return lowerCDNA3BufferLDST(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
+      } else if (isa<fly_rocdl::CopyOpCDNA3BufferCopyType>(copyOpType))
+        return lowerCDNA3BufferCopy(op, rewriter, loc, copyAtom, srcFlyTy, dstFlyTy, src, dst);
       return rewriter.notifyMatchFailure(op, "unsupported CopyOp type");
     };
 
@@ -573,7 +573,7 @@ private:
     return 0;
   }
 
-  LogicalResult lowerCDNA3BufferLDST(CopyAtomCall op, ConversionPatternRewriter &rewriter,
+  LogicalResult lowerCDNA3BufferCopy(CopyAtomCall op, ConversionPatternRewriter &rewriter,
                                      Location loc, CopyAtomType copyAtomTy,
                                      fly::MemRefType srcFlyTy, fly::MemRefType dstFlyTy, Value src,
                                      Value dst) const {

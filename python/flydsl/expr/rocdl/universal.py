@@ -6,7 +6,7 @@ from ..._mlir.dialects import arith, fly
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import LayoutType, PointerType
 from ..._mlir.dialects.fly import MemRefType as FlyMemRefType
-from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferLDSTType, MmaAtomCDNA3_MFMAType
+from ..._mlir.dialects.fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
 from ..primitive import (
     get_iter,
     get_layout,
@@ -15,10 +15,10 @@ from ..primitive import (
 )
 from ..typing import Tensor
 
-BufferCopy = lambda bit_size: CopyOpCDNA3BufferLDSTType.get(bit_size)  # noqa: E731
-BufferCopy32b = lambda: CopyOpCDNA3BufferLDSTType.get(32)  # noqa: E731
-BufferCopy64b = lambda: CopyOpCDNA3BufferLDSTType.get(64)  # noqa: E731
-BufferCopy128b = lambda: CopyOpCDNA3BufferLDSTType.get(128)  # noqa: E731
+BufferCopy = lambda bit_size: CopyOpCDNA3BufferCopyType.get(bit_size)  # noqa: E731
+BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)  # noqa: E731
+BufferCopy64b = lambda: CopyOpCDNA3BufferCopyType.get(64)  # noqa: E731
+BufferCopy128b = lambda: CopyOpCDNA3BufferCopyType.get(128)  # noqa: E731
 
 
 def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
