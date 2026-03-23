@@ -49,19 +49,19 @@ Add or update SPDX license headers on changed files before committing.
 Run `update_license_headers.py` from this skill's `scripts/` directory on the current repo:
 
 ```bash
-python /FlyDSL/.claude/skills/license-header/scripts/update_license_headers.py --repo .
+python scripts/update_license_headers.py --repo .
 ```
 
 To preview changes without writing:
 
 ```bash
-python /FlyDSL/.claude/skills/license-header/scripts/update_license_headers.py --repo . --dry-run
+python scripts/update_license_headers.py --repo . --dry-run
 ```
 
 To process specific files only:
 
 ```bash
-python /FlyDSL/.claude/skills/license-header/scripts/update_license_headers.py file1.py file2.cu
+python scripts/update_license_headers.py file1.py file2.cu
 ```
 
 ### 2. Review output
