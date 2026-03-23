@@ -239,6 +239,7 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._fx_tok_map,
             self._fx_comb_bar,
             self._fx_trecv,
+            self._fx_tis,
             cur_tok,
             total_recv_val,
         )
