@@ -42,6 +42,43 @@ def get_gpu_module_body(module_op: gpu.GPUModuleOp):
     return module_op.regions[0].blocks[0]
 
 
+def _validate_known_block_size(value):
+    """Validate and normalize *known_block_size* to a list of 3 positive ints.
+
+    Returns ``None`` when *value* is ``None`` (attribute should be omitted).
+
+    Raises:
+        TypeError: if *value* is not a sequence of integers.
+        ValueError: if the length is not 3 or any element is not positive.
+    """
+    if value is None:
+        return None
+
+    try:
+        elems = list(value)
+    except TypeError:
+        raise TypeError(
+            f"known_block_size must be a sequence of 3 positive integers, got {type(value).__name__}"
+        ) from None
+
+    if len(elems) != 3:
+        raise ValueError(
+            f"known_block_size must have exactly 3 elements (x, y, z), got {len(elems)}"
+        )
+
+    for i, v in enumerate(elems):
+        if not isinstance(v, int):
+            raise TypeError(
+                f"known_block_size[{i}] must be an int, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(
+                f"known_block_size[{i}] must be positive, got {v}"
+            )
+
+    return elems
+
+
 def create_gpu_func(
     sym_name: str,
     function_type: ir.TypeAttr,
@@ -261,10 +298,30 @@ class KernelLauncher:
         kernel_name: str,
         kernel_args: Tuple,
         call_location: Optional[ir.Location] = None,
+        known_block_size: Optional[List[int]] = None,
     ):
         self._kernel_name = kernel_name
         self._kernel_args = kernel_args
         self._call_location = call_location
+        self._known_block_size = known_block_size
+
+    def _check_block_vs_known(self, block_dims: Tuple) -> None:
+        """Warn when statically-known *block* dims disagree with *known_block_size*."""
+        if self._known_block_size is None:
+            return
+        labels = ("x", "y", "z")
+        for i, (launch_val, declared) in enumerate(zip(block_dims, self._known_block_size)):
+            if isinstance(launch_val, int) and launch_val != declared:
+                import warnings
+                warnings.warn(
+                    f"launch block {labels[i]}={launch_val} differs from "
+                    f"known_block_size {labels[i]}={declared} declared on "
+                    f"kernel '{self._kernel_name}'. "
+                    f"This produces an internally-inconsistent IR and is "
+                    f"undefined behavior on AMDGPU.",
+                    stacklevel=3,
+                )
+                return  # one warning per launch is enough
 
     def launch(
         self,
@@ -290,6 +347,8 @@ class KernelLauncher:
 
         grid_dims = _normalize_dim(grid)
         block_dims = _normalize_dim(block)
+
+        self._check_block_vs_known(block_dims)
 
         with launch_loc:
             grid_x = _to_index_value(grid_dims[0])
@@ -348,7 +407,7 @@ class KernelFunction:
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._name = name
-        self._known_block_size = known_block_size
+        self._known_block_size = _validate_known_block_size(known_block_size)
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
@@ -430,7 +489,7 @@ class KernelFunction:
 
         kernel_args = self._emit_kernel(ctx, args, kwargs)
 
-        return KernelLauncher(self._kernel_name, kernel_args, call_loc)
+        return KernelLauncher(self._kernel_name, kernel_args, call_loc, self._known_block_size)
 
 
 # =============================================================================
