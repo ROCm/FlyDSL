@@ -402,8 +402,8 @@ def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
 }
 def Fly_GetDynSharedOp : Fly_Op<"get_dyn_shared", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins);
-  let results = (outs AnyType:$result);
-  let assemblyFormat = "`(` `)` attr-dict `:` type($result)";
+  let results = (outs Fly_Pointer:$result);
+  let assemblyFormat = "`(` `)` attr-dict `:` qualified(type($result))";
 }
 def Fly_IntToPtrOp : Fly_Op<"inttoptr", [Pure]> {
   let arguments = (ins AnyTypeOf<[I64, I32]>:$src);
