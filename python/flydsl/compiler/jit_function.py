@@ -386,6 +386,53 @@ class MlirCompiler:
             f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
         ]
 
+    @staticmethod
+    def _pre_binary_fragments(*, chip: str) -> list:
+        """All passes EXCEPT the final gpu-module-to-binary pass.
+
+        Derived from _pipeline_fragments to ensure the single-phase and
+        two-phase compilation paths stay in sync.
+        """
+        all_frags = MlirCompiler._pipeline_fragments(chip=chip)
+        if all_frags and isinstance(all_frags[-1], str) and all_frags[-1].startswith('gpu-module-to-binary'):
+            return all_frags[:-1]
+        return all_frags
+
+    @staticmethod
+    def _binary_fragment(*, chip: str) -> str:
+        """Just the gpu-module-to-binary pass (depends on waves_per_eu/maxnreg)."""
+        all_frags = MlirCompiler._pipeline_fragments(chip=chip)
+        if all_frags and isinstance(all_frags[-1], str) and all_frags[-1].startswith('gpu-module-to-binary'):
+            return all_frags[-1]
+        raise RuntimeError('Last pipeline fragment is not gpu-module-to-binary')
+
+    @classmethod
+    def compile_pre_binary(cls, module: ir.Module, *, chip: str = None) -> ir.Module:
+        """Phase 1: Run all passes except gpu-module-to-binary."""
+        module.operation.verify()
+        if chip is None:
+            chip = env.compile.arch or get_rocm_arch()
+        module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
+        fragments = cls._pre_binary_fragments(chip=chip)
+        pipeline = f"builtin.module({','.join(fragments)})"
+        pm = PassManager.parse(pipeline)
+        pm.enable_verifier(env.debug.enable_verifier)
+        pm.run(module.operation)
+        return module
+
+    @classmethod
+    def compile_binary(cls, pre_binary_asm: str, *, chip: str = None) -> ir.Module:
+        """Phase 2: Run gpu-module-to-binary on a pre-binary module ASM."""
+        if chip is None:
+            chip = env.compile.arch or get_rocm_arch()
+        module = ir.Module.parse(pre_binary_asm)
+        frag = cls._binary_fragment(chip=chip)
+        pipeline = f"builtin.module({frag})"
+        pm = PassManager.parse(pipeline)
+        pm.enable_verifier(env.debug.enable_verifier)
+        pm.run(module.operation)
+        return module
+
     @classmethod
     def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -634,6 +681,7 @@ class JitFunction:
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
+        self._pre_binary_cache = {}  # (chip, base_cache_key) -> (pre_binary_asm, chip)
 
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
@@ -682,13 +730,17 @@ class JitFunction:
         else:
             return type(arg)
 
-    def _make_cache_key(self, bound_args):
-        """Build a tuple cache key from bound arguments.
+    def _make_base_cache_key(self, bound_args):
+        """Build a tuple cache key from bound arguments (without compile_hints).
 
         For parameters annotated with a runtime type (one that implements
         __fly_ptrs__, e.g. Int32, Stream), the value is excluded from the
         key — only the Python type matters.  This prevents unnecessary
         recompilation when only runtime values change.
+
+        This is the shared base for _make_cache_key. It does NOT include
+        compile_hints, so it can be used for pre-binary module caching
+        across autotuning configs that only differ in waves_per_eu/maxnreg.
         """
         from .jit_argument import _is_constexpr_annotation
         sig = self._sig
@@ -708,6 +760,15 @@ class JitFunction:
                     self._arg_cache_sig(a) for a in arg)))
             else:
                 key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
+        return tuple(key_parts)
+
+    def _make_cache_key(self, bound_args):
+        """Cache key including compile_hints for full artifact caching."""
+        key_parts = list(self._make_base_cache_key(bound_args))
+        from .kernel_function import CompilationContext
+        hints = CompilationContext.get_compile_hints()
+        if hints:
+            key_parts.append(('__compile_hints__', tuple(sorted(hints.items()))))
         return tuple(key_parts)
 
     @staticmethod
@@ -808,7 +869,28 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+            # Two-phase compilation: reuse pre-binary module for different compile_hints.
+            # This avoids redundant full recompilations during autotuning when only
+            # waves_per_eu/maxnreg differ.
+            _hints = CompilationContext.get_compile_hints()
+            base_key = self._make_base_cache_key(bound.arguments)
+            chip_cache_key = (chip, base_key)
+
+            if use_cache and _hints and chip_cache_key in self._pre_binary_cache:
+                # Phase 2 only: reuse cached pre-binary, just run gpu-module-to-binary
+                pre_binary_asm, cached_chip = self._pre_binary_cache[chip_cache_key]
+                compiled_module = MlirCompiler.compile_binary(pre_binary_asm, chip=cached_chip)
+            elif _hints:
+                # Phase 1: compile without gpu-module-to-binary, cache it
+                pre_binary_module = MlirCompiler.compile_pre_binary(module, chip=chip)
+                pre_binary_asm = pre_binary_module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info)
+                if use_cache:
+                    self._pre_binary_cache[chip_cache_key] = (pre_binary_asm, chip)
+                # Phase 2: run gpu-module-to-binary
+                compiled_module = MlirCompiler.compile_binary(pre_binary_asm, chip=chip)
+            else:
+                # No compile_hints: use original single-phase path
+                compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
 
             if env.compile.compile_only:
                 print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
