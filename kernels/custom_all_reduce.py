@@ -393,6 +393,58 @@ class FlyDSLAllreduce:
         except Exception:
             pass
 
+    _SUPPORTED_WORLD_SIZES = {2, 4, 8}
+    _SUPPORTED_DTYPES = {torch.float32, torch.float16, torch.bfloat16}
+
+    def should_custom_ar(self, inp, *, open_fp8_quant: bool = False) -> bool:
+        """Check whether the custom allreduce kernel can handle this input.
+
+        Returns False (caller should fall back to NCCL) when any of these
+        conditions is violated:
+          1. world_size ∈ {2, 4, 8}
+          2. inp byte-size is a multiple of 16
+          3. dtype ∈ {float32, float16, bfloat16}
+          4. inp byte-size ≤ max_size / 2  (2-stage write-mode uses 2× tmp)
+          5. fp8 quantisation is not requested
+          6. full_nvlink (fully_connected) is True, or world_size == 2
+        """
+        from flydsl.utils import log
+
+        if self.world_size not in self._SUPPORTED_WORLD_SIZES:
+            log().error("custom allreduce unsupported: world_size=%d, "
+                        "expected one of %s", self.world_size,
+                        sorted(self._SUPPORTED_WORLD_SIZES))
+            return False
+
+        inp_size = int(inp.numel()) * int(inp.element_size())
+        if inp_size % 16 != 0:
+            log().error("custom allreduce unsupported: inp_size=%d "
+                        "is not a multiple of 16", inp_size)
+            return False
+
+        if inp.dtype not in self._SUPPORTED_DTYPES:
+            log().error("custom allreduce unsupported: dtype=%s, "
+                        "expected one of {%s}", inp.dtype,
+                        ", ".join(str(d) for d in sorted(self._SUPPORTED_DTYPES, key=str)))
+            return False
+
+        if inp_size > self.max_size // 2:
+            log().error("custom allreduce unsupported: inp_size=%d "
+                        "exceeds max_size/2=%d", inp_size, self.max_size // 2)
+            return False
+
+        if open_fp8_quant:
+            log().error("custom allreduce unsupported: fp8 quantisation "
+                        "is not supported")
+            return False
+
+        if self.world_size > 2 and not self.full_nvlink:
+            log().error("custom allreduce unsupported: fully_connected=false "
+                        "is not supported for world_size=%d", self.world_size)
+            return False
+
+        return True
+
     _DTYPE_STR_CACHE = {}
 
     def _dtype_str(self, t) -> str:
@@ -400,7 +452,9 @@ class FlyDSLAllreduce:
         if dtype in self._DTYPE_STR_CACHE:
             return self._DTYPE_STR_CACHE[dtype]
         name = str(dtype)
-        if "float16" in name:
+        if "bfloat16" in name:
+            result = "bf16"
+        elif "float16" in name:
             result = "f16"
         elif "float32" in name:
             result = "f32"
@@ -445,7 +499,7 @@ class FlyDSLAllreduce:
         #   world_size <= 4, bytes < 160KB → 1-stage
         #   world_size <= 8, bytes < 80KB  → 1-stage
         #   otherwise                      → 2-stage
-        elem_bytes = 2 if dtype_str == "f16" else 4
+        elem_bytes = 2 if dtype_str in ("f16", "bf16") else 4
         bytes_n = N * elem_bytes
         if self.world_size == 2:
             _stage = "1"
@@ -457,7 +511,7 @@ class FlyDSLAllreduce:
         try:
             grid_x = self._grid_x_cache[(int(N), str(dtype_str), _stage)]
         except Exception:
-            pack_elems = 8 if dtype_str == "f16" else 4
+            pack_elems = 8 if dtype_str in ("f16", "bf16") else 4
             num_packs = int(N) // int(pack_elems)
             if _stage == "1":
                 # 1-stage: tnum_gpu threads per warp handle one pack each (match aiter)
@@ -521,10 +575,12 @@ class FlyDSLAllreduce:
     ):
         """Unified all-reduce (eager and cudagraph).
 
+        Returns None when the input is not supported by the custom kernel
+        (caller should fall back to NCCL).
         Selects write_mode kernel when N > 512*4096 and world_size == 8.
         """
-        _ = use_new
-        _ = open_fp8_quant
+        if not self.should_custom_ar(inp, open_fp8_quant=open_fp8_quant):
+            return None
 
         if out is None:
             if self._reuse_out_default and (self._cached_out is not None) and self._cached_out.shape == inp.shape and self._cached_out.dtype == inp.dtype and self._cached_out.device == inp.device:
