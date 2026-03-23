@@ -497,6 +497,11 @@ def load_v4i32_global(addr_i64: Any) -> ir.Value:
     remote GPU's shmem_comb_inp via XGMI P2P, replacing 4 separate
     load_i32_global calls and reducing P2P load instruction count by 4×.
 
+    NOTE: Do NOT add nontemporal=True here.  On GFX942 (MI300X), setting
+    dlc=1 (nt flag) on XGMI P2P reads forces every load to bypass L2 and
+    traverse the full XGMI fabric, causing ~13x slowdown vs letting L2 cache
+    the incoming P2P data normally.
+
     Args:
         addr_i64: i64 integer address in global (addrspace 1) memory.
 

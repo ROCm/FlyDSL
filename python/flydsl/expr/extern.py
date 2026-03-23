@@ -117,7 +117,9 @@ class ExternFunction:
         self.is_pure   = is_pure
         # Cache resolved MLIR types per context (keyed by Context object id).
         self._types_cache: dict = {}
-        # Track which gpu.module bodies we have already declared into.
+        # Track which (context, gpu.module body) pairs we have declared into.
+        # We key by (id(Context.current), id(gpu_module_body)) to avoid false
+        # cache hits caused by Python GC reusing object IDs across compilations.
         self._declared_in: set = set()
 
     # -- type resolution (lazy, per context) --------------------------------
@@ -133,7 +135,9 @@ class ExternFunction:
     # -- declaration in GPU module ------------------------------------------
     def _ensure_declared(self, gpu_module_body) -> None:
         """Add ``llvm.func private`` declaration to the GPU module body if absent."""
-        body_id = id(gpu_module_body)
+        # Use (context_id, body_id) as the cache key to prevent false hits
+        # when Python GC recycles object addresses across separate compilations.
+        body_id = (id(ir.Context.current), id(gpu_module_body))
         if body_id in self._declared_in:
             return
 

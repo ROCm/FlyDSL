@@ -332,6 +332,7 @@ def run_profiler(rank, world_size, args):
     cur_tok = args.max_tokens
     n_exp   = world_size * args.num_experts_per_rank
 
+    _combine_wpb = args.combine_warp_per_block if args.combine_warp_per_block > 0 else None
     cfg = FlyDSLDispatchCombineConfigV2(
         rank=rank, world_size=world_size,
         hidden_dim=args.hidden_dim,
@@ -342,6 +343,7 @@ def run_profiler(rank, world_size, args):
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
         chip=args.chip,
+        combine_warp_num_per_block=_combine_wpb,
     )
 
     mori_bn  = args.mori_block_num      if args.mori_block_num      > 0 else cfg.block_num
@@ -476,6 +478,8 @@ def _parse_args():
     p.add_argument("--k",                    type=int, default=8)
     p.add_argument("--block-num",            type=int, default=16)
     p.add_argument("--warp-per-block",       type=int, default=4)
+    p.add_argument("--combine-warp-per-block", type=int, default=0,
+                   help="combine 内核专用 warp_per_block（0=与 --warp-per-block 相同）")
     p.add_argument("--mori-block-num",       type=int, default=0,
                    help="mori 专用 block_num（0=与FlyDSL相同，mori默认最优=80）")
     p.add_argument("--mori-warp-per-block",  type=int, default=0,
