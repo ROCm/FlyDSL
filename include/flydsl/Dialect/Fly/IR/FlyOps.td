@@ -337,7 +337,7 @@ def Fly_MakeMmaAtomOp : Fly_Op<"make_mma_atom", [Pure]> {
 def Fly_MakeCopyAtomOp : Fly_Op<"make_copy_atom", [Pure]> {
   let arguments = (ins I32Attr:$valBits);
   let results = (outs Fly_CopyAtom:$result);
-  let assemblyFormat = "attr-dict `:` type($result)";
+  let assemblyFormat = "attr-dict `:` qualified(type($result))";
 }
 
 def Fly_CopyAtomCall : Fly_Op<"copy_atom_call"> {
@@ -374,6 +374,7 @@ def Fly_TiledMmaPartitionOp : Fly_Op<"tiled_mma.partition", [Pure, DeclareOpInte
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma,
                        Fly_TensorLikeType:$input, Fly_IntTuple:$coord);
   let results = (outs Fly_TensorLikeType:$result);
+  let assemblyFormat = "`(` $operand_id `,` $tiled_mma `,` $input `,` $coord `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma.partition_shape", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_IntTuple:$shape);

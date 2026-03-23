@@ -7,13 +7,12 @@
 #include "mlir/IR/BuiltinTypes.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Utils/AddressSpaceUtils.h"
 
 namespace mlir::fly {
 
 class BufferFatPtr {
-  static constexpr unsigned kRsrcAddrSpace = mapToLLVMAddressSpace(AddressSpace::BufferDesc);
-  static constexpr unsigned kOffsetBitWidth = 32;
+  static constexpr unsigned kRsrcAddrSpace = 8;   // BufferDesc
+  static constexpr unsigned kOffsetBitWidth = 32; // constrained by BufferCopy instruction
 
   fly::PointerType ptrTy;
   Value fatPtr;

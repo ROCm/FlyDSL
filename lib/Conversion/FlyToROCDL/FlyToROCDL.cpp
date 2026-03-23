@@ -34,6 +34,22 @@ using namespace mlir::fly;
 
 namespace {
 
+unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
+  switch (addrSpace) {
+  case AddressSpace::Global:
+    return 1;
+  case AddressSpace::Shared:
+    return 3;
+  case AddressSpace::Register:
+    return 5;
+  case AddressSpace::BufferDesc:
+    return 8;
+  default:
+    assert(false && "Unsupported address space");
+    return 0;
+  }
+}
+
 Value applySwizzleOnPtr(OpBuilder &b, Location loc, Value ptr, SwizzleAttr swizzle) {
   if (swizzle.isTrivialSwizzle())
     return ptr;
@@ -288,7 +304,8 @@ public:
   LogicalResult matchAndRewrite(MakeViewOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const override {
     if (isa<fly::CoordTensorType>(op.getResult().getType())) {
-      assert(op.getResult().use_empty() && "coord_tensor result should have no uses");
+      if (!op.getResult().use_empty())
+        return rewriter.notifyMatchFailure(op, "coord_tensor result should have no uses");
       rewriter.eraseOp(op);
       return success();
     } else {

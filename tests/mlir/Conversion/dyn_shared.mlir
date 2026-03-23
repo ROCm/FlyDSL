@@ -56,7 +56,7 @@ gpu.module @load_module {
     %shmem = fly.get_dyn_shared() : !fly.ptr<i8, shared, align<1024>>
     %off = fly.make_int_tuple(%offset) : (i32) -> !fly.int_tuple<?>
     // CHECK: llvm.getelementptr {{.*}}[0] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
-    // CHECK: llvm.getelementptr {{.*}}[%{{.*}}] : (!llvm.ptr<3>, i64) -> !llvm.ptr<3>, i8
+    // CHECK: llvm.getelementptr {{.*}}[%{{.*}}] : (!llvm.ptr<3>, i32) -> !llvm.ptr<3>, i8
     %ptr = fly.add_offset(%shmem, %off) : (!fly.ptr<i8, shared, align<1024>>, !fly.int_tuple<?>) -> !fly.ptr<i8, shared>
     // CHECK: llvm.load {{.*}} : !llvm.ptr<3> -> i8
     %val = fly.ptr.load(%ptr) : (!fly.ptr<i8, shared>) -> i8

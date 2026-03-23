@@ -66,10 +66,8 @@ Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutC() const {
 
   int GroupM = 64 / N;
   int ValM0 = 4;
-  int ValM1 = M / 4 / GroupM;
 
-  return FxLayout(FxShape(FxThr(N, GroupM), FxVal(ValM0, ValM1)),
-                  FxStride(FxThr(M, ValM0), FxVal(1, ValM0 * GroupM)));
+  return FxLayout(FxShape(FxThr(N, GroupM), FxVal(ValM0)), FxStride(FxThr(M, ValM0), FxVal(1)));
 }
 
 LogicalResult MmaAtomCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
