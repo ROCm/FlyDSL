@@ -118,10 +118,10 @@ def build_flash_attn_func_module_primary(
     assert BLOCK_M % NUM_WAVES == 0
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
-    assert dtype_str in ("f16", "bf16"), "flash_attn_func supports f16 and bf16"
     assert flat_work_group_size == 512, (
         f"Only flat_work_group_size=512 is supported, got {flat_work_group_size}"
     )
+    assert dtype_str in ("f16", "bf16"), "flash_attn_func only supports f16 and bf16"
     assert BLOCK_N % 32 == 0
     assert BLOCK_N_OUT % BLOCK_N == 0
 
@@ -287,7 +287,7 @@ def build_flash_attn_func_module_primary(
         # ---- Decompose block_id ----
         head_idx = block_id % NUM_HEADS
         temp = block_id // NUM_HEADS
-        num_q_tiles = seq_len_v // BLOCK_M
+        num_q_tiles = (seq_len_v + BLOCK_M - 1) // BLOCK_M
         q_tile_idx = temp % num_q_tiles
         batch_idx = temp // num_q_tiles
         q_start = q_tile_idx * BLOCK_M
@@ -568,11 +568,15 @@ def build_flash_attn_func_module_primary(
         # B operand uses j = lane_mod_32, k-subblock = lane_div_32*MFMA_LANE_K.
         q_row = q_start + wave_q_offset + lane_mod_32
         q_row_i32 = arith.index_cast(T.i32, q_row)
+        q_in_bounds = arith.cmpi(arith.CmpIPredicate.slt, q_row, seq_len_v)
+        q_row_safe = arith.select(q_in_bounds, q_row, arith.index(0))
+        c_zero_mfma_pack = arith.constant_vector(0.0, mfma_pack_type)
         q_b_packs = []
         for ks in range_constexpr(K_STEPS_QK):
             q_col = arith.index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
-            g_idx = global_idx(q_row, q_col)
-            q_b_packs.append(load_global_mfma_pack(q_ptr, g_idx))
+            g_idx = global_idx(q_row_safe, q_col)
+            raw = load_global_mfma_pack(q_ptr, g_idx)
+            q_b_packs.append(arith.select(q_in_bounds, raw, c_zero_mfma_pack))
 
         # ---- Constants ----
         c_neg_inf = arith.constant(float("-inf"), type=compute_type)
@@ -595,7 +599,11 @@ def build_flash_attn_func_module_primary(
             return arith.ArithValue(v_f32).shuffle_xor(shuf_32_i32, width_i32)
 
         # ---- KV loop upper bound ----
-        kv_upper = q_start + BLOCK_M if CAUSAL else seq_len_v
+        _q_end = q_start + BLOCK_M
+        if CAUSAL:
+            kv_upper = arith.MinSIOp(_q_end, seq_len_v).result
+        else:
+            kv_upper = seq_len_v
 
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = ENABLE_DMA and not ENABLE_PREFETCH_3BUF
@@ -963,7 +971,7 @@ def build_flash_attn_func_module_primary(
                     _yield_args.append(_cur_buf_id)
             yield _yield_args
 
-        # ---- Normalize and store O ----
+        # ---- Normalize and store O (skip OOB rows for partial Q tiles) ----
         l_final = loop_results[1]
         o_finals = [
             loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)
@@ -976,24 +984,27 @@ def build_flash_attn_func_module_primary(
         ).result
         inv_l_vec = vector.broadcast(v16f32_type, inv_l)
 
-        for dc in range_constexpr(D_CHUNKS):
-            o_norm_vec = arith.MulFOp(
-                o_finals[dc],
-                inv_l_vec,
-                fastmath=fm_fast,
-            ).result
-            for r in range_constexpr(16):
-                o_val = vector.extract(
-                    o_norm_vec,
-                    static_position=[r],
-                    dynamic_position=[],
-                )
-                o_f16 = arith.trunc_f(elem_type, o_val)
+        _o_guard = scf.IfOp(q_in_bounds, [], has_else=False)
+        with ir.InsertionPoint(_o_guard.then_block):
+            for dc in range_constexpr(D_CHUNKS):
+                o_norm_vec = arith.MulFOp(
+                    o_finals[dc],
+                    inv_l_vec,
+                    fastmath=fm_fast,
+                ).result
+                for r in range_constexpr(16):
+                    o_val = vector.extract(
+                        o_norm_vec,
+                        static_position=[r],
+                        dynamic_position=[],
+                    )
+                    o_f16 = arith.trunc_f(elem_type, o_val)
 
-                d_row_rel = lane_div_32 * 4 + (r // 4) * 8 + (r % 4)
-                d_col = arith.index(dc * D_CHUNK) + d_row_rel
-                o_global = global_idx(q_row, d_col)
-                _gep_store(o_f16, o_ptr, o_global)
+                    d_row_rel = lane_div_32 * 4 + (r // 4) * 8 + (r % 4)
+                    d_col = arith.index(dc * D_CHUNK) + d_row_rel
+                    o_global = global_idx(q_row, d_col)
+                    _gep_store(o_f16, o_ptr, o_global)
+            scf.YieldOp([])
 
     @flyc.jit
     def launch_flash_attn_func(
@@ -1013,7 +1024,7 @@ def build_flash_attn_func_module_primary(
 
         bs_idx = arith.index_cast(T.index, batch_size)
         sl_idx = arith.index_cast(T.index, seq_len)
-        num_q_tiles = sl_idx // BLOCK_M
+        num_q_tiles = (sl_idx + BLOCK_M - 1) // BLOCK_M
         grid_x = bs_idx * num_q_tiles * NUM_HEADS
 
         launcher = flash_attn_func_kernel(Q, K, V, O, seq_len)

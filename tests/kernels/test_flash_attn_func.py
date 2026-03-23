@@ -46,6 +46,33 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "daz": True,
 }
 
+# (batch, seq_len, num_heads, head_dim)
+DEFAULT_CONFIGS = [
+    (8, 128, 64, 128),
+    (8, 256, 64, 128),
+    (8, 512, 64, 128),
+    (1, 128, 64, 128),
+    (1, 256, 64, 128),
+    (1, 512, 64, 128),
+    (1, 1024, 64, 128),
+
+    (1, 2048, 64, 128),
+    (1, 4096, 64, 128),
+    (1, 8192, 64, 128),
+
+    (1, 2048, 32, 128),
+    (1, 4096, 32, 128),
+    (1, 8192, 32, 128),
+
+    (1, 2048, 16, 128),
+    (1, 4096, 16, 128),
+    (1, 8192, 16, 128),
+
+    (1, 2048, 8, 128),
+    (1, 4096, 8, 128),
+    (1, 8192, 8, 128),
+]
+
 
 def setup_seed(seed: int) -> None:
     """Set random seed for reproducibility across all RNG sources."""
@@ -162,7 +189,7 @@ def compare_arrays(
 
 def run_config(
     batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters,
-    seed=DEFAULT_SEED, dtype_str="f16",
+    seed=DEFAULT_SEED, dtype_str="f16", verbose=True,
 ):
     device = "cuda"
     results = {}
@@ -230,23 +257,23 @@ def run_config(
     results["min_cos"] = min_cos
     results["passed"] = max_err < 1e-2 and min_cos > 0.99
 
-    # Compute and print MD5 hashes
-    tag = f"B={B} S={S} H={H} D={D}"
-    print(f"  [{tag}] active_path = {active_path}")
-    result_md5 = compute_md5(o_flat)
-    ref_md5 = compute_md5(ref_flat)
-    print(f"  [{tag}] result_md5 = {result_md5}")
-    print(f"  [{tag}] ref_md5    = {ref_md5}")
-    if result_md5 == ref_md5:
-        print(f"  [{tag}] MD5 match: EXACT (bit-identical)")
-    else:
-        print(f"  [{tag}] MD5 match: DIFFER (not bit-identical)")
+    if verbose:
+        tag = f"B={B} S={S} H={H} D={D}"
+        print(f"  [{tag}] active_path = {active_path}")
+        result_md5 = compute_md5(o_flat)
+        ref_md5 = compute_md5(ref_flat)
+        print(f"  [{tag}] result_md5 = {result_md5}")
+        print(f"  [{tag}] ref_md5    = {ref_md5}")
+        if result_md5 == ref_md5:
+            print(f"  [{tag}] MD5 match: EXACT (bit-identical)")
+        else:
+            print(f"  [{tag}] MD5 match: DIFFER (not bit-identical)")
 
-    print(f"  [{tag}] --- compare_arrays ---")
-    compare_arrays(
-        o_flat.to(torch.float32).detach().cpu().numpy(),
-        ref_flat.to(torch.float32).detach().cpu().numpy(),
-    )
+        print(f"  [{tag}] --- compare_arrays ---")
+        compare_arrays(
+            o_flat.to(torch.float32).detach().cpu().numpy(),
+            ref_flat.to(torch.float32).detach().cpu().numpy(),
+        )
 
     try:
         def kernel_fn():
@@ -264,114 +291,246 @@ def run_config(
     return results
 
 
+def run_aiter_bench(
+    batch, seq_len, nheads, head_dim, dtype, causal,
+    warmup, iters, seed=DEFAULT_SEED, backend="ck",
+):
+    """Run CK or ASM kernel via aiter and return {tflops, max_err, us}."""
+    try:
+        import aiter
+    except ImportError:
+        return {"err": "aiter not installed"}
+
+    if backend == "asm" and dtype != torch.bfloat16:
+        return {"skip": True}
+
+    os.environ["AITER_BF16_FWD_BACKEND"] = backend
+    results = {}
+    setup_seed(seed)
+    torch.cuda.empty_cache()
+
+    B, S, H, D = batch, seq_len, nheads, head_dim
+    q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    try:
+        out = aiter.flash_attn_func(
+            q, k, v, 0.0, None, causal, (-1, -1),
+            None, None, True,
+            return_lse=True, return_attn_probs=True, how_v3_bf16_cvt=2,
+        )[0]
+        torch.cuda.synchronize()
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return {"err": f"{backend}: {e}"}
+
+    ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal).to(dtype)
+    max_err = (out.float() - ref.float()).abs().max().item()
+    results["max_err"] = max_err
+
+    try:
+        def bench_fn():
+            aiter.flash_attn_func(
+                q, k, v, 0.0, None, causal, (-1, -1),
+                None, None, True,
+                return_lse=True, return_attn_probs=True, how_v3_bf16_cvt=2,
+            )
+
+        _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
+def _fmt_result(r):
+    """Format: 'Time(us) TFLOPS MaxErr'."""
+    if r.get("skip"):
+        return f"{'--':>10s} {'--':>8s} {'--':>8s}"
+    if "err" in r:
+        return f"{'--':>10s} {'ERR':>8s} {'--':>8s}"
+    us = f"{r['us']:>10.1f}" if "us" in r else f"{'N/A':>10s}"
+    tf = f"{r['tflops']:>8.3f}" if "tflops" in r else f"{'N/A':>8s}"
+    err = f"{r['max_err']:>8.2e}" if "max_err" in r else f"{'N/A':>8s}"
+    return f"{us} {tf} {err}"
+
+
+def _fmt_cmp(fly_r, other_r):
+    """Format FlyDSL vs other: 'TFLOPS% MaxErr-ratio'."""
+    if other_r.get("skip") or "err" in other_r or "err" in fly_r:
+        return f"{'--':>7s} {'--':>6s}"
+    fly_tf = fly_r.get("tflops")
+    oth_tf = other_r.get("tflops")
+    fly_err = fly_r.get("max_err")
+    oth_err = other_r.get("max_err")
+    if fly_tf and oth_tf and oth_tf > 0:
+        pct = f"{fly_tf / oth_tf * 100:>6.1f}%"
+    else:
+        pct = f"{'N/A':>7s}"
+    if fly_err is not None and oth_err is not None and oth_err > 0:
+        ratio = f"{fly_err / oth_err:>5.2f}x"
+    else:
+        ratio = f"{'N/A':>6s}"
+    return f"{pct} {ratio}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="flash_attn_func FlyDSL Test/Benchmark")
     parser.add_argument("--batch", type=int, default=None)
     parser.add_argument("--seq_len", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
     parser.add_argument("--head_dim", type=int, default=None)
-    parser.add_argument("--no-causal", action="store_true")
+    causal_group = parser.add_mutually_exclusive_group()
+    causal_group.add_argument("--causal", action="store_true", dest="causal")
+    causal_group.add_argument("--no-causal", action="store_false", dest="causal")
+    parser.set_defaults(causal=None)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
-        "--dtype", type=str, default="fp16", choices=["fp16", "bf16"],
-        help="Data type: fp16 or bf16 (default: fp16)",
+        "--dtype", type=str, default=None, choices=["fp16", "bf16"],
+        help="Data type: fp16 or bf16 (default: both)",
     )
     parser.add_argument(
-        "--seed", type=int, default=DEFAULT_SEED, help=f"Random seed for reproducibility (default: {DEFAULT_SEED})"
+        "--seed", type=int, default=DEFAULT_SEED,
+        help=f"Random seed for reproducibility (default: {DEFAULT_SEED})",
+    )
+    parser.add_argument(
+        "--compare", action="store_true",
+        help="Compare FlyDSL vs CK vs ASM performance (requires aiter)",
     )
     args = parser.parse_args()
 
-    causal = not args.no_causal
     dtype_map = {"fp16": (torch.float16, "f16"), "bf16": (torch.bfloat16, "bf16")}
-    dtype, dtype_str = dtype_map[args.dtype]
+    dtypes_to_test = [args.dtype] if args.dtype else ["bf16", "fp16"]
+    causals_to_test = [args.causal] if args.causal is not None else [True, False]
 
-    print("=" * 130)
-    print(f"FlyDSL flash_attn_func ({'causal' if causal else 'non-causal'}, {args.dtype})")
-    print("  Tile: BLOCK_M=128, BLOCK_N=32 fallback (default) + CK-like N=128 fast path (gated)")
-    print("  Strategy: K@Q^T + register S/P ping-pong + V^T@P")
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"  Kernel opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-    print("=" * 130)
-
-    if args.seq_len or args.head_dim or args.batch:
-        configs = [(args.batch or 1, args.seq_len or 256, args.num_heads or 8, args.head_dim or 128)]
+    if args.batch or args.seq_len or args.num_heads or args.head_dim:
+        configs = [(args.batch or 1, args.seq_len or 128, args.num_heads or 8, args.head_dim or 128)]
     else:
-        configs = [
-            (8, 256, 64, 128),
-            (8, 512, 64, 128),
-            (1, 256, 64, 128),
-            (1, 512, 64, 128),
-            (1, 1024, 64, 128),
+        configs = DEFAULT_CONFIGS
 
-            (1, 2048, 64, 128),
-            (1, 4096, 64, 128),
-            (1, 8192, 64, 128),
+    causal_desc = {True: "causal", False: "non-causal", None: "causal+non-causal"}[args.causal]
+    dtype_desc = args.dtype or "bf16+fp16"
 
-            (1, 2048, 32, 128),
-            (1, 4096, 32, 128),
-            (1, 8192, 32, 128),
+    if args.compare:
+        # ---- Comparison mode: FlyDSL vs CK vs ASM ----
+        print("=" * 130)
+        print(f"FlyDSL vs CK vs ASM  ({causal_desc}, {dtype_desc})")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
+        print(f"  CK: bf16+fp16, ASM: bf16 only")
+        print("=" * 130)
+        print("Running benchmarks ...")
 
-            (1, 2048, 16, 128),
-            (1, 4096, 16, 128),
-            (1, 8192, 16, 128),
+        rows = []
+        for dtype_key in dtypes_to_test:
+            dtype, dtype_str = dtype_map[dtype_key]
+            for causal in causals_to_test:
+                for batch, seq_len, nh, hd in configs:
+                    causal_tag = "causal" if causal else "nocausal"
+                    tag = f"B={batch} S={seq_len} H={nh} D={hd} {dtype_key} {causal_tag}"
+                    print(f"  {tag} ...", flush=True)
 
-            (1, 2048, 8, 128),
-            (1, 4096, 8, 128),
-            (1, 8192, 8, 128),
-        ]
+                    fly_r = run_config(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                    )
+                    ck_r = run_aiter_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, backend="ck",
+                    )
+                    asm_r = run_aiter_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, backend="asm",
+                    )
+                    rows.append((tag, fly_r, ck_r, asm_r))
 
-    hdr = (
-        f"{'Config/Path':>56s} | {'Status':>6s} | {'MaxErr':>8s} "
-        f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
-    )
-    print(f"\n{hdr}")
-    print("-" * len(hdr))
-
-    all_passed = True
-    for batch, seq_len, nh, hd in configs:
-        tag = f"B={batch} S={seq_len} H={nh} D={hd} {args.dtype}"
-        try:
-            r = run_config(
-                batch,
-                seq_len,
-                nh,
-                hd,
-                dtype,
-                causal,
-                warmup=args.warmup,
-                iters=args.iters,
-                seed=args.seed,
-                dtype_str=dtype_str,
-            )
-            if "err" in r:
-                cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
-                print(f"{cfg_path:>56s} | {'ERROR':>6s} | {r['err'][:60]}")
-                all_passed = False
-                continue
-
-            status = "PASS" if r["passed"] else "FAIL"
-            if not r["passed"]:
-                all_passed = False
-            cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
-
-            us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
-            tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
+        col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
+        cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
+        hdr1 = (
+            f"{'Config':>45s} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
+            f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
+        )
+        hdr2 = (
+            f"{'':>45s} | {col} | {col} | {col}"
+            f" | {cmp_col} | {cmp_col}"
+        )
+        sep = "-" * len(hdr2)
+        print(f"\n{hdr1}")
+        print(hdr2)
+        print(sep)
+        for tag, fly_r, ck_r, asm_r in rows:
             print(
-                f"{cfg_path:>56s} | {status:>6s} | "
-                f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-                f"{us_s} {tf_s}"
+                f"{tag:>45s} | {_fmt_result(fly_r)} | "
+                f"{_fmt_result(ck_r)} | {_fmt_result(asm_r)}"
+                f" | {_fmt_cmp(fly_r, ck_r)} | {_fmt_cmp(fly_r, asm_r)}"
             )
-        except Exception as e:
-            print(f"{tag:>56s} | {'ERROR':>6s} | {str(e)[:60]}")
-            all_passed = False
+        print("=" * len(hdr2))
 
-    print("=" * 130)
-    if all_passed:
-        print("All tests PASSED")
     else:
-        print("Some tests FAILED")
-        sys.exit(1)
+        # ---- Normal FlyDSL test mode ----
+        print("=" * 130)
+        print(f"FlyDSL flash_attn_func ({causal_desc}, {dtype_desc})")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"  Kernel opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
+        print("=" * 130)
+
+        hdr = (
+            f"{'Config/Path':>66s} | {'Status':>6s} | {'MaxErr':>8s} "
+            f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
+        )
+        print(f"\n{hdr}")
+        print("-" * len(hdr))
+
+        all_passed = True
+        for dtype_key in dtypes_to_test:
+            dtype, dtype_str = dtype_map[dtype_key]
+            for causal in causals_to_test:
+                for batch, seq_len, nh, hd in configs:
+                    causal_tag = "causal" if causal else "nocausal"
+                    tag = f"B={batch} S={seq_len} H={nh} D={hd} {dtype_key} {causal_tag}"
+                    try:
+                        r = run_config(
+                            batch, seq_len, nh, hd, dtype, causal,
+                            warmup=args.warmup, iters=args.iters,
+                            seed=args.seed, dtype_str=dtype_str,
+                        )
+                        if "err" in r:
+                            cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
+                            print(f"{cfg_path:>66s} | {'ERROR':>6s} | {r['err'][:60]}")
+                            all_passed = False
+                            continue
+
+                        status = "PASS" if r["passed"] else "FAIL"
+                        if not r["passed"]:
+                            all_passed = False
+                        cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
+
+                        us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
+                        tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
+                        print(
+                            f"{cfg_path:>66s} | {status:>6s} | "
+                            f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
+                            f"{us_s} {tf_s}"
+                        )
+                    except Exception as e:
+                        print(f"{tag:>66s} | {'ERROR':>6s} | {str(e)[:60]}")
+                        all_passed = False
+
+        print("=" * 130)
+        if all_passed:
+            print("All tests PASSED")
+        else:
+            print("Some tests FAILED")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
