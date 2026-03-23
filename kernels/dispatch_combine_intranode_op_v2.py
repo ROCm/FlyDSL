@@ -36,6 +36,9 @@ class FlyDSLDispatchCombineConfigV2:
     warp_num_per_block: int = 16
     block_num: int = 80
     chip: str = "gfx942"
+    # combine 内核可独立设置 warp_num_per_block（dispatch 因已知 P2P bug 限制为 ≤4）
+    # None 表示与 warp_num_per_block 相同；建议设为 8 以对齐 mori 默认配置
+    combine_warp_num_per_block: int = None
 
     @property
     def elem_size(self):
@@ -91,14 +94,18 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             data_type=config.data_type,
         )
 
-        print(f"[v2] Rank {r}: creating v2 combine jit...")
+        # combine 可独立使用更大的 warp_num_per_block（不受 dispatch P2P bug 限制）
+        _comb_wpb = (config.combine_warp_num_per_block
+                     if config.combine_warp_num_per_block is not None
+                     else config.warp_num_per_block)
+        print(f"[v2] Rank {r}: creating v2 combine jit (warp_per_block={_comb_wpb})...")
         self._comb_fn = make_combine_jit(
             rank=r, npes=config.world_size,
             experts_per_token=config.top_k,
             hidden_dim=config.hidden_dim,
             max_tok_per_rank=config.max_num_inp_token_per_rank,
             block_num=config.block_num,
-            warp_num_per_block=config.warp_num_per_block,
+            warp_num_per_block=_comb_wpb,
             data_type=config.data_type,
         )
 

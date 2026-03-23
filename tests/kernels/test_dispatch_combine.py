@@ -423,6 +423,8 @@ def _worker(rank, world_size, args, master_port):
     n_exp   = args.num_experts or (actual_ws * 32)
     experts = n_exp // actual_ws
 
+    _cwpb = getattr(args, 'combine_warp_per_block', None)
+    _cwpb = _cwpb if (_cwpb and _cwpb > 0) else None
     cfg = FlyDSLDispatchCombineConfigV2(
         rank=actual_rank, world_size=actual_ws,
         hidden_dim=args.hidden_dim,
@@ -433,6 +435,7 @@ def _worker(rank, world_size, args, master_port):
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
         chip=args.chip,
+        combine_warp_num_per_block=_cwpb,
     )
 
     try:
@@ -492,6 +495,8 @@ def _parse_args():
     p.add_argument("--k", type=int, default=8)
     p.add_argument("--block-num", type=int, default=16)
     p.add_argument("--warp-per-block", type=int, default=4)
+    p.add_argument("--combine-warp-per-block", type=int, default=0,
+                   help="combine 内核专用 warp_per_block（0=与 --warp-per-block 相同）")
     p.add_argument("--chip", type=str, default="gfx942")
     p.add_argument("--n-rounds", type=int, default=3)
     p.add_argument("--warmup", type=int, default=3)
