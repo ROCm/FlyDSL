@@ -31,6 +31,8 @@ def _elem_type(dtype_str: str) -> ir.Type:
     d = (dtype_str or "").strip().lower()
     if d in {"f16", "fp16"}:
         return T.f16
+    if d in {"bf16"}:
+        return T.bf16
     if d in {"f32", "fp32"}:
         return T.f32
     raise ValueError(f"unsupported dtype_str: {dtype_str!r}")
@@ -40,7 +42,7 @@ def _pack_elems(dtype_str: str) -> int:
     d = (dtype_str or "").strip().lower()
     if d in {"f32", "fp32"}:
         return 4
-    if d in {"f16", "fp16"}:
+    if d in {"f16", "fp16", "bf16"}:
         return 8
     raise ValueError(f"unsupported dtype_str: {dtype_str!r}")
 
@@ -179,6 +181,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     largest_part_p = part_p + (num_packs % world_size)
     tnum_gpu = threads // world_size
     is_f32 = dtype_str.lower().strip() in {"f32", "fp32"}
+    is_bf16 = dtype_str.lower().strip() in {"bf16"}
     # Vectorized gather path: requires perfect partition + no world_size=6
     vec_ok = (num_packs % world_size == 0) and (world_size != 6)
 
@@ -208,7 +211,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         if is_f32:
             v4f32 = T.f32x4
         else:
-            v8f16 = T.f16x8
+            v8half = T.bf16x8 if is_bf16 else T.f16x8
             v8f32 = T.vec(8, T.f32)
 
         gpu_func_op = _set_workgroup_size(threads)
@@ -283,14 +286,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         vf = vector.BitCastOp(v4f32, raw_i).result
                         acc = vf if acc is None else acc + vf
                     else:
-                        v16 = vector.BitCastOp(v8f16, raw_i).result
+                        v16 = vector.BitCastOp(v8half, raw_i).result
                         v32 = arith.ExtFOp(v8f32, v16).result
                         acc = v32 if acc is None else acc + v32
                 if is_f32:
                     out_bits = vector.BitCastOp(v4i32, acc).result
                 else:
                     from flydsl._mlir.dialects import llvm
-                    out_bits = llvm.BitcastOp(v4i32, acc.truncf(v8f16)).result
+                    out_bits = llvm.BitcastOp(v4i32, acc.truncf(v8half)).result
                 dst_off = arith.ExtUIOp(i64, p).result * ea.constant(16, type=i64)
                 signal_ops.st_global_16b(out_ptr_i64 + dst_off, out_bits)
                 scf.YieldOp([])
@@ -323,7 +326,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         if is_f32:
             v4f32 = T.f32x4
         else:
-            v8f16 = T.f16x8
+            v8half = T.bf16x8 if is_bf16 else T.f16x8
             v8f32 = T.vec(8, T.f32)
 
         gpu_func_op = _set_workgroup_size(threads)
@@ -404,14 +407,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         vf = vector.BitCastOp(v4f32, raw_i).result
                         acc = vf if acc is None else acc + vf
                     else:
-                        v16 = vector.BitCastOp(v8f16, raw_i).result
+                        v16 = vector.BitCastOp(v8half, raw_i).result
                         v32 = arith.ExtFOp(v8f32, v16).result
                         acc = v32 if acc is None else acc + v32
                 if is_f32:
                     out_raw = vector.BitCastOp(v4i32, acc).result
                 else:
                     from flydsl._mlir.dialects import llvm
-                    out_raw = llvm.BitcastOp(v4i32, acc.truncf(v8f16)).result
+                    out_raw = llvm.BitcastOp(v4i32, acc.truncf(v8half)).result
                 rel_p = cur - start_p
                 signal_ops.st_global_16b(tmp_out_i64 + arith.ExtUIOp(i64, rel_p).result * ea.constant(16, type=i64),
                         out_raw)
@@ -503,7 +506,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         if is_f32:
             v4f32 = T.f32x4
         else:
-            v8f16 = T.f16x8
+            v8half = T.bf16x8 if is_bf16 else T.f16x8
             v8f32 = T.vec(8, T.f32)
 
         gpu_func_op = _set_workgroup_size(threads)
@@ -611,13 +614,13 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     vf = vector.BitCastOp(v4f32, raw_i).result
                     acc = vf if acc is None else acc + vf
                 else:
-                    v16 = vector.BitCastOp(v8f16, raw_i).result
+                    v16 = vector.BitCastOp(v8half, raw_i).result
                     v32 = arith.ExtFOp(v8f32, v16).result
                     acc = v32 if acc is None else acc + v32
             if is_f32:
                 out_raw = vector.BitCastOp(v4i32, acc).result
             else:
-                out_raw = vector.BitCastOp(v4i32, acc.truncf(v8f16)).result
+                out_raw = vector.BitCastOp(v4i32, acc.truncf(v8half)).result
 
             dst_out_off = rank_i32 * ea.constant(part_p, type=i32) + cur
             dst_byte_off = arith.ExtUIOp(i64, dst_out_off).result * ea.constant(16, type=i64)
