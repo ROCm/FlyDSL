@@ -16,7 +16,6 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
-from kernels.layout_utils import idx2crd
 from kernels.pipeline_utils import make_tail_plan
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
@@ -187,9 +186,11 @@ def compile_wmma_gemm_tdm(
         layout_thr = fx.make_layout(
             (m_warp, n_warp, 2, 16),
             (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
-        thr_coord = idx2crd(tx, layout_thr)
-        wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
-            thr_coord[0], thr_coord[1], thr_coord[2], thr_coord[3])
+        thr_coord = fx.idx2crd(tx, layout_thr)
+        wave_m_idx = fx.get(thr_coord, 0)
+        wave_n_idx = fx.get(thr_coord, 1)
+        lane_kgrp = fx.get(thr_coord, 2)
+        lane16 = fx.get(thr_coord, 3)
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)

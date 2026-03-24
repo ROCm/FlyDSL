@@ -94,6 +94,13 @@ namespace mlir::fly_rocdl {
 
 bool MmaAtomGFX1250_WMMAType::isStatic() const { return true; }
 
+Value MmaAtomGFX1250_WMMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                   Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+}
+
 Type MmaAtomGFX1250_WMMAType::getValTypeA() const { return getElemTyA(); }
 Type MmaAtomGFX1250_WMMAType::getValTypeB() const { return getElemTyB(); }
 Type MmaAtomGFX1250_WMMAType::getValTypeC() const { return getElemTyAcc(); }

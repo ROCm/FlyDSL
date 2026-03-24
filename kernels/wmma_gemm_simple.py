@@ -11,7 +11,6 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
@@ -110,18 +109,16 @@ def compile_wmma_gemm(
 
         layout_thr = fx.make_layout((waves_per_block, WAVE_SIZE), (WAVE_SIZE, 1))
         layout_lane = fx.make_layout((2, 16), (16, 1))
-        layout_lds_a = fx.make_layout((tile_m, tile_k), (tile_k, 1))
-        layout_lds_b = fx.make_layout((tile_k, tile_n), (tile_n, 1))
         layout_vec_a = fx.make_layout((tile_m, tile_k // 4), (tile_k // 4, 1))
         layout_vec_b = fx.make_layout((tile_k, tile_n // 4), (tile_n // 4, 1))
 
-        thr = idx2crd(tx, layout_thr)
-        wave_id = layout_get(thr, 0)
-        lane = layout_get(thr, 1)
+        thr = fx.idx2crd(tx, layout_thr)
+        wave_id = fx.get(thr, 0)
+        lane = fx.get(thr, 1)
 
-        lc = idx2crd(lane, layout_lane)
-        lane_kgrp = layout_get(lc, 0)  # 0/1
-        lane16 = layout_get(lc, 1)  # 0..15
+        lc = fx.idx2crd(lane, layout_lane)
+        lane_kgrp = fx.get(lc, 0)  # 0/1
+        lane16 = fx.get(lc, 1)  # 0..15
         warp_n_off = wave_id * arith.index(warp_tile_n)
 
         elem_ty = _elem_type()
@@ -143,28 +140,28 @@ def compile_wmma_gemm(
 
             for t in range_constexpr(vec_iters_a):
                 vec_idx = tx + arith.index(t * block_threads)
-                a_crd = idx2crd(vec_idx, layout_vec_a)
-                a_m = layout_get(a_crd, 0)
-                a_kv = layout_get(a_crd, 1)
+                a_crd = fx.idx2crd(vec_idx, layout_vec_a)
+                a_m = fx.get(a_crd, 0)
+                a_kv = fx.get(a_crd, 1)
                 a_k = a_kv * arith.index(4)
 
                 g_off = (blk_m + a_m) * arith.index(K) + (k_base + a_k)
                 v_i16 = buffer_ops.buffer_load(a_rsrc, g_off, vec_width=4, dtype=T.i16)
                 v = vector.bitcast(vec4_elem_ty, v_i16)
-                lds_off = crd2idx((a_m, a_k), layout_lds_a)
+                lds_off = a_m * arith.index(tile_k) + a_k
                 vector.store(v, lds_a_mem, [lds_off])
 
             for t in range_constexpr(vec_iters_b):
                 vec_idx = tx + arith.index(t * block_threads)
-                b_crd = idx2crd(vec_idx, layout_vec_b)
-                b_k = layout_get(b_crd, 0)
-                b_nv = layout_get(b_crd, 1)
+                b_crd = fx.idx2crd(vec_idx, layout_vec_b)
+                b_k = fx.get(b_crd, 0)
+                b_nv = fx.get(b_crd, 1)
                 b_n = b_nv * arith.index(4)
 
                 g_off = (k_base + b_k) * n_stride + (blk_n + b_n)
                 v_i16 = buffer_ops.buffer_load(b_rsrc, g_off, vec_width=4, dtype=T.i16)
                 v = vector.bitcast(vec4_elem_ty, v_i16)
-                lds_off = crd2idx((b_k, b_n), layout_lds_b)
+                lds_off = b_k * arith.index(tile_n) + b_n
                 vector.store(v, lds_b_mem, [lds_off])
 
             gpu.barrier()
@@ -179,7 +176,7 @@ def compile_wmma_gemm(
                     for k0 in range_constexpr(2):
                         for k1 in range_constexpr(8):
                             kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                            off = crd2idx((kk, n_off + lane16), layout_lds_b)
+                            off = kk * arith.index(tile_n) + (n_off + lane16)
                             vals.append(lds_b.load([off]))
                     b_frags.append(vector.from_elements(T.vec(16, elem_ty), vals))
 
@@ -189,7 +186,7 @@ def compile_wmma_gemm(
                     for k0 in range_constexpr(2):
                         for k1 in range_constexpr(8):
                             kk = k_step + (arith.index(k0 * 2) + lane_kgrp) * arith.index(8) + arith.index(k1)
-                            off = crd2idx((m_off + lane16, kk), layout_lds_a)
+                            off = (m_off + lane16) * arith.index(tile_k) + kk
                             a_vals.append(lds_a.load([off]))
                     a_frag = vector.from_elements(T.vec(16, elem_ty), a_vals)
 
