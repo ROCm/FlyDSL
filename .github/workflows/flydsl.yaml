@@ -22,7 +22,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1', 'linux-flydsl-navi-1' ]
+        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1', 'linux-flydsl-navi-2' ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
