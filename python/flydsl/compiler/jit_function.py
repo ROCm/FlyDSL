@@ -17,9 +17,9 @@ from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.typing import Stream
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+from .backends import get_backend
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -81,17 +81,10 @@ def _flydsl_key() -> str:
                 contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
+    backend = get_backend()
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
-        so_patterns = [
-            "_fly*.so",
-            "_fly_rocdl*.so",
-            "libFly*.so",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
-        ]
-        for pattern in so_patterns:
+        for pattern in backend.native_lib_patterns():
             for so_file in sorted(mlir_libs_dir.glob(pattern)):
                 h = hashlib.sha256()
                 with open(so_file, "rb") as f:
@@ -102,7 +95,7 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}-" + "-".join(contents)
+    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -351,50 +344,23 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _pipeline_fragments(backend) -> list:
+    """Return the MLIR pass-pipeline fragments for *backend*."""
+    from .kernel_function import CompilationContext
+
+    hints = CompilationContext.get_compile_hints()
+    return backend.pipeline_fragments(compile_hints=hints)
+
+
 class MlirCompiler:
-    @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
-        from .kernel_function import CompilationContext
-        hints = CompilationContext.get_compile_hints()
-        waves_per_eu = hints.get('waves_per_eu')
-        maxnreg = hints.get('maxnreg')
-
-        # Build compiler option flags for gpu-module-to-binary
-        debug_opt = "-g" if env.debug.enable_debug_info else ""
-        wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
-        maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
-        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
-
-        wave64 = "false" if is_rdna_arch(chip) else "true"
-        return [
-            "fly-rewrite-func-signature",
-            "fly-canonicalize",
-            "fly-layout-lowering",
-            "convert-fly-to-rocdl",
-            "canonicalize",
-            f"gpu.module(convert-scf-to-cf,cse,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
-            "reconcile-unrealized-casts",
-            *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
-            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
-        ]
-
     @classmethod
-    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
         module.operation.verify()
 
-        if chip is None:
-            chip = env.compile.arch or get_rocm_arch()
+        backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
+        fragments = _pipeline_fragments(backend)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -785,8 +751,8 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                chip = env.compile.arch or get_rocm_arch()
-                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
+                backend = get_backend()
+                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -810,10 +776,10 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
             if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
                 return None
 
             compiled_func = CompiledArtifact(
