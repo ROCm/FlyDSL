@@ -185,7 +185,6 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "softmax":
         from kernels.softmax_kernel import build_softmax_module
-
         # M is runtime; module construction uses a dummy M.
         # `flydsl.compile()` already has its own cache.
         m = build_softmax_module(1, N, dtype)
@@ -196,7 +195,6 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
-
         m = build_layernorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
@@ -207,7 +205,6 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
-
         m = build_rmsnorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
@@ -217,7 +214,6 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "wmma_gemm":
         from kernels.rdna_gemm import create_wmma_gemm_module
-
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
         launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
@@ -232,7 +228,6 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "wmma_fp8_gemm":
         from kernels.rdna_fp8_gemm import compile_fp8_gemm, preshuffle_b_fp8, fp8_quantize_per_token, fp8_quantize_per_channel
-
         K = N  # square by default
         torch.manual_seed(42)
         A_f32 = torch.randn(M, K, device="cuda") * 0.1
