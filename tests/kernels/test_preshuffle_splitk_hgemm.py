@@ -52,8 +52,8 @@ def run_torch_bench(a, b):
 @pytest.mark.parametrize(
     "m, n, k, TILE_K, TILE_M, TILE_N, PACK_N, SPLIT_K",
     [
-        (32, 7168, 2048, 128, 2, 2, 2, 4),
-        (4096, 4096, 4096, 64, 8, 4, 1, 1),
+        (32, 7168, 2048, 128, 32, 256, 2, 4),
+        (4096, 4096, 4096, 64, 128, 512, 1, 1),
     ]
 )
 @pytest.mark.parametrize("test_graph", [
