@@ -1,22 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "flydsl-c/FlyROCDLDialect.h"
 
-#include "flydsl/Conversion/FlyGpuToLLVM/FlyGpuToLLVM.h"
-#include "flydsl/Conversion/FlyToROCDL/FlyToROCDL.h"
+#include "flydsl/Conversion/Passes.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
 
-// Pull in the conversion pass registration (inline functions).
-namespace mlir {
-#define GEN_PASS_REGISTRATION
-#include "flydsl/Conversion/Passes.h.inc"
-} // namespace mlir
-
 using namespace mlir;
 using namespace mlir::fly_rocdl;
 
-MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl,
-                                      mlir::fly_rocdl::FlyROCDLDialect)
+MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyROCDLDialect)
 
 //===----------------------------------------------------------------------===//
 // MmaAtomCDNA3_MFMAType
@@ -30,12 +25,10 @@ MlirTypeID mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetTypeID(void) {
   return wrap(MmaAtomCDNA3_MFMAType::getTypeID());
 }
 
-MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k,
-                                              MlirType elemTyA,
-                                              MlirType elemTyB,
-                                              MlirType elemTyAcc) {
-  return wrap(MmaAtomCDNA3_MFMAType::get(m, n, k, unwrap(elemTyA),
-                                         unwrap(elemTyB), unwrap(elemTyAcc)));
+MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGet(int32_t m, int32_t n, int32_t k, MlirType elemTyA,
+                                              MlirType elemTyB, MlirType elemTyAcc) {
+  return wrap(
+      MmaAtomCDNA3_MFMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB), unwrap(elemTyAcc)));
 }
 
 int32_t mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetM(MlirType type) {
@@ -63,31 +56,27 @@ MlirType mlirFlyROCDLMmaAtomCDNA3_MFMATypeGetElemTyAcc(MlirType type) {
 }
 
 //===----------------------------------------------------------------------===//
-// CopyOpCDNA3BufferLDSTType
+// CopyOpCDNA3BufferCopyType
 //===----------------------------------------------------------------------===//
 
-bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferLDSTType(MlirType type) {
-  return isa<CopyOpCDNA3BufferLDSTType>(unwrap(type));
+bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopyType(MlirType type) {
+  return isa<CopyOpCDNA3BufferCopyType>(unwrap(type));
 }
 
-MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetTypeID(void) {
-  return wrap(CopyOpCDNA3BufferLDSTType::getTypeID());
+MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetTypeID(void) {
+  return wrap(CopyOpCDNA3BufferCopyType::getTypeID());
 }
 
-MlirType mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGet(MlirContext ctx, int32_t bitSize) {
-  return wrap(CopyOpCDNA3BufferLDSTType::get(unwrap(ctx), bitSize));
+MlirType mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGet(MlirContext ctx, int32_t bitSize) {
+  return wrap(CopyOpCDNA3BufferCopyType::get(unwrap(ctx), bitSize));
 }
 
-int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type) {
-  return cast<CopyOpCDNA3BufferLDSTType>(unwrap(type)).getBitSize();
+int32_t mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(MlirType type) {
+  return cast<CopyOpCDNA3BufferCopyType>(unwrap(type)).getBitSize();
 }
 
 //===----------------------------------------------------------------------===//
 // Pass Registration
 //===----------------------------------------------------------------------===//
 
-void mlirRegisterFlyToROCDLConversionPass(void) {
-  mlir::registerFlyToROCDLConversionPass();
-}
-
-void mlirRegisterFlyGpuToLLVMPass(void) { mlir::registerFlyGpuToLLVMPass(); }
+void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }

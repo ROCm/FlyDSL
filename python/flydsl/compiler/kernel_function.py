@@ -1,4 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import inspect
+import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, get_origin
 
@@ -6,7 +10,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
-from .protocol import fly_values, fly_types, fly_construct
+from .protocol import fly_construct, fly_types, fly_values
 
 # =============================================================================
 # GPU Operation Helpers
@@ -171,6 +175,30 @@ class CompilationContext:
 
     _current: Optional["CompilationContext"] = None
 
+    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    _compile_hints = threading.local()
+
+    @classmethod
+    @contextmanager
+    def compile_hints(cls, hints: dict):
+        """Context manager for setting compiler hints (thread-safe).
+
+        Usage:
+            with CompilationContext.compile_hints({"waves_per_eu": 2}):
+                fn(*args, **kwargs)
+        """
+        prev = getattr(cls._compile_hints, 'data', None)
+        cls._compile_hints.data = hints
+        try:
+            yield
+        finally:
+            cls._compile_hints.data = prev
+
+    @classmethod
+    def get_compile_hints(cls):
+        """Get compiler hints for the current thread, or empty dict."""
+        return getattr(cls._compile_hints, 'data', None) or {}
+
     def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
         self.gpu_module_op = None
         self.kernel_counter = 0
@@ -264,24 +292,33 @@ class KernelLauncher:
             block_z = _to_index_value(block_dims[2])
 
             smem_val = None
-            if isinstance(smem, ir.Value):
-                smem_val = smem
-            elif smem > 0:
-                smem_val = arith.constant(ir.IntegerType.get_signless(32), smem)
+            smem_raw = _unwrap_to_raw(smem)
+            if isinstance(smem_raw, ir.Value):
+                smem_val = smem_raw
+            else:
+                smem_py = None
+                try:
+                    smem_py = int(smem_raw)
+                except (TypeError, ValueError):
+                    smem_py = None
+                if smem_py is not None and smem_py > 0:
+                    smem_val = arith.constant(ir.IntegerType.get_signless(32), smem_py)
 
             if stream is not None:
-                async_object = _unwrap_to_raw(stream)
+                stream_val = _unwrap_to_raw(stream)
             else:
                 ctx = CompilationContext.get_current()
-                async_object = ctx.stream_arg if ctx and ctx.stream_arg else None
+                stream_val = ctx.stream_arg if ctx and ctx.stream_arg else None
+
+            async_deps = [stream_val] if stream_val is not None else None
 
             gpu.LaunchFuncOp(
                 ["kernels", self._kernel_name],
                 (grid_x, grid_y, grid_z),
                 (block_x, block_y, block_z),
                 kernel_operands,
+                async_dependencies=async_deps,
                 dynamic_shared_memory_size=smem_val,
-                async_object=async_object,
                 loc=launch_loc,
                 ip=None,
             )
@@ -299,9 +336,10 @@ class KernelFunction:
     configuring and launching the kernel.
     """
 
-    def __init__(self, func: Callable, some_args=None):
+    def __init__(self, func: Callable, some_args=None, name: Optional[str] = None):
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
+        self._name = name
         self._kernel_name: Optional[str] = None
         self._location_tracker = FuncLocationTracker(func)
 
@@ -339,7 +377,10 @@ class KernelFunction:
             kernel_arg_types.extend(fly_types(value))
 
         kernel_id = ctx.next_kernel_id()
-        self._kernel_name = f"{self._func.__name__}_{kernel_id}"
+        if self._name is not None:
+            self._kernel_name = self._name
+        else:
+            self._kernel_name = f"{self._func.__name__}_{kernel_id}"
 
         ctx.register_kernel_tracker(self._kernel_name, self._location_tracker)
 
@@ -384,7 +425,7 @@ class KernelFunction:
 # =============================================================================
 
 
-def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction:
+def kernel(func: Optional[Callable] = None, *, some_args=None, name: Optional[str] = None) -> KernelFunction:
     """Decorator for GPU kernel functions.
 
     Usage:
@@ -393,8 +434,8 @@ def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction
             # kernel body
             ...
 
-        # Or with arguments
-        @kernel(some_args=value)
+        # With explicit kernel name (visible in profiler):
+        @kernel(name="gemm_m16n128k128_bf16")
         def my_kernel(a: Tensor):
             ...
 
@@ -404,10 +445,12 @@ def kernel(func: Optional[Callable] = None, *, some_args=None) -> KernelFunction
     Args:
         func: Function to decorate
         some_args: Optional kernel-specific arguments
+        name: Optional kernel name override; shown in profiler instead of the
+              Python function name. Tile/dtype info can be embedded here.
 
     Returns:
         KernelFunction wrapper
     """
     if func is None:
-        return lambda f: KernelFunction(f, some_args=some_args)
-    return KernelFunction(func, some_args=some_args)
+        return lambda f: KernelFunction(f, some_args=some_args, name=name)
+    return KernelFunction(func, some_args=some_args, name=name)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
 
 // Pointer operation lowering tests:
@@ -74,6 +76,26 @@ func.func @test_add_offset_dynamic(%ptr: !fly.ptr<f32, global>, %off: i32) {
 
 // -----
 
+// === GetDynShared ===
+
+// get_dyn_shared returns a pointer to dynamic shared memory.
+// After lowering, it creates a global [0 x i8] addrspace(3) and returns its address.
+
+// CHECK: llvm.mlir.global external @__dynamic_shared__
+// CHECK-SAME: {addr_space = 3 : i32, alignment = 1024 : i64, dso_local} : !llvm.array<0 x i8>
+// CHECK-LABEL: gpu.func @test_get_dyn_shared
+gpu.module @dyn_shared_module {
+  gpu.func @test_get_dyn_shared() kernel {
+    // CHECK: %[[ADDR:.*]] = llvm.mlir.addressof @__dynamic_shared__
+    // CHECK: %[[PTR:.*]] = llvm.getelementptr %[[ADDR]][0] : (!llvm.ptr<3>) -> !llvm.ptr<3>, i8
+    // CHECK-NOT: fly.get_dyn_shared
+    %ptr = fly.get_dyn_shared() : !fly.ptr<i8, shared, align<1024>>
+    gpu.return
+  }
+}
+
+// -----
+
 // === MakeView (identity when address spaces match) ===
 
 // CHECK-LABEL: @test_make_view
@@ -82,14 +104,14 @@ func.func @test_make_view(%ptr: !fly.ptr<f32, global>) -> f32 {
   %s = fly.make_int_tuple() : () -> !fly.int_tuple<(4, 8)>
   %d = fly.make_int_tuple() : () -> !fly.int_tuple<(1, 4)>
   %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(4, 8)>, !fly.int_tuple<(1, 4)>) -> !fly.layout<(4, 8) : (1, 4)>
-  // make_view wraps ptr + layout into a memref; after lowering it's identity.
   // CHECK-NOT: fly.make_view
   %view = fly.make_view(%ptr, %layout) : (!fly.ptr<f32, global>, !fly.layout<(4, 8) : (1, 4)>) -> !fly.memref<f32, global, (4, 8) : (1, 4)>
-  // The memref.load uses the same base pointer %PTR (make_view was eliminated).
-  %idx = fly.make_int_tuple() : () -> !fly.int_tuple<7>
+  %iter = fly.get_iter(%view) : (!fly.memref<f32, global, (4, 8) : (1, 4)>) -> !fly.ptr<f32, global>
+  %offset = fly.make_int_tuple() : () -> !fly.int_tuple<7>
   // CHECK: llvm.getelementptr %[[PTR]][{{.*}}] : (!llvm.ptr<1>, i64) -> !llvm.ptr<1>, f32
+  %gep = fly.add_offset(%iter, %offset) : (!fly.ptr<f32, global>, !fly.int_tuple<7>) -> !fly.ptr<f32, global>
   // CHECK: %[[VAL:.*]] = llvm.load
-  %val = fly.memref.load(%view, %idx) : (!fly.memref<f32, global, (4, 8) : (1, 4)>, !fly.int_tuple<7>) -> f32
+  %val = fly.ptr.load(%gep) : (!fly.ptr<f32, global>) -> f32
   // CHECK: return %[[VAL]]
   return %val : f32
 }

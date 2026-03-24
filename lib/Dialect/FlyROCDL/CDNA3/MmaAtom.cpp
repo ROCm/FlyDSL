@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -31,11 +34,23 @@ namespace mlir::fly_rocdl {
 
 bool MmaAtomCDNA3_MFMAType::isStatic() const { return true; }
 
+Value MmaAtomCDNA3_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+}
+
 Attribute MmaAtomCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
 
 Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(getM()), FxC(getN()), FxC(getK())}));
 }
+
+Type MmaAtomCDNA3_MFMAType::getValTypeA() const { return getElemTyA(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeB() const { return getElemTyB(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeC() const { return getElemTyAcc(); }
+Type MmaAtomCDNA3_MFMAType::getValTypeD() const { return getElemTyAcc(); }
 
 Attribute MmaAtomCDNA3_MFMAType::getThrValLayoutA() const {
   return cdna3::getThrValLayoutAB(getContext(), getM(), getN(), getK(), getElemTyA(), getElemTyB(),

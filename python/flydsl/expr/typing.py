@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import ctypes
 from typing import Generic, TypeVar
 
@@ -21,6 +24,7 @@ from .numeric import (
     Float16,
     Float32,
     Float64,
+    Index,
     Int4,
     Int8,
     Int16,
@@ -49,7 +53,7 @@ def default_f8_type() -> ir.Type:
         arch = str(get_rocm_arch())
     except Exception:
         arch = ""
-    if "gfx95" in arch:
+    if "gfx95" in arch or "gfx12" in arch:
         return Float8E4M3FN.ir_type
     return Float8E4M3FNUZ.ir_type
 
@@ -235,6 +239,7 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Index",
     "Uint8",
     "Uint16",
     "Uint32",
@@ -295,6 +300,8 @@ class Tensor:
 
 
 class Stream:
+    _is_stream_param = True
+
     def __init__(self, value=None):
         self.value = value
         self._stream_storage = None
@@ -303,11 +310,26 @@ class Stream:
         return [gpu.AsyncTokenType.get()]
 
     def __fly_ptrs__(self):
-        if self.value is None:
+        if isinstance(self.value, int):
+            self._stream_storage = ctypes.c_void_p(self.value)
+        elif self.value is None:
             self._stream_storage = ctypes.c_void_p(0)
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    @staticmethod
+    def _extract_stream_value(arg):
+        raw = arg.value if isinstance(arg, Stream) else arg
+        if raw is None:
+            return 0
+        elif isinstance(raw, int):
+            return raw
+        return raw.cuda_stream
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod
     def __fly_construct__(cls, values):

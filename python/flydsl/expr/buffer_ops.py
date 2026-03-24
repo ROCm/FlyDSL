@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """AMD Buffer Load/Store Operations - High-level Python API
 
 This module provides high-level Python wrappers for AMD CDNA3/CDNA4 buffer operations.
@@ -25,8 +28,49 @@ from .._mlir import ir
 from .._mlir.dialects import llvm, rocdl, arith as std_arith
 from .._mlir.extras import types as T
 from typing import Optional, Union
+from ..runtime.device import is_rdna_arch
+from .meta import traced_op
+
+
+def _get_buffer_flags(arch=None):
+    """Get AMD buffer resource descriptor (V#) flags word (bits 127:96).
+
+    Constructs the 32-bit flags field for rocdl.make.buffer.rsrc, following the
+    same logic as LLVM's AMDGPUToROCDL makeBufferRsrc():
+      https://github.com/llvm/llvm-project/blob/main/mlir/lib/Conversion/AMDGPUToROCDL/AMDGPUToROCDL.cpp
+
+    Bit layout (common to all architectures):
+      bits [11:0]  - DST_SEL: ignored by raw buffer intrinsics
+      bits [14:12] - DATA_FORMAT: must be nonzero, 7 = float
+      bits [18:15] - NUM_FORMAT:  must be nonzero, 4 = 32-bit
+      bit  [19]    - In nested heap (0)
+      bit  [20]    - Behavior on unmap (0 = return 0 / ignore)
+      bits [22:21] - Index stride for swizzles (0)
+      bit  [23]    - Add thread ID (0)
+      bit  [24]    - Reserved: must be 1 on RDNA, 0 on CDNA
+      bits [26:25] - Reserved (0)
+      bit  [27]    - Non-volatile (CDNA only, 0)
+      bits [29:28] - OOB_SELECT (RDNA only): 0=structured, 2=none, 3=check offset
+      bits [31:30] - Type (must be 0)
+
+    CDNA (gfx9xx):    (7 << 12) | (4 << 15)                         = 0x20070
+    RDNA (gfx10+):    (7 << 12) | (4 << 15) | (1 << 24) | (2 << 28) = 0x21020070
+      - bit 24 set to 1 (required on RDNA)
+      - OOB_SELECT=2 (no bounds checking, matching LLVM boundsCheck=false)
+    """
+    import os
+
+    if arch is None:
+        arch = os.environ.get("FLYDSL_GPU_ARCH")
+    flags = (7 << 12) | (4 << 15)
+    if is_rdna_arch(arch):
+        flags |= (1 << 24)   # reserved bit, must be 1 on RDNA
+        flags |= (2 << 28)   # OOB_SELECT = 2 (no bounds checking)
+    return flags
 
 __all__ = [
+    'create_llvm_ptr',
+    'get_element_ptr',
     'create_buffer_resource',
     'buffer_load',
     'buffer_store',
@@ -36,13 +80,17 @@ __all__ = [
 
 def _unwrap_value(value):
     """Recursively unwrap ArithValue or similar wrappers to get the actual MLIR value.
-    
-    flir's ArithValue can be nested (double-wrapped), so we need to unwrap recursively
-    until we get to a real ir.Value (OpResult or BlockArgument).
+
+    Handles:
+    - FlyDSL ArithValue (has ._value)
+    - flyc DSL Numeric like fx.Int32 (has .ir_value() method)
+    - flyc ArithValue (is already ir.Value subclass)
     """
+    # DSL Numeric (Int32, Float32, etc.) — use ir_value() to materialize
+    if hasattr(value, 'ir_value') and not isinstance(value, ir.Value):
+        return value.ir_value()
     max_depth = 10  # Safety limit
     depth = 0
-    
     while depth < max_depth and not isinstance(value, ir.Value):
         if hasattr(value, '_value'):
             value = value._value
@@ -51,13 +99,12 @@ def _unwrap_value(value):
         else:
             break
         depth += 1
-    
     return value
 
 
 def _create_i64_constant(value: int) -> ir.Value:
     """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = ir.IntegerType.get_signless(64)
+    i64_type = T.i64()
     attr = ir.IntegerAttr.get(i64_type, value)
     op = std_arith.ConstantOp(i64_type, attr)
     return op.result
@@ -65,7 +112,7 @@ def _create_i64_constant(value: int) -> ir.Value:
 
 def _create_i32_constant(value: int) -> ir.Value:
     """Create i32 constant using standard MLIR arith dialect."""
-    i32_type = ir.IntegerType.get_signless(32)
+    i32_type = T.i32()
     if value > 0x7FFFFFFF:
         value = int(value - 2**32)
     attr = ir.IntegerAttr.get(i32_type, value)
@@ -75,7 +122,7 @@ def _create_i32_constant(value: int) -> ir.Value:
 
 def _create_i16_constant(value: int) -> ir.Value:
     """Create i16 constant using standard MLIR arith dialect."""
-    i16_type = ir.IntegerType.get_signless(16)
+    i16_type = T.i16()
     attr = ir.IntegerAttr.get(i16_type, value)
     op = std_arith.ConstantOp(i16_type, attr)
     return _unwrap_value(op.result)
@@ -83,10 +130,76 @@ def _create_i16_constant(value: int) -> ir.Value:
 
 def _create_i64_constant(value: int) -> ir.Value:
     """Create i64 constant using standard MLIR arith dialect."""
-    i64_type = ir.IntegerType.get_signless(64)
+    i64_type = T.i64()
     attr = ir.IntegerAttr.get(i64_type, value)
     op = std_arith.ConstantOp(i64_type, attr)
     return _unwrap_value(op.result)
+
+
+def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
+    """Create an LLVM pointer from an integer or index value."""
+    value = _unwrap_value(value)
+    if isinstance(value.type, ir.IndexType):
+        i64_type = T.i64()
+        value = _unwrap_value(std_arith.IndexCastOp(i64_type, value).result)
+    ptr_type = ir.Type.parse(f'!llvm.ptr<{address_space}>')
+    return llvm.IntToPtrOp(ptr_type, value).result
+
+
+def get_element_ptr(
+    base_ptr,
+    byte_offset: Union[int, ir.Value, None] = None,
+    static_byte_offset: int = 0,
+    elem_type: Optional[ir.Type] = None,
+    no_wrap_flags=None,
+) -> ir.Value:
+    """Build an LLVM GEP from a base pointer plus byte offsets."""
+    _gep_dynamic_index_sentinel = -(2**31)
+
+    base_ptr = _unwrap_value(base_ptr)
+    if not isinstance(static_byte_offset, int):
+        raise TypeError(
+            f"static_byte_offset must be int, got {type(static_byte_offset).__name__}"
+        )
+    if elem_type is None:
+        elem_type = T.i8()
+    elif callable(elem_type):
+        elem_type = elem_type()
+
+    if byte_offset is None:
+        dynamic_indices = []
+        raw_constant_indices = [int(static_byte_offset)]
+    elif isinstance(byte_offset, int):
+        dynamic_indices = []
+        raw_constant_indices = [int(byte_offset) + int(static_byte_offset)]
+    else:
+        offset_val = _unwrap_value(byte_offset)
+        if isinstance(offset_val.type, ir.IndexType):
+            i64_type = T.i64()
+            offset_val = _unwrap_value(std_arith.IndexCastOp(i64_type, offset_val).result)
+        elif not isinstance(offset_val.type, ir.IntegerType):
+            raise TypeError(
+                "byte_offset must be int, index, or integer-typed MLIR value; "
+                f"got {offset_val.type}"
+            )
+
+        if static_byte_offset != 0:
+            static_type = offset_val.type
+            static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
+            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
+            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
+
+        dynamic_indices = [offset_val]
+        raw_constant_indices = [_gep_dynamic_index_sentinel]
+
+    return llvm.GEPOp(
+        base_ptr.type,
+        base_ptr,
+        dynamic_indices,
+        raw_constant_indices,
+        elem_type,
+        no_wrap_flags,
+    ).result
 
 
 class BufferResourceDescriptor:
@@ -134,7 +247,7 @@ class BufferResourceDescriptor:
         base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw_val)
         
         # Create buffer resource descriptor
-        flags_val = (7 << 12) | (4 << 15)  # data_format=7 (float), num_format=4 (32bit)
+        flags_val = _get_buffer_flags()
         flags = _create_i32_constant(flags_val)
         stride_val = _create_i16_constant(stride)
         
@@ -172,7 +285,7 @@ class BufferResourceDescriptor:
                 num_records = _create_i64_constant(nbytes)
             else:
                 v = _unwrap_value(num_records_bytes)
-                i64_type = ir.IntegerType.get_signless(64)
+                i64_type = T.i64()
                 if not isinstance(v.type, ir.IntegerType) or v.type.width != 64:
                     if isinstance(v.type, ir.IndexType):
                         op = std_arith.IndexCastOp(i64_type, v)
@@ -182,7 +295,7 @@ class BufferResourceDescriptor:
                 num_records = v
         elif max_size:
             # Use max for flexibility (hardware will check actual bounds)
-            # Note: flir's rocdl.make.buffer.rsrc requires i32, not i64
+            # Note: FlyDSL's rocdl.make.buffer.rsrc requires i32, not i64
             num_records = _create_i64_constant(0xFFFFFFFF)  # FALLBACK_MAX_SIZE
         else:
             # Use the logical memref size (in bytes) for hardware OOB checking.
@@ -202,6 +315,7 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
+@traced_op
 def create_buffer_resource(memref_val: ir.Value, 
                            stride: int = 0,
                            max_size: bool = True,
@@ -230,6 +344,7 @@ def create_buffer_resource(memref_val: ir.Value,
     return desc.rsrc
 
 
+@traced_op
 def buffer_load(rsrc: ir.Value,
                 offset: ir.Value,
                 vec_width: int = 4,
@@ -265,14 +380,19 @@ def buffer_load(rsrc: ir.Value,
     """
     # Default dtype to f32
     if dtype is None:
-        dtype = ir.F32Type.get()
-    
-    # Unwrap offset first
+        dtype = T.f32()
+    # Accept DSL Numeric class (e.g. fx.Int32) as dtype: unwrap to ir.Type
+    elif hasattr(dtype, "ir_type"):
+        dtype = dtype.ir_type
+
+    # Unwrap offset first (accept DSL Numeric values via ir_value())
+    if hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
     offset = _unwrap_value(offset)
     
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), offset)
+        op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
     
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
@@ -304,7 +424,7 @@ def buffer_load(rsrc: ir.Value,
         else:
             soffset = _unwrap_value(soffset_bytes)
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     
@@ -320,6 +440,7 @@ def buffer_load(rsrc: ir.Value,
     return load_op.result
 
 
+@traced_op
 def buffer_store(data: ir.Value,
                  rsrc: ir.Value,
                  offset: ir.Value,
@@ -345,14 +466,18 @@ def buffer_store(data: ir.Value,
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
-    # Unwrap all inputs
+    # Unwrap all inputs (accept DSL Numeric values via ir_value())
+    if hasattr(data, "ir_value"):
+        data = data.ir_value()
+    if hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)
     offset = _unwrap_value(offset)
     
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
-        op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), offset)
+        op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
     
     # IMPORTANT: RawPtrBufferStoreOp offset is in BYTES.
@@ -386,7 +511,7 @@ def buffer_store(data: ir.Value,
         else:
             soffset = _unwrap_value(soffset_bytes)
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
-                op = std_arith.IndexCastOp(ir.IntegerType.get_signless(32), soffset)
+                op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
     aux_flags = _create_i32_constant(cache_modifier)
     

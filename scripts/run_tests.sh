@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 # FlyDSL Test Suite
 # Fail-fast: exits immediately on first test failure.
 #
@@ -25,15 +27,15 @@ if [ "${RUN_TESTS_FULL:-0}" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. All pytest-based tests (kernels + pyir + examples)
+# 1. All pytest-based tests (kernels + unit + examples)
 # ---------------------------------------------------------------------------
 echo "========================================================================"
-echo "Pytest: kernels + pyir + examples"
+echo "Pytest: kernels + unit + examples"
 echo "========================================================================"
 
 python3 -m pytest \
     tests/kernels/ \
-    tests/pyir/ \
+    tests/unit/ \
     tests/python/examples/ \
     "${pytest_args[@]}"
 

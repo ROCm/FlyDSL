@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYDSL_DIALECT_FLY_IR_DIALECT_H
 #define FLYDSL_DIALECT_FLY_IR_DIALECT_H
 

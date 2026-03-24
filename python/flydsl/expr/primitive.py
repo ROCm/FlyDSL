@@ -1,5 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 from .._mlir import ir
-from .._mlir.dialects import arith as _arith, fly
+from .._mlir.dialects import arith as _arith
+from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     # Enum Attributes
     AddressSpace,
@@ -277,15 +281,27 @@ def get_flat_coord(index, layout, loc=None, ip=None):
     return fly.get_flat_coord(index, layout, loc=loc, ip=ip)
 
 
+def _to_i32(v):
+    """Cast index-type ir.Value to i32 (required by fly.make_int_tuple)."""
+    if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):
+        return _arith.IndexCastOp(T.i32(), v).result
+    return v
+
+
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
+    if isinstance(crd, (list, tuple)):
+        crd_i32 = [_to_i32(c) for c in crd]
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type(tuple(crd_i32))
+        crd = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
 
 
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
+        idx = _to_i32(idx)
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type(idx)
         idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
 
@@ -297,7 +313,7 @@ def get(int_tuple, mode, loc=None, ip=None):
     selected = fly.select(int_tuple, indices=[mode], loc=loc, ip=ip)
     result = fly.get_scalar(selected, loc=loc, ip=ip)
     if isinstance(result, ir.Value) and not isinstance(result.type, ir.IndexType):
-        result = _arith.IndexCastOp(ir.IndexType.get(), result).result
+        result = _arith.IndexCastOp(T.index(), result).result
     return result
 
 
@@ -486,6 +502,11 @@ def make_ptr(result_type, args, loc=None, ip=None):
 
 
 @traced_op
+def get_dyn_shared(loc=None, ip=None):
+    return fly.get_dyn_shared(loc=loc, ip=ip)
+
+
+@traced_op
 def add_offset(ptr, offset, loc=None, ip=None):
     if not isinstance(offset, ir.Value):
         offset = make_int_tuple(offset, loc=loc, ip=ip)
@@ -540,8 +561,11 @@ def mma_atom_call(mma_atom, d, a, b, c, loc=None, ip=None):
 
 
 @traced_op
-def copy_atom_call(copy_atom, src, dst, loc=None, ip=None):
-    return fly.copy_atom_call(copy_atom, src, dst, loc=loc, ip=ip)
+def copy_atom_call(copy_atom, src, dst, *, pred=None, loc=None, ip=None):
+    kwargs = dict(loc=loc, ip=ip)
+    if pred is not None:
+        kwargs["pred"] = pred
+    return fly.copy_atom_call(copy_atom, src, dst, **kwargs)
 
 
 @traced_op
@@ -600,7 +624,7 @@ def printf(*args, format_str="", loc=None, ip=None):
         elif isinstance(val, str):
             return (True, val)
         elif isinstance(val, bool):
-            return (False, _arith.constant(ir.IntegerType.get_signless(1), int(val)))
+            return (False, _arith.constant(T.bool(), int(val)))
         elif isinstance(val, int):
             return (False, _arith.constant(T.i32(), val))
         elif isinstance(val, float):

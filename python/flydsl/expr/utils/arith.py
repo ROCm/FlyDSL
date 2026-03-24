@@ -1,9 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import builtins
 from functools import partialmethod
 
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
+from ..meta import traced_op
 
 
 def element_type(ty) -> ir.Type:
@@ -64,6 +68,8 @@ def arith_const(value, ty=None, *, loc=None, ip=None):
 
 
 def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     src_elem_type = element_type(src.type)
     if res_elem_type == src_elem_type:
         return src
@@ -74,6 +80,8 @@ def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
 
 
 def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed:
         return arith.fptosi(res_type, src, loc=loc, ip=ip)
@@ -81,6 +89,8 @@ def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed and element_type(src.type).width > 1:
         return arith.sitofp(res_type, src, loc=loc, ip=ip)
@@ -88,6 +98,8 @@ def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
 
 
 def int_to_int(src, dst_type, *, signed=None, loc=None, ip=None):
+    if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
+        src = src.ir_value()
     src_width = element_type(src.type).width
     dst_width = dst_type.width
     dst_ir_type = recast_type(src.type, dst_type.ir_type)
@@ -106,6 +118,9 @@ def _coerce_other(self, other, *, loc=None, ip=None):
     if isinstance(other, (int, float, bool)):
         return arith_const(other, self.type, loc=loc, ip=ip).with_signedness(self.signed)
     if not isinstance(other, ArithValue):
+        # Accept DSL Numeric types (Int32, Float32, etc.) by unwrapping via ir_value()
+        if hasattr(other, "ir_value"):
+            return ArithValue(other.ir_value())
         return NotImplemented
     return other
 
@@ -233,7 +248,7 @@ def _shift_op(self, other, op, reverse=False, *, loc=None, ip=None):
     if op == "shl":
         return arith.shli(lhs, rhs, loc=loc, ip=ip)
     signed = getattr(lhs, "signed", None)
-    if signed is not False:
+    if signed is True:
         return arith.shrsi(lhs, rhs, loc=loc, ip=ip)
     return arith.shrui(lhs, rhs, loc=loc, ip=ip)
 
@@ -387,7 +402,15 @@ class ArithValue(ir.Value):
         return super().__hash__()
 
     def __str__(self):
-        return "?"
+        try:
+            ty = str(self.type)
+            owner = self.owner
+            if isinstance(owner, ir.Block):
+                return f"ArithValue(type={ty}, block_arg)"
+            op_name = owner.name
+            return f"ArithValue(type={ty}, op={op_name})"
+        except Exception:
+            return f"ArithValue(type=?)"
 
     def __repr__(self):
         return self.__str__()
@@ -406,6 +429,7 @@ def _to_raw(v):
     return ir.Value._CAPICreate(v._CAPIPtr)
 
 
+@traced_op
 def constant(value, *, type=None, index=False, loc=None, ip=None):
     """Create a constant value.
 
@@ -421,9 +445,9 @@ def constant(value, *, type=None, index=False, loc=None, ip=None):
     elif isinstance(value, float):
         mlir_type = T.f32()
     elif isinstance(value, bool):
-        mlir_type = ir.IntegerType.get_signless(1)
+        mlir_type = T.bool()
     elif isinstance(value, int):
-        mlir_type = ir.IntegerType.get_signless(32)
+        mlir_type = T.i32()
     else:
         raise ValueError(f"unsupported constant type: {builtins.type(value)}")
     if isinstance(mlir_type, (ir.F16Type, ir.F32Type, ir.F64Type, ir.BF16Type)):
@@ -431,11 +455,13 @@ def constant(value, *, type=None, index=False, loc=None, ip=None):
     return arith.constant(mlir_type, value, loc=loc, ip=ip)
 
 
+@traced_op
 def index(value, *, loc=None, ip=None):
     """Create an index constant."""
     return constant(value, index=True, loc=loc, ip=ip)
 
 
+@traced_op
 def constant_vector(element_value, vector_type, *, loc=None):
     """Create a splat constant vector."""
     elem_ty = element_type(vector_type)
@@ -447,38 +473,45 @@ def constant_vector(element_value, vector_type, *, loc=None):
     return arith.constant(vector_type, dense, loc=loc)
 
 
+@traced_op
 def index_cast(target_type, value, *, loc=None):
     """Cast between index and integer types."""
     v = _to_raw(value)
     return arith.IndexCastOp(target_type, v, loc=loc).result
 
 
+@traced_op
 def select(condition, true_value, false_value, *, loc=None):
     """Select between two values based on a boolean condition."""
     return arith.SelectOp(_to_raw(condition), _to_raw(true_value),
                           _to_raw(false_value), loc=loc).result
 
 
+@traced_op
 def sitofp(target_type, value, *, loc=None):
     """Convert signed integer to floating point."""
     return arith.SIToFPOp(target_type, _to_raw(value), loc=loc).result
 
 
+@traced_op
 def trunc_f(target_type, value, *, loc=None):
     """Truncate floating point to narrower type (e.g. f32 -> f16)."""
     return arith.TruncFOp(target_type, _to_raw(value), loc=loc).result
 
 
+@traced_op
 def andi(lhs, rhs, *, loc=None):
     """Bitwise AND."""
     return arith.AndIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
 
 
+@traced_op
 def xori(lhs, rhs, *, loc=None):
     """Bitwise XOR."""
     return arith.XOrIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
 
 
+@traced_op
 def shli(lhs, rhs, *, loc=None):
     """Left shift."""
     return arith.ShLIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Blockscale Preshuffle GEMM kernel (Fly dialect, MFMA FP8).
 
 Per-block scaling (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128).
@@ -18,10 +21,10 @@ from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_store_16b_xor16,
     lds_store_8b_xor16,
     make_preshuffle_b_layout,
@@ -123,6 +126,11 @@ def compile_blockscale_preshuffle_gemm(
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
 
+    module_name = (
+        f"bs_gemm_{out_dtype}_{epilog_tag}"
+        f"_t{tile_m}x{tile_n}x{tile_k}"
+    ).replace("-", "_")
+
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────
     lds_tile_bytes = tile_m * lds_stride_bytes
     lds_out_bytes = 2 * tile_m * tile_n if use_cshuffle_epilog else 0
@@ -150,7 +158,7 @@ def compile_blockscale_preshuffle_gemm(
     num_acc_n = n_per_wave // 16
 
     # ── Kernel function ───────────────────────────────────────────────────
-    @flyc.kernel
+    @flyc.kernel(name=module_name)
     def kernel_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
@@ -160,8 +168,8 @@ def compile_blockscale_preshuffle_gemm(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
-        c_m = arith.index_cast(T.index, i32_m.ir_value())
-        c_n = arith.index_cast(T.index, i32_n.ir_value())
+        c_m = arith.index_cast(T.index, i32_m)
+        c_n = arith.index_cast(T.index, i32_n)
 
         acc_init = arith.constant_vector(0.0, T.f32x4)
 
@@ -207,14 +215,14 @@ def compile_blockscale_preshuffle_gemm(
             lds_out = None
 
         # ---- Buffer resources (explicit num_records_bytes for correct OOB on M tail) ----
-        rt_M = arith.index_cast(T.index, i32_m.ir_value())
-        rt_N = arith.index_cast(T.index, i32_n.ir_value())
-        a_nbytes = rt_M * arith.index(K)  # fp8: 1 byte/elem
+        rt_M = arith.index_cast(T.index, i32_m)
+        rt_N = arith.index_cast(T.index, i32_n)
+        a_nbytes = rt_M * fx.Index(K)  # fp8: 1 byte/elem
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes)
         out_elem_bytes = 2  # bf16/fp16
-        c_nbytes = rt_M * rt_N * arith.index(out_elem_bytes)
+        c_nbytes = rt_M * rt_N * fx.Index(out_elem_bytes)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nbytes)
-        sa_nbytes = arith.index(K // 128) * rt_M * arith.index(4)  # [scale_k, M] f32
+        sa_nbytes = arith.index(K // 128) * rt_M * fx.Index(4)  # [scale_k, M] f32
         scale_a_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=sa_nbytes)
 
         b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=True)
@@ -226,14 +234,14 @@ def compile_blockscale_preshuffle_gemm(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         col_offset_base = lane_div_16 * kpack_elems
@@ -260,14 +268,14 @@ def compile_blockscale_preshuffle_gemm(
             )
 
         c64_b = 64
-        _lds_k_dim_c = arith.index(tile_k)
+        _lds_k_dim_c = fx.Index(tile_k)
 
         def load_b_packs_k64(base_k, ku: int, ni: int):
             base_k_bytes = base_k
             k0_base = base_k_bytes // c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
-            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], arith.index(0))
+            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Index(0))
             idx_pack = crd2idx(coord_pack, layout_b)
             b16 = _buffer_load_vec(
                 buffer_ops, vector, b_rsrc, idx_pack,
@@ -310,7 +318,7 @@ def compile_blockscale_preshuffle_gemm(
             (tile_m, tile_k_dwords), (tile_k_dwords, 1)
         )
         chunk_i32_a = a_load_bytes // 4
-        c_chunk_a = arith.index(chunk_i32_a)
+        c_chunk_a = fx.Index(chunk_i32_a)
         tx_i32_base = tx * c_chunk_a
 
         def load_a(idx_i32):
@@ -345,7 +353,7 @@ def compile_blockscale_preshuffle_gemm(
                     parts.append(a_vec)
             return parts
 
-        c4_bytes = arith.index(4)  # bytes per dword (always 4, used for LDS byte addressing)
+        c4_bytes = fx.Index(4)  # bytes per dword (always 4, used for LDS byte addressing)
 
         def store_a_tile_to_lds(vec_a_parts, lds_buffer):
             for i in range_constexpr(num_a_loads):
@@ -357,7 +365,7 @@ def compile_blockscale_preshuffle_gemm(
                         layout_lds=layout_lds,
                         row_local=row_a_local, col_local_i32=col_a_local_i32,
                         tx_c4=c4_bytes, k_blocks16=k_blocks16,
-                        lds_base=arith.index(0),
+                        lds_base=fx.Index(0),
                         vec_part_i32x4=vec_a_parts[i], elem_bytes=elem_bytes,
                     )
                 elif a_load_bytes == 8:
@@ -367,7 +375,7 @@ def compile_blockscale_preshuffle_gemm(
                         layout_lds=layout_lds,
                         row_local=row_a_local, col_local_i32=col_a_local_i32,
                         tx_c4=c4_bytes, k_blocks16=k_blocks16,
-                        lds_base=arith.index(0),
+                        lds_base=fx.Index(0),
                         vec_part_i32x2=vec_a_parts[i],
                     )
 
@@ -434,13 +442,11 @@ def compile_blockscale_preshuffle_gemm(
         mfma_res_ty = T.f32x4
 
         if _is_gfx950:
-            vec4_i64 = T.vec(4, T.i64)
-            vec8_i32 = T.vec(8, T.i32)
             c0_i64 = arith.constant(0, type=T.i64)
 
             def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                return vector.bitcast(vec8_i32, v4)
+                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                return vector.bitcast(T.vec(8, T.i32), v4)
         else:
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -454,17 +460,17 @@ def compile_blockscale_preshuffle_gemm(
         # ── Blockscale compute tile ───────────────────────────────────────
         from flydsl._mlir.dialects import math as math_dialect
 
-        c_scale_block_k = arith.index(scale_block_k)
-        c_scale_k = arith.index(scale_k)
-        c_128 = arith.index(128)
-        c_M = arith.index(M)
+        c_scale_block_k = fx.Index(scale_block_k)
+        c_scale_k = fx.Index(scale_k)
+        c_128 = fx.Index(128)
+        c_M = fx.Index(M)
         row_off_base = lane_div_16 * 4
 
         def load_scales_for_tile(k_base):
             """Load and combine scales for all scale blocks in a K-tile. Returns list of combined_scales."""
             all_combined = []
             for sb in range_constexpr(sb_per_tile):
-                kb = k_base // c_scale_block_k + arith.index(sb)
+                kb = k_base // c_scale_block_k + fx.Index(sb)
                 sa_base_offset = kb * c_M
                 s_a_vecs = []
                 for mi in range_constexpr(m_repeat):
@@ -486,10 +492,9 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_b_vals.append(s_b_val)
 
-                vec4_f32 = T.f32x4
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
-                    s_b_vecs.append(vector.broadcast(vec4_f32, s_b_vals[ni]))
+                    s_b_vecs.append(vector.broadcast(T.f32x4, s_b_vals[ni]))
 
                 combined_scales = []
                 for mi in range_constexpr(m_repeat):
@@ -717,7 +722,7 @@ def compile_blockscale_preshuffle_gemm(
                 store_a_tile_to_lds(prefetch_a_tile(base_k), lds_buffer)
 
         # ── Main pipeline: prologue ───────────────────────────────────────
-        k0 = arith.index(0)
+        k0 = fx.Index(0)
         b_tile_pong = prefetch_b_tile(k0)
         scales_pong = load_scales_for_tile(k0)
         _load_a_to_lds(k0, lds_a_pong)
@@ -730,7 +735,7 @@ def compile_blockscale_preshuffle_gemm(
 
         if (num_tiles % 2) == 1:
             for k_iv in range_constexpr(0, K - tile_k, tile_k * 2):
-                _k = arith.index(k_iv)
+                _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
@@ -772,7 +777,7 @@ def compile_blockscale_preshuffle_gemm(
             )
         else:
             for k_iv in range_constexpr(0, K - tile_k * 3, tile_k * 2):
-                _k = arith.index(k_iv)
+                _k = fx.Index(k_iv)
                 next_k1 = _k + tile_k
                 _load_a_to_lds(next_k1, lds_a_ping)
                 b_tile_ping = prefetch_b_tile(next_k1)
@@ -834,9 +839,6 @@ def compile_blockscale_preshuffle_gemm(
         store_output(final_accs)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (out_dtype, K, scale_block_k, use_cshuffle_epilog,
-                  tile_m, tile_n, tile_k, use_async_copy)
-
     @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
@@ -848,7 +850,6 @@ def compile_blockscale_preshuffle_gemm(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYROCDL_DIALECT
 #define FLYROCDL_DIALECT
 
@@ -16,7 +19,6 @@ def FlyROCDL_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
-  let usePropertiesForAttributes = 1;
 }
 
 class FlyxROCL_MmaAtom<string typeName, string typeMnemonic, list<Trait> traits = []> 

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Static vs dynamic layout types test (mirrors a reference notebook Cell 11).
 
-Ported from legacy FLIR dialect to Fly dialect API.
+Ported from legacy dialect to Fly dialect API.
 """
 
 import pytest
