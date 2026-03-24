@@ -44,13 +44,19 @@ class TestCollectAssignedVars:
         result = ReplaceIfWithDispatch._collect_assigned_vars(stmts)
         assert result == []
 
-    def test_tuple_target_ignored(self):
-        """Tuple unpacking targets are not Name nodes at top level."""
+    def test_tuple_target_detected(self):
+        """Tuple unpacking targets are recursively extracted (Bug 5 fix)."""
         code = "a, b = 1, 2"
         stmts = ast.parse(code).body
         result = ReplaceIfWithDispatch._collect_assigned_vars(stmts)
-        # ast.Tuple target, not ast.Name — not collected
-        assert result == []
+        assert result == ["a", "b"]
+
+    def test_nested_tuple_target(self):
+        """Nested tuple unpacking targets are recursively extracted."""
+        code = "(a, (b, c)), d = nested_func()"
+        stmts = ast.parse(code).body
+        result = ReplaceIfWithDispatch._collect_assigned_vars(stmts)
+        assert result == ["a", "b", "c", "d"]
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +297,89 @@ else:
         common = [v for v in then_vars if v in else_vars]
         assert common == ["a"]
 
+
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: Non-MLIR values raise clear TypeError
+# ---------------------------------------------------------------------------
+
+class TestNonMLIRValueError:
+    def test_then_branch_non_mlir(self):
+        """Non-MLIR value in then-branch raises TypeError, not AttributeError."""
+        with Context() as ctx, Location.unknown():
+            module = Module.create()
+            i1 = IntegerType.get_signless(1)
+            with InsertionPoint(module.body):
+                f = func.FuncOp("test_non_mlir", FunctionType.get([i1], []))
+                entry = f.add_entry_block()
+                with InsertionPoint(entry):
+                    cond = entry.arguments[0]
+
+                    def then_fn():
+                        return {"x": 42}  # Python int, not MLIR Value
+
+                    def else_fn():
+                        i32 = IntegerType.get_signless(32)
+                        return {"x": arith.ConstantOp(i32, 0).result}
+
+                    with pytest.raises(TypeError, match="not an MLIR Value"):
+                        ReplaceIfWithDispatch.scf_if_dispatch_v(
+                            cond, then_fn, else_fn, ("x",)
+                        )
+
+    def test_else_branch_non_mlir(self):
+        """Non-MLIR value in else-branch raises TypeError."""
+        with Context() as ctx, Location.unknown():
+            module = Module.create()
+            i32 = IntegerType.get_signless(32)
+            i1 = IntegerType.get_signless(1)
+            with InsertionPoint(module.body):
+                f = func.FuncOp("test_non_mlir_else", FunctionType.get([i1], []))
+                entry = f.add_entry_block()
+                with InsertionPoint(entry):
+                    cond = entry.arguments[0]
+
+                    def then_fn():
+                        return {"x": arith.ConstantOp(i32, 1).result}
+
+                    def else_fn():
+                        return {"x": None}  # Not an MLIR Value
+
+                    with pytest.raises(TypeError, match="not an MLIR Value"):
+                        ReplaceIfWithDispatch.scf_if_dispatch_v(
+                            cond, then_fn, else_fn, ("x",)
+                        )
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: Type mismatch between branches raises clear TypeError
+# ---------------------------------------------------------------------------
+
+class TestTypeMismatchError:
+    def test_type_mismatch(self):
+        """Mismatched MLIR types between branches raises TypeError."""
+        with Context() as ctx, Location.unknown():
+            module = Module.create()
+            i32 = IntegerType.get_signless(32)
+            i64 = IntegerType.get_signless(64)
+            i1 = IntegerType.get_signless(1)
+            with InsertionPoint(module.body):
+                f = func.FuncOp("test_mismatch", FunctionType.get([i1], []))
+                entry = f.add_entry_block()
+                with InsertionPoint(entry):
+                    cond = entry.arguments[0]
+
+                    def then_fn():
+                        return {"x": arith.ConstantOp(i32, 1).result}
+
+                    def else_fn():
+                        return {"x": arith.ConstantOp(i64, 1).result}  # i64 != i32
+
+                    with pytest.raises(TypeError, match="mismatched types"):
+                        ReplaceIfWithDispatch.scf_if_dispatch_v(
+                            cond, then_fn, else_fn, ("x",)
+                        )
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: void if/else still works

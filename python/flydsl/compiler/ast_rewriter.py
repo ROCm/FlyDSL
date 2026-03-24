@@ -269,11 +269,20 @@ class ReplaceIfWithDispatch(Transformer):
     def _collect_assigned_vars(stmts):
         """Find all variable names assigned in a statement list (preserving order)."""
         assigned = []
+
+        def _extract_names(target):
+            """Recursively extract Name nodes from assignment targets."""
+            if isinstance(target, ast.Name):
+                if target.id not in assigned:
+                    assigned.append(target.id)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for elt in target.elts:
+                    _extract_names(elt)
+
         for stmt in stmts:
             if isinstance(stmt, ast.Assign):
                 for target in stmt.targets:
-                    if isinstance(target, ast.Name) and target.id not in assigned:
-                        assigned.append(target.id)
+                    _extract_names(target)
             elif isinstance(stmt, ast.AugAssign):
                 if isinstance(stmt.target, ast.Name) and stmt.target.id not in assigned:
                     assigned.append(stmt.target.id)
@@ -313,6 +322,16 @@ class ReplaceIfWithDispatch(Transformer):
         # Execute then_fn() at the current insertion point — ops are emitted here
         then_result = then_fn()
         then_values = [_unwrap(then_result[k]) for k in var_names]
+
+        # Bug 3: Validate that all then-branch values are MLIR Values
+        for i, (v, name) in enumerate(zip(then_values, var_names)):
+            if not isinstance(v, ir.Value):
+                raise TypeError(
+                    f"if/else variable '{name}' in then-branch is a "
+                    f"{type(v).__name__}, not an MLIR Value. "
+                    f"Only MLIR Values can be yielded from dynamic if/else branches."
+                )
+
         result_types = [v.type for v in then_values]
 
         # Create IfOp with the inferred result types
@@ -342,11 +361,35 @@ class ReplaceIfWithDispatch(Transformer):
         # Erase the marker op (no longer needed)
         marker.operation.erase()
 
+        # Bug 6 (Copilot): Guard against empty else region blocks
+        if len(if_op.regions[1].blocks) == 0:
+            if_op.regions[1].blocks.append(*[])
+
         # Execute else_fn() inside the else-region
         else_block = if_op.regions[1].blocks[0]
         with ir.InsertionPoint(else_block):
             else_result = else_fn()
             else_values = [_unwrap(else_result[k]) for k in var_names]
+
+            # Bug 3: Validate else-branch values
+            for i, (v, name) in enumerate(zip(else_values, var_names)):
+                if not isinstance(v, ir.Value):
+                    raise TypeError(
+                        f"if/else variable '{name}' in else-branch is a "
+                        f"{type(v).__name__}, not an MLIR Value. "
+                        f"Only MLIR Values can be yielded from dynamic if/else branches."
+                    )
+
+            # Bug 4: Check type mismatch between then/else branches
+            for i, (tv, ev, name) in enumerate(zip(then_values, else_values, var_names)):
+                if tv.type != ev.type:
+                    raise TypeError(
+                        f"if/else variable '{name}' has mismatched types: "
+                        f"then-branch produces {tv.type}, "
+                        f"else-branch produces {ev.type}. "
+                        f"Both branches must yield the same MLIR type."
+                    )
+
             scf.YieldOp(else_values)
 
         # Return IfOp results
@@ -431,8 +474,14 @@ class ReplaceIfWithDispatch(Transformer):
                 )
             )
 
-            then_body = list(node.body) + [return_dict_node(common_vars)]
-            else_body = list(node.orelse) + [return_dict_node(common_vars)]
+            # Bug 1: Add nonlocal declarations for common_vars so that
+            # read-then-write patterns (e.g. acc = acc * rescale) don't
+            # cause UnboundLocalError in the generated closure.
+            nonlocal_stmt = ast.Nonlocal(names=list(common_vars))
+            nonlocal_stmt = ast.copy_location(nonlocal_stmt, node)
+
+            then_body = [nonlocal_stmt] + list(node.body) + [return_dict_node(common_vars)]
+            else_body = [nonlocal_stmt] + list(node.orelse) + [return_dict_node(common_vars)]
 
             then_func = ast.FunctionDef(
                 name=then_name,
