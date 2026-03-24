@@ -62,9 +62,18 @@ echo "========================================================================"
 echo "Examples (examples/)"
 echo "========================================================================"
 
+# Examples known to work on non-CDNA (RDNA) GPUs.
+# Others are skipped on non-CDNA since they use MFMA or other CDNA-only features.
+_RDNA_EXAMPLE_WHITELIST="01-vectorAdd.py 02-tiledCopy.py"
+
+_gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 for example in "${REPO_ROOT}"/examples/*.py; do
     [ -f "${example}" ] || continue
     name="$(basename "${example}")"
+    if [[ "${_gpu_arch}" != gfx9* ]] && ! echo "${_RDNA_EXAMPLE_WHITELIST}" | grep -qw "${name}"; then
+        echo "  SKIP  ${name}  (not in RDNA whitelist, arch: ${_gpu_arch})"
+        continue
+    fi
     output=$(python3 "${example}" 2>&1) || {
         echo "  FAIL  ${name}"; echo "$output" | tail -10 | sed 's/^/        /'; exit 1
     }
