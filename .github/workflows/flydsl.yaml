@@ -133,12 +133,7 @@ jobs:
 
       - name: Run tests
         run: |
-          if [[ "${{ matrix.runners }}" == *navi* ]]; then
-            echo "Navi runner: running WMMA kernel tests only"
-            docker exec flydsl_test bash -c "cd /flydsl-test && python3 -m pytest tests/kernels/test_wmma_gemm.py tests/kernels/test_wmma_fp8_gemm.py -v --no-header --tb=short"
-          else
-            docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
-          fi
+          docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
       - name: Show tests logs
         if: failure()
@@ -153,7 +148,6 @@ jobs:
           fi
 
       - name: Run benchmarks
-        if: ${{ !contains(matrix.runners, 'navi') }}
         run: |
           docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_benchmark.sh"
 

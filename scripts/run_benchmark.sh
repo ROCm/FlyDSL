@@ -27,6 +27,18 @@ fi
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
 
+# Detect GPU architecture — CDNA benchmarks are skipped on non-CDNA GPUs.
+GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
+IS_CDNA=false
+case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
+
+if [ "${IS_CDNA}" = "false" ]; then
+  echo "========================================================================"
+  echo "GPU arch: ${GPU_ARCH} (non-CDNA) — skipping CDNA-only benchmarks."
+  echo "========================================================================"
+  exit 0
+fi
+
 SUCCESS_COUNT=0
 FAIL_COUNT=0
 
