@@ -27,6 +27,20 @@ fi
 BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
 
+# Auto-select GPU with the most free VRAM (skip if HIP_VISIBLE_DEVICES is already set).
+if [ -z "${HIP_VISIBLE_DEVICES:-}" ] && command -v python3 >/dev/null 2>&1; then
+    _best_gpu=$(python3 -c "
+import torch
+if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+    best = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[0])
+    print(best)
+" 2>/dev/null || true)
+    if [ -n "${_best_gpu}" ]; then
+        export HIP_VISIBLE_DEVICES="${_best_gpu}"
+        echo "[run_benchmark] Auto-selected GPU ${_best_gpu} (most free VRAM)"
+    fi
+fi
+
 # Detect GPU architecture — CDNA benchmarks are skipped on non-CDNA GPUs.
 GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 IS_CDNA=false

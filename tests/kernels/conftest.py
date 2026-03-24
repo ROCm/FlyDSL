@@ -35,7 +35,6 @@ def pytest_collection_modifyitems(config, items):
         return
 
     is_cdna = "gfx9" in arch
-    is_rdna4 = "gfx12" in arch
 
     if is_cdna:
         return
