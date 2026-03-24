@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-_BASE_VERSION = "0.1.2"
+_BASE_VERSION = "0.1.1"
 
 try:
     from ._version import __version__
