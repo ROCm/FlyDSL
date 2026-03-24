@@ -20,4 +20,4 @@ runners:
 
   linux-flydsl-navi-2:
     gpu_arch: gfx1201
-    gpu_count: 1
+    gpu_count: 4

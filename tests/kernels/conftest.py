@@ -8,14 +8,16 @@ Automatically skips tests that are incompatible with the current GPU:
 
 import pytest
 
-# Test files that use MFMA instructions and only work on CDNA (gfx9xx) GPUs.
+# Test files that require CDNA (gfx9xx) GPUs.
+# Reasons: MFMA instructions, hardcoded wave64, or imports from CDNA-only kernels.
 _CDNA_ONLY_TEST_FILES = frozenset({
-    "test_preshuffle_gemm.py",
-    "test_blockscale_preshuffle_gemm.py",
-    "test_moe_gemm.py",
-    "test_moe_blockscale.py",
-    "test_moe_reduce.py",
-    "test_pa.py",
+    "test_preshuffle_gemm.py",         # MFMA preshuffle pipeline
+    "test_blockscale_preshuffle_gemm.py",  # MFMA blockscale pipeline
+    "test_moe_gemm.py",                # MFMA MoE 2-stage
+    "test_moe_blockscale.py",          # MFMA MoE blockscale
+    "test_moe_reduce.py",              # imports moe_gemm_2stage (MFMA)
+    "test_pa.py",                      # MFMA paged attention
+    "test_quant.py",                   # hardcodes WARP_SIZE=64
 })
 
 
