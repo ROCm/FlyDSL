@@ -62,11 +62,11 @@ def compile_hgemm_kernel(
     m: int,
     n: int,
     k: int,
-    BLOCK_K: int = 64,
+    TILE_K: int = 64,
     BLOCK_M_WARPS: int = 1,
     BLOCK_N_WARPS: int = 4,
-    WARP_M_STEPS: int = 8,
-    WARP_N_STEPS: int = 2,
+    TILE_M: int = 128,
+    TILE_N: int = 128,
     PACK_N: int = 2,
     STAGES : int = 2,
     ASYNC_COPY: bool = False,
@@ -74,6 +74,7 @@ def compile_hgemm_kernel(
     B_PRE_SHUFFLE: bool = True,
     SPLIT_K: int = 1,
 ):
+    BLOCK_K = TILE_K
     assert (k % SPLIT_K == 0) and (k // SPLIT_K >= 1)
     ks = k // SPLIT_K
     assert (ks % BLOCK_K == 0) and (ks // BLOCK_K >= 1)
@@ -103,6 +104,11 @@ def compile_hgemm_kernel(
     WARP_K_STEPS = BLOCK_K // WARP_ATOM_K
     assert (BLOCK_K % WARP_ATOM_K == 0) and (WARP_K_STEPS >= 1)
     BLOCK_THREADS = BLOCK_M_WARPS * BLOCK_N_WARPS * WARP_SIZE
+    WARP_M_STEPS = TILE_M // BLOCK_M_WARPS // WARP_ATOM_M
+    WARP_N_STEPS = TILE_N // BLOCK_N_WARPS // WARP_ATOM_N
+    assert (WARP_M_STEPS >= 1) and (WARP_N_STEPS >= 1)
+    assert TILE_M % (BLOCK_M_WARPS * WARP_ATOM_M) == 0
+    assert TILE_N % (BLOCK_N_WARPS * WARP_ATOM_N) == 0
     WARP_M = WARP_M_STEPS * WARP_ATOM_M
     WARP_N = WARP_N_STEPS * WARP_ATOM_N
     BLOCK_M = BLOCK_M_WARPS * WARP_M
@@ -505,10 +511,8 @@ def compile_hgemm_kernel(
         with ir.InsertionPoint(ctx.gpu_module_body):
             allocator.finalize()
         
-        # bm = (m + BLOCK_M - 1) // BLOCK_M
-        # bn = (n + BLOCK_N - 1) // BLOCK_N
-        bm = m // BLOCK_M
-        bn = n // BLOCK_N
+        bm = (m + BLOCK_M - 1) // BLOCK_M
+        bn = (n + BLOCK_N - 1) // BLOCK_N
         hgemm_kernel._func.__name__ = KERNEL_NAME
         hgemm_kernel(C, A, B, CLEAN).launch(grid=(bm, bn, SPLIT_K), block=(BLOCK_THREADS, 1, 1), stream=stream)
     
