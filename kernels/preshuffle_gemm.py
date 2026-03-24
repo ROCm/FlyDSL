@@ -22,7 +22,6 @@ from flydsl.expr.typing import T
 from flydsl.compiler.protocol import fly_values
 from typing import Optional
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -302,14 +301,14 @@ def compile_preshuffle_gemm_a8(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         kpack_elems = 16 if elem_bytes == 1 else 8
@@ -673,8 +672,6 @@ def compile_preshuffle_gemm_a8(
                         f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
                     )
                 mfma_res_ty = T.f32x4
-                vec4_i64 = T.vec(4, T.i64)
-                vec8_i32 = T.vec(8, T.i32)
                 c0_i64 = arith.constant(0, type=T.i64)
 
                 _fp4_cbsz = 4 if is_fp4 else 0
@@ -689,8 +686,8 @@ def compile_preshuffle_gemm_a8(
                 _num_acc_n_packed = num_acc_n // _fp4_pack_N
 
                 def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                    v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                    return vector.bitcast(vec8_i32, v4)
+                    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                    return vector.bitcast(T.vec(8, T.i32), v4)
 
                 if is_fp4:
                     _fp4_a_sc, _fp4_b_sc = fp4_scales if fp4_scales else ([], [])
@@ -800,11 +797,7 @@ def compile_preshuffle_gemm_a8(
             return current_accs_list, scales_pf
 
         # ── Epilogue (store output) ───────────────────────────────────────
-        vec1_f16 = T.vec(1, _out_elem())
-        vec2_f16 = T.vec(2, _out_elem())
-        vec1_i16 = T.vec(1, T.i16)
-        vec2_i16 = T.i16x2
-        vec1_i32 = T.vec(1, T.i32)
+        vec1_out = T.vec(1, _out_elem())
 
         def store_output(final_accs, scales):
             if is_f16_or_bf16 or is_fp4:
@@ -840,7 +833,7 @@ def compile_preshuffle_gemm_a8(
                         v16 = arith.trunc_f(_out_elem(), val_s)
 
                         lds_idx = row_base_lds + col_local
-                        v1 = vector.from_elements(vec1_f16, [v16])
+                        v1 = vector.from_elements(vec1_out, [v16])
                         vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):

@@ -3,6 +3,7 @@
 
 from ..._mlir import ir
 from ..._mlir.dialects import arith, fly
+from ..._mlir.extras import types as T
 from ..._mlir.dialects._fly_enum_gen import AddressSpace
 from ..._mlir.dialects.fly import LayoutType, PointerType
 from ..._mlir.dialects.fly import MemRefType as FlyMemRefType
@@ -25,7 +26,7 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
         # default to f32
-        ty_acc = ir.F32Type.get()
+        ty_acc = T.f32()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
     return MmaAtomCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
@@ -59,14 +60,10 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
     else:
         num_records_bytes = MAX_BUFFER_SIZE
 
-    i16_type = ir.IntegerType.get_signless(16)
-    i32_type = ir.IntegerType.get_signless(32)
-    i64_type = ir.IntegerType.get_signless(64)
-
-    stride_val = arith.ConstantOp(i16_type, ir.IntegerAttr.get(i16_type, 0)).result
-    num_records_val = arith.ConstantOp(i64_type, ir.IntegerAttr.get(i64_type, num_records_bytes)).result
+    stride_val = arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
+    num_records_val = arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), num_records_bytes)).result
     flags_val_int = (7 << 12) | (4 << 15)
-    flags_val = arith.ConstantOp(i32_type, ir.IntegerAttr.get(i32_type, flags_val_int)).result
+    flags_val = arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), flags_val_int)).result
 
     src_ptr_ty = PointerType(ptr.type)
     buf_ptr_ty = PointerType.get(
