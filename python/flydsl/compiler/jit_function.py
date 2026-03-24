@@ -667,7 +667,8 @@ class JitFunction:
            identity (e.g. TensorAdaptor includes assumed_align).
         2. Python scalars — value in key when not runtime; type only when
            runtime (annotated as Int32/Stream/etc.).
-        3. Tensor-like (dtype+shape) — fallback for bare torch.Tensor.
+        3. Registry raw_cache_signature — lightweight sig from raw arg
+           without full JitArgument construction overhead.
         4. Everything else — type only.
         """
         if hasattr(arg, "__cache_signature__"):
@@ -676,10 +677,11 @@ class JitFunction:
             if runtime:
                 return type(arg)
             return (type(arg), arg)
-        # elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
-        #     strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
-        #     return (arg.dtype, tuple(arg.shape), strides)
         else:
+            from .jit_argument import JitArgumentRegistry
+            constructor, _ = JitArgumentRegistry.get(type(arg))
+            if constructor is not None and hasattr(constructor, 'raw_cache_signature'):
+                return constructor.raw_cache_signature(arg)
             return type(arg)
 
     def _make_cache_key(self, bound_args):
