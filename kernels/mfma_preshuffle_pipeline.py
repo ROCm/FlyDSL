@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Shared MFMA preshuffle helpers for preshuffle GEMM kernels.
 
 Key primitives:
@@ -12,7 +15,14 @@ from flydsl.expr.typing import T
 from flydsl.expr import arith as _arith
 import flydsl.expr as fx
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+
+def crd2idx(crd, layout):
+    """crd2idx returning an index-type scalar (unwraps fly.int_tuple)."""
+    result = fx.crd2idx(crd, layout)
+    scalar = fx.get_scalar(result)
+    if isinstance(scalar, ir.Value) and not isinstance(scalar.type, ir.IndexType):
+        scalar = _arith.IndexCastOp(T.index, scalar).result
+    return scalar
 
 
 def swizzle_xor16(row, col, k_blocks16):
@@ -316,9 +326,9 @@ def tile_chunk_coord_i32(
         raise ValueError(f"chunk_i32 must be one of (1,2,4), got {chunk_i32!r}")
     chunk_off_i32 = arith.constant(i * total_threads * chunk_i32, index=True)
     tile_idx_i32 = tx_i32_base + chunk_off_i32
-    coord_local = idx2crd(tile_idx_i32, layout_tile_div4)
-    row_local = layout_get(coord_local, 0)
-    col_local_i32 = layout_get(coord_local, 1)
+    coord_local = fx.idx2crd(tile_idx_i32, layout_tile_div4)
+    row_local = fx.get(coord_local, 0)
+    col_local_i32 = fx.get(coord_local, 1)
     return row_local, col_local_i32
 
 

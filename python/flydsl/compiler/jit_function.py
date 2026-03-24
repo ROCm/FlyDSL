@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import ctypes
 import hashlib
 import inspect
@@ -13,8 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
+from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .jit_argument import convert_to_jit_arguments
@@ -122,10 +125,47 @@ def _is_user_function(func, rootFile):
     return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
 
 
+def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -> List[str]:
+    """Recursively collect scalar closure values from func and all callable deps in its closure.
+
+    This ensures that compile-time parameters captured by nested @kernel functions
+    (e.g. tile_m, tile_n, waves_per_eu inside a KernelFunction._func) are included
+    in the cache key even when the outer @jit launcher does not reference them directly.
+    """
+    if visited_ids is None:
+        visited_ids = set()
+    if id(func) in visited_ids:
+        return []
+    visited_ids.add(id(func))
+
+    vals = []
+    if not (func.__code__.co_freevars and getattr(func, "__closure__", None)):
+        return vals
+
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(val, (int, float, bool, str, type(None), tuple)):
+            vals.append(f"{name}={val!r}")
+        else:
+            # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
+            underlying = _get_underlying_func(val)
+            if underlying is not None and id(underlying) not in visited_ids:
+                nested = _collect_closure_scalar_vals(underlying, visited_ids)
+                # Prefix with the closure var name to avoid collisions across nesting levels
+                vals.extend(f"via:{name}:{v}" for v in nested)
+
+    return vals
+
+
 def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
     if visited is None:
         visited = set()
     sources = []
+
+    # 1) Scan global name references (co_names → __globals__)
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -140,6 +180,27 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # 2) Scan closure variables (co_freevars → __closure__) for callable
+    #    dependencies.  This catches @flyc.kernel functions defined in an
+    #    enclosing scope and captured by the @flyc.jit launcher via closure.
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
 
 
@@ -159,17 +220,13 @@ def _jit_function_cache_key(func: Callable) -> str:
     depSources.sort()
     parts.extend(depSources)
 
-    if func.__code__.co_freevars and getattr(func, "__closure__", None):
-        closure_vals = []
-        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            try:
-                val = cell.cell_contents
-                if isinstance(val, (int, float, bool, str, type(None), tuple)):
-                    closure_vals.append(f"{name}={val!r}")
-            except ValueError:
-                pass
-        if closure_vals:
-            parts.append("closure:" + ",".join(closure_vals))
+    # Collect scalar closure values recursively — this covers compile-time parameters
+    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+    # indirectly via nested @kernel / helper functions, without requiring an explicit
+    # _cache_tag tuple in every kernel factory function.
+    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+    if all_closure_vals:
+        parts.append("closure_vals:" + ",".join(all_closure_vals))
 
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
@@ -251,8 +308,9 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
+        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -296,9 +354,20 @@ def _sanitize_path_component(s: str) -> str:
 class MlirCompiler:
     @staticmethod
     def _pipeline_fragments(*, chip: str) -> list:
+        from .kernel_function import CompilationContext
+        hints = CompilationContext.get_compile_hints()
+        waves_per_eu = hints.get('waves_per_eu')
+        maxnreg = hints.get('maxnreg')
+
+        # Build compiler option flags for gpu-module-to-binary
+        debug_opt = "-g" if env.debug.enable_debug_info else ""
+        wpe_opt = f" --amdgpu-waves-per-eu={waves_per_eu}" if waves_per_eu else ""
+        maxnreg_opt = f" --amdgpu-num-vgpr={maxnreg}" if maxnreg else ""
+        all_opts = f"{debug_opt}{wpe_opt}{maxnreg_opt}".strip()
+
         wave64 = "false" if is_rdna_arch(chip) else "true"
         return [
-            "gpu-kernel-outlining{data-layout-str=}",
+            "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
             "convert-fly-to-rocdl",
@@ -313,7 +382,8 @@ class MlirCompiler:
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
             "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
+            *((['ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}'] if env.debug.enable_debug_info else [])),
+            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
         ]
 
     @classmethod
@@ -758,16 +828,20 @@ class JitFunction:
 
             result = compiled_func(*jit_args)
 
-            # Build CallState so subsequent calls skip DLPack
-            try:
-                state = _build_call_state(
-                    sig, args_tuple,
-                    compiled_func._get_func_exe(),
-                )
-                if state is not None:
-                    self._call_state_cache[cache_key] = state
-            except Exception:
-                pass
+            # Build CallState so subsequent calls skip DLPack.
+            # Only when caching is enabled -- otherwise compiled_func will be
+            # GC'd and the function pointer inside CallState becomes dangling,
+            # causing a SIGSEGV on the next call with the same cache_key.
+            if use_cache:
+                try:
+                    state = _build_call_state(
+                        sig, args_tuple,
+                        compiled_func._get_func_exe(),
+                    )
+                    if state is not None:
+                        self._call_state_cache[cache_key] = state
+                except Exception:
+                    pass
 
             return result
 

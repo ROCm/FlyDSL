@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYDSL_DIALECT_FLY_UTILS_LAYOUTUTILS_H
 #define FLYDSL_DIALECT_FLY_UTILS_LAYOUTUTILS_H
 
@@ -12,6 +15,7 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
+#include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
 namespace mlir::fly {
 
@@ -247,7 +251,15 @@ private:
 
 public:
   LayoutValueAdaptor() = default;
-  LayoutValueAdaptor(Value value, Attribute attr) : value(value), attr(attr) {}
+  LayoutValueAdaptor(Value value, Attribute attr) : value(value), attr(attr) {
+    if (isa<LayoutAttr>(attr)) {
+      auto layoutVal = cast<TypedValue<LayoutType>>(value);
+      assert(isNormalForm(layoutVal) && "Layout must be in normal form");
+    } else if (isa<ComposedLayoutAttr>(attr)) {
+      auto composedLayoutVal = cast<TypedValue<ComposedLayoutType>>(value);
+      assert(isNormalForm(composedLayoutVal) && "ComposedLayout must be in normal form");
+    }
+  }
 
   Value getValue() const { return value; }
   Attribute getAttr() const { return attr; }

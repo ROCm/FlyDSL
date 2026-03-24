@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """CPU dispatch overhead benchmark: FlyDSL vs Triton vs PyTorch.
 
 Measures pure CPU-side dispatch time (no GPU sync) for a small vec_add kernel.

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """GPU intrinsics and address space helpers.
 
 Provides thread/block indexing (``thread_idx``, ``block_idx``),

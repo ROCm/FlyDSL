@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Integration tests: GPU kernels with raw int stream and torch.nn.Parameter.
 
 Validates end-to-end that:

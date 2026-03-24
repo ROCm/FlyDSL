@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """RMSNorm kernel builder using the @flyc.kernel API.
 
 RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma

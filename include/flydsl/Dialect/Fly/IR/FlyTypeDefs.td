@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLY_TYPEDEFS
 #define FLY_TYPEDEFS
 
@@ -65,7 +68,9 @@ def Fly_Layout : Fly_Type<"Layout", "layout", [
   ];
 }
 
-def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", []> {
+def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins Fly_SwizzleAttr:$attr);
   let assemblyFormat = "`<` $attr `>`";
 
@@ -102,7 +107,9 @@ def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
   ];
 }
 
-def Fly_Tile : Fly_Type<"Tile", "tile", []> {
+def Fly_Tile : Fly_Type<"Tile", "tile", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins Fly_TileAttr:$attr);
   let assemblyFormat = "`<` $attr `>`";
 
@@ -180,6 +187,8 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let extraClassDeclaration = [{
     MemRefType at(int32_t idx) const;
     MemRefType at(ArrayRef<int32_t> idxs) const;
+    
+    PointerType getPointerType() const;
     int32_t getValueDivisibility() const;
   }];
 
@@ -205,7 +214,9 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   ];
 }
 
-def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", []> {
+def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins
     "Type":$copyAtom,
     Fly_Layout:$layoutThrVal,
@@ -214,7 +225,9 @@ def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", []> {
   let assemblyFormat = "`<` $copyAtom `,` $layoutThrVal `,` $tileMN `>`";
 }
 
-def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
+def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins
     "Type":$mmaAtom,
     Fly_Layout:$atomLayout,

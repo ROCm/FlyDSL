@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Softmax kernel builder using the @flyc.kernel API.
 
 softmax(x)_i = exp(x_i - max(x)) / sum(exp(x - max(x)))

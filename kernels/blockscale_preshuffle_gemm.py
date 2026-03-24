@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Blockscale Preshuffle GEMM kernel (Fly dialect, MFMA FP8).
 
 Per-block scaling (ScaleBlockM=1, ScaleBlockN=128, ScaleBlockK=128).
@@ -18,10 +21,10 @@ from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_store_16b_xor16,
     lds_store_8b_xor16,
     make_preshuffle_b_layout,
@@ -123,6 +126,11 @@ def compile_blockscale_preshuffle_gemm(
 
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
 
+    module_name = (
+        f"bs_gemm_{out_dtype}_{epilog_tag}"
+        f"_t{tile_m}x{tile_n}x{tile_k}"
+    ).replace("-", "_")
+
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────
     lds_tile_bytes = tile_m * lds_stride_bytes
     lds_out_bytes = 2 * tile_m * tile_n if use_cshuffle_epilog else 0
@@ -150,7 +158,7 @@ def compile_blockscale_preshuffle_gemm(
     num_acc_n = n_per_wave // 16
 
     # ── Kernel function ───────────────────────────────────────────────────
-    @flyc.kernel
+    @flyc.kernel(name=module_name)
     def kernel_gemm(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
@@ -226,14 +234,14 @@ def compile_blockscale_preshuffle_gemm(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         col_offset_base = lane_div_16 * kpack_elems
@@ -434,13 +442,11 @@ def compile_blockscale_preshuffle_gemm(
         mfma_res_ty = T.f32x4
 
         if _is_gfx950:
-            vec4_i64 = T.vec(4, T.i64)
-            vec8_i32 = T.vec(8, T.i32)
             c0_i64 = arith.constant(0, type=T.i64)
 
             def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                return vector.bitcast(vec8_i32, v4)
+                v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                return vector.bitcast(T.vec(8, T.i32), v4)
         else:
             mfma_fn = rocdl.mfma_f32_16x16x32_fp8_fp8
 
@@ -486,10 +492,9 @@ def compile_blockscale_preshuffle_gemm(
                     )
                     s_b_vals.append(s_b_val)
 
-                vec4_f32 = T.f32x4
                 s_b_vecs = []
                 for ni in range_constexpr(num_acc_n):
-                    s_b_vecs.append(vector.broadcast(vec4_f32, s_b_vals[ni]))
+                    s_b_vecs.append(vector.broadcast(T.f32x4, s_b_vals[ni]))
 
                 combined_scales = []
                 for mi in range_constexpr(m_repeat):
@@ -834,9 +839,6 @@ def compile_blockscale_preshuffle_gemm(
         store_output(final_accs)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (out_dtype, K, scale_block_k, use_cshuffle_epilog,
-                  tile_m, tile_n, tile_k, use_async_copy)
-
     @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
@@ -848,7 +850,6 @@ def compile_blockscale_preshuffle_gemm(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()

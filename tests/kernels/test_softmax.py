@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 Softmax Operator Test with Manual Vectorization and Register Buffering
 Implementation based on high-performance C++ kernel logic:

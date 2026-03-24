@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 # Dump IR at each compilation stage.
 # Usage: bash scripts/dumpir.sh python my_kernel.py [args...]
 #

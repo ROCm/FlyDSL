@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """PA Decode FP8 — FlyDSL vs Gluon, with Gluon reduce + one-shot + PS modes."""
 import sys, os, torch, math, logging, random, gc
 import pytest
