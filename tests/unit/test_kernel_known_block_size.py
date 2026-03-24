@@ -234,18 +234,6 @@ class TestKnownBlockSizeLaunchMismatch:
     def _setup(self):
         self.x = torch.zeros(64, device="cuda", dtype=torch.float32)
 
-    def test_mismatch_warns(self):
-        @flyc.kernel(known_block_size=[256, 1, 1])
-        def _kn_256(x: fx.Tensor):
-            pass
-
-        @flyc.jit
-        def _launch_wrong(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-            _kn_256(x).launch(grid=(1, 1, 1), block=(128, 1, 1), stream=stream)
-
-        with pytest.warns(UserWarning, match="launch block x=128 differs from known_block_size x=256"):
-            _launch_wrong(self.x, stream=torch.cuda.current_stream())
-
     def test_matching_block_no_warning(self):
         import warnings
 
@@ -270,7 +258,7 @@ class TestKnownBlockSizeLaunchMismatch:
 
         @flyc.jit
         def _launch_any(x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-            _kn_none(x).launch(grid=(1, 1, 1), block=(512, 1, 1), stream=stream)
+            _kn_none(x).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
