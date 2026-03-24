@@ -651,6 +651,11 @@ def make_ptr(result_type, args, loc=None, ip=None):
 
 
 @traced_op
+def get_dyn_shared(loc=None, ip=None):
+    return fly.get_dyn_shared(loc=loc, ip=ip)
+
+
+@traced_op
 def inttoptr(result_type, src, loc=None, ip=None):
     return fly.inttoptr(result_type, src, loc=loc, ip=ip)
 
