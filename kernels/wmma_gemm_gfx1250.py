@@ -139,7 +139,7 @@ def compile_wmma_gemm_tdm(
 
     buf_size_elems = lds_a_elems + lds_b_elems
 
-    # --- LDS allocation ---
+    # --- LDS allocation (B-first: B at offset 0 for smaller ds_load offsets) ---
     num_warps = m_warp * n_warp
 
     stage_allocators = []
@@ -151,8 +151,8 @@ def compile_wmma_gemm_tdm(
         off = alloc._align(alloc.ptr, 16)
         alloc.ptr = off + buf_size_elems * elem_bytes
         stage_allocators.append(alloc)
-        stage_a_offsets.append(off)
-        stage_b_offsets.append(off + lds_a_elems * elem_bytes)
+        stage_b_offsets.append(off)
+        stage_a_offsets.append(off + lds_b_elems * elem_bytes)
 
     # Compile-time pipeline parameters
     pre_loaded = num_buffers - 1        # stages pre-loaded in prologue
