@@ -419,9 +419,18 @@ def cosize(layout, loc=None, ip=None):
     return result
 
 
+def _to_i32(v):
+    """Cast index-type ir.Value to i32 (required by fly.make_int_tuple)."""
+    if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):
+        return _arith.IndexCastOp(T.i32(), v).result
+    return v
+
+
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
     if not isinstance(crd, ir.Value):
+        if isinstance(crd, (list, tuple)):
+            crd = tuple(_to_i32(c) for c in crd)
         crdTy, dyncElems = fly.infer_int_tuple_type(crd)
         crd = fly.make_coord(crdTy, dyncElems, loc=loc, ip=ip)
     return fly.crd2idx(crd, layout, loc=loc, ip=ip)
@@ -430,7 +439,8 @@ def crd2idx(crd, layout, loc=None, ip=None):
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
-        IntTupleTy, dyncElems = fly.infer_int_tuple_type((idx,))
+        idx = _to_i32(idx)
+        IntTupleTy, dyncElems = fly.infer_int_tuple_type(idx)
         idx = fly.make_int_tuple(IntTupleTy, dyncElems, loc=loc, ip=ip)
     return fly.idx2crd(idx, layout, loc=loc, ip=ip)
 
