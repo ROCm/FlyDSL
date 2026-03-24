@@ -403,6 +403,71 @@ class InsertEmptyYieldForSCFFor(Transformer):
     def _is_range(cls, iter_node):
         return cls._iter_call_name(iter_node) == "range"
 
+    _CONSTEXPR_ANNOTATIONS = {"Constexpr", "fx.Constexpr", "const_expr"}
+    _dynamic_params = frozenset()  # Default: no dynamic params known
+
+    def _extract_dynamic_params(self, func_node):
+        """Extract non-Constexpr parameter names from a FunctionDef node."""
+        params = set()
+        for arg in func_node.args.args + func_node.args.posonlyargs + func_node.args.kwonlyargs:
+            annotation = arg.annotation
+            if annotation is None:
+                params.add(arg.arg)
+                continue
+            ann_str = ast.unparse(annotation) if annotation else ""
+            if any(ce in ann_str for ce in self._CONSTEXPR_ANNOTATIONS):
+                continue
+            if "Stream" in ann_str:
+                continue
+            params.add(arg.arg)
+        return frozenset(params)
+
+    def generic_visit(self, node):
+        """Override to extract dynamic params from FunctionDef before visiting children."""
+        if isinstance(node, ast.FunctionDef) and not getattr(node, _ASTREWRITE_MARKER, False):
+            self._dynamic_params = self._extract_dynamic_params(node)
+        return super().generic_visit(node)
+
+    def _is_constexpr_arg(self, node):
+        """Check if a range() argument is statically evaluable at AST level.
+
+        Returns True for expressions that can only produce Python values
+        (never MLIR Values): literals, variable names, and arithmetic on
+        those.  Returns False for function calls, attribute accesses, and
+        subscripts which may produce MLIR Values at runtime.
+
+        For ast.Name, returns False if the name is a function parameter
+        without Constexpr type annotation (it will be an MLIR value).
+        """
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, ast.Name):
+            # Exclude names that are known dynamic parameters (non-Constexpr
+            # function arguments become MLIR values at JIT time).
+            if node.id in self._dynamic_params:
+                return False
+            return True
+        if isinstance(node, ast.UnaryOp):
+            return self._is_constexpr_arg(node.operand)
+        if isinstance(node, ast.BinOp):
+            return (self._is_constexpr_arg(node.left)
+                    and self._is_constexpr_arg(node.right))
+        # ast.Call, ast.Attribute, ast.Subscript, etc. -> could produce MLIR Values
+        return False
+
+    def _is_auto_constexpr_range(self, call_node):
+        """Check if a range() call can be auto-promoted to constexpr.
+
+        A range() is auto-constexpr when:
+        1. All positional arguments are statically evaluable
+        2. No `init=` keyword argument (loop-carried values require scf.for)
+        """
+        # init= keyword means loop-carried values -> must be scf.for
+        for kw in call_node.keywords:
+            if kw.arg == "init":
+                return False
+        return all(self._is_constexpr_arg(a) for a in call_node.args)
+
     def visit_For(self, node: ast.For) -> ast.For:
         if self._is_range_constexpr(node.iter):
             node.iter.func = ast.Name(id="range", ctx=ast.Load())
@@ -410,6 +475,12 @@ class InsertEmptyYieldForSCFFor(Transformer):
             node = ast.fix_missing_locations(node)
             return node
         if self._is_range(node.iter):
+            if self._is_auto_constexpr_range(node.iter):
+                # All arguments are compile-time constants -> unroll like range_constexpr
+                node.iter.func = ast.Name(id="range", ctx=ast.Load())
+                node = self.generic_visit(node)
+                node = ast.fix_missing_locations(node)
+                return node
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
         if "for_" in line or "scf.for_" in line or "scf_range" in line:
