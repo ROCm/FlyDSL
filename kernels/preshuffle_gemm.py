@@ -959,11 +959,11 @@ def compile_preshuffle_gemm_a8(
                 if dswr_tail > mfma_total:
                     dswr_tail = mfma_total
                 num_gmem_loads = num_b_loads + num_a_async_loads
-                # if is_fp4:
-                #     num_fp4_scale_k_groups = 1 if int(tile_k) == 128 else (k_unroll // 2)
-                #     num_a_scale_loads = num_fp4_scale_k_groups * (m_repeat // 2)
-                #     num_b_scale_loads = num_fp4_scale_k_groups * (num_acc_n // 2)
-                #     num_gmem_loads += num_a_scale_loads + num_b_scale_loads
+                if is_fp4 and tile_k != 128:
+                    num_fp4_scale_k_groups = 1 if int(tile_k) == 128 else (k_unroll // 2)
+                    num_a_scale_loads = num_fp4_scale_k_groups * (m_repeat // 2)
+                    num_b_scale_loads = num_fp4_scale_k_groups * (num_acc_n // 2)
+                    num_gmem_loads += num_a_scale_loads + num_b_scale_loads
                 # print("mfma_total, dswr_tail, dstr_advance", mfma_total, dswr_tail, dstr_advance)
                 dsrd_preload_eff = min(int(dsrd_preload), num_ds_load)
                 dvmem_preload_eff = min(int(dvmem_preload), num_gmem_loads)
