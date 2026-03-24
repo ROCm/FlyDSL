@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLY_DIALECT
 #define FLY_DIALECT
 
@@ -16,7 +19,6 @@ def Fly_Dialect : Dialect {
   
   let useDefaultTypePrinterParser = 1;
   let useDefaultAttributePrinterParser = 1;
-  let usePropertiesForAttributes = 1;
 }
 
 class Fly_Type<string typeName, string typeMnemonic, list<Trait> traits = []>

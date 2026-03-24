@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Verify upstream gpu-to-llvm behavior with asyncObject vs asyncDependencies.
 
 MLIR IR-level tests that document how the upstream gpu-to-llvm pass handles

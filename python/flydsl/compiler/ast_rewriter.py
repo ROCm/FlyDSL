@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import ast
 import difflib
 import inspect
@@ -340,10 +343,19 @@ class InsertEmptyYieldForSCFFor(Transformer):
     @staticmethod
     def _to_index(val):
         if isinstance(val, ir.Value):
-            return val
+            if val.type == ir.IndexType.get():
+                return val
+            return arith.IndexCastOp(ir.IndexType.get(), val).result
         if hasattr(val, "ir_value"):
-            return val.ir_value()
-        return arith.ConstantOp(ir.IndexType.get(), val).result
+            raw = val.ir_value()
+            if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
+                return arith.IndexCastOp(ir.IndexType.get(), raw).result
+            return raw
+        if isinstance(val, int) and not isinstance(val, bool):
+            return arith.ConstantOp(ir.IndexType.get(), val).result
+        raise TypeError(
+            f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}"
+        )
 
     @staticmethod
     def scf_range(start, stop=None, step=None, *, init=None):

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Test fx.printf: IR generation, GPU lowering, CPU lowering."""
 
 from flydsl._mlir.ir import (

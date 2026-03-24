@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """LayerNorm kernel builder using the @flyc.kernel API.
 
 LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta

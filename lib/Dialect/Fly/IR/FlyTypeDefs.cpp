@@ -1,16 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "mlir/IR/DialectImplementation.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/LayoutUtils.h"
+#include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
 namespace mlir::fly {
 
 bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
+bool SwizzleType::isStatic() const { return true; }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
+bool TileType::isStatic() const { return true; }
 bool CoordTensorType::isStatic() const {
   return getBase().isStatic() && cast<MayStaticAttrInterface>(getLayout()).isStatic();
+}
+
+bool TiledCopyType::isStatic() const {
+  return cast<MayStaticTypeInterface>(getCopyAtom()).isStatic();
+}
+bool TiledMmaType::isStatic() const {
+  return cast<MayStaticTypeInterface>(getMmaAtom()).isStatic();
+}
+
+Value BasisType::rebuildStaticValue(OpBuilder &, Location, Value) const { return nullptr; }
+
+Value IntTupleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<IntTupleType>>(currentValue)))
+    return nullptr;
+  return MakeIntTupleOp::create(builder, loc, *this, ValueRange{});
+}
+
+Value LayoutType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<LayoutType>>(currentValue)))
+    return nullptr;
+  Value shape = IntTupleType::get(getAttr().getShape()).rebuildStaticValue(builder, loc, nullptr);
+  Value stride = IntTupleType::get(getAttr().getStride()).rebuildStaticValue(builder, loc, nullptr);
+  return MakeLayoutOp::create(builder, loc, *this, shape, stride);
+}
+
+Value SwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
+Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                             Value currentValue) const {
+  if (currentValue && isNormalForm(cast<TypedValue<ComposedLayoutType>>(currentValue)))
+    return nullptr;
+  ComposedLayoutAttr attr = getAttr();
+  Attribute innerAttr = attr.getInner();
+  Value inner;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(innerAttr))
+    inner = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(innerAttr))
+    inner = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr))
+    inner = SwizzleType::get(swizzleAttr).rebuildStaticValue(builder, loc, nullptr);
+  if (!inner)
+    return nullptr;
+  Value offset = IntTupleType::get(attr.getOffset()).rebuildStaticValue(builder, loc, nullptr);
+  Value outer = LayoutType::get(attr.getOuter()).rebuildStaticValue(builder, loc, nullptr);
+  return MakeComposedLayoutOp::create(builder, loc, *this, inner, offset, outer);
+}
+
+Value TileType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
+Value CoordTensorType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                          Value currentValue) const {
+  if (currentValue && isWeaklyNormalForm(cast<TypedValue<CoordTensorType>>(currentValue)))
+    return nullptr;
+  Value base =
+      IntTupleType::get(cast<IntTupleAttr>(getBase())).rebuildStaticValue(builder, loc, nullptr);
+  Value layout;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(getLayout()))
+    layout = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(getLayout()))
+    layout = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  else
+    return nullptr;
+  return MakeViewOp::create(builder, loc, base, layout);
+}
+
+Value TiledCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                        Value currentValue) const {
+  if (currentValue && isa<MakeTiledCopyOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  Value copyAtom =
+      cast<MayStaticTypeInterface>(getCopyAtom()).rebuildStaticValue(builder, loc, nullptr);
+  if (!copyAtom)
+    return nullptr;
+  Value layoutThrVal = getLayoutThrVal().rebuildStaticValue(builder, loc, nullptr);
+  Value tileMN = TileType::get(getTileMN().getAttr()).rebuildStaticValue(builder, loc, nullptr);
+  if (!tileMN)
+    return nullptr;
+  return MakeTiledCopyOp::create(builder, loc, *this, copyAtom, layoutThrVal, tileMN);
+}
+
+Value TiledMmaType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isa<MakeTiledMmaOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  Value mmaAtom =
+      cast<MayStaticTypeInterface>(getMmaAtom()).rebuildStaticValue(builder, loc, nullptr);
+  if (!mmaAtom)
+    return nullptr;
+  Value atomLayout = getAtomLayout().rebuildStaticValue(builder, loc, nullptr);
+  Value permutation = getPermutation().rebuildStaticValue(builder, loc, nullptr);
+  return MakeTiledMmaOp::create(builder, loc, *this, mmaAtom, atomLayout, permutation);
+}
+
+Value CopyAtomType::rebuildStaticValue(OpBuilder &builder, Location loc, Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, *this, getValBits());
 }
 
 int32_t BasisType::depth() { return getAttr().depth(); }
@@ -81,6 +191,20 @@ ComposedLayoutType ComposedLayoutType::at(ArrayRef<int32_t> idxs) const {
   return ComposedLayoutType::get(getContext(), getAttr().at(idxs));
 }
 
+int32_t PointerType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  int32_t alignmentBytes = getAlignment().getAlignment();
+  assert(alignmentBytes * 8 % bitWidth == 0);
+  return alignmentBytes * 8 / bitWidth;
+}
+
+int32_t MemRefType::getValueDivisibility() const {
+  int32_t bitWidth = getElemTy().getIntOrFloatBitWidth();
+  int32_t alignmentBytes = getAlignment().getAlignment();
+  assert(alignmentBytes * 8 % bitWidth == 0);
+  return alignmentBytes * 8 / bitWidth;
+}
+
 MemRefType MemRefType::at(int32_t idx) const {
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))
@@ -98,6 +222,10 @@ MemRefType MemRefType::at(ArrayRef<int32_t> idxs) const {
   auto composed = cast<ComposedLayoutAttr>(layoutAttr);
   return MemRefType::get(getElemTy(), getAddressSpace(), composed.at(idxs), getAlignment(),
                          getSwizzle());
+}
+
+PointerType MemRefType::getPointerType() const {
+  return PointerType::get(getElemTy(), getAddressSpace(), getAlignment(), getSwizzle());
 }
 
 CoordTensorType CoordTensorType::at(int32_t idx) const {
@@ -143,8 +271,7 @@ void CoordTensorType::print(AsmPrinter &printer) const {
   printer << ">";
 }
 
-static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
-                                          AlignAttr &alignment,
+static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy, AlignAttr &alignment,
                                           SwizzleAttr &swizzle) {
   alignment = AlignAttr::getTrivialAlignment(elemTy);
   swizzle = SwizzleAttr::getTrivialSwizzle(elemTy.getContext());
@@ -157,7 +284,8 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
       if (val <= 0 || val % elemByte != 0)
         return parser.emitError(parser.getCurrentLocation(),
                                 "alignment must be a positive multiple of "
-                                "element byte size (") << elemByte << "), got " << val;
+                                "element byte size (")
+               << elemByte << "), got " << val;
       alignment = AlignAttr::get(elemTy.getContext(), val);
       if (succeeded(parser.parseOptionalComma())) {
         auto sw = FieldParser<SwizzleAttr>::parse(parser);
@@ -175,9 +303,8 @@ static LogicalResult parseAlignAndSwizzle(AsmParser &parser, Type elemTy,
   return success();
 }
 
-static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy,
-                                 AlignAttr alignment, SwizzleAttr swizzle,
-                                 MLIRContext *ctx) {
+static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr alignment,
+                                 SwizzleAttr swizzle, MLIRContext *ctx) {
   if (alignment != AlignAttr::getTrivialAlignment(elemTy)) {
     printer << ",";
     printer.printStrippedAttrOrType(alignment);
@@ -199,8 +326,7 @@ Type PointerType::parse(AsmParser &parser) {
     return {};
   AlignAttr alignment;
   SwizzleAttr swizzle;
-  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) ||
-      parser.parseGreater())
+  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) || parser.parseGreater())
     return {};
   return get(elemTy.getContext(), elemTy, *addressSpace, alignment, swizzle);
 }
@@ -208,8 +334,7 @@ Type PointerType::parse(AsmParser &parser) {
 void PointerType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ",";
   printer.printStrippedAttrOrType(getAddressSpace());
-  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(),
-                       getContext());
+  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
 
@@ -229,8 +354,7 @@ Type MemRefType::parse(AsmParser &parser) {
     return {};
   AlignAttr alignment;
   SwizzleAttr swizzle;
-  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) ||
-      parser.parseGreater())
+  if (failed(parseAlignAndSwizzle(parser, elemTy, alignment, swizzle)) || parser.parseGreater())
     return {};
   return get(elemTy.getContext(), elemTy, *addressSpace, layout, alignment, swizzle);
 }
@@ -244,8 +368,7 @@ void MemRefType::print(AsmPrinter &printer) const {
     printer.printStrippedAttrOrType(layout);
   else
     printer.printStrippedAttrOrType(cast<ComposedLayoutAttr>(layoutAttr));
-  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(),
-                       getContext());
+  printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
 
@@ -258,6 +381,13 @@ TileType TiledMmaType::getDefaultPermutationMNK(MLIRContext *ctx) {
 }
 
 bool CopyOpUniversalCopyType::isStatic() const { return true; }
+
+Value CopyOpUniversalCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                  Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
+}
 
 Attribute CopyOpUniversalCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
@@ -300,6 +430,13 @@ Attribute CopyAtomType::getThrValLayoutRef() {
 }
 
 bool MmaAtomUniversalFMAType::isStatic() const { return true; }
+
+Value MmaAtomUniversalFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                  Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+}
 
 Attribute MmaAtomUniversalFMAType::getShapeMNK() const {
   return IntTupleAttr::get(ArrayAttr::get(getContext(), {FxC(1), FxC(1), FxC(1)}));

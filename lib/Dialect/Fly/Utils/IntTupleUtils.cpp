@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -642,7 +645,9 @@ static IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAtt
 IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile) {
   auto *ctx = profile.getContext();
   SmallVector<int32_t, 4> modes;
-  assert(!profile.isLeaf() && "intTupleMakeBasisTupleLike expects a non-leaf IntTupleAttr");
+  if (profile.isLeaf()) {
+    return IntTupleAttr::getLeafStatic(ctx, 1);
+  }
   return intTupleMakeBasisTupleLikeImpl(ctx, profile, modes);
 }
 

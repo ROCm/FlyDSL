@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
 #define FLYDSL_DIALECT_FLY_UTILS_INTTUPLEUTILS_H
 
@@ -7,6 +10,7 @@
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/IntUtils.h"
+#include "flydsl/Dialect/Fly/Utils/NormalForm.h"
 
 //===----------------------------------------------------------------------===//
 // IntTupleAttr utilities
@@ -64,8 +68,7 @@ public:
   static IntTupleValueAdaptor create(Builder &builder, Value value, IntTupleAttr attr) {
     // Rebuild the adaptor from a normal-form IntTuple value while re-establishing
     // the leaf/non-leaf invariant above.
-    auto defOp = value.getDefiningOp<MakeIntTupleOp>();
-    assert(defOp && "Value must be a MakeIntTupleOp");
+    assert(isNormalForm(cast<TypedValue<IntTupleType>>(value)) && "Value must be in normal form");
     if (attr.isLeaf()) {
       if (attr.isStatic()) {
         if (attr.isLeafInt()) {

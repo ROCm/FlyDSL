@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import os
 import re
 from pathlib import Path
@@ -242,7 +245,7 @@ class DebugEnvManager(EnvManager):
     # MLIR pass manager options
     print_origin_ir = OptBool(False, description="Print origin IR")
     print_after_all = OptBool(False, description="Print IR after each MLIR pass")
-    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
+    enable_debug_info = OptBool(False, description="Generate debug info in compiled code")
     enable_verifier = OptBool(True, description="Verify IR module")
 
 
