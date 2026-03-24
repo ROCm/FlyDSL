@@ -62,10 +62,8 @@ echo "========================================================================"
 echo "Examples (examples/)"
 echo "========================================================================"
 
-# Examples known to work on non-CDNA (RDNA) GPUs.
-# Others are skipped on non-CDNA since they use MFMA or other CDNA-only features.
-_RDNA_EXAMPLE_WHITELIST="01-vectorAdd.py 02-tiledCopy.py"
-
+# Whitelist from tests/arch_compat.py (single source of truth for arch compat).
+_RDNA_EXAMPLE_WHITELIST=$(python3 -c "from tests.arch_compat import RDNA_COMPATIBLE_EXAMPLES; print(' '.join(RDNA_COMPATIBLE_EXAMPLES))" 2>/dev/null || echo "")
 _gpu_arch=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 for example in "${REPO_ROOT}"/examples/*.py; do
     [ -f "${example}" ] || continue

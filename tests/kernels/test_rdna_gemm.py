@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WMMA GEMM correctness tests for RDNA4 (gfx12xx, wave32).
 
-Kernel implementation: kernels/wmma_gemm.py
+Kernel implementation: kernels/rdna_gemm.py
 """
 
 import os
@@ -15,7 +15,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.wmma_gemm import create_wmma_gemm_module
+from kernels.rdna_gemm import create_wmma_gemm_module
 from tests.test_common import verify_output, run_perftest
 from flydsl.runtime.device import get_rocm_arch
 

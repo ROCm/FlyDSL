@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """WMMA FP8 GEMM correctness tests for RDNA4 (gfx12xx, wave32).
 
-Kernel implementation: kernels/wmma_fp8_gemm.py
+Kernel implementation: kernels/rdna_fp8_gemm.py
 """
 
 import os
@@ -15,7 +15,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.wmma_fp8_gemm import (
+from kernels.rdna_fp8_gemm import (
     compile_fp8_gemm,
     preshuffle_b_fp8,
     fp8_quantize_per_token,

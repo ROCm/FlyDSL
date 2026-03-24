@@ -4,21 +4,12 @@ Automatically skips tests that are incompatible with the current GPU:
   - MFMA-based kernels (preshuffle GEMM, MoE, blockscale, PA) require CDNA (gfx9xx)
   - WMMA-based kernels require RDNA4 (gfx12xx) — handled by per-test _requires_rdna4()
   - Generic kernels (softmax, layernorm, vec_add, quant, etc.) run on all architectures
+
+Configuration lives in tests/arch_compat.py (single source of truth).
 """
 
 import pytest
-
-# Test files that require CDNA (gfx9xx) GPUs.
-# Reasons: MFMA instructions, hardcoded wave64, or imports from CDNA-only kernels.
-_CDNA_ONLY_TEST_FILES = frozenset({
-    "test_preshuffle_gemm.py",         # MFMA preshuffle pipeline
-    "test_blockscale_preshuffle_gemm.py",  # MFMA blockscale pipeline
-    "test_moe_gemm.py",                # MFMA MoE 2-stage
-    "test_moe_blockscale.py",          # MFMA MoE blockscale
-    "test_moe_reduce.py",              # imports moe_gemm_2stage (MFMA)
-    "test_pa.py",                      # MFMA paged attention
-    "test_quant.py",                   # hardcodes WARP_SIZE=64
-})
+from tests.arch_compat import CDNA_ONLY_TESTS
 
 
 def _get_gpu_arch():
@@ -44,5 +35,5 @@ def pytest_collection_modifyitems(config, items):
     )
     for item in items:
         filename = item.fspath.basename
-        if filename in _CDNA_ONLY_TEST_FILES:
+        if filename in CDNA_ONLY_TESTS:
             item.add_marker(skip_marker)
