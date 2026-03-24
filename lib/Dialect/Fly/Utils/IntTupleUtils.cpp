@@ -645,7 +645,9 @@ static IntTupleAttr intTupleMakeBasisTupleLikeImpl(MLIRContext *ctx, IntTupleAtt
 IntTupleAttr intTupleMakeBasisTupleLike(IntTupleAttr profile) {
   auto *ctx = profile.getContext();
   SmallVector<int32_t, 4> modes;
-  assert(!profile.isLeaf() && "intTupleMakeBasisTupleLike expects a non-leaf IntTupleAttr");
+  if (profile.isLeaf()) {
+    return IntTupleAttr::getLeafStatic(ctx, 1);
+  }
   return intTupleMakeBasisTupleLikeImpl(ctx, profile, modes);
 }
 

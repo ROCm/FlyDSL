@@ -273,8 +273,11 @@ compute(acc_final, tile_final)
 ```python
 from flydsl.expr import arith
 
-c42 = arith.constant(42, index=True)           # index type constant
-c3_14 = arith.constant(3.14, type=T.f32())     # f32 constant
+c42 = fx.Index(42)                              # index type constant (preferred)
+c3_14 = fx.Float32(3.14)                        # f32 constant (preferred)
+mask = fx.Int32(0xFF)                            # i32 constant (preferred)
+c42 = arith.constant(42, index=True)            # legacy index constant
+c3_14 = arith.constant(3.14, type=T.f32())     # legacy f32 constant
 
 # NOTE: arith.constant takes `type` as keyword arg, NOT positional
 result = arith.addf(a, b)    # float add

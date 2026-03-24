@@ -39,7 +39,14 @@ def Fly_MayStaticAttrInterface : AttrInterface<"MayStaticAttrInterface"> {
 }
 def Fly_MayStaticTypeInterface : TypeInterface<"MayStaticTypeInterface"> {
   let cppNamespace = "::mlir::fly";
-  let methods = Fly_MayStaticInterface.methods;
+  let methods = !listconcat(Fly_MayStaticInterface.methods, [
+    InterfaceMethod<
+      "Rebuild to a normal form op that produces a value of this static type. "
+      "Returns nullptr if the given value is already in normal form.",
+      "::mlir::Value", 
+      "rebuildStaticValue",
+      (ins "::mlir::OpBuilder &":$builder, "::mlir::Location":$loc, "::mlir::Value":$currentValue)>
+  ]);
 }
 
 

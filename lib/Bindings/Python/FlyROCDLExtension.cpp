@@ -102,25 +102,25 @@ struct PyMmaAtomCDNA3_MFMAType : PyConcreteType<PyMmaAtomCDNA3_MFMAType> {
   }
 };
 
-struct PyCopyOpCDNA3BufferLDSTType : PyConcreteType<PyCopyOpCDNA3BufferLDSTType> {
-  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyROCDLCopyOpCDNA3BufferLDSTType;
+struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType> {
+  static constexpr IsAFunctionTy isaFunction = mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopyType;
   static constexpr GetTypeIDFunctionTy getTypeIdFunction =
-      mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetTypeID;
-  static constexpr const char *pyClassName = "CopyOpCDNA3BufferLDSTType";
+      mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetTypeID;
+  static constexpr const char *pyClassName = "CopyOpCDNA3BufferCopyType";
   using Base::Base;
 
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
         [](int32_t bitSize, DefaultingPyMlirContext context) {
-          return PyCopyOpCDNA3BufferLDSTType(
-              context->getRef(), mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGet(context->get(), bitSize));
+          return PyCopyOpCDNA3BufferCopyType(
+              context->getRef(), mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGet(context->get(), bitSize));
         },
         "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpCDNA3BufferLDSTType with the given bit size (32, 64, or 128)");
+        "Create a CopyOpCDNA3BufferCopyType with the given bit size (32, 64, or 128)");
 
-    c.def_prop_ro("bit_size", [](PyCopyOpCDNA3BufferLDSTType &self) -> int32_t {
-      return mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(self);
+    c.def_prop_ro("bit_size", [](PyCopyOpCDNA3BufferCopyType &self) -> int32_t {
+      return mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(self);
     });
   }
 };
@@ -134,5 +134,5 @@ NB_MODULE(_fly_rocdl, m) {
   m.doc() = "MLIR Python FlyROCDL Extension";
 
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyMmaAtomCDNA3_MFMAType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferLDSTType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
 }
