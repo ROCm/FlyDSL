@@ -47,18 +47,19 @@ def compile_backend_name() -> str:
 
 @lru_cache(maxsize=4)
 def _make_backend(name: str, arch: str) -> BaseBackend:
-    """Internal: create and cache a backend instance for (name, arch)."""
-    key = name.lower()
-    if key not in _registry:
+    """Internal: create and cache a backend instance for *(name, arch)*.
+
+    Both *name* and *arch* must already be resolved (non-empty) so that
+    the ``lru_cache`` key is deterministic and won't become stale when
+    environment variables change after the first call.
+    """
+    if name not in _registry:
         available = ", ".join(sorted(_registry)) or "(none)"
         raise ValueError(
             f"Unknown compile backend '{name}'. Registered backends: {available}"
         )
-    backend_cls = _registry[key]
-    if arch:
-        target = backend_cls.make_target(arch)
-    else:
-        target = backend_cls.detect_target()
+    backend_cls = _registry[name]
+    target = backend_cls.make_target(arch)
     return backend_cls(target)
 
 
@@ -70,7 +71,16 @@ def get_backend(name: Optional[str] = None, *, arch: str = "") -> BaseBackend:
     """
     if name is None:
         name = compile_backend_name()
-    return _make_backend(name.lower(), arch)
+    name = name.lower()
+    if not arch:
+        backend_cls = _registry.get(name)
+        if backend_cls is None:
+            available = ", ".join(sorted(_registry)) or "(none)"
+            raise ValueError(
+                f"Unknown compile backend '{name}'. Registered backends: {available}"
+            )
+        arch = backend_cls.detect_target().arch
+    return _make_backend(name, arch)
 
 
 # -- auto-register built-in backends ------------------------------------

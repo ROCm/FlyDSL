@@ -344,14 +344,15 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
+def _pipeline_fragments(backend) -> list:
+    """Return the MLIR pass-pipeline fragments for *backend*."""
+    from .kernel_function import CompilationContext
+
+    hints = CompilationContext.get_compile_hints()
+    return backend.pipeline_fragments(compile_hints=hints)
+
+
 class MlirCompiler:
-    @staticmethod
-    def _pipeline_fragments(backend) -> list:
-        from .kernel_function import CompilationContext
-
-        hints = CompilationContext.get_compile_hints()
-        return backend.pipeline_fragments(compile_hints=hints)
-
     @classmethod
     def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
         module.operation.verify()
@@ -359,7 +360,7 @@ class MlirCompiler:
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(backend)
+        fragments = _pipeline_fragments(backend)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
