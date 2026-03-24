@@ -26,9 +26,6 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
-      - name: Clean workspace (fix root-owned files from Docker)
-        run: sudo rm -rf "${GITHUB_WORKSPACE}/flydsl-test" || true
-
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -169,6 +166,5 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker stop flydsl_test || true
-          docker rm flydsl_test || true
-          sudo rm -rf "${GITHUB_WORKSPACE}/flydsl-test" || true
+          docker stop flydsl_test
+          docker rm flydsl_test
