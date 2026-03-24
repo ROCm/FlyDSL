@@ -676,9 +676,9 @@ class JitFunction:
             if runtime:
                 return type(arg)
             return (type(arg), arg)
-        elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
-            strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
-            return (arg.dtype, tuple(arg.shape), strides)
+        # elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
+        #     strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
+        #     return (arg.dtype, tuple(arg.shape), strides)
         else:
             return type(arg)
 
