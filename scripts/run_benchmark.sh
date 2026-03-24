@@ -41,17 +41,13 @@ if torch.cuda.is_available() and torch.cuda.device_count() > 1:
     fi
 fi
 
-# Detect GPU architecture — CDNA benchmarks are skipped on non-CDNA GPUs.
+# Detect GPU architecture — CDNA-only benchmarks are guarded by IS_CDNA.
 GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 IS_CDNA=false
+IS_RDNA4=false
 case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
-
-if [ "${IS_CDNA}" = "false" ]; then
-  echo "========================================================================"
-  echo "GPU arch: ${GPU_ARCH} (non-CDNA) — skipping CDNA-only benchmarks."
-  echo "========================================================================"
-  exit 0
-fi
+case "${GPU_ARCH}" in gfx12*) IS_RDNA4=true ;; esac
+echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4})"
 
 SUCCESS_COUNT=0
 FAIL_COUNT=0
@@ -418,8 +414,8 @@ if [ "${RUN_RMSNORM}" -eq 1 ]; then
   done
 fi
 
-# Preshuffle GEMM
-if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
+# Preshuffle GEMM (CDNA only — uses MFMA)
+if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $GEMM_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -541,8 +537,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
   done
 fi
 
-# MoE
-if [ "${RUN_MOE}" -eq 1 ]; then
+# MoE (CDNA only — uses MFMA)
+if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   for shape in $MOE_SHAPES; do
     oldIFS=$IFS
     IFS=,
@@ -590,6 +586,23 @@ if [ "${RUN_MOE}" -eq 1 ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi
   done
+fi
+
+# RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
+if [ "${IS_RDNA4}" = "true" ]; then
+  echo ""
+  echo "========================================================================"
+  echo "RDNA4 WMMA Benchmarks"
+  echo "========================================================================"
+  log="${BENCH_LOG_DIR}/rdna_wmma_sweep.log"
+  if python3 -c "from tests.kernels.benchmark_common import run_wmma_sweep, print_perf_table; rows = run_wmma_sweep(); print_perf_table(rows)" >"${log}" 2>&1; then
+    cat "${log}"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+  else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo "RDNA4 WMMA benchmark failed. Log: ${log}" >&2
+    tail -20 "${log}" >&2
+  fi
 fi
 
 # Summary

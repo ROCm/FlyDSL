@@ -237,8 +237,8 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         torch.manual_seed(42)
         A_f32 = torch.randn(M, K, device="cuda") * 0.1
         B_f32 = torch.randn(K, N, device="cuda") * 0.1
-        A_fp8, sa = fp8_quantize_per_token, fp8_quantize_per_channel(A_f32)
-        B_fp8, sb = fp8_quantize_per_token, fp8_quantize_per_channel(B_f32)
+        A_fp8, sa = fp8_quantize_per_token(A_f32)
+        B_fp8, sb = fp8_quantize_per_channel(B_f32)
         B_shuf = preshuffle_b_fp8(B_fp8).view(torch.float32).contiguous()
         A_view = A_fp8.view(torch.float32).contiguous()
         C = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
@@ -373,11 +373,11 @@ def run_wmma_sweep(
 
             A_f32 = torch.randn(M, K, device="cuda") * 0.1
             B_f32 = torch.randn(K, N, device="cuda") * 0.1
-            A_fp8, sa = fp8_quantize_per_token, fp8_quantize_per_channel(A_f32)
-            B_fp8, sb = fp8_quantize_per_token, fp8_quantize_per_channel(B_f32)
+            A_fp8, sa = fp8_quantize_per_token(A_f32)
+            B_fp8, sb = fp8_quantize_per_channel(B_f32)
             B_col = B_fp8.T.contiguous().T
-            sa_t = torch.tensor(sa, dtype=torch.float32, device="cuda")
-            sb_t = torch.tensor(sb, dtype=torch.float32, device="cuda")
+            sa_t = sa.to(device="cuda", dtype=torch.float32).unsqueeze(1).contiguous()   # (M, 1)
+            sb_t = sb.to(device="cuda", dtype=torch.float32).unsqueeze(0).contiguous()   # (1, N)
             torch_us = bench_gpu_us_torch(
                 lambda: torch._scaled_mm(A_fp8, B_col, scale_a=sa_t, scale_b=sb_t, out_dtype=torch.bfloat16),
                 warmup=warmup,
