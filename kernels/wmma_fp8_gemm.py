@@ -19,7 +19,6 @@ Tile config (tuned for M=32):
   tile_k=32  (2 WMMA K-tiles)
   waves_m=1, waves_n=2 → 2 waves = 64 threads per block
   wave_reg_m=2, wave_reg_n=4 → 8 accumulators per wave
-  
 """
 
 import os
