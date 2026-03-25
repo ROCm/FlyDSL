@@ -601,6 +601,19 @@ class JitFunction:
         self._sig = None  # lazy: set on first call
         self._mem_cache = {}
 
+    def get_last_artifact(self) -> Optional["CompiledArtifact"]:
+        """Return the most recently compiled artifact, or None.
+
+        Used by external integrations (e.g. ``flydsl.jax``) to retrieve
+        compiled kernels for registration with framework-specific runtimes.
+        """
+        artifact = getattr(self, "_last_compiled", None)
+        if artifact is None and self._mem_cache:
+            candidate = next(reversed(self._mem_cache.values()))
+            if isinstance(candidate, CompiledArtifact):
+                artifact = candidate
+        return artifact
+
     def _ensure_sig(self):
         """Initialize signature + param metadata on first call (not at decoration time)."""
         if self._sig is not None:
@@ -715,6 +728,11 @@ class JitFunction:
                     self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            # Keep _last_compiled up to date so external integrations
+            # (e.g. flydsl.jax) can retrieve the artifact for this
+            # compilation even when the fast path is taken.
+            self._last_compiled = cached_func
+
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
@@ -787,6 +805,11 @@ class JitFunction:
                 self.func.__name__,
                 original_ir,
             )
+
+            # Always keep a reference to the last compiled artifact so that
+            # external tools (e.g. flydsl.jax) can retrieve it even when
+            # caching is disabled via FLYDSL_RUNTIME_ENABLE_CACHE=0.
+            self._last_compiled = compiled_func
 
             if use_cache:
                 self._mem_cache[cache_key] = compiled_func

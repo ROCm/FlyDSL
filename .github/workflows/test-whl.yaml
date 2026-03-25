@@ -59,6 +59,12 @@ jobs:
           docker exec flydsl_test bash -c "mkdir -p /flydsl/build-fly/bin && cp /dist/fly-opt /flydsl/build-fly/bin/fly-opt && chmod +x /flydsl/build-fly/bin/fly-opt"
           docker exec flydsl_test bash -c "git config --global --add safe.directory /flydsl"
 
+      - name: Install JAX ROCm (optional)
+        continue-on-error: true
+        run: |
+          docker exec flydsl_test bash -c "python3 -m pip install jax jaxlib jax-rocm7-pjrt jax-rocm7-plugin 2>&1 | tail -5"
+          docker exec flydsl_test bash -c "python3 -c 'import jax; print(\"JAX\", jax.__version__, \"backend:\", jax.default_backend())' 2>/dev/null || echo 'JAX installation failed (non-blocking)'"
+
       - name: Run tests
         id: tests
         run: |

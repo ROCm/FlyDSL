@@ -53,6 +53,10 @@ for example in "${REPO_ROOT}"/examples/*.py; do
     output=$(python3 "${example}" 2>&1) || {
         echo "  FAIL  ${name}"; echo "$output" | tail -10 | sed 's/^/        /'; exit 1
     }
+    if echo "$output" | grep -q "^SKIP:"; then
+        echo "  SKIP  ${name}  ($(echo "$output" | grep "^SKIP:" | head -1))"
+        continue
+    fi
     if echo "$output" | grep -qE "Result correct: False|All passed: False"; then
         echo "  FAIL  ${name}"; echo "$output" | tail -10 | sed 's/^/        /'; exit 1
     fi
