@@ -217,7 +217,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         return bench_gpu_us_torch(lambda: exe(x, gamma, y, M), warmup=warmup, iters=iters)
 
     if op == "wmma_gemm":
-        from kernels.rdna_gemm import create_wmma_gemm_module
+        from kernels.rdna_f16_gemm import create_wmma_gemm_module
 
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
@@ -232,7 +232,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
         )
 
     if op == "wmma_fp8_gemm":
-        from kernels.rdna_fp8_gemm import compile_fp8_gemm, preshuffle_b_fp8, fp8_quantize_per_token, fp8_quantize_per_channel
+        from kernels.rdna_fp8_preshuffle_gemm import compile_fp8_gemm, preshuffle_b_fp8, fp8_quantize_per_token, fp8_quantize_per_channel
 
         K = N  # square by default
         torch.manual_seed(42)
@@ -374,7 +374,7 @@ def run_wmma_sweep(
             print(f"ERROR: fp8_gemm {shape} FAILED: {e}")
             fail_count += 1
         try:
-            from kernels.rdna_fp8_gemm import fp8_quantize_per_token, fp8_quantize_per_channel
+            from kernels.rdna_fp8_preshuffle_gemm import fp8_quantize_per_token, fp8_quantize_per_channel
 
             A_f32 = torch.randn(M, K, device="cuda") * 0.1
             B_f32 = torch.randn(K, N, device="cuda") * 0.1
