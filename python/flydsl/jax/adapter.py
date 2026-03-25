@@ -153,8 +153,6 @@ class JaxTensorAdaptor:
     def __cache_signature__(self):
         return (
             self._orig_dtype,
-            tuple(self._orig_shape),
-            tuple(self._orig_strides),
             self.assumed_align,
             self.use_32bit_stride,
             self._dynamic_leading_dim,

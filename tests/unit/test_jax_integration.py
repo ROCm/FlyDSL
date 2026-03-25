@@ -100,12 +100,13 @@ class TestJaxTensorAdaptor:
         ta2 = from_jax(a)
         assert ta1.__cache_signature__() == ta2.__cache_signature__()
 
-    def test_cache_signature_differs_by_shape(self):
+    def test_cache_signature_same_dtype_same_sig(self):
+        """Shape is not part of cache signature (handled by JitFunction)."""
         from flydsl.jax import from_jax
 
         a = jnp.ones(128, dtype=jnp.float32)
         b = jnp.ones(256, dtype=jnp.float32)
-        assert from_jax(a).__cache_signature__() != from_jax(b).__cache_signature__()
+        assert from_jax(a).__cache_signature__() == from_jax(b).__cache_signature__()
 
     def test_cache_signature_differs_by_dtype(self):
         from flydsl.jax import from_jax

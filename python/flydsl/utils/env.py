@@ -224,6 +224,7 @@ class CompileEnvManager(EnvManager):
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
     compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
+    backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
 
 
 class DebugEnvManager(EnvManager):
@@ -245,7 +246,7 @@ class DebugEnvManager(EnvManager):
     # MLIR pass manager options
     print_origin_ir = OptBool(False, description="Print origin IR")
     print_after_all = OptBool(False, description="Print IR after each MLIR pass")
-    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
+    enable_debug_info = OptBool(False, description="Generate debug info in compiled code")
     enable_verifier = OptBool(True, description="Verify IR module")
 
 

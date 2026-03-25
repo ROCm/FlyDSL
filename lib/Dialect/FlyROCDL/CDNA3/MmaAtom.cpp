@@ -34,6 +34,13 @@ namespace mlir::fly_rocdl {
 
 bool MmaAtomCDNA3_MFMAType::isStatic() const { return true; }
 
+Value MmaAtomCDNA3_MFMAType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                Value currentValue) const {
+  if (currentValue && isa<MakeMmaAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeMmaAtomOp::create(builder, loc, Type(*this));
+}
+
 Attribute MmaAtomCDNA3_MFMAType::getThrLayout() const { return FxLayout(FxC(64), FxC(1)); }
 
 Attribute MmaAtomCDNA3_MFMAType::getShapeMNK() const {

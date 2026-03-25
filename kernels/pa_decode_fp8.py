@@ -21,7 +21,6 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 QUERY_GROUP_SIZE = 16
 HEAD_SIZE = 128

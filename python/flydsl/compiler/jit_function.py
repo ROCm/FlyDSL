@@ -16,10 +16,10 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..runtime.device import get_rocm_arch, is_rdna_arch
 from ..expr.typing import Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
+from .backends import get_backend
 from .jit_argument import convert_to_jit_arguments
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
@@ -81,17 +81,10 @@ def _flydsl_key() -> str:
                 contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
+    backend = get_backend()
     mlir_libs_dir = flydsl_root / "_mlir" / "_mlir_libs"
     if mlir_libs_dir.is_dir():
-        so_patterns = [
-            "_fly*.so",
-            "_fly_rocdl*.so",
-            "libFly*.so",
-            "libfly_jit_runtime.so",
-            "libmlir_rocm_runtime.so",
-            "_mlirRegisterEverything*.so",
-        ]
-        for pattern in so_patterns:
+        for pattern in backend.native_lib_patterns():
             for so_file in sorted(mlir_libs_dir.glob(pattern)):
                 h = hashlib.sha256()
                 with open(so_file, "rb") as f:
@@ -102,7 +95,7 @@ def _flydsl_key() -> str:
                         h.update(chunk)
                 contents.append(h.hexdigest())
 
-    key = f"flydsl:{flydsl.__version__}-" + "-".join(contents)
+    key = f"flydsl:{flydsl.__version__}:{backend.hash()}-" + "-".join(contents)
     log().debug(f"flydsl_key: {hashlib.sha256(key.encode()).hexdigest()[:16]}")
     return key
 
@@ -125,10 +118,47 @@ def _is_user_function(func, rootFile):
     return os.path.dirname(os.path.abspath(funcFile)) == os.path.dirname(os.path.abspath(rootFile))
 
 
+def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -> List[str]:
+    """Recursively collect scalar closure values from func and all callable deps in its closure.
+
+    This ensures that compile-time parameters captured by nested @kernel functions
+    (e.g. tile_m, tile_n, waves_per_eu inside a KernelFunction._func) are included
+    in the cache key even when the outer @jit launcher does not reference them directly.
+    """
+    if visited_ids is None:
+        visited_ids = set()
+    if id(func) in visited_ids:
+        return []
+    visited_ids.add(id(func))
+
+    vals = []
+    if not (func.__code__.co_freevars and getattr(func, "__closure__", None)):
+        return vals
+
+    for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+        try:
+            val = cell.cell_contents
+        except ValueError:
+            continue
+        if isinstance(val, (int, float, bool, str, type(None), tuple)):
+            vals.append(f"{name}={val!r}")
+        else:
+            # Recurse into callable deps (KernelFunction, JitFunction, plain functions)
+            underlying = _get_underlying_func(val)
+            if underlying is not None and id(underlying) not in visited_ids:
+                nested = _collect_closure_scalar_vals(underlying, visited_ids)
+                # Prefix with the closure var name to avoid collisions across nesting levels
+                vals.extend(f"via:{name}:{v}" for v in nested)
+
+    return vals
+
+
 def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = None) -> List[str]:
     if visited is None:
         visited = set()
     sources = []
+
+    # 1) Scan global name references (co_names → __globals__)
     for name in func.__code__.co_names:
         obj = func.__globals__.get(name)
         underlying = _get_underlying_func(obj)
@@ -143,6 +173,27 @@ def _collect_dependency_sources(func, rootFile, visited: Optional[Set[int]] = No
             src = underlying.__code__.co_code.hex()
         sources.append(f"{name}:{src}")
         sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
+    # 2) Scan closure variables (co_freevars → __closure__) for callable
+    #    dependencies.  This catches @flyc.kernel functions defined in an
+    #    enclosing scope and captured by the @flyc.jit launcher via closure.
+    if func.__code__.co_freevars and getattr(func, "__closure__", None):
+        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
+            try:
+                val = cell.cell_contents
+            except ValueError:
+                continue
+            underlying = _get_underlying_func(val)
+            if underlying is None or id(underlying) in visited:
+                continue
+            visited.add(id(underlying))
+            try:
+                src = inspect.getsource(underlying)
+            except OSError:
+                src = underlying.__code__.co_code.hex()
+            sources.append(f"closure:{name}:{src}")
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+
     return sources
 
 
@@ -162,17 +213,13 @@ def _jit_function_cache_key(func: Callable) -> str:
     depSources.sort()
     parts.extend(depSources)
 
-    if func.__code__.co_freevars and getattr(func, "__closure__", None):
-        closure_vals = []
-        for name, cell in zip(func.__code__.co_freevars, func.__closure__):
-            try:
-                val = cell.cell_contents
-                if isinstance(val, (int, float, bool, str, type(None), tuple)):
-                    closure_vals.append(f"{name}={val!r}")
-            except ValueError:
-                pass
-        if closure_vals:
-            parts.append("closure:" + ",".join(closure_vals))
+    # Collect scalar closure values recursively — this covers compile-time parameters
+    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+    # indirectly via nested @kernel / helper functions, without requiring an explicit
+    # _cache_tag tuple in every kernel factory function.
+    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+    if all_closure_vals:
+        parts.append("closure_vals:" + ",".join(all_closure_vals))
 
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
@@ -254,8 +301,9 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
+        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
         pm = PassManager.parse(
-            "builtin.module(gpu-module-to-binary{format=isa opts= section= toolkit=})",
+            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -296,38 +344,23 @@ def _sanitize_path_component(s: str) -> str:
     return _re.sub(r"[^A-Za-z0-9_.-]+", "_", s) if s else "unknown"
 
 
-class MlirCompiler:
-    @staticmethod
-    def _pipeline_fragments(*, chip: str) -> list:
-        wave64 = "false" if is_rdna_arch(chip) else "true"
-        return [
-            "gpu-kernel-outlining{data-layout-str=}",
-            "fly-canonicalize",
-            "fly-layout-lowering",
-            "convert-fly-to-rocdl",
-            "canonicalize",
-            f"gpu.module(convert-scf-to-cf,cse,"
-            f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}})",
-            f"rocdl-attach-target{{O=2 abi=600 chip={chip} correct-sqrt=true daz=false fast=false features= "
-            f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
-            "convert-scf-to-cf",
-            "convert-cf-to-llvm",
-            "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
-            "convert-arith-to-llvm",
-            "convert-func-to-llvm",
-            "reconcile-unrealized-casts",
-            "gpu-module-to-binary{format=fatbin}",
-        ]
+def _pipeline_fragments(backend) -> list:
+    """Return the MLIR pass-pipeline fragments for *backend*."""
+    from .kernel_function import CompilationContext
 
+    hints = CompilationContext.get_compile_hints()
+    return backend.pipeline_fragments(compile_hints=hints)
+
+
+class MlirCompiler:
     @classmethod
-    def compile(cls, module: ir.Module, *, chip: str = None, func_name: str = "") -> ir.Module:
+    def compile(cls, module: ir.Module, *, arch: str = "", func_name: str = "") -> ir.Module:
         module.operation.verify()
 
-        if chip is None:
-            chip = env.compile.arch or get_rocm_arch()
+        backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        fragments = cls._pipeline_fragments(chip=chip)
+        fragments = _pipeline_fragments(backend)
 
         if env.debug.print_origin_ir:
             log().info(f"Origin IR: \n{module}")
@@ -613,7 +646,8 @@ class JitFunction:
            identity (e.g. TensorAdaptor includes assumed_align).
         2. Python scalars — value in key when not runtime; type only when
            runtime (annotated as Int32/Stream/etc.).
-        3. Tensor-like (dtype+shape) — fallback for bare torch.Tensor.
+        3. Registry raw_cache_signature — lightweight sig from raw arg
+           without full JitArgument construction overhead.
         4. Everything else — type only.
         """
         if hasattr(arg, "__cache_signature__"):
@@ -622,10 +656,11 @@ class JitFunction:
             if runtime:
                 return type(arg)
             return (type(arg), arg)
-        elif hasattr(arg, "dtype") and hasattr(arg, "shape"):
-            strides = tuple(arg.stride()) if hasattr(arg, "stride") else ()
-            return (arg.dtype, tuple(arg.shape), strides)
         else:
+            from .jit_argument import JitArgumentRegistry
+            constructor, _ = JitArgumentRegistry.get(type(arg))
+            if constructor is not None and hasattr(constructor, 'raw_cache_signature'):
+                return constructor.raw_cache_signature(arg)
             return type(arg)
 
     def _make_cache_key(self, bound_args):
@@ -734,8 +769,8 @@ class JitFunction:
             func_tracker = FuncLocationTracker(self.func)
 
             with ir.InsertionPoint(module.body), loc:
-                chip = env.compile.arch or get_rocm_arch()
-                gpu_module = create_gpu_module("kernels", targets=[f'#rocdl.target<chip = "{chip}">'])
+                backend = get_backend()
+                gpu_module = create_gpu_module("kernels", targets=backend.gpu_module_targets())
 
                 func_op = func.FuncOp(self.func.__name__, (ir_types, []))
                 func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
@@ -759,10 +794,10 @@ class JitFunction:
 
             original_ir = module.operation.get_asm(enable_debug_info=True)
 
-            compiled_module = MlirCompiler.compile(module, chip=chip, func_name=self.func.__name__)
+            compiled_module = MlirCompiler.compile(module, arch=backend.target.arch, func_name=self.func.__name__)
 
             if env.compile.compile_only:
-                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={chip})")
+                print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={backend.target.arch})")
                 return None
 
             compiled_func = CompiledArtifact(
@@ -784,16 +819,20 @@ class JitFunction:
 
             result = compiled_func(*jit_args)
 
-            # Build CallState so subsequent calls skip DLPack
-            try:
-                state = _build_call_state(
-                    sig, args_tuple,
-                    compiled_func._get_func_exe(),
-                )
-                if state is not None:
-                    self._call_state_cache[cache_key] = state
-            except Exception:
-                pass
+            # Build CallState so subsequent calls skip DLPack.
+            # Only when caching is enabled -- otherwise compiled_func will be
+            # GC'd and the function pointer inside CallState becomes dangling,
+            # causing a SIGSEGV on the next call with the same cache_key.
+            if use_cache:
+                try:
+                    state = _build_call_state(
+                        sig, args_tuple,
+                        compiled_func._get_func_exe(),
+                    )
+                    if state is not None:
+                        self._call_state_cache[cache_key] = state
+                except Exception:
+                    pass
 
             return result
 
