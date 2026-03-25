@@ -7,6 +7,7 @@ Tests flash_attn_func against PyTorch SDPA.
 import os
 import sys
 import argparse
+import csv
 import hashlib
 import random
 from pathlib import Path
@@ -59,18 +60,22 @@ DEFAULT_CONFIGS = [
     (1, 2048, 64, 128),
     (1, 4096, 64, 128),
     (1, 8192, 64, 128),
+    (4, 8192, 64, 128),
 
     (1, 2048, 32, 128),
     (1, 4096, 32, 128),
     (1, 8192, 32, 128),
+    (8, 8192, 32, 128),
 
     (1, 2048, 16, 128),
     (1, 4096, 16, 128),
     (1, 8192, 16, 128),
+    (16, 8192, 16, 128),
 
     (1, 2048, 8, 128),
     (1, 4096, 8, 128),
     (1, 8192, 8, 128),
+    (32, 8192, 8, 128),
 ]
 
 
@@ -355,7 +360,7 @@ def _fmt_result(r):
     if "err" in r:
         return f"{'--':>10s} {'ERR':>8s} {'--':>8s}"
     us = f"{r['us']:>10.1f}" if "us" in r else f"{'N/A':>10s}"
-    tf = f"{r['tflops']:>8.3f}" if "tflops" in r else f"{'N/A':>8s}"
+    tf = f"{r['tflops']:>8.1f}" if "tflops" in r else f"{'N/A':>8s}"
     err = f"{r['max_err']:>8.2e}" if "max_err" in r else f"{'N/A':>8s}"
     return f"{us} {tf} {err}"
 
@@ -377,6 +382,159 @@ def _fmt_cmp(fly_r, other_r):
     else:
         ratio = f"{'N/A':>6s}"
     return f"{pct} {ratio}"
+
+
+def _gpu_short_name():
+    """Extract short GPU name, e.g. 'AMD Instinct MI308X' -> 'MI308X'."""
+    return torch.cuda.get_device_name(0).split()[-1]
+
+
+def _csv_val(r, key):
+    """Extract a value from result dict for CSV, formatted to match console."""
+    if r.get("skip") or "err" in r:
+        return ""
+    v = r.get(key)
+    if v is None:
+        return ""
+    if key in ("us", "tflops"):
+        return f"{v:.1f}"
+    if key == "max_err":
+        return f"{v:.2e}"
+    if key == "min_cos":
+        return f"{v:.5f}"
+    return v
+
+
+def _csv_cmp(fly_r, other_r):
+    """Compute (tflops_pct_str, maxerr_ratio_str) for CSV, formatted to match console."""
+    if other_r.get("skip") or "err" in other_r or "err" in fly_r:
+        return ("", "")
+    ft, ot = fly_r.get("tflops"), other_r.get("tflops")
+    pct = f"{ft / ot * 100:.1f}%" if ft and ot and ot > 0 else ""
+    fe, oe = fly_r.get("max_err"), other_r.get("max_err")
+    rat = f"{fe / oe:.2f}x" if fe is not None and oe is not None and oe > 0 else ""
+    return (pct, rat)
+
+
+def _write_cmp_csv(csv_path, data_rows, avg_rows):
+    """Write compare-mode results to CSV."""
+    header = [
+        "B", "S", "H", "D", "dtype", "causal",
+        "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
+        "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
+        "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
+        "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
+        "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
+    ]
+    def _metrics(fr, cr, ar):
+        fck = _csv_cmp(fr, cr)
+        fasm = _csv_cmp(fr, ar)
+        return [
+            _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
+            _csv_val(cr, "us"), _csv_val(cr, "tflops"), _csv_val(cr, "max_err"),
+            _csv_val(ar, "us"), _csv_val(ar, "tflops"), _csv_val(ar, "max_err"),
+            fck[0], fck[1], fasm[0], fasm[1],
+        ]
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for cfg, fr, cr, ar in data_rows:
+            w.writerow(list(cfg) + _metrics(fr, cr, ar))
+        for label, fa, ca, aa in avg_rows:
+            w.writerow([label, "", "", "", "", ""] + _metrics(fa, ca, aa))
+
+
+def _write_normal_csv(csv_path, data_rows, avg_rows):
+    """Write normal-mode results to CSV."""
+    header = ["B", "S", "H", "D", "dtype", "causal", "Path", "Status",
+              "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for cfg, path, status, r in data_rows:
+            w.writerow(list(cfg) + [
+                path, status,
+                _csv_val(r, "max_err"), _csv_val(r, "min_cos"),
+                _csv_val(r, "us"), _csv_val(r, "tflops"),
+            ])
+        for label, avg in avg_rows:
+            w.writerow([label, "", "", "", "", "", "", "--",
+                _csv_val(avg, "max_err"), _csv_val(avg, "min_cos"),
+                _csv_val(avg, "us"), _csv_val(avg, "tflops"),
+            ])
+
+
+def _avg_results(results_list, keys=("us", "tflops", "max_err")):
+    """Average valid results over the specified keys."""
+    valid = [r for r in results_list if not r.get("skip") and "err" not in r]
+    if not valid:
+        return {"skip": True}
+    avg = {}
+    for key in keys:
+        vals = [r[key] for r in valid if key in r]
+        if vals:
+            avg[key] = sum(vals) / len(vals)
+    return avg
+
+
+def _tag_group(cfg):
+    """Extract (dtype_key, causal_tag) from config tuple."""
+    return cfg[4], cfg[5]
+
+
+def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
+    """Print grouped averages: all, then dtype x causal, dtype-only, causal-only."""
+    print_avg_fn("AVG (all)", rows)
+    seen_dtypes, seen_causals = [], []
+    for row in rows:
+        dk, ct = tag_fn(row)
+        if dk not in seen_dtypes:
+            seen_dtypes.append(dk)
+        if ct not in seen_causals:
+            seen_causals.append(ct)
+    if len(seen_dtypes) > 1 and len(seen_causals) > 1:
+        for dk in seen_dtypes:
+            for ct in seen_causals:
+                subset = [r for r in rows if tag_fn(r) == (dk, ct)]
+                if subset:
+                    print_avg_fn(f"AVG ({dk} {ct})", subset)
+    if len(seen_dtypes) > 1:
+        for dk in seen_dtypes:
+            subset = [r for r in rows if tag_fn(r)[0] == dk]
+            if subset:
+                print_avg_fn(f"AVG ({dk})", subset)
+    if len(seen_causals) > 1:
+        for ct in seen_causals:
+            subset = [r for r in rows if tag_fn(r)[1] == ct]
+            if subset:
+                print_avg_fn(f"AVG ({ct})", subset)
+
+
+_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'D':>4s} {'dtype':>5s} {'causal':>8s}"
+_CFG_W = len(_CFG_HDR)
+_PATH_W = 20
+
+
+def _fmt_cfg(cfg):
+    """Format config tuple (B, S, H, D, dtype, causal) as fixed-width columns."""
+    B, S, H, D, dt, cs = cfg
+    return f"{B:>4d} {S:>6d} {H:>4d} {D:>4d} {dt:>5s} {cs:>8s}"
+
+
+def _fmt_normal_row(cfg, path, status, r):
+    """Format one row for normal test mode."""
+    cfg_s = _fmt_cfg(cfg) if isinstance(cfg, tuple) else f"{cfg:>{_CFG_W}s}"
+    path_s = f"  {path:<{_PATH_W}s}" if path else f"  {'':<{_PATH_W}s}"
+    prefix = f"{cfg_s}{path_s}"
+    if "err" in r:
+        return f"{prefix} | {'ERROR':>6s} | {r['err'][:60]}"
+    us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
+    tf_s = f"{r['tflops']:>9.1f}" if "tflops" in r else "      N/A"
+    return (
+        f"{prefix} | {status:>6s} | "
+        f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
+        f"{us_s} {tf_s}"
+    )
 
 
 def main():
@@ -433,8 +591,8 @@ def main():
             for causal in causals_to_test:
                 for batch, seq_len, nh, hd in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    tag = f"B={batch} S={seq_len} H={nh} D={hd} {dtype_key} {causal_tag}"
-                    print(f"  {tag} ...", flush=True)
+                    cfg = (batch, seq_len, nh, hd, dtype_key, causal_tag)
+                    print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
                     fly_r = run_config(
                         batch, seq_len, nh, hd, dtype, causal,
@@ -451,29 +609,49 @@ def main():
                         warmup=args.warmup, iters=args.iters,
                         seed=args.seed, backend="asm",
                     )
-                    rows.append((tag, fly_r, ck_r, asm_r))
+                    rows.append((cfg, fly_r, ck_r, asm_r))
 
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
         hdr1 = (
-            f"{'Config':>45s} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
+            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
             f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
         )
         hdr2 = (
-            f"{'':>45s} | {col} | {col} | {col}"
+            f"{'':>{_CFG_W}s} | {col} | {col} | {col}"
             f" | {cmp_col} | {cmp_col}"
         )
         sep = "-" * len(hdr2)
         print(f"\n{hdr1}")
         print(hdr2)
         print(sep)
-        for tag, fly_r, ck_r, asm_r in rows:
+        for cfg, fly_r, ck_r, asm_r in rows:
             print(
-                f"{tag:>45s} | {_fmt_result(fly_r)} | "
+                f"{_fmt_cfg(cfg)} | {_fmt_result(fly_r)} | "
                 f"{_fmt_result(ck_r)} | {_fmt_result(asm_r)}"
                 f" | {_fmt_cmp(fly_r, ck_r)} | {_fmt_cmp(fly_r, asm_r)}"
             )
+
+        cmp_avg_rows = []
+
+        def _cmp_avg(label, subset):
+            fa = _avg_results([f for _, f, _, _ in subset])
+            ca = _avg_results([c for _, _, c, _ in subset])
+            aa = _avg_results([a for _, _, _, a in subset])
+            print(
+                f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
+                f"{_fmt_result(ca)} | {_fmt_result(aa)}"
+                f" | {_fmt_cmp(fa, ca)} | {_fmt_cmp(fa, aa)}"
+            )
+            cmp_avg_rows.append((label, fa, ca, aa))
+
+        print(sep)
+        _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)
         print("=" * len(hdr2))
+
+        csv_path = f"fmha_perf_compare_{_gpu_short_name()}.csv"
+        _write_cmp_csv(csv_path, rows, cmp_avg_rows)
+        print(f"Results saved to: {csv_path}")
 
     else:
         # ---- Normal FlyDSL test mode ----
@@ -484,7 +662,7 @@ def main():
         print("=" * 130)
 
         hdr = (
-            f"{'Config/Path':>66s} | {'Status':>6s} | {'MaxErr':>8s} "
+            f"{_CFG_HDR}  {'Path':<{_PATH_W}s} | {'Status':>6s} | {'MaxErr':>8s} "
             f"{'MinCos':>8s} | {'Time(us)':>10s} {'TFLOPS':>8s}"
         )
         print(f"\n{hdr}")
@@ -497,53 +675,54 @@ def main():
             for causal in causals_to_test:
                 for batch, seq_len, nh, hd in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    tag = f"B={batch} S={seq_len} H={nh} D={hd} {dtype_key} {causal_tag}"
+                    cfg = (batch, seq_len, nh, hd, dtype_key, causal_tag)
                     try:
                         r = run_config(
                             batch, seq_len, nh, hd, dtype, causal,
                             warmup=args.warmup, iters=args.iters,
                             seed=args.seed, dtype_str=dtype_str,
                         )
+                        path = r.get("active_path", "unknown")
                         if "err" in r:
-                            cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
-                            print(f"{cfg_path:>66s} | {'ERROR':>6s} | {r['err'][:60]}")
+                            print(_fmt_normal_row(cfg, path, "ERROR", r))
                             all_passed = False
-                            rows.append((cfg_path, "ERROR", r))
+                            rows.append((cfg, path, "ERROR", r))
                             continue
 
                         status = "PASS" if r["passed"] else "FAIL"
                         if not r["passed"]:
                             all_passed = False
-                        cfg_path = f"{tag} / {r.get('active_path', 'unknown')}"
-
-                        us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
-                        tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
-                        print(
-                            f"{cfg_path:>66s} | {status:>6s} | "
-                            f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-                            f"{us_s} {tf_s}"
-                        )
-                        rows.append((cfg_path, status, r))
+                        print(_fmt_normal_row(cfg, path, status, r))
+                        rows.append((cfg, path, status, r))
                     except Exception as e:
-                        print(f"{tag:>66s} | {'ERROR':>6s} | {str(e)[:60]}")
+                        print(_fmt_normal_row(cfg, "", "ERROR", {"err": str(e)}))
                         all_passed = False
-                        rows.append((tag, "ERROR", {"err": str(e)}))
+                        rows.append((cfg, "", "ERROR", {"err": str(e)}))
 
         # ---- Summary table ----
         print(f"\n{hdr}")
         print("-" * len(hdr))
-        for cfg_path, status, r in rows:
-            if "err" in r:
-                print(f"{cfg_path:>66s} | {'ERROR':>6s} | {r['err'][:60]}")
-            else:
-                us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
-                tf_s = f"{r['tflops']:>9.3f}" if "tflops" in r else "      N/A"
-                print(
-                    f"{cfg_path:>66s} | {status:>6s} | "
-                    f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-                    f"{us_s} {tf_s}"
-                )
+        for cfg, path, status, r in rows:
+            print(_fmt_normal_row(cfg, path, status, r))
+
+        normal_avg_rows = []
+
+        def _normal_avg_fn(label, subset):
+            avg = _avg_results(
+                [r for _, _, _, r in subset],
+                keys=("max_err", "min_cos", "us", "tflops"),
+            )
+            if not avg.get("skip"):
+                print(_fmt_normal_row(label, "", "--", avg))
+                normal_avg_rows.append((label, avg))
+
+        print("-" * len(hdr))
+        _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _normal_avg_fn)
         print("=" * len(hdr))
+
+        csv_path = f"fmha_perf_{_gpu_short_name()}.csv"
+        _write_normal_csv(csv_path, rows, normal_avg_rows)
+        print(f"Results saved to: {csv_path}")
         if all_passed:
             print("All tests PASSED")
         else:

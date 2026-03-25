@@ -45,13 +45,13 @@ def _waitcnt_vm_n(n):
 def select_flash_attn_func_path(num_heads, head_dim, causal=True, dtype_str="f16"):
     """Select active flash_attn_func path tag for build-time specialization."""
     override = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PATH", "auto").strip().lower()
-    if override in ("fallback", "fallback_n32", "n32"):
-        return "fallback_n32"
-    if override in ("fastpath", "ck_n128_fastpath", "n128"):
-        return "ck_n128_fastpath"
+    if override in ("N32",):
+        return "N32"
+    if override in ("N128",):
+        return "N128"
     if dtype_str in ("f16", "bf16") and causal and head_dim == 128:
-        return "ck_n128_fastpath"
-    return "fallback_n32"
+        return "N128"
+    return "N32"
 
 
 def build_flash_attn_func_module_primary(
@@ -83,7 +83,7 @@ def build_flash_attn_func_module_primary(
     PATH_TAG = select_flash_attn_func_path(
         num_heads, head_dim, causal=causal, dtype_str=dtype_str
     )
-    BLOCK_N_OUT = 128 if PATH_TAG == "ck_n128_fastpath" else BLOCK_N
+    BLOCK_N_OUT = 128 if PATH_TAG == "N128" else BLOCK_N
     N_SUBTILES = BLOCK_N_OUT // BLOCK_N
     ENABLE_PREFETCH_3BUF = (
         os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_PREFETCH3", "0") == "1"
@@ -91,7 +91,7 @@ def build_flash_attn_func_module_primary(
     # buffer_load_dwordx4_lds (16B DMA-to-LDS) requires gfx950+; gfx94x only has dword (4B).
     _has_lds_load_b128 = not gpu_arch.startswith("gfx942")
     ENABLE_DMA = _has_lds_load_b128 and (
-        PATH_TAG == "ck_n128_fastpath" or (
+        PATH_TAG == "N128" or (
             os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"
         )
     )
