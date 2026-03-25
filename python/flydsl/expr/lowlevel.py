@@ -548,6 +548,74 @@ def _to_ptr(v: ir.Value) -> ir.Value:
     return v
 
 
+def _to_ptr_global(v: ir.Value) -> ir.Value:
+    """Convert i64 to LLVM ptr addrspace(1) (global address space)."""
+    ptr_g = llvm.PointerType.get(address_space=1)
+    return llvm.IntToPtrOp(ptr_g, _unwrap(v)).result
+
+
+def load_i32_global_at(base_i64: Any, offset: Any) -> ir.Value:
+    """Load i32 from ``base_i64 + offset * 4`` using global addrspace(1)."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr  = _to_ptr_global(addr)
+    return llvm.LoadOp(_i32(), ptr, alignment=4).result
+
+
+def load_f32_global_at(base_i64: Any, offset: Any) -> ir.Value:
+    """Load f32 from ``base_i64 + offset * 4`` using global addrspace(1)."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr  = _to_ptr_global(addr)
+    f32  = ir.F32Type.get()
+    return llvm.LoadOp(f32, ptr, alignment=4).result
+
+
+def load_i64_global_at(base_i64: Any, offset: Any) -> ir.Value:
+    """Load i64 from ``base_i64 + offset * 8`` using global addrspace(1)."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(8), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr  = _to_ptr_global(addr)
+    return llvm.LoadOp(_i64(), ptr, alignment=8).result
+
+
+def store_i32_global_at(base_i64: Any, offset: Any, val: Any) -> None:
+    """Store i32 to ``base_i64 + offset * 4`` using global addrspace(1)."""
+    base = _unwrap(base_i64)
+    off  = _unwrap(offset)
+    val_ = _unwrap(val)
+    off64 = llvm.ZExtOp(_i64(), off).res if off.type == _i32() else off
+    byte_off = llvm.MulOp(off64, _const_i64(4), ir.Attribute.parse("#llvm.overflow<none>")).result
+    addr = llvm.AddOp(base, byte_off, ir.Attribute.parse("#llvm.overflow<none>")).result
+    ptr  = _to_ptr_global(addr)
+    llvm.StoreOp(val_, ptr, alignment=4)
+
+
+def atomic_add_i32_global_at(addr_i64: Any, val: Any) -> ir.Value:
+    """Atomic fetch-add i32 at i64 address using global addrspace(1).
+
+    Like atomic_add_i32_at but generates global_atomic_add instead of flat_atomic_add.
+    """
+    addr = _unwrap(addr_i64)
+    val_ = _unwrap(val)
+    ptr  = _to_ptr_global(addr)
+    return llvm.AtomicRMWOp(
+        llvm.AtomicBinOp.add,
+        ptr,
+        val_,
+        llvm.AtomicOrdering.monotonic,
+    ).res
+
+
 def load_i32_at(base_i64: Any, offset: Any) -> ir.Value:
     """Load i32 from ``base_i64 + offset * 4``."""
     base = _unwrap(base_i64)
