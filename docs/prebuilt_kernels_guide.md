@@ -224,15 +224,16 @@ Shared data movement and layout utilities for preshuffle GEMM kernels.
 | `lds_load_pack_k32(...)` | Load A-pack from LDS for K32 micro-step |
 | `swizzle_xor16(...)` | XOR-based swizzle for LDS bank-conflict avoidance |
 
-### 4.4 Layout Utilities (`kernels/layout_utils.py`)
+### 4.4 Layout Coordinate Helpers
 
-Pure-arith layout helpers for static-stride layouts:
+Native Fly dialect coordinate mapping (in `flydsl.expr` and `kernels/mfma_preshuffle_pipeline.py`):
 
 | Function | Description |
 |---|---|
-| `crd2idx(crd, layout)` | Coordinate → flat index using pure arith ops |
-| `idx2crd(idx, layout)` | Flat index → coordinate list using pure arith ops |
-| `get(int_tuple, mode)` | Extract element at index from Python list/tuple |
+| `fx.crd2idx(crd, layout)` | Coordinate → flat index (Fly dialect op) |
+| `fx.idx2crd(idx, layout)` | Flat index → coordinate tuple (Fly dialect op) |
+| `fx.get(int_tuple, mode)` | Extract element at index from `!fly.int_tuple` |
+| `crd2idx(crd, layout)` | Wrapper in `mfma_preshuffle_pipeline.py` (auto index cast) |
 
 ---
 
@@ -279,11 +280,16 @@ What operation do you need?
 │   └── Uses new @flyc.kernel API
 │       └── See kernels/preshuffle_gemm.py
 │
+├── MoE (Mixture of Experts)
+│   ├── Blockscale MoE (gate+up+reduce)
+│   │   └── → kernels/moe_blockscale_2stage.py
+│   └── Standard MoE (fp8/f16/bf16/int8/int4)
+│       └── → kernels/moe_gemm_2stage.py
+│
 └── Building blocks
     ├── Warp/block reduction     → reduce.py
     ├── MFMA epilogue selection  → mfma_epilogues.py
-    ├── Preshuffle data movement → mfma_preshuffle_pipeline.py
-    └── Static layout helpers    → layout_utils.py
+    └── Preshuffle data movement → mfma_preshuffle_pipeline.py
 ```
 
 ---
@@ -300,7 +306,9 @@ What operation do you need?
 | `kernels/reduce.py` | Shared warp/block reduction helpers |
 | `kernels/mfma_epilogues.py` | MFMA epilogue strategies (default, CShuffle) |
 | `kernels/mfma_preshuffle_pipeline.py` | Preshuffle data movement and layout utilities |
-| `kernels/layout_utils.py` | Pure-arith layout helpers (`crd2idx`, `idx2crd`) |
+| `kernels/blockscale_preshuffle_gemm.py` | Blockscale preshuffle GEMM (per-block FP8 scaling) |
+| `kernels/moe_gemm_2stage.py` | MoE GEMM 2-stage (gate/up + reduce, fp8/f16/bf16/int8/int4) |
+| `kernels/moe_blockscale_2stage.py` | MoE Blockscale 2-stage (per-block scaling) |
 
 ## 8. Test Files
 

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 # POSIX sh compatible (also works in bash).
 set -eu
 # Enable pipefail when supported (bash/ksh/zsh); ignore if unavailable (dash/posix sh).
@@ -22,7 +24,7 @@ if [ -d "${MLIR_LIBS_DIR}" ]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flir_bench}"
+BENCH_LOG_DIR="${BENCH_LOG_DIR:-/tmp/flydsl_bench}"
 mkdir -p "${BENCH_LOG_DIR}"
 
 SUCCESS_COUNT=0
@@ -60,12 +62,17 @@ fp8,5120,5120,8320,128,256,128
 fp8,9728,8192,8320,128,256,128
 fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,128,256,128
+fp8,5120,5120,8320,128,128,128
+fp8,9728,8192,8320,128,128,128
+fp8,8192,8192,8192,128,128,128
+int8,9728,8192,8320,128,128,128
 '
 
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
 GEMM_FP4_SHAPES='
 8192,8192,8192,64,128,256
 8192,8192,8192,64,256,256
+8192,8192,8192,128,256,128
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -278,10 +285,10 @@ if m:
     tflops = float(m.group(1))
     tbps = float(m.group(2))
 
-# MoE-style: "FLIR MoE stageX[dt]: ... XX.XX TFLOPS ... Y.YYY TB/s"
+# MoE-style: "FlyDSL MoE stageX[dt]: ... XX.XX TFLOPS ... Y.YYY TB/s"
 if tbps is None or tflops is None:
     m = None
-    for m in re.finditer(r"FLIR MoE .*?\:\s*[0-9.]+\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
+    for m in re.finditer(r"FlyDSL MoE .*?\:\s*[0-9.]+\s*us,\s*([0-9.]+)\s*TFLOPS.*?([0-9.]+)\s*TB/s", txt):
         pass
     if m:
         tflops = float(m.group(1))
@@ -411,7 +418,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       echo "gemm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "gemm"
     fi
-    row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+    gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+    row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
@@ -453,7 +461,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       echo "gemm failed. Log: ${log}" >&2
       _show_fail_log "${log}" "gemm"
     fi
-    shape_tag="${M}x${N}x${K}"
+    shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
     row="$(_py_parse_and_emit gemm_async "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -483,17 +491,20 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ]; then
       --tile_k "$tile_k" >"${log}" 2>&1; then
       # Check if test was skipped due to architecture
       if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        _emit_row "gemm" "${M}x${N}x${K}" "${dtype}" "skip" "skip"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        row="$(_py_parse_and_emit gemm "${M}x${N}x${K}" "${dtype}" "${log}")"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
       fi
     else
       # Skip gracefully on unsupported architectures or missing features
       if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        _emit_row "gemm" "${M}x${N}x${K}" "${dtype}" "skip" "skip"
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
         echo "gemm fp4 failed. Log: ${log}" >&2
@@ -539,16 +550,16 @@ if [ "${RUN_MOE}" -eq 1 ]; then
     # Keep shape string compact (no spaces/commas) so table alignment stays stable.
     shape_moe="t${tokens}-d${model_dim}x${inter_dim}-e${experts}k${topk}"
 
-    dt_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s1="$(grep -Eo 'FLIR MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s1="$(grep -Eo 'FlyDSL MoE stage1\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s1}" ] && [ -n "${tf_s1}" ] && [ -n "${tb_s1}" ]; then
       _emit_row "moe_gemm1" "${shape_moe}" "${dt_s1}" "${tb_s1}" "${tf_s1}"
     fi
 
-    dt_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
-    tf_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
-    tb_s2="$(grep -Eo 'FLIR MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    dt_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:' "${log}" | tail -1 | cut -d'[' -f2 | cut -d']' -f1 || true)"
+    tf_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TFLOPS' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
+    tb_s2="$(grep -Eo 'FlyDSL MoE stage2\[[^]]+\]:.* ([0-9.]+) TB/s' "${log}" | tail -1 | awk '{print $(NF-1)}' || true)"
     if [ -n "${dt_s2}" ] && [ -n "${tf_s2}" ] && [ -n "${tb_s2}" ]; then
       _emit_row "moe_gemm2" "${shape_moe}" "${dt_s2}" "${tb_s2}" "${tf_s2}"
     fi

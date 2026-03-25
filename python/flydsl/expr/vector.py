@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Vector dialect helpers.
 
 This module exists so tests can import vector ops through `flydsl._mlir_helpers`
@@ -7,16 +10,20 @@ instead of directly importing from `_mlir.dialects.*`.
 from __future__ import annotations
 
 from .._mlir.dialects import vector as _vector
+from .meta import traced_op
 
 
 # Re-export everything from the upstream dialect module for convenience.
 from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
 
 
+@traced_op
 def from_elements(*args, loc=None, ip=None, **kwargs):
-    # The upstream `vector.from_elements` expects each element to be an `ir.Value`.
-    # In our codebase, scalar values may be auto-wrapped as `arith.ArithValue`.
-    # Unwrap them here so call sites don't need to sprinkle `arith.as_value(...)`.
+    """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers.
+
+    Accepts the same arguments as ``vector.from_elements`` but transparently
+    handles ``ArithValue`` scalars so callers don't need explicit unwrapping.
+    """
     from . import arith as _arith_ext
 
     if len(args) >= 2:
@@ -29,6 +36,7 @@ def from_elements(*args, loc=None, ip=None, **kwargs):
     return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
 
 
+@traced_op
 def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
     """Vector store wrapper that accepts ArithValue/wrappers for value/indices."""
     from . import arith as _arith_ext
@@ -48,6 +56,7 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
 # -----------------------------------------------------------------------------
 
 
+@traced_op
 def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip=None):
     """Wrapper around `vector.ExtractOp(...).result`."""
     from . import arith as _arith_ext
@@ -66,6 +75,7 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
     ).result
 
 
+@traced_op
 def load_op(result_type, memref, indices, *, loc=None, ip=None):
     """Wrapper around `vector.LoadOp(...).result`."""
     from . import arith as _arith_ext
@@ -79,6 +89,7 @@ def load_op(result_type, memref, indices, *, loc=None, ip=None):
     ).result
 
 
+@traced_op
 def bitcast(result_type, source, *, loc=None, ip=None):
     """Wrapper around `vector.BitCastOp(...).result`."""
     from . import arith as _arith_ext

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 set -e
 
 # Default to downloading llvm-project in the parent directory of flydsl
@@ -13,13 +15,14 @@ LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
 # Read LLVM commit hash from thirdparty/llvm-hash.txt
 LLVM_HASH_FILE="${REPO_ROOT}/thirdparty/llvm-hash.txt"
-if [[ -f "${LLVM_HASH_FILE}" ]]; then
-    LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
-else
-    echo "Warning: ${LLVM_HASH_FILE} not found, using hardcoded default."
-    LLVM_COMMIT_DEFAULT="ac5dc54d509169d387fcfd495d71853d81c46484"
-fi
+LLVM_COMMIT_DEFAULT=$(cat "${LLVM_HASH_FILE}" | tr -d '[:space:]')
 LLVM_COMMIT="${LLVM_COMMIT:-$LLVM_COMMIT_DEFAULT}"
+
+if [[ ${#LLVM_COMMIT} -lt 40 ]]; then
+    echo "Error: LLVM_COMMIT must be a full 40-char SHA (got '${LLVM_COMMIT}')"
+    echo "Shallow fetch does not support short hashes."
+    exit 1
+fi
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
@@ -29,22 +32,21 @@ echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
 echo "LLVM Commit:    $LLVM_COMMIT"
 
 # 1. Clone LLVM
+LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/llvm/llvm-project.git}"
+
 if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Cloning llvm-project..."
-    git clone https://github.com/ROCm/llvm-project.git "$LLVM_SRC_DIR"
+    echo "Fetching llvm-project commit ${LLVM_COMMIT} (shallow, single commit)..."
+    git init "$LLVM_SRC_DIR"
+    pushd "$LLVM_SRC_DIR"
+    git remote add origin "$LLVM_REMOTE"
+else
+    pushd "$LLVM_SRC_DIR"
 fi
 
-echo "Checking out llvm-project commit ${LLVM_COMMIT} (amd-staging)..."
-pushd "$LLVM_SRC_DIR"
-
-# Check if we need to switch remote to ROCm fork
-CURRENT_REMOTE=$(git remote get-url origin)
-if [[ "$CURRENT_REMOTE" == *"github.com/llvm/llvm-project"* ]]; then
-    echo "Detected upstream LLVM. Switching origin to ROCm fork for amd-staging..."
-    git remote set-url origin https://github.com/ROCm/llvm-project.git
+if ! git cat-file -e "${LLVM_COMMIT}^{commit}" 2>/dev/null; then
+    echo "Fetching commit ${LLVM_COMMIT} ..."
+    git fetch --depth 1 origin "${LLVM_COMMIT}"
 fi
-
-git fetch origin amd-staging
 git checkout "${LLVM_COMMIT}"
 popd
 
@@ -77,6 +79,7 @@ cmake -G "$GENERATOR" \
     -B "$LLVM_BUILD_DIR" \
     -DLLVM_ENABLE_PROJECTS="mlir;clang" \
     -DLLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU" \
+    -DLLVM_ENABLE_RUNTIMES="compiler-rt" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_STANDARD=17 \
     -DLLVM_ENABLE_ASSERTIONS=ON \
@@ -88,7 +91,8 @@ cmake -G "$GENERATOR" \
     -Dnanobind_DIR="$NANOBIND_DIR" \
     -DBUILD_SHARED_LIBS=OFF \
     -DLLVM_BUILD_LLVM_DYLIB=OFF \
-    -DLLVM_LINK_LLVM_DYLIB=OFF 
+    -DLLVM_LINK_LLVM_DYLIB=OFF \
+    -DCMAKE_INSTALL_RPATH="\$ORIGIN"
 
 # 4. Build
 PARALLEL_JOBS=$(( $(nproc) / 2 ))

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import functools
 import os
 import subprocess
@@ -24,10 +27,8 @@ def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
 
 @functools.lru_cache(maxsize=None)
 def get_rocm_arch(timeout_s: int = 5) -> str:
-    """Best-effort ROCm GPU arch string (e.g. 'gfx942') without torch."""
-    env = (os.environ.get("FLYDSL_GPU_ARCH")
-        or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
-    )
+    """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
+    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         if env.startswith("gfx"):
             return env
@@ -40,3 +41,19 @@ def get_rocm_arch(timeout_s: int = 5) -> str:
         return arch.split(":", 1)[0]
 
     return "gfx942"
+
+
+def is_rdna_arch(arch: Optional[str] = None) -> bool:
+    """Check if architecture is RDNA-based (gfx10/11/12, wave32).
+
+    This is the single source of truth for CDNA vs RDNA classification.
+    RDNA architectures use wave32 and have different buffer descriptor flags.
+
+    If arch is None, the current GPU arch is auto-detected.
+    """
+    if arch is None:
+        arch = get_rocm_arch()
+    if not arch:
+        return False
+    arch = arch.lower()
+    return arch.startswith("gfx10") or arch.startswith("gfx11") or arch.startswith("gfx12")

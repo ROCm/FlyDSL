@@ -193,19 +193,26 @@ raw_bid = gpu.block_id("x")
 ```python
 from flydsl.expr import arith
 from flydsl.expr.typing import T
+import flydsl.expr as fx
 
-# Constants
+# Constants (prefer DSL numeric types)
+c42 = fx.Index(42)          # index type constant
+c3_14 = fx.Float32(3.14)    # f32 constant
+mask = fx.Int32(0xFF)       # i32 constant
+
+# Legacy constant API (still works)
 c42 = arith.constant(42, index=True)     # index type
-c3_14 = arith.constant(3.14, T.f32)      # f32 type
+c3_14 = arith.constant(3.14, type=T.f32) # f32 type
 
-# Arithmetic (operator overloading via ArithValue)
+# Arithmetic (operator overloading via ArithValue / Numeric)
 result = a + b
 result = a * 2
 result = a // 4
 result = a % 16
 
-# Cast
-idx = arith.index_cast(T.index, int_val)
+# Cast (prefer DSL numeric constructors)
+idx = fx.Index(int_val)     # cast to index type
+i32_val = fx.Int32(idx)     # cast to i32
 
 # Select
 result = arith.select(cond, true_val, false_val)
@@ -293,6 +300,18 @@ rocdl.sched_mfma(cnt)    # wait for cnt MFMA instructions to complete
 rocdl.sched_vmem(cnt)    # wait for cnt VMEM reads to complete
 rocdl.sched_dsrd(cnt)    # wait for cnt DS (LDS) reads to complete
 rocdl.sched_dswr(cnt)    # wait for cnt DS (LDS) writes to complete
+```
+
+#### Math Intrinsics
+
+Single-instruction hardware math (guaranteed 1 VALU cycle, lower precision than `math.*`):
+
+```python
+# Base-2 exponential (v_exp_f32)
+result = rocdl.exp2(T.f32, x)
+
+# Reciprocal (v_rcp_f32)
+result = rocdl.rcp(T.f32, x)
 ```
 
 #### Low-Level Ops

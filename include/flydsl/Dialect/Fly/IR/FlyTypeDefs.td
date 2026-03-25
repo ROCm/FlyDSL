@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLY_TYPEDEFS
 #define FLY_TYPEDEFS
 
@@ -58,11 +61,16 @@ def Fly_Layout : Fly_Type<"Layout", "layout", [
   let builders = [
     TypeBuilderWithInferredContext<(ins "LayoutAttr":$attr), [{
       return $_get(attr.getContext(), attr);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "IntTupleAttr":$shape, "IntTupleAttr":$stride), [{
+      return $_get(shape.getContext(), LayoutAttr::get(shape, stride));
     }]>
   ];
 }
 
-def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", []> {
+def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins Fly_SwizzleAttr:$attr);
   let assemblyFormat = "`<` $attr `>`";
 
@@ -92,11 +100,16 @@ def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
   let builders = [
     TypeBuilderWithInferredContext<(ins "ComposedLayoutAttr":$attr), [{
       return $_get(attr.getContext(), attr);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
+      return $_get(inner.getContext(), ComposedLayoutAttr::get(inner, offset, outer));
     }]>
   ];
 }
 
-def Fly_Tile : Fly_Type<"Tile", "tile", []> {
+def Fly_Tile : Fly_Type<"Tile", "tile", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins Fly_TileAttr:$attr);
   let assemblyFormat = "`<` $attr `>`";
 
@@ -107,6 +120,9 @@ def Fly_Tile : Fly_Type<"Tile", "tile", []> {
   let builders = [
     TypeBuilderWithInferredContext<(ins "TileAttr":$attr), [{
       return $_get(attr.getContext(), attr);
+    }]>,
+    TypeBuilderWithInferredContext<(ins "ArrayAttr":$modes), [{
+      return $_get(modes.getContext(), TileAttr::get(modes));
     }]>
   ];
 }
@@ -115,15 +131,15 @@ def Fly_Pointer : Fly_Type<"Pointer", "ptr", []> {
   let parameters = (ins
     "Type":$elemTy,
     "AddressSpaceAttr":$addressSpace,
-    DefaultValuedParameter<"AlignAttr","AlignAttr::getTrivialAlignment($_ctxt)">:$alignment,
+    "AlignAttr":$alignment,
     DefaultValuedParameter<"SwizzleAttr","SwizzleAttr::getTrivialSwizzle($_ctxt)">:$swizzle
   );
-  let assemblyFormat = "`<` $elemTy `,` `` $addressSpace (`,` $alignment^)? (`,` $swizzle^)? `>`";
+  let hasCustomAssemblyFormat = 1;
 
   let builders = [
     TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace,
-                   AlignAttr::getTrivialAlignment(elemTy.getContext()),
+                   AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
     TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "AlignAttr":$alignment), [{
@@ -134,15 +150,17 @@ def Fly_Pointer : Fly_Type<"Pointer", "ptr", []> {
       return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, swizzle);
     }]>
   ];
-  let extraClassDeclaration = [{}];
+  let extraClassDeclaration = [{
+    int32_t getValueDivisibility() const;
+  }];
 }
 
 def Fly_CoordTensor : Fly_Type<"CoordTensor", "coord_tensor", [
     DeclareTypeInterfaceMethods<Fly_NestedTypeInterface>,
     DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
 ]> {
-  let parameters = (ins Fly_IntTupleAttr:$base, Fly_LayoutAttr:$layout);
-  let assemblyFormat = "`<` $base `,` $layout `>`";
+  let parameters = (ins Fly_IntTupleAttr:$base, "Attribute":$layout);
+  let hasCustomAssemblyFormat = 1;
 
   let extraClassDeclaration = [{
     CoordTensorType at(int32_t idx) const;
@@ -150,7 +168,7 @@ def Fly_CoordTensor : Fly_Type<"CoordTensor", "coord_tensor", [
   }];
   
   let builders = [
-    TypeBuilderWithInferredContext<(ins "IntTupleAttr":$base, "LayoutAttr":$layout), [{
+    TypeBuilderWithInferredContext<(ins "IntTupleAttr":$base, "Attribute":$layout), [{
       return $_get(base.getContext(), base, layout);
     }]>
   ];
@@ -160,41 +178,45 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let parameters = (ins
     "Type":$elemTy,
     "AddressSpaceAttr":$addressSpace,
-    Fly_LayoutAttr:$layout,
-    DefaultValuedParameter<"AlignAttr","AlignAttr::getTrivialAlignment($_ctxt)">:$alignment,
+    "Attribute":$layout,
+    "AlignAttr":$alignment,
     DefaultValuedParameter<"SwizzleAttr","SwizzleAttr::getTrivialSwizzle($_ctxt)">:$swizzle
   );
-  let assemblyFormat = "`<` $elemTy `,` `` $addressSpace `,` $layout (`,` $alignment^)? (`,` $swizzle^)? `>`";
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = [{
+    MemRefType at(int32_t idx) const;
+    MemRefType at(ArrayRef<int32_t> idxs) const;
+    
+    PointerType getPointerType() const;
+    int32_t getValueDivisibility() const;
+  }];
 
   let builders = [
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "LayoutAttr":$layout), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$layout), [{
       // default address space is Global
-      return $_get(elemTy.getContext(), elemTy, AddressSpaceAttr::get(elemTy.getContext(), static_cast<::mlir::fly::AddressSpace>(0)), layout,
-                   AlignAttr::getTrivialAlignment(elemTy.getContext()),
+      return $_get(elemTy.getContext(), elemTy, AddressSpaceAttr::get(elemTy.getContext(), ::mlir::fly::AddressSpace::Global), layout,
+                   AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout,
-                   AlignAttr::getTrivialAlignment(elemTy.getContext()),
+                   AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout, "AlignAttr":$alignment), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment,
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "LayoutAttr":$layout, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment, swizzle);
     }]>
   ];
 }
 
-def IteratorLikeType : AnyTypeOf<[Fly_IntTuple, Fly_Pointer]>;
-def TensorLikeType : AnyTypeOf<[Fly_CoordTensor, Fly_MemRef]>;
-def AnyLayoutType : AnyTypeOf<[Fly_Layout, Fly_ComposedLayout]>;
-def LayoutLikeType : AnyTypeOf<[AnyLayoutType, TensorLikeType]>;
-def IntTupleLikeType : AnyTypeOf<[Fly_IntTuple, LayoutLikeType]>;
-
-def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", []> {
+def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins
     "Type":$copyAtom,
     Fly_Layout:$layoutThrVal,
@@ -203,13 +225,19 @@ def Fly_TiledCopy : Fly_Type<"TiledCopy", "tiled_copy", []> {
   let assemblyFormat = "`<` $copyAtom `,` $layoutThrVal `,` $tileMN `>`";
 }
 
-def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", []> {
+def Fly_TiledMma : Fly_Type<"TiledMma", "tiled_mma", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
   let parameters = (ins
     "Type":$mmaAtom,
     Fly_Layout:$atomLayout,
-    Fly_Tile:$permutation
+    DefaultValuedParameter<"TileType", "TiledMmaType::getDefaultPermutationMNK($_ctxt)">:$permutation
   );
-  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout `,` $permutation `>`";
+  let assemblyFormat = "`<` $mmaAtom `,` $atomLayout (`,` $permutation^)? `>`";
+
+  let extraClassDeclaration = [{
+    static TileType getDefaultPermutationMNK(MLIRContext *ctx);
+  }];
 }
 
 def Fly_CopyAtom : Fly_Type<"CopyAtom", "copy_atom", [

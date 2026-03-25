@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef CONVERSION_FLYTOROCDL_FLYTOROCDL_H
 #define CONVERSION_FLYTOROCDL_FLYTOROCDL_H
 
@@ -5,6 +8,7 @@
 
 namespace mlir {
 #define GEN_PASS_DECL_FLYTOROCDLCONVERSIONPASS
+#define GEN_PASS_DECL_FLYROCDLCLUSTERATTRPASS
 #include "flydsl/Conversion/Passes.h.inc"
 } // namespace mlir
 

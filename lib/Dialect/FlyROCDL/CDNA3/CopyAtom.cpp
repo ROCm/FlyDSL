@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -9,17 +12,24 @@ using namespace mlir::fly;
 
 namespace mlir::fly_rocdl {
 
-bool CopyOpCDNA3BufferLDSTType::isStatic() const { return true; }
+bool CopyOpCDNA3BufferCopyType::isStatic() const { return true; }
 
-Attribute CopyOpCDNA3BufferLDSTType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+Value CopyOpCDNA3BufferCopyType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                                    Value currentValue) const {
+  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+    return nullptr;
+  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, getBitSize()), getBitSize());
+}
 
-Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutSrc() const {
+Attribute CopyOpCDNA3BufferCopyType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
+
+Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutSrc() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutDst() const {
+Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutDst() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
-Attribute CopyOpCDNA3BufferLDSTType::getThrBitLayoutRef() const {
+Attribute CopyOpCDNA3BufferCopyType::getThrBitLayoutRef() const {
   return FxLayout(FxShape(FxC(1), FxC(getBitSize())), FxStride(FxC(1), FxC(1)));
 }
 

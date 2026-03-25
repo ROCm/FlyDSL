@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import ctypes
 from itertools import chain
 from typing import List, Protocol, runtime_checkable

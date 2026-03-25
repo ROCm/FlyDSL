@@ -11,10 +11,17 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
+from flydsl.expr import idx2crd, get as layout_get
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
+
+
+def crd2idx(crd, layout):
+    off = fx.get_scalar(fx.crd2idx(crd, layout))
+    if isinstance(off, ir.Value) and not isinstance(off.type, ir.IndexType):
+        off = arith.index_cast(T.index, off)
+    return off
 
 
 def compile_wmma_gemm(

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import os
 import re
 from pathlib import Path
@@ -7,6 +10,14 @@ T = TypeVar("T")
 
 
 class EnvOption(Generic[T]):
+    """Descriptor that reads a typed value from an environment variable.
+
+    Subclass and override ``parse_value`` for custom types.  When accessed
+    as an instance attribute of an ``EnvManager`` subclass, the descriptor
+    reads ``os.environ[env_var]``, parses it, and returns the result (or
+    the default if the variable is unset).
+    """
+
     def __init__(
         self,
         default: T,
@@ -52,6 +63,8 @@ class EnvOption(Generic[T]):
 
 
 class OptBool(EnvOption[bool]):
+    """Boolean environment option (truthy: ``1``, ``true``, ``yes``, ``on``)."""
+
     def __init__(
         self,
         default: bool = False,
@@ -65,6 +78,8 @@ class OptBool(EnvOption[bool]):
 
 
 class OptInt(EnvOption[int]):
+    """Integer environment option with optional min/max validation."""
+
     def __init__(
         self,
         default: int = 0,
@@ -92,6 +107,8 @@ class OptInt(EnvOption[int]):
 
 
 class OptStr(EnvOption[str]):
+    """String environment option with optional ``choices`` validation."""
+
     def __init__(
         self,
         default: str = "",
@@ -116,6 +133,8 @@ E = TypeVar("E", int, str)
 
 
 class OptList(EnvOption[list[E]]):
+    """List environment option parsed from a separated string (default: comma)."""
+
     def __init__(
         self,
         default: Optional[list[E]] = None,
@@ -168,6 +187,13 @@ class EnvManagerMeta(type):
 
 
 class EnvManager(metaclass=EnvManagerMeta):
+    """Base class for environment-variable-driven configuration.
+
+    Subclasses declare ``EnvOption`` descriptors as class attributes.
+    The metaclass auto-generates ``env_var`` names from the prefix
+    and attribute name if not explicitly provided.
+    """
+
     env_prefix: str = "FLYDSL"
     options: Dict[str, EnvOption]
 
@@ -191,14 +217,19 @@ class EnvManager(metaclass=EnvManagerMeta):
 
 
 class CompileEnvManager(EnvManager):
+    """Compile-time options (``FLYDSL_COMPILE_*`` environment variables)."""
+
     env_prefix = "COMPILE"
 
     opt_level = OptInt(2, min_value=0, max_value=3, description="Optimization level")
     compile_only = OptBool(False, env_var="COMPILE_ONLY", description="Only compile without execution, useful for verifying compilation without a GPU")
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
+    backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
 
 
 class DebugEnvManager(EnvManager):
+    """Debug and diagnostics options (``FLYDSL_DEBUG_*`` / ``FLYDSL_DUMP_*``)."""
+
     env_prefix = "DEBUG"
 
     dump_asm = OptBool(False, description="Dump ASM to file")
@@ -215,11 +246,13 @@ class DebugEnvManager(EnvManager):
     # MLIR pass manager options
     print_origin_ir = OptBool(False, description="Print origin IR")
     print_after_all = OptBool(False, description="Print IR after each MLIR pass")
-    enable_debug_info = OptBool(True, description="Generate debug info in compiled code")
+    enable_debug_info = OptBool(False, description="Generate debug info in compiled code")
     enable_verifier = OptBool(True, description="Verify IR module")
 
 
 class RuntimeEnvManager(EnvManager):
+    """Runtime options (``FLYDSL_RUNTIME_*`` environment variables)."""
+
     env_prefix = "RUNTIME"
 
     cache_dir = OptStr(str(Path.home() / ".flydsl" / "cache"), description="Directory for caching compiled kernels")

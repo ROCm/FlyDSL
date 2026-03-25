@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Preshuffle GEMM kernel using the @flyc.kernel API."""
 
 import flydsl.compiler as flyc
@@ -17,8 +20,8 @@ from flydsl.expr import buffer_ops, rocdl
 
 from flydsl.expr.typing import T
 from flydsl.compiler.protocol import fly_values
+from typing import Optional
 
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 from kernels.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -42,9 +45,10 @@ def compile_preshuffle_gemm_a8(
     tile_n: int,
     tile_k: int,
     in_dtype: str = "fp8",
+    out_dtype: str = "fp16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
-    waves_per_eu: int = None,
+    waves_per_eu: Optional[int] = None,
     use_async_copy: bool = False,
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
@@ -52,10 +56,11 @@ def compile_preshuffle_gemm_a8(
     Returns a JitFunction that auto-compiles and executes when called.
     Signature:  launch_fn(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, M, N, stream)
 
-    Compile-time constants: K, tile_m/n/k, in_dtype (determine loop structure).
+    Compile-time constants: K, tile_m/n/k, in_dtype, out_dtype (determine loop structure).
     Runtime parameters: M, N (passed as i32 kernel args).
 
     Args:
+        out_dtype: Output element type, "fp16" or "bf16" (default: "fp16").
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         use_async_copy: Use async DMA for A tile global-to-LDS transfer.
     """
@@ -64,6 +69,11 @@ def compile_preshuffle_gemm_a8(
             "in_dtype must be one of ('fp8','int8','int4','fp16','bf16','fp4'), "
             f"got {in_dtype!r}"
         )
+    if out_dtype not in ("fp16", "bf16"):
+        raise ValueError(
+            f"out_dtype must be 'fp16' or 'bf16', got {out_dtype!r}"
+        )
+    _out_is_bf16 = out_dtype == "bf16"
     is_fp4 = in_dtype == "fp4"
     is_int4 = in_dtype == "int4"
     is_int8 = (in_dtype == "int8") or is_int4
@@ -83,12 +93,14 @@ def compile_preshuffle_gemm_a8(
         )
 
     _min_k_unroll = tile_k_bytes // a_elem_vec_pack // 64
-    if is_fp4 and _min_k_unroll < 2:
+    if is_fp4 and _min_k_unroll < 2 and int(tile_k) != 128:
         raise ValueError(
-            f"FP4 requires tile_k >= {64 * 2 * a_elem_vec_pack} "
-            f"(mfma_scale_f32_16x16x128 needs k_unroll >= 2), "
+            f"FP4 requires tile_k=128 or tile_k >= {64 * 2 * a_elem_vec_pack} "
+            f"(mfma_scale_f32_16x16x128 needs k_unroll >= 1), "
             f"got tile_k={tile_k} (k_unroll={_min_k_unroll})"
         )
+    if is_fp4 and int(tile_k) == 128 and lds_stage != 2:
+        raise NotImplementedError("FP4 tile_k=128 currently only supports lds_stage=2")
 
     mfma_i32_k32 = None
     if is_int8:
@@ -162,8 +174,11 @@ def compile_preshuffle_gemm_a8(
             return T.i16x4
         return T.i64
 
+    def _out_elem():
+        return T.bf16 if _out_is_bf16 else T.f16
+
     epilog_tag = "cshuffle" if use_cshuffle_epilog else "direct"
-    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{epilog_tag}".replace("-", "_")
+    module_name = f"mfma_preshuffle_{lds_stage}stages_{in_dtype}_{out_dtype}_{epilog_tag}".replace("-", "_")
 
     # ── LDS sizing (pure Python, no MLIR ops) ────────────────────────────────
     lds_tile_bytes = int(tile_m) * int(lds_stride_bytes) // a_elem_vec_pack
@@ -197,8 +212,8 @@ def compile_preshuffle_gemm_a8(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
-        c_m = arith.index_cast(T.index, i32_m.ir_value())
-        c_n = arith.index_cast(T.index, i32_n.ir_value())
+        c_m = arith.index_cast(T.index, i32_m)
+        c_n = arith.index_cast(T.index, i32_n)
 
         # ---- Types ----
         acc_init = (
@@ -250,7 +265,7 @@ def compile_preshuffle_gemm_a8(
 
             if use_cshuffle_epilog:
                 lds_out = SmemPtr(
-                    base_ptr_pong, lds_pong_offset, T.f16, shape=(tile_m * tile_n,)
+                    base_ptr_pong, lds_pong_offset, _out_elem(), shape=(tile_m * tile_n,)
                 ).get()
             else:
                 lds_out = None
@@ -261,7 +276,7 @@ def compile_preshuffle_gemm_a8(
             lds_a_pong = lds_a_ptr.get()
             lds_a_ping = lds_a_pong
             lds_out = (
-                SmemPtr(base_ptr_pong, lds_alloc_offset, T.f16, shape=(tile_m * tile_n,)).get()
+                SmemPtr(base_ptr_pong, lds_alloc_offset, _out_elem(), shape=(tile_m * tile_n,)).get()
                 if use_cshuffle_epilog
                 else None
             )
@@ -286,14 +301,14 @@ def compile_preshuffle_gemm_a8(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = idx2crd(tx, layout_wave_lane)
-        wave_id = layout_get(coord_wave_lane, 0)
-        lane_id = layout_get(coord_wave_lane, 1)
+        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        wave_id = fx.get(coord_wave_lane, 0)
+        lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = idx2crd(lane_id, layout_lane16)
-        lane_div_16 = layout_get(coord_lane16, 0)
-        lane_mod_16 = layout_get(coord_lane16, 1)
+        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        lane_div_16 = fx.get(coord_lane16, 0)
+        lane_mod_16 = fx.get(coord_lane16, 1)
 
         row_a_lds = lane_mod_16
         kpack_elems = 16 if elem_bytes == 1 else 8
@@ -333,10 +348,10 @@ def compile_preshuffle_gemm_a8(
         c64_b = 64
         c0_idx = 0
 
-        _b_stride_n0_c = arith.index(_stride_n0)
-        _b_stride_k0_c = arith.index(_stride_k0)
-        _b_stride_klane_c = arith.index(_stride_klane)
-        _b_stride_nlane_c = arith.index(_stride_nlane)
+        _b_stride_n0_c = fx.Index(_stride_n0)
+        _b_stride_k0_c = fx.Index(_stride_k0)
+        _b_stride_klane_c = fx.Index(_stride_klane)
+        _b_stride_nlane_c = fx.Index(_stride_nlane)
 
         _b_dword_stride_n0 = _stride_n0 // 4
         _b_dword_stride_k0 = _stride_k0 // 4
@@ -345,13 +360,13 @@ def compile_preshuffle_gemm_a8(
 
         _b_n_full_dword_list = []
         for _ni in range_constexpr(num_acc_n):
-            _n_dword = (n_blk_list[_ni] * arith.index(_b_dword_stride_n0)
-                        + n_intra_list[_ni] * arith.index(_b_dword_stride_nlane)
-                        + lane_div_16 * arith.index(_b_dword_stride_klane))
+            _n_dword = (n_blk_list[_ni] * fx.Index(_b_dword_stride_n0)
+                        + n_intra_list[_ni] * fx.Index(_b_dword_stride_nlane)
+                        + lane_div_16 * fx.Index(_b_dword_stride_klane))
             _b_n_full_dword_list.append(_n_dword)
 
-        _b_dword_stride_k0_c = arith.index(_b_dword_stride_k0)
-        _c64_elem = arith.index(64 // elem_bytes * b_elem_vec_pack) if (64 // elem_bytes * b_elem_vec_pack) != 64 else arith.index(64)
+        _b_dword_stride_k0_c = fx.Index(_b_dword_stride_k0)
+        _c64_elem = arith.index(64 // elem_bytes * b_elem_vec_pack) if (64 // elem_bytes * b_elem_vec_pack) != 64 else fx.Index(64)
 
         def _extract_b_packs(b16):
             b_i64x2 = vector.bitcast(T.i64x2, b16)
@@ -420,9 +435,9 @@ def compile_preshuffle_gemm_a8(
             return b_tile
 
         # ── A LDS load/store helpers (now take lds_buffer memref directly) ──
-        lds_base_zero = arith.index(0)
+        lds_base_zero = fx.Index(0)
 
-        _lds_k_dim_c = arith.index(lds_k_dim)
+        _lds_k_dim_c = fx.Index(lds_k_dim)
 
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
@@ -449,7 +464,7 @@ def compile_preshuffle_gemm_a8(
         num_a_loads = bytes_per_thread_a // a_load_bytes
         tile_k_dwords = (tile_k * 2) // 4 if elem_bytes == 2 else tile_k // 4 // a_elem_vec_pack
         layout_a_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), (tile_k_dwords, 1))
-        c4 = arith.index(4)
+        c4 = fx.Index(4)
         tx_i32_base = tx * c4
 
         def load_a_16(idx_elem):
@@ -502,9 +517,15 @@ def compile_preshuffle_gemm_a8(
             )
 
         def dma_a_tile_to_lds(base_k_div4, lds_buffer):
-            from flydsl._mlir.dialects import llvm, memref as memref_dialect
+            from flydsl._mlir.dialects import memref as memref_dialect
 
             dma_bytes = a_async_load_bytes
+            wave_offset = rocdl.readfirstlane(
+                T.i64,
+                arith.index_cast(
+                    T.i64, wave_id * arith.constant(wave_size * dma_bytes, index=True)
+                ),
+            )
 
             for i in range_constexpr(num_a_async_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32_async(i)
@@ -514,12 +535,14 @@ def compile_preshuffle_gemm_a8(
                 global_offset = arith.index_cast(T.i32, global_byte_idx)
 
                 if i == 0:
-                    lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * wave_size * dma_bytes
-                    lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, lds_addr))
+                    lds_base = memref_dialect.extract_aligned_pointer_as_index(lds_buffer)
+                    lds_ptr_base = buffer_ops.create_llvm_ptr(arith.index_cast(T.i64, lds_base), address_space=3)
+                    lds_ptr = buffer_ops.get_element_ptr(lds_ptr_base, wave_offset)
                 else:
-                    lds_ptr_i64_lane0 += total_threads * dma_bytes
-                lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
-                lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64_lane0)
+                    lds_ptr = buffer_ops.get_element_ptr(
+                        lds_ptr,
+                        static_byte_offset=total_threads * dma_bytes,
+                    )
 
                 size_i32 = arith.constant(dma_bytes, type=T.i32)
                 soffset = arith.constant(0, type=T.i32)
@@ -555,67 +578,69 @@ def compile_preshuffle_gemm_a8(
             return a_regs, b_regs
 
         # ── FP4 scale pre-fetch (outside compute_tile for latency hiding) ──
+        _fp4_tilek128 = False
         if is_fp4:
-            from flydsl._mlir.dialects import fly as _fly_d, llvm as _llvm_d
-
             _fp4_pack_M_outer = 2
             _fp4_pack_N_outer = 2
             _fp4_pack_K_outer = 2
+            _fp4_tilek128 = int(tile_k) == 128
+            _fp4_scale_chunk_k = 32 * 4 * _fp4_pack_K_outer
             _K1_outer = K // (32 * 4 * _fp4_pack_K_outer)
-            _k_unroll_packed_outer = k_unroll // _fp4_pack_K_outer
+            _k_unroll_packed_outer = 1 if _fp4_tilek128 else (k_unroll // _fp4_pack_K_outer)
             _m_repeat_packed_outer = m_repeat // _fp4_pack_M_outer
             _num_acc_n_packed_outer = num_acc_n // _fp4_pack_N_outer
             _fp4_scale_k_stride = tile_k // (32 * 4 * _fp4_pack_K_outer)
             _fp4_use_scheduler = (tile_m >= 64)
 
-            _ptr_type = ir.Type.parse('!llvm.ptr<1>')
-            _i32_type = T.i32
-            _i64_type = T.i64
-            _scale_a_raw = fly_values(arg_scale_a)[0]
-            _scale_b_raw = fly_values(arg_scale_b)[0]
-            _scale_a_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_a_raw)
-            _scale_b_ptr = _fly_d.extract_aligned_pointer_as_index(_ptr_type, _scale_b_raw)
-            _scale_a_ptr_int = _llvm_d.ptrtoint(_i64_type, _scale_a_ptr)
-            _scale_b_ptr_int = _llvm_d.ptrtoint(_i64_type, _scale_b_ptr)
+            _scale_lane_elem_off = lane_div_16 * fx.Index(16) + lane_mod_16
+            _scale_row_stride_elems = _K1_outer * 64
 
-            _scale_lane_byte_off = arith.index_cast(T.i32, (lane_div_16 * arith.index(16) + lane_mod_16) * arith.index(4))
-            _scale_lane_byte_i64 = _llvm_d.ZExtOp(_i64_type, _scale_lane_byte_off).result
-
-            _scale_a_base_ptrs = []
+            _scale_a_base_elems = []
             for mi in range_constexpr(_m_repeat_packed_outer):
-                mni_a = arith.index(mi) + bx_m // arith.index(_fp4_pack_M_outer * 16)
-                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, mni_a * arith.index(_K1_outer * 64 * 4))).result
-                base = _llvm_d.AddOp(_scale_a_ptr_int, mni_byte_off, _llvm_d.IntegerOverflowFlags(0)).result
-                base = _llvm_d.AddOp(base, _scale_lane_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
-                _scale_a_base_ptrs.append(_llvm_d.inttoptr(_ptr_type, base))
+                mni_a = fx.Index(mi) + bx_m // arith.index(_fp4_pack_M_outer * 16)
+                _scale_a_base_elems.append(
+                    mni_a * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off
+                )
 
-            _scale_b_base_ptrs = []
+            _scale_b_base_elems = []
             for ni in range_constexpr(_num_acc_n_packed_outer):
-                mni_b = arith.index(ni) + (by_n + n_tile_base) // arith.index(_fp4_pack_N_outer * 16)
-                mni_byte_off = _llvm_d.ZExtOp(_i64_type, arith.index_cast(T.i32, mni_b * arith.index(_K1_outer * 64 * 4))).result
-                base = _llvm_d.AddOp(_scale_b_ptr_int, mni_byte_off, _llvm_d.IntegerOverflowFlags(0)).result
-                base = _llvm_d.AddOp(base, _scale_lane_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
-                _scale_b_base_ptrs.append(_llvm_d.inttoptr(_ptr_type, base))
+                mni_b = fx.Index(ni) + (by_n + n_tile_base) // arith.index(_fp4_pack_N_outer * 16)
+                _scale_b_base_elems.append(
+                    mni_b * arith.index(_scale_row_stride_elems) + _scale_lane_elem_off
+                )
 
-            _stride_k0_bytes = 64 * 4
+            _stride_k0_elems = 64
 
             def load_fp4_scales(base_k_scale_idx):
                 a_scales, b_scales = [], []
+                base_k_elem_off = base_k_scale_idx * fx.Index(_stride_k0_elems)
                 for ku in range_constexpr(_k_unroll_packed_outer):
-                    ku_byte_offset = arith.index_cast(T.i32, (base_k_scale_idx + arith.index(ku)) * arith.index(_stride_k0_bytes))
-                    ku_byte_i64 = _llvm_d.ZExtOp(_i64_type, ku_byte_offset).result
+                    ku_elem_off = base_k_elem_off + fx.Index(ku * _stride_k0_elems)
                     for mi in range_constexpr(_m_repeat_packed_outer):
-                        addr_i64 = _llvm_d.AddOp(_llvm_d.ptrtoint(_i64_type, _scale_a_base_ptrs[mi]), ku_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
-                        addr_ptr = _llvm_d.inttoptr(_ptr_type, addr_i64)
-                        a_scales.append(_llvm_d.load(_i32_type, addr_ptr, alignment=4))
+                        a_scales.append(
+                            buffer_ops.buffer_load(
+                                scale_a_rsrc,
+                                _scale_a_base_elems[mi] + ku_elem_off,
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                        )
                     for ni in range_constexpr(_num_acc_n_packed_outer):
-                        addr_i64 = _llvm_d.AddOp(_llvm_d.ptrtoint(_i64_type, _scale_b_base_ptrs[ni]), ku_byte_i64, _llvm_d.IntegerOverflowFlags(0)).result
-                        addr_ptr = _llvm_d.inttoptr(_ptr_type, addr_i64)
-                        b_scales.append(_llvm_d.load(_i32_type, addr_ptr, alignment=4))
+                        b_scales.append(
+                            buffer_ops.buffer_load(
+                                scale_b_rsrc,
+                                _scale_b_base_elems[ni] + ku_elem_off,
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                        )
                 return a_scales, b_scales
 
+            def load_fp4_scale_chunk(base_k):
+                return load_fp4_scales(base_k // fx.Index(_fp4_scale_chunk_k))
+
         # ── Compute tile (MFMA) ───────────────────────────────────────────
-        def compute_tile(accs_in, b_tile_in, lds_buffer, *, is_last_tile=False, a0_prefetch=None, fp4_scales=None):
+        def compute_tile(accs_in, b_tile_in, lds_buffer, *, is_last_tile=False, a0_prefetch=None, fp4_scales=None, fp4_scale_half=0):
             scales_pf = {}
             if is_last_tile and (not is_f16_or_bf16):
                 s_b_vals = []
@@ -647,8 +672,6 @@ def compile_preshuffle_gemm_a8(
                         f"tile_k must be divisible by 128 for mfma_scale_x128, got tile_k={tile_k}"
                     )
                 mfma_res_ty = T.f32x4
-                vec4_i64 = T.vec(4, T.i64)
-                vec8_i32 = T.vec(8, T.i32)
                 c0_i64 = arith.constant(0, type=T.i64)
 
                 _fp4_cbsz = 4 if is_fp4 else 0
@@ -663,20 +686,27 @@ def compile_preshuffle_gemm_a8(
                 _num_acc_n_packed = num_acc_n // _fp4_pack_N
 
                 def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                    v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                    return vector.bitcast(vec8_i32, v4)
+                    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
+                    return vector.bitcast(T.vec(8, T.i32), v4)
 
                 if is_fp4:
                     _fp4_a_sc, _fp4_b_sc = fp4_scales if fp4_scales else ([], [])
-                    for ku128 in range_constexpr(_k_unroll_packed):
+                    ku128_iters = 1 if _fp4_tilek128 else _k_unroll_packed
+                    ikxdl_iters = 1 if _fp4_tilek128 else _fp4_pack_K
+                    for ku128 in range_constexpr(ku128_iters):
+                        a_scale_base = 0 if _fp4_tilek128 else ku128 * _m_repeat_packed
+                        b_scale_base = 0 if _fp4_tilek128 else ku128 * _num_acc_n_packed
                         for mi_p in range_constexpr(_m_repeat_packed):
-                            a_scale_val = _fp4_a_sc[ku128 * _m_repeat_packed + mi_p]
+                            a_scale_val = _fp4_a_sc[a_scale_base + mi_p]
                             for ni_p in range_constexpr(_num_acc_n_packed):
-                                b_scale_val = _fp4_b_sc[ku128 * _num_acc_n_packed + ni_p]
-                                for ikxdl in range_constexpr(_fp4_pack_K):
-                                    k_idx = ku128 * _fp4_pack_K + ikxdl
+                                b_scale_val = _fp4_b_sc[b_scale_base + ni_p]
+                                for ikxdl in range_constexpr(ikxdl_iters):
+                                    k_idx = 0 if _fp4_tilek128 else ku128 * _fp4_pack_K + ikxdl
                                     b_packs0, b_packs1 = b_tile_in[k_idx]
-                                    col_base = col_offset_base_bytes + arith.index((k_idx * 128) // a_elem_vec_pack)
+                                    col_base = col_offset_base_bytes if _fp4_tilek128 else (
+                                        col_offset_base_bytes + arith.index((k_idx * 128) // a_elem_vec_pack)
+                                    )
+                                    scale_k_sel = fp4_scale_half if _fp4_tilek128 else ikxdl
                                     for imxdl in range_constexpr(_fp4_pack_M):
                                         mi_idx = mi_p * _fp4_pack_M + imxdl
                                         curr_row_a_lds = row_a_lds + (mi_idx * 16)
@@ -697,8 +727,8 @@ def compile_preshuffle_gemm_a8(
                                                 mfma_res_ty,
                                                 [a128, b128, current_accs_list[acc_idx],
                                                  _fp4_cbsz, _fp4_blgp,
-                                                 ikxdl * _fp4_pack_M + imxdl, a_scale_val,
-                                                 ikxdl * _fp4_pack_N + inxdl, b_scale_val],
+                                                 scale_k_sel * _fp4_pack_M + imxdl, a_scale_val,
+                                                 scale_k_sel * _fp4_pack_N + inxdl, b_scale_val],
                                             )
                 else:
                     for ku128 in range_constexpr(k_unroll // 2):
@@ -767,11 +797,7 @@ def compile_preshuffle_gemm_a8(
             return current_accs_list, scales_pf
 
         # ── Epilogue (store output) ───────────────────────────────────────
-        vec1_f16 = T.vec(1, T.f16)
-        vec2_f16 = T.f16x2
-        vec1_i16 = T.vec(1, T.i16)
-        vec2_i16 = T.i16x2
-        vec1_i32 = T.vec(1, T.i32)
+        vec1_out = T.vec(1, _out_elem())
 
         def store_output(final_accs, scales):
             if is_f16_or_bf16 or is_fp4:
@@ -804,10 +830,10 @@ def compile_preshuffle_gemm_a8(
                             val_s = (val * s_a) * s_b_vals[ni]
                         else:
                             val_s = val
-                        v16 = arith.trunc_f(T.bf16 if is_fp4 else T.f16, val_s)
+                        v16 = arith.trunc_f(_out_elem(), val_s)
 
                         lds_idx = row_base_lds + col_local
-                        v1 = vector.from_elements(vec1_f16, [v16])
+                        v1 = vector.from_elements(vec1_out, [v16])
                         vector.store(v1, lds_out, [lds_idx], alignment=2)
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
@@ -830,6 +856,7 @@ def compile_preshuffle_gemm_a8(
                     lane_div_16=lane_div_16, lane_mod_16=lane_mod_16,
                     bx_m=bx_m, by_n=by_n, n_tile_base=n_tile_base, lds_out=lds_out,
                     write_row_to_lds=write_row_to_lds, store_pair=store_pair,
+                    frag_elem_type=_out_elem(),
                 )
                 return
 
@@ -851,7 +878,7 @@ def compile_preshuffle_gemm_a8(
                         val_s = (val * s_a) * s_b_vals[ni]
                     else:
                         val_s = val
-                    val_f16 = arith.trunc_f(T.bf16 if is_fp4 else T.f16, val_s)
+                    val_f16 = arith.trunc_f(_out_elem(), val_s)
                     idx_out = idx_base + (ni * 16)
                     buffer_ops.buffer_store(val_f16, c_rsrc, idx_out)
 
@@ -883,7 +910,7 @@ def compile_preshuffle_gemm_a8(
                     rocdl.sched_mfma(mfma_group)
                     rocdl.sched_dsrd(1)
                     rocdl.sched_mfma(mfma_group)
-                    if sche_i >= dswr_start - 1:
+                    if not use_async_copy and sche_i >= dswr_start - 1:
                         rocdl.sched_dswr(1)
                 rocdl.sched_barrier(0)
                 return
@@ -950,13 +977,18 @@ def compile_preshuffle_gemm_a8(
                 num_gmem_loads = num_b_loads + num_a_async_loads
                 dswr_start = max(mfma_total - dswr_tail - dstr_advance, 0)
                 dsrd_preload = 2
+                dvmem_preload = 2
                 if dsrd_preload > num_ds_load:
                     dsrd_preload = num_ds_load
+                if dvmem_preload > num_gmem_loads:
+                    dvmem_preload = num_gmem_loads
+                vmem_schedule = _build_scheduler(num_gmem_loads - dvmem_preload, mfma_total)
                 dsrd_schedule = _build_scheduler(num_ds_load - dsrd_preload, mfma_total)
-                vmem_schedule = _build_scheduler(num_gmem_loads, mfma_total)
 
                 idx_ds_read = dsrd_preload
-                idx_gmem_load = 0
+                idx_gmem_load = dvmem_preload
+                if dvmem_preload:
+                    rocdl.sched_vmem(dvmem_preload)
                 if dsrd_preload:
                     rocdl.sched_dsrd(dsrd_preload)
                 for mfma_idx in range_constexpr(mfma_total):
@@ -1002,35 +1034,85 @@ def compile_preshuffle_gemm_a8(
         n_btile = k_unroll * 2 * num_acc_n
         n_a0pf = 2
 
-        def _pack_state(accs_l, bt_flat, a0pf):
-            return list(accs_l) + list(bt_flat) + [a0pf[0], a0pf[1]]
+        if is_fp4:
+            n_fp4_asc = _k_unroll_packed_outer * _m_repeat_packed_outer
+            n_fp4_bsc = _k_unroll_packed_outer * _num_acc_n_packed_outer
+
+        def _pack_state(accs_l, bt_flat, a0pf, fp4_scales=None):
+            state = list(accs_l) + list(bt_flat) + [a0pf[0], a0pf[1]]
+            if is_fp4:
+                a_scales, b_scales = fp4_scales
+                state.extend(a_scales)
+                state.extend(b_scales)
+            return state
 
         def _unpack_state(vals):
             accs_l = list(vals[:n_accs])
             bt_flat = list(vals[n_accs:n_accs + n_btile])
             a0pf = (vals[n_accs + n_btile], vals[n_accs + n_btile + 1])
-            return accs_l, bt_flat, a0pf
+            if not is_fp4:
+                return accs_l, bt_flat, a0pf, None
+            sc_base = n_accs + n_btile + n_a0pf
+            a_scales = list(vals[sc_base:sc_base + n_fp4_asc])
+            b_scales = list(vals[sc_base + n_fp4_asc:sc_base + n_fp4_asc + n_fp4_bsc])
+            return accs_l, bt_flat, a0pf, (a_scales, b_scales)
 
         def _build_pingpong_body(k_iv, inner_state):
-            accs_in, bt_flat_in, a0pf_in = _unpack_state(inner_state)
+            accs_in, bt_flat_in, a0pf_in, fp4_scales_pong_in = _unpack_state(inner_state)
             b_tile_pong_in = _unflatten_b_tile(bt_flat_in)
 
+            if _fp4_tilek128:
+                next_k1 = k_iv + tile_k
+                if use_async_copy:
+                    prefetch_a_to_lds(next_k1, lds_a_ping)
+                else:
+                    store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
+                b_tile_ping = prefetch_b_tile(next_k1)
+                accs_in, _ = compute_tile(
+                    accs_in, b_tile_pong_in, lds_a_pong,
+                    a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in, fp4_scale_half=0,
+                )
+                hot_loop_scheduler()
+                rocdl.s_waitcnt(num_b_loads)
+                gpu.barrier()
+                a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+
+                next_k2 = k_iv + (tile_k * 2)
+                _sc_ping = load_fp4_scale_chunk(next_k2) if is_fp4 else None
+                rocdl.sched_barrier(0)
+                if use_async_copy:
+                    prefetch_a_to_lds(next_k2, lds_a_pong)
+                else:
+                    store_a_tile_to_lds(prefetch_a_tile(next_k2), lds_a_pong)
+                b_tile_pong_new = prefetch_b_tile(next_k2)
+                accs_in, _ = compute_tile(
+                    accs_in, b_tile_ping, lds_a_ping,
+                    a0_prefetch=a0_prefetch_ping, fp4_scales=fp4_scales_pong_in, fp4_scale_half=1,
+                )
+                hot_loop_scheduler()
+                rocdl.s_waitcnt(num_b_loads)
+                gpu.barrier()
+                a0_prefetch_pong_new = prefetch_a0_pack(lds_a_pong)
+
+                return _pack_state(accs_in, _flatten_b_tile(b_tile_pong_new),
+                                   a0_prefetch_pong_new, _sc_ping)
+
             next_k1 = k_iv + tile_k
-            _sc_pong = load_fp4_scales(k_iv // arith.index(tile_k) * arith.index(_fp4_scale_k_stride)) if is_fp4 else None
+            _sc_ping = load_fp4_scale_chunk(k_iv + fx.Index(tile_k)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k1, lds_a_ping)
             else:
                 store_a_tile_to_lds(prefetch_a_tile(next_k1), lds_a_ping)
             b_tile_ping = prefetch_b_tile(next_k1)
             accs_in, _ = compute_tile(accs_in, b_tile_pong_in, lds_a_pong,
-                                      a0_prefetch=a0pf_in, fp4_scales=_sc_pong)
+                                      a0_prefetch=a0pf_in, fp4_scales=fp4_scales_pong_in)
             hot_loop_scheduler()
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
             a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
 
             next_k2 = k_iv + (tile_k * 2)
-            _sc_ping = load_fp4_scales((k_iv + arith.index(tile_k)) // arith.index(tile_k) * arith.index(_fp4_scale_k_stride)) if is_fp4 else None
+            _sc_pong = load_fp4_scale_chunk(k_iv + (tile_k * 2)) if is_fp4 else None
             if use_async_copy:
                 prefetch_a_to_lds(next_k2, lds_a_pong)
             else:
@@ -1044,13 +1126,13 @@ def compile_preshuffle_gemm_a8(
             a0_prefetch_pong_new = prefetch_a0_pack(lds_a_pong)
 
             return _pack_state(accs_in, _flatten_b_tile(b_tile_pong_new),
-                               a0_prefetch_pong_new)
+                               a0_prefetch_pong_new, _sc_pong)
 
         if lds_stage == 2:
             def prefetch_a0_pack(lds_buffer):
                 return lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_buffer)
 
-            k0 = arith.index(0)
+            k0 = fx.Index(0)
             b_tile0 = prefetch_b_tile(k0)
             if use_async_copy:
                 prefetch_a_to_lds(k0, lds_a_pong)
@@ -1059,28 +1141,75 @@ def compile_preshuffle_gemm_a8(
             gpu.barrier()
             accs = [acc_init] * n_accs
             a0_prefetch_pong = prefetch_a0_pack(lds_a_pong)
+            fp4_scales0 = load_fp4_scale_chunk(fx.Index(0)) if is_fp4 else None
 
             num_tiles = K // tile_k
-            if (num_tiles % 2) == 1:
+            if _fp4_tilek128:
+                if (num_tiles % 2) == 1:
+                    c_k_main = K - tile_k
+                    init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
+                                             a0_prefetch_pong, fp4_scales0)
+                    results = init_state
+                    for iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
+                        results = yield _build_pingpong_body(iv, inner)
+                    accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(results)
+                    b_tile_pong_final = _unflatten_b_tile(bt_flat)
+                    final_accs, scales = compute_tile(
+                        accs, b_tile_pong_final, lds_a_pong,
+                        is_last_tile=not is_fp4, a0_prefetch=a0pf,
+                        fp4_scales=fp4_scales_final, fp4_scale_half=0,
+                    )
+                else:
+                    c_k_stop = K - (tile_k * 3)
+                    init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
+                                             a0_prefetch_pong, fp4_scales0)
+                    results = init_state
+                    for iv, inner in range(0, c_k_stop, tile_k * 2, init=init_state):
+                        results = yield _build_pingpong_body(iv, inner)
+                    accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(results)
+                    b_tile_pong_ep = _unflatten_b_tile(bt_flat)
+
+                    last_k = arith.index(K - tile_k)
+                    b_tile_ping = prefetch_b_tile(last_k)
+                    if use_async_copy:
+                        prefetch_a_to_lds(last_k, lds_a_ping)
+                    else:
+                        a_regs_ping = prefetch_a_tile(last_k)
+                    accs, _ = compute_tile(
+                        accs, b_tile_pong_ep, lds_a_pong,
+                        a0_prefetch=a0pf, fp4_scales=fp4_scales_ep, fp4_scale_half=0,
+                    )
+                    if not use_async_copy:
+                        store_a_tile_to_lds(a_regs_ping, lds_a_ping)
+                    rocdl.s_waitcnt(num_b_loads)
+                    gpu.barrier()
+                    a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
+                    final_accs, scales = compute_tile(
+                        accs, b_tile_ping, lds_a_ping,
+                        is_last_tile=not is_fp4, a0_prefetch=a0_prefetch_ping,
+                        fp4_scales=fp4_scales_ep, fp4_scale_half=1,
+                    )
+            elif (num_tiles % 2) == 1:
                 c_k_main = K - tile_k
                 init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                         a0_prefetch_pong)
+                                         a0_prefetch_pong, fp4_scales0)
+                results = init_state
                 for iv, inner in range(0, c_k_main, tile_k * 2, init=init_state):
                     results = yield _build_pingpong_body(iv, inner)
-                accs, bt_flat, a0pf = _unpack_state(results)
+                accs, bt_flat, a0pf, fp4_scales_final = _unpack_state(results)
                 b_tile_pong_final = _unflatten_b_tile(bt_flat)
-                _sc_last = load_fp4_scales(arith.index(((K // tile_k) - 1) * _fp4_scale_k_stride)) if is_fp4 else None
                 final_accs, scales = compute_tile(
                     accs, b_tile_pong_final, lds_a_pong,
-                    is_last_tile=not is_fp4, a0_prefetch=a0pf, fp4_scales=_sc_last,
+                    is_last_tile=not is_fp4, a0_prefetch=a0pf, fp4_scales=fp4_scales_final,
                 )
             else:
                 c_k_stop = K - (tile_k * 3)
                 init_state = _pack_state(accs, _flatten_b_tile(b_tile0),
-                                         a0_prefetch_pong)
+                                         a0_prefetch_pong, fp4_scales0)
+                results = init_state
                 for iv, inner in range(0, c_k_stop, tile_k * 2, init=init_state):
                     results = yield _build_pingpong_body(iv, inner)
-                accs, bt_flat, a0pf = _unpack_state(results)
+                accs, bt_flat, a0pf, fp4_scales_ep = _unpack_state(results)
                 b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
                 last_k = arith.index(K - tile_k)
@@ -1089,23 +1218,22 @@ def compile_preshuffle_gemm_a8(
                     prefetch_a_to_lds(last_k, lds_a_ping)
                 else:
                     a_regs_ping = prefetch_a_tile(last_k)
-                _sc_ep = load_fp4_scales(arith.index(((K // tile_k) - 2) * _fp4_scale_k_stride)) if is_fp4 else None
+                _sc_last = load_fp4_scale_chunk(last_k) if is_fp4 else None
                 accs, _ = compute_tile(accs, b_tile_pong_ep, lds_a_pong,
-                                       a0_prefetch=a0pf, fp4_scales=_sc_ep)
+                                       a0_prefetch=a0pf, fp4_scales=fp4_scales_ep)
                 if not use_async_copy:
                     store_a_tile_to_lds(a_regs_ping, lds_a_ping)
                 hot_loop_scheduler()
                 rocdl.s_waitcnt(num_b_loads)
                 gpu.barrier()
                 a0_prefetch_ping = prefetch_a0_pack(lds_a_ping)
-                _sc_last2 = load_fp4_scales(arith.index(((K // tile_k) - 1) * _fp4_scale_k_stride)) if is_fp4 else None
                 final_accs, scales = compute_tile(
                     accs, b_tile_ping, lds_a_ping,
-                    is_last_tile=not is_fp4, a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_last2,
+                    is_last_tile=not is_fp4, a0_prefetch=a0_prefetch_ping, fp4_scales=_sc_last,
                 )
             store_output(final_accs, scales)
         else:
-            a_regs0, b_tile0 = prefetch_ab_tile(arith.index(0))
+            a_regs0, b_tile0 = prefetch_ab_tile(fx.Index(0))
             store_a_tile_to_lds(a_regs0, lds_a_pong)
             gpu.barrier()
             accs = [acc_init] * n_accs
@@ -1119,7 +1247,7 @@ def compile_preshuffle_gemm_a8(
 
                 next_k = iv + tile_k
                 a_next, b_next = prefetch_ab_tile(next_k)
-                _fp4_sc = load_fp4_scales(iv // arith.index(tile_k) * arith.index(_fp4_scale_k_stride)) if is_fp4 else None
+                _fp4_sc = load_fp4_scales(iv // fx.Index(tile_k) * fx.Index(_fp4_scale_k_stride)) if is_fp4 else None
                 accs_in, _ = compute_tile(accs_in, b_tile_in, lds_a_pong, fp4_scales=_fp4_sc)
                 gpu.barrier()
                 store_a_tile_to_lds(a_next, lds_a_pong)
@@ -1137,8 +1265,6 @@ def compile_preshuffle_gemm_a8(
             store_output(final_accs, scales)
 
     # ── Host launcher ──────────────────────────────────────────────────────
-    _cache_tag = (in_dtype, K, lds_stage, use_cshuffle_epilog)
-
     @flyc.jit
     def launch_gemm(
         arg_c: fx.Tensor,
@@ -1150,7 +1276,6 @@ def compile_preshuffle_gemm_a8(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        _ = _cache_tag
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()
@@ -1191,19 +1316,23 @@ def compile_preshuffle_gemm_w4(
     out_dtype: str = "bf16",
     lds_stage: int = 2,
     use_cshuffle_epilog: bool = False,
+    waves_per_eu: Optional[int] = None,
+    use_async_copy: bool = False,
 ):
     """MXFP4 preshuffle GEMM — delegates to compile_preshuffle_gemm_a8 with fp4 config."""
     if a_dtype == "fp8":
         raise NotImplementedError("fp8-A not yet supported with MXFP4 kernel (op_sel_a overflow)")
     if str(get_hip_arch()) != "gfx950":
         raise RuntimeError(f"FP4 GEMM requires gfx950, got {get_hip_arch()}")
-
     inner = compile_preshuffle_gemm_a8(
         M=M, N=N, K=K,
         tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
         in_dtype="fp4",
-        lds_stage=1,
+        lds_stage=lds_stage,
+        out_dtype=out_dtype,
         use_cshuffle_epilog=use_cshuffle_epilog,
+        waves_per_eu=waves_per_eu,
+        use_async_copy=use_async_copy,
     )
     return inner
 

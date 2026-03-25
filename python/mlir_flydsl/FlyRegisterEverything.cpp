@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "mlir-c/RegisterEverything.h"
 #include "mlir/Bindings/Python/Nanobind.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
@@ -22,5 +25,5 @@ NB_MODULE(_mlirRegisterEverything, m) {
   mlirRegisterAllPasses();
   mlirRegisterFlyPasses();
   mlirRegisterFlyToROCDLConversionPass();
-  mlirRegisterFlyGpuToLLVMPass();
+  mlirRegisterFlyROCDLClusterAttrPass();
 }

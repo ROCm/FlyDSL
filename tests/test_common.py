@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import logging
 
-logger = logging.getLogger("flir")
+logger = logging.getLogger("flydsl")
 
 pd.set_option("display.max_rows", 200)
 ## debug ##
@@ -53,7 +53,7 @@ def perftest(
             run_iters(num_warmup, func, *args, **kwargs)
             torch.cuda.synchronize()
 
-            if int(os.environ.get("FLIR_LOG_MORE", 0)):
+            if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
                 latencies = []
                 start_event = torch.cuda.Event(enable_timing=True)
                 end_event = torch.cuda.Event(enable_timing=True)
@@ -282,7 +282,7 @@ def post_process_data(df, num_iters, warm_iter=1):
     indices_to_add = [idx for sublist in index_sublists for idx in sublist]
     indices.update(indices_to_add)
     indices.update(dropped_indexs)
-    if int(os.environ.get("FLIR_LOG_MORE", 0)):
+    if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
         logger.info(f"abnormal data indices: {indices}")
         for i in indices:
             logger.info(f"abnormal data: {df.iloc[i]['self_device_time_total']}")
@@ -360,7 +360,7 @@ def get_trace_perf(prof, num_iters):
             df.at[avg_name, el] = df[el].sum() / num_iters
         else:
             df.at[avg_name, el] = df[el].sum() / actual_iters
-    if int(os.environ.get("FLIR_LOG_MORE", 0)):
+    if int(os.environ.get("FLYDSL_LOG_MORE", 0)):
         pd.set_option("display.expand_frame_repr", False)
         pd.set_option("display.max_colwidth", 90)
         pd.set_option("display.float_format", "{:,.1f}".format)

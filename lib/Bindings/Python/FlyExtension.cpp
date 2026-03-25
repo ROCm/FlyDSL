@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir-c/Dialect/LLVM.h"
 #include "mlir-c/IR.h"
@@ -68,9 +71,9 @@ int32_t rank(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::ComposedLayoutType>(ty))
     return t.getAttr().rank();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::CoordTensorType>(ty))
-    return t.getLayout().rank();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).rank();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::MemRefType>(ty))
-    return t.getLayout().rank();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).rank();
   throw std::invalid_argument("Unsupported type for rank()");
 }
 
@@ -84,9 +87,9 @@ int32_t depth(MlirValue int_or_tuple) {
   if (auto t = ::mlir::dyn_cast<::mlir::fly::ComposedLayoutType>(ty))
     return t.getAttr().depth();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::CoordTensorType>(ty))
-    return t.getLayout().depth();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).depth();
   if (auto t = ::mlir::dyn_cast<::mlir::fly::MemRefType>(ty))
-    return t.getLayout().depth();
+    return ::mlir::cast<::mlir::fly::NestedAttrInterface>(t.getLayout()).depth();
   throw std::invalid_argument("Unsupported type for depth()");
 }
 
@@ -244,12 +247,18 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
           if (addressSpace.has_value())
             addr = static_cast<::mlir::fly::AddressSpace>(addressSpace.value());
 
-          int32_t alignSize = alignment.value_or(1);
-          assert(alignSize > 0 && "alignment must be positive");
+          auto elemType = unwrap(elemTy);
+          int32_t alignSize = alignment.value_or(
+              ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
+          int32_t elemByte = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+          if (alignSize <= 0 || alignSize % elemByte != 0)
+            throw std::invalid_argument(
+                "alignment must be a positive multiple of element byte size (" +
+                std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
           return PyPointerType(context->getRef(),
                                wrap(::mlir::fly::PointerType::get(
-                                   unwrap(elemTy), ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
+                                   elemType, ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
                                    ::mlir::fly::AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(), nb::kw_only(),
@@ -294,15 +303,21 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           if (addressSpace.has_value())
             addr = static_cast<::mlir::fly::AddressSpace>(addressSpace.value());
 
-          int32_t alignSize = alignment.value_or(1);
-          assert(alignSize > 0 && "alignment must be positive");
-
           MlirType elemTy = elemTyObj;
+          auto elemType = unwrap(elemTy);
+          int32_t alignSize = alignment.value_or(
+              ::mlir::fly::AlignAttr::getTrivialAlignment(elemType).getAlignment());
+          int32_t elemByte = (elemType.getIntOrFloatBitWidth() + 7) / 8;
+          if (alignSize <= 0 || alignSize % elemByte != 0)
+            throw std::invalid_argument(
+                "alignment must be a positive multiple of element byte size (" +
+                std::to_string(elemByte) + "), got " + std::to_string(alignSize));
+
           return PyMemRefType(
               context->getRef(),
               wrap(::mlir::fly::MemRefType::get(
-                  unwrap(elemTy), ::mlir::fly::AddressSpaceAttr::get(ctx, addr),
-                  layoutType.getAttr(), ::mlir::fly::AlignAttr::get(ctx, alignSize))));
+                  elemType, ::mlir::fly::AddressSpaceAttr::get(ctx, addr), layoutType.getAttr(),
+                  ::mlir::fly::AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "layout"_a, "address_space"_a = 0, "alignment"_a = nb::none(), nb::kw_only(),
         "context"_a = nb::none(),

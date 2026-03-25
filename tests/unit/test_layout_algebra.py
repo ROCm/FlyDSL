@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """
 Layout algebra tests using the Fly dialect API with static types.
 
@@ -247,7 +251,7 @@ def test_complement_simple_rank_2():
 def test_complement_rank_2_error():
     """Rank-2 non-injective complement: (3,2):(1,2).
 
-    Fly dialect does NOT raise on non-injective layouts (unlike FLIR).
+    Fly dialect does NOT raise on non-injective layouts (unlike the legacy dialect).
     Verify it runs without crash and returns a result.
     """
     def build():

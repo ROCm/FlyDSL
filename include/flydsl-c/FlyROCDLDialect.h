@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #ifndef FLYDSL_C_FLYROCDLDIALECT_H
 #define FLYDSL_C_FLYROCDLDIALECT_H
 
@@ -51,24 +54,21 @@ MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyB(MlirTy
 MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLMmaAtomGFX1250_WMMATypeGetElemTyAcc(MlirType type);
 
 //===----------------------------------------------------------------------===//
-// CopyOpCDNA3BufferLDSTType
+// CopyOpCDNA3BufferCopyType
 //===----------------------------------------------------------------------===//
 
-MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferLDSTType(MlirType type);
-MLIR_CAPI_EXPORTED MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetTypeID(void);
-MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGet(MlirContext ctx,
+MLIR_CAPI_EXPORTED bool mlirTypeIsAFlyROCDLCopyOpCDNA3BufferCopyType(MlirType type);
+MLIR_CAPI_EXPORTED MlirTypeID mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetTypeID(void);
+MLIR_CAPI_EXPORTED MlirType mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGet(MlirContext ctx,
                                                                      int32_t bitSize);
-MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLCopyOpCDNA3BufferLDSTTypeGetBitSize(MlirType type);
+MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(MlirType type);
 
 //===----------------------------------------------------------------------===//
 // Pass Registration
 //===----------------------------------------------------------------------===//
 
-/// Register the FlyToROCDL conversion pass.
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
-
-/// Register the FlyGpuToLLVM pass (replaces gpu-to-llvm with asyncObject fix).
-MLIR_CAPI_EXPORTED void mlirRegisterFlyGpuToLLVMPass(void);
+MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 
 #ifdef __cplusplus
 }

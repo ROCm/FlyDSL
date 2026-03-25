@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
+
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/InitAllDialects.h"
@@ -17,7 +20,7 @@ int main(int argc, char **argv) {
   mlir::registerAllPasses();
   mlir::fly::registerFlyPasses();
   mlir::registerFlyToROCDLConversionPass();
-  mlir::registerFlyGpuToLLVMPass();
+  mlir::registerFlyROCDLClusterAttrPass();
 
   mlir::DialectRegistry registry;
   mlir::registerAllDialects(registry);

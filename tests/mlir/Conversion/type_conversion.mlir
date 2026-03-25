@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 FlyDSL Project Contributors
 // RUN: %fly-opt %s --convert-fly-to-rocdl | FileCheck %s
 
 // Type conversion tests for convert-fly-to-rocdl:

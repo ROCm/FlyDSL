@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Blockscale Preshuffle GEMM Test (FP8 A8W8, per-block scales)."""
 
 import os

@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+import ctypes
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
@@ -54,7 +58,14 @@ class JitArgumentRegistry:
 
     @classmethod
     def get(cls, py_type: type) -> Optional[Tuple[Callable, Type[DslType]]]:
-        return cls.registry.get(py_type, (None, None))
+        result = cls.registry.get(py_type, None)
+        if result is not None:
+            return result
+        # Fallback: check base classes (e.g., torch.nn.Parameter -> torch.Tensor)
+        for registered_type, entry in cls.registry.items():
+            if isinstance(registered_type, type) and issubclass(py_type, registered_type):
+                return entry
+        return (None, None)
 
     @classmethod
     def get_dsl_type(cls, jit_arg_type: type) -> Type[DslType]:
@@ -93,10 +104,12 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        if isinstance(value, JitArgument) and isinstance(value, DslType):
+        is_jit_arg = hasattr(value, '__fly_types__') and hasattr(value, '__fly_ptrs__')
+        is_dsl_type = hasattr(value, '__fly_construct__') and hasattr(value, '__fly_values__')
+        if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
-        elif isinstance(value, JitArgument):
+        elif is_jit_arg:
             jit_arg = value
             dsl_type = JitArgumentRegistry.get_dsl_type(type(value))
             if dsl_type is None:
@@ -104,13 +117,17 @@ def convert_to_jit_arguments(
                     f"No DslType registered for JitArgument type {type(value).__name__} (parameter '{param_name}')"
                 )
         else:
-            jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
-            if jit_arg_constructor is None:
-                raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
-            try:
-                jit_arg = jit_arg_constructor(value)
-            except Exception as e:
-                raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
+            if isinstance(value, int) and annotation is Stream:
+                jit_arg = Stream(value)
+                dsl_type = Stream
+            else:
+                jit_arg_constructor, dsl_type = JitArgumentRegistry.get(type(value))
+                if jit_arg_constructor is None:
+                    raise TypeError(f"No JitArgument registered for type {type(value).__name__} (parameter '{param_name}')")
+                try:
+                    jit_arg = jit_arg_constructor(value)
+                except Exception as e:
+                    raise TypeError(f"Failed to construct JitArgument for parameter '{param_name}': {e}") from e
 
         param_names.append(param_name)
         jit_args.append(jit_arg)
@@ -138,6 +155,24 @@ class TensorAdaptor:
         self.tensor_adaptor = DLTensorAdaptor(dlpack_tensor.__dlpack__(stream=-1), assumed_align, use_32bit_stride)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
+        self._orig_dtype = tensor.dtype
+        self._orig_shape = tensor.shape
+        self._orig_strides = tensor.stride()
+
+    @staticmethod
+    def _extract_data_ptr(arg):
+        return arg.data_ptr()
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        """Reusable slot for tensor arguments.
+
+        For bare-pointer calling convention, only the data pointer changes
+        between calls with the same shape/dtype/strides.
+        """
+        if not hasattr(arg, 'data_ptr'):
+            return None
+        return ctypes.c_void_p, cls._extract_data_ptr
 
     def requires_memref_desc(func):
         def wrapper(self, *args, **kwargs):
@@ -153,6 +188,18 @@ class TensorAdaptor:
     @requires_memref_desc
     def __fly_ptrs__(self):
         return self.tensor_adaptor.get_c_pointers()
+
+    @staticmethod
+    def raw_cache_signature(tensor: torch.Tensor):
+        """Lightweight cache sig from a raw tensor, no DLPack overhead."""
+        return (tensor.dtype,)
+
+    def __cache_signature__(self):
+        return (
+            self._orig_dtype,
+            self.assumed_align,
+            self.use_32bit_stride,
+        )
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         if leading_dim is None:

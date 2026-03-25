@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """ROCDL dialect extension for ROCm/AMD GPU programming.
 
 This module provides access to ROCm-specific GPU operations including:
@@ -15,15 +18,14 @@ Example:
 """
 
 from .._mlir.dialects.rocdl import *  # noqa: F401,F403
-from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferLDSTType
-
-from .._mlir._mlir_libs._fly_rocdl import MmaAtomCDNA3_MFMAType
+from .._mlir._mlir_libs._fly_rocdl import CopyOpCDNA3BufferCopyType, MmaAtomCDNA3_MFMAType
 from .._mlir._mlir_libs._fly_rocdl import MmaAtomGFX1250_WMMAType
+from .._mlir.extras import types as T
 
-BufferLDST = lambda bit_size: CopyOpCDNA3BufferLDSTType.get(bit_size)  # noqa: E731
-BufferLDST32b = lambda: CopyOpCDNA3BufferLDSTType.get(32)  # noqa: E731
-BufferLDST64b = lambda: CopyOpCDNA3BufferLDSTType.get(64)  # noqa: E731
-BufferLDST128b = lambda: CopyOpCDNA3BufferLDSTType.get(128)  # noqa: E731
+BufferCopy = lambda bit_size: CopyOpCDNA3BufferCopyType.get(bit_size)  # noqa: E731
+BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)  # noqa: E731
+BufferCopy64b = lambda: CopyOpCDNA3BufferCopyType.get(64)  # noqa: E731
+BufferCopy128b = lambda: CopyOpCDNA3BufferCopyType.get(128)  # noqa: E731
 
 
 def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
@@ -38,7 +40,7 @@ def MFMA(m, n, k, elem_type, elem_type_b=None, elem_type_acc=None):
     """
     from .._mlir import ir
 
-    if isinstance(elem_type, type) and hasattr(elem_type, 'ir_type'):
+    if isinstance(elem_type, type) and hasattr(elem_type, "ir_type"):
         ty = elem_type.ir_type
     elif isinstance(elem_type, ir.Type):
         ty = elem_type
@@ -91,12 +93,11 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
 
     llvm_ptr_ty = ir.Type.parse("!llvm.ptr")
     base = fly.extract_aligned_pointer_as_index(llvm_ptr_ty, raw_memref, loc=loc, ip=ip)
-    i16 = ir.IntegerType.get_signless(16)
-    i32 = ir.IntegerType.get_signless(32)
-    i64 = ir.IntegerType.get_signless(64)
-    stride = _arith.ConstantOp(i16, ir.IntegerAttr.get(i16, 0)).result
-    num_records = _arith.ConstantOp(i64, ir.IntegerAttr.get(i64, 0xFFFFFFFF)).result
-    flags = _arith.ConstantOp(i32, ir.IntegerAttr.get(i32, (7 << 12) | (4 << 15))).result
+    stride = _arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
+    num_records = _arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), 0xFFFFFFFF)).result
+    from .buffer_ops import _get_buffer_flags
+
+    flags = _arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), _get_buffer_flags())).result
 
     bd_ptr_type = fly.PointerType.get(
         elem_type,
@@ -122,6 +123,18 @@ _ods_cluster_load_async_to_lds_b32 = cluster_load_async_to_lds_b32
 _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
+_ods_wmma_f32_16x16x16_f16 = wmma_f32_16x16x16_f16
+_ods_wmma_f32_16x16x16_bf16 = wmma_f32_16x16x16_bf16
+_ods_wmma_f16_16x16x16_f16 = wmma_f16_16x16x16_f16
+_ods_wmma_bf16_16x16x16_bf16 = wmma_bf16_16x16x16_bf16
+_ods_wmma_i32_16x16x16_iu8 = wmma_i32_16x16x16_iu8
+_ods_wmma_i32_16x16x16_iu4 = wmma_i32_16x16x16_iu4
+_ods_wmma_f32_16x16x16_fp8_fp8 = globals().get("wmma_f32_16x16x16_fp8_fp8", None)
+_ods_wmma_f32_16x16x16_fp8_bf8 = globals().get("wmma_f32_16x16x16_fp8_bf8", None)
+_ods_wmma_f32_16x16x16_bf8_fp8 = globals().get("wmma_f32_16x16x16_bf8_fp8", None)
+_ods_wmma_f32_16x16x16_bf8_bf8 = globals().get("wmma_f32_16x16x16_bf8_bf8", None)
+_ods_wmma_i32_16x16x32_iu4 = globals().get("wmma_i32_16x16x32_iu4", None)
+
 _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
@@ -213,6 +226,117 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
     ).result
 
 
+
+# ---------------------------------------------------------------------------
+# WMMA wrappers  (Wave Matrix Multiply-Accumulate -- RDNA3/RDNA4)
+#
+# WMMA operands are [A, B, C] -- all MLIR Values, no integer flags.
+# For IU variants the operand list is [A_sign, A, B_sign, B, C, clamp].
+# For OPSEL variants (f16->f16, bf16->bf16) the list is [A, B, C, op_sel].
+# ---------------------------------------------------------------------------
+
+
+def _unwrap_wmma_operand(v, *, loc=None):
+    """Accept Python ints (for flags like op_sel/clamp/signed) and ArithValue wrappers."""
+    from flydsl._mlir.ir import IntegerType
+
+    from . import arith as _arith_ext
+
+    if isinstance(v, bool):
+        return _arith_ext.unwrap(_arith_ext.constant(int(v), type=IntegerType.get_signless(1), loc=loc), loc=loc)
+    if isinstance(v, int):
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc), loc=loc)
+    return _arith_ext.unwrap(v, loc=loc)
+
+
+# --- f32 output variants ---
+
+
+def wmma_f32_16x16x16_f16(result_type, operands, *, loc=None, ip=None):
+    """WMMA f16->f32, 16x16x16. Operands: [A, B, C]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_f16(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf16(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf16->f32, 16x16x16. Operands: [A, B, C]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf16(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- fp8 variants (gfx12 / RDNA4 only) ---
+
+
+def wmma_f32_16x16x16_fp8_fp8(result_type, operands, *, loc=None, ip=None):
+    """WMMA fp8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_fp8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_fp8_fp8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_fp8_fp8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_fp8_bf8(result_type, operands, *, loc=None, ip=None):
+    """WMMA fp8+bf8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_fp8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_fp8_bf8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_fp8_bf8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf8_fp8(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf8+fp8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_bf8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_bf8_fp8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf8_fp8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_f32_16x16x16_bf8_bf8(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf8->f32, 16x16x16 (gfx12). Operands: [A, B, C]. Returns Value."""
+    if _ods_wmma_f32_16x16x16_bf8_bf8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x16_bf8_bf8")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f32_16x16x16_bf8_bf8(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- f16/bf16 output variants (OPSEL: operands include op_sel flag) ---
+
+
+def wmma_f16_16x16x16_f16(result_type, operands, *, loc=None, ip=None):
+    """WMMA f16->f16, 16x16x16. Operands: [A, B, C, op_sel]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_f16_16x16x16_f16(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_bf16_16x16x16_bf16(result_type, operands, *, loc=None, ip=None):
+    """WMMA bf16->bf16, 16x16x16. Operands: [A, B, C, op_sel]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_bf16_16x16x16_bf16(result_type, ops, loc=loc, ip=ip).result
+
+
+# --- Integer variants (IU: operands include sign flags and clamp) ---
+
+
+def wmma_i32_16x16x16_iu8(result_type, operands, *, loc=None, ip=None):
+    """WMMA int8->i32, 16x16x16. Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x16_iu8(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_i32_16x16x16_iu4(result_type, operands, *, loc=None, ip=None):
+    """WMMA int4->i32, 16x16x16. Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x16_iu4(result_type, ops, loc=loc, ip=ip).result
+
+
+def wmma_i32_16x16x32_iu4(result_type, operands, *, loc=None, ip=None):
+    """WMMA int4->i32, 16x16x32 (gfx12). Operands: [A_sign, A, B_sign, B, C, clamp]. Returns Value."""
+    if _ods_wmma_i32_16x16x32_iu4 is None:
+        raise AttributeError("ROCDL op not found: wmma_i32_16x16x32_iu4")
+    ops = [_unwrap_wmma_operand(v, loc=loc) for v in operands]
+    return _ods_wmma_i32_16x16x32_iu4(result_type, ops, loc=loc, ip=ip).result
+
+
 def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
                                       *, fmtA=4, fmtB=4, modC=0,
                                       scaleAType=0, fmtScaleA=0,
@@ -234,11 +358,11 @@ def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
     """
     if _ods_wmma_scale_f32_16x16x128_f8f6f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_16x16x128_f8f6f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_wmma_operand(a, loc=loc)
+    b_v = _unwrap_wmma_operand(b, loc=loc)
+    c_v = _unwrap_wmma_operand(c, loc=loc)
+    sA = _unwrap_wmma_operand(scaleA, loc=loc)
+    sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_16x16x128_f8f6f4(
         result_type, a_v, b_v, c_v, sA, sB,
         fmtA=fmtA, fmtB=fmtB, modC=modC,
@@ -271,11 +395,11 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
     """
     if _ods_wmma_scale_f32_32x16x128_f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_32x16x128_f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_wmma_operand(a, loc=loc)
+    b_v = _unwrap_wmma_operand(b, loc=loc)
+    c_v = _unwrap_wmma_operand(c, loc=loc)
+    sA = _unwrap_wmma_operand(scaleA, loc=loc)
+    sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_32x16x128_f4(
         result_type, a_v, b_v, c_v, sA, sB,
         modC=modC,
@@ -431,7 +555,11 @@ __all__ = [
     
     # Matrix operations - WMMA (Wave Matrix Multiply-Accumulate)
     'wmma_f32_16x16x16_f16', 'wmma_f32_16x16x16_bf16',
-    'wmma_i32_16x16x16_iu8',
+    'wmma_f16_16x16x16_f16', 'wmma_bf16_16x16x16_bf16',
+    'wmma_i32_16x16x16_iu8', 'wmma_i32_16x16x16_iu4',
+    'wmma_f32_16x16x16_fp8_fp8', 'wmma_f32_16x16x16_fp8_bf8',
+    'wmma_f32_16x16x16_bf8_fp8', 'wmma_f32_16x16x16_bf8_bf8',
+    'wmma_i32_16x16x32_iu4',
     'wmma_scale_f32_16x16x128_f8f6f4',   # gfx1250 WMMA_SCALE 16x16x128 (FP4/FP6/FP8)
     'wmma_scale_f32_32x16x128_f4',        # gfx1250 WMMA_SCALE 32x16x128 (FP4 only)
     
@@ -470,8 +598,8 @@ __all__ = [
     'cvt_pk_f32_bf8', 'cvt_pk_f32_fp8',
 
     # Copy atom types
-    'CopyOpCDNA3BufferLDSTType',
-    'BufferLDST', 'BufferLDST32b', 'BufferLDST64b', 'BufferLDST128b',
+    'CopyOpCDNA3BufferCopyType',
+    'BufferCopy', 'BufferCopy32b', 'BufferCopy64b', 'BufferCopy128b',
 
     # MMA atom types
     'MmaAtomCDNA3_MFMAType', 'MFMA',
@@ -495,3 +623,41 @@ __all__ = [
     'cluster_workgroup_id_x', 'cluster_workgroup_id_y', 'cluster_workgroup_id_z',
     'cluster_load_async_to_lds',   # per-lane MCAST load (Global → LDS)
 ]
+
+
+# ── Wrappers that accept DSL Numeric args (fx.Int32, fx.Float32, etc.) ───────
+# The ODS-generated ops require raw ir.Value. These wrappers call ir_value()
+# on any DSL Numeric argument before forwarding to the underlying MLIR op.
+
+
+def _to_ir(v):
+    """Coerce DSL Numeric to ir.Value if needed."""
+    if not isinstance(v, __import__("flydsl._mlir.ir", fromlist=["Value"]).Value) and hasattr(v, "ir_value"):
+        return v.ir_value()
+    return v
+
+
+def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
+
+    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+
+
+def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
+
+    return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
+
+
+def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
+    from .._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
+
+    return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
+
+
+def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
+    from .._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
+
+    return _op(
+        _to_ir(rsrc), _to_ir(lds_ptr), _to_ir(size), _to_ir(voffset), _to_ir(soffset), _to_ir(offset), _to_ir(aux), **kw
+    )

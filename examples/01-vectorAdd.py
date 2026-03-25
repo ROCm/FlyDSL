@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 import torch
 
 import flydsl.compiler as flyc
@@ -60,8 +63,6 @@ def vectorAdd(
     fx.printf("> vectorAdd: n={}, grid_x={}", n, grid_x)
 
     vectorAddKernel(A, B, C, block_dim).launch(grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream)
-
-
 
 
 def run_eager():
