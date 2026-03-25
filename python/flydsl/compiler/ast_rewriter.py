@@ -235,12 +235,13 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _unwrap_value(v):
-        """Unwrap a FlyDSL value to a raw ir.Value."""
-        if isinstance(v, ir.Value):
-            return v
-        if hasattr(v, "ir_value"):
-            return v.ir_value()
-        return v
+        """Unwrap a FlyDSL value to a raw ir.Value.
+
+        Delegates to kernel_function._unwrap_to_raw which also handles
+        multi-value __fly_values__ types (e.g. derived Tensor types).
+        """
+        from .kernel_function import _unwrap_to_raw
+        return _unwrap_to_raw(v)
 
     @staticmethod
     def scf_if_dispatch(cond, then_fn, else_fn=None):
@@ -419,9 +420,10 @@ class ReplaceIfWithDispatch(Transformer):
         Python builtins are NOT considered dynamic — they just wrap Python-level
         boolean logic. Only calls to user/MLIR functions can produce Values.
 
-        Compare expressions (==, !=, <, >, etc.) involving non-constant, non-literal
-        operands are also considered potentially dynamic, since dunder methods like
-        __eq__ may return MLIR Values.
+        Compare expressions (==, !=, <, >, etc.) are considered potentially dynamic
+        only when an operand is a function call (ast.Call), since call results may
+        be MLIR Values whose dunder methods (__eq__, __lt__, etc.) return Values.
+        Plain variable names (ast.Name) are treated as Python-level values.
         """
         for child in ast.walk(test_node):
             if isinstance(child, ast.Call):
