@@ -442,6 +442,9 @@ class ReplaceIfWithDispatch(Transformer):
                 # Python-level values (constexpr params, loop vars, strings).
                 for operand in [child.left] + child.comparators:
                     if isinstance(operand, ast.Call):
+                        fn = operand.func
+                        if isinstance(fn, ast.Name) and fn.id in ReplaceIfWithDispatch._REWRITE_HELPER_NAMES:
+                            continue
                         return True
         return False
 
