@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 import torch
 
 from .._mlir._mlir_libs._fly import DLTensorAdaptor
-from ..expr.typing import Constexpr, Int32, Stream, Tensor
+from ..expr.typing import Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
 
 
@@ -215,4 +215,5 @@ def from_dlpack(
 
 
 JitArgumentRegistry.register(int)(Int32)
+JitArgumentRegistry.register(float)(Float32)
 JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
