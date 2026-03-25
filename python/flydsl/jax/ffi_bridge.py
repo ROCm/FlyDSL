@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
-import os
 import struct
 import subprocess
 import threading

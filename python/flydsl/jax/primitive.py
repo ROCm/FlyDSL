@@ -39,7 +39,7 @@ Limitations
 from __future__ import annotations
 
 import functools
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Callable, Dict, Optional, Tuple
 
 try:
     import jax
