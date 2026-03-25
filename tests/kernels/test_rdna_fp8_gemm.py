@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WMMA FP8 GEMM correctness tests for RDNA4 (gfx12xx, wave32).
+"""WMMA FP8 GEMM correctness tests for RDNA4 (gfx120x, wave32).
 
 Kernel implementation: kernels/rdna_fp8_gemm.py
 """
@@ -33,8 +33,8 @@ ARCH = str(get_rocm_arch())
 
 
 def _requires_rdna4():
-    if "gfx12" not in ARCH:
-        pytest.skip(f"WMMA FP8 GEMM requires RDNA4 (gfx12xx), got {ARCH}")
+    if not ARCH.startswith("gfx120"):
+        pytest.skip(f"WMMA FP8 GEMM requires RDNA4 (gfx120x), got {ARCH}")
 
 
 def _run_fp8_gemm(M, N, K, tile_m=32, tile_n=None, tile_k=32):

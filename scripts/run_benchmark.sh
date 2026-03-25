@@ -46,7 +46,7 @@ GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(ge
 IS_CDNA=false
 IS_RDNA4=false
 case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
-case "${GPU_ARCH}" in gfx12*) IS_RDNA4=true ;; esac
+case "${GPU_ARCH}" in gfx120*) IS_RDNA4=true ;; esac
 echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4})"
 
 SUCCESS_COUNT=0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WMMA GEMM kernel for RDNA4 (gfx12xx, wave32).
+"""WMMA GEMM kernel for RDNA4 (gfx120x, wave32).
 
 4-warp LDS kernel inspired by Triton's 93 TFLOPS approach.
 
@@ -33,7 +33,6 @@ from flydsl.expr.typing import T
 from flydsl.utils.smem_allocator import SmemAllocator
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import arith as _std_arith
 
 
 WMMA_M = 16
@@ -96,10 +95,10 @@ def create_wmma_gemm_module(
     is_bf16 = in_dtype == "bf16"
 
     def _in_elem_ty():
-        return ir.BF16Type.get() if is_bf16 else ir.F16Type.get()
+        return T.bf16 if is_bf16 else T.f16
 
     def _out_elem_ty():
-        return ir.F32Type.get() if out_dtype == "f32" else ir.BF16Type.get()
+        return T.f32 if out_dtype == "f32" else T.bf16
 
     def _wmma_op(result_type, a_vec, b_vec, acc, v8i16_ty):
         if is_bf16:
@@ -124,12 +123,12 @@ def create_wmma_gemm_module(
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
     ):
-        in_ir_ty = ir.BF16Type.get() if is_bf16 else ir.F16Type.get()
-        v8_in_ty = ir.VectorType.get([8], in_ir_ty)
-        v4f32_ty = ir.VectorType.get([4], ir.F32Type.get())
+        in_ir_ty = T.bf16 if is_bf16 else T.f16
+        v8_in_ty = T.vec(8, in_ir_ty)
+        v4f32_ty = T.f32x4
         v8f32_ty = T.vec(8, T.f32)
-        i16_ty = ir.IntegerType.get_signless(16)
-        v8i16_ty = ir.VectorType.get([8], i16_ty)
+        i16_ty = T.i16
+        v8i16_ty = T.vec(8, i16_ty)
 
         from flydsl.utils.smem_allocator import SmemPtr
 
@@ -139,10 +138,10 @@ def create_wmma_gemm_module(
         tid = gpu.thread_id("x")
         pid = gpu.block_id("x")
 
-        c32 = arith.index(32)
-        c16 = arith.index(16)
-        c8 = arith.index(8)
-        c2 = arith.index(2)
+        c32 = fx.Index(32)
+        c16 = fx.Index(16)
+        c8 = fx.Index(8)
+        c2 = fx.Index(2)
         wave_id = tid // c32
         lane = tid % c32
         lane16 = lane % c16
@@ -151,8 +150,8 @@ def create_wmma_gemm_module(
 
         # Swizzle workgroup mapping for L2 locality
         effective_group_m = min(group_m, grid_m)
-        c_grid_n = arith.index(grid_n)
-        c_group_m = arith.index(effective_group_m)
+        c_grid_n = fx.Index(grid_n)
+        c_group_m = fx.Index(effective_group_m)
         num_pid_in_group = c_group_m * c_grid_n
         group_id = pid // num_pid_in_group
         first_pid_m = group_id * c_group_m
@@ -163,12 +162,12 @@ def create_wmma_gemm_module(
         bid_n = pid_in_group // group_size_m
 
         # 2x2 warp layout
-        c_wn = arith.index(waves_n)
+        c_wn = fx.Index(waves_n)
         wave_m = wave_id // c_wn
         wave_n = wave_id % c_wn
 
-        tile_m0 = bid_m * arith.index(BLOCK_M)
-        tile_n0 = bid_n * arith.index(BLOCK_N)
+        tile_m0 = bid_m * fx.Index(BLOCK_M)
+        tile_n0 = bid_n * fx.Index(BLOCK_N)
 
         a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=True)
         bt_rsrc = buffer_ops.create_buffer_resource(arg_bt, max_size=True)
@@ -179,19 +178,19 @@ def create_wmma_gemm_module(
         # ============================================================
         a_lds_info = []
         for al in range_constexpr(NUM_A_LOADS):
-            a_lin = tid * arith.index(LOAD_VEC) + arith.index(al * THREADS_PER_BLOCK * LOAD_VEC)
-            a_load_row = a_lin // arith.index(BLOCK_K)
-            a_load_col = a_lin % arith.index(BLOCK_K)
-            lds_rel = a_load_row * arith.index(BLOCK_K_PAD_A) + a_load_col
+            a_lin = tid * fx.Index(LOAD_VEC) + fx.Index(al * THREADS_PER_BLOCK * LOAD_VEC)
+            a_load_row = a_lin // fx.Index(BLOCK_K)
+            a_load_col = a_lin % fx.Index(BLOCK_K)
+            lds_rel = a_load_row * fx.Index(BLOCK_K_PAD_A) + a_load_col
             g_row = tile_m0 + a_load_row
             a_lds_info.append((g_row, a_load_col, lds_rel))
 
         b_lds_info = []
         for bl in range_constexpr(NUM_B_LOADS):
-            b_lin = tid * arith.index(LOAD_VEC) + arith.index(bl * THREADS_PER_BLOCK * LOAD_VEC)
-            b_load_row = b_lin // arith.index(BLOCK_K)
-            b_load_col = b_lin % arith.index(BLOCK_K)
-            lds_rel = arith.index(LDS_A_SIZE) + b_load_row * arith.index(BLOCK_K_PAD_B) + b_load_col
+            b_lin = tid * fx.Index(LOAD_VEC) + fx.Index(bl * THREADS_PER_BLOCK * LOAD_VEC)
+            b_load_row = b_lin // fx.Index(BLOCK_K)
+            b_load_col = b_lin % fx.Index(BLOCK_K)
+            lds_rel = fx.Index(LDS_A_SIZE) + b_load_row * fx.Index(BLOCK_K_PAD_B) + b_load_col
             g_row = tile_n0 + b_load_row
             b_lds_info.append((g_row, b_load_col, lds_rel))
 
@@ -204,17 +203,17 @@ def create_wmma_gemm_module(
             for al in range_constexpr(NUM_A_LOADS):
                 g_row, a_load_col, _ = a_lds_info[al]
                 g_col = k_base + a_load_col
-                elem_off = g_row * arith.index(K) + g_col
+                elem_off = g_row * fx.Index(K) + g_col
                 f32_off = elem_off // c2
-                a_raw = buffer_ops.buffer_load(a_rsrc, f32_off, vec_width=4, dtype=ir.F32Type.get())
+                a_raw = buffer_ops.buffer_load(a_rsrc, f32_off, vec_width=4, dtype=T.f32)
                 raw_data.append(a_raw)
 
             for bl in range_constexpr(NUM_B_LOADS):
                 g_row, b_load_col, _ = b_lds_info[bl]
                 g_col = k_base + b_load_col
-                elem_off = g_row * arith.index(K) + g_col
+                elem_off = g_row * fx.Index(K) + g_col
                 f32_off = elem_off // c2
-                b_raw = buffer_ops.buffer_load(bt_rsrc, f32_off, vec_width=4, dtype=ir.F32Type.get())
+                b_raw = buffer_ops.buffer_load(bt_rsrc, f32_off, vec_width=4, dtype=T.f32)
                 raw_data.append(b_raw)
 
             return raw_data  # [a0, a1, a2, a3, b0, b1, b2, b3] -- 8 x v4f32
@@ -242,10 +241,10 @@ def create_wmma_gemm_module(
         def _load_a_from_lds(rk, buf_offset):
             """Load A WMMA operands from LDS for K-step rk."""
             vecs = []
-            col_base = arith.index(rk * WMMA_K) + base8
+            col_base = fx.Index(rk * WMMA_K) + base8
             for rm in range_constexpr(reg_m):
-                row = wave_m * arith.index(reg_m * WMMA_M) + arith.index(rm * WMMA_M) + lane16
-                lds_idx = buf_offset + row * arith.index(BLOCK_K_PAD_A) + col_base
+                row = wave_m * fx.Index(reg_m * WMMA_M) + fx.Index(rm * WMMA_M) + lane16
+                lds_idx = buf_offset + row * fx.Index(BLOCK_K_PAD_A) + col_base
                 a_raw = vector.load_op(v8_in_ty, lds_view, [lds_idx])
                 vecs.append(a_raw)
             return vecs
@@ -253,10 +252,10 @@ def create_wmma_gemm_module(
         def _load_b_from_lds(rk, buf_offset):
             """Load B WMMA operands from LDS for K-step rk."""
             vecs = []
-            col_base = arith.index(rk * WMMA_K) + base8
+            col_base = fx.Index(rk * WMMA_K) + base8
             for rn in range_constexpr(reg_n):
-                row = wave_n * arith.index(reg_n * WMMA_N) + arith.index(rn * WMMA_N) + lane16
-                lds_idx = buf_offset + arith.index(LDS_A_SIZE) + row * arith.index(BLOCK_K_PAD_B) + col_base
+                row = wave_n * fx.Index(reg_n * WMMA_N) + fx.Index(rn * WMMA_N) + lane16
+                lds_idx = buf_offset + fx.Index(LDS_A_SIZE) + row * fx.Index(BLOCK_K_PAD_B) + col_base
                 b_raw = vector.load_op(v8_in_ty, lds_view, [lds_idx])
                 vecs.append(b_raw)
             return vecs
@@ -295,9 +294,9 @@ def create_wmma_gemm_module(
 
         def _load_a_single_from_lds(rk, rm_val, buf_offset):
             """Load a single A WMMA operand from LDS for K-step rk, repeat rm_val."""
-            col_base = arith.index(rk * WMMA_K) + base8
-            row = wave_m * arith.index(reg_m * WMMA_M) + arith.index(rm_val * WMMA_M) + lane16
-            lds_idx = buf_offset + row * arith.index(BLOCK_K_PAD_A) + col_base
+            col_base = fx.Index(rk * WMMA_K) + base8
+            row = wave_m * fx.Index(reg_m * WMMA_M) + fx.Index(rm_val * WMMA_M) + lane16
+            lds_idx = buf_offset + row * fx.Index(BLOCK_K_PAD_A) + col_base
             return vector.load_op(v8_in_ty, lds_view, [lds_idx])
 
         # ============================================================
@@ -310,8 +309,8 @@ def create_wmma_gemm_module(
         # DOUBLE-BUFFERED PIPELINE WITH SPLIT LOAD/STORE
         # ============================================================
 
-        c_lds_buf_stride = arith.index(LDS_ONE_BUF)
-        c_zero = arith.index(0)
+        c_lds_buf_stride = fx.Index(LDS_ONE_BUF)
+        c_zero = fx.Index(0)
 
         # --- PROLOGUE ---
         prologue_data = _gmem_load(c_zero)
@@ -327,11 +326,11 @@ def create_wmma_gemm_module(
             s_accs = list(state[:n_acc])
 
             # Ping-pong: even iterations read buf0/write buf1, odd reversed
-            read_off = iv % arith.index(2) * c_lds_buf_stride
-            write_off = (arith.index(1) - iv % arith.index(2)) * c_lds_buf_stride
+            read_off = iv % fx.Index(2) * c_lds_buf_stride
+            write_off = (fx.Index(1) - iv % fx.Index(2)) * c_lds_buf_stride
 
             # 1. Issue GMEM loads for next tile (non-blocking)
-            next_k = (iv + arith.index(1)) * arith.index(BLOCK_K)
+            next_k = (iv + fx.Index(1)) * fx.Index(BLOCK_K)
             next_data = _gmem_load(next_k)
 
             # 2. Compute from current read buffer
@@ -350,25 +349,25 @@ def create_wmma_gemm_module(
 
         # --- EPILOGUE: Last tile in LDS ---
         # After num_k_tiles-1 iterations, last written buffer is the read buffer
-        last_read_off = arith.index((num_k_tiles - 1) % 2) * c_lds_buf_stride
+        last_read_off = fx.Index((num_k_tiles - 1) % 2) * c_lds_buf_stride
         for rk in range_constexpr(reg_k):
             accs = _do_compute_rk(accs, rk, last_read_off)
 
         # ============================================================
         # Store results to GMEM
         # ============================================================
-        c_layout_n = arith.index(N)
+        c_layout_n = fx.Index(N)
         for rm in range_constexpr(reg_m):
             for rn in range_constexpr(reg_n):
                 idx = rm * reg_n + rn
-                wmma_m_off = wave_m * arith.index(reg_m * WMMA_M) + arith.index(rm * WMMA_M)
-                wmma_n_off = wave_n * arith.index(reg_n * WMMA_N) + arith.index(rn * WMMA_N)
+                wmma_m_off = wave_m * fx.Index(reg_m * WMMA_M) + fx.Index(rm * WMMA_M)
+                wmma_n_off = wave_n * fx.Index(reg_n * WMMA_N) + fx.Index(rn * WMMA_N)
                 for si in range_constexpr(8):
-                    g_row = tile_m0 + wmma_m_off + base8 + arith.index(si)
+                    g_row = tile_m0 + wmma_m_off + base8 + fx.Index(si)
                     g_col = tile_n0 + wmma_n_off + lane16
                     val = vector.extract(accs[idx], static_position=[si], dynamic_position=[])
                     if out_dtype == "bf16":
-                        val = arith.trunc_f(ir.BF16Type.get(), val)
+                        val = arith.trunc_f(T.bf16, val)
                     elem_off = g_row * c_layout_n + g_col
                     buffer_ops.buffer_store(val, c_rsrc, elem_off)
 

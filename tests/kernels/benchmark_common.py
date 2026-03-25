@@ -330,7 +330,7 @@ def run_wmma_sweep(
     from flydsl.runtime.device import get_rocm_arch
 
     arch = get_rocm_arch()
-    if "gfx12" not in arch:
+    if not arch.startswith("gfx120"):
         return rows
 
     # wmma_gemm (LDS bf16)

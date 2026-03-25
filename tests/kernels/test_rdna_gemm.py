@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WMMA GEMM correctness tests for RDNA4 (gfx12xx, wave32).
+"""WMMA GEMM correctness tests for RDNA4 (gfx120x, wave32).
 
 Kernel implementation: kernels/rdna_gemm.py
 """
@@ -28,8 +28,8 @@ ARCH = str(get_rocm_arch())
 
 
 def _requires_rdna4():
-    if "gfx12" not in ARCH:
-        pytest.skip(f"WMMA GEMM requires RDNA4 (gfx12xx), got {ARCH}")
+    if not ARCH.startswith("gfx120"):
+        pytest.skip(f"WMMA GEMM requires RDNA4 (gfx120x), got {ARCH}")
 
 
 @pytest.mark.parametrize(
