@@ -10,8 +10,15 @@ Requirements:
     pip install jax[rocm]
 """
 
-import jax
-import jax.numpy as jnp
+import sys
+
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    print("SKIP: JAX not installed")
+    sys.exit(0)
+
 import numpy as np
 
 import flydsl.compiler as flyc

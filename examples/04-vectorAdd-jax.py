@@ -14,8 +14,14 @@ Requirements:
     pip install jax[rocm]   # ROCm backend for AMD GPUs
 """
 
-import jax
-import jax.numpy as jnp
+import sys
+
+try:
+    import jax
+    import jax.numpy as jnp
+except ImportError:
+    print("SKIP: JAX not installed")
+    sys.exit(0)
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
