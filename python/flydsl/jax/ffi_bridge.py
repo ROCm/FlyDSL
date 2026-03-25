@@ -201,25 +201,12 @@ def compile_and_register(
         for _name, val in sorted(runtime_scalars.items()):
             call_args.append(val)
 
-        # Force a fresh compilation by temporarily clearing the JitFunction's
-        # caches.  Without this, a prior eager call with different adaptor
-        # options (e.g. mark_layout_dynamic) may produce a cache hit with an
-        # artifact whose function signature doesn't match the XLA bridge's
-        # calling convention.
-        saved_mem = flyc_func._mem_cache
-        saved_call = flyc_func._call_state_cache
-        flyc_func._mem_cache = {}
-        flyc_func._call_state_cache = {}
-        try:
-            flyc_func(*call_args, **constexpr_kwargs)
-            artifact = flyc_func.get_last_artifact()
-        finally:
-            # Merge the fresh compilation into the saved caches and restore.
-            saved_mem.update(flyc_func._mem_cache)
-            saved_call.update(flyc_func._call_state_cache)
-            flyc_func._mem_cache = saved_mem
-            flyc_func._call_state_cache = saved_call
+        # Trigger compilation. The cache key now includes dynamic layout
+        # state, so a prior eager call with mark_layout_dynamic won't
+        # collide with this plain-array compilation.
+        flyc_func(*call_args, **constexpr_kwargs)
 
+        artifact = flyc_func.get_last_artifact()
         if artifact is None:
             raise RuntimeError(
                 "FlyDSL compilation did not produce a cached artifact.  "

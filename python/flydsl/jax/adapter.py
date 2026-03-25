@@ -110,6 +110,8 @@ class JaxTensorAdaptor:
         self._orig_strides = _jax_strides(array)
         self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
+        self._dynamic_leading_dim = None
+        self._dynamic_divisibility = None
 
         # Float8 arrays: extract DLPack from a uint8 view.
         dlpack_array = array
@@ -155,6 +157,8 @@ class JaxTensorAdaptor:
             tuple(self._orig_strides),
             self.assumed_align,
             self.use_32bit_stride,
+            self._dynamic_leading_dim,
+            self._dynamic_divisibility,
         )
 
     # ------------------------------------------------------------------
@@ -182,6 +186,8 @@ class JaxTensorAdaptor:
         """Mark dimensions as dynamic for shape-polymorphic compilation."""
         if leading_dim is None:
             leading_dim = -1
+        self._dynamic_leading_dim = leading_dim
+        self._dynamic_divisibility = divisibility
         self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
         return self
 

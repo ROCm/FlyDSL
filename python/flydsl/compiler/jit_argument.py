@@ -161,6 +161,8 @@ try:
             self._orig_dtype = tensor.dtype
             self._orig_shape = tensor.shape
             self._orig_strides = tensor.stride()
+            self._dynamic_leading_dim = None
+            self._dynamic_divisibility = None
 
         @staticmethod
         def _extract_data_ptr(arg):
@@ -199,11 +201,15 @@ try:
                 tuple(self._orig_strides),
                 self.assumed_align,
                 self.use_32bit_stride,
+                self._dynamic_leading_dim,
+                self._dynamic_divisibility,
             )
 
         def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
             if leading_dim is None:
                 leading_dim = -1
+            self._dynamic_leading_dim = leading_dim
+            self._dynamic_divisibility = divisibility
             self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
             return self
 
