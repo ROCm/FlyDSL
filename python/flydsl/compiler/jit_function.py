@@ -693,6 +693,11 @@ class JitFunction:
                     self._mem_cache[cache_key] = cached_func
 
         if cached_func is not None:
+            # Keep _last_compiled up to date so external integrations
+            # (e.g. flydsl.jax) can retrieve the artifact for this
+            # compilation even when the fast path is taken.
+            self._last_compiled = cached_func
+
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(

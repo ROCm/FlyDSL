@@ -62,8 +62,14 @@ _BRIDGE_C = _THIS_DIR / "_xla_bridge.c"
 
 
 def _ensure_bridge_lib() -> ctypes.CDLL:
-    """Load ``_xla_bridge.so``, compiling from source if necessary."""
-    if not _BRIDGE_SO.exists():
+    """Load ``_xla_bridge.so``, compiling from source if necessary.
+
+    Recompiles if the .c source is newer than the .so to avoid stale binaries.
+    """
+    needs_compile = not _BRIDGE_SO.exists()
+    if not needs_compile and _BRIDGE_C.exists():
+        needs_compile = _BRIDGE_C.stat().st_mtime > _BRIDGE_SO.stat().st_mtime
+    if needs_compile:
         if not _BRIDGE_C.exists():
             raise FileNotFoundError(
                 f"Cannot find XLA bridge source: {_BRIDGE_C}\n"
@@ -195,11 +201,25 @@ def compile_and_register(
         for _name, val in sorted(runtime_scalars.items()):
             call_args.append(val)
 
-        # Trigger compilation by calling the JitFunction.
-        flyc_func(*call_args, **constexpr_kwargs)
+        # Force a fresh compilation by temporarily clearing the JitFunction's
+        # caches.  Without this, a prior eager call with different adaptor
+        # options (e.g. mark_layout_dynamic) may produce a cache hit with an
+        # artifact whose function signature doesn't match the XLA bridge's
+        # calling convention.
+        saved_mem = flyc_func._mem_cache
+        saved_call = flyc_func._call_state_cache
+        flyc_func._mem_cache = {}
+        flyc_func._call_state_cache = {}
+        try:
+            flyc_func(*call_args, **constexpr_kwargs)
+            artifact = flyc_func.get_last_artifact()
+        finally:
+            # Merge the fresh compilation into the saved caches and restore.
+            saved_mem.update(flyc_func._mem_cache)
+            saved_call.update(flyc_func._call_state_cache)
+            flyc_func._mem_cache = saved_mem
+            flyc_func._call_state_cache = saved_call
 
-        # Retrieve the compiled artifact via the public API.
-        artifact = flyc_func.get_last_artifact()
         if artifact is None:
             raise RuntimeError(
                 "FlyDSL compilation did not produce a cached artifact.  "
