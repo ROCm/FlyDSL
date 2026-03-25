@@ -836,6 +836,13 @@ public:
       if (!isNormalForm(cast<TypedValue<ComposedLayoutType>>(layout)))
         return failure();
       layoutAdaptor = LayoutValueAdaptor(layout, composedLayoutTy.getAttr());
+    } else if (auto swizzleTy = dyn_cast<SwizzleType>(layout.getType())) {
+      LayoutBuilder<LayoutValueAdaptor> layoutBuilder(rewriter, loc);
+      IntTupleValueAdaptor coordAdaptor =
+          IntTupleValueAdaptor::create(layoutBuilder, coord, coordTy.getAttr());
+      IntTupleValueAdaptor result = layoutBuilder.applySwizzle(coordAdaptor, swizzleTy.getAttr());
+      rewriter.replaceOp(op, layoutBuilder.finalize(result));
+      return success();
     } else {
       return failure();
     }
@@ -1838,7 +1845,9 @@ public:
 
     if (srcRank == 1) {
       if (srcLayoutAttr.getShape().isLeaf()) {
-        CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+        Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
+        Value dstDecomposition = DecompositionOp::create(rewriter, loc, dst);
+        CopyAtomCall::create(rewriter, loc, copyAtomVal, srcDecomposition, dstDecomposition, pred);
         rewriter.eraseOp(op);
         return success();
       }
@@ -1919,17 +1928,18 @@ public:
     int32_t bRank = bLayoutAttr.rank();
     int32_t cRank = cLayoutAttr.rank();
 
-    int32_t loop_m = dLayoutAttr.getShape().at(1).getLeafAsInt().getValue();
-    int32_t loop_n = dLayoutAttr.getShape().at(2).getLeafAsInt().getValue();
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+    auto get_static_product = [&](IntTupleAttr shape) {
+      return intTupleProduct(attrBuilder, shape).getLeafAsInt().getValue();
+    };
 
-    assert(loop_m == aLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_m");
-    assert(loop_n == bLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_n");
-    assert(loop_m == cLayoutAttr.getShape().at(1).getLeafAsInt().getValue() &&
-           "Mismatch in loop_m");
-    assert(loop_n == cLayoutAttr.getShape().at(2).getLeafAsInt().getValue() &&
-           "Mismatch in loop_n");
+    int32_t loop_m = get_static_product(dLayoutAttr.getShape().at(1));
+    int32_t loop_n = get_static_product(dLayoutAttr.getShape().at(2));
+
+    assert(loop_m == get_static_product(aLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
+    assert(loop_n == get_static_product(bLayoutAttr.getShape().at(1)) && "Mismatch in loop_n");
+    assert(loop_m == get_static_product(cLayoutAttr.getShape().at(1)) && "Mismatch in loop_m");
+    assert(loop_n == get_static_product(cLayoutAttr.getShape().at(2)) && "Mismatch in loop_n");
 
     if (dRank == 1 && aRank == 1 && bRank == 1 && cRank == 1) {
       MmaAtomCall::create(rewriter, loc, mmaAtomVal, d, a, b, c);
@@ -1963,9 +1973,8 @@ public:
       rewriter.eraseOp(op);
       return success();
     } else if (aRank == 3 && bRank == 3) {
-      int32_t loop_k = aLayoutAttr.getShape().at(2).getLeafAsInt().getValue();
-      assert(loop_k == bLayoutAttr.getShape().at(2).getLeafAsInt().getValue() &&
-             "Mismatch in loop_k");
+      int32_t loop_k = get_static_product(aLayoutAttr.getShape().at(2));
+      assert(loop_k == get_static_product(bLayoutAttr.getShape().at(2)) && "Mismatch in loop_k");
 
       for (int32_t k = 0; k < loop_k; ++k) {
         Value cSrc = (k == 0) ? c : d;

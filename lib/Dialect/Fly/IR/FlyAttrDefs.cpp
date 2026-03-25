@@ -374,8 +374,13 @@ void IntAttr::print(::mlir::AsmPrinter &odsPrinter) const { prettyPrintIntAttr(o
     valueAttr = IntAttr::getStatic(ctx, value);
   }
 
+  auto nextLoc = odsParser.getCurrentLocation();
+  const char *nextPtr = nextLoc.getPointer();
+  if (!nextPtr || *nextPtr != 'E' || !std::isdigit(static_cast<unsigned char>(*(nextPtr + 1))))
+    return valueAttr;
+
   StringRef strRefModes;
-  if (failed(odsParser.parseOptionalKeyword(&strRefModes)) || !strRefModes.starts_with("E"))
+  if (failed(odsParser.parseOptionalKeyword(&strRefModes)))
     return valueAttr;
 
   SmallVector<int32_t> modes;
