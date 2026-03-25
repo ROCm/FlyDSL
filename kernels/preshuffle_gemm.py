@@ -418,28 +418,31 @@ def compile_preshuffle_gemm_a8(
             if not is_int4 and not is_f16_or_bf16:
                 base_k_bytes = base_k * elem_bytes
                 k0_base = base_k_bytes // c64_b
+                k_dwords = []
+                for ku in range_constexpr(k_unroll):
+                    k_dwords.append((k0_base + ku) * _b_dword_stride_k0_c)
+                packs0_per_ku = [[] for _ in range(k_unroll)]
+                packs1_per_ku = [[] for _ in range(k_unroll)]
+                for ni in range_constexpr(num_acc_n):
+                    for ku in range_constexpr(k_unroll):
+                        b0, b1 = _load_b_single(k_dwords[ku], ni)
+                        packs0_per_ku[ku].append(b0)
+                        packs1_per_ku[ku].append(b1)
                 b_tile = []
                 for ku in range_constexpr(k_unroll):
-                    k0 = k0_base + ku
-                    k_dword = k0 * _b_dword_stride_k0_c
-                    packs0 = []
-                    packs1 = []
-                    for ni in range_constexpr(num_acc_n):
-                        b0, b1 = _load_b_single(k_dword, ni)
-                        packs0.append(b0)
-                        packs1.append(b1)
-                    b_tile.append((packs0, packs1))
+                    b_tile.append((packs0_per_ku[ku], packs1_per_ku[ku]))
                 return b_tile
 
+            packs0_per_ku = [[] for _ in range(k_unroll)]
+            packs1_per_ku = [[] for _ in range(k_unroll)]
+            for ni in range_constexpr(num_acc_n):
+                for ku in range_constexpr(k_unroll):
+                    b0, b1 = load_b_packs_k64(base_k, ku, ni)
+                    packs0_per_ku[ku].append(b0)
+                    packs1_per_ku[ku].append(b1)
             b_tile = []
             for ku in range_constexpr(k_unroll):
-                packs0 = []
-                packs1 = []
-                for ni in range_constexpr(num_acc_n):
-                    b0, b1 = load_b_packs_k64(base_k, ku, ni)
-                    packs0.append(b0)
-                    packs1.append(b1)
-                b_tile.append((packs0, packs1))
+                b_tile.append((packs0_per_ku[ku], packs1_per_ku[ku]))
             return b_tile
 
         # ── A LDS load/store helpers (now take lds_buffer memref directly) ──
