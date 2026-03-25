@@ -263,6 +263,11 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
         c: vector<16xf32> (32x16 FP32 accumulator)
         scaleA: i32 (A scale VGPR)
         scaleB: i32 (B scale VGPR)
+
+    scaleAType/scaleBType: lane half-select (0=lanes 0-15, 1=lanes 16-31)
+        — maps to VOP3PX2 scale_op_sel bits (OPSEL)
+    fmtScaleA/fmtScaleB: scale data format (0=E8M0, 2=E4M3)
+        — maps to VOP3PX2 neg_lo/neg_hi bits (repurposed)
     """
     if _ods_wmma_scale_f32_32x16x128_f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_32x16x128_f4")
