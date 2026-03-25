@@ -68,6 +68,22 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._alloc_buffers()
         ms.shmem_barrier_all()
 
+        # 预计算 dispatch P2P 地址表（消除内核中 ptr_p2p extern 调用开销）
+        npes = config.world_size
+        self._p2p_tok_off  = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_tis      = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_out_wts  = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_out_idx  = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_out_tok  = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        self._p2p_recv_num = torch.zeros(npes, dtype=torch.int64, device=self._dev)
+        for pe in range(npes):
+            self._p2p_tok_off[pe]  = ms.shmem_ptr_p2p(self.shmem_tok_off.data_ptr(), r, pe)
+            self._p2p_tis[pe]      = ms.shmem_ptr_p2p(self.shmem_tok_id_to_src.data_ptr(), r, pe)
+            self._p2p_out_wts[pe]  = ms.shmem_ptr_p2p(self.shmem_disp_out_wts.data_ptr(), r, pe)
+            self._p2p_out_idx[pe]  = ms.shmem_ptr_p2p(self.shmem_disp_out_idx.data_ptr(), r, pe)
+            self._p2p_out_tok[pe]  = ms.shmem_ptr_p2p(self.shmem_disp_out_tok.data_ptr(), r, pe)
+            self._p2p_recv_num[pe] = ms.shmem_ptr_p2p(self.shmem_recv_tok_num.data_ptr(), r, pe)
+
         # 创建 @flyc.jit launcher（首次调用时自动编译 + shmem_module_init）
         _disp_wpb = config.warp_num_per_block
         print(f"[v2] Rank {r}: creating v2 dispatch jit (warp_per_block={_disp_wpb})...")
@@ -119,6 +135,13 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
         self._fx_xdb_mem   = fx.Int64(self.shmem_xdev_bar_mem.data_ptr())
         self._fx_comb_bar  = fx.Int64(self.comb_bar.data_ptr())
         self._fx_trecv     = fx.Int64(self.total_recv.data_ptr())  # alias of _fx_total_rv
+        # dispatch P2P 地址数组（预计算，消除内核中 ptr_p2p extern 调用）
+        self._fx_p2p_tok_off  = fx.Int64(self._p2p_tok_off.data_ptr())
+        self._fx_p2p_tis      = fx.Int64(self._p2p_tis.data_ptr())
+        self._fx_p2p_out_wts  = fx.Int64(self._p2p_out_wts.data_ptr())
+        self._fx_p2p_out_idx  = fx.Int64(self._p2p_out_idx.data_ptr())
+        self._fx_p2p_out_tok  = fx.Int64(self._p2p_out_tok.data_ptr())
+        self._fx_p2p_recv_num = fx.Int64(self._p2p_recv_num.data_ptr())
 
     def _alloc_buffers(self):
         cfg  = self.cfg
@@ -203,6 +226,12 @@ class FlyDSLDispatchCombineIntraNodeOpV2:
             self._fx_tok_map,
             self._fx_tis,
             self._fx_total_rv,
+            self._fx_p2p_tok_off,
+            self._fx_p2p_tis,
+            self._fx_p2p_out_wts,
+            self._fx_p2p_out_idx,
+            self._fx_p2p_out_tok,
+            self._fx_p2p_recv_num,
             cur_tok,  # 裸 Python int，不要用 fx.Int32（会传指针而非值）
         )
         torch.cuda.synchronize()
