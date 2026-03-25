@@ -2694,7 +2694,8 @@ def compile_moe_gemm2(
                     # stable path here.)
                     out_base_idx = None
                     if out_is_bf16:
-                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out)
+                        arg_out_v = arg_out._value if hasattr(arg_out, "_value") else arg_out
+                        out_base_idx = memref.extract_aligned_pointer_as_index(arg_out_v)
 
                     def write_row_to_lds(
                         *,
@@ -2748,7 +2749,18 @@ def compile_moe_gemm2(
                                 v = v * sx * sw
                             if doweight_stage2:
                                 v = v * tw
-                            v_out = arith.trunc_f(out_elem(), v)
+                            if out_is_bf16:
+                                # Workaround: arith.truncf f32->bf16 lowers incorrectly on
+                                # AMDGPU (produces f16 bit patterns). Use RTZ bitwise
+                                # truncation (drop lower 16 bits) instead.
+                                _i32_ty = ir.IntegerType.get_signless(32)
+                                _i16_ty = ir.IntegerType.get_signless(16)
+                                _v_i32 = arith.bitcast(_i32_ty, v)
+                                _shifted = arith.shrui(_v_i32, arith.i32(16))
+                                _trunc16 = arith.TruncIOp(_i16_ty, arith.as_value(_shifted)).result
+                                v_out = arith.bitcast(ir.BF16Type.get(), _trunc16)
+                            else:
+                                v_out = arith.trunc_f(out_elem(), v)
 
                             lds_idx = row_base_lds + col_local
                             vec1_out = I.vec(1, out_elem())

@@ -977,9 +977,12 @@ def run_moe_stage2(
     sorted_weights_1d = sorted_weights.contiguous().view(-1)  # [sorted_size]
 
     out_s = str(out_dtype).strip().lower()
-    if out_s not in ("f16", "fp16", "half"):
-        raise ValueError(f"out_dtype must be 'f16' (stage2 f32 path removed), got {out_dtype!r}")
-    out_torch_dtype = torch.float16
+    if out_s in ("f16", "fp16", "half"):
+        out_torch_dtype = torch.float16
+    elif out_s in ("bf16", "bfloat16"):
+        out_torch_dtype = torch.bfloat16
+    else:
+        raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
 
     out = torch.zeros((tokens, model_dim), device=device, dtype=out_torch_dtype)
     out_perf = torch.zeros_like(out)
@@ -996,6 +999,7 @@ def run_moe_stage2(
         tile_n=tile_n,
         tile_k=tile_k,
         doweight_stage2=bool(doweight_stage2),
+        out_dtype=out_dtype,
     )
     is_reduce_exe = (getattr(exe, "mode", None) == MoeGemm2Mode.REDUCE) or bool(use_reduce)
 
@@ -1098,7 +1102,7 @@ def run_moe_stage2(
     a2_elem_bytes = 2 if in_dtype in ("int4_bf16", "bf16", "fp16", "fp8_bf16") else 1  # bf16/fp16 activations
     bytes_moved += tokens * topk * inter_dim * a2_elem_bytes  # a2 (logical)
     bytes_moved += (experts * model_dim * inter_dim) // (2 if is_int4 else 1)  # w2 (packed for int4)
-    bytes_moved += tokens * model_dim * (2 if out_torch_dtype == torch.float16 else 4)  # out
+    bytes_moved += tokens * model_dim * (2 if out_torch_dtype in (torch.float16, torch.bfloat16) else 4)  # out
     bytes_moved += tokens * topk * 4  # a2_scale f32 (logical)
     bytes_moved += experts * model_dim * 4  # w2_scale f32 (1D)
     bytes_moved += int(sorted_weights.numel()) * 4
