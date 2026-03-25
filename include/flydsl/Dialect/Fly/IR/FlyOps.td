@@ -380,7 +380,7 @@ def Fly_TiledMmaPartitionShapeOp : Fly_Op<"tiled_mma.partition_shape", [Pure, De
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_IntTuple:$shape);
   let results = (outs Fly_IntTuple:$result);
 }
-def Fly_MmaMakeFragmentOp : Fly_Op<"mma_atom.make_fragment", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+def Fly_MmaMakeFragmentOp : Fly_Op<"mma.make_fragment", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_MmaOperandAttr:$operand_id, Fly_TiledMma:$tiled_mma, Fly_MemRef:$input);
   let results = (outs Fly_MemRef:$result);
 }
@@ -397,7 +397,7 @@ def Fly_GemmOp : Fly_Op<"gemm"> {
 // MemRef and Ptr operations
 //===----------------------------------------------------------------------===//
 
-def Fly_MakePtrOp : Fly_Op<"make_ptr", [Pure]> {
+def Fly_MakePtrOp : Fly_Op<"make_ptr", []> {
   let arguments = (ins Variadic<AnyType>:$args, OptionalAttr<DictionaryAttr>:$dictAttrs);
   let results = (outs Fly_Pointer:$result);
 }
