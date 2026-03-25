@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -185,6 +186,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "softmax":
         from kernels.softmax_kernel import build_softmax_module
+
         # M is runtime; module construction uses a dummy M.
         # `flydsl.compile()` already has its own cache.
         m = build_softmax_module(1, N, dtype)
@@ -195,6 +197,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
+
         m = build_layernorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
@@ -205,6 +208,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
+
         m = build_rmsnorm_module(1, N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
@@ -214,6 +218,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "wmma_gemm":
         from kernels.rdna_gemm import create_wmma_gemm_module
+
         K = N  # square by default; caller can override via config
         torch_dtype = torch.bfloat16 if dtype == "bf16" else torch.float16
         launch, *_ = create_wmma_gemm_module(M, N, K, in_dtype=dtype, out_dtype="bf16")
@@ -228,6 +233,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
 
     if op == "wmma_fp8_gemm":
         from kernels.rdna_fp8_gemm import compile_fp8_gemm, preshuffle_b_fp8, fp8_quantize_per_token, fp8_quantize_per_channel
+
         K = N  # square by default
         torch.manual_seed(42)
         A_f32 = torch.randn(M, K, device="cuda") * 0.1
@@ -333,6 +339,8 @@ def run_wmma_sweep(
     if not arch.startswith("gfx120"):
         return rows
 
+    fail_count = 0
+
     # wmma_gemm (LDS bf16)
     for M, N, dt in _default_wmma_configs():
         K = N
@@ -341,8 +349,9 @@ def run_wmma_sweep(
         torch_us = None
         try:
             flydsl_us = _bench_flydsl_torch(op="wmma_gemm", M=M, N=N, dtype=dt, warmup=warmup, iters=iters)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"ERROR: wmma_gemm {shape} FAILED: {e}")
+            fail_count += 1
         try:
             torch_dtype, _ = _dtype_torch(dt)
             A = torch.randn(M, K, dtype=torch_dtype, device="cuda")
@@ -350,7 +359,7 @@ def run_wmma_sweep(
             C = torch.zeros(M, N, dtype=torch_dtype, device="cuda")
             torch_us = bench_gpu_us_torch(lambda: torch.mm(A, B, out=C), warmup=warmup, iters=iters)
         except Exception:
-            pass
+            pass  # torch reference failure is non-fatal
         rows.append(PerfRow(op="wmma_gemm", shape=shape, dtype=dt, flydsl_gpu_us=flydsl_us, aiter_gpu_us=torch_us))
 
     # wmma_fp8_gemm (A raw, B preshuffled)
@@ -361,8 +370,9 @@ def run_wmma_sweep(
         torch_us = None
         try:
             flydsl_us = _bench_flydsl_torch(op="wmma_fp8_gemm", M=M, N=N, dtype="bf16", warmup=warmup, iters=iters)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"ERROR: fp8_gemm {shape} FAILED: {e}")
+            fail_count += 1
         try:
             from kernels.rdna_fp8_gemm import fp8_quantize_per_token, fp8_quantize_per_channel
 
@@ -379,8 +389,11 @@ def run_wmma_sweep(
                 iters=iters,
             )
         except Exception:
-            pass
+            pass  # torch reference failure is non-fatal
         rows.append(PerfRow(op="fp8_gemm", shape=shape, dtype="fp8", flydsl_gpu_us=flydsl_us, aiter_gpu_us=torch_us))
+
+    if fail_count > 0:
+        raise RuntimeError(f"{fail_count} RDNA WMMA benchmark(s) failed — see errors above")
 
     return rows
 
