@@ -665,11 +665,9 @@ class FlyDSLAllreduce:
                 use_write_mode=True,
                 stream_ptr=stream_ptr,
             )
-            # Host-side barrier: ensures all remote XGMI writes to local
-            # output_buffer are complete before the copy.
-            torch.cuda.current_stream().synchronize()
-            import torch.distributed as dist
-            dist.barrier(group=self.group)
+            # torch.cuda.current_stream().synchronize()
+            # import torch.distributed as dist
+            # dist.barrier(group=self.group)
             out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
         else:
             self.input_buffer[:bytes_n].copy_(inp.view(torch.uint8))
