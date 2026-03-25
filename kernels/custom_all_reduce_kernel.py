@@ -496,7 +496,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         tmp_ptrs: Int64,
     ):
         import math
-        from flydsl._mlir.dialects import arith, memref, scf, vector, rocdl
+        from flydsl._mlir.dialects import arith, memref, scf, vector
 
         i32, i64 = T.i32, T.i64
         idx = ir.IndexType.get()
@@ -639,8 +639,9 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
             scf.YieldOp([cur + stride_s2, stride_s2])
 
-        gpu.barrier()
-        rocdl.s_waitcnt(0)
+        _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
+                         self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size,
+                         need_wbl2=False)
 
     # -----------------------------------------------------------------------
     # Host launchers (@flyc.jit)
