@@ -291,6 +291,7 @@ class KernelLauncher:
             block_y = _to_index_value(block_dims[1])
             block_z = _to_index_value(block_dims[2])
 
+            smem = _unwrap_to_raw(smem)
             smem_val = None
             smem_raw = _unwrap_to_raw(smem)
             if isinstance(smem_raw, ir.Value):
