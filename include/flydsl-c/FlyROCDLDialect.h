@@ -68,6 +68,7 @@ MLIR_CAPI_EXPORTED int32_t mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(MlirT
 //===----------------------------------------------------------------------===//
 
 MLIR_CAPI_EXPORTED void mlirRegisterFlyToROCDLConversionPass(void);
+MLIR_CAPI_EXPORTED void mlirRegisterFlyROCDLClusterAttrPass(void);
 
 #ifdef __cplusplus
 }

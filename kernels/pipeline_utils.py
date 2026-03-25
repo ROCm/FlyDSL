@@ -33,7 +33,7 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
                 else (j - pre_loaded + num_buffers - 1) % num_buffers
             )
             outstanding = (
-                2 if (load_stage is not None and load_stage != next_compute)
+                2 * (num_buffers - 2) if (load_stage is not None and load_stage != next_compute)
                 else 0
             )
         plan.append((load_stage, compute_stage, outstanding))

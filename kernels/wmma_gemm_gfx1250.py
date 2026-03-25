@@ -16,6 +16,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
+from flydsl.expr import idx2crd
 from kernels.pipeline_utils import make_tail_plan
 
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
@@ -23,6 +24,7 @@ WAVE_SIZE = 32
 
 LDS_PAD_A = 8
 LDS_PAD_B = 8
+LDS_PAD_D_BYTES = 16
 
 _STAGE_NAMES = ("ping", "pong", "pang")
 
@@ -41,9 +43,11 @@ def compile_wmma_gemm_tdm(
     m_warp: int = 2,
     n_warp: int = 4,
     in_dtype: str = "fp16",
+    out_dtype: str = None,
     num_buffers: int = 2,
     waves_per_eu: int = None,
     l2_prefetch_distance: int = 2,
+    use_tdm_store: bool = True,
     cluster_m: int = 1,
     cluster_n: int = 1,
 ):
@@ -52,10 +56,13 @@ def compile_wmma_gemm_tdm(
     Returns a JitFunction: launch_fn(arg_c, arg_a, arg_b, M, N, stream)
 
     Args:
+        out_dtype: Output element type ("f16", "bf16", "f32").
+                   Default (None) = matches input type.
         num_buffers: Number of LDS buffers (2=double, 3=triple buffering).
         waves_per_eu: Occupancy hint (None = default, 1-4 = limit occupancy).
         l2_prefetch_distance: Number of k-tiles ahead to prefetch into L2.
                               0 = disabled, 2 = typical value.
+        use_tdm_store: Use TDM store epilogue via LDS (True) or buffer_store (False).
         cluster_m: Cluster dimension along M (WG rows per cluster, 1=disabled).
         cluster_n: Cluster dimension along N (WG cols per cluster, 1=disabled).
     """
@@ -65,7 +72,12 @@ def compile_wmma_gemm_tdm(
     if in_dtype not in ("fp16", "bf16"):
         raise ValueError(f"in_dtype must be 'fp16' or 'bf16', got {in_dtype!r}")
     is_f16 = in_dtype == "fp16"
+    if out_dtype is None:
+        out_dtype = "f16" if is_f16 else "bf16"
+    if out_dtype not in ("f32", "f16", "bf16"):
+        raise ValueError(f"out_dtype must be 'f32', 'f16', or 'bf16', got {out_dtype!r}")
     elem_bytes = 2
+    elem_bytes_d = 2 if out_dtype in ("f16", "bf16") else 4
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -127,7 +139,7 @@ def compile_wmma_gemm_tdm(
 
     buf_size_elems = lds_a_elems + lds_b_elems
 
-    # --- LDS allocation ---
+    # --- LDS allocation (B-first: B at offset 0 for smaller ds_load offsets) ---
     num_warps = m_warp * n_warp
 
     stage_allocators = []
@@ -139,8 +151,8 @@ def compile_wmma_gemm_tdm(
         off = alloc._align(alloc.ptr, 16)
         alloc.ptr = off + buf_size_elems * elem_bytes
         stage_allocators.append(alloc)
-        stage_a_offsets.append(off)
-        stage_b_offsets.append(off + lds_a_elems * elem_bytes)
+        stage_b_offsets.append(off)
+        stage_a_offsets.append(off + lds_b_elems * elem_bytes)
 
     # Compile-time pipeline parameters
     pre_loaded = num_buffers - 1        # stages pre-loaded in prologue
@@ -148,6 +160,16 @@ def compile_wmma_gemm_tdm(
     _tail_start = loop_iters * num_buffers  # index of first un-computed tile in tail
     extra = num_k_tiles - _tail_start - pre_loaded
     tail_plan = _make_tail_plan(num_buffers, pre_loaded, extra)
+
+    if use_tdm_store:
+        lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
+        warp_d_bytes = warp_tile_m * lds_d_row_stride
+        total_d_bytes = num_warps * warp_d_bytes
+        d_output_off = 0
+        _last_compute_stage = tail_plan[-1][1]
+        d_reuse_stage = 1 if _last_compute_stage == 0 else 0
+        if total_d_bytes > stage_allocators[d_reuse_stage].ptr:
+            stage_allocators[d_reuse_stage].ptr = total_d_bytes
 
     @flyc.kernel
     def kernel_wmma_gemm_tdm(
@@ -186,11 +208,9 @@ def compile_wmma_gemm_tdm(
         layout_thr = fx.make_layout(
             (m_warp, n_warp, 2, 16),
             (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
-        thr_coord = fx.idx2crd(tx, layout_thr)
-        wave_m_idx = fx.get(thr_coord, 0)
-        wave_n_idx = fx.get(thr_coord, 1)
-        lane_kgrp = fx.get(thr_coord, 2)
-        lane16 = fx.get(thr_coord, 3)
+        thr_coord = idx2crd(tx, layout_thr)
+        wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
+            fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3))
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
@@ -200,7 +220,7 @@ def compile_wmma_gemm_tdm(
         # --- Epilogue setup ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
         n_stride = arith.index(N)
-        c_nrec = m_idx * n_stride * arith.index(4)
+        c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
         # --- TDM async copy helpers (MCAST-aware) ---
@@ -302,72 +322,74 @@ def compile_wmma_gemm_tdm(
                 results.append(v)
             return vector.shuffle(results[0], results[1], list(range(16)))
 
-        # --- K-subtile load/compute helpers ---
-        # Number of LDS loads per K-subtile:
-        # B frags: wmma_n_rep * 2 (ds_load_tr16_b128), A frags: wmma_m_rep * 2
-        LOADS_PER_SUBTILE = (wmma_m_rep + wmma_n_rep) * 2
+        # --- K-subtile compute (A-streaming pipeline) ---
+        def _load_b_frags(b_lds_buffer, b_bases, ks):
+            """Load all B fragments for one K-subtile (no wait)."""
+            return [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
+                    for wn in range_constexpr(wmma_n_rep)]
 
-        def load_k_subtile_frags(a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks):
-            """Batch-load all A and B fragments for one K-subtile (no wait).
+        def _a_streaming_compute(accs, a_buf, a_bases, b_frags, ks,
+                                 emit_filler=None, next_b_info=None):
+            """Stream A fragments per-wm group, interleaved with WMMA.
 
-            All base addresses are precomputed by _precompute_{a,b}_lane_bases.
-            ks is the K-subtile index (compile-time constant).
+            B frags are pre-loaded and reused across all wm groups.
+            Next A frag is pre-loaded during current wm's WMMA to hide
+            ds_load latency behind WMMA execution.
+
+            next_b_info: optional (b_buf, b_bases, next_ks) — issues B loads
+                         for the next K-subtile during last wm's WMMAs.
+                         When set, returns (accs, next_b_frags).
             """
-            b_frags = [load_wmma_frag_tr(b_lds_buffer, b_bases[wn], ks)
-                for wn in range_constexpr(wmma_n_rep)]
-
-            a_frags = [load_wmma_frag(a_lds_buffer, a_bases[wm], ks)
-                for wm in range_constexpr(wmma_m_rep)]
-
-            return a_frags, b_frags
-
-        def do_k_subtile_wmma(a_frags, b_frags, accs):
-            """Execute all WMMAs for one K-subtile using pre-loaded fragments."""
+            next_b_frags = None
+            a_frag = load_wmma_frag(a_buf, a_bases[0], ks)
             for wm in range_constexpr(wmma_m_rep):
+                is_last = (wm == wmma_m_rep - 1)
+                if not is_last:
+                    a_next = load_wmma_frag(a_buf, a_bases[wm + 1], ks)
+                if is_last:
+                    rocdl.s_wait_dscnt(0)
+                    if emit_filler is not None:
+                        rocdl.sched_barrier(0)
+                        emit_filler()
+                    if next_b_info is not None:
+                        nb_buf, nb_bases, nb_ks = next_b_info
+                        next_b_frags = _load_b_frags(nb_buf, nb_bases, nb_ks)
+                else:
+                    rocdl.s_wait_dscnt(2)
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
                     accs[idx] = wmma_op(
                         T.vec(8, T.f32),
-                        b_frags[wn], a_frags[wm],
-                        accs[idx],
+                        b_frags[wn], a_frag, accs[idx],
                         signA=False, signB=False, modC=0,
                         reuseA=False, reuseB=False,
                     ).result
+                if not is_last:
+                    a_frag = a_next
+            if next_b_info is not None:
+                return accs, next_b_frags
             return accs
 
-        # --- Compute on one LDS buffer (K-subtile pipelined) ---
+        # --- Compute on one LDS buffer (A-streaming K-subtile pipeline) ---
         def compute_tile(accs_in, lds_a_ptr, lds_b_ptr, emit_filler=None):
             current_accs = list(accs_in)
-
-            # Precompute all lane bases once per tile
-            a_lds_buffer, a_bases = _precompute_a_lane_bases(lds_a_ptr)
-            b_lds_buffer, b_bases = _precompute_b_lane_bases(lds_b_ptr)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a_ptr)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b_ptr)
 
             if k_wmma_steps == 1:
-                a_frags, b_frags = load_k_subtile_frags(
-                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(a_frags, b_frags, current_accs)
+                b_frags = _load_b_frags(b_buf, b_bases, 0)
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, b_frags, 0,
+                    emit_filler=emit_filler)
             else:
-                # Prologue: batch-load K-subtile 0
-                prev_a, prev_b = load_k_subtile_frags(
-                    a_lds_buffer, a_bases, b_lds_buffer, b_bases, 0)
-
-                # Main K-loop: overlap load[ks+1] with compute[ks]
+                prev_b = _load_b_frags(b_buf, b_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
-                    next_a, next_b = load_k_subtile_frags(
-                        a_lds_buffer, a_bases, b_lds_buffer, b_bases, ks + 1)
-                    rocdl.s_wait_dscnt(LOADS_PER_SUBTILE)
-                    current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
-                    prev_a, prev_b = next_a, next_b
-
-                rocdl.s_wait_dscnt(0)
-                if emit_filler is not None:
-                    rocdl.sched_barrier(0)
-                    emit_filler()
-                current_accs = do_k_subtile_wmma(prev_a, prev_b, current_accs)
+                    current_accs, prev_b = _a_streaming_compute(
+                        current_accs, a_buf, a_bases, prev_b, ks,
+                        next_b_info=(b_buf, b_bases, ks + 1))
+                current_accs = _a_streaming_compute(
+                    current_accs, a_buf, a_bases, prev_b,
+                    k_wmma_steps - 1, emit_filler=emit_filler)
 
             return current_accs
 
@@ -375,19 +397,39 @@ def compile_wmma_gemm_tdm(
         def hot_loop_scheduler():
             rocdl.sched_barrier(0)
 
-        # --- Epilogue: vectorized buffer_store_b128 ---
+        # --- LDS store helper ---
+        def _lds_store_b128(lds_buffer, byte_offset, data):
+            """Store 16 bytes to LDS at given byte offset via ds_store_b128."""
+            from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
+            lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
+            raw_memref = arith.unwrap(lds_buffer)
+            lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
+            from flydsl.expr.arith import ArithValue as _AV
+            total_byte = _AV(lds_base) + byte_offset
+            addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
+            ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
+            llvm_dialect.store(data, ptr_val)
+
+        # --- Epilogue helpers ---
+        _half_out = out_dtype in ("f16", "bf16")
+        _out_elem = T.f16 if out_dtype == "f16" else (T.bf16 if out_dtype == "bf16" else None)
+
         def epilogue_prepare_addrs():
-            """Precompute all epilogue store addresses (VALU only, no stores). """
+            """Precompute all epilogue store addresses (VALU only, no stores)."""
             addrs = []
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
                     col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
                                 + lane_kgrp * arith.index(8))
-                    for half in range_constexpr(2):
-                        col = col_base + arith.index(half * 4)
-                        c_off = row * n_stride + col
-                        addrs.append(c_off)
+                    if _half_out:
+                        c_off_bytes = (row * n_stride + col_base) * arith.index(elem_bytes_d)
+                        addrs.append(c_off_bytes)
+                    else:
+                        for half in range_constexpr(2):
+                            col = col_base + arith.index(half * 4)
+                            c_off = row * n_stride + col
+                            addrs.append(c_off)
             return addrs
 
         def epilogue_stores(final_accs, addrs):
@@ -396,36 +438,59 @@ def compile_wmma_gemm_tdm(
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
-                    for half in range_constexpr(2):
-                        vals = [vector.extract(
-                            final_accs[idx],
-                            static_position=[half * 4 + vi],
-                            dynamic_position=[])
-                            for vi in range_constexpr(4)]
-                        vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                        buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
+                    if _half_out:
+                        h_vec = arith.trunc_f(
+                            T.vec(8, _out_elem), final_accs[idx])
+                        i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
+                        buffer_ops.buffer_store(
+                            i32_vec, c_rsrc, addrs[addr_idx],
+                            offset_is_bytes=True)
                         addr_idx += 1
+                    else:
+                        for half in range_constexpr(2):
+                            vals = [vector.extract(
+                                final_accs[idx],
+                                static_position=[half * 4 + vi],
+                                dynamic_position=[])
+                                for vi in range_constexpr(4)]
+                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+                            buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
+                            addr_idx += 1
 
-        # --- Pipeline helpers ---
-        def wait_and_barrier(outstanding=0):
-            tdm_ops.tensor_wait(outstanding)
-            gpu.barrier()
+        def epilogue_lds_stores(final_accs, d_buf, d_base):
+            """Write accumulators to D output LDS via ds_store_b128."""
+            for wm in range_constexpr(wmma_m_rep):
+                for wn in range_constexpr(wmma_n_rep):
+                    idx = wm * wmma_n_rep + wn
+                    if _half_out:
+                        h_vec = arith.trunc_f(
+                            T.vec(8, _out_elem), final_accs[idx])
+                        i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
+                        imm_off = (wm * WMMA_M * lds_d_row_stride
+                                   + wn * WMMA_N * elem_bytes_d)
+                        _lds_store_b128(
+                            d_buf, d_base + arith.index(imm_off), _raw(i32_vec))
+                    else:
+                        for half in range_constexpr(2):
+                            vals = [vector.extract(
+                                final_accs[idx],
+                                static_position=[half * 4 + vi],
+                                dynamic_position=[])
+                                for vi in range_constexpr(4)]
+                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+                            imm_off = (wm * WMMA_M * lds_d_row_stride
+                                       + wn * WMMA_N * 4 + half * 16)
+                            _lds_store_b128(
+                                d_buf, d_base + arith.index(imm_off), _raw(vec4))
 
-        def wait_and_cluster_barrier(outstanding=0):
-            """Fused WG barrier + cluster sync: reduces instruction overhead
-            by issuing the cluster signal while tensor_wait is still draining,
-            then waiting for both to complete."""
+        # --- Pipeline fence ---
+        def pipeline_fence(outstanding=0):
+            """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline. """
             tdm_ops.tensor_wait(outstanding)
             if use_cluster:
                 gpu.cluster_barrier()
             else:
                 gpu.barrier()
-
-        def _compute_and_schedule(accs_in, lds_a, lds_b):
-            rocdl.sched_barrier(0)
-            accs_out = compute_tile(accs_in, lds_a, lds_b)
-            hot_loop_scheduler()
-            return accs_out
 
         _effective_l2_pf = l2_prefetch_distance
         if use_cluster and l2_prefetch_distance > 0:
@@ -459,16 +524,52 @@ def compile_wmma_gemm_tdm(
         stages_a_mem = [stages_a[i].get() for i in range_constexpr(num_buffers)]
         stages_b_mem = [stages_b[i].get() for i in range_constexpr(num_buffers)]
 
+        # D output LDS setup for TDM store epilogue
+        if use_tdm_store:
+            d_lds_base_ptr = base_ptrs[d_reuse_stage]
+            d_lds_f16_count = total_d_bytes // elem_bytes
+            d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty,
+                             shape=(d_lds_f16_count,))
+            d_lds_buffer = _get_lds_memref(d_smem)
+
+            warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) \
+                * arith.index(warp_d_bytes)
+            d_lane_base = (warp_lds_off
+                           + lane16 * arith.index(lds_d_row_stride)
+                           + lane_kgrp * arith.index(8 * elem_bytes_d))
+
+            wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
+            d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) \
+                + arith.index(d_output_off)
+
+            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) \
+                * arith.index(warp_tile_m)
+            warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) \
+                * arith.index(warp_tile_n)
+
+            d_desc = tdm_ops.make_tensor_descriptor_2d(
+                global_ptr=arg_c,
+                lds_memref=d_lds_base_ptr,
+                global_offset=(blk_m + warp_m_off_sgpr,
+                               blk_n + warp_n_off_sgpr),
+                tensor_shape=(warp_tile_m, warp_tile_n),
+                strides=(N, 1),
+                tile_shape=(warp_tile_m, warp_tile_n),
+                elem_bytes=elem_bytes_d,
+                pad_interval=warp_tile_n,
+                pad_amount=LDS_PAD_D_BYTES // elem_bytes_d,
+                num_warps=1,
+                lds_byte_offset=d_warp_off_sgpr,
+                for_store=True,
+            )
+
         # Prologue: load first (num_buffers - 1) tiles into stages 0..(num_buffers-2)
         for i in range_constexpr(pre_loaded):
             copy_a_to_lds(arith.index(i * tile_k), stages_a_mem[i])
             copy_b_to_lds(arith.index(i * tile_k), stages_b_mem[i])
-        wait_and_barrier(outstanding=2 * (num_buffers - 2))
+        pipeline_fence(outstanding=2 * (num_buffers - 2))
 
-        # Main loop: each iteration covers (num_buffers) K-tiles
-        # Sub-phase s: load next tile (MCAST), compute current tile, then barrier
-        # The last sub-phase uses wait_and_cluster_barrier to fuse the WG
-        # barrier with cluster sync for the NEXT iteration's MCAST loads.
+        # Main loop: each iteration covers num_buffers K-tiles
         main_end = loop_iters * num_buffers * tile_k
 
         if loop_iters > 0:
@@ -480,16 +581,14 @@ def compile_wmma_gemm_tdm(
                     copy_a_to_lds(iv + arith.index(_load_k_off), stages_a_mem[_load_stage])
                     copy_b_to_lds(iv + arith.index(_load_k_off), stages_b_mem[_load_stage])
                     _l2_prefetch(iv + arith.index(s * tile_k))
-                    accs_in = _compute_and_schedule(accs_in, stages_a[s], stages_b[s])
-                    if s == num_buffers - 1:
-                        wait_and_cluster_barrier(outstanding=2)
-                    else:
-                        wait_and_barrier(outstanding=2)
+                    rocdl.sched_barrier(0)
+                    accs_in = compute_tile(accs_in, stages_a[s], stages_b[s])
+                    hot_loop_scheduler()
+                    pipeline_fence(outstanding=2 * (num_buffers - 2))
                 results = yield list(accs_in)
             accs = list(results)
 
         # Tail: handle remaining tiles using the compile-time plan
-        # outstanding=-1 → last step: use compute_tile (no barrier).
         if loop_iters == 0 and use_cluster:
             gpu.cluster_barrier()
         _extra_j = 0
@@ -500,27 +599,36 @@ def compile_wmma_gemm_tdm(
                 copy_b_to_lds(arith.index(_k_off), stages_b_mem[_load_stage])
                 _extra_j += 1
             if _outstanding == -1:
-                epi_addrs_box = [None]
-
-                def _emit_epi_addrs():
-                    epi_addrs_box[0] = epilogue_prepare_addrs()
-
-                accs = compute_tile(
-                    accs, stages_a[_compute_stage], stages_b[_compute_stage],
-                    emit_filler=_emit_epi_addrs)
-            else:
-                accs = _compute_and_schedule(
-                    accs, stages_a[_compute_stage], stages_b[_compute_stage])
-                if use_cluster and _load_stage is not None:
-                    wait_and_cluster_barrier(outstanding=_outstanding)
+                if use_tdm_store:
+                    accs = compute_tile(
+                        accs, stages_a[_compute_stage], stages_b[_compute_stage])
                 else:
-                    wait_and_barrier(outstanding=_outstanding)
+                    epi_addrs_box = [None]
 
-        epilogue_stores(accs, epi_addrs_box[0])
+                    def _emit_epi_addrs():
+                        epi_addrs_box[0] = epilogue_prepare_addrs()
 
-    cache_tag = (in_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
+                    accs = compute_tile(
+                        accs, stages_a[_compute_stage], stages_b[_compute_stage],
+                        emit_filler=_emit_epi_addrs)
+            else:
+                rocdl.sched_barrier(0)
+                accs = compute_tile(
+                    accs, stages_a[_compute_stage], stages_b[_compute_stage])
+                hot_loop_scheduler()
+                pipeline_fence(outstanding=_outstanding)
+
+        if use_tdm_store:
+            epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
+            rocdl.s_wait_dscnt(0)
+            tdm_ops.tensor_store_2d(d_desc)
+            tdm_ops.tensor_wait(0)
+        else:
+            epilogue_stores(accs, epi_addrs_box[0])
+
+    cache_tag = (in_dtype, out_dtype, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                  num_buffers, effective_waves_per_eu, l2_prefetch_distance,
-                 cluster_m, cluster_n)
+                 use_tdm_store, cluster_m, cluster_n)
 
     @flyc.jit
     def launch_wmma_gemm_tdm(

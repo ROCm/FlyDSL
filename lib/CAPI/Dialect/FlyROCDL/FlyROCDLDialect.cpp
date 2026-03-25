@@ -124,3 +124,4 @@ int32_t mlirFlyROCDLCopyOpCDNA3BufferCopyTypeGetBitSize(MlirType type) {
 //===----------------------------------------------------------------------===//
 
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
+void mlirRegisterFlyROCDLClusterAttrPass(void) { mlir::registerFlyROCDLClusterAttrPass(); }

@@ -27,10 +27,8 @@ def _arch_from_rocm_agent_enumerator(timeout_s: int = 5) -> Optional[str]:
 
 @functools.lru_cache(maxsize=None)
 def get_rocm_arch(timeout_s: int = 5) -> str:
-    """Best-effort ROCm GPU arch string (e.g. 'gfx942') without torch."""
-    env = (os.environ.get("FLYDSL_GPU_ARCH")
-        or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
-    )
+    """Best-effort ROCm GPU arch string (e.g. 'gfx942')."""
+    env = os.environ.get("FLYDSL_GPU_ARCH") or os.environ.get("HSA_OVERRIDE_GFX_VERSION")
     if env:
         if env.startswith("gfx"):
             return env

@@ -381,11 +381,11 @@ def wmma_scale_f32_16x16x128_f8f6f4(result_type, a, b, c, scaleA, scaleB,
     """
     if _ods_wmma_scale_f32_16x16x128_f8f6f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_16x16x128_f8f6f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_wmma_operand(a, loc=loc)
+    b_v = _unwrap_wmma_operand(b, loc=loc)
+    c_v = _unwrap_wmma_operand(c, loc=loc)
+    sA = _unwrap_wmma_operand(scaleA, loc=loc)
+    sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_16x16x128_f8f6f4(
         result_type, a_v, b_v, c_v, sA, sB,
         fmtA=fmtA, fmtB=fmtB, modC=modC,
@@ -410,14 +410,19 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
         c: vector<16xf32> (32x16 FP32 accumulator)
         scaleA: i32 (A scale VGPR)
         scaleB: i32 (B scale VGPR)
+
+    scaleAType/scaleBType: lane half-select (0=lanes 0-15, 1=lanes 16-31)
+        — maps to VOP3PX2 scale_op_sel bits (OPSEL)
+    fmtScaleA/fmtScaleB: scale data format (0=E8M0, 2=E4M3)
+        — maps to VOP3PX2 neg_lo/neg_hi bits (repurposed)
     """
     if _ods_wmma_scale_f32_32x16x128_f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_32x16x128_f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_wmma_operand(a, loc=loc)
+    b_v = _unwrap_wmma_operand(b, loc=loc)
+    c_v = _unwrap_wmma_operand(c, loc=loc)
+    sA = _unwrap_wmma_operand(scaleA, loc=loc)
+    sB = _unwrap_wmma_operand(scaleB, loc=loc)
     return _ods_wmma_scale_f32_32x16x128_f4(
         result_type, a_v, b_v, c_v, sA, sB,
         modC=modC,
@@ -426,6 +431,8 @@ def wmma_scale_f32_32x16x128_f4(result_type, a, b, c, scaleA, scaleB,
         reuseA=reuseA, reuseB=reuseB,
         loc=loc, ip=ip,
     ).result
+
+
 def wave_id():
     """Get wave-id-in-workgroup as SGPR (via TTMP8[29:25]).
 
