@@ -419,6 +419,39 @@ def cosize(layout, loc=None, ip=None):
     return result
 
 
+import re as _re
+
+
+def _parse_static_layout(layout):
+    """Extract (shapes, strides) from a static flat layout.
+
+    Returns (shapes: list[int], strides: list[int]) if layout is fully static
+    and flat (depth=1). Returns None otherwise.
+    """
+    if not isinstance(layout, ir.Value):
+        return None
+    try:
+        ly_ty = LayoutType(layout.type)
+    except Exception:
+        return None
+    if not ly_ty.is_static or ly_ty.depth != 1:
+        return None
+    shape_ty = IntTupleType(ly_ty.shape)
+    stride_ty = IntTupleType(ly_ty.stride)
+
+    def _extract_values(t):
+        m = _re.search(r"\(([^()]+)\)", str(t))
+        if m:
+            return [int(x.strip()) for x in m.group(1).split(",")]
+        return [t.static_value] if t.is_leaf and t.is_static else None
+
+    shapes = _extract_values(shape_ty)
+    strides = _extract_values(stride_ty)
+    if shapes is None or strides is None:
+        return None
+    return shapes, strides
+
+
 def _to_i32(v):
     """Cast index-type ir.Value to i32 (required by fly.make_int_tuple)."""
     if isinstance(v, ir.Value) and isinstance(v.type, ir.IndexType):
@@ -428,6 +461,27 @@ def _to_i32(v):
 
 @traced_op
 def crd2idx(crd, layout, loc=None, ip=None):
+    # Fast path: static flat layout + coordinate is Python list/tuple
+    parsed = _parse_static_layout(layout)
+    if parsed is not None and isinstance(crd, (list, tuple)):
+        _, strides = parsed
+        result = None
+        for coord_v, stride_v in zip(crd, strides):
+            if stride_v == 0:
+                continue
+            cv = coord_v
+            if isinstance(cv, ir.Value) and not isinstance(cv.type, ir.IndexType):
+                cv = _arith.IndexCastOp(T.index(), cv).result
+            if stride_v == 1:
+                term = cv
+            else:
+                term = _arith.MulIOp(cv, _arith.ConstantOp(T.index(), stride_v).result).result
+            result = term if result is None else _arith.AddIOp(result, term).result
+        if result is None:
+            result = _arith.ConstantOp(T.index(), 0).result
+        return result
+
+    # Fallback: fly dialect path
     if not isinstance(crd, ir.Value):
         if isinstance(crd, (list, tuple)):
             crd = tuple(_to_i32(c) for c in crd)
@@ -438,6 +492,31 @@ def crd2idx(crd, layout, loc=None, ip=None):
 
 @traced_op
 def idx2crd(idx, layout, loc=None, ip=None):
+    # Fast path: static flat layout -> pure arith (divui/remui on index type)
+    parsed = _parse_static_layout(layout)
+    if parsed is not None:
+        shapes, strides = parsed
+        if isinstance(idx, ir.Value) and not isinstance(idx.type, ir.IndexType):
+            idx = _arith.IndexCastOp(T.index(), idx).result
+        ndims = len(strides)
+        ordered = sorted(
+            [(i, s, sz) for i, (s, sz) in enumerate(zip(strides, shapes)) if s != 0],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        coords = [None] * ndims
+        remaining = idx
+        for i, stride_val, size_val in ordered:
+            c = _arith.DivUIOp(remaining, _arith.ConstantOp(T.index(), stride_val).result).result
+            if size_val is not None:
+                c = _arith.RemUIOp(c, _arith.ConstantOp(T.index(), size_val).result).result
+            coords[i] = c
+        for i in range(ndims):
+            if coords[i] is None:
+                coords[i] = remaining
+        return coords
+
+    # Fallback: fly dialect path
     if isinstance(idx, ir.Value) and not str(idx.type).startswith("!fly.int_tuple"):
         idx = _to_i32(idx)
         IntTupleTy, dyncElems = fly.infer_int_tuple_type(idx)

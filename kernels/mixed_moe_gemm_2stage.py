@@ -32,6 +32,7 @@ from flydsl._mlir.dialects.arith import CmpIPredicate
 from kernels.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
+    crd2idx,
     lds_store_16b_xor16,
     lds_store_8b_xor16,
     lds_store_4b_xor16,
@@ -42,7 +43,6 @@ from kernels.mfma_preshuffle_pipeline import (
     swizzle_xor16,
 )
 from kernels.mfma_epilogues import c_shuffle_epilog, mfma_epilog
-from kernels.layout_utils import crd2idx, idx2crd, get as layout_get
 
 import functools
 
@@ -640,12 +640,12 @@ def compile_mixed_moe_gemm1(
                         return parts
 
                     # tx -> wave/lane (GEMM-style decomposition).
-                    coord_wl = idx2crd(tx, layout_tx_wave_lane)
-                    wave_id = layout_get(coord_wl, 0)
-                    lane_id = layout_get(coord_wl, 1)
-                    coord_l16 = idx2crd(lane_id, layout_lane16)
-                    lane_div_16 = layout_get(coord_l16, 0)
-                    lane_mod_16 = layout_get(coord_l16, 1)
+                    coord_wl = fx.idx2crd(tx, layout_tx_wave_lane)
+                    wave_id = fx.get(coord_wl, 0)
+                    lane_id = fx.get(coord_wl, 1)
+                    coord_l16 = fx.idx2crd(lane_id, layout_lane16)
+                    lane_div_16 = fx.get(coord_l16, 0)
+                    lane_mod_16 = fx.get(coord_l16, 1)
 
                     # Match GEMM naming/pattern: row in LDS is lane_mod_16, and col base is lane_div_16*16B (KPackBytes=16).
                     row_a_lds = lane_mod_16
@@ -690,14 +690,14 @@ def compile_mixed_moe_gemm1(
                         col_g_list.append(out_col)
 
                         gate_row_w = expert_off_idx + out_col
-                        gate_coord_n = idx2crd(gate_row_w, layout_n_blk_intra)
-                        gate_n_blk_list.append(layout_get(gate_coord_n, 0))
-                        gate_n_intra_list.append(layout_get(gate_coord_n, 1))
+                        gate_coord_n = fx.idx2crd(gate_row_w, layout_n_blk_intra)
+                        gate_n_blk_list.append(fx.get(gate_coord_n, 0))
+                        gate_n_intra_list.append(fx.get(gate_coord_n, 1))
 
                         up_row_w = gate_row_w + inter_idx
-                        up_coord_n = idx2crd(up_row_w, layout_n_blk_intra)
-                        up_n_blk_list.append(layout_get(up_coord_n, 0))
-                        up_n_intra_list.append(layout_get(up_coord_n, 1))
+                        up_coord_n = fx.idx2crd(up_row_w, layout_n_blk_intra)
+                        up_n_blk_list.append(fx.get(up_coord_n, 0))
+                        up_n_intra_list.append(fx.get(up_coord_n, 1))
 
                     # --- B Load Logic (K64) - shared layout with preshuffle GEMM ---
                     def load_b_packs_k64(base_k, ku: int, n_blk, n_intra):
@@ -888,8 +888,7 @@ def compile_mixed_moe_gemm1(
                             if elem_bytes == 1
                             else (col_base_swz_bytes / arith.index(2))
                         )
-                        # Pass as list so layout_utils.crd2idx uses static arith path
-                        idx_a16 = crd2idx([curr_row_a_lds, col_base_swz], layout_lds)
+                        idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
                         idx_a16 = idx_a16 + lds_base
                         loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                         a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
@@ -2216,12 +2215,12 @@ def compile_mixed_moe_gemm2(
                     return parts
 
                 # tx -> wave/lane (GEMM-style decomposition).
-                coord_wl = idx2crd(tx, layout_tx_wave_lane)
-                wave_id = layout_get(coord_wl, 0)
-                lane_id = layout_get(coord_wl, 1)
-                coord_l16 = idx2crd(lane_id, layout_lane16)
-                lane_div_16 = layout_get(coord_l16, 0)
-                lane_mod_16 = layout_get(coord_l16, 1)
+                coord_wl = fx.idx2crd(tx, layout_tx_wave_lane)
+                wave_id = fx.get(coord_wl, 0)
+                lane_id = fx.get(coord_wl, 1)
+                coord_l16 = fx.idx2crd(lane_id, layout_lane16)
+                lane_div_16 = fx.get(coord_l16, 0)
+                lane_mod_16 = fx.get(coord_l16, 1)
 
                 row_a_lds = lane_mod_16
 
@@ -2255,9 +2254,9 @@ def compile_mixed_moe_gemm2(
                     c_offset = arith.constant(offset, index=True)
                     global_n = by_n + n_tile_base + c_offset + lane_mod_16
                     row_w = expert_off_idx + global_n
-                    coord_n = idx2crd(row_w, layout_n_blk_intra)
-                    n_blk_list.append(layout_get(coord_n, 0))
-                    n_intra_list.append(layout_get(coord_n, 1))
+                    coord_n = fx.idx2crd(row_w, layout_n_blk_intra)
+                    n_blk_list.append(fx.get(coord_n, 0))
+                    n_intra_list.append(fx.get(coord_n, 1))
 
                 m_repeat = tile_m // 16
                 k_unroll = tile_k_bytes // 128  # K64-byte micro-step (2x MFMA)
@@ -2428,8 +2427,7 @@ def compile_mixed_moe_gemm2(
                         if elem_bytes == 1
                         else (col_base_swz_bytes / arith.index(2))
                     )
-                    # Pass as list so layout_utils.crd2idx uses static arith path
-                    idx_a16 = crd2idx([curr_row_a_lds, col_base_swz], layout_lds)
+                    idx_a16 = crd2idx((curr_row_a_lds, col_base_swz), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
