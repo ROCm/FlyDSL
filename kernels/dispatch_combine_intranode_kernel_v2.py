@@ -47,6 +47,11 @@ from flydsl.expr.lowlevel import (
     load_f32_at,
     load_i64_at,
     store_i32_at,
+    load_i32_global_at,
+    load_f32_global_at,
+    load_i64_global_at,
+    store_i32_global_at,
+    atomic_add_i32_global_at,
     store_i32_global,
     store_i32_system,
     store_i32_shmem,
@@ -162,12 +167,12 @@ def make_dispatch_kernel(
             i = idx_to_i32(i)
             src_tok  = divui(i, experts_per_token)
             j        = remui(i, experts_per_token)
-            dest_exp = load_i32_at(addr_idx, i)
-            dest_pe  = divui(dest_exp, experts_per_rank)
-
-            # 去重检测：ballot 判断当前 (srcTok, destPe) 是否被更早的 slot 发过
+            # 两个 idx load 并行发射（消除不必要的 s_waitcnt vmcnt(0)）
+            dest_exp = load_i32_global_at(addr_idx, i)
             safe_lane    = select_i32(icmp_ult_i32(lane, j), lane, const_i32(0))
-            lane_exp     = load_i32_at(addr_idx, src_tok * experts_per_token + safe_lane)
+            lane_exp     = load_i32_global_at(addr_idx, src_tok * experts_per_token + safe_lane)
+            # divui 延后到两个 load 都发射之后
+            dest_pe      = divui(dest_exp, experts_per_rank)
             lane_pe      = divui(lane_exp, experts_per_rank)
             dup_per_lane = select_i32(
                 icmp_eq_i32(lane_pe, dest_pe),
@@ -191,7 +196,7 @@ def make_dispatch_kernel(
                     [_i32_ty], has_else=True)
                 with _IP(_if_nodup.then_block):
                     _old_tok = atomic_fetch_add_i32_global(
-                        load_i64_at(addr_p2p_tok_off, dest_pe),
+                        load_i64_global_at(addr_p2p_tok_off, dest_pe),
                         const_i32(1))
                     _scf_d.YieldOp([_lv_unwrap(_old_tok)])
                 with _IP(_if_nodup.else_block):
@@ -207,7 +212,7 @@ def make_dispatch_kernel(
             dtm_val = select_i32(is_dup, const_i32(sentinel_val),
                                   dest_pe * max_recv + dest_tok_all)
             if icmp_eq_i32(lane, const_i32(0)):
-                store_i32_at(addr_tok_map, i, dtm_val)
+                store_i32_global_at(addr_tok_map, i, dtm_val)
 
             # 仅非重复时写入 tok_id_to_src 和更新 dest_pe_ctr（lane0）
             # P2P global store（与 mori GetAs<T*>(destPe)[offset] = val 一致）
@@ -215,56 +220,62 @@ def make_dispatch_kernel(
                 if _icmp_eq_i64(dup_ballot, const_i64(0)):
                     src_enc  = rank * max_tok_per_rank + src_tok
                     store_i32_global(
-                        load_i64_at(addr_p2p_tis, dest_pe),
+                        load_i64_global_at(addr_p2p_tis, dest_pe),
                         dest_tok_all, src_enc)
                     ctr_addr = addr_dest_ctr + zext_i32_to_i64(dest_pe) * 4
-                    atomic_add_i32_at(ctr_addr, const_i32(1))
+                    atomic_add_i32_global_at(ctr_addr, const_i32(1))
 
             # 写入权重 + 索引（lanes 0..k-1，仅非重复路径）
             # P2P global store（与 mori 一致）
             if icmp_ult_i32(lane, const_i32(experts_per_token)):
                 if _icmp_eq_i64(dup_ballot, const_i64(0)):
                     wt_src   = src_tok * experts_per_token + lane
-                    wt_val   = load_f32_at(addr_wts, wt_src)
-                    ix_val   = load_i32_at(addr_idx, wt_src)
+                    wt_val   = load_f32_global_at(addr_wts, wt_src)
+                    ix_val   = load_i32_global_at(addr_idx, wt_src)
                     dst_slot = dest_tok_all * experts_per_token + lane
                     store_i32_global(
-                        load_i64_at(addr_p2p_out_wts, dest_pe),
+                        load_i64_global_at(addr_p2p_out_wts, dest_pe),
                         dst_slot, _bitcast_f32_to_i32(wt_val))
                     store_i32_global(
-                        load_i64_at(addr_p2p_out_idx, dest_pe),
+                        load_i64_global_at(addr_p2p_out_idx, dest_pe),
                         dst_slot, ix_val)
 
             # 写入 token embedding（inp_tok 不在 shmem heap，用 XGMI 直接写）
-            tok_remote = load_i64_at(addr_p2p_out_tok, dest_pe) + \
+            # 优化 1: is_dup 时 copy_end == lane4，循环零迭代（等价于 mori 的 continue）
+            # 优化 2: stride=512，每次先发 2 个 global_load_dwordx4 再 2 个 store，隐藏内存延迟
+            tok_remote = load_i64_global_at(addr_p2p_out_tok, dest_pe) + \
                 zext_i32_to_i64(dest_tok_all * hidden_dim * hidden_elem_size)
             inp_src_b  = addr_inp_tok + zext_i32_to_i64(
                 src_tok * hidden_dim * hidden_elem_size)
-            lane4 = lane * 4
-            for ec4 in range(as_index(lane4), as_index(n_i32), 256):
-                ec4     = idx_to_i32(ec4)
-                ec4_byt = zext_i32_to_i64(ec4) * 4
-                vec4    = load_v4i32(inp_src_b + ec4_byt)
-                if _icmp_eq_i64(dup_ballot, const_i64(0)):
-                    store_v4i32_global(vec4, tok_remote + ec4_byt)
+            lane4    = lane * 4
+            copy_end = select_i32(is_dup, lane4, const_i32(n_i32))
+            for ec4 in range(as_index(lane4), as_index(copy_end), 512):
+                ec4      = idx_to_i32(ec4)
+                ec4_byt0 = zext_i32_to_i64(ec4) * 4
+                ec4_byt1 = zext_i32_to_i64(ec4 + 256) * 4
+                vec4_0   = load_v4i32_global(inp_src_b + ec4_byt0)
+                vec4_1   = load_v4i32_global(inp_src_b + ec4_byt1)
+                store_v4i32_global(vec4_0, tok_remote + ec4_byt0)
+                store_v4i32_global(vec4_1, tok_remote + ec4_byt1)
 
         # ── Phase 2: 栅栏 + 发送 token 数量信号 ──────────────────────────────
         # Phase 1 全部使用 XGMI P2P store（非 NIC put），无需 quiet。
         # sync_threads + atomicAdd barrier 确保本 block 所有 warp 的 P2P store 已完成。
         sync_threads()
         if icmp_eq_i32(tid, const_i32(0)):
-            atomic_add_i32_at(addr_disp_bar, const_i32(1))
+            atomic_add_i32_global_at(addr_disp_bar, const_i32(1))
 
         rtn_local_off = zext_i32_to_i64(const_i32(rank)) * 4
         for dest_pe in range(as_index(lane), as_index(npes), 64):
             dest_pe = idx_to_i32(dest_pe)
             if icmp_eq_i32(gw_id, const_i32(0)):
                 mori_shmem.int32_wait_until_equals(addr_disp_bar, block_num)
-                store_i32_at(addr_disp_bar, const_i32(0), const_i32(0))
-                nsig       = load_i32_at(addr_dest_ctr, dest_pe) + 1
-                rtn_remote = load_i64_at(addr_p2p_recv_num, dest_pe) + rtn_local_off
+                store_i32_global_at(addr_disp_bar, const_i32(0), const_i32(0))
+                nsig       = load_i32_global_at(addr_dest_ctr, dest_pe) + 1
+                rtn_remote = load_i64_global_at(addr_p2p_recv_num, dest_pe) + rtn_local_off
                 mori_shmem.int32_wait_until_equals(rtn_remote, 0)
-                fence_one_as_seq_cst()
+                # fence 已移除：barrier wait 已保证 Phase 1 P2P store 可见性
+                # mori 同样只用 AtomicStoreRelaxedSystem，无额外 fence
                 store_i32_system(rtn_remote, const_i32(0), nsig)
 
         # ── Phase 3: 接收信号，累计 total_recv ───────────────────────────────
@@ -275,12 +286,12 @@ def make_dispatch_kernel(
                 sig_val  = mori_shmem.int32_wait_until_greater_than(rtn_src, 0)
                 recv_cnt = sig_val - 1
                 store_i32_system(rtn_src, const_i32(0), const_i32(0))
-                atomic_add_i32_at(addr_total_rv, recv_cnt)
-                store_i32_at(addr_dest_ctr, src_pe, const_i32(0))
+                atomic_add_i32_global_at(addr_total_rv, recv_cnt)
+                store_i32_global_at(addr_dest_ctr, src_pe, const_i32(0))
 
         if icmp_eq_i32(gw_id, const_i32(0)):
             if icmp_eq_i32(lane, const_i32(0)):
-                store_i32_at(addr_tok_off, const_i32(0), const_i32(0))
+                store_i32_global_at(addr_tok_off, const_i32(0), const_i32(0))
 
     return ep_dispatch_intranode
 
