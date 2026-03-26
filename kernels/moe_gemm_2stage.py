@@ -1271,22 +1271,29 @@ def compile_moe_gemm1(
                     for k_iv in range(arith.index(0), c_k_main2, c256):
                         # ---- stage 0: Load High(N), Compute Low(N) ----
                         next_k1 = k_iv + c128
-                        x_regs_ping = load_x_tile(next_k1)
-                        
-                        # Load high half of current K256 chunk
-                        raw_gate_ping = load_b_half_tilek128_raw(1, qs_gate, qz_gate, k_iv, n_blk_gate, n_intra_gate)
-                        raw_up_ping = load_b_half_tilek128_raw(1, qs_up, qz_up, k_iv, n_blk_up, n_intra_up)
 
                         b_gate_pong = dequant_b_half_tilek128(raw_gate_pong, 0)
                         b_up_pong = dequant_b_half_tilek128(raw_up_pong, 0)
 
                         rocdl.sched_barrier(0)
 
+                        x_regs_ping = load_x_tile(next_k1)
+                        
+                        # Load high half of current K256 chunk
+                        raw_gate_ping = load_b_half_tilek128_raw(1, qs_gate, qz_gate, k_iv, n_blk_gate, n_intra_gate)
+                        raw_up_ping = load_b_half_tilek128_raw(1, qs_up, qz_up, k_iv, n_blk_up, n_intra_up)
+
                         acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
                             acc_gate, acc_up, b_gate_pong, b_up_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
                         )
                         a0_prefetch_pong = None
                         store_x_tile_to_lds(x_regs_ping, lds_base_ping)
+
+                        next_k2 = k_iv + c256
+                        # Preload qparams for NEXT K256 chunk
+                        qs_gate, qz_gate = preload_qparams_tilek128(next_k2, n_blk_gate, n_intra_gate)
+                        qs_up, qz_up = preload_qparams_tilek128(next_k2, n_blk_up, n_intra_up)
+                        
                         hot_loop_scheduler()
                         gpu.barrier()
                         
@@ -1294,22 +1301,17 @@ def compile_moe_gemm1(
                         a0_prefetch_ping = lds_load_packs_k64(row_a_lds, col_offset_base_bytes, lds_base_ping)
 
                         # ---- stage 1: Preload QParams(N+1), Load Low(N+1), Compute High(N) ----
-                        next_k2 = k_iv + c256
-                        x_regs_pong = load_x_tile(next_k2)
-                        
-                        # Preload qparams for NEXT K256 chunk
-                        qs_gate, qz_gate = preload_qparams_tilek128(next_k2, n_blk_gate, n_intra_gate)
-                        qs_up, qz_up = preload_qparams_tilek128(next_k2, n_blk_up, n_intra_up)
-                        
+
                         b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
                         b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
 
                         rocdl.sched_barrier(0)
 
+                        x_regs_pong = load_x_tile(next_k2)
+
                         # Load low half of NEXT K256 chunk
                         raw_gate_pong = load_b_half_tilek128_raw(0, qs_gate, qz_gate, next_k2, n_blk_gate, n_intra_gate)
                         raw_up_pong = load_b_half_tilek128_raw(0, qs_up, qz_up, next_k2, n_blk_up, n_intra_up)
-
 
                         acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
                             acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping,
@@ -3016,11 +3018,11 @@ def compile_moe_gemm2(
                         # ---- stage 0: Load High(N), Compute Low(N) ----
                         next_k1 = k_iv + c128
                         x_regs_ping = load_x_tile(next_k1)
+
+                        b_pong = dequant_b_half_tilek128(raw_pong, 0)
                         
                         # Load high half of current K256 chunk
                         raw_ping = load_b_half_tilek128_raw(1, qs_word, qz_word, k_iv)
-
-                        b_pong = dequant_b_half_tilek128(raw_pong, 0)
 
                         rocdl.sched_barrier(0)
 
