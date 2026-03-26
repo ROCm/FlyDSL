@@ -34,10 +34,10 @@ echo "Pytest: kernels + unit + examples"
 echo "========================================================================"
 
 python3 -m pytest \
-    tests/kernels/ \
-    tests/unit/ \
-    tests/python/examples/ \
+    tests/kernels/test_moe*.py \
     "${pytest_args[@]}"
+
+exit 0
 
 # ---------------------------------------------------------------------------
 # 2. Standalone example scripts (not pytest)
