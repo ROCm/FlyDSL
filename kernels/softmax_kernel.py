@@ -149,14 +149,14 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
 
             def _load_vec(rsrc, col_byte_off, soff=None):
                 dw = col_byte_off >> fx.Int32(2)
-                raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset_bytes=soff)
+                raw = buffer_ops.buffer_load(rsrc, dw, vec_width=vec_dwords, dtype=T.i32, soffset=soff)
                 if vec_dwords == VEC_WIDTH:
                     return raw.bitcast(vec_type_e)
                 return vector.bitcast(vec_type_e, raw)
 
             def _store_vec(data, rsrc, col_byte_off, soff=None):
                 dw = col_byte_off >> fx.Int32(2)
-                buffer_ops.buffer_store(data, rsrc, dw, soffset_bytes=soff)
+                buffer_ops.buffer_store(data, rsrc, dw, soffset=soff)
 
             # 1. Load + compute local max
             row_buffer = []
