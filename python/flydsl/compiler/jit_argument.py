@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 import torch
 
 from .._mlir._mlir_libs._fly import DLTensorAdaptor
-from ..expr.typing import Constexpr, Int32, Stream, Tensor
+from ..expr.typing import Boolean, Constexpr, Float32, Int32, Stream, Tensor
 from .protocol import DslType, JitArgument
 
 
@@ -81,7 +81,8 @@ def _is_constexpr_annotation(annotation) -> bool:
 
 def _is_type_param_annotation(annotation) -> bool:
     """Check if annotation is Type, Type[T]."""
-    return annotation is Type or get_origin(annotation) is Type
+    origin = get_origin(annotation)
+    return annotation is Type or origin is Type or origin is type
 
 
 def convert_to_jit_arguments(
@@ -214,5 +215,7 @@ def from_dlpack(
     return TensorAdaptor(tensor, assumed_align, use_32bit_stride)
 
 
+JitArgumentRegistry.register(bool)(Boolean)
 JitArgumentRegistry.register(int)(Int32)
+JitArgumentRegistry.register(float)(Float32)
 JitArgumentRegistry.register(torch.cuda.Stream)(Stream)
