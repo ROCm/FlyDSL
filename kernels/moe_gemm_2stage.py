@@ -401,49 +401,59 @@ def compile_moe_gemm1(
                 expert_off_idx = expert_idx * inter2_idx  # index
     
                 # ---- X gmem->reg prefetch (match preshuffle GEMM mapping) ----
-                # Prefer 16B buffer-load (dwordx4). If the per-thread byte count isn't divisible by
-                # 16, fall back to 8B (dwordx2) or 4B (dword) loads. For fp16 we require 16B.
+                # Prefer 16B buffer-load (dwordx4). For 1B element types, split the per-thread byte
+                # count into 16B pieces plus a final 8B/4B remainder when needed (e.g. 40B -> 16+16+8).
+                # For fp16 we still require 16B-aligned chunks only.
                 if is_f16:
                     if bytes_per_thread_x % 16 != 0:
                         raise ValueError(
                             f"[fp16] bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 16"
                         )
-                    x_load_bytes = 16
+                    x_load_bytes_plan = [16] * (bytes_per_thread_x // 16)
                 else:
-                    if bytes_per_thread_x % 16 == 0:
-                        x_load_bytes = 16
-                    elif bytes_per_thread_x % 8 == 0:
-                        x_load_bytes = 8
-                    elif bytes_per_thread_x % 4 == 0:
-                        x_load_bytes = 4
-                    else:
+                    if bytes_per_thread_x % 4 != 0:
                         raise ValueError(
                             f"bytes_per_thread_x ({bytes_per_thread_x}) must be divisible by 4 to use the dword-indexed load mapping."
                         )
-                num_x_loads = bytes_per_thread_x // x_load_bytes
-                chunk_i32 = x_load_bytes // 4  # dwords per chunk (1/2/4)
+                    x_load_bytes_plan = []
+                    rem_x_bytes = bytes_per_thread_x
+                    while rem_x_bytes >= 16:
+                        x_load_bytes_plan.append(16)
+                        rem_x_bytes -= 16
+                    if rem_x_bytes == 12:
+                        x_load_bytes_plan.extend((8, 4))
+                    elif rem_x_bytes in (8, 4):
+                        x_load_bytes_plan.append(rem_x_bytes)
+                    elif rem_x_bytes != 0:
+                        raise ValueError(
+                            f"Unsupported X load remainder {rem_x_bytes} for bytes_per_thread_x={bytes_per_thread_x}"
+                        )
+                num_x_loads = len(x_load_bytes_plan)
+                x_chunk_i32_plan = [load_bytes // 4 for load_bytes in x_load_bytes_plan]
+                x_chunk_prefix_i32 = []
+                chunk_prefix_i32 = 0
+                for chunk_i32_i in x_chunk_i32_plan:
+                    x_chunk_prefix_i32.append(chunk_prefix_i32)
+                    chunk_prefix_i32 += total_threads * chunk_i32_i
     
                 c_k_div4 = (k_in * arith.constant(int(elem_bytes), index=True)) / arith.index(4)
                 layout_x_div4 = flir.make_layout((tokens_in, c_k_div4), stride=(c_k_div4, 1))
                 tile_k_dwords = (int(tile_k) * int(elem_bytes)) // 4
                 layout_x_tile_div4 = flir.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
-                c_chunk_i32 = arith.constant(chunk_i32, index=True)
-                tx_i32_base = tx * c_chunk_i32
                 mask24 = arith.i32(0xFFFFFF)
                 # Keep i32 constants available for epilogue index math.
                 tokens_i32 = arith.index_cast(i32, tokens_in)
                 topk_i32 = arith.i32(topk)
     
                 def x_tile_chunk_coord_i32(i: int):
-                    return tile_chunk_coord_i32(
-                        flir,
-                        arith,
-                        tx_i32_base=tx_i32_base,
-                        i=i,
-                        total_threads=total_threads,
-                        layout_tile_div4=layout_x_tile_div4,
-                        chunk_i32=chunk_i32,
-                    )
+                    chunk_i32_i = x_chunk_i32_plan[i]
+                    tx_i32_base = tx * arith.constant(chunk_i32_i, index=True)
+                    chunk_off_i32 = arith.constant(x_chunk_prefix_i32[i], index=True)
+                    tile_idx_i32 = tx_i32_base + chunk_off_i32
+                    coord_local = flir.idx2crd(tile_idx_i32, layout_x_tile_div4)
+                    row_local = flir.get(coord_local, 0)
+                    col_local_i32 = flir.get(coord_local, 1)
+                    return row_local, col_local_i32
     
                 # decode token once (per thread's M-slice) and build a base row offset.
                 x_row_base_div4 = []
@@ -482,12 +492,12 @@ def compile_moe_gemm1(
                 vec4_i32 = I.vec(4, i32)
                 vec4_x = I.vec(4, x_elem)
     
-                def load_x(idx_i32):
-                    """Load `x_load_bytes` bytes from X (gmem) into regs.
+                def load_x(idx_i32, x_load_bytes_i: int):
+                    """Load `x_load_bytes_i` bytes from X (gmem) into regs.
     
                     For 16B, keep the fast dwordx4 path. For 8B/4B, use byte offsets.
                     """
-                    if x_load_bytes == 16:
+                    if x_load_bytes_i == 16:
                         idx_elem = idx_i32 if elem_bytes == 1 else (idx_i32 * arith.index(2))
                         return buffer_copy_gmem16_dwordx4(
                             flir,
@@ -500,10 +510,10 @@ def compile_moe_gemm1(
                             elem_bytes=elem_bytes,
                         )
                     idx_bytes = idx_i32 * arith.index(4)
-                    atom = atom_x_g2r8 if x_load_bytes == 8 else atom_x_g2r4
+                    atom = atom_x_g2r8 if x_load_bytes_i == 8 else atom_x_g2r4
                     view = flir.TensorView(
                         arg_x,
-                        (x_load_bytes,),
+                        (x_load_bytes_i,),
                         strides=(1,),
                         base_indices=(idx_bytes,),
                         element_type=x_elem,
@@ -512,7 +522,7 @@ def compile_moe_gemm1(
                         atom,
                         view,
                         None,
-                        alignment=x_load_bytes,
+                        alignment=x_load_bytes_i,
                         return_vector=True,
                         src_buffer_resource=x_rsrc,
                         src_buffer_offset_in_bytes=True,
@@ -523,11 +533,12 @@ def compile_moe_gemm1(
                     base_k_div4 = (base_k * arith.constant(int(elem_bytes), index=True)) / arith.index(4)
                     parts = []
                     for i in range_constexpr(num_x_loads):
+                        x_load_bytes_i = x_load_bytes_plan[i]
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
-                        x_vec = load_x(idx_i32)
-                        if x_load_bytes == 16:
+                        x_vec = load_x(idx_i32, x_load_bytes_i)
+                        if x_load_bytes_i == 16:
                             parts.append(vector.bitcast(vec4_i32, x_vec))
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_i == 8:
                             parts.append(vector.bitcast(vec2_i32, x_vec))
                         else:
                             parts.append(vector.bitcast(vec1_i32, x_vec))
@@ -1010,9 +1021,10 @@ def compile_moe_gemm1(
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
+                        x_load_bytes_i = x_load_bytes_plan[i]
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
-                        if x_load_bytes == 16:
+                        if x_load_bytes_i == 16:
                             lds_store_16b_xor16(
                                 flir,
                                 arith,
@@ -1030,7 +1042,7 @@ def compile_moe_gemm1(
                                 vec_part_i32x4=vec_x_in_parts[i],
                                 elem_bytes=elem_bytes,
                             )
-                        elif x_load_bytes == 8:
+                        elif x_load_bytes_i == 8:
                             lds_store_8b_xor16(
                                 flir,
                                 arith,
@@ -1266,6 +1278,8 @@ def compile_moe_gemm1(
                         b_gate_pong = dequant_b_half_tilek128(raw_gate_pong, 0)
                         b_up_pong = dequant_b_half_tilek128(raw_up_pong, 0)
 
+                        rocdl.sched_barrier(0)
+
                         acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
                             acc_gate, acc_up, b_gate_pong, b_up_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
                         )
@@ -1285,12 +1299,15 @@ def compile_moe_gemm1(
                         qs_gate, qz_gate = preload_qparams_tilek128(next_k2, n_blk_gate, n_intra_gate)
                         qs_up, qz_up = preload_qparams_tilek128(next_k2, n_blk_up, n_intra_up)
                         
+                        b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
+                        b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
+
+                        rocdl.sched_barrier(0)
+
                         # Load low half of NEXT K256 chunk
                         raw_gate_pong = load_b_half_tilek128_raw(0, qs_gate, qz_gate, next_k2, n_blk_gate, n_intra_gate)
                         raw_up_pong = load_b_half_tilek128_raw(0, qs_up, qz_up, next_k2, n_blk_up, n_intra_up)
 
-                        b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
-                        b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
 
                         acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
                             acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping,
@@ -2992,6 +3009,8 @@ def compile_moe_gemm2(
 
                         b_pong = dequant_b_half_tilek128(raw_pong, 0)
 
+                        rocdl.sched_barrier(0)
+
                         acc, _ = compute_tile_a8w4smooth_tilek128(
                             acc, b_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
                         )
@@ -3009,11 +3028,14 @@ def compile_moe_gemm2(
                         
                         # Preload qparams for NEXT K256 chunk
                         qs_word, qz_word = preload_qparams_tilek128(next_k2)
-                        
+
+                        b_ping = dequant_b_half_tilek128(raw_ping, 1)
+
+                        rocdl.sched_barrier(0)
+                                                
                         # Load low half of NEXT K256 chunk
                         raw_pong = load_b_half_tilek128_raw(0, qs_word, qz_word, next_k2)
 
-                        b_ping = dequant_b_half_tilek128(raw_ping, 1)
 
                         acc, _ = compute_tile_a8w4smooth_tilek128(
                             acc, b_ping, lds_base_ping, a0_prefetch=a0_prefetch_ping,
