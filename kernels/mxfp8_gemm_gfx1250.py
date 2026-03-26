@@ -6,13 +6,16 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, tdm_ops, vector
-from flydsl._mlir.dialects import llvm as llvm_dialect
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 from flydsl.expr import idx2crd
+from kernels.gemm_gfx1250_common import (
+    enable_wmma_pipeline, get_lds_memref, lds_load_b128, lds_load_b32,
+    pipeline_fence, store_acc_vec8_to_buffer, store_acc_vec8_to_lds,
+)
 from kernels.pipeline_utils import make_tail_plan
 
 # WMMA tile dimensions for MXFP8
@@ -127,6 +130,9 @@ def compile_mxfp8_gemm(
 
     lds_a_stride_bytes = packed_tile_k + LDS_PAD_A_BYTES
     lds_b_stride_bytes = packed_tile_k + LDS_PAD_B_BYTES
+    # Element-based strides (f16 = 2 bytes each) for vector LDS load/store
+    lds_a_stride = lds_a_stride_bytes // 2
+    lds_b_stride = lds_b_stride_bytes // 2
 
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
     lds_b_data_bytes = tile_n * lds_b_stride_bytes
@@ -174,6 +180,9 @@ def compile_mxfp8_gemm(
         warp_d_bytes = warp_tile_m * lds_d_row_stride
         total_d_bytes = num_warps * warp_d_bytes
         d_output_off = 0
+        _lds_d_stride_elems = lds_d_row_stride // 2
+        _warp_d_elems = warp_d_bytes // 2
+        _n_col_d_elems = WMMA_N * elem_bytes_d // 2
         _last_compute_stage = _raw_tail_plan[-1][1]
         d_reuse_stage = 1 if _last_compute_stage == 0 else 0
         if total_d_bytes > stage_allocators[d_reuse_stage].ptr:
@@ -196,11 +205,7 @@ def compile_mxfp8_gemm(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
-        llvm_dialect.inline_asm(
-            None, [],
-            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-            "", has_side_effects=True,
-        )
+        enable_wmma_pipeline()
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
@@ -231,11 +236,6 @@ def compile_mxfp8_gemm(
         n_stride = arith.index(N)
         c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
-
-        def _get_lds_memref(lds_ptr):
-            if isinstance(lds_ptr, SmemPtr):
-                return get_op_result_or_value(lds_ptr.get())
-            return get_op_result_or_value(lds_ptr)
 
         # --- TDM async copy helpers ---
         def copy_a_data_to_lds(k_base, lds_mem_ref):
@@ -328,41 +328,15 @@ def compile_mxfp8_gemm(
 
         elem_ty_lds = T.f16
 
-        # --- LDS load helpers ---
-        def _lds_load_b128(lds_buffer, byte_offset):
-            """Load 16 bytes from LDS at given byte offset via ds_load_b128."""
-            from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
-            lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-            raw_memref = arith.unwrap(lds_buffer)
-            lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
-            from flydsl.expr.arith import ArithValue as _AV
-            total_byte = _AV(lds_base) + byte_offset
-            addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-            ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
-            vec4_i32_ty = ir.VectorType.get([4], ir.IntegerType.get_signless(32))
-            return llvm_dialect.load(vec4_i32_ty, ptr_val)
-
-        def _lds_store_b128(lds_buffer, byte_offset, data):
-            """Store 16 bytes to LDS at given byte offset via ds_store_b128."""
-            from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
-            lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-            raw_memref = arith.unwrap(lds_buffer)
-            lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
-            from flydsl.expr.arith import ArithValue as _AV
-            total_byte = _AV(lds_base) + byte_offset
-            addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-            ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
-            llvm_dialect.store(data, ptr_val)
-
         # --- Fragment loading (FP8: 4 × ds_load_b128 → vec<16xi32>) ---
         def _precompute_a_lane_bases(lds_ptr):
-            """Precompute per-wm A fragment lane base addresses (in BYTES)."""
-            lds_buffer = _get_lds_memref(lds_ptr)
-            row_base = (warp_m_base + lane16) * arith.index(lds_a_stride_bytes)
-            k_half_off = lane_kgrp * arith.index(64)  # 64 bytes per K-half
+            """Precompute per-wm A fragment lane base addresses (in f16 elements)."""
+            lds_buffer = get_lds_memref(lds_ptr)
+            row_base = (warp_m_base + lane16) * arith.index(lds_a_stride)
+            k_half_off = lane_kgrp * arith.index(32)  # 32 elems = 64 bytes per K-half
             bases = []
             for wm in range_constexpr(wmma_m_rep):
-                base = row_base + arith.index(wm * WMMA_M * lds_a_stride_bytes) + k_half_off
+                base = row_base + arith.index(wm * WMMA_M * lds_a_stride) + k_half_off
                 bases.append(base)
             return lds_buffer, bases
 
@@ -372,24 +346,24 @@ def compile_mxfp8_gemm(
             Returns vector<16xi32> (16 VGPRs, 64 FP8 per lane).
             4 × ds_load_b128 sequential (64 bytes per K-half).
             """
-            k_byte_off = arith.index(ks * WMMA_K)  # 128 bytes per K-subtile
-            byte_off = a_lane_base + k_byte_off
-            v0 = _lds_load_b128(lds_buffer, byte_off)
-            v1 = _lds_load_b128(lds_buffer, byte_off + arith.index(16))
-            v2 = _lds_load_b128(lds_buffer, byte_off + arith.index(32))
-            v3 = _lds_load_b128(lds_buffer, byte_off + arith.index(48))
+            k_elem_off = arith.index(ks * WMMA_K // 2)  # 64 elems per K-subtile
+            elem_off = a_lane_base + k_elem_off
+            v0 = lds_load_b128(lds_buffer, elem_off)
+            v1 = lds_load_b128(lds_buffer, elem_off + arith.index(8))
+            v2 = lds_load_b128(lds_buffer, elem_off + arith.index(16))
+            v3 = lds_load_b128(lds_buffer, elem_off + arith.index(24))
             v01 = vector.shuffle(v0, v1, list(range(8)))
             v23 = vector.shuffle(v2, v3, list(range(8)))
             return vector.shuffle(v01, v23, list(range(16)))
 
         def _precompute_b_lane_bases(lds_ptr):
-            """Precompute per-wn B fragment lane base addresses (in BYTES)."""
-            lds_buffer = _get_lds_memref(lds_ptr)
-            row_base = (warp_n_base + lane16) * arith.index(lds_b_stride_bytes)
-            k_half_off = lane_kgrp * arith.index(64)  # sequential
+            """Precompute per-wn B fragment lane base addresses (in f16 elements)."""
+            lds_buffer = get_lds_memref(lds_ptr)
+            row_base = (warp_n_base + lane16) * arith.index(lds_b_stride)
+            k_half_off = lane_kgrp * arith.index(32)  # 32 elems = 64 bytes
             bases = []
             for wn in range_constexpr(wmma_n_rep):
-                base = row_base + arith.index(wn * WMMA_N * lds_b_stride_bytes) + k_half_off
+                base = row_base + arith.index(wn * WMMA_N * lds_b_stride) + k_half_off
                 bases.append(base)
             return lds_buffer, bases
 
@@ -399,21 +373,21 @@ def compile_mxfp8_gemm(
 
         # --- Scale loading ---
         def _precompute_scale_lane_bases(lds_ptr, warp_base, reps, interleaved_cols=0):
-            """Precompute scale lane bases (in BYTES).
+            """Precompute scale lane bases (in f16 elements).
 
             Original layout: [tile_m_or_n, scale_k_per_tile] bytes.
             Interleaved layout: [WMMA_M * m_or_n_warp, wmma_rep * scale_k_per_tile] bytes.
             """
-            lds_buffer = _get_lds_memref(lds_ptr)
+            lds_buffer = get_lds_memref(lds_ptr)
             if scale_preshuffle and interleaved_cols > 0:
                 warp_lds_row = warp_base / arith.index(reps) + lane16
-                base = warp_lds_row * arith.index(interleaved_cols)
-                return lds_buffer, [base]  # single base for b128 load
+                base = warp_lds_row * arith.index(interleaved_cols // 2)
+                return lds_buffer, [base]
             else:
-                row_base = (warp_base + lane16) * arith.index(scale_k_per_tile)
+                row_base = (warp_base + lane16) * arith.index(scale_k_per_tile // 2)
                 bases = []
                 for w in range_constexpr(reps):
-                    base = row_base + arith.index(w * WMMA_M * scale_k_per_tile)
+                    base = row_base + arith.index(w * WMMA_M * scale_k_per_tile // 2)
                     bases.append(base)
                 return lds_buffer, bases
 
@@ -423,30 +397,21 @@ def compile_mxfp8_gemm(
             FP8: no byte swap needed (unlike FP4's [0,2,1,3]).
             The preshuffle path already handles layout on host side.
             """
-            from flydsl._mlir.dialects import llvm as _llvm, memref as _memref
-            lds_ptr_ty = ir.Type.parse("!llvm.ptr<3>")
-            raw_memref = arith.unwrap(lds_buffer)
-            lds_base = _memref.extract_aligned_pointer_as_index(raw_memref)
-            byte_off = scale_base + arith.index(ks * SCALES_PER_WMMA)
-            from flydsl.expr.arith import ArithValue as _AV
-            total_byte = _AV(lds_base) + byte_off
-            addr_i32 = _raw(arith.index_cast(T.i32, total_byte))
-            ptr_val = _llvm.inttoptr(lds_ptr_ty, addr_i32)
-            i32_ty = ir.IntegerType.get_signless(32)
-            return llvm_dialect.load(i32_ty, ptr_val)
+            elem_off = scale_base + arith.index(ks * SCALES_PER_WMMA // 2)
+            return lds_load_b32(lds_buffer, elem_off)
 
         def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
             """Load all wmma_rep scales via ds_load_b128(s) for K-subtile *ks*.
 
             FP8: no byte swap (identity mapping, unlike FP4).
             """
-            ks_byte_off = ks * reps * SCALES_PER_WMMA
-            eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
+            ks_elem_off = ks * reps * SCALES_PER_WMMA // 2
+            eff_base = scale_base if ks_elem_off == 0 else scale_base + arith.index(ks_elem_off)
             num_loads = (reps + 3) // 4
             vecs = []
             for ld in range_constexpr(num_loads):
-                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(_lds_load_b128(lds_buffer, off))
+                off = eff_base if ld == 0 else eff_base + arith.index(ld * 8)
+                vecs.append(lds_load_b128(lds_buffer, off))
             results = []
             for i in range_constexpr(reps):
                 vi = vector.extract(vecs[i // 4], static_position=[i % 4], dynamic_position=[])
@@ -576,67 +541,29 @@ def compile_mxfp8_gemm(
                             addrs.append(c_off)
             return addrs
 
+        _half_out = out_dtype in ("bf16", "f16")
+        _out_elem = T.bf16 if out_dtype == "bf16" else (T.f16 if out_dtype == "f16" else None)
+
         def epilogue_stores(final_accs, addrs):
-            _bf16_out = out_dtype in ("bf16", "f16")
-            _out_elem = T.bf16 if out_dtype == "bf16" else (T.f16 if out_dtype == "f16" else None)
             addr_idx = 0
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
-                    if _bf16_out:
-                        bf16_vec = arith.trunc_f(
-                            T.vec(8, _out_elem), final_accs[idx])
-                        i32_vec = vector.bitcast(T.vec(4, T.i32), bf16_vec)
-                        buffer_ops.buffer_store(
-                            i32_vec, c_rsrc, addrs[addr_idx],
-                            offset_is_bytes=True)
-                        addr_idx += 1
+                    if _half_out:
+                        addr_idx += store_acc_vec8_to_buffer(
+                            final_accs[idx], c_rsrc, addrs[addr_idx],
+                            out_elem=_out_elem, offset_is_bytes=True)
                     else:
-                        for half in range_constexpr(2):
-                            vals = [vector.extract(
-                                final_accs[idx],
-                                static_position=[half * 4 + vi],
-                                dynamic_position=[])
-                                for vi in range_constexpr(4)]
-                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                            buffer_ops.buffer_store(vec4, c_rsrc, addrs[addr_idx])
-                            addr_idx += 1
+                        addr_idx += store_acc_vec8_to_buffer(
+                            final_accs[idx], c_rsrc, addrs[addr_idx:addr_idx + 2])
 
         def epilogue_lds_stores(final_accs, d_buf, d_base):
-            _out_is_f16 = out_dtype in ("bf16", "f16")
-            _out_elem = T.bf16 if out_dtype == "bf16" else (T.f16 if out_dtype == "f16" else None)
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
                     idx = wm * wmma_n_rep + wn
-                    if _out_is_f16:
-                        bf16_vec = arith.trunc_f(
-                            T.vec(8, _out_elem), final_accs[idx])
-                        i32_vec = vector.bitcast(T.vec(4, T.i32), bf16_vec)
-                        imm_off = (wm * WMMA_M * lds_d_row_stride
-                                   + wn * WMMA_N * elem_bytes_d)
-                        _lds_store_b128(
-                            d_buf, d_base + arith.index(imm_off), _raw(i32_vec))
-                    else:
-                        for half in range_constexpr(2):
-                            vals = [vector.extract(
-                                final_accs[idx],
-                                static_position=[half * 4 + vi],
-                                dynamic_position=[])
-                                for vi in range_constexpr(4)]
-                            vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                            imm_off = (wm * WMMA_M * lds_d_row_stride
-                                       + wn * WMMA_N * 4 + half * 16)
-                            _lds_store_b128(
-                                d_buf, d_base + arith.index(imm_off), _raw(vec4))
-
-        # --- Pipeline fence ---
-        def pipeline_fence(outstanding=0):
-            """Fused READY+REUSE fence for gfx1250 multi-buffer pipeline."""
-            tdm_ops.tensor_wait(outstanding)
-            if use_cluster:
-                gpu.cluster_barrier()
-            else:
-                gpu.barrier()
+                    imm = wm * WMMA_M * _lds_d_stride_elems + wn * _n_col_d_elems
+                    store_acc_vec8_to_lds(
+                        d_buf, d_base, imm, final_accs[idx], out_elem=_out_elem)
 
         _effective_l2_pf = l2_prefetch_distance
         if use_cluster and l2_prefetch_distance > 0:
@@ -691,13 +618,13 @@ def compile_mxfp8_gemm(
             d_lds_f16_count = total_d_bytes // 2
             d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds,
                              shape=(d_lds_f16_count,))
-            d_lds_buffer = _get_lds_memref(d_smem)
+            d_lds_buffer = get_lds_memref(d_smem)
 
             warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) \
-                * arith.index(warp_d_bytes)
+                * arith.index(_warp_d_elems)
             d_lane_base = (warp_lds_off
-                           + lane16 * arith.index(lds_d_row_stride)
-                           + lane_kgrp * arith.index(8 * elem_bytes_d))
+                           + lane16 * arith.index(_lds_d_stride_elems)
+                           + lane_kgrp * arith.index(4 * elem_bytes_d))
 
             wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
             d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) \
@@ -729,7 +656,8 @@ def compile_mxfp8_gemm(
                 arith.index(i * tile_k),
                 stages_a_mem[i], stages_b_mem[i],
                 stages_as_mem[i], stages_bs_mem[i])
-        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
+        pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                                   use_cluster=use_cluster)
 
         # Main loop
         main_end = loop_iters * num_buffers * tile_k
@@ -752,7 +680,8 @@ def compile_mxfp8_gemm(
                         stages_as[s], stages_bs[s])
                     hot_loop_scheduler()
                     pipeline_fence(
-                        outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
+                        outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2),
+                        use_cluster=use_cluster)
                 results = yield list(accs_in)
             accs = list(results)
 
@@ -791,7 +720,8 @@ def compile_mxfp8_gemm(
                     stages_a[_compute_stage], stages_b[_compute_stage],
                     stages_as[_compute_stage], stages_bs[_compute_stage])
                 hot_loop_scheduler()
-                pipeline_fence(outstanding=_outstanding)
+                pipeline_fence(outstanding=_outstanding,
+                               use_cluster=use_cluster)
 
         if use_tdm_store:
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
