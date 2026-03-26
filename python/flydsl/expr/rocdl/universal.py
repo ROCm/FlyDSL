@@ -62,7 +62,8 @@ def make_buffer_tensor(tensor: Tensor) -> Tensor:
 
     stride_val = arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
     num_records_val = arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), num_records_bytes)).result
-    flags_val_int = (7 << 12) | (4 << 15)
+    from ..buffer_ops import _get_buffer_flags
+    flags_val_int = _get_buffer_flags()
     flags_val = arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), flags_val_int)).result
 
     src_ptr_ty = PointerType(ptr.type)

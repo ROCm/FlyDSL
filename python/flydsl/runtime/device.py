@@ -56,4 +56,8 @@ def is_rdna_arch(arch: Optional[str] = None) -> bool:
     if not arch:
         return False
     arch = arch.lower()
-    return arch.startswith("gfx10") or arch.startswith("gfx11") or arch.startswith("gfx12")
+    if arch.startswith("gfx10") or arch.startswith("gfx11"):
+        return True
+    if arch.startswith("gfx120"):
+        return True
+    return False
