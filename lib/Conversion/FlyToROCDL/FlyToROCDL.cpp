@@ -112,22 +112,6 @@ public:
       return success();
     }
 
-    // Shared/Global: convert pointer type (bitcast or pass-through)
-    auto resultTy = dyn_cast<LLVM::LLVMPointerType>(getTypeConverter()->convertType(flyPtrTy));
-    if (!resultTy)
-      return failure();
-
-    auto args = adaptor.getArgs();
-    if (args.size() == 1) {
-      Value src = args[0];
-      if (src.getType() == resultTy) {
-        rewriter.replaceOp(op, src);
-        return success();
-      }
-      rewriter.replaceOpWithNewOp<LLVM::BitcastOp>(op, resultTy, src);
-      return success();
-    }
-
     return rewriter.notifyMatchFailure(op, "unsupported make_ptr address space");
   }
 };
