@@ -1331,6 +1331,7 @@ def compile_moe_gemm1(
 
                     b_gate_pong = dequant_b_half_tilek128(raw_gate_pong, 0)
                     b_up_pong = dequant_b_half_tilek128(raw_up_pong, 0)
+                    rocdl.sched_barrier(0)
 
                     acc_gate, acc_up, _ = compute_tile_a8w4smooth_tilek128(
                         acc_gate, acc_up, b_gate_pong, b_up_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
@@ -1346,6 +1347,7 @@ def compile_moe_gemm1(
                     # Epilogue: compute last tile (high128) with scale prefetch to overlap loads with MFMA.
                     b_gate_ping = dequant_b_half_tilek128(raw_gate_ping, 1)
                     b_up_ping = dequant_b_half_tilek128(raw_up_ping, 1)
+                    rocdl.sched_barrier(0)
                     acc_gate, acc_up, epilogue_pf = compute_tile_a8w4smooth_tilek128(
                         acc_gate, acc_up, b_gate_ping, b_up_ping, lds_base_ping,
                         prefetch_epilogue=True, a0_prefetch=a0_prefetch_ping,
@@ -3027,6 +3029,11 @@ def compile_moe_gemm2(
                         a0_prefetch_pong = None
                         store_x_tile_to_lds(x_regs_ping, lds_base_ping)
                         hot_loop_scheduler()
+                        
+                        next_k2 = k_iv + c256
+                        # Preload qparams for NEXT K256 chunk
+                        qs_word, qz_word = preload_qparams_tilek128(next_k2)
+
                         gpu.barrier()
                         
                         # Cross-tile prefetch for the ping tile we are about to compute.
@@ -3036,9 +3043,6 @@ def compile_moe_gemm2(
                         next_k2 = k_iv + c256
 
                         x_regs_pong = load_x_tile(next_k2)
-                        # Preload qparams for NEXT K256 chunk
-                        qs_word, qz_word = preload_qparams_tilek128(next_k2)
-
                         b_ping = dequant_b_half_tilek128(raw_ping, 1)
 
                         rocdl.sched_barrier(0)
@@ -3067,6 +3071,7 @@ def compile_moe_gemm2(
                     raw_ping = load_b_half_tilek128_raw(1, qs_word, qz_word, k_tail0)
 
                     b_pong = dequant_b_half_tilek128(raw_pong, 0)
+                    rocdl.sched_barrier(0)
 
                     acc, _ = compute_tile_a8w4smooth_tilek128(
                         acc, b_pong, lds_base_pong, a0_prefetch=a0_prefetch_pong,
@@ -3081,6 +3086,7 @@ def compile_moe_gemm2(
                     
                     # Epilogue compute (high128).
                     b_ping = dequant_b_half_tilek128(raw_ping, 1)
+                    rocdl.sched_barrier(0)
                     acc, epilogue_pf = compute_tile_a8w4smooth_tilek128(
                         acc, b_ping, lds_base_ping,
                         prefetch_epilogue=True, a0_prefetch=a0_prefetch_ping,
