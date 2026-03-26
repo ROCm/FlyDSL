@@ -344,6 +344,32 @@ def create_buffer_resource(memref_val: ir.Value,
     return desc.rsrc
 
 
+_BUFFER_LOAD_INST = {
+    1: "buffer_load_ubyte",
+    2: "buffer_load_ushort",
+    4: "buffer_load_dword",
+    8: "buffer_load_dwordx2",
+    12: "buffer_load_dwordx3",
+    16: "buffer_load_dwordx4",
+}
+
+_BUFFER_STORE_INST = {
+    1: "buffer_store_byte",
+    2: "buffer_store_short",
+    4: "buffer_store_dword",
+    8: "buffer_store_dwordx2",
+    12: "buffer_store_dwordx3",
+    16: "buffer_store_dwordx4",
+}
+
+
+def _get_type_bytes(mlir_type) -> int:
+    """Return total byte width of an MLIR scalar or vector type."""
+    if hasattr(mlir_type, 'element_type'):  # VectorType
+        return mlir_type.shape[0] * (mlir_type.element_type.width // 8)
+    return mlir_type.width // 8
+
+
 @traced_op
 def buffer_load(rsrc: ir.Value,
                 voffset: ir.Value,
@@ -433,11 +459,10 @@ def buffer_load(rsrc: ir.Value,
     if not 0 <= ioffset <= (1 << 12) - 1:
         raise ValueError(f"ioffset must be a 12-bit unsigned value (0-4095), got {ioffset}")
     if ioffset != 0:
-        vec_width_actual = result_type.shape[0] if hasattr(result_type, 'shape') else 1
-        if vec_width_actual <= 1:
-            load_inst = "buffer_load_dword"
-        else:
-            load_inst = f"buffer_load_dwordx{vec_width_actual}"
+        total_bytes = _get_type_bytes(result_type)
+        load_inst = _BUFFER_LOAD_INST.get(total_bytes)
+        if load_inst is None:
+            raise ValueError(f"No buffer_load instruction for {total_bytes}-byte type")
         asm = f"{load_inst} $0, $1, $2, $3 offen offset:{ioffset}"
         return llvm.InlineAsmOp(
             res=result_type,
@@ -542,12 +567,10 @@ def buffer_store(data: ir.Value,
     if not 0 <= ioffset <= (1 << 12) - 1:
         raise ValueError(f"ioffset must be a 12-bit unsigned value (0-4095), got {ioffset}")
     if ioffset != 0:
-        data_type = data.type
-        vec_width_actual = data_type.shape[0] if hasattr(data_type, 'shape') else 1
-        if vec_width_actual <= 1:
-            store_inst = "buffer_store_dword"
-        else:
-            store_inst = f"buffer_store_dwordx{vec_width_actual}"
+        total_bytes = _get_type_bytes(data.type)
+        store_inst = _BUFFER_STORE_INST.get(total_bytes)
+        if store_inst is None:
+            raise ValueError(f"No buffer_store instruction for {total_bytes}-byte type")
         asm = f"{store_inst} $0, $1, $2, $3 offen offset:{ioffset}"
         llvm.InlineAsmOp(
             res=None,
