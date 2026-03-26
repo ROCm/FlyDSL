@@ -180,7 +180,7 @@ def build_quant_module(N):
             dw_in = col_bytes.shrui(arith.constant(2, type=T.i32))
             raw_data = buffer_ops.buffer_load(
                 in_rsrc, dw_in, vec_width=vec_dwords_f16,
-                dtype=T.i32, soffset_bytes=row_soffset_in, mask=is_valid,
+                dtype=T.i32, soffset=row_soffset_in, mask=is_valid,
             )
             vec_f16 = vector.bitcast(vec_type_f16, raw_data)
             vec_f32 = vec_f16.extf(vec_type_f32)
@@ -228,7 +228,7 @@ def build_quant_module(N):
             dw_out = col_bytes_out.shrui(arith.constant(2, type=T.i32))
             buffer_ops.buffer_store(
                 out_packed, out_rsrc, dw_out,
-                soffset_bytes=row_soffset_out, mask=is_valid,
+                soffset=row_soffset_out, mask=is_valid,
             )
 
     @flyc.jit
