@@ -283,6 +283,7 @@ class FlyDSLAllreduce:
         self._IS_CAPTURING = False
         self._graph_inp = None
         self._graph_out = None
+        self._graph_use_write_mode = False
         self._gpu_graph_in_ptrs_array = torch.tensor(rotated_input_buf_ptrs, dtype=torch.int64, device=self.device)
         self._graph_in_bases = []
         self._gpu_graph_out_ptrs_array = torch.tensor(self._output_buffer_ptrs[:8], dtype=torch.int64, device=self.device)
@@ -315,10 +316,11 @@ class FlyDSLAllreduce:
             self._IS_CAPTURING = True
             self._graph_inp = None
             self._graph_out = None
+            self._graph_use_write_mode = False
             yield
         finally:
             self._IS_CAPTURING = False
-            if self._graph_inp is not None:
+            if self._graph_inp is not None and not self._graph_use_write_mode:
                 self._register_graph_tensors()
 
     @classmethod
@@ -620,11 +622,15 @@ class FlyDSLAllreduce:
                     self._graph_use_write_mode = True
                     self._run_kernel(
                         N, dtype_str,
-                        gpu_out_ptrs_array=self._gpu_graph_out_ptrs_array,
+                        # Keep write-mode graph path on stable pre-registered
+                        # output buffers to avoid graph-time IPC out-pointer
+                        # remapping issues.
+                        gpu_out_ptrs_array=self._gpu_output_buffer_ptrs_array,
                         inp_ptr=int(inp.data_ptr()),
                         use_write_mode=True,
                         stream_ptr=stream_ptr,
                     )
+                    out.view(torch.uint8)[:bytes_n].copy_(self.output_buffer[:bytes_n])
                 else:
                     self._graph_use_write_mode = False
                     self._run_kernel(
