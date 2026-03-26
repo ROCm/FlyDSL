@@ -351,12 +351,13 @@ def buffer_load(rsrc: ir.Value,
                 dtype = None,
                 mask: Optional[ir.Value] = None,
                 cache_modifier: int = 0,
-                soffset_bytes: Optional[Union[int, ir.Value]] = None) -> ir.Value:
+                soffset_bytes: Optional[Union[int, ir.Value]] = None,
+                ioffset: int = 0) -> ir.Value:
     """AMD buffer load operation.
-    
+
     Load data from global memory using buffer descriptor and offset.
     Uses hardware-level bounds checking and vectorization.
-    
+
     Args:
         rsrc: Buffer resource descriptor (!llvm.ptr<8>)
         offset: Offset in elements (i32 type)
@@ -367,14 +368,17 @@ def buffer_load(rsrc: ir.Value,
         soffset_bytes: Optional scalar offset (in BYTES) added by the buffer instruction (soffset).
                       Use this to fold small constant deltas into the instruction instead of emitting
                       extra VGPR address arithmetic.
-        
+        ioffset: 12-bit unsigned instruction immediate offset in bytes (0-4095).
+                 When non-zero, emits inline asm to use the hardware immediate offset
+                 field which is not exposed by the MLIR ROCDL dialect.
+
     Returns:
         Loaded data (scalar or vector depending on vec_width)
-        
+
     Example:
         >>> # Load 4xf32
         >>> data = buffer_load(rsrc, offset, vec_width=4)
-        >>> 
+        >>>
         >>> # Load with mask
         >>> data = buffer_load(rsrc, offset, vec_width=4, mask=valid)
     """
@@ -389,32 +393,32 @@ def buffer_load(rsrc: ir.Value,
     if hasattr(offset, "ir_value"):
         offset = offset.ir_value()
     offset = _unwrap_value(offset)
-    
+
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
         op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
-    
+
     # IMPORTANT: Buffer load offset is in BYTES, not elements!
     # For vec4xf32, each element is 4 bytes, so multiply offset by 4
     element_bytes = dtype.width // 8
     bytes_const = _create_i32_constant(element_bytes)
     op = std_arith.MulIOp(offset, bytes_const)
     offset = _unwrap_value(op.result)
-    
+
     # Apply mask by setting invalid offsets to max
     if mask is not None:
         mask = _unwrap_value(mask)
         max_offset = _create_i32_constant(0x7FFFFFFF)
         op = std_arith.SelectOp(mask, offset, max_offset)
         offset = _unwrap_value(op.result)
-    
+
     # Create vector type
     if vec_width == 1:
         result_type = dtype
     else:
         result_type = ir.VectorType.get([vec_width], dtype)
-    
+
     # Create instruction offset and aux flags
     if soffset_bytes is None:
         soffset = _create_i32_constant(0)
@@ -426,18 +430,34 @@ def buffer_load(rsrc: ir.Value,
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_flags = _create_i32_constant(cache_modifier)
-    
+
     # Emit buffer load
-    load_op = rocdl.RawPtrBufferLoadOp(
-        result_type, 
-        rsrc, 
-        offset, 
-        soffset,   # soffset (scalar byte offset)
-        aux_flags  # aux (cache modifiers)
-    )
-    
-    return load_op.result
+    if not 0 <= ioffset <= (1 << 12) - 1:
+        raise ValueError(f"ioffset must be a 12-bit unsigned value (0-4095), got {ioffset}")
+    if ioffset != 0:
+        vec_width_actual = result_type.shape[0] if hasattr(result_type, 'shape') else 1
+        if vec_width_actual <= 1:
+            load_inst = "buffer_load_dword"
+        else:
+            load_inst = f"buffer_load_dwordx{vec_width_actual}"
+        asm = f"{load_inst} $0, $1, $2, $3 offen offset:{ioffset}"
+        return llvm.InlineAsmOp(
+            res=result_type,
+            operands_=[offset, rsrc, soffset],
+            asm_string=asm,
+            constraints="=v,v,s,s",
+            has_side_effects=True,
+            is_align_stack=False,
+        ).results[0]
+    else:
+        aux_flags = _create_i32_constant(cache_modifier)
+        return rocdl.RawPtrBufferLoadOp(
+            result_type,
+            rsrc,
+            offset,
+            soffset,   # soffset (scalar byte offset)
+            aux_flags  # aux (cache modifiers)
+        ).result
 
 
 @traced_op
@@ -448,21 +468,27 @@ def buffer_store(data: ir.Value,
                  cache_modifier: int = 0,
                  *,
                  soffset_bytes: Optional[Union[int, ir.Value]] = None,
-                 offset_is_bytes: bool = False):
+                 offset_is_bytes: bool = False,
+                 ioffset: int = 0):
     """AMD buffer store operation.
-    
+
     Store data to global memory using buffer descriptor and offset.
-    
+
     Args:
         data: Data to store (scalar or vector)
         rsrc: Buffer resource descriptor (!llvm.ptr<8>)
         offset: Offset in elements (i32 type)
         mask: Optional mask for predicated store (i1 type)
         cache_modifier: Cache control flags (0 for default)
-        
+        soffset_bytes: Optional scalar offset (in BYTES) added by the buffer instruction (soffset).
+        offset_is_bytes: If True, skip element-to-byte scaling on offset.
+        ioffset: 12-bit unsigned instruction immediate offset in bytes (0-4095).
+                 When non-zero, emits inline asm to use the hardware immediate offset
+                 field which is not exposed by the MLIR ROCDL dialect.
+
     Example:
         >>> buffer_store(data, rsrc, offset)
-        >>> 
+        >>>
         >>> # Store with mask
         >>> buffer_store(data, rsrc, offset, mask=valid)
     """
@@ -474,12 +500,12 @@ def buffer_store(data: ir.Value,
     data = _unwrap_value(data)
     rsrc = _unwrap_value(rsrc)
     offset = _unwrap_value(offset)
-    
+
     # Convert offset to i32 if needed
     if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
         op = std_arith.IndexCastOp(T.i32(), offset)
         offset = _unwrap_value(op.result)
-    
+
     # IMPORTANT: RawPtrBufferStoreOp offset is in BYTES.
     # For backward compat, `buffer_store()` accepts element offsets by default
     # and scales them to bytes. Set `offset_is_bytes=True` to skip scaling.
@@ -494,14 +520,14 @@ def buffer_store(data: ir.Value,
         bytes_const = _create_i32_constant(element_bytes)
         op = std_arith.MulIOp(offset, bytes_const)
         offset = _unwrap_value(op.result)
-    
+
     # Apply mask by setting invalid offsets to max
     if mask is not None:
         mask = _unwrap_value(mask)
         max_offset = _create_i32_constant(0x7FFFFFFF)
         op = std_arith.SelectOp(mask, offset, max_offset)
         offset = _unwrap_value(op.result)
-    
+
     # Create instruction offset (soffset) and aux flags
     if soffset_bytes is None:
         soffset = _create_i32_constant(0)
@@ -513,16 +539,32 @@ def buffer_store(data: ir.Value,
             if not isinstance(soffset.type, ir.IntegerType) or soffset.type.width != 32:
                 op = std_arith.IndexCastOp(T.i32(), soffset)
                 soffset = _unwrap_value(op.result)
-    aux_flags = _create_i32_constant(cache_modifier)
-    
+
     # Emit buffer store
-    rocdl.RawPtrBufferStoreOp(
-        data,
-        rsrc,
-        offset,
-        soffset,   # soffset (scalar byte offset)
-        aux_flags  # aux (cache modifiers)
-    )
-
-
-
+    if not 0 <= ioffset <= (1 << 12) - 1:
+        raise ValueError(f"ioffset must be a 12-bit unsigned value (0-4095), got {ioffset}")
+    if ioffset != 0:
+        data_type = data.type
+        vec_width_actual = data_type.shape[0] if hasattr(data_type, 'shape') else 1
+        if vec_width_actual <= 1:
+            store_inst = "buffer_store_dword"
+        else:
+            store_inst = f"buffer_store_dwordx{vec_width_actual}"
+        asm = f"{store_inst} $0, $1, $2, $3 offen offset:{ioffset}"
+        llvm.InlineAsmOp(
+            res=None,
+            operands_=[data, offset, rsrc, soffset],
+            asm_string=asm,
+            constraints="v,v,s,s",
+            has_side_effects=True,
+            is_align_stack=False,
+        )
+    else:
+        aux_flags = _create_i32_constant(cache_modifier)
+        rocdl.RawPtrBufferStoreOp(
+            data,
+            rsrc,
+            offset,
+            soffset,   # soffset (scalar byte offset)
+            aux_flags  # aux (cache modifiers)
+        )
