@@ -126,14 +126,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
         
-      - name: Install aiter
+      - name: Prepare aiter
         if: ${{ !contains(matrix.runners, 'navi') }}
         run: |
-          docker exec flydsl_test bash -c "git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
+          docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
+          docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
 
       - name: Run tests
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
+          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
       - name: Show tests logs
         if: failure()
@@ -149,7 +150,7 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          docker exec flydsl_test bash -c "cd /flydsl-test && bash scripts/run_benchmark.sh"
+          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && bash scripts/run_benchmark.sh"
 
       - name: Show benchmarks logs
         if: failure()
