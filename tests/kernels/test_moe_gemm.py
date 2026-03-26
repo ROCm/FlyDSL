@@ -14,6 +14,8 @@ import flydsl.compiler as flyc
 import pytest
 import torch
 
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 # -----------------------------------------------------------------------------
 # Ensure we use the repo-local `flydsl` when running this file directly.
 #

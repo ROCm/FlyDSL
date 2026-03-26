@@ -15,6 +15,10 @@ Usage:
 import time
 import torch
 
+import pytest
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
 # ─────────────────────────────────────────────────────────────────
 # 1. FlyDSL vec_add
 # ─────────────────────────────────────────────────────────────────

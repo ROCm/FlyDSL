@@ -91,12 +91,35 @@ def insert_point(ctx):
         yield InsertionPoint.current
 
 
+def pytest_addoption(parser):
+    """Add FlyDSL test-session options that map to env variables."""
+    group = parser.getgroup("flydsl")
+    group.addoption(
+        "--flydsl-compile-backend",
+        action="store",
+        default=None,
+        help="Set FLYDSL_COMPILE_BACKEND for this pytest session.",
+    )
+    group.addoption(
+        "--flydsl-compile-arch",
+        action="store",
+        default=None,
+        help="Set ARCH for this pytest session.",
+    )
+
+
 def pytest_configure(config):
-    """Register custom markers."""
+    """Register custom markers and apply FlyDSL env overrides."""
     config.addinivalue_line(
         "markers",
         "large_shape: marks tests with large shapes that are slow to run (deselect with '-m \"not large_shape\"')",
     )
+    backend = config.getoption("--flydsl-compile-backend")
+    arch = config.getoption("--flydsl-compile-arch")
+    if backend:
+        os.environ["FLYDSL_COMPILE_BACKEND"] = backend
+    if arch:
+        os.environ["ARCH"] = arch
 
 
 def pytest_sessionfinish(session, exitstatus):

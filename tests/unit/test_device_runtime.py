@@ -7,6 +7,8 @@ import pytest
 
 import flydsl.runtime.device_runtime as dr
 
+pytestmark = [pytest.mark.l0_backend_agnostic]
+
 
 @pytest.fixture(autouse=True)
 def _reset_device_runtime_singleton():
