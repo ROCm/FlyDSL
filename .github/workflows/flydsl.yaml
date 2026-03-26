@@ -22,7 +22,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1' ]
+        runners: [ 'linux-flydsl-mi325-1', 'linux-flydsl-mi355-1', 'linux-flydsl-navi-2' ]
       fail-fast: false
     runs-on: ${{ matrix.runners }}
     steps:
@@ -74,7 +74,7 @@ jobs:
           path: mlir_install.tgz
           # Key includes LLVM commit and hashes of build scripts/workflow.
           # Repo is checked out under `flydsl-test/` (see actions/checkout path), so hash paths must include it.
-          key: mlir-install-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
+          key: mlir-install-${{ matrix.runners }}-${{ hashFiles('flydsl-test/thirdparty/llvm-hash.txt', 'flydsl-test/scripts/build_llvm.sh', 'flydsl-test/CMakeLists.txt', 'flydsl-test/.github/workflows/flydsl.yaml') }}
 
       - name: Use cached MLIR install tarball (skip LLVM build)
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -127,6 +127,7 @@ jobs:
           retention-days: 7
         
       - name: Install aiter
+        if: ${{ !contains(matrix.runners, 'navi') }}
         run: |
           docker exec flydsl_test bash -c "git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter && cd /tmp/aiter && python3 setup.py develop"
 
