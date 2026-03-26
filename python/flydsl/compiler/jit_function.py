@@ -29,8 +29,7 @@ from .kernel_function import (
     create_gpu_module,
     get_gpu_module_body,
 )
-from .protocol import fly_types, fly_pointers, fly_construct
-
+from .protocol import fly_construct, fly_pointers, fly_types
 
 
 @lru_cache(maxsize=1)
@@ -39,7 +38,7 @@ def _flydsl_key() -> str:
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.lang.*, flydsl.utils.*
+         flydsl.runtime.*, flydsl.utils.*
       2. Native shared libraries (_fly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -58,7 +57,6 @@ def _flydsl_key() -> str:
         (str(flydsl_root / "compiler"), "flydsl.compiler."),
         (str(flydsl_root / "expr"), "flydsl.expr."),
         (str(flydsl_root / "runtime"), "flydsl.runtime."),
-        (str(flydsl_root / "lang"), "flydsl.lang."),
         (str(flydsl_root / "utils"), "flydsl.utils."),
     ]
     for pkg_path, prefix in pkg_prefixes:
@@ -301,9 +299,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
     """
     try:
         mod = ir.Module.parse(asm, context=ctx)
-        di_pass = "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
+        di_pass = (
+            "ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}," if env.debug.enable_debug_info else ""
+        )
         pm = PassManager.parse(
-            f"builtin.module({di_pass}gpu-module-to-binary{{format=isa opts=\"{'-g' if env.debug.enable_debug_info else ''}\" section= toolkit=}})",
+            f'builtin.module({di_pass}gpu-module-to-binary{{format=isa opts="{"-g" if env.debug.enable_debug_info else ""}" section= toolkit=}})',
             context=ctx,
         )
         pm.enable_verifier(bool(verify))
@@ -485,7 +485,7 @@ def _resolve_jit_arg_type(arg, annotation):
 
     if isinstance(arg, int) and annotation is Stream:
         return Stream
-    if hasattr(arg, '__fly_ptrs__'):
+    if hasattr(arg, "__fly_ptrs__"):
         return type(arg)
     constructor, _ = JitArgumentRegistry.get(type(arg))
     return constructor
@@ -514,13 +514,13 @@ def _build_call_state(sig, args_tuple, func_exe):
         if annotation is not inspect.Parameter.empty and _is_type_param_annotation(annotation):
             continue
 
-        if getattr(annotation, '_is_stream_param', False):
+        if getattr(annotation, "_is_stream_param", False):
             has_user_stream = True
 
         arg = args_tuple[i]
 
         jit_arg_type = _resolve_jit_arg_type(arg, annotation)
-        if jit_arg_type is None or not hasattr(jit_arg_type, '_reusable_slot_spec'):
+        if jit_arg_type is None or not hasattr(jit_arg_type, "_reusable_slot_spec"):
             return None
 
         spec = jit_arg_type._reusable_slot_spec(arg)
@@ -558,7 +558,7 @@ class CallState:
     thread-local storage for thread safety.
     """
 
-    __slots__ = ('_func_exe', '_spec', '_tls')
+    __slots__ = ("_func_exe", "_spec", "_tls")
 
     def __init__(self, slot_specs, func_exe):
         self._func_exe = func_exe
@@ -583,7 +583,7 @@ class CallState:
         self._tls._storages = storages
 
     def __call__(self, args_tuple):
-        if not hasattr(self._tls, 'packed'):
+        if not hasattr(self._tls, "packed"):
             self._init_buffers()
 
         for arg_idx, storage, extract in self._tls.updaters:
@@ -645,8 +645,9 @@ class JitFunction:
             return (type(arg), arg)
         else:
             from .jit_argument import JitArgumentRegistry
+
             constructor, _ = JitArgumentRegistry.get(type(arg))
-            if constructor is not None and hasattr(constructor, 'raw_cache_signature'):
+            if constructor is not None and hasattr(constructor, "raw_cache_signature"):
                 return constructor.raw_cache_signature(arg)
             return type(arg)
 
@@ -659,6 +660,7 @@ class JitFunction:
         recompilation when only runtime values change.
         """
         from .jit_argument import _is_constexpr_annotation
+
         sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
@@ -669,11 +671,9 @@ class JitFunction:
                 key_parts.append((name, type(arg), arg))
                 continue
 
-            is_runtime = (ann is not inspect.Parameter.empty
-                          and hasattr(ann, '__fly_ptrs__'))
+            is_runtime = ann is not inspect.Parameter.empty and hasattr(ann, "__fly_ptrs__")
             if isinstance(arg, tuple):
-                key_parts.append((name, tuple(
-                    self._arg_cache_sig(a) for a in arg)))
+                key_parts.append((name, tuple(self._arg_cache_sig(a) for a in arg)))
             else:
                 key_parts.append((name, self._arg_cache_sig(arg, runtime=is_runtime)))
         return tuple(key_parts)
@@ -718,7 +718,9 @@ class JitFunction:
             # Build CallState via JitArgument registry (same dispatch as compile path)
             try:
                 state = _build_call_state(
-                    sig, args_tuple, cached_func._get_func_exe(),
+                    sig,
+                    args_tuple,
+                    cached_func._get_func_exe(),
                 )
             except Exception:
                 state = None
@@ -803,7 +805,8 @@ class JitFunction:
             if use_cache:
                 try:
                     state = _build_call_state(
-                        sig, args_tuple,
+                        sig,
+                        args_tuple,
                         compiled_func._get_func_exe(),
                     )
                     if state is not None:
