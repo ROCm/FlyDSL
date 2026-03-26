@@ -8,7 +8,6 @@ Memory ordering uses GFX942 inline assembly for XGMI/HBM visibility.
 from __future__ import annotations
 
 import flydsl.compiler as flyc
-import flydsl.expr as fx
 from flydsl.expr import arith as ea, gpu, range_constexpr, signal_ops
 from flydsl._mlir.dialects import gpu as _raw_gpu
 from flydsl.expr.typing import T, Int32, Int64, Stream
@@ -99,7 +98,7 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
                            L2; matches aiter's end_sync<ngpus,true> with
                            ATOMIC_RELAXED + MEMORY_SCOPE_SYSTEM.
     """
-    from flydsl._mlir.dialects import arith, scf
+    from flydsl._mlir.dialects import arith, scf, llvm, rocdl
 
     i32, i64 = T.i32, T.i64
 
@@ -124,7 +123,24 @@ def _signal_end_sync(*, lane_i32, rank_i32, bid_i32, self_sg_i64, sgs_i64,
             signal_ops.st_xgmi_u32(peer_sg + end_rank_off, flag)
         else:
             signal_ops.st_signal_u32(peer_sg + end_rank_off, flag)
-        signal_ops.spin_wait_ge(end_wait_addr, flag)
+        # AIter-like polling sequence:
+        #   global_load_dword ... sc1
+        #   s_waitcnt
+        #   buffer_inv sc1
+        #   cmp / loop
+        init_cur = signal_ops.ld_uncached_u32(end_wait_addr)
+        w = scf.WhileOp([i32], [init_cur])
+        wb = ir.Block.create_at_start(w.before, [i32])
+        wa = ir.Block.create_at_start(w.after, [i32])
+        with ir.InsertionPoint(wb):
+            cur = wb.arguments[0]
+            need_wait = arith.CmpIOp(arith.CmpIPredicate.ult, cur, flag).result
+            scf.ConditionOp(need_wait, [cur])
+        with ir.InsertionPoint(wa):
+            nxt = signal_ops.ld_uncached_u32(end_wait_addr)
+            llvm.InlineAsmOp(None, [], "buffer_inv sc1", "", has_side_effects=True)
+            rocdl.s_waitcnt(0)
+            scf.YieldOp([nxt])
         scf.YieldOp([])
 
     gpu.barrier()
@@ -570,7 +586,17 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             rel_idx = cur - start_w
             dst_off = rank_i32 * ea.constant(part_p, type=i32) + rel_idx
             dst_tmp = signal_ops.load_ptr_from_array(tmp_ptrs_i64, warp_id)
-            signal_ops.st_global_16b(dst_tmp + arith.ExtUIOp(i64, dst_off).result * ea.constant(16, type=i64), raw)
+            tmp_addr = dst_tmp + arith.ExtUIOp(i64, dst_off).result * ea.constant(16, type=i64)
+            is_tmp_null = arith.CmpIOp(arith.CmpIPredicate.eq, dst_tmp, ea.constant(0, type=i64)).result
+            tmp_low4 = arith.AndIOp(tmp_addr, ea.constant(0xF, type=i64)).result
+            is_tmp_misaligned = arith.CmpIOp(arith.CmpIPredicate.ne, tmp_low4, ea.constant(0, type=i64)).result
+            bad_tmp_addr = arith.OrIOp(is_tmp_null, is_tmp_misaligned).result
+            if_tmp_ok = scf.IfOp(bad_tmp_addr, results_=[], has_else=True)
+            with ir.InsertionPoint(if_tmp_ok.then_block):
+                scf.YieldOp([])
+            with ir.InsertionPoint(if_tmp_ok.else_block):
+                signal_ops.st_global_16b(tmp_addr, raw)
+                scf.YieldOp([])
             scf.YieldOp([cur + stride_s1, stride_s1])
 
         # Signal all ranks that stage 1 is complete
@@ -592,7 +618,19 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
             src_off = warp_id * ea.constant(part_p, type=i32) + cur
             load_addr = tmp_out_i64 + arith.ExtUIOp(i64, src_off).result * ea.constant(16, type=i64)
-            raw = signal_ops.ld_global_16b(load_addr)
+            is_tmpout_null = arith.CmpIOp(arith.CmpIPredicate.eq, tmp_out_i64, ea.constant(0, type=i64)).result
+            load_low4 = arith.AndIOp(load_addr, ea.constant(0xF, type=i64)).result
+            is_load_misaligned = arith.CmpIOp(arith.CmpIPredicate.ne, load_low4, ea.constant(0, type=i64)).result
+            bad_load_addr = arith.OrIOp(is_tmpout_null, is_load_misaligned).result
+            raw_if = scf.IfOp(bad_load_addr, results_=[v4i32], has_else=True)
+            with ir.InsertionPoint(raw_if.then_block):
+                scf.YieldOp([arith.ConstantOp(v4i32, ir.DenseElementsAttr.get_splat(
+                    ir.VectorType.get([4], ir.IntegerType.get_signless(32)),
+                    ir.IntegerAttr.get(ir.IntegerType.get_signless(32), 0)
+                )).result])
+            with ir.InsertionPoint(raw_if.else_block):
+                scf.YieldOp([signal_ops.ld_global_16b(load_addr)])
+            raw = raw_if.results[0]
 
             sm_idx = ea.index_cast(idx, lane_i32)
             memref.StoreOp(raw, smem, [sm_idx])
@@ -635,13 +673,23 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 is_warp_w = arith.CmpIOp(arith.CmpIPredicate.eq, warp_id_local,
                                           ea.constant(w, type=i32)).result
                 dst_ptr = arith.SelectOp(is_warp_w, out_ptrs_arr[w], dst_ptr).result
-            signal_ops.st_global_16b(dst_ptr + dst_byte_off, out_raw)
+            out_addr = dst_ptr + dst_byte_off
+            is_out_null = arith.CmpIOp(arith.CmpIPredicate.eq, dst_ptr, ea.constant(0, type=i64)).result
+            out_low4 = arith.AndIOp(out_addr, ea.constant(0xF, type=i64)).result
+            is_out_misaligned = arith.CmpIOp(arith.CmpIPredicate.ne, out_low4, ea.constant(0, type=i64)).result
+            bad_out_addr = arith.OrIOp(is_out_null, is_out_misaligned).result
+            if_out_ok = scf.IfOp(bad_out_addr, results_=[], has_else=True)
+            with ir.InsertionPoint(if_out_ok.then_block):
+                scf.YieldOp([])
+            with ir.InsertionPoint(if_out_ok.else_block):
+                signal_ops.st_global_16b(out_addr, out_raw)
+                scf.YieldOp([])
 
             scf.YieldOp([cur + stride_s2, stride_s2])
 
         _signal_end_sync(lane_i32=lane_i32, rank_i32=rank_i32, bid_i32=bid_i32,
                          self_sg_i64=self_sg_i64, sgs_i64=sgs, ngpus=world_size,
-                         need_wbl2=False)
+                         need_wbl2=True)
 
     # -----------------------------------------------------------------------
     # Host launchers (@flyc.jit)
@@ -701,7 +749,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
 
     # Unique function names per (N, dtype_str, world_size, threads) to prevent
     # file-cache collisions (N is baked into kernel body, not the cache key).
-    _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}"
+    _suffix = f"_N{N}_{dtype_str}_ws{world_size}_t{threads}_rev20260326"
     run_1stage_arr.func.__name__        = f"run_1stage_arr{_suffix}"
     run_2stage_arr.func.__name__        = f"run_2stage_arr{_suffix}"
     run_2stage_write_mode.func.__name__ = f"run_2stage_write_mode{_suffix}"
