@@ -658,7 +658,7 @@ class JitFunction:
         key — only the Python type matters.  This prevents unnecessary
         recompilation when only runtime values change.
         """
-        from .jit_argument import _is_constexpr_annotation
+        from .jit_argument import _is_constexpr_annotation, _is_type_param_annotation
         sig = self._sig
         key_parts = []
         for name, arg in bound_args.items():
@@ -667,6 +667,10 @@ class JitFunction:
 
             if ann is not inspect.Parameter.empty and _is_constexpr_annotation(ann):
                 key_parts.append((name, type(arg), arg))
+                continue
+
+            if ann is not inspect.Parameter.empty and _is_type_param_annotation(ann):
+                key_parts.append((name, "Type", arg))
                 continue
 
             is_runtime = (ann is not inspect.Parameter.empty
