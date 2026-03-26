@@ -378,6 +378,18 @@ def _get_type_bytes(mlir_type) -> int:
     return mlir_type.width // 8
 
 
+def _cache_modifier_suffix(cache_modifier: int) -> str:
+    """Decode cache_modifier bitmask into SP3 instruction suffixes."""
+    parts = []
+    if cache_modifier & 1:
+        parts.append("glc")
+    if cache_modifier & 2:
+        parts.append("slc")
+    if cache_modifier & 4:
+        parts.append("dlc")
+    return " " + " ".join(parts) if parts else ""
+
+
 @traced_op
 def buffer_load(rsrc: ir.Value,
                 voffset: ir.Value,
@@ -471,7 +483,7 @@ def buffer_load(rsrc: ir.Value,
         load_inst = _BUFFER_LOAD_INST.get(total_bytes)
         if load_inst is None:
             raise ValueError(f"No buffer_load instruction for {total_bytes}-byte type")
-        asm = f"{load_inst} $0, $1, $2, $3 offen offset:{ioffset}"
+        asm = f"{load_inst} $0, $1, $2, $3 offen offset:{ioffset}{_cache_modifier_suffix(cache_modifier)}"
         return llvm.InlineAsmOp(
             res=result_type,
             operands_=[voffset, rsrc, soffset_val],
@@ -579,7 +591,7 @@ def buffer_store(data: ir.Value,
         store_inst = _BUFFER_STORE_INST.get(total_bytes)
         if store_inst is None:
             raise ValueError(f"No buffer_store instruction for {total_bytes}-byte type")
-        asm = f"{store_inst} $0, $1, $2, $3 offen offset:{ioffset}"
+        asm = f"{store_inst} $0, $1, $2, $3 offen offset:{ioffset}{_cache_modifier_suffix(cache_modifier)}"
         llvm.InlineAsmOp(
             res=None,
             operands_=[data, voffset, rsrc, soffset_val],
