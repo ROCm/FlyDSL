@@ -391,25 +391,20 @@ class FlyDSLAllreduce:
         return result
 
     def _compile(self, *, N: int, dtype_str: str):
-        from flydsl.compiler.jit_function import MlirCompiler
-        from flydsl.compiler.executor import ExecutionEngineExecutor
-        from kernels.aiter_signal_all_reduce_raw import build_aiter_signal_allreduce_raw_module
+        from kernels.custom_all_reduce_kernel import make_allreduce_kernels
 
-        key = (N, dtype_str, self.world_size, "flydsl_allreduce")
-        exe = self._exe_cache.get(key)
-        if exe is not None:
-            return exe
-        m = build_aiter_signal_allreduce_raw_module(
+        key = (N, dtype_str, self.world_size)
+        fns = self._exe_cache.get(key)
+        if fns is not None:
+            return fns
+        fns = make_allreduce_kernels(
             N=N,
             dtype_str=dtype_str,
             world_size=self.world_size,
             threads=self._threads,
         )
-        with m.context:
-            lowered = MlirCompiler.compile(m)
-        exe = ExecutionEngineExecutor(lowered)
-        self._exe_cache[key] = exe
-        return exe
+        self._exe_cache[key] = fns
+        return fns
 
     def _run_kernel(
         self,
@@ -424,6 +419,8 @@ class FlyDSLAllreduce:
         stream_ptr: int | None = None,
     ):
         """Launch 2-stage allreduce kernel."""
+        from flydsl.expr.typing import Int32, Int64, Stream
+
         try:
             grid_x = self._grid_x_cache[(int(N), str(dtype_str))]
         except Exception:
@@ -434,26 +431,33 @@ class FlyDSLAllreduce:
             self._grid_x_cache[(int(N), str(dtype_str))] = int(grid_x)
 
         if stream_ptr is None:
-            stream_ptr = int(torch.cuda.current_stream().cuda_stream)
+            stream_obj = torch.cuda.current_stream()
+        else:
+            stream_obj = torch.cuda.ExternalStream(stream_ptr)
 
-        exe = self._compile(N=N, dtype_str=dtype_str)
+        fns = self._compile(N=N, dtype_str=dtype_str)
 
         if use_write_mode:
-            exe.run_2stage_write_mode(
-                self.rank, grid_x, self._self_sg,
-                int(self._gpu_sg_ptrs_array.data_ptr()),
-                inp_ptr,
-                int(gpu_out_ptrs_array.data_ptr()),
-                int(self._gpu_tmp_ptrs_nonrotated_array.data_ptr()),
-                stream_ptr,
+            fns["run_2stage_write_mode"](
+                Int32(self.rank),
+                Int32(grid_x),
+                Int64(self._self_sg),
+                Int64(int(self._gpu_sg_ptrs_array.data_ptr())),
+                Int64(int(inp_ptr)),
+                Int64(int(gpu_out_ptrs_array.data_ptr())),
+                Int64(int(self._gpu_tmp_ptrs_nonrotated_array.data_ptr())),
+                stream=stream_obj,
             )
         else:
-            exe.run_2stage_arr(
-                self.rank, grid_x, self._self_sg,
-                int(self._gpu_sg_ptrs_array.data_ptr()),
-                int(gpu_in_ptrs_array.data_ptr()),
-                int(self._gpu_tmp_ptrs_array.data_ptr()),
-                out_ptr, stream_ptr,
+            fns["run_2stage_arr"](
+                Int32(self.rank),
+                Int32(grid_x),
+                Int64(self._self_sg),
+                Int64(int(self._gpu_sg_ptrs_array.data_ptr())),
+                Int64(int(gpu_in_ptrs_array.data_ptr())),
+                Int64(int(self._gpu_tmp_ptrs_array.data_ptr())),
+                Int64(int(out_ptr)),
+                stream=stream_obj,
             )
 
     def custom_all_reduce(

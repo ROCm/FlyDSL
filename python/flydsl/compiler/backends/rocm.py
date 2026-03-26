@@ -51,6 +51,7 @@ class RocmBackend(BaseBackend):
             f"finite-only=false module= triple=amdgcn-amd-amdhsa unsafe-math=false wave64={wave64}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
+            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
             "gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}",
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
@@ -60,7 +61,6 @@ class RocmBackend(BaseBackend):
                 if env.debug.enable_debug_info
                 else []
             ),
-            f'gpu-module-to-binary{{format=fatbin opts="{all_opts}"}}',
         ]
 
     def gpu_module_targets(self) -> List[str]:
