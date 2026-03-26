@@ -89,16 +89,14 @@ def reference_mxfp4_gemm(a_packed, b_packed, a_scale, b_scale, M, N, K):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("wave_specialized_tdm", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
-@pytest.mark.parametrize("use_scf_loop", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
                      num_buffers, use_tdm_store, out_dtype,
                      wave_specialized_tdm,
                      use_scale_opsel,
-                     use_scf_loop,
                      l2_prefetch_distance=0,
                      cluster_m=1, cluster_n=1,
-                     inst_prefetch=False, 
+                     inst_prefetch=False,
                      waves_per_eu=None):
     """MXFP4 GEMM correctness unit test."""
     arch = str(get_rocm_arch(timeout_s=300))
@@ -159,7 +157,6 @@ def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         out_dtype=out_dtype,
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
-        use_scf_loop=use_scf_loop,
         use_scale_opsel=use_scale_opsel,
     )
     launch_fn(
@@ -232,7 +229,6 @@ def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
         out_dtype=out_dtype,
         wave_specialized_tdm=False,
         use_scale_opsel=False,
-        use_scf_loop=False,
         l2_prefetch_distance=2,
         cluster_m=cluster_m, cluster_n=cluster_n,
     )
@@ -260,7 +256,6 @@ if __name__ == "__main__":
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
-    parser.add_argument("--use-scf-loop", action="store_true", default=False)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False,
                         help="Enable scale opsel half-select")
     args = parser.parse_args()
@@ -273,7 +268,6 @@ if __name__ == "__main__":
         out_dtype=args.out_dtype,
         wave_specialized_tdm=args.wave_spec_tdm,
         use_scale_opsel=args.use_scale_opsel,
-        use_scf_loop=args.use_scf_loop,
         m_warp=args.m_warp,
         n_warp=args.n_warp,
         l2_prefetch_distance=args.l2_prefetch_distance,
