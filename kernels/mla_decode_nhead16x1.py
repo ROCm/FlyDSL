@@ -216,6 +216,11 @@ def _math_exp2(val, fastmath=None):
     return _math.Exp2Op(_raw(val), **kw).result
 
 
+def _fast_exp2(val):
+    """Bare v_exp_f32 via rocdl.exp2 — no range reduction."""
+    return rocdl.exp2(ir.F32Type.get(), _raw(val))
+
+
 def _math_log(val, fastmath=None):
     """Wrap math.LogOp, returning .result."""
     kw = {}
@@ -225,6 +230,7 @@ def _math_log(val, fastmath=None):
 
 
 def compile_mla_decode(
+    persistent=False,
     num_q_heads=16,
     num_kv_heads=1,
     kv_lora_rank=512,
@@ -264,6 +270,8 @@ def compile_mla_decode(
     assert PAGE_BLOCK_SIZE <= 64, (
         f"page_block_size ({PAGE_BLOCK_SIZE}) must be <= 64"
     )
+
+    PERSISTENT = persistent
 
     if sm_scale is None:
         sm_scale = 1.0 / math.sqrt(HEAD_DIM_QK)
@@ -928,15 +936,18 @@ def compile_mla_decode(
         # 8 × ds_read_b128 at stride 64 bytes; each reads 16 contiguous
         # bytes = 2 i64 MFMA operands.  Total: 8 × 2 = 16 i64 = K_LORA_STEPS.
         K_LDS_RD_INSTS = K_LDS_WR_INSTS  # 8
+        K_LDS_RD_HALF = K_LDS_RD_INSTS // 2  # 4
 
-        def _k_lora_lds_read(extra_offset_dw=0):
-            """Read K lora from LDS → K_LORA_STEPS i64 operands via ds_read_b128."""
+        def _k_lora_lds_read_half(half_id, extra_offset_dw=0):
+            """Read half of K lora: 4 × ds_read_b128 → 8 i64 operands."""
             k_ops = []
-            for inst in range_constexpr(K_LDS_RD_INSTS):
+            start = half_id * K_LDS_RD_HALF
+            for inst in range_constexpr(K_LDS_RD_HALF):
+                actual_inst = start + inst
                 rd_addr = (
                     lds_k_lora_base_idx
                     + k_lora_rd_base
-                    + arith.index((extra_offset_dw + inst * 16) * 4)
+                    + arith.index((extra_offset_dw + actual_inst * 16) * 4)
                 )
                 pair = _lds_load(rd_addr, v2i64_type)
                 val0 = vector.extract(pair, static_position=[0],
@@ -1064,14 +1075,8 @@ def compile_mla_decode(
 
             return global_max, s_vals
 
-        def _softmax_finalize_64(global_max, s_vals, m_old, l_old):
-            """Online softmax for 4 s_vals → 2 p_packs (each i64, 8 fp8).
-
-            Each wave computes P for its own 16 tokens (4 per lane).
-            P is written to shared S→P LDS with wave_id offset,
-            then a cross-wave barrier syncs all writes before each
-            lane reads two i64 values spanning all 4 wave groups (64 tokens).
-            """
+        def _softmax_finalize(global_max, s_vals, m_old, l_old):
+            """Online softmax: rescale + exp2 → p_vals, l_new."""
             m_new = _std_arith.MaximumFOp(
                 _raw(m_old), _raw(global_max), fastmath=fm_fast,
             ).result
@@ -1087,7 +1092,7 @@ def compile_mla_decode(
                 _raw(scaled_m_new),
                 fastmath=fm_fast,
             ).result
-            rescale = _math_exp2(rescale_arg, fastmath=fm_fast)
+            rescale = _fast_exp2(rescale_arg)
 
             p_vals = [None] * 4
             local_sum = c_zero_f
@@ -1100,7 +1105,7 @@ def compile_mla_decode(
                     _raw(scaled_m_new),
                     fastmath=fm_fast,
                 ).result
-                p = _math_exp2(exp_arg)
+                p = _fast_exp2(exp_arg)
                 p_vals[ii] = p
                 local_sum = _std_arith.AddFOp(
                     _raw(local_sum), _raw(p), fastmath=fm_fast
@@ -1113,11 +1118,14 @@ def compile_mla_decode(
                 _raw(l_scaled), _raw(local_sum), fastmath=fm_fast
             ).result
 
+            return m_new, l_new, p_vals, rescale
+
+        def _p_store(p_vals):
+            """Pack 4 f32 p_vals → fp8 i32, ds_write to S→P LDS."""
             w = rocdl.cvt_pk_fp8_f32(
                 i32_type, _raw(p_vals[0]), _raw(p_vals[1]), c_zero_i32, 0)
             w = rocdl.cvt_pk_fp8_f32(
                 i32_type, _raw(p_vals[2]), _raw(p_vals[3]), w, 1)
-
             llvm.InlineAsmOp(
                 res=None,
                 operands_=[_raw(_s_resp_wr_i32), _raw(w)],
@@ -1127,6 +1135,8 @@ def compile_mla_decode(
                 is_align_stack=False,
             )
 
+        def _p_load():
+            """Barrier + ds_read 2 × i64 p_packs from S→P LDS."""
             _barrier(lgkmcnt=0)
 
             p_pack_0 = llvm.InlineAsmOp(
@@ -1153,7 +1163,7 @@ def compile_mla_decode(
                 is_align_stack=False,
             ).result
 
-            return m_new, l_new, p_pack_0, p_pack_1, rescale
+            return p_pack_0, p_pack_1
 
         def _make_rescale_vec(rescale):
             return vector.broadcast(v4f32_type, rescale)
@@ -1173,16 +1183,41 @@ def compile_mla_decode(
         # K_{N+1} ds_read || GEMM1 (vt from iter_args) || V_transpose
         # → return k_ops_next, vt_next_0, vt_next_1
 
+        GEMM0_SPLIT = K_LORA_STEPS // 2       # 8: split point for CKV prefetch
+
         def _do_full(rope_ops, kv_pos,
                      m_cur, l_cur, o_accs, k_ops_pf,
                      vt_half0, vt_half1,
-                     next_ckv_0, next_ckv_1, do_causal=False):
+                     next_base, next_off, do_causal=False):
+            # Occu2: hardware interleaves two wave slots, no need for
+            # compiler interleave.  sched_barrier(0) keeps each instruction
+            # type in its own region.
+            # CKV buffer_loads are split across GEMM0 to avoid issuing
+            # too many at once.
 
+            # ---- buffer_load: CKV first half ----
+            next_ckv_0 = _ckv_global_load(next_base, next_off, 0)
+            rocdl.sched_barrier(0)
+
+            # ---- GEMM0 first half (MFMA) ----
             s_acc = c_zero_v4f32
-            for ks in range_constexpr(K_LORA_STEPS):
+            for ks in range_constexpr(GEMM0_SPLIT):
                 s_acc = _mfma_fp8(
                     v4f32_type,
                     [k_ops_pf[ks], q_packs[ks], s_acc, 0, 0, 0],
+                )
+            rocdl.sched_barrier(0)
+
+            # ---- buffer_load: CKV second half ----
+            next_ckv_1 = _ckv_global_load(next_base, next_off, 1)
+            rocdl.sched_barrier(0)
+
+            # ---- GEMM0 second half (MFMA) ----
+            for ks in range_constexpr(K_LORA_STEPS - GEMM0_SPLIT):
+                idx = GEMM0_SPLIT + ks
+                s_acc = _mfma_fp8(
+                    v4f32_type,
+                    [k_ops_pf[idx], q_packs[idx], s_acc, 0, 0, 0],
                 )
             for ks in range_constexpr(K_ROPE_STEPS):
                 s_acc = _mfma_fp8(
@@ -1190,39 +1225,59 @@ def compile_mla_decode(
                     [rope_ops[ks], q_packs[K_LORA_STEPS + ks],
                      s_acc, 0, 0, 0],
                 )
+            rocdl.sched_barrier(0)
 
-            # Barrier: all waves finish previous K reads before softmax
-            # reuses the LDS region for reduction buffers
+            # ---- sync: previous K ds_reads complete ----
             _barrier(lgkmcnt=0)
 
+            # ---- Softmax (VALU) ----
             global_max, s_vals = _softmax_reduce_16(
                 s_acc,
                 kv_pos=kv_pos if do_causal else None,
                 do_causal=do_causal)
-            m_cur, l_cur, p_pack_0, p_pack_1, rescale = _softmax_finalize_64(
+            m_cur, l_cur, p_vals, rescale = _softmax_finalize(
                 global_max, s_vals, m_cur, l_cur)
 
+            # ---- P store: fp8 pack + ds_write (VALU + LDS) ----
+            _p_store(p_vals)
+            rocdl.sched_barrier(0)
+
+            # ---- Rescale O (VALU) ----
             rescale_vec = _make_rescale_vec(rescale)
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = _rescale_acc(o_accs[dc], rescale_vec)
+            rocdl.sched_barrier(0)
 
-            # Wait for next tile's CKV global loads
-            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
+            # ---- P load: barrier + ds_read p_packs ----
+            _barrier(lgkmcnt=0)
+            
+            p_pack_0, p_pack_1 = _p_load()
+            rocdl.sched_barrier(0)
 
-            # K_{N+1} write to LDS
+            # ---- vmcnt(0): wait for next CKV buffer loads ----
+            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=20))
+
+            # ---- K_{N+1} ds_write first half ----
             _k_lora_lds_write(next_ckv_0, base_offset_bytes=0)
+            rocdl.sched_barrier(0)
+
+            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
             _k_lora_lds_write(next_ckv_1,
                               base_offset_bytes=K_LORA_LDS_BYTES_HALF)
+            rocdl.sched_barrier(0)
 
-            # Barrier: K writes done, all waves synced
+            # ---- sync: K writes complete, all waves ----
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
             gpu.barrier()
-
             rocdl.sched_barrier(0)
-            # --- Three-way concurrent: K read || GEMM1 || V transpose ---
-            # LLVM will interleave ds_read / v_mfma / v_perm freely
-            k_ops_next = _k_lora_lds_read(extra_offset_dw=0)
 
+            # ---- K_{N+1} ds_read first half ----
+            k_ops_half0 = _k_lora_lds_read_half(0)
+            k_ops_half1 = _k_lora_lds_read_half(1)
+            k_ops_next = k_ops_half0 + k_ops_half1
+            rocdl.sched_barrier(0)
+
+            # ---- GEMM1 (MFMA) ----
             for dc in range_constexpr(D_CHUNKS):
                 o_accs[dc] = _mfma_fp8(
                     v4f32_type,
@@ -1232,9 +1287,12 @@ def compile_mla_decode(
                     v4f32_type,
                     [vt_half1[dc], p_pack_1, o_accs[dc], 0, 0, 0],
                 )
+            rocdl.sched_barrier(0)
 
+            # ---- V_transpose (VALU / v_perm) ----
             vt_next_0 = _v_register_transpose_half(next_ckv_0)
             vt_next_1 = _v_register_transpose_half(next_ckv_1)
+            rocdl.sched_barrier(0)
 
             return m_cur, l_cur, o_accs, k_ops_next, vt_next_0, vt_next_1
 
@@ -1263,7 +1321,7 @@ def compile_mla_decode(
 
             rocdl.sched_barrier(0)
 
-            # ---- Preamble ----
+            # ---- Preamble: buffer_load CKV_0 ----
             pf_phys_0, pf_off_0 = lookup_page_issue(kv_split_start)
             pf_phys_1, pf_off_1 = lookup_page_issue(
                 kv_split_start + arith.index(BLOCK_N))
@@ -1271,22 +1329,39 @@ def compile_mla_decode(
             pf_ckv_0 = _ckv_global_load(pf_base_0, pf_off_0, 0)
             pf_ckv_1 = _ckv_global_load(pf_base_0, pf_off_0, 1)
             pf_rope = _rope_direct_load(pf_base_0, pf_off_0)
+            rocdl.sched_barrier(0)
 
-            # Wait for CKV_0 data
+            # ---- vmcnt(0): CKV_0 data ready ----
             rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
             gpu.barrier()
 
-            # K_0 write to LDS
+            # ---- K_0 ds_write first half ----
             _k_lora_lds_write(pf_ckv_0, base_offset_bytes=0)
+            rocdl.sched_barrier(0)
+
+            # ---- K_0 ds_write second half ----
             _k_lora_lds_write(pf_ckv_1,
                               base_offset_bytes=K_LORA_LDS_BYTES_HALF)
+            rocdl.sched_barrier(0)
+
+            # ---- sync: K writes complete ----
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
             gpu.barrier()
+            rocdl.sched_barrier(0)
 
-            # K_0 read (prefetch) + V_transpose (overlaps K read latency)
-            k_ops_init = _k_lora_lds_read(extra_offset_dw=0)
+            # ---- K_0 ds_read first half ----
+            k_ops_init_0 = _k_lora_lds_read_half(0)
+            rocdl.sched_barrier(0)
+
+            # ---- K_0 ds_read second half ----
+            k_ops_init_1 = _k_lora_lds_read_half(1)
+            k_ops_init = k_ops_init_0 + k_ops_init_1
+            rocdl.sched_barrier(0)
+
+            # ---- V_transpose (VALU) ----
             vt_init_0 = _v_register_transpose_half(pf_ckv_0)
             vt_init_1 = _v_register_transpose_half(pf_ckv_1)
+            rocdl.sched_barrier(0)
 
             body_init = (
                 [_raw(m_init), _raw(l_init)]
@@ -1328,20 +1403,20 @@ def compile_mla_decode(
                 next_off = body_ia[
                     N_PREFIX + N_KOPS + 2 * N_VT + N_ROPE + 1]
 
-                # Issue next tile's CKV + rope loads (overlap with GEMM0)
+                # ---- prep: resolve next page + rope load ----
                 next_base = lookup_page_resolve(next_phys)
-                pf_ckv_next_0 = _ckv_global_load(next_base, next_off, 0)
-                pf_ckv_next_1 = _ckv_global_load(next_base, next_off, 1)
                 pf_rope_next = _rope_direct_load(next_base, next_off)
                 nn_phys, nn_off = lookup_page_issue(
                     kv_pos + arith.index(2 * BLOCK_N))
 
+                # CKV buffer_loads are issued inside _do_full,
+                # split across GEMM0.
                 m_new, l_new, o_accs, k_ops_next, vt_next_0, vt_next_1 = \
                     _do_full(
                         cur_rope,
                         kv_pos, m_running, l_running, o_accs,
                         cur_k_ops, cur_vt_0, cur_vt_1,
-                        pf_ckv_next_0, pf_ckv_next_1,
+                        next_base, next_off,
                         do_causal=CAUSAL)
 
                 yield (
@@ -1513,4 +1588,1128 @@ def compile_mla_decode(
             stream=stream,
         )
 
-    return launch_mla_decode
+    if not PERSISTENT:
+        return launch_mla_decode
+
+    # ================================================================
+    # Persistent kernel — shares constants from compile_mla_decode,
+    # helper functions are re-defined inside this kernel body.
+    # The core computation (GEMM0/1, softmax, V transpose) is identical
+    # to the non-persistent path; only the outer loop, Q loading, and
+    # output addresses differ.
+    # ================================================================
+    @flyc.kernel
+    def mla_decode_kernel_persistent(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        block_table: fx.Tensor,
+        kv_indptr: fx.Tensor,
+        kv_last_page_lens: fx.Tensor,
+        work_indptr: fx.Tensor,
+        work_info_set: fx.Tensor,
+        max_num_blocks: fx.Int32,
+        max_seqlen_q: fx.Int32,
+        splitData: fx.Tensor,
+        splitLse: fx.Tensor,
+    ):
+        compute_type = T.f32
+        elem_type = default_f8_type()
+        lds_elem_type = ir.IntegerType.get_signless(8)
+
+        i32_type = ir.IntegerType.get_signless(32)
+        i64_type = ir.IntegerType.get_signless(64)
+        v4f32_type = ir.VectorType.get([4], compute_type)
+        v2f32_type = ir.VectorType.get([2], compute_type)
+        v1i32_type = ir.VectorType.get([1], i32_type)
+        v2i64_type = ir.VectorType.get([2], i64_type)
+        v4i32_type = ir.VectorType.get([4], i32_type)
+        i8_type = ir.IntegerType.get_signless(8)
+        v8i8_type = ir.VectorType.get([8], i8_type)
+        v4f16_type = ir.VectorType.get([4], T.f16)
+        v8f16_type = ir.VectorType.get([8], T.f16)
+
+        max_num_blocks_v = arith.index_cast(T.index, max_num_blocks.ir_value())
+        seqlen_q_v = arith.index(1)
+
+        base_ptr_lds = allocator_lds.get_base()
+
+        lds_k_lora_buf = SmemPtr(
+            base_ptr_lds, lds_k_lora_offset, lds_elem_type,
+            shape=(K_LORA_LDS_BYTES,)
+        ).get()
+        lds_red = SmemPtr(
+            base_ptr_lds, lds_red_offset, T.f32, shape=(256,)
+        ).get()
+        lds_reshape = SmemPtr(
+            base_ptr_lds, lds_k_lora_offset, T.f32,
+            shape=(RESHAPE_TOTAL,)
+        ).get()
+        lds_s_resp_buf = SmemPtr(
+            base_ptr_lds, lds_s_resp_offset, lds_elem_type,
+            shape=(S_RESP_LDS_BYTES,)
+        ).get()
+
+        # ---- Thread / block indices ----
+        head_group_idx = gpu.block_id("y")
+        tid = gpu.thread_id("x")
+        wave_id = tid / arith.index(WARP_SIZE)
+        lane = tid % arith.index(WARP_SIZE)
+
+        lane_mod_16 = lane % arith.index(16)
+        lane_div_16 = lane / arith.index(16)
+        lane_mod_8 = lane % arith.index(8)
+        lane_div_8 = lane / arith.index(8)
+
+        wave_half = wave_id / arith.index(2)
+        wave_sub  = wave_id % arith.index(2)
+
+        k_r_id = lane_mod_16 % arith.index(4)
+        k_g_id = lane_mod_16 / arith.index(4)
+        k_lora_wave_rd_dw = (
+            wave_sub * arith.index(K_LORA_ROUND2_OFFSET)
+            + wave_half * arith.index(K_LORA_PI1_OFFSET_DW)
+        )
+        k_lora_rd_full_dw = (
+            k_r_id * arith.index(K_LORA_RID_STRIDE_DW)
+            + k_g_id * arith.index(K_LORA_GID_STRIDE_DW)
+            + lane_div_16 * arith.index(4)
+            + k_lora_wave_rd_dw
+        )
+        k_lora_rd_base = k_lora_rd_full_dw * arith.index(4)
+
+        _rope_lane_off = (
+            lane_mod_16 * arith.index(STRIDE_TOKEN_KV * elem_bytes)
+            + lane_div_16 * arith.index(8 * elem_bytes)
+            + arith.index(HEAD_DIM_LORA * elem_bytes)
+        )
+        _rope_wave_soff = rocdl.readfirstlane(
+            i32_type,
+            _index_cast_to_i32(
+                wave_id * arith.index(16 * STRIDE_TOKEN_KV * elem_bytes)
+            ),
+        )
+
+        q_head_idx = head_group_idx * arith.index(HEADS_PER_WAVE) + lane_mod_16
+        q_head_base = head_group_idx * arith.index(HEADS_PER_WAVE)
+        kv_head_idx = q_head_base / arith.index(GQA_GROUP)
+        kv_head_offset = kv_head_idx * arith.index(HEAD_DIM_QK)
+
+        s_perm0 = arith.constant(0x07060302, type=i32_type)
+        s_perm1 = arith.constant(0x05040100, type=i32_type)
+        s_perm2 = arith.constant(0x05010400, type=i32_type)
+        s_perm3 = arith.constant(0x07030602, type=i32_type)
+
+        # ---- S→P LDS addresses ----
+        lds_s_resp_base_idx = _memref.ExtractAlignedPointerAsIndexOp(
+            lds_s_resp_buf).result
+        lds_s_resp_base_i32 = rocdl.readfirstlane(
+            i32_type, _index_cast_to_i32(lds_s_resp_base_idx))
+
+        _s_resp_wr_off = (
+            lane_div_16
+            + wave_id * arith.index(4)
+            + lane_mod_16 * arith.index(S_RESP_STRIDE_DW)
+        ) * arith.index(4)
+        _s_resp_wr_i32 = _std_arith.AddIOp(
+            _raw(_index_cast_to_i32(_s_resp_wr_off)),
+            _raw(lds_s_resp_base_i32)).result
+
+        _s_resp_rd_off_0 = (
+            lane_div_16 * arith.index(2)
+            + lane_mod_16 * arith.index(S_RESP_STRIDE_DW)
+        ) * arith.index(4)
+        _s_resp_rd_i32_0 = _std_arith.AddIOp(
+            _raw(_index_cast_to_i32(_s_resp_rd_off_0)),
+            _raw(lds_s_resp_base_i32)).result
+
+        _s_resp_rd_off_1 = _s_resp_rd_off_0 + arith.index(32)
+        _s_resp_rd_i32_1 = _std_arith.AddIOp(
+            _raw(_index_cast_to_i32(_s_resp_rd_off_1)),
+            _raw(lds_s_resp_base_i32)).result
+
+        # ---- CKV global load addresses ----
+        _ckv_p_id_bytes = lane_mod_16 * arith.index(4 * elem_bytes)
+        _ckv_wave_bytes = wave_id * arith.index(CKV_HDIM_PER_WAVE * elem_bytes)
+        _ckv_base_bytes = _ckv_p_id_bytes + _ckv_wave_bytes
+        _ckv_q_id = lane_div_16
+        _ckv_q_id_stride = _ckv_q_id * arith.index(8 * STRIDE_TOKEN_KV * elem_bytes)
+
+        def _vt_perm(src_hi, src_lo, sel):
+            return llvm.call_intrinsic(
+                i32_type, "llvm.amdgcn.perm",
+                [src_hi, src_lo, sel], [], [],
+            )
+
+        # ---- Block table ----
+        max_log_block = max_num_blocks_v - arith.index(1)
+        bt_rsrc = buffer_ops.create_buffer_resource(block_table)
+        c_zero_i32 = arith.constant(0, type=T.i32)
+        _bt_aux = arith.constant(0, type=T.i32)
+        _c6_i32 = arith.constant(6, type=T.i32)
+        _c2_i32 = arith.constant(2, type=T.i32)
+        _c_pbs_mask_i32 = arith.constant(
+            PAGE_BLOCK_SIZE - 1, type=T.i32
+        )
+        _bt_soff = _raw(c_zero_i32)
+
+        def lookup_page_issue(kv_abs_pos, clamp=True,
+                               pos_i32=None):
+            if clamp:
+                p_off = kv_abs_pos % arith.index(PAGE_BLOCK_SIZE)
+                log_block = kv_abs_pos / arith.index(PAGE_BLOCK_SIZE)
+                log_block = _std_arith.MinUIOp(
+                    _raw(log_block), _raw(max_log_block)
+                ).result
+                bt_byte_off = _index_cast_to_i32(
+                    log_block * arith.index(4)
+                )
+            else:
+                if pos_i32 is None:
+                    pos_i32 = _index_cast_to_i32(
+                        kv_abs_pos)
+                _and_res = _std_arith.AndIOp(
+                    _raw(pos_i32),
+                    _raw(_c_pbs_mask_i32),
+                ).result
+                p_off = arith.index_cast(T.index, _and_res)
+                log_block_i32 = _std_arith.ShRUIOp(
+                    _raw(pos_i32),
+                    _raw(_c6_i32),
+                ).result
+                bt_byte_off = _std_arith.ShLIOp(
+                    _raw(log_block_i32),
+                    _raw(_c2_i32),
+                ).result
+            phys_i32 = rocdl.raw_ptr_buffer_load(
+                i32_type, bt_rsrc, bt_byte_off,
+                _raw(_bt_soff), _raw(_bt_aux),
+            )
+            return phys_i32, p_off
+
+        def lookup_page_resolve(phys_i32):
+            phys = arith.index_cast(T.index, phys_i32)
+            return phys * arith.index(STRIDE_PAGE)
+
+        _wave_id_i32 = _index_cast_to_i32(wave_id)
+        _wave_id_sgpr = rocdl.readfirstlane(i32_type, _wave_id_i32)
+
+        def _i32_to_lds_ptr(i32_val):
+            i64_val = _std_arith.ExtUIOp(i64_type, i32_val).result
+            return _inttoptr_lds(i64_val)
+
+        # ---- K LDS base addresses ----
+        lds_k_lora_base_idx = _memref.ExtractAlignedPointerAsIndexOp(
+            lds_k_lora_buf).result
+        lds_k_lora_base_i32 = rocdl.readfirstlane(
+            i32_type, _index_cast_to_i32(lds_k_lora_base_idx))
+
+        # ---- K LDS write address (per-thread) ----
+        _k_wr_q_id = lane_div_16
+        _k_wr_p_id = tid % arith.index(16)
+        _p_mod2 = _k_wr_p_id % arith.index(2)
+        _p_div8 = _k_wr_p_id / arith.index(8)
+        _p_mid  = (_k_wr_p_id % arith.index(8)) / arith.index(2)
+        _k_wr_p_remapped = (
+            _p_mid * arith.index(4)
+            + _p_div8 * arith.index(2)
+            + _p_mod2
+        )
+        _k_lora_wr_base_dw = (
+            _k_wr_q_id * arith.index(256)
+            + _k_wr_p_remapped
+        )
+        _k_lora_wr_wave_dw = wave_id * arith.index(32)
+        _k_lora_wr_addr_dw = _k_lora_wr_base_dw + _k_lora_wr_wave_dw
+        k_lora_wr_addr_bytes = _k_lora_wr_addr_dw * arith.index(4)
+        k_lora_wr_addr_i32 = _index_cast_to_i32(k_lora_wr_addr_bytes)
+        k_lora_wr_addr_i32_sgpr = _std_arith.AddIOp(
+            _raw(k_lora_wr_addr_i32), _raw(lds_k_lora_base_i32)).result
+
+        # ---- Buffer resources ----
+        q_row = arith.index(0)
+        q_rsrc = buffer_ops.create_buffer_resource(Q)
+        c_max_records = arith.index(0xEFFFFFFE)
+        kv_rsrc = buffer_ops.create_buffer_resource(
+            KV, num_records_bytes=c_max_records
+        )
+        splitData_rsrc = buffer_ops.create_buffer_resource(splitData)
+        splitLse_rsrc = buffer_ops.create_buffer_resource(splitLse)
+        kv_indptr_rsrc = buffer_ops.create_buffer_resource(kv_indptr)
+        kv_last_page_rsrc = buffer_ops.create_buffer_resource(kv_last_page_lens)
+        work_indptr_rsrc = buffer_ops.create_buffer_resource(work_indptr)
+        work_info_rsrc = buffer_ops.create_buffer_resource(work_info_set)
+
+        lds_base_byte_idx = lds_k_lora_base_idx
+        c_dword_sz = arith.constant(4, type=T.i32)
+        aux = arith.constant(0, type=T.i32)
+
+        q_packs = [None] * K_STEPS
+
+        Q_LDS_QUAD_BYTES = 4 * Q_TILE_DIM * elem_bytes
+        Q_GLOBAL_QUAD_BYTES = 4 * HEAD_DIM_QK * elem_bytes
+        Q_CALL_SOFFSETS = [
+            arith.constant(
+                c * (Q_GLOBAL_QUAD_BYTES - Q_LDS_QUAD_BYTES),
+                type=i32_type,
+            )
+            for c in range(Q_CALLS_PER_WAVE)
+        ]
+        Q_CALL_INST_OFFSETS = [
+            arith.constant(c * Q_LDS_QUAD_BYTES, type=i32_type)
+            for c in range(Q_CALLS_PER_WAVE)
+        ]
+        Q_TILE_BYTES = Q_TILE_ELEMS * elem_bytes
+
+        # ---- Constants ----
+        c_neg_inf = arith.constant(float("-inf"), type=compute_type)
+        c_neg_large = arith.constant(-1e6, type=compute_type)
+        c_zero_f = arith.constant(0.0, type=compute_type)
+        c_one_f = arith.constant(1.0, type=compute_type)
+        c_sm_scale = arith.constant(sm_scale, type=compute_type)
+        c_sm_scale_log2e = arith.constant(sm_scale * 1.4426950408889634, type=compute_type)
+        c_zero_v4f32 = arith.constant_vector(0.0, v4f32_type)
+
+        # ---- seqlen_kv_v placeholder (set per work item) ----
+        seqlen_kv_v = arith.index(0)
+
+        # ---- Helper functions (identical to non-persistent kernel) ----
+        def _mfma_fp8(result_type, operands, **kw):
+            return rocdl.mfma_f32_16x16x32_fp8_fp8(result_type, operands, **kw)
+
+        _CKV_INSTS_PER_HALF = CKV_MEM_LD_INSTS // 2
+
+        def _ckv_global_load(kv_page_base, page_off, half_idx):
+            page_byte_base = kv_page_base * arith.index(elem_bytes)
+            kv_head_byte = kv_head_offset * arith.index(elem_bytes)
+            p_off_byte = page_off * arith.index(STRIDE_TOKEN_KV * elem_bytes)
+            voff_base = (page_byte_base + kv_head_byte + p_off_byte
+                         + _ckv_base_bytes + _ckv_q_id_stride)
+            voff_base_i32 = _index_cast_to_i32(voff_base)
+            half_soff = arith.constant(
+                half_idx * 32 * STRIDE_TOKEN_KV * elem_bytes, type=T.i32)
+            vgprs = []
+            for inst in range_constexpr(_CKV_INSTS_PER_HALF):
+                inst_off = inst * STRIDE_TOKEN_KV * elem_bytes
+                if inst_off == 0:
+                    voff_dw0 = voff_base_i32
+                else:
+                    voff_dw0 = _std_arith.AddIOp(
+                        _raw(voff_base_i32),
+                        _raw(arith.constant(inst_off, type=T.i32)),
+                    ).result
+                dw0 = rocdl.raw_ptr_buffer_load(
+                    i32_type, kv_rsrc, voff_dw0,
+                    _raw(half_soff), _raw(aux),
+                )
+                dw1_off = inst_off + 64 * elem_bytes
+                voff_dw1 = _std_arith.AddIOp(
+                    _raw(voff_base_i32),
+                    _raw(arith.constant(dw1_off, type=T.i32)),
+                ).result
+                dw1 = rocdl.raw_ptr_buffer_load(
+                    i32_type, kv_rsrc, voff_dw1,
+                    _raw(half_soff), _raw(aux),
+                )
+                vgprs.append(dw0)
+                vgprs.append(dw1)
+            return vgprs
+
+        def _k_lora_lds_write(ckv_vgprs, base_offset_bytes=0):
+            wr_ptr = _i32_to_lds_ptr(k_lora_wr_addr_i32_sgpr)
+            for inst in range_constexpr(K_LDS_WR_INSTS):
+                r_id = inst % 4
+                g_id = inst // 4
+                lds_off = base_offset_bytes + (
+                    r_id * K_LORA_RID_STRIDE_DW
+                    + g_id * K_LORA_GID_STRIDE_DW
+                ) * 4
+                lds_ptr_off = _get_element_ptr(
+                    wr_ptr, static_byte_offset=lds_off)
+                dw0 = ckv_vgprs[inst * 2 + 0]
+                dw0_val = dw0 if isinstance(dw0, ir.Value) else _raw(dw0)
+                llvm.StoreOp(dw0_val, lds_ptr_off)
+                lds_ptr_off2 = _get_element_ptr(
+                    wr_ptr, static_byte_offset=lds_off + 64)
+                dw1 = ckv_vgprs[inst * 2 + 1]
+                dw1_val = dw1 if isinstance(dw1, ir.Value) else _raw(dw1)
+                llvm.StoreOp(dw1_val, lds_ptr_off2)
+
+        def _rope_direct_load(kv_page_base, page_off):
+            page_byte_base = kv_page_base * arith.index(elem_bytes)
+            kv_head_byte = kv_head_offset * arith.index(elem_bytes)
+            p_off_byte = page_off * arith.index(STRIDE_TOKEN_KV * elem_bytes)
+            voff_base = page_byte_base + kv_head_byte + p_off_byte + _rope_lane_off
+            voff_base_i32 = _index_cast_to_i32(voff_base)
+            rope_ops = []
+            for ks in range_constexpr(K_ROPE_STEPS):
+                ks_off = ks * 32 * elem_bytes
+                if ks_off == 0:
+                    voff_i32 = voff_base_i32
+                else:
+                    voff_i32 = _std_arith.AddIOp(
+                        _raw(voff_base_i32),
+                        _raw(arith.constant(ks_off, type=T.i32)),
+                    ).result
+                dw_pair = rocdl.raw_ptr_buffer_load(
+                    i64_type, kv_rsrc, voff_i32,
+                    _raw(_rope_wave_soff), _raw(aux),
+                )
+                rope_ops.append(dw_pair)
+            return rope_ops
+
+        K_LDS_RD_INSTS = K_LDS_WR_INSTS
+        K_LDS_RD_HALF = K_LDS_RD_INSTS // 2
+
+        def _k_lora_lds_read_half(half_id, extra_offset_dw=0):
+            k_ops = []
+            start = half_id * K_LDS_RD_HALF
+            for inst in range_constexpr(K_LDS_RD_HALF):
+                actual_inst = start + inst
+                rd_addr = (
+                    lds_k_lora_base_idx
+                    + k_lora_rd_base
+                    + arith.index((extra_offset_dw + actual_inst * 16) * 4)
+                )
+                pair = _lds_load(rd_addr, v2i64_type)
+                val0 = vector.extract(pair, static_position=[0],
+                                      dynamic_position=[])
+                val1 = vector.extract(pair, static_position=[1],
+                                      dynamic_position=[])
+                k_ops.append(val0)
+                k_ops.append(val1)
+            return k_ops
+
+        def _v_register_transpose_half(half_vgprs):
+            def _v(idx):
+                v = half_vgprs[idx]
+                return v if isinstance(v, ir.Value) else _raw(v)
+
+            acc_V = [None] * 16
+            for i in range_constexpr(2):
+                for sec in range_constexpr(2):
+                    s_base = sec * 8
+                    s0 = _v(s_base + 0 + i)
+                    s1 = _v(s_base + 2 + i)
+                    s2 = _v(s_base + 4 + i)
+                    s3 = _v(s_base + 6 + i)
+                    tmp0 = _vt_perm(s1, s0, s_perm2)
+                    tmp1 = _vt_perm(s1, s0, s_perm3)
+                    tmp2 = _vt_perm(s3, s2, s_perm2)
+                    tmp3 = _vt_perm(s3, s2, s_perm3)
+                    d0 = _vt_perm(tmp2, tmp0, s_perm1)
+                    d1 = _vt_perm(tmp2, tmp0, s_perm0)
+                    d2 = _vt_perm(tmp3, tmp1, s_perm1)
+                    d3 = _vt_perm(tmp3, tmp1, s_perm0)
+                    acc_V[i * 8 + sec + 0] = d0
+                    acc_V[i * 8 + sec + 2] = d1
+                    acc_V[i * 8 + sec + 4] = d2
+                    acc_V[i * 8 + sec + 6] = d3
+
+            c32 = _std_arith.ConstantOp(
+                i64_type, ir.IntegerAttr.get(i64_type, 32)).result
+            v_ops = []
+            for idx in range_constexpr(D_CHUNKS):
+                a = acc_V[idx * 2]
+                b = acc_V[idx * 2 + 1]
+                a_i64 = _std_arith.ExtUIOp(i64_type, a).result
+                b_i64 = _std_arith.ExtUIOp(i64_type, b).result
+                b_sh = _std_arith.ShLIOp(b_i64, c32).result
+                op = _std_arith.OrIOp(a_i64, b_sh).result
+                v_ops.append(op)
+            return v_ops
+
+        def _softmax_reduce_16(s_acc, kv_pos=None, do_causal=False):
+            s_vals = []
+            for ii in range_constexpr(4):
+                s_val = vector.extract(
+                    s_acc, static_position=[ii], dynamic_position=[],
+                )
+                if CAUSAL and do_causal:
+                    kv_abs = (kv_pos
+                              + wave_id * arith.index(16)
+                              + lane_div_16 * arith.index(4)
+                              + arith.index(ii))
+                    q_abs_pos = seqlen_kv_v - seqlen_q_v + q_row
+                    kv_abs_i64 = arith.index_cast(T.i64, kv_abs)
+                    q_abs_i64 = arith.index_cast(T.i64, q_abs_pos)
+                    is_masked = _std_arith.CmpIOp(
+                        _std_arith.CmpIPredicate.ugt,
+                        _raw(kv_abs_i64), _raw(q_abs_i64),
+                    ).result
+                    s_val = _std_arith.SelectOp(
+                        is_masked, _raw(c_neg_large), _raw(s_val),
+                    ).result
+                s_vals.append(s_val)
+
+            local_max = s_vals[0]
+            for ii in range_constexpr(3):
+                local_max = _std_arith.MaximumFOp(
+                    _raw(local_max), _raw(s_vals[ii + 1]),
+                    fastmath=fm_fast,
+                ).result
+
+            red_wr_idx = (
+                wave_id * arith.index(64)
+                + lane_mod_16 * arith.index(4)
+                + lane_div_16
+            )
+            _memref.StoreOp(local_max, lds_red, [_raw(red_wr_idx)])
+            _barrier(lgkmcnt=0)
+
+            global_max = c_neg_large
+            for w in range_constexpr(NUM_WAVES):
+                red_rd_base = (
+                    arith.index(w * 64)
+                    + lane_mod_16 * arith.index(4)
+                )
+                max_vec = vector.load_op(
+                    v4f32_type, lds_red, [_raw(red_rd_base)])
+                for g in range_constexpr(4):
+                    max_g = vector.extract(
+                        max_vec, static_position=[g], dynamic_position=[],
+                    )
+                    global_max = _std_arith.MaximumFOp(
+                        _raw(global_max), _raw(max_g),
+                        fastmath=fm_fast,
+                    ).result
+
+            return global_max, s_vals
+
+        def _softmax_finalize(global_max, s_vals, m_old, l_old):
+            m_new = _std_arith.MaximumFOp(
+                _raw(m_old), _raw(global_max), fastmath=fm_fast,
+            ).result
+            scaled_m_new = _std_arith.MulFOp(
+                _raw(c_sm_scale_log2e), _raw(m_new), fastmath=fm_fast,
+            ).result
+            rescale_arg = _std_arith.SubFOp(
+                _std_arith.MulFOp(
+                    _raw(m_old), _raw(c_sm_scale_log2e), fastmath=fm_fast,
+                ).result,
+                _raw(scaled_m_new),
+                fastmath=fm_fast,
+            ).result
+            rescale = _fast_exp2(rescale_arg)
+            p_vals = [None] * 4
+            local_sum = c_zero_f
+            for ii in range_constexpr(4):
+                exp_arg = _std_arith.SubFOp(
+                    _std_arith.MulFOp(
+                        _raw(s_vals[ii]), _raw(c_sm_scale_log2e),
+                        fastmath=fm_fast,
+                    ).result,
+                    _raw(scaled_m_new),
+                    fastmath=fm_fast,
+                ).result
+                p = _fast_exp2(exp_arg)
+                p_vals[ii] = p
+                local_sum = _std_arith.AddFOp(
+                    _raw(local_sum), _raw(p), fastmath=fm_fast
+                ).result
+            l_scaled = _std_arith.MulFOp(
+                _raw(l_old), _raw(rescale), fastmath=fm_fast
+            ).result
+            l_new = _std_arith.AddFOp(
+                _raw(l_scaled), _raw(local_sum), fastmath=fm_fast
+            ).result
+            return m_new, l_new, p_vals, rescale
+
+        def _p_store(p_vals):
+            w = rocdl.cvt_pk_fp8_f32(
+                i32_type, _raw(p_vals[0]), _raw(p_vals[1]), c_zero_i32, 0)
+            w = rocdl.cvt_pk_fp8_f32(
+                i32_type, _raw(p_vals[2]), _raw(p_vals[3]), w, 1)
+            llvm.InlineAsmOp(
+                res=None,
+                operands_=[_raw(_s_resp_wr_i32), _raw(w)],
+                asm_string="ds_write_b32 $0, $1",
+                constraints="v,v",
+                has_side_effects=True,
+                is_align_stack=False,
+            )
+
+        def _p_load():
+            _barrier(lgkmcnt=0)
+            p_pack_0 = llvm.InlineAsmOp(
+                res=i64_type,
+                operands_=[_raw(_s_resp_rd_i32_0)],
+                asm_string=(
+                    "ds_read_b64 $0, $1\n"
+                    "s_waitcnt lgkmcnt(0)"
+                ),
+                constraints="=v,v",
+                has_side_effects=True,
+                is_align_stack=False,
+            ).result
+            p_pack_1 = llvm.InlineAsmOp(
+                res=i64_type,
+                operands_=[_raw(_s_resp_rd_i32_1)],
+                asm_string=(
+                    "ds_read_b64 $0, $1\n"
+                    "s_waitcnt lgkmcnt(0)"
+                ),
+                constraints="=v,v",
+                has_side_effects=True,
+                is_align_stack=False,
+            ).result
+            return p_pack_0, p_pack_1
+
+        def _make_rescale_vec(rescale):
+            return vector.broadcast(v4f32_type, rescale)
+
+        def _rescale_acc(acc, rescale_vec):
+            return _std_arith.MulFOp(
+                _raw(acc), _raw(rescale_vec),
+                fastmath=fm_fast,
+            ).result
+
+        GEMM0_SPLIT = K_LORA_STEPS // 2
+
+        def _do_full(rope_ops, kv_pos,
+                     m_cur, l_cur, o_accs, k_ops_pf,
+                     vt_half0, vt_half1,
+                     next_base, next_off, do_causal=False):
+            next_ckv_0 = _ckv_global_load(next_base, next_off, 0)
+            rocdl.sched_barrier(0)
+            s_acc = c_zero_v4f32
+            for ks in range_constexpr(GEMM0_SPLIT):
+                s_acc = _mfma_fp8(
+                    v4f32_type,
+                    [k_ops_pf[ks], q_packs[ks], s_acc, 0, 0, 0],
+                )
+            rocdl.sched_barrier(0)
+            next_ckv_1 = _ckv_global_load(next_base, next_off, 1)
+            rocdl.sched_barrier(0)
+            for ks in range_constexpr(K_LORA_STEPS - GEMM0_SPLIT):
+                idx = GEMM0_SPLIT + ks
+                s_acc = _mfma_fp8(
+                    v4f32_type,
+                    [k_ops_pf[idx], q_packs[idx], s_acc, 0, 0, 0],
+                )
+            for ks in range_constexpr(K_ROPE_STEPS):
+                s_acc = _mfma_fp8(
+                    v4f32_type,
+                    [rope_ops[ks], q_packs[K_LORA_STEPS + ks],
+                     s_acc, 0, 0, 0],
+                )
+            rocdl.sched_barrier(0)
+            _barrier(lgkmcnt=0)
+            global_max, s_vals = _softmax_reduce_16(
+                s_acc,
+                kv_pos=kv_pos if do_causal else None,
+                do_causal=do_causal)
+            m_cur, l_cur, p_vals, rescale = _softmax_finalize(
+                global_max, s_vals, m_cur, l_cur)
+            _p_store(p_vals)
+            rocdl.sched_barrier(0)
+            rescale_vec = _make_rescale_vec(rescale)
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = _rescale_acc(o_accs[dc], rescale_vec)
+            rocdl.sched_barrier(0)
+            _barrier(lgkmcnt=0)
+            p_pack_0, p_pack_1 = _p_load()
+            rocdl.sched_barrier(0)
+            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=20))
+            _k_lora_lds_write(next_ckv_0, base_offset_bytes=0)
+            rocdl.sched_barrier(0)
+            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
+            _k_lora_lds_write(next_ckv_1,
+                              base_offset_bytes=K_LORA_LDS_BYTES_HALF)
+            rocdl.sched_barrier(0)
+            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+            gpu.barrier()
+            rocdl.sched_barrier(0)
+            k_ops_half0 = _k_lora_lds_read_half(0)
+            k_ops_half1 = _k_lora_lds_read_half(1)
+            k_ops_next = k_ops_half0 + k_ops_half1
+            rocdl.sched_barrier(0)
+            for dc in range_constexpr(D_CHUNKS):
+                o_accs[dc] = _mfma_fp8(
+                    v4f32_type,
+                    [vt_half0[dc], p_pack_0, o_accs[dc], 0, 0, 0],
+                )
+                o_accs[dc] = _mfma_fp8(
+                    v4f32_type,
+                    [vt_half1[dc], p_pack_1, o_accs[dc], 0, 0, 0],
+                )
+            rocdl.sched_barrier(0)
+            vt_next_0 = _v_register_transpose_half(next_ckv_0)
+            vt_next_1 = _v_register_transpose_half(next_ckv_1)
+            rocdl.sched_barrier(0)
+            return m_cur, l_cur, o_accs, k_ops_next, vt_next_0, vt_next_1
+
+        # ================================================================
+        # Persistent outer loop
+        # ================================================================
+        worker_idx = gpu.block_id("x")
+        worker_i32 = _index_cast_to_i32(worker_idx)
+        worker_p1_i32 = _std_arith.AddIOp(
+            _raw(worker_i32),
+            _raw(arith.constant(1, type=T.i32)),
+        ).result
+
+        work_start_i32 = buffer_ops.buffer_load(
+            work_indptr_rsrc, worker_i32,
+            vec_width=1, dtype=i32_type,
+        )
+        work_end_i32 = buffer_ops.buffer_load(
+            work_indptr_rsrc, worker_p1_i32,
+            vec_width=1, dtype=i32_type,
+        )
+        work_start = arith.index_cast(
+            T.index, rocdl.readfirstlane(i32_type, work_start_i32))
+        work_end = arith.index_cast(
+            T.index, rocdl.readfirstlane(i32_type, work_end_i32))
+
+        has_work = _std_arith.CmpIOp(
+            _std_arith.CmpIPredicate.ult,
+            _raw(work_start), _raw(work_end),
+        ).result
+
+        if has_work:
+            for work_idx_raw in _scf.for_(
+                _raw(work_start), _raw(work_end),
+                _raw(arith.index(1)),
+            ):
+                work_idx_i32 = _index_cast_to_i32(work_idx_raw)
+                wi_byte_base = _std_arith.ShLIOp(
+                    _raw(work_idx_i32),
+                    _raw(arith.constant(5, type=T.i32)),
+                ).result
+
+                def _rd_field(f):
+                    off = _std_arith.AddIOp(
+                        _raw(wi_byte_base),
+                        _raw(arith.constant(f * 4, type=T.i32)),
+                    ).result
+                    return rocdl.readfirstlane(
+                        i32_type,
+                        buffer_ops.buffer_load(
+                            work_info_rsrc, off,
+                            vec_width=1, dtype=i32_type,
+                        ),
+                    )
+
+                batch_idx_i32 = _rd_field(0)
+                partial_qo_loc_i32 = _rd_field(1)
+                qo_start_i32 = _rd_field(2)
+                kv_start_pages_i32 = _rd_field(4)
+                kv_end_pages_i32 = _rd_field(5)
+
+                # ---- Per-work batch info ----
+                batch_page_start_i32 = rocdl.readfirstlane(
+                    i32_type,
+                    buffer_ops.buffer_load(
+                        kv_indptr_rsrc, batch_idx_i32,
+                        vec_width=1, dtype=i32_type,
+                    ),
+                )
+                batch_idx_p1_i32 = _std_arith.AddIOp(
+                    _raw(batch_idx_i32),
+                    _raw(arith.constant(1, type=T.i32)),
+                ).result
+                batch_page_end_i32 = rocdl.readfirstlane(
+                    i32_type,
+                    buffer_ops.buffer_load(
+                        kv_indptr_rsrc, batch_idx_p1_i32,
+                        vec_width=1, dtype=i32_type,
+                    ),
+                )
+                kv_last_len_i32 = rocdl.readfirstlane(
+                    i32_type,
+                    buffer_ops.buffer_load(
+                        kv_last_page_rsrc, batch_idx_i32,
+                        vec_width=1, dtype=i32_type,
+                    ),
+                )
+
+                total_pages_i32 = _std_arith.SubIOp(
+                    _raw(batch_page_end_i32),
+                    _raw(batch_page_start_i32),
+                ).result
+                seqlen_kv_i32 = _std_arith.AddIOp(
+                    _std_arith.MulIOp(
+                        _std_arith.SubIOp(
+                            _raw(total_pages_i32),
+                            _raw(arith.constant(1, type=T.i32)),
+                        ).result,
+                        _raw(arith.constant(PAGE_BLOCK_SIZE, type=T.i32)),
+                    ).result,
+                    _raw(kv_last_len_i32),
+                ).result
+                seqlen_kv_v = arith.index_cast(T.index, seqlen_kv_i32)
+
+                # ---- Update _bt_soff for block_table lookup ----
+                _bt_soff = _std_arith.ShLIOp(
+                    _std_arith.MulIOp(
+                        _raw(batch_idx_i32),
+                        _raw(_index_cast_to_i32(max_num_blocks_v)),
+                    ).result,
+                    _raw(_c2_i32),
+                ).result
+
+                # ---- Convert page indices → token positions ----
+                local_start_i32 = _std_arith.SubIOp(
+                    _raw(kv_start_pages_i32),
+                    _raw(batch_page_start_i32),
+                ).result
+                local_end_i32 = _std_arith.SubIOp(
+                    _raw(kv_end_pages_i32),
+                    _raw(batch_page_start_i32),
+                ).result
+                kv_split_start = arith.index_cast(
+                    T.index,
+                    _std_arith.MulIOp(
+                        _raw(local_start_i32),
+                        _raw(arith.constant(PAGE_BLOCK_SIZE, type=T.i32)),
+                    ).result,
+                )
+                kv_split_end = arith.index_cast(
+                    T.index,
+                    _std_arith.MulIOp(
+                        _raw(local_end_i32),
+                        _raw(arith.constant(PAGE_BLOCK_SIZE, type=T.i32)),
+                    ).result,
+                )
+
+                # ---- Load Q for this work item ----
+                q_voff_base_bytes = (
+                    arith.index_cast(T.index, qo_start_i32)
+                    * arith.index(STRIDE_TOKEN_Q * elem_bytes)
+                    + head_group_idx
+                    * arith.index(HEADS_PER_WAVE * HEAD_DIM_QK * elem_bytes)
+                    + lane_div_16 * arith.index(HEAD_DIM_QK * elem_bytes)
+                    + lane_mod_16 * arith.index(4)
+                )
+
+                for d_tile_start, batch_size_q in _Q_BATCHES:
+                    for t in range_constexpr(batch_size_q):
+                        d_tile = d_tile_start + t
+                        tile_lds_byte = (
+                            lds_base_byte_idx
+                            + arith.index(t * Q_TILE_BYTES)
+                        )
+                        tile_lds_i64 = arith.index_cast(T.i64, tile_lds_byte)
+                        tile_lds_scalar = rocdl.readfirstlane(
+                            T.i64, tile_lds_i64
+                        )
+                        tile_lds_ptr = _inttoptr_lds(tile_lds_scalar)
+                        q_voff_byte = (
+                            q_voff_base_bytes
+                            + arith.index(d_tile * Q_TILE_DIM * elem_bytes)
+                        )
+                        q_voff_i32 = _index_cast_to_i32(q_voff_byte)
+                        for c in range_constexpr(Q_CALLS_PER_WAVE):
+                            rocdl.raw_ptr_buffer_load_lds(
+                                q_rsrc, tile_lds_ptr,
+                                _raw(c_dword_sz),
+                                q_voff_i32,
+                                _raw(Q_CALL_SOFFSETS[c]),
+                                _raw(Q_CALL_INST_OFFSETS[c]),
+                                _raw(aux),
+                            )
+                    rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
+                    gpu.barrier()
+                    for t in range_constexpr(batch_size_q):
+                        d_tile = d_tile_start + t
+                        q_tile_byte_base = (
+                            lds_base_byte_idx
+                            + arith.index(t * Q_TILE_BYTES)
+                            + lane_mod_16
+                            * arith.index(Q_TILE_DIM * elem_bytes)
+                            + lane_div_16 * arith.index(8)
+                        )
+                        for local_ks in range_constexpr(2):
+                            global_ks = d_tile * 2 + local_ks
+                            _base_off = local_ks * 32
+                            q_packs[global_ks] = _lds_load(
+                                q_tile_byte_base, i64_type,
+                                static_byte_offset=_base_off,
+                            )
+                    gpu.barrier()
+
+                # ---- Main KV loop (same structure as non-persistent) ----
+                has_kv_work = _std_arith.CmpIOp(
+                    _std_arith.CmpIPredicate.ult,
+                    _raw(kv_split_start), _raw(kv_split_end),
+                ).result
+
+                N_PREFIX = 2 + D_CHUNKS
+                N_KOPS = K_LORA_STEPS
+                N_VT = D_CHUNKS
+                N_ROPE = K_ROPE_STEPS
+
+                if has_kv_work:
+                    o_accs_init = [
+                        arith.constant_vector(0.0, v4f32_type)
+                        for _ in range_constexpr(D_CHUNKS)]
+                    m_init = c_neg_large
+                    l_init = c_zero_f
+
+                    rocdl.sched_barrier(0)
+
+                    pf_phys_0, pf_off_0 = lookup_page_issue(kv_split_start)
+                    pf_phys_1, pf_off_1 = lookup_page_issue(
+                        kv_split_start + arith.index(BLOCK_N))
+                    pf_base_0 = lookup_page_resolve(pf_phys_0)
+                    pf_ckv_0 = _ckv_global_load(pf_base_0, pf_off_0, 0)
+                    pf_ckv_1 = _ckv_global_load(pf_base_0, pf_off_0, 1)
+                    pf_rope = _rope_direct_load(pf_base_0, pf_off_0)
+                    rocdl.sched_barrier(0)
+
+                    rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
+                    gpu.barrier()
+
+                    _k_lora_lds_write(pf_ckv_0, base_offset_bytes=0)
+                    rocdl.sched_barrier(0)
+                    _k_lora_lds_write(pf_ckv_1,
+                                      base_offset_bytes=K_LORA_LDS_BYTES_HALF)
+                    rocdl.sched_barrier(0)
+
+                    rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+                    gpu.barrier()
+                    rocdl.sched_barrier(0)
+
+                    k_ops_init_0 = _k_lora_lds_read_half(0)
+                    rocdl.sched_barrier(0)
+                    k_ops_init_1 = _k_lora_lds_read_half(1)
+                    k_ops_init = k_ops_init_0 + k_ops_init_1
+                    rocdl.sched_barrier(0)
+
+                    vt_init_0 = _v_register_transpose_half(pf_ckv_0)
+                    vt_init_1 = _v_register_transpose_half(pf_ckv_1)
+                    rocdl.sched_barrier(0)
+
+                    body_init = (
+                        [_raw(m_init), _raw(l_init)]
+                        + [_raw(v) for v in o_accs_init]
+                        + [_raw(v) for v in k_ops_init]
+                        + [_raw(v) for v in vt_init_0]
+                        + [_raw(v) for v in vt_init_1]
+                        + [_raw(v) for v in pf_rope]
+                        + [_raw(pf_phys_1), _raw(pf_off_1)]
+                    )
+                    for kv_pos, body_ia, body_results in _scf.for_(
+                        _raw(kv_split_start), _raw(kv_split_end),
+                        _raw(arith.index(BLOCK_N)),
+                        iter_args=body_init
+                    ):
+                        m_running = body_ia[0]
+                        l_running = body_ia[1]
+                        o_accs = [
+                            body_ia[2 + dc]
+                            for dc in range_constexpr(D_CHUNKS)
+                        ]
+                        cur_k_ops = [
+                            body_ia[N_PREFIX + i]
+                            for i in range_constexpr(N_KOPS)
+                        ]
+                        cur_vt_0 = [
+                            body_ia[N_PREFIX + N_KOPS + i]
+                            for i in range_constexpr(N_VT)
+                        ]
+                        cur_vt_1 = [
+                            body_ia[N_PREFIX + N_KOPS + N_VT + i]
+                            for i in range_constexpr(N_VT)
+                        ]
+                        cur_rope = [
+                            body_ia[N_PREFIX + N_KOPS + 2 * N_VT + i]
+                            for i in range_constexpr(N_ROPE)
+                        ]
+                        next_phys = body_ia[N_PREFIX + N_KOPS + 2 * N_VT + N_ROPE]
+                        next_off = body_ia[
+                            N_PREFIX + N_KOPS + 2 * N_VT + N_ROPE + 1]
+
+                        next_base = lookup_page_resolve(next_phys)
+                        pf_rope_next = _rope_direct_load(next_base, next_off)
+                        nn_phys, nn_off = lookup_page_issue(
+                            kv_pos + arith.index(2 * BLOCK_N))
+
+                        m_new, l_new, o_accs, k_ops_next, vt_next_0, vt_next_1 = \
+                            _do_full(
+                                cur_rope,
+                                kv_pos, m_running, l_running, o_accs,
+                                cur_k_ops, cur_vt_0, cur_vt_1,
+                                next_base, next_off,
+                                do_causal=CAUSAL)
+
+                        yield (
+                            [_raw(m_new), _raw(l_new)]
+                            + [_raw(v) for v in o_accs]
+                            + [_raw(v) for v in k_ops_next]
+                            + [_raw(v) for v in vt_next_0]
+                            + [_raw(v) for v in vt_next_1]
+                            + [_raw(v) for v in pf_rope_next]
+                            + [_raw(nn_phys), _raw(nn_off)]
+                        )
+
+                    # ---- Epilogue ----
+                    m_final = body_results[0]
+                    l_partial = body_results[1]
+                    o_finals = [
+                        body_results[2 + dc]
+                        for dc in range_constexpr(D_CHUNKS)
+                    ]
+
+                    red_wr_idx_epi = (
+                        wave_id * arith.index(64)
+                        + lane_mod_16 * arith.index(4)
+                        + lane_div_16
+                    )
+                    _memref.StoreOp(l_partial, lds_red, [_raw(red_wr_idx_epi)])
+                    _barrier(lgkmcnt=0)
+
+                    l_final = c_zero_f
+                    for w in range_constexpr(4):
+                        red_rd_base_epi = (
+                            arith.index(w * 64)
+                            + lane_mod_16 * arith.index(4)
+                        )
+                        l_vec = vector.load_op(v4f32_type, lds_red,
+                                                [_raw(red_rd_base_epi)])
+                        for g in range_constexpr(4):
+                            l_g = vector.extract(
+                                l_vec, static_position=[g], dynamic_position=[],
+                            )
+                            l_final = _std_arith.AddFOp(
+                                _raw(l_final), _raw(l_g), fastmath=fm_fast
+                            ).result
+                    rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+
+                    c_eps = arith.constant(1.0e-30, type=compute_type)
+                    l_safe = _std_arith.MaximumFOp(
+                        _raw(l_final), _raw(c_eps),
+                    ).result
+                    l_rcp = _std_arith.DivFOp(
+                        _raw(c_one_f), _raw(l_safe),
+                        fastmath=fm_fast,
+                    ).result
+                    inv_l_vec = vector.broadcast(v4f32_type, l_rcp)
+
+                    m_final_scaled = _std_arith.MulFOp(
+                        _raw(m_final), _raw(c_sm_scale), fastmath=fm_fast
+                    ).result
+                    log_l = _math_log(l_final, fastmath=fm_fast)
+
+                    o_scaled = []
+                    for dc in range_constexpr(D_CHUNKS):
+                        o_scaled.append(_std_arith.MulFOp(
+                            _raw(o_finals[dc]), _raw(inv_l_vec),
+                            fastmath=fm_fast,
+                        ).result)
+
+                    rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0, lgkmcnt=0))
+                    gpu.barrier()
+
+                    # ---- Output: splitData / splitLse ----
+                    reshape_wb = wave_id * arith.index(RESHAPE_WAVE)
+                    partial_qo_loc = arith.index_cast(
+                        T.index, partial_qo_loc_i32)
+
+                    for rbatch in range_constexpr(RESHAPE_BATCHES):
+                        dc_base = rbatch * RESHAPE_CPB
+                        for j in range_constexpr(4):
+                            v2_02 = vector.shuffle(
+                                o_scaled[dc_base + 0], o_scaled[dc_base + 2],
+                                [j, 4 + j])
+                            v2_13 = vector.shuffle(
+                                o_scaled[dc_base + 1], o_scaled[dc_base + 3],
+                                [j, 4 + j])
+                            v4_gather = vector.shuffle(
+                                v2_02, v2_13, [0, 2, 1, 3])
+                            wr_base = (
+                                reshape_wb
+                                + lane_mod_16 * arith.index(RESHAPE_ROW)
+                                + lane_div_16 * arith.index(16)
+                                + arith.index(j * 4)
+                            )
+                            vector.store(
+                                v4_gather, lds_reshape, [_raw(wr_base)])
+
+                        rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+
+                        for rp in range_constexpr(2):
+                            for si in range_constexpr(2):
+                                rd_idx = (
+                                    reshape_wb
+                                    + (arith.index(rp * 8) + lane_div_8)
+                                        * arith.index(RESHAPE_ROW)
+                                    + arith.index(si * 32)
+                                    + lane_mod_8 * arith.index(4)
+                                )
+                                rd_val = vector.load_op(
+                                    v4f32_type, lds_reshape,
+                                    [_raw(rd_idx)])
+                                new_head = (
+                                    head_group_idx
+                                        * arith.index(HEADS_PER_WAVE)
+                                    + arith.index(rp * 8)
+                                    + lane_div_8
+                                )
+                                d_col = (
+                                    wave_id * arith.index(CKV_HDIM_PER_WAVE)
+                                    + arith.index(
+                                        rbatch * RESHAPE_CPB * 16
+                                        + si * 32)
+                                    + lane_mod_8 * arith.index(4)
+                                )
+                                g_idx = (
+                                    partial_qo_loc
+                                    * arith.index(NUM_Q_HEADS * HEAD_DIM_V)
+                                    + new_head * arith.index(HEAD_DIM_V)
+                                    + d_col
+                                )
+                                o_off_i32 = _index_cast_to_i32(g_idx)
+                                buffer_ops.buffer_store(
+                                    rd_val, splitData_rsrc, o_off_i32)
+
+                    lse_val = _std_arith.AddFOp(
+                        _raw(m_final_scaled), _raw(log_l), fastmath=fm_fast
+                    ).result
+                    lse_g_idx = (
+                        partial_qo_loc * arith.index(NUM_Q_HEADS)
+                        + q_head_idx
+                    )
+                    lse_off_i32 = _index_cast_to_i32(lse_g_idx)
+                    buffer_ops.buffer_store(
+                        lse_val, splitLse_rsrc, lse_off_i32)
+
+                yield ()
+
+    # ── Persistent host launcher ──
+    @flyc.jit
+    def launch_mla_decode_persistent(
+        Q: fx.Tensor,
+        KV: fx.Tensor,
+        block_table: fx.Tensor,
+        kv_indptr: fx.Tensor,
+        kv_last_page_lens: fx.Tensor,
+        work_indptr: fx.Tensor,
+        work_info_set: fx.Tensor,
+        max_num_blocks: fx.Int32,
+        max_seqlen_q: fx.Int32,
+        splitData: fx.Tensor,
+        splitLse: fx.Tensor,
+        num_workers: fx.Int32,
+        stream: fx.Stream,
+    ):
+        allocator_lds.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator_lds.finalize()
+
+        num_workers_idx = arith.index_cast(T.index, num_workers.ir_value())
+        c_nhg = arith.index(NUM_HEAD_GROUPS)
+
+        mla_decode_kernel_persistent(
+            Q, KV, block_table, kv_indptr, kv_last_page_lens,
+            work_indptr, work_info_set,
+            max_num_blocks, max_seqlen_q,
+            splitData, splitLse,
+        ).launch(
+            grid=(num_workers_idx, c_nhg, arith.index(1)),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+    return launch_mla_decode_persistent
